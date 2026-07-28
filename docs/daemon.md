@@ -1,0 +1,150 @@
+# GeneHub Daemon 规格
+
+> 用户 PC 上唯一的常驻进程。Rust 实现，随桌面端分发。  
+> 上位文档：[architecture.md](./architecture.md)。本文只展开 daemon 内部。
+
+---
+
+## 1. 设计原则
+
+| 原则 | 含义 |
+|------|------|
+| **按 MVP 裁剪** | 成熟实现有几十个模块；我们只做闭环需要的那几个，不做"以后可能有用"的 |
+| **内核不认识具体 agent** | 具体知识全部关在 adapter 里，见 [architecture.md](./architecture.md) §2 |
+| **无状态优先** | 除会话记录外不缓存；重启后靠磁盘恢复，不靠内存 |
+| **单进程** | 不拆微服务，不引数据库服务；SQLite 或 JSONL 落盘 |
+
+体积目标：release 二进制 **< 20MB**，加上内置 agent 与 Tauri 壳，整包仍在下载 80MB 内。
+
+---
+
+## 2. 模块划分
+
+```
+apps/daemon/src/
+├── main.rs           启动、单实例锁、优雅退出
+├── config.rs         配置与数据目录
+├── transport/
+│   ├── local.rs      本地 HTTP + WebSocket（127.0.0.1，回环）
+│   ├── lan.rs        局域网直连（同网段客户端，免走公网）
+│   ├── uplink.rs     出站长连接到 Hub 转发层，供远端客户端接入
+│   └── auth.rs       客户端鉴权：本地 token / 配对凭证
+├── proto/            由 packages/proto 生成 + 手写辅助
+├── session/
+│   ├── manager.rs    会话生命周期、订阅广播、断线重放
+│   ├── store.rs      落盘（JSONL 追加 + 索引）
+│   └── timeline.rs   TimelineItem 装配与增量合并
+├── adapter/
+│   ├── mod.rs        AgentAdapter / AgentSession trait + 注册表
+│   ├── registry.rs   发现、probe、catalog 缓存
+│   ├── genet/        内置 agent（stdio JSONL）
+│   └── acp/          通用 ACP（stdio NDJSON）
+├── workspace.rs      项目与工作区
+├── files.rs          目录树、读写、监听
+├── git.rs            status / diff / commit（调 git 命令，不引 libgit2）
+├── pty.rs            终端会话
+└── pairing.rs        设备配对、Hub 登记
+```
+
+MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、MCP 注入、插件系统、会话 fork/rewind。
+
+---
+
+## 3. 客户端协议
+
+### 3.1 传输
+
+| 通道 | 用途 | 优先级 |
+|------|------|--------|
+| `ws://127.0.0.1:<port>/ws` | 同机客户端（桌面壳内的 WebView） | ① 最优 |
+| 局域网直连 | 同网段的手机与另一台电脑 | ② |
+| 出站长连接到 Hub 转发层 | 公网访问；daemon 主动连出，不监听公网端口 | ③ 兜底 |
+
+三条通道**说同一套消息**，差别只在鉴权与加密层。客户端按优先级依次尝试，对用户不可见。daemon 永远不在公网监听端口。
+
+### 3.2 消息形状
+
+请求/响应 + 服务端推送，统一 JSON 信封：
+
+```jsonc
+// 客户端 → daemon
+{ "id": "c1", "type": "session.send", "payload": { "sessionId": "...", "text": "..." } }
+// daemon → 客户端（应答）
+{ "id": "c1", "type": "result", "ok": true, "payload": { ... } }
+// daemon → 客户端（推送）
+{ "type": "event", "topic": "session:<id>", "payload": { /* SessionEvent */ } }
+```
+
+### 3.3 MVP 方法集
+
+| 域 | 方法 |
+|----|------|
+| 握手 | `hello`（版本、能力、机器指纹）、`subscribe` / `unsubscribe` |
+| Agent | `agent.list`（含 probe 状态与 catalog）、`agent.refresh` |
+| 会话 | `session.create` / `list` / `get` / `send` / `interrupt` / `close` / `archive` |
+| 会话配置 | `session.setModel` / `setMode` / `respondPermission` |
+| 工作区 | `workspace.list` / `open` / `create` |
+| 文件 | `file.tree` / `read` / `write` / `watch` |
+| Git | `git.status` / `git.diff` / `git.commit` |
+| 终端 | `pty.open` / `write` / `resize` / `close`（输出走推送） |
+
+**断线重连**：客户端带上最后收到的事件序号，`subscribe` 时 daemon 回补缺口；补不齐（超出保留窗口）就回全量快照并明确告知，不做静默半量。
+
+---
+
+## 4. 会话存储
+
+```
+<data>/sessions/<workspace-hash>/<session-id>.jsonl
+```
+
+- 一行一个 `TimelineItem`，追加写，永不改写既有行
+- 同目录 `meta.json`：agent id、模型、cwd、创建时间、`PersistHandle`
+- 恢复时优先让 agent 自己 resume（用 `PersistHandle`）；agent 不支持恢复的，daemon 用本地记录**只读回放**，并在 UI 上标明"历史只读"
+
+流式增量（`ItemDelta`）**不落盘**，只落最终态，否则文件大小会失控。
+
+---
+
+## 5. 权限与审批
+
+daemon 不发明自己的审批策略——各 agent 的模式（如只读/写入/放行）已经定义了行为，daemon 做三件事：
+
+1. 把 adapter 抛上来的审批请求排队并推给客户端
+2. 把用户的回答投递回 adapter
+3. 记审计（谁、何时、批准了什么）
+
+没有客户端在线时：请求挂起并计时，超时按 agent 默认策略处理，同时留下审计记录。**不能默默放行。**
+
+---
+
+## 6. 安全
+
+| 面 | 做法 |
+|----|------|
+| 本地端口 | 只绑 `127.0.0.1`，带一次性 token；token 存在只有当前用户可读的文件里 |
+| 远端接入 | 只走出站 relay 连接，端到端加密，配对凭证可撤销 |
+| 工作目录 | 文件与 git 接口限制在已登记的工作区内，拒绝路径穿越 |
+| 命令执行 | 以当前用户权限运行，不内建沙箱；隔离由部署形态负责，见 [security-model.md](./security-model.md) |
+| 撤销 | Hub 侧撤销后 daemon 进入 revoked 状态并停止重连 |
+
+---
+
+## 7. 与 Hub 的关系
+
+Hub 对 daemon 只有两个面，虽然部署在同一个服务里，但 daemon 必须当成两件事对待：
+
+- **控制面**：登记这台机器、上报心跳与在线状态、接收撤销指令。daemon 不理解账号、租用与计费。
+- **转发层**：一条出站长连接，对面只搬运加密帧、不解密、不理解会话语义。daemon **不能**因为"反正连的是 Hub"就在这条连接上发明文控制消息。
+
+理由与守则见 [architecture.md](./architecture.md) §6；接口清单见 [control-plane.md](./control-plane.md)。
+
+---
+
+## 8. 验收标准
+
+1. `cargo test`：协议编解码、timeline 装配、adapter 注册、路径穿越防护
+2. 冒烟：以 `genet` adapter 建会话、发一条带工具调用的任务、事件序列完整
+3. **双 adapter 验证**：同一段前端代码分别驱动 `genet` 与一个真实 ACP CLI，渲染结果一致——这是 [architecture.md](./architecture.md) §2 B3 的验收动作
+4. 重启后能加载既有会话并继续对话
+5. 拔网线再插回，客户端事件不丢不重

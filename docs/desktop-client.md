@@ -1,0 +1,180 @@
+# GeneHub Desktop（PC 客户端）规格
+
+> 参考实现：[ref-repos/cc-switch](../../ref-repos/cc-switch)（Tauri 2：托盘、关窗驻留、轻量模式、开机自启、安装包）。  
+> 目标：有**安装过程**、能**后台常驻**、托盘可**唤醒主界面**；daemon 与默认 agent 随客户端存活。
+
+---
+
+## 1. 用户可感知行为
+
+| 行为 | 默认 |
+|------|------|
+| 官网下载 → 安装器安装（非绿色解压凑合） | 必须 |
+| 安装后可从开始菜单 / Applications 启动 | 必须 |
+| 关闭主窗口 → **最小化到托盘**，进程与 daemon 继续跑 | 默认开启（可改为退出） |
+| 托盘左键 / 菜单「打开主界面」→ 显示并聚焦窗口 | 必须 |
+| 托盘菜单「退出」→ 停 agent → 停 daemon → 退出 | 必须 |
+| 开机自启（设置项） | 应有 |
+| 单实例：再次打开快捷方式 → 唤醒已有实例 | 必须 |
+| 托盘图标区分在线 / 离线 / 有任务在跑 | 建议 D2 |
+| **装完不用装别的东西就能跑任务** | 必须（靠内置 PI Agent） |
+
+用户心智：**装一次，挂后台，手机/浏览器随时连这台 PC。**
+
+---
+
+## 2. 从 cc-switch 对齐的能力映射
+
+| cc-switch | GeneHub Desktop |
+|-----------|-----------------|
+| `minimize_to_tray_on_close` | 同左，默认 `true` |
+| 托盘菜单 `show_main` | 「打开 GeneHub」 |
+| `lightweight`：销毁 WebView 只留托盘 | 可选「省内存后台」；daemon **不**随窗口销毁 |
+| `auto_launch` | 设置项「登录时启动 GeneHub」 |
+| `visible: false` 首启再 show | 先起托盘 + daemon，再弹主界面 |
+| WiX / dmg / AppImage `bundle` | Windows NSIS 或 WiX；macOS `.dmg`；Linux AppImage/deb |
+| `deep-link`（`ccswitch://`） | `genethub://` |
+| `updater` 插件 | D3：应用内更新 |
+| 退出前移除托盘图标（Win 残影） | 必须照做 |
+
+GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
+
+---
+
+## 3. 进程与生命周期
+
+```
+安装
+  └─ 写入 Program Files / Applications + 快捷方式
+       + sidecar 资源（genet-daemon、genet-agent，两个静态二进制）
+
+启动（或开机自启）
+  ├─ 单实例锁
+  ├─ 创建托盘
+  ├─ 启动 sidecar：genet-daemon（内置 Hub 地址）
+  ├─ 校验内置 agent 二进制存在且可执行
+  └─ 显示主窗口（或仅托盘）
+
+关主窗口
+  └─ hide（或 lightweight 销毁窗口）—— daemon 继续
+
+托盘「打开主界面」
+  └─ show + unminimize + focus
+
+退出
+  └─ 停 agent 执行 → 停 daemon → 移除托盘 → exit
+```
+
+**硬约束：** 只要托盘还在，daemon 就必须在（除非用户显式「暂停远程连接」）。
+
+---
+
+## 4. 体积方案（目标与实测依据）
+
+目标：**下载体积 ≤ 80MB（压缩后），安装后 ≤ 200MB。**
+
+daemon 与 agent 都改成 Rust 之后，原先最大的两块不确定性——Node 运行时（约 120MB）与上百兆 `node_modules`——直接消失了。预算构成：
+
+| 项 | 预算（未压缩） | 说明 |
+|----|----------------|------|
+| Tauri 壳 | ~10 MB | 用系统 WebView，不带 Chromium |
+| `genet-daemon` | < 20 MB | Rust 静态二进制，strip + LTO |
+| `genet-agent` | < 15 MB | 同上 |
+| 工作台静态产物 | < 10 MB | 自研前端，按 [web-workbench.md](./web-workbench.md) 的范围裁剪 |
+| 图标、字体、许可证等 | ~5 MB | |
+
+**不打包**：任何外部 agent 的 SDK 或运行时。用户想用 Claude Code、Cursor，daemon 检测本机已装的即可（[architecture.md](./architecture.md) §3.3）——把别人的 CLI 塞进我们的安装包既臃肿又有授权麻烦。
+
+执行策略：按平台构建只带该平台二进制；release profile 开 `opt-level="z"` + LTO + strip；安装包压缩（NSIS LZMA / dmg 压缩）。
+
+现在的风险已经不是体积超标，而是**别让它慢慢长回去**：每次发版记录一次三个二进制的大小，涨幅异常就查。
+
+---
+
+## 5. 内置 Genet Agent（保证「装完就能跑」）
+
+桌面端随包内置 `genet-agent`（Rust，规格见 [builtin-agent.md](./builtin-agent.md)），解决的是**新用户第一分钟就得能跑起一条任务**，不能卡在"请先安装并登录某个 CLI"。
+
+- daemon 的 `genet` adapter 按需拉起它，用户不需要装任何外部 CLI。
+- 首启默认选中它，「先体验」的第一条任务就跑在它上面。
+- MVP 能力：Agent Loop、provider（Anthropic + OpenAI 兼容）、SKILL 机制、session 持久化、7 个核心工具。
+- 模型凭证：用户在设置里填 API Key；未填时首条任务给出明确提示而不是静默失败。
+
+**它在 UI 里和其他 agent 平级**：设置页检测本机已装的 Claude Code / Cursor / Codex，装了就出现在 agent 选择器里，没装就不显示（不要弹安装指引打断新用户）。内置 agent 只是默认选中的那一个，不是唯一的那一个。
+
+---
+
+## 6. 托盘菜单（MVP）
+
+```
+打开主界面
+──────────
+本机状态：在线 / 离线 / 正在执行 N 个任务
+公钥指纹：ABCD-EFGH-…（点击复制，用于核对）
+重新生成认领链接        ← 临时用户的恢复入口，必须常驻
+──────────
+暂停远程连接
+开机自启 ✓
+关闭窗口时保持后台 ✓
+──────────
+退出 GeneHub
+```
+
+「重新生成认领链接」是临时用户丢失身份后唯一的挽救手段，不能藏进二级设置。
+
+---
+
+## 7. 设置项
+
+| Key | 默认 | 文案 |
+|-----|------|------|
+| `minimize_to_tray_on_close` | `true` | 关闭窗口时最小化到托盘 |
+| `launch_at_login` | `true`（可讨论） | 开机时启动 GeneHub |
+| `show_window_on_launch` | `true` | 启动时显示主界面 |
+| `pause_remote` | `false` | 暂停远程连接 |
+| `default_provider` | `pi` | 默认使用的 agent |
+| `public_workspace_path` | 空 | 公开出租时允许的工作目录（不填不允许公开） |
+
+---
+
+## 8. 与账号旅程的衔接
+
+1. 安装并启动 → 托盘常驻、daemon 已在跑
+2. 主界面二选一：
+   - 「先体验」→ 临时用户 + 生成恢复密钥（提示可导出）
+   - 「登录并绑定这台电脑」→ 浏览器确认页 + 配对码（底层是设备码授权）
+3. 绑定成功 → 托盘显示「已连接」，Web/手机能看到这台机器
+4. 用户关窗去干活 → 不必重新开 App
+
+---
+
+## 9. 实现里程碑
+
+**D1（桌面壳骨架）**
+
+- Tauri 2 工程 + 三平台安装包 target
+- 托盘 + 关窗驻留 + 打开主界面 + 单实例
+- sidecar 拉起 daemon 与 PI Agent；退出时确保子进程被杀
+- 体积方案实测（这一步决定后面所有取舍）
+
+**D2**
+
+- 设备码授权接入 Hub、托盘状态与心跳
+- 开机自启、深链 `genethub://`
+- 公钥指纹展示、重新生成认领链接
+
+**D3**
+
+- 应用内更新（Tauri updater）
+- lightweight 省内存模式
+- 出租相关开关（工作目录、暂停接单）
+
+---
+
+## 10. 参考文件（cc-switch）
+
+- `src-tauri/tauri.conf.json` — bundle / window / deep-link / updater
+- `src-tauri/src/tray.rs` — 托盘菜单与 `show_main`
+- `src-tauri/src/lightweight.rs` — 无窗口后台
+- `src-tauri/src/auto_launch.rs` — 开机自启
+- `src-tauri/src/lib.rs` — `CloseRequested` → 托盘；`RunEvent` 退出清理
