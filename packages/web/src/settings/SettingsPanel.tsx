@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { Host } from "../host";
+import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
 import { useWorkbench } from "../session/store";
 
@@ -17,8 +17,8 @@ const KNOWN_PROVIDERS = [
  * A client that is compromised later should not be able to read out a
  * credential it never saw.
  */
-export function SettingsPanel({ host }: { host: Host }) {
-  const { settings, loadSettings, setProvider, agents, hub, pair, unpair } = useWorkbench();
+export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpoint | null }) {
+  const { settings, loadSettings, setProvider, agents, hub, pair, unpair, client } = useWorkbench();
 
   useEffect(() => {
     if (!settings) void loadSettings();
@@ -26,6 +26,8 @@ export function SettingsPanel({ host }: { host: Host }) {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 overflow-y-auto p-4">
+      <Machine identity={client?.identity ?? null} expected={endpoint?.fingerprint} />
+
       <section>
         <h2 className="mb-2 text-sm font-medium">模型密钥</h2>
         <p className="mb-3 text-xs text-muted">
@@ -78,6 +80,52 @@ export function SettingsPanel({ host }: { host: Host }) {
         />
       </section>
     </div>
+  );
+}
+
+/**
+ * Which machine answered, and the fingerprint of the key it answered with.
+ *
+ * Shown on every host, not only the remote ones: a fingerprint is only useful
+ * if the user has somewhere to read the expected value, and the desktop is that
+ * somewhere ([security-model.md](../../docs/security-model.md) §1.2). Where the
+ * shell knows the fingerprint independently we compare the two ourselves,
+ * because a mismatch there means something is sitting in the middle.
+ */
+function Machine({
+  identity,
+  expected,
+}: {
+  identity: { machineId: string; fingerprint: string; daemonVersion: string } | null;
+  expected?: string;
+}) {
+  if (!identity) return null;
+  const mismatched = expected !== undefined && expected !== identity.fingerprint;
+
+  return (
+    <section>
+      <h2 className="mb-2 text-sm font-medium">这台机器</h2>
+      <div className="flex flex-col gap-1 rounded bg-surface px-3 py-2 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="text-muted">公钥指纹</span>
+          <code data-testid="fingerprint" className="font-mono text-sm tracking-wider">
+            {identity.fingerprint}
+          </code>
+        </div>
+        <p className="text-muted">
+          在别的设备上连到这台机器时，核对这串指纹是否一致；不一致说明连的不是这台机器。
+        </p>
+        <div className="flex gap-3 text-muted">
+          <span>{identity.machineId}</span>
+          <span>daemon {identity.daemonVersion}</span>
+        </div>
+        {mismatched ? (
+          <p role="alert" className="text-danger">
+            指纹与本机记录的 {expected} 不一致，先不要在这条连接上输入任何密钥。
+          </p>
+        ) : null}
+      </div>
+    </section>
   );
 }
 

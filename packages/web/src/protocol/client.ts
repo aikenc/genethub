@@ -1,4 +1,5 @@
 import type {
+  HelloResult,
   ProtocolError,
   Reply,
   Request,
@@ -84,6 +85,8 @@ export class Client {
   private state: ConnectionState = "connecting";
   /** Why the connection gave up, when it did so for a reason worth showing. */
   failure: ProtocolError | null = null;
+  /** What the daemon said it is, including the key fingerprint to compare. */
+  identity: HelloResult | null = null;
 
   constructor(private readonly options: ClientOptions) {}
 
@@ -194,7 +197,8 @@ export class Client {
     this.socket?.send(frame);
 
     try {
-      await promise;
+      const reply = await promise;
+      if (reply?.type === "hello") this.identity = reply.data;
     } catch (error) {
       // A refused handshake is not something retrying fixes: the versions do
       // not match, or the credential is wrong. Stop, and keep the reason so the

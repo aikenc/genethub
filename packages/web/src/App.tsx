@@ -151,7 +151,7 @@ export function App({ host = detectHost() }: { host?: Host }) {
           </Panel>
         ) : null}
         <Panel active={panel === "settings"}>
-          <SettingsPanel host={host} />
+          <SettingsPanel host={host} endpoint={endpoint} />
         </Panel>
       </main>
     </div>

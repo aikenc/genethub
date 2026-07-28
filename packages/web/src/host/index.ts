@@ -13,6 +13,12 @@ export interface Endpoint {
   /** How we got here, for the connection badge. */
   via: "loopback" | "lan" | "relay";
   label: string;
+  /**
+   * The daemon's key fingerprint as the shell learned it, without asking the
+   * connection. Present only where the shell has an independent source; it is
+   * what makes comparing against the handshake worth anything.
+   */
+  fingerprint?: string;
 }
 
 export interface Notification {
@@ -93,6 +99,7 @@ export function desktopHost(): Host {
         url: `ws://127.0.0.1:${found.port}/ws?token=${found.token}`,
         via: "loopback",
         label: "这台电脑",
+        fingerprint: found.fingerprint,
       };
     },
     notify(notification) {

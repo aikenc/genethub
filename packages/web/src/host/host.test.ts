@@ -35,6 +35,9 @@ describe("finding the machine to connect to", () => {
       url: "ws://127.0.0.1:42123/ws?token=tok",
       via: "loopback",
       label: "这台电脑",
+      // Carried through so the settings page can hold it up against what the
+      // handshake claims.
+      fingerprint: "AB-CD",
     });
     vi.unstubAllGlobals();
   });

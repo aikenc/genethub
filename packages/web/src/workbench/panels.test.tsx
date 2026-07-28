@@ -222,6 +222,52 @@ describe("the settings panel", () => {
     expect(field).toHaveAttribute("placeholder", "已配置，输入新值可替换");
   });
 
+  it("shows the fingerprint of the machine that answered", async () => {
+    const { client } = stubDaemon({
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    (client as { identity?: unknown }).identity = {
+      machineId: "m_1",
+      fingerprint: "AAAA-BBBB-CCCC-DDDD",
+      daemonVersion: "0.1.0",
+      protocolVersion: 1,
+      transport: "loopback",
+    };
+    install(client);
+
+    render(<SettingsPanel host={browserHost()} />);
+    expect(await screen.findByTestId("fingerprint")).toHaveTextContent("AAAA-BBBB-CCCC-DDDD");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  /**
+   * The whole point of the fingerprint: where the shell knows what it should
+   * be, a different answer means the connection is not going where it claims.
+   */
+  it("warns when the connection's fingerprint is not the one this machine has", async () => {
+    const { client } = stubDaemon({
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    (client as { identity?: unknown }).identity = {
+      machineId: "m_1",
+      fingerprint: "AAAA-BBBB-CCCC-DDDD",
+      daemonVersion: "0.1.0",
+      protocolVersion: 1,
+      transport: "loopback",
+    };
+    install(client);
+
+    render(
+      <SettingsPanel
+        host={browserHost()}
+        endpoint={{ url: "ws://127.0.0.1:1/ws", via: "loopback", label: "本机", fingerprint: "EEEE-FFFF" }}
+      />,
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("EEEE-FFFF");
+  });
+
   it("re-probes the agents after a key lands, so the list stops lying", async () => {
     const { client, calls } = stubDaemon({
       "settings.get": () => ({

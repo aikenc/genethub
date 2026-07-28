@@ -69,19 +69,18 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 
 ---
 
-## 4. 体积方案（目标与实测依据）
+## 4. 体积（预算与实测）
 
-目标：**下载体积 ≤ 80MB（压缩后），安装后 ≤ 200MB。**
+目标：**下载体积 ≤ 80MB（压缩后），安装后 ≤ 200MB。** 首个 Linux 包实测**下载 6MB、安装后 13MB**，比预算小一个数量级——因为原先最大的两块不确定性（Node 运行时约 120MB 与上百兆 `node_modules`）在 daemon 与 agent 改成 Rust 后直接消失了。
 
-daemon 与 agent 都改成 Rust 之后，原先最大的两块不确定性——Node 运行时（约 120MB）与上百兆 `node_modules`——直接消失了。预算构成：
-
-| 项 | 预算（未压缩） | 说明 |
+| 项 | 实测（未压缩） | 说明 |
 |----|----------------|------|
-| Tauri 壳 | ~10 MB | 用系统 WebView，不带 Chromium |
-| `genet-daemon` | < 20 MB | Rust 静态二进制，strip + LTO |
-| `genet-agent` | < 15 MB | 同上 |
-| 工作台静态产物 | < 10 MB | 自研前端，按 [web-workbench.md](./web-workbench.md) 的范围裁剪 |
-| 图标、字体、许可证等 | ~5 MB | |
+| Tauri 壳（含工作台静态产物） | 5.3 MB | 用系统 WebView，不带 Chromium；前端资源编译进二进制 |
+| `genet-daemon` | 4.4 MB | Rust 二进制 |
+| `genet-agent` | 3.9 MB | 同上 |
+| 图标与桌面项 | < 10 KB | |
+
+数字由 `apps/desktop/scripts/bundle.sh` 每次打包时重新量，超预算直接失败。
 
 ### 4.1 硬约束：PC 端零 Node 运行时
 
@@ -105,7 +104,7 @@ daemon 与 agent 都改成 Rust 之后，原先最大的两块不确定性——
 
 **这条约束的顺带好处**：桌面端 UI 和浏览器工作台是**同一套前端代码**（`packages/web`），一次实现两处运行，差异只有一层薄薄的能力适配（见 §4.2）。
 
-验收方式：安装后扫描整个安装目录，**出现 `node` / `node.exe` / `node_modules` 即判定失败**，写进发版检查。
+验收方式：打包脚本扫描包内全部文件，**出现 `node` / `node.exe` / `node_modules` 即判定失败**。同一步还会把包解开、直接运行里面的 daemon，确认它能起来并报出端口——装得上但跑不起来的包，用户装完才发现就太晚了。
 
 ### 4.2 同一套前端，两种宿主
 
