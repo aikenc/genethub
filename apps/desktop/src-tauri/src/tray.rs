@@ -1,6 +1,6 @@
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::AppState;
 
@@ -17,7 +17,7 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "打开主界面", true, None::<&str>)?;
     let status = MenuItem::with_id(app, "status", "本机状态：启动中", false, None::<&str>)?;
-    let claim = MenuItem::with_id(app, "claim", "重新生成认领链接", true, None::<&str>)?;
+    let pair = MenuItem::with_id(app, "pair", "连接到 Hub", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 GeneHub", true, None::<&str>)?;
 
     let menu = Menu::with_items(
@@ -26,7 +26,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             &open,
             &PredefinedMenuItem::separator(app)?,
             &status,
-            &claim,
+            &pair,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -39,15 +39,15 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
-            "claim" => {
+            "pair" => {
                 show_main_window(app);
-                let _ = app.emit_to("main", "genethub://claim-link", ());
+                let _ = app.emit_to("main", "genehub://pair", ());
             }
             "quit" => {
                 // Stopping the daemon before exiting is the whole contract of the
                 // tray: no tray icon means no background agent host.
                 if let Some(state) = app.try_state::<AppState>() {
-                    state.sidecar.stop();
+                    state.daemon.stop();
                 }
                 app.exit(0);
             }
@@ -66,11 +66,4 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .build(app)?;
 
     Ok(())
-}
-
-pub fn set_status<R: Runtime>(app: &AppHandle<R>, text: &str) {
-    let _ = app;
-    let _ = text;
-    // Menu item text updates land with the status polling work in D2; the item is
-    // already in place so the layout does not shift when it starts updating.
 }

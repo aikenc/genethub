@@ -1,5 +1,6 @@
 import type {
   AgentInfo,
+  HubStatus,
   PermissionOutcome,
   SessionSnapshot,
   SessionSummary,
@@ -19,6 +20,7 @@ interface WorkbenchState {
   activeSessionId: string | null;
   timeline: TimelineState;
   notice: string | null;
+  hub: HubStatus | null;
 
   attach(client: Client): Promise<void>;
   openWorkspace(root: string): Promise<void>;
@@ -29,6 +31,9 @@ interface WorkbenchState {
   setModel(modelId: string): Promise<void>;
   setMode(modeId: string): Promise<void>;
   answerPermission(outcome: PermissionOutcome): Promise<void>;
+  refreshHub(): Promise<void>;
+  pair(hubUrl: string): Promise<void>;
+  unpair(): Promise<void>;
 }
 
 export const useWorkbench = create<WorkbenchState>((set, get) => ({
@@ -40,12 +45,14 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   activeSessionId: null,
   timeline: emptyTimeline(),
   notice: null,
+  hub: null,
 
   async attach(client) {
     set({ client });
     client.onStateChange((connection) => set({ connection }));
     client.onNotice((_level, message) => set({ notice: message }));
     await refreshCatalog(client, set);
+    await get().refreshHub();
   },
 
   async openWorkspace(root) {
@@ -122,6 +129,24 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
     await client.call({ type: "session.setMode", payload: { sessionId, modeId } });
+  },
+
+  async refreshHub() {
+    const reply = await require_(get().client).call({ type: "hub.status" });
+    if (reply?.type === "hubStatus") set({ hub: reply.data });
+  },
+
+  async pair(hubUrl) {
+    const reply = await require_(get().client).call({
+      type: "hub.pair",
+      payload: { hubUrl, displayName: null },
+    });
+    if (reply?.type === "hubStatus") set({ hub: reply.data });
+  },
+
+  async unpair() {
+    const reply = await require_(get().client).call({ type: "hub.unpair" });
+    if (reply?.type === "hubStatus") set({ hub: reply.data });
   },
 
   async answerPermission(outcome) {

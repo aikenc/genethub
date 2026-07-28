@@ -87,9 +87,13 @@ export function desktopHost(): Host {
   return {
     kind: "desktop",
     async endpoint() {
-      const found = await tauri.core.invoke<{ url: string } | null>("daemon_endpoint");
+      const found = await tauri.core.invoke<DaemonEndpoint | null>("daemon_endpoint");
       if (!found) return null;
-      return { url: found.url, via: "loopback", label: "这台电脑" };
+      return {
+        url: `ws://127.0.0.1:${found.port}/ws?token=${found.token}`,
+        via: "loopback",
+        label: "这台电脑",
+      };
     },
     notify(notification) {
       void tauri.core.invoke("notify", { ...notification });
@@ -101,4 +105,12 @@ export function desktopHost(): Host {
       return tauri.core.invoke<string | null>("pick_directory");
     },
   };
+}
+
+/** What the shell reads off the daemon's own startup output. */
+interface DaemonEndpoint {
+  port: number;
+  token: string;
+  machineId: string;
+  fingerprint: string;
 }

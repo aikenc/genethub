@@ -8,3 +8,6 @@ target/
 .env
 .DS_Store
 *.tsbuildinfo
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/bin/*
+!apps/desktop/src-tauri/bin/README.md

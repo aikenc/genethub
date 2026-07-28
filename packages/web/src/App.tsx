@@ -7,10 +7,21 @@ import { Composer } from "./session/Composer";
 import { PermissionCard } from "./session/Permission";
 import { Timeline } from "./session/Timeline";
 import { useWorkbench } from "./session/store";
+import { Pairing } from "./hub/Pairing";
 
 export function App({ host = detectHost() }: { host?: Host }) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">("loading");
+  const [showPairing, setShowPairing] = useState(false);
   const workbench = useWorkbench();
+  const pairing = workbench.hub?.state === "pairing";
+
+  // While a code is on screen, approval happens somewhere else entirely, so the
+  // only way to learn it succeeded is to ask.
+  useEffect(() => {
+    if (!pairing) return;
+    const timer = setInterval(() => void workbench.refreshHub(), 2000);
+    return () => clearInterval(timer);
+  }, [pairing, workbench]);
 
   useEffect(() => {
     let client: Client | null = null;
@@ -47,7 +58,27 @@ export function App({ host = detectHost() }: { host?: Host }) {
         <header className="flex items-center gap-3 border-b border-line bg-surface px-4 py-2">
           <h1 className="truncate text-sm font-medium">{session?.title ?? "新会话"}</h1>
           <ConnectionBadge state={workbench.connection} endpoint={endpoint} />
+          {host.kind === "desktop" ? (
+            <button
+              type="button"
+              className="rounded border border-line px-2 py-1 text-xs text-muted hover:text-fg"
+              onClick={() => setShowPairing((open) => !open)}
+            >
+              {workbench.hub?.state === "paired" ? "远程访问已开启" : "开启远程访问"}
+            </button>
+          ) : null}
         </header>
+
+        {showPairing || pairing ? (
+          <div className="border-b border-line bg-bg p-4">
+            <Pairing
+              status={workbench.hub}
+              host={host}
+              onPair={(hubUrl) => workbench.pair(hubUrl)}
+              onUnpair={() => workbench.unpair()}
+            />
+          </div>
+        ) : null}
 
         <AgentControls
           agents={workbench.agents}
