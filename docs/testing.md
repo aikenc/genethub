@@ -216,7 +216,9 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 | Linux | 干净容器里安装分发包，脚本驱动首启与自检 |
 | Windows / macOS | CI runner 上装包 + 冒烟；无 runner 时至少每次发版手动过一遍主旅程 |
 
-自检项：可执行权限、内置 agent 二进制可用、数据目录创建、单实例锁、卸载残留清理。
+自检项：可执行权限、内置 agent 二进制可用、数据目录创建、单实例锁、卸载残留清理，以及**安装目录内不存在 `node` / `node.exe` / `node_modules`**（PC 端零 Node 运行时，见 [desktop-client.md](./desktop-client.md) §4.1）。
+
+外部 agent（OpenCode 等）由**测试环境预装**，不随分发包安装——这正是要验证的行为之一：装了就出现在选择器里，没装就不出现，且不影响其他 agent。
 
 **成本控制**（仅 J-real）：flash 档模型、提示词短、设 `max_tokens` 上限；记录每轮 token 消耗，异常增长要查。
 

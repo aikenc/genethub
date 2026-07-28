@@ -1,0 +1,37 @@
+[package]
+name = "genet-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GeneHub daemon: session kernel, agent adapters and client transports"
+
+[[bin]]
+name = "genet-daemon"
+path = "src/main.rs"
+
+[dependencies]
+genehub-proto = { path = "../../packages/proto" }
+
+anyhow.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+ignore.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+dirs = "6"
+portable-pty = "0.9"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

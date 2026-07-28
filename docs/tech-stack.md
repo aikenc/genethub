@@ -19,12 +19,12 @@ apps/hub              ← control/（账号·机器目录·租用）+ forward/�
 
 | 组件 | 技术 | 理由 |
 |------|------|------|
-| **PC Desktop** | [Tauri 2](https://tauri.app/) | 系统 WebView，壳本身几 MB；体积预算要留给 sidecar，不该被 Electron 吃掉 80MB |
+| **PC Desktop** | [Tauri 2](https://tauri.app/) | **UI 仍是 H5**，但走系统 WebView：拿到 Electron 的开发体验，不用背 Chromium + Node 的体积。壳本身几 MB，预算留给 sidecar |
 | **Mobile** | [Capacitor](https://capacitorjs.com/) | 同一 Web 资源打进 iOS/Android；扫码、深链成熟 |
 | **浏览器** | 同一 `packages/web` 直出 | 一次性链接打开即用 |
 | **daemon** | Rust | 单文件二进制 < 20MB，无运行时依赖；替掉 Node 方案后安装包大头消失 |
 | **内置 Agent** | Rust | 与 daemon 同栈；< 15MB；协议自实现 |
-| **Hub** | Node（TypeScript）起步 | 与前端同栈、迭代快；并发压力上来再换 Go |
+| **Hub** | Node（TypeScript）起步 | **仅服务端**；与前端同栈、迭代快，并发压力上来再换 Go |
 | **前端** | React + Vite + TS | 见 §1.1 与 [web-workbench.md](./web-workbench.md) §5 |
 
 ### 1.1 前端：自研而非 fork（决策已变更）
@@ -44,7 +44,9 @@ GeneHub 安装包（NSIS/WiX · dmg · AppImage）
 └── 默认配置：Hub 地址（转发层同域）
 ```
 
-体积构成因为两个进程都换成 Rust 而大幅简化：不再需要随包携带 Node 运行时与上百兆 `node_modules`。完整规格见 [desktop-client.md](./desktop-client.md)。
+体积构成因为两个进程都换成 Rust 而大幅简化：不再需要随包携带 Node 运行时与上百兆 `node_modules`。
+
+**PC 端零 Node 运行时是硬约束**，但它禁的是运行时进程，不是技术栈：窗口内容依然是 `packages/web` 那套 H5，只是跑在系统 WebView 而不是 Node 上。Node 只允许出现在构建期（前端打包、tauri-cli）与服务端（Hub）。约束细则、双宿主适配与验收方式见 [desktop-client.md](./desktop-client.md) §4.1–4.2。
 
 ---
 

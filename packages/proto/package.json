@@ -1,0 +1,15 @@
+{
+  "name": "@genehub/proto",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generated TypeScript view of the GeneHub session protocol",
+  "type": "module",
+  "types": "./bindings/index.ts",
+  "exports": {
+    ".": "./bindings/index.ts"
+  },
+  "scripts": {
+    "generate": "cargo test -p genehub-proto",
+    "check": "cargo test -p genehub-proto && git diff --exit-code bindings/"
+  }
+}

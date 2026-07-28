@@ -43,7 +43,7 @@
 后续：引导绑定邮箱 / GitHub
 ```
 
-**成功标准：** 安装完成后，跳过登录 ≤ 2 次点击进入可用，并且**能真的跑起一条任务**（靠内置 PI Agent 保证，不依赖用户先装 Claude Code / Codex）。
+**成功标准：** 安装完成后，跳过登录 ≤ 2 次点击进入可用，并且**能真的跑起一条任务**（靠内置 Genet Agent 保证，不依赖用户先装 Claude Code / Codex）。
 
 桌面行为细则见 [desktop-client.md](./desktop-client.md)。
 

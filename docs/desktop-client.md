@@ -17,7 +17,7 @@
 | 开机自启（设置项） | 应有 |
 | 单实例：再次打开快捷方式 → 唤醒已有实例 | 必须 |
 | 托盘图标区分在线 / 离线 / 有任务在跑 | 建议 D2 |
-| **装完不用装别的东西就能跑任务** | 必须（靠内置 PI Agent） |
+| **装完不用装别的东西就能跑任务** | 必须（靠内置 Genet Agent） |
 
 用户心智：**装一次，挂后台，手机/浏览器随时连这台 PC。**
 
@@ -83,7 +83,42 @@ daemon 与 agent 都改成 Rust 之后，原先最大的两块不确定性——
 | 工作台静态产物 | < 10 MB | 自研前端，按 [web-workbench.md](./web-workbench.md) 的范围裁剪 |
 | 图标、字体、许可证等 | ~5 MB | |
 
-**不打包**：任何外部 agent 的 SDK 或运行时。用户想用 Claude Code、Cursor，daemon 检测本机已装的即可（[architecture.md](./architecture.md) §3.3）——把别人的 CLI 塞进我们的安装包既臃肿又有授权麻烦。
+### 4.1 硬约束：PC 端零 Node 运行时
+
+安装包里**不允许出现 Node 运行时或 `node_modules`**。这不是体积偏好，而是一条边界：一旦允许带运行时，体积、启动时间、供应链面和跨平台适配都会跟着回来。
+
+**这条约束禁的是「Node 这个进程」，不是「JS / H5 这套技术栈」。** 两者经常被混为一谈，这里说清楚：
+
+- **UI 就是 H5**，而且是刻意选的。Tauri 用系统自带的 WebView（Windows WebView2 / macOS WKWebView / Linux WebKitGTK）渲染界面，我们写的是标准 HTML + CSS + TypeScript。
+- 这些 JS **跑在 WebView 里，是浏览器 JS，不是 Node JS**：没有 `require`、没有 `fs`、没有 npm 运行时依赖。要碰文件、进程、密钥这些，一律通过 IPC 交给 Rust 侧。
+- 对比 Electron 的差别正在这里：Electron 同时打包 Chromium **和 Node**，所以起步就是一百多兆；Tauri 两个都不带，UI 却一样是 H5。**我们要的是 Electron 的开发体验，不要它的体积和运行时。**
+
+于是「Node」在三个位置出现，只有第一个被禁：
+
+| 位置 | 是否允许 | 说明 |
+|------|----------|------|
+| **随包分发、开机跟着跑** | **禁止** | 两个 sidecar 都是 Rust 静态二进制，UI 走系统 WebView |
+| 构建期工具链（Vite / tsc / tauri-cli） | 允许 | 只在开发机和 CI 上跑，产物是纯静态文件，不进安装包 |
+| 用户自己装的外部 agent | 不归我们管 | 某些 agent 自带运行时，那是它自己的安装，我们既不打包也不代劳 |
+
+**不打包**：任何外部 agent 的 SDK 或运行时。用户想用 Claude Code、Cursor、OpenCode，daemon 检测本机已装的即可（[architecture.md](./architecture.md) §3.3）——把别人的 CLI 塞进我们的安装包既臃肿又有授权麻烦，还会把它的运行时依赖变成我们的。
+
+**这条约束的顺带好处**：桌面端 UI 和浏览器工作台是**同一套前端代码**（`packages/web`），一次实现两处运行，差异只有一层薄薄的能力适配（见 §4.2）。
+
+验收方式：安装后扫描整个安装目录，**出现 `node` / `node.exe` / `node_modules` 即判定失败**，写进发版检查。
+
+### 4.2 同一套前端，两种宿主
+
+`packages/web` 同时作为浏览器工作台和桌面窗口内容，靠一层运行环境适配抹平差异：
+
+| 差异点 | 浏览器里 | 桌面 WebView 里 |
+|--------|----------|-----------------|
+| 连 daemon | 经 Hub 转发层的公网上行 | 直连 `127.0.0.1` 本地端口，最快且不出网 |
+| 静态资源 | Hub 提供 | 打进 app bundle，离线可用 |
+| 原生能力 | 无 | 托盘、通知、自启、选目录，经 Tauri IPC 调 Rust |
+| 登录态 | Cookie / 设备会话 | 复用 daemon 本地凭证，不必再登一次 |
+
+约束：**这层适配必须收敛在一个模块里**（`packages/web/src/host/`），业务组件不允许直接判断"我是不是在 Tauri 里"。否则两个宿主的分支会长满全项目，最后变成事实上的两套前端。
 
 执行策略：按平台构建只带该平台二进制；release profile 开 `opt-level="z"` + LTO + strip；安装包压缩（NSIS LZMA / dmg 压缩）。
 
@@ -154,7 +189,7 @@ daemon 与 agent 都改成 Rust 之后，原先最大的两块不确定性——
 
 - Tauri 2 工程 + 三平台安装包 target
 - 托盘 + 关窗驻留 + 打开主界面 + 单实例
-- sidecar 拉起 daemon 与 PI Agent；退出时确保子进程被杀
+- sidecar 拉起 daemon（agent 由 daemon 自己按需拉起）；退出时确保整棵子进程树被杀
 - 体积方案实测（这一步决定后面所有取舍）
 
 **D2**

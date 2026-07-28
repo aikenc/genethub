@@ -1,0 +1,455 @@
+//! Request dispatch: one `Request` in, one `Reply` or `ProtocolError` out.
+//!
+//! Kept free of transport concerns so the same routing serves loopback, LAN
+//! and forwarded connections without duplication.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use genehub_proto::{
+    ErrorCode, HelloResult, ProtocolError, Reply, Request, TransportKind, PROTOCOL_VERSION,
+};
+use tokio::sync::broadcast;
+
+use crate::state::Shared;
+use crate::{files, git};
+
+/// What a handled request may ask the connection to do beyond replying.
+pub enum SideEffect {
+    None,
+    Subscribe {
+        session_id: String,
+        receiver: broadcast::Receiver<genehub_proto::SequencedEvent>,
+    },
+    Unsubscribe {
+        session_id: String,
+    },
+}
+
+pub struct Handled {
+    pub reply: Result<Reply, ProtocolError>,
+    pub effect: SideEffect,
+}
+
+impl Handled {
+    fn ok(reply: Reply) -> Self {
+        Handled {
+            reply: Ok(reply),
+            effect: SideEffect::None,
+        }
+    }
+
+    fn err(code: ErrorCode, message: impl Into<String>) -> Self {
+        Handled {
+            reply: Err(ProtocolError {
+                code,
+                message: message.into(),
+            }),
+            effect: SideEffect::None,
+        }
+    }
+}
+
+/// Maps an internal failure onto a client-visible error.
+///
+/// Everything that reaches a user goes through here, so the wording is worth
+/// keeping honest: `docs/testing.md` §4.4 requires every failure to say
+/// something actionable rather than render blank.
+fn failed(error: anyhow::Error) -> Handled {
+    let message = format!("{error:#}");
+    let code = if message.contains("escapes the workspace") {
+        ErrorCode::Forbidden
+    } else if message.contains("no such") {
+        ErrorCode::NotFound
+    } else if message.contains("does not") || message.contains("not supported") {
+        ErrorCode::Unsupported
+    } else {
+        ErrorCode::Internal
+    };
+    Handled {
+        reply: Err(ProtocolError { code, message }),
+        effect: SideEffect::None,
+    }
+}
+
+pub async fn handle(state: &Shared, transport: TransportKind, request: Request) -> Handled {
+    match request {
+        Request::Hello {
+            protocol_version, ..
+        } => {
+            if protocol_version != PROTOCOL_VERSION {
+                // Refusing beats guessing: a client that speaks a different
+                // version will misread events in ways that look like data loss.
+                return Handled::err(
+                    ErrorCode::ProtocolVersion,
+                    format!(
+                        "this daemon speaks protocol {PROTOCOL_VERSION}, the client asked for {protocol_version}"
+                    ),
+                );
+            }
+            Handled::ok(Reply::Hello(HelloResult {
+                daemon_version: state.version.clone(),
+                protocol_version: PROTOCOL_VERSION,
+                machine_id: state.machine.machine_id.clone(),
+                fingerprint: state.machine.fingerprint(),
+                transport,
+            }))
+        }
+
+        Request::Subscribe {
+            session_id,
+            since_seq,
+        } => match state.sessions.subscribe(&session_id, since_seq).await {
+            Ok((snapshot, replayed, reset, receiver)) => Handled {
+                reply: Ok(Reply::Subscribed {
+                    snapshot,
+                    replayed,
+                    reset,
+                }),
+                effect: SideEffect::Subscribe {
+                    session_id,
+                    receiver,
+                },
+            },
+            Err(error) => failed(error),
+        },
+
+        Request::Unsubscribe { session_id } => Handled {
+            reply: Ok(Reply::Ack),
+            effect: SideEffect::Unsubscribe { session_id },
+        },
+
+        Request::AgentList => {
+            let providers = state.providers().await;
+            Handled::ok(Reply::Agents(state.registry.list(&providers).await))
+        }
+
+        Request::AgentRefresh => {
+            let providers = state.providers().await;
+            Handled::ok(Reply::Agents(state.registry.refresh(&providers).await))
+        }
+
+        Request::SessionCreate {
+            workspace_id,
+            agent_id,
+            model_id,
+            mode_id,
+            title,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match state
+                .sessions
+                .create(
+                    &workspace_id,
+                    workspace.root,
+                    &agent_id,
+                    model_id,
+                    mode_id,
+                    title,
+                )
+                .await
+            {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionList {
+            workspace_id,
+            include_archived,
+        } => match state
+            .sessions
+            .list(workspace_id.as_deref(), include_archived)
+            .await
+        {
+            Ok(sessions) => Handled::ok(Reply::Sessions(sessions)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionGet { session_id } => match state.sessions.snapshot(&session_id).await {
+            Ok(snapshot) => Handled::ok(Reply::Snapshot(snapshot)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionSend {
+            session_id,
+            text,
+            attachments,
+        } => {
+            if text.trim().is_empty() && attachments.is_empty() {
+                return Handled::err(ErrorCode::BadRequest, "there is nothing to send");
+            }
+            let providers = state.providers().await;
+            match state
+                .sessions
+                .send(&session_id, text, attachments, &providers)
+                .await
+            {
+                Ok(_) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionInterrupt { session_id } => {
+            match state.sessions.interrupt(&session_id).await {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionClose { session_id } => match state.sessions.close(&session_id).await {
+            Ok(()) => Handled::ok(Reply::Ack),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionArchive {
+            session_id,
+            archived,
+        } => match state.sessions.archive(&session_id, archived).await {
+            Ok(summary) => Handled::ok(Reply::Session(summary)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionSetModel {
+            session_id,
+            model_id,
+        } => match state.sessions.set_model(&session_id, &model_id).await {
+            Ok(()) => Handled::ok(Reply::Ack),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionSetMode {
+            session_id,
+            mode_id,
+        } => match state.sessions.set_mode(&session_id, &mode_id).await {
+            Ok(()) => Handled::ok(Reply::Ack),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionRespondPermission {
+            session_id,
+            request_id,
+            outcome,
+        } => match state
+            .sessions
+            .respond_permission(&session_id, &request_id, outcome)
+            .await
+        {
+            Ok(()) => Handled::ok(Reply::Ack),
+            Err(error) => failed(error),
+        },
+
+        Request::WorkspaceList => Handled::ok(Reply::Workspaces(state.workspaces.list().await)),
+
+        Request::WorkspaceOpen { root } => {
+            match state.workspaces.open(Path::new(&root), None).await {
+                Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::WorkspaceCreate { root, name } => {
+            let path = Path::new(&root);
+            if let Err(error) = std::fs::create_dir_all(path) {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    format!("could not create {root}: {error}"),
+                );
+            }
+            match state.workspaces.open(path, Some(name)).await {
+                Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::FileTree {
+            workspace_id,
+            path,
+            depth,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let target = match state
+                .workspaces
+                .resolve(&workspace_id, path.as_deref().unwrap_or("."))
+                .await
+            {
+                Ok(target) => target,
+                Err(error) => return failed(error),
+            };
+            match files::tree(&workspace.root, &target, depth.unwrap_or(2).min(8)) {
+                Ok(tree) => Handled::ok(Reply::FileTree(tree)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::FileRead { workspace_id, path } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let target = match state.workspaces.resolve(&workspace_id, &path).await {
+                Ok(target) => target,
+                Err(error) => return failed(error),
+            };
+            match files::read(&workspace.root, &target) {
+                Ok(content) => Handled::ok(Reply::FileContent(content)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::FileWrite {
+            workspace_id,
+            path,
+            content,
+        } => {
+            let target = match state.workspaces.resolve(&workspace_id, &path).await {
+                Ok(target) => target,
+                Err(error) => return failed(error),
+            };
+            match files::write(&target, &content) {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::GitStatus { workspace_id } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match git::status(&workspace.root).await {
+                Ok(status) => Handled::ok(Reply::GitStatus(status)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::GitDiff { workspace_id, path } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match git::diff(&workspace.root, path.as_deref()).await {
+                Ok(diff) => Handled::ok(Reply::GitDiff { diff }),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::GitCommit {
+            workspace_id,
+            message,
+            paths,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match git::commit(&workspace.root, &message, &paths).await {
+                Ok(commit) => Handled::ok(Reply::GitCommit { commit }),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::PtyOpen {
+            workspace_id,
+            cols,
+            rows,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match state
+                .terminals
+                .open(&workspace.root, cols.unwrap_or(80), rows.unwrap_or(24))
+                .await
+            {
+                Ok(pty_id) => Handled::ok(Reply::Pty { pty_id }),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::PtyWrite { pty_id, data } => match state.terminals.write(&pty_id, &data).await {
+            Ok(()) => Handled::ok(Reply::Ack),
+            Err(error) => failed(error),
+        },
+
+        Request::PtyResize { pty_id, cols, rows } => {
+            match state.terminals.resize(&pty_id, cols, rows).await {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::PtyClose { pty_id } => match state.terminals.close(&pty_id).await {
+            Ok(()) => Handled::ok(Reply::Ack),
+            Err(error) => failed(error),
+        },
+    }
+}
+
+/// Requests allowed before a successful `hello`.
+pub fn needs_handshake(request: &Request) -> bool {
+    !matches!(request, Request::Hello { .. })
+}
+
+pub fn transport_for(remote: Option<std::net::IpAddr>) -> TransportKind {
+    match remote {
+        Some(ip) if ip.is_loopback() => TransportKind::Loopback,
+        Some(_) => TransportKind::Lan,
+        None => TransportKind::Forwarded,
+    }
+}
+
+pub type SharedState = Arc<crate::state::AppState>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn loopback_and_lan_addresses_are_distinguished() {
+        assert_eq!(
+            transport_for(Some(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+            TransportKind::Loopback
+        );
+        assert_eq!(
+            transport_for(Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)))),
+            TransportKind::Lan
+        );
+        assert_eq!(transport_for(None), TransportKind::Forwarded);
+    }
+
+    #[test]
+    fn only_hello_may_precede_the_handshake() {
+        assert!(!needs_handshake(&Request::Hello {
+            client_name: "web".into(),
+            protocol_version: 1
+        }));
+        assert!(needs_handshake(&Request::AgentList));
+    }
+
+    #[test]
+    fn workspace_escapes_are_reported_as_forbidden_not_internal() {
+        let handled = failed(anyhow::anyhow!("path escapes the workspace"));
+        match handled.reply {
+            Err(error) => assert_eq!(error.code, ErrorCode::Forbidden),
+            Ok(_) => panic!("expected an error"),
+        }
+    }
+
+    #[test]
+    fn a_missing_entity_is_reported_as_not_found() {
+        let handled = failed(anyhow::anyhow!("no such session: s1"));
+        match handled.reply {
+            Err(error) => assert_eq!(error.code, ErrorCode::NotFound),
+            Ok(_) => panic!("expected an error"),
+        }
+    }
+}

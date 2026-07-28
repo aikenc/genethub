@@ -138,7 +138,7 @@ audit_logs
 | 约束 | MVP 要求 | 落点 |
 |------|----------|------|
 | 工作目录白名单 | 必须指定 `workspace_path`，租客只能在此路径下发起执行 | Hub 校验 `cwd` 前缀；daemon 侧后续加二次校验 |
-| provider 凭证 | 默认使用**机器内置 PI Agent + 租客自带 API Key**，不得默认借用机主的 Claude/Codex 登录 | 桌面端「公开设置」显式勾选 |
+| provider 凭证 | 默认使用**机器内置 Genet Agent + 租客自带 API Key**，不得默认借用机主的 Claude/Codex 登录 | 桌面端「公开设置」显式勾选 |
 | 用量上限 | 单租约最大执行数 / 时长；超限自动结束 | `limits_json` |
 | 单活跃租约 | 一台机器同时只有一个租客 | DB 唯一约束 |
 | 结束清理 | 停止全部执行、断开会话、写审计 | Hub 主动下 `control.request` |

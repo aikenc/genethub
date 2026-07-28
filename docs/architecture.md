@@ -111,6 +111,8 @@ pub trait AgentSession: Send + Sync {
 
 MVP 三个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一批 agent**，`opencode` 则是**形状差异最大的那个**——它不是子进程 stdio 而是本地 HTTP + SSE。用它来证伪 B3 最狠：如果归一化层能同时吃下 stdio 流和 HTTP 事件流，那它多半是真抽象而不是某一种传输的马甲。
 
+**外部 agent 一律不随包分发**，只检测用户自己安装的。除了体积与授权，还有一条更硬的理由：有些 agent 自带 Node 或其他运行时，打包它们等于把它们的运行时依赖变成我们的，而 PC 端零 Node 运行时是硬约束（[desktop-client.md](./desktop-client.md) §4.1）。没装就不在选择器里出现，装了就出现。
+
 用户自定义 agent 走配置声明，不需要改代码：
 
 ```jsonc

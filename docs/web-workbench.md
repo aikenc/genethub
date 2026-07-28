@@ -147,4 +147,21 @@ WebSocket（自有会话协议）
 
 ## 7. 与桌面 / 手机壳的关系
 
-同一份构建产物三处复用：浏览器直出、Tauri 打进桌面包、Capacitor 打进手机包。壳只提供三件事：**深链、通知、扫码**。任何"只有桌面能用"的功能都要先问一句能不能用 Web 能力实现。
+同一份构建产物三处复用：浏览器直出、Tauri 打进桌面包、Capacitor 打进手机包。
+
+这一点值得说明白，因为它常被误解：**PC 端"不依赖 Node"并不意味着 PC 端不能用 H5**。Tauri 的窗口内容就是本项目这套前端，只是渲染它的是系统 WebView 而非 Chromium，驱动它的是 Rust 而非 Node。被排除的是 Node 运行时进程，技术栈本身没有任何降级（见 [desktop-client.md](./desktop-client.md) §4.1）。
+
+宿主差异收敛在 `src/host/` 一个模块里，对外暴露统一接口：
+
+```ts
+interface Host {
+  connect(machine: MachineRef): Promise<Channel>; // 桌面直连 127.0.0.1，浏览器走 Hub 转发
+  notify(n: Notification): void;
+  openExternal(url: string): void;
+  pickDirectory?(): Promise<string | null>;       // 可选能力，缺失即不渲染入口
+}
+```
+
+**业务组件不允许出现 `if (isTauri)`。** 需要区分宿主时，要么走上面的接口，要么把该能力声明为可选并在缺失时隐藏入口——和处理 agent `Capabilities` 的做法一致（§2.2）。否则宿主分支会长满全项目，最后变成事实上的两套前端。
+
+壳自身只提供三件事：**深链、通知、扫码**。任何"只有桌面能用"的功能都要先问一句能不能用 Web 能力实现。

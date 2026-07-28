@@ -1,0 +1,1173 @@
+//! Adapter for the built-in agent: child process, JSONL frames over stdio.
+//!
+//! All knowledge of that agent's wire format is confined to this file. The
+//! translation to `SessionEvent` happens here so nothing above the adapter
+//! layer ever sees an agent-shaped frame.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
+
+use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
+use genehub_proto::{
+    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOutcome, ProbeState,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+};
+use serde_json::{json, Map, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::{broadcast, Mutex};
+
+use super::{
+    find_executable, AgentAdapter, AgentSession, PromptInput, ProviderMap, SessionConfig,
+};
+use crate::config::ProviderConfig;
+
+const BINARY: &str = "genet-agent";
+const EVENT_CAPACITY: usize = 1024;
+
+/// Thinking levels the agent accepts, exposed as this adapter's "modes".
+const THINKING_LEVELS: [&str; 7] = [
+    "off", "minimal", "low", "medium", "high", "xhigh", "max",
+];
+
+pub struct GenetAdapter {
+    binary: Option<PathBuf>,
+}
+
+impl GenetAdapter {
+    pub fn discover() -> Self {
+        // Next to the daemon first: that is where the installer puts it, and it
+        // must win over any unrelated binary of the same name on PATH.
+        let sibling = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join(BINARY)))
+            .filter(|path| path.is_file());
+        let binary = std::env::var("GENET_AGENT_COMMAND")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or(sibling)
+            .or_else(|| find_executable(BINARY));
+        GenetAdapter { binary }
+    }
+}
+
+#[async_trait]
+impl AgentAdapter for GenetAdapter {
+    fn id(&self) -> &str {
+        "genet"
+    }
+
+    fn label(&self) -> &str {
+        "GeneHub Agent"
+    }
+
+    fn builtin(&self) -> bool {
+        true
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            interrupt: true,
+            set_model: true,
+            // Thinking level is this agent's only mode axis.
+            set_mode: true,
+            // No approval flow of its own yet, so the frontend must not render
+            // approval controls for it.
+            permissions: false,
+            resume: true,
+            attachments: false,
+        }
+    }
+
+    async fn probe(&self) -> ProbeState {
+        match &self.binary {
+            Some(_) => ProbeState::Ready,
+            None => ProbeState::NotInstalled,
+        }
+    }
+
+    async fn catalog(&self, providers: &ProviderMap) -> Catalog {
+        let models: Vec<ModelInfo> = configured_models(providers)
+            .into_iter()
+            .map(|model| ModelInfo {
+                id: format!("{}/{}", model.provider, model.id),
+                label: model.label,
+                context_window: model.context_window,
+                reasoning: model.reasoning,
+            })
+            .collect();
+        let modes = THINKING_LEVELS
+            .iter()
+            .map(|level| ModeInfo {
+                id: (*level).to_string(),
+                label: format!("Thinking: {level}"),
+                description: None,
+            })
+            .collect();
+        Catalog {
+            default_model: models.first().map(|m| m.id.clone()),
+            models,
+            modes,
+            default_mode: Some("medium".to_string()),
+        }
+    }
+
+    async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
+        let binary = self
+            .binary
+            .clone()
+            .ok_or_else(|| anyhow!("the built-in agent binary is not available"))?;
+
+        let home = config.scratch_dir.join("genet");
+        std::fs::create_dir_all(&home).context("creating the agent scratch directory")?;
+        write_models_file(&home, &config.providers)?;
+
+        let session_file = home.join("session.jsonl");
+        let mut command = Command::new(&binary);
+        command
+            .arg("--mode")
+            .arg("rpc")
+            .arg("--session")
+            .arg(&session_file)
+            .current_dir(&config.cwd)
+            .env("GENET_AGENT_HOME", &home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        if let Some(model) = config.model_id.as_ref() {
+            command.arg("--model").arg(model);
+        }
+        if let Some(mode) = config.mode_id.as_ref() {
+            command.arg("--thinking").arg(mode);
+        }
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("spawning {}", binary.display()))?;
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let stdin = child.stdin.take().expect("stdin was piped");
+
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let turn = Arc::new(Mutex::new(TurnState::default()));
+
+        let session = GenetSession {
+            stdin: Mutex::new(stdin),
+            events: events.clone(),
+            turn: turn.clone(),
+            child: Mutex::new(Some(child)),
+            session_file,
+        };
+
+        // stderr is drained separately: the agent logs diagnostics there and a
+        // full pipe would block the process.
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "genet-agent", "{line}");
+            }
+        });
+
+        tokio::spawn(translate_stream(stdout, events, turn));
+
+        Ok(Box::new(session))
+    }
+}
+
+/// What the translator needs to know about the turn currently in flight.
+#[derive(Default)]
+struct TurnState {
+    id: Option<String>,
+    counter: u64,
+    text_item: Option<String>,
+    reasoning_item: Option<String>,
+    usage: Usage,
+    /// Tool call id -> (normalized name, raw arguments), captured when the call
+    /// is announced so the result can be rendered with its inputs.
+    calls: HashMap<String, (String, Value)>,
+    failure: Option<TurnError>,
+    canceled: bool,
+}
+
+impl TurnState {
+    fn next_item_id(&mut self) -> String {
+        self.counter += 1;
+        let turn = self.id.as_deref().unwrap_or("t0");
+        format!("{turn}-{}", self.counter)
+    }
+}
+
+struct GenetSession {
+    stdin: Mutex<ChildStdin>,
+    events: broadcast::Sender<SessionEvent>,
+    turn: Arc<Mutex<TurnState>>,
+    child: Mutex<Option<Child>>,
+    session_file: PathBuf,
+}
+
+impl GenetSession {
+    async fn command(&self, value: Value) -> Result<()> {
+        let mut line = serde_json::to_string(&value)?;
+        line.push('\n');
+        let mut stdin = self.stdin.lock().await;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .context("writing to the agent process")?;
+        stdin.flush().await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AgentSession for GenetSession {
+    fn events(&self) -> broadcast::Receiver<SessionEvent> {
+        self.events.subscribe()
+    }
+
+    async fn send(&self, input: PromptInput) -> Result<String> {
+        let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
+        {
+            let mut turn = self.turn.lock().await;
+            *turn = TurnState {
+                id: Some(turn_id.clone()),
+                ..TurnState::default()
+            };
+        }
+        self.command(json!({
+            "id": turn_id,
+            "type": "prompt",
+            "message": input.text,
+        }))
+        .await?;
+        Ok(turn_id)
+    }
+
+    async fn interrupt(&self) -> Result<()> {
+        {
+            let mut turn = self.turn.lock().await;
+            turn.canceled = true;
+        }
+        self.command(json!({ "type": "abort" })).await
+    }
+
+    async fn close(&self) -> Result<()> {
+        // Dropping stdin is the agent's shutdown signal; it drains in-flight
+        // work before exiting, so wait rather than killing outright.
+        let mut child = self.child.lock().await;
+        if let Some(mut child) = child.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        Ok(())
+    }
+
+    async fn set_model(&self, model_id: &str) -> Result<()> {
+        let (provider, id) = model_id
+            .split_once('/')
+            .ok_or_else(|| anyhow!("model id must be 'provider/id', got '{model_id}'"))?;
+        self.command(json!({
+            "type": "set_model",
+            "provider": provider,
+            "modelId": id,
+        }))
+        .await?;
+        let _ = self.events.send(SessionEvent::ModelChanged {
+            model_id: model_id.to_string(),
+        });
+        Ok(())
+    }
+
+    async fn set_mode(&self, mode_id: &str) -> Result<()> {
+        if !THINKING_LEVELS.contains(&mode_id) {
+            return Err(anyhow!("unknown thinking level '{mode_id}'"));
+        }
+        self.command(json!({ "type": "set_thinking_level", "level": mode_id }))
+            .await?;
+        let _ = self.events.send(SessionEvent::ModeChanged {
+            mode_id: mode_id.to_string(),
+        });
+        Ok(())
+    }
+
+    async fn respond_permission(&self, _request: &str, _outcome: PermissionOutcome) -> Result<()> {
+        Err(anyhow!("the built-in agent does not request approvals"))
+    }
+
+    fn persistence(&self) -> Option<super::PersistHandle> {
+        Some(super::PersistHandle {
+            agent_id: "genet".into(),
+            value: json!({ "sessionFile": self.session_file }),
+        })
+    }
+}
+
+async fn translate_stream(
+    stdout: tokio::process::ChildStdout,
+    events: broadcast::Sender<SessionEvent>,
+    turn: Arc<Mutex<TurnState>>,
+) {
+    let mut lines = BufReader::new(stdout).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(frame) => {
+                        let mut state = turn.lock().await;
+                        translate_frame(&frame, &mut state, &events);
+                    }
+                    Err(error) => {
+                        tracing::warn!("undecodable frame from the agent: {error}");
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!("agent stdout closed: {error}");
+                break;
+            }
+        }
+    }
+
+    // The process died. If a turn was in flight the client is still waiting for
+    // it, so fail it explicitly rather than leaving a spinner forever.
+    let mut state = turn.lock().await;
+    if let Some(turn_id) = state.id.take() {
+        let _ = events.send(SessionEvent::TurnFailed {
+            turn_id,
+            error: TurnError {
+                code: TurnErrorCode::AgentCrashed,
+                message: "The agent process stopped unexpectedly.".into(),
+            },
+        });
+    }
+}
+
+fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sender<SessionEvent>) {
+    let Some(kind) = frame.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(turn_id) = state.id.clone() else {
+        // Frames outside a turn (responses to control commands) carry no
+        // timeline meaning.
+        return;
+    };
+    let emit = |event: SessionEvent| {
+        let _ = events.send(event);
+    };
+
+    match kind {
+        "agent_start" => emit(SessionEvent::TurnStarted {
+            turn_id: turn_id.clone(),
+        }),
+
+        "text_start" => {
+            let id = state.next_item_id();
+            state.text_item = Some(id.clone());
+            emit(SessionEvent::Item {
+                turn_id,
+                item: TimelineItem::AssistantMessage {
+                    id,
+                    text: String::new(),
+                },
+            });
+        }
+        "text_delta" => {
+            if let (Some(id), Some(delta)) = (
+                state.text_item.clone(),
+                frame.get("delta").and_then(Value::as_str),
+            ) {
+                emit(SessionEvent::ItemDelta {
+                    turn_id,
+                    item_id: id,
+                    delta: ItemDelta::Text {
+                        delta: delta.to_string(),
+                    },
+                });
+            }
+        }
+        "text_end" => {
+            if let Some(id) = state.text_item.take() {
+                let text = frame
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                emit(SessionEvent::Item {
+                    turn_id,
+                    item: TimelineItem::AssistantMessage { id, text },
+                });
+            }
+        }
+
+        "thinking_start" => {
+            let id = state.next_item_id();
+            state.reasoning_item = Some(id.clone());
+            emit(SessionEvent::Item {
+                turn_id,
+                item: TimelineItem::Reasoning {
+                    id,
+                    text: String::new(),
+                },
+            });
+        }
+        "thinking_delta" => {
+            if let (Some(id), Some(delta)) = (
+                state.reasoning_item.clone(),
+                frame.get("delta").and_then(Value::as_str),
+            ) {
+                emit(SessionEvent::ItemDelta {
+                    turn_id,
+                    item_id: id,
+                    delta: ItemDelta::Text {
+                        delta: delta.to_string(),
+                    },
+                });
+            }
+        }
+        "thinking_end" => {
+            state.reasoning_item = None;
+        }
+
+        "toolcall_end" => {
+            let call = frame.get("toolCall").unwrap_or(&Value::Null);
+            let (Some(id), Some(name)) = (
+                call.get("id").and_then(Value::as_str),
+                call.get("name").and_then(Value::as_str),
+            ) else {
+                return;
+            };
+            let arguments = call.get("arguments").cloned().unwrap_or(Value::Null);
+            state
+                .calls
+                .insert(id.to_string(), (name.to_string(), arguments.clone()));
+            emit(SessionEvent::Item {
+                turn_id,
+                item: TimelineItem::ToolCall {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    status: ToolStatus::Pending,
+                    detail: detail_from_call(name, &arguments),
+                },
+            });
+        }
+
+        "tool_execution_start" => {
+            if let Some(id) = frame.get("toolCallId").and_then(Value::as_str) {
+                emit(SessionEvent::ItemDelta {
+                    turn_id,
+                    item_id: id.to_string(),
+                    delta: ItemDelta::ToolStatus {
+                        status: ToolStatus::Running,
+                        detail: None,
+                    },
+                });
+            }
+        }
+
+        "tool_execution_end" => {
+            let Some(id) = frame.get("toolCallId").and_then(Value::as_str) else {
+                return;
+            };
+            let (name, arguments) = state
+                .calls
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| ("unknown".to_string(), Value::Null));
+            let result = frame.get("result").unwrap_or(&Value::Null);
+            let is_error = frame
+                .get("isError")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let status = if is_error {
+                ToolStatus::Error
+            } else {
+                ToolStatus::Ok
+            };
+            emit(SessionEvent::Item {
+                turn_id,
+                item: TimelineItem::ToolCall {
+                    id: id.to_string(),
+                    name: name.clone(),
+                    status,
+                    detail: detail_from_result(&name, &arguments, result, is_error),
+                },
+            });
+        }
+
+        "message_end" => {
+            let message = frame.get("message").unwrap_or(&Value::Null);
+            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                // The agent echoes the prompt back as a user message; the
+                // daemon already recorded that from the client request.
+                return;
+            }
+            if let Some(usage) = message.get("usage") {
+                accumulate_usage(&mut state.usage, usage);
+            }
+            match message.get("stopReason").and_then(Value::as_str) {
+                Some("error") => {
+                    let message = message
+                        .get("errorMessage")
+                        .and_then(Value::as_str)
+                        .unwrap_or("The agent could not complete this turn.");
+                    state.failure = Some(classify_failure(message));
+                }
+                Some("aborted") => state.canceled = true,
+                _ => {}
+            }
+        }
+
+        "compaction_end" => {
+            let id = state.next_item_id();
+            let reason = frame
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("auto")
+                .to_string();
+            emit(SessionEvent::Item {
+                turn_id,
+                item: TimelineItem::Compaction { id, reason },
+            });
+        }
+
+        "agent_end" => {
+            let usage = std::mem::take(&mut state.usage);
+            let failure = state.failure.take();
+            let canceled = state.canceled;
+            state.id = None;
+            state.calls.clear();
+            state.text_item = None;
+            state.reasoning_item = None;
+            state.canceled = false;
+
+            if let Some(error) = failure {
+                emit(SessionEvent::TurnFailed { turn_id, error });
+            } else if canceled {
+                emit(SessionEvent::TurnCanceled { turn_id });
+            } else {
+                emit(SessionEvent::TurnCompleted { turn_id, usage });
+            }
+        }
+
+        _ => {}
+    }
+}
+
+/// Turns an agent-side failure message into a code the frontend can act on.
+///
+/// The message is matched rather than a status code because the agent reports
+/// provider failures as prose; misclassifying only costs a less specific icon,
+/// whereas dropping the distinction entirely would leave "no API key" looking
+/// like a server outage.
+fn classify_failure(message: &str) -> TurnError {
+    let lower = message.to_lowercase();
+    let code = if lower.contains("no model configured")
+        || lower.contains("api key")
+        || lower.contains("unauthorized")
+        || lower.contains("401")
+    {
+        TurnErrorCode::MissingCredentials
+    } else if lower.contains("429") || lower.contains("rate limit") {
+        TurnErrorCode::RateLimited
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        TurnErrorCode::Timeout
+    } else {
+        TurnErrorCode::Upstream
+    };
+    TurnError {
+        code,
+        message: message.to_string(),
+    }
+}
+
+fn accumulate_usage(total: &mut Usage, usage: &Value) {
+    let field = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    total.input_tokens += field("input");
+    total.output_tokens += field("output");
+    total.cache_read_tokens += field("cacheRead");
+    total.cache_write_tokens += field("cacheWrite");
+    if let Some(cost) = usage.get("cost").and_then(|c| c.get("total")).and_then(Value::as_f64) {
+        total.cost_usd = Some(total.cost_usd.unwrap_or(0.0) + cost);
+    }
+}
+
+fn arg_str(arguments: &Value, key: &str) -> String {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Detail for a call that has been announced but not yet run.
+fn detail_from_call(name: &str, arguments: &Value) -> ToolCallDetail {
+    match name {
+        "bash" => ToolCallDetail::Shell {
+            command: arg_str(arguments, "command"),
+            output: String::new(),
+            exit_code: None,
+        },
+        "read" => ToolCallDetail::Read {
+            path: arg_str(arguments, "path"),
+            content: String::new(),
+            truncated: false,
+        },
+        "write" => ToolCallDetail::Write {
+            path: arg_str(arguments, "path"),
+            content: arg_str(arguments, "content"),
+        },
+        "edit" => ToolCallDetail::Edit {
+            path: arg_str(arguments, "path"),
+            diff: String::new(),
+        },
+        "grep" | "find" | "ls" => ToolCallDetail::Search {
+            query: search_query(name, arguments),
+            matches: Vec::new(),
+        },
+        _ => ToolCallDetail::Unknown {
+            raw: arguments.clone(),
+        },
+    }
+}
+
+fn search_query(name: &str, arguments: &Value) -> String {
+    match name {
+        "grep" => arg_str(arguments, "pattern"),
+        "find" => arg_str(arguments, "pattern"),
+        _ => {
+            let path = arg_str(arguments, "path");
+            if path.is_empty() {
+                ".".to_string()
+            } else {
+                path
+            }
+        }
+    }
+}
+
+/// Detail once the tool has run. `result` is the agent's tool result object:
+/// `{ content: [{type, text}], details?: {...} }`.
+fn detail_from_result(
+    name: &str,
+    arguments: &Value,
+    result: &Value,
+    is_error: bool,
+) -> ToolCallDetail {
+    let text = result
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    let details = result.get("details").cloned().unwrap_or(Value::Null);
+    let truncated = details
+        .get("truncation")
+        .and_then(|t| t.get("truncated"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    match name {
+        "bash" => ToolCallDetail::Shell {
+            command: arg_str(arguments, "command"),
+            output: text.clone(),
+            exit_code: exit_code_from(&text, is_error),
+        },
+        "read" => ToolCallDetail::Read {
+            path: arg_str(arguments, "path"),
+            content: text,
+            truncated,
+        },
+        "write" => ToolCallDetail::Write {
+            path: arg_str(arguments, "path"),
+            content: arg_str(arguments, "content"),
+        },
+        "edit" => ToolCallDetail::Edit {
+            path: arg_str(arguments, "path"),
+            diff: details
+                .get("diff")
+                .and_then(Value::as_str)
+                .unwrap_or(&text)
+                .to_string(),
+        },
+        "grep" | "find" | "ls" => ToolCallDetail::Search {
+            query: search_query(name, arguments),
+            matches: parse_matches(&text),
+        },
+        _ => {
+            let mut raw = Map::new();
+            raw.insert("arguments".into(), arguments.clone());
+            raw.insert("output".into(), Value::String(text));
+            if !details.is_null() {
+                raw.insert("details".into(), details);
+            }
+            ToolCallDetail::Unknown {
+                raw: Value::Object(raw),
+            }
+        }
+    }
+}
+
+/// The agent appends `Command exited with code N` after the output on failure.
+fn exit_code_from(text: &str, is_error: bool) -> Option<i32> {
+    if !is_error {
+        return Some(0);
+    }
+    text.rsplit("Command exited with code ")
+        .next()
+        .and_then(|tail| tail.trim().parse::<i32>().ok())
+}
+
+/// Search tools return `path:line:text` or bare paths, one per line.
+fn parse_matches(text: &str) -> Vec<genehub_proto::SearchMatch> {
+    text.lines()
+        .filter(|line| !line.is_empty() && *line != "(empty directory)")
+        .take(500)
+        .map(|line| {
+            let mut parts = line.splitn(3, ':');
+            let path = parts.next().unwrap_or(line).to_string();
+            match (parts.next(), parts.next()) {
+                (Some(number), Some(preview)) if number.parse::<u32>().is_ok() => {
+                    genehub_proto::SearchMatch {
+                        path,
+                        line: number.parse().ok(),
+                        preview: preview.to_string(),
+                    }
+                }
+                _ => genehub_proto::SearchMatch {
+                    path: line.to_string(),
+                    line: None,
+                    preview: String::new(),
+                },
+            }
+        })
+        .collect()
+}
+
+struct ConfiguredModel {
+    provider: String,
+    id: String,
+    label: String,
+    api: String,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    context_window: Option<u64>,
+    max_tokens: Option<u64>,
+    reasoning: bool,
+}
+
+/// Maps provider credentials onto the models we offer for them.
+///
+/// The list is deliberately small and explicit rather than fetched: an agent
+/// picker that hangs on a network call is worse than one that shows a few
+/// well-known models.
+fn configured_models(providers: &ProviderMap) -> Vec<ConfiguredModel> {
+    let mut models = Vec::new();
+    for (provider, config) in providers {
+        if config.api_key.as_deref().unwrap_or_default().is_empty() {
+            continue;
+        }
+        for (id, label, reasoning, context, max_tokens) in known_models(provider) {
+            models.push(ConfiguredModel {
+                provider: provider.clone(),
+                id: id.to_string(),
+                label: label.to_string(),
+                api: api_for(provider).to_string(),
+                base_url: config.base_url.clone(),
+                api_key: config.api_key.clone(),
+                context_window: Some(context),
+                max_tokens: Some(max_tokens),
+                reasoning,
+            });
+        }
+    }
+    models
+}
+
+fn api_for(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" => "anthropic",
+        _ => "openai",
+    }
+}
+
+fn known_models(provider: &str) -> Vec<(&'static str, &'static str, bool, u64, u64)> {
+    match provider {
+        "anthropic" => vec![
+            ("claude-sonnet-4-20250514", "Claude Sonnet 4", true, 200_000, 8192),
+            ("claude-haiku-4-20250514", "Claude Haiku 4", false, 200_000, 8192),
+        ],
+        "deepseek" => vec![
+            ("deepseek-v4-flash", "DeepSeek V4 Flash", true, 128_000, 8192),
+            ("deepseek-chat", "DeepSeek Chat", false, 128_000, 8192),
+        ],
+        "openai" => vec![
+            ("gpt-4o-mini", "GPT-4o mini", false, 128_000, 4096),
+            ("gpt-4o", "GPT-4o", false, 128_000, 4096),
+        ],
+        // A provider we do not have a list for still works: the user's own
+        // model id is accepted verbatim by the agent.
+        _ => vec![],
+    }
+}
+
+/// Writes the agent's `models.json`.
+///
+/// This is the single seam that swaps a real provider for the test mock: only
+/// `baseUrl` changes, so both modes exercise the same provider code path
+/// (`docs/testing.md` §2.1).
+fn write_models_file(home: &std::path::Path, providers: &ProviderMap) -> Result<()> {
+    let models: Vec<Value> = configured_models(providers)
+        .into_iter()
+        .map(|model| {
+            json!({
+                "provider": model.provider,
+                "id": model.id,
+                "name": model.label,
+                "api": model.api,
+                "baseUrl": model.base_url,
+                "apiKey": model.api_key,
+                "contextWindow": model.context_window,
+                "maxTokens": model.max_tokens,
+                "reasoning": model.reasoning,
+            })
+        })
+        .collect();
+    let path = home.join("models.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&json!({ "models": models }))?)
+        .with_context(|| format!("writing {}", path.display()))?;
+    crate::config::restrict_to_owner(&path)?;
+    Ok(())
+}
+
+/// Convenience for callers that hold a single provider entry.
+pub fn provider_map(entries: Vec<(&str, ProviderConfig)>) -> ProviderMap {
+    entries
+        .into_iter()
+        .map(|(name, config)| (name.to_string(), config))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_turn() -> TurnState {
+        TurnState {
+            id: Some("t1".into()),
+            ..TurnState::default()
+        }
+    }
+
+    fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
+        }
+        out
+    }
+
+    #[test]
+    fn a_streamed_reply_becomes_an_item_then_deltas_then_a_final_item() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+
+        for frame in [
+            json!({"type": "agent_start"}),
+            json!({"type": "text_start"}),
+            json!({"type": "text_delta", "delta": "he"}),
+            json!({"type": "text_delta", "delta": "llo"}),
+            json!({"type": "text_end", "content": "hello"}),
+            json!({"type": "agent_end"}),
+        ] {
+            translate_frame(&frame, &mut state, &tx);
+        }
+
+        let events = drain(&mut rx);
+        assert!(matches!(events[0], SessionEvent::TurnStarted { .. }));
+        let item_id = match &events[1] {
+            SessionEvent::Item {
+                item: TimelineItem::AssistantMessage { id, text },
+                ..
+            } => {
+                assert!(text.is_empty(), "the opening item starts empty");
+                id.clone()
+            }
+            other => panic!("expected an opening item, got {other:?}"),
+        };
+        assert!(matches!(
+            &events[2],
+            SessionEvent::ItemDelta { item_id: id, .. } if *id == item_id
+        ));
+        match &events[4] {
+            SessionEvent::Item {
+                item: TimelineItem::AssistantMessage { id, text },
+                ..
+            } => {
+                assert_eq!(id, &item_id, "the final item reuses the streaming id");
+                assert_eq!(text, "hello");
+            }
+            other => panic!("expected the final item, got {other:?}"),
+        }
+        assert!(matches!(events[5], SessionEvent::TurnCompleted { .. }));
+    }
+
+    #[test]
+    fn a_bash_call_carries_its_command_before_the_output_exists() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &json!({"type": "toolcall_end", "toolCall": {
+                "id": "call_1", "name": "bash", "arguments": {"command": "ls -a"}
+            }}),
+            &mut state,
+            &tx,
+        );
+        match &drain(&mut rx)[0] {
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall { status, detail, .. },
+                ..
+            } => {
+                assert_eq!(*status, ToolStatus::Pending);
+                assert_eq!(
+                    detail,
+                    &ToolCallDetail::Shell {
+                        command: "ls -a".into(),
+                        output: String::new(),
+                        exit_code: None
+                    }
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_command_reports_its_exit_code() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &json!({"type": "toolcall_end", "toolCall": {
+                "id": "c", "name": "bash", "arguments": {"command": "false"}
+            }}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(
+            &json!({"type": "tool_execution_end", "toolCallId": "c", "isError": true,
+                    "result": {"content": [{"type": "text", "text": "out\n\nCommand exited with code 3"}]}}),
+            &mut state,
+            &tx,
+        );
+        let events = drain(&mut rx);
+        match events.last().unwrap() {
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall { status, detail, .. },
+                ..
+            } => {
+                assert_eq!(*status, ToolStatus::Error);
+                match detail {
+                    ToolCallDetail::Shell { exit_code, .. } => assert_eq!(*exit_code, Some(3)),
+                    other => panic!("unexpected detail {other:?}"),
+                }
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// Rule 1 of the normalized model: an agent we have never seen must still
+    /// render, so an unmapped tool becomes `Unknown` rather than nothing.
+    #[test]
+    fn an_unmapped_tool_falls_back_to_unknown_without_losing_data() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &json!({"type": "toolcall_end", "toolCall": {
+                "id": "c", "name": "teleport", "arguments": {"destination": "mars"}
+            }}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(
+            &json!({"type": "tool_execution_end", "toolCallId": "c",
+                    "result": {"content": [{"type": "text", "text": "arrived"}]}}),
+            &mut state,
+            &tx,
+        );
+        let events = drain(&mut rx);
+        match events.last().unwrap() {
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall { name, detail, .. },
+                ..
+            } => {
+                assert_eq!(name, "teleport");
+                match detail {
+                    ToolCallDetail::Unknown { raw } => {
+                        assert_eq!(raw["arguments"]["destination"], "mars");
+                        assert_eq!(raw["output"], "arrived");
+                    }
+                    other => panic!("unexpected detail {other:?}"),
+                }
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_echoed_user_prompt_is_not_duplicated_onto_the_timeline() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &json!({"type": "message_end", "message": {"role": "user", "content": "hi"}}),
+            &mut state,
+            &tx,
+        );
+        assert!(
+            drain(&mut rx).is_empty(),
+            "the daemon already recorded the prompt it sent"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_errors_out_fails_with_a_classified_code() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &json!({"type": "message_end", "message": {
+                "role": "assistant", "stopReason": "error",
+                "errorMessage": "no model configured; set an API key"
+            }}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(&json!({"type": "agent_end"}), &mut state, &tx);
+        match drain(&mut rx).last().unwrap() {
+            SessionEvent::TurnFailed { error, .. } => {
+                assert_eq!(error.code, TurnErrorCode::MissingCredentials);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_aborted_turn_is_reported_as_canceled_not_completed() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "aborted"}}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(&json!({"type": "agent_end"}), &mut state, &tx);
+        assert!(matches!(
+            drain(&mut rx).last().unwrap(),
+            SessionEvent::TurnCanceled { .. }
+        ));
+    }
+
+    #[test]
+    fn usage_accumulates_across_the_turns_inside_one_run() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        for _ in 0..2 {
+            translate_frame(
+                &json!({"type": "message_end", "message": {
+                    "role": "assistant", "stopReason": "stop",
+                    "usage": {"input": 10, "output": 5, "cost": {"total": 0.25}}
+                }}),
+                &mut state,
+                &tx,
+            );
+        }
+        translate_frame(&json!({"type": "agent_end"}), &mut state, &tx);
+        match drain(&mut rx).last().unwrap() {
+            SessionEvent::TurnCompleted { usage, .. } => {
+                assert_eq!(usage.input_tokens, 20);
+                assert_eq!(usage.output_tokens, 10);
+                assert_eq!(usage.cost_usd, Some(0.5));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frames_arriving_outside_a_turn_are_ignored() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = TurnState::default();
+        translate_frame(&json!({"type": "text_start"}), &mut state, &tx);
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn grep_output_is_parsed_into_located_matches() {
+        let matches = parse_matches("src/a.rs:12:let x = 1\nsrc/b.rs:3:fn main()");
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].path, "src/a.rs");
+        assert_eq!(matches[0].line, Some(12));
+        assert_eq!(matches[0].preview, "let x = 1");
+    }
+
+    #[test]
+    fn bare_paths_from_ls_parse_without_a_line_number() {
+        let matches = parse_matches("a.txt\nsub/");
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().all(|m| m.line.is_none()));
+        assert_eq!(matches[1].path, "sub/");
+    }
+
+    #[test]
+    fn only_providers_with_a_key_reach_the_model_list() {
+        let providers = provider_map(vec![
+            (
+                "deepseek",
+                ProviderConfig {
+                    api_key: Some("sk-test".into()),
+                    base_url: Some("http://127.0.0.1:1/v1".into()),
+                },
+            ),
+            (
+                "anthropic",
+                ProviderConfig {
+                    api_key: None,
+                    base_url: None,
+                },
+            ),
+        ]);
+        let models = configured_models(&providers);
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.provider == "deepseek"));
+        assert!(models.iter().all(|m| m.api == "openai"));
+    }
+
+    #[test]
+    fn the_models_file_carries_the_base_url_the_test_harness_injected() {
+        let dir = tempfile::tempdir().unwrap();
+        let providers = provider_map(vec![(
+            "deepseek",
+            ProviderConfig {
+                api_key: Some("sk-test".into()),
+                base_url: Some("http://127.0.0.1:9/v1".into()),
+            },
+        )]);
+        write_models_file(dir.path(), &providers).unwrap();
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("models.json")).unwrap())
+                .unwrap();
+        assert_eq!(written["models"][0]["baseUrl"], "http://127.0.0.1:9/v1");
+        assert_eq!(written["models"][0]["apiKey"], "sk-test");
+    }
+}
