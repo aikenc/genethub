@@ -12,12 +12,12 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use genehub_proto::{parse_envelope, ErrorCode, NoticeLevel, SequencedEvent, ServerFrame};
+use genehub_proto::ServerFrame;
 use tokio::sync::{broadcast, mpsc};
 
-use super::auth;
+use super::{auth, session};
 use crate::pty::PtyMessage;
-use crate::router::{self, SideEffect};
+use crate::router;
 use crate::state::Shared;
 
 pub struct Listener {
@@ -29,24 +29,10 @@ pub struct Listener {
 ///
 /// A terminal is shared across a user's devices on purpose: picking up a
 /// running command on your phone is the point of the product.
-type PtyFanout = broadcast::Sender<ServerFrame>;
+pub type PtyFanout = broadcast::Sender<ServerFrame>;
 
-pub async fn serve(
-    state: Shared,
-    mut pty_rx: mpsc::UnboundedReceiver<PtyMessage>,
-) -> Result<Listener> {
-    let (config_port, lan_enabled) = {
-        let config = state.config.read().await;
-        (config.port, config.lan_enabled)
-    };
-
-    let bind: IpAddr = if lan_enabled {
-        // Listening beyond loopback is opt-in; see `docs/daemon.md` §6.
-        "0.0.0.0".parse().unwrap()
-    } else {
-        "127.0.0.1".parse().unwrap()
-    };
-
+/// Starts the pump that turns terminal output into client frames.
+pub fn pty_fanout(mut pty_rx: mpsc::UnboundedReceiver<PtyMessage>) -> PtyFanout {
     let (pty_tx, _) = broadcast::channel::<ServerFrame>(1024);
     let fanout = pty_tx.clone();
     tokio::spawn(async move {
@@ -60,6 +46,21 @@ pub async fn serve(
             let _ = fanout.send(frame);
         }
     });
+    pty_tx
+}
+
+pub async fn serve(state: Shared, pty_tx: PtyFanout) -> Result<Listener> {
+    let (config_port, lan_enabled) = {
+        let config = state.config.read().await;
+        (config.port, config.lan_enabled)
+    };
+
+    let bind: IpAddr = if lan_enabled {
+        // Listening beyond loopback is opt-in; see `docs/daemon.md` §6.
+        "0.0.0.0".parse().unwrap()
+    } else {
+        "127.0.0.1".parse().unwrap()
+    };
 
     let app = Router::new()
         .route("/health", get(health))
@@ -123,9 +124,9 @@ async fn upgrade(
 }
 
 async fn connection(socket: WebSocket, context: Context_, remote: IpAddr) {
-    let transport = router::transport_for(Some(remote));
     let (mut sink, mut stream) = socket.split();
     let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<ServerFrame>();
+    let (inbound, inbound_rx) = mpsc::unbounded_channel::<String>();
 
     // One writer task owns the sink, so handlers and event pumps can all send
     // without contending for it.
@@ -140,132 +141,33 @@ async fn connection(socket: WebSocket, context: Context_, remote: IpAddr) {
         }
     });
 
-    // Terminal output flows to every client without an explicit subscription.
-    let pty_out = outbound.clone();
-    let mut pty_rx = context.pty.subscribe();
-    let pty_task = tokio::spawn(async move {
-        loop {
-            match pty_rx.recv().await {
-                Ok(frame) => {
-                    if pty_out.send(frame).is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            }
-        }
-    });
-
-    let mut subscriptions: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
-    let mut greeted = false;
+    let loop_task = tokio::spawn(session::drive(
+        context.state.clone(),
+        router::transport_for(Some(remote)),
+        session::Channels {
+            inbound: inbound_rx,
+            outbound,
+            pty: context.pty.subscribe(),
+        },
+    ));
 
     while let Some(Ok(message)) = stream.next().await {
-        let text = match message {
-            Message::Text(text) => text.to_string(),
+        match message {
+            Message::Text(text) => {
+                if inbound.send(text.to_string()).is_err() {
+                    break;
+                }
+            }
             Message::Close(_) => break,
             // Ping and pong are handled by the transport; binary frames are not
             // part of this protocol.
             _ => continue,
-        };
-
-        let envelope = match parse_envelope(&text) {
-            Ok(envelope) => envelope,
-            Err((id, error)) => {
-                let _ = outbound.send(ServerFrame::Result {
-                    id: id.unwrap_or_else(|| "unknown".into()),
-                    ok: false,
-                    payload: None,
-                    error: Some(error),
-                });
-                continue;
-            }
-        };
-
-        if !greeted && router::needs_handshake(&envelope.request) {
-            let _ = outbound.send(ServerFrame::err(
-                envelope.id,
-                ErrorCode::Unauthorized,
-                "send hello before anything else",
-            ));
-            continue;
-        }
-
-        let handled = router::handle(&context.state, transport, envelope.request).await;
-        let frame = match handled.reply {
-            Ok(reply) => {
-                greeted = true;
-                ServerFrame::ok(envelope.id, reply)
-            }
-            Err(error) => ServerFrame::Result {
-                id: envelope.id,
-                ok: false,
-                payload: None,
-                error: Some(error),
-            },
-        };
-        let _ = outbound.send(frame);
-
-        match handled.effect {
-            SideEffect::None => {}
-            SideEffect::Subscribe {
-                session_id,
-                receiver,
-            } => {
-                // Re-subscribing replaces the old pump rather than doubling
-                // every event.
-                if let Some(previous) = subscriptions.remove(&session_id) {
-                    previous.abort();
-                }
-                let sender = outbound.clone();
-                let topic = session_id.clone();
-                let task = tokio::spawn(forward_events(topic, receiver, sender));
-                subscriptions.insert(session_id, task);
-            }
-            SideEffect::Unsubscribe { session_id } => {
-                if let Some(task) = subscriptions.remove(&session_id) {
-                    task.abort();
-                }
-            }
         }
     }
 
-    for (_, task) in subscriptions {
-        task.abort();
-    }
-    pty_task.abort();
-    drop(outbound);
+    drop(inbound);
+    let _ = loop_task.await;
     let _ = writer.await;
-}
-
-async fn forward_events(
-    session_id: String,
-    mut receiver: broadcast::Receiver<SequencedEvent>,
-    outbound: mpsc::UnboundedSender<ServerFrame>,
-) {
-    loop {
-        match receiver.recv().await {
-            Ok(event) => {
-                if outbound
-                    .send(ServerFrame::event(&session_id, event))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
-            Err(broadcast::error::RecvError::Lagged(missed)) => {
-                // Say so rather than leaving a hole: the client can resubscribe
-                // with its last sequence number and get a clean answer.
-                let _ = outbound.send(ServerFrame::Notice {
-                    level: NoticeLevel::Warning,
-                    message: format!(
-                        "{missed} events were dropped for {session_id}; reconnect to resync"
-                    ),
-                });
-            }
-        }
-    }
 }
 
 /// Convenience for tests and the desktop shell.

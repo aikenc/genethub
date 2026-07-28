@@ -7,6 +7,7 @@ pub mod adapter;
 pub mod config;
 pub mod files;
 pub mod git;
+pub mod hub;
 pub mod pty;
 pub mod router;
 pub mod session;
@@ -23,17 +24,33 @@ pub struct Daemon {
     pub state: Shared,
     pub port: u16,
     listener: tokio::task::JoinHandle<()>,
+    uplink: Option<transport::uplink::Uplink>,
 }
 
 impl Daemon {
     pub async fn start(paths: config::Paths) -> Result<Self> {
         let (state, pty_rx) = AppState::build(paths).await?;
-        let listener = transport::local::serve(state.clone(), pty_rx).await?;
+        let pty = transport::local::pty_fanout(pty_rx);
+        let listener = transport::local::serve(state.clone(), pty.clone()).await?;
         state.publish_endpoint(listener.port)?;
+
+        // Enrolled machines dial the Hub so they stay reachable from outside;
+        // an unenrolled one is simply a local-only daemon, which is a perfectly
+        // good way to use the product.
+        let uplink = state.machine.enrollment.as_ref().map(|enrollment| {
+            transport::uplink::Uplink::start(
+                state.clone(),
+                pty,
+                enrollment.uplink_url.clone(),
+                enrollment.ticket(),
+            )
+        });
+
         Ok(Daemon {
             state,
             port: listener.port,
             listener: listener.handle,
+            uplink,
         })
     }
 
@@ -52,6 +69,9 @@ impl Daemon {
     pub async fn shutdown(self) {
         self.state.sessions.shutdown().await;
         self.state.terminals.close_all().await;
+        if let Some(uplink) = self.uplink {
+            uplink.stop();
+        }
         self.listener.abort();
         let _ = std::fs::remove_file(self.state.paths.endpoint_file());
     }

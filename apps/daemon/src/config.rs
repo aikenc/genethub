@@ -164,8 +164,19 @@ pub struct MachineState {
 #[serde(rename_all = "camelCase")]
 pub struct Enrollment {
     pub hub_url: String,
+    /// The Hub's id for this machine, shown in the owner's list.
     pub machine_id: String,
-    pub token: String,
+    pub uplink_url: String,
+    pub daemon_id: String,
+    /// Presented on the uplink. Only its hash ever left this machine.
+    pub secret: String,
+}
+
+impl Enrollment {
+    /// What goes in the uplink's `Authorization` header.
+    pub fn ticket(&self) -> String {
+        format!("{}.{}", self.daemon_id, self.secret)
+    }
 }
 
 impl MachineState {
