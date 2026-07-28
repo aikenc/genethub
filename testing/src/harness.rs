@@ -41,12 +41,37 @@ impl Mode {
 const REAL_MODEL: &str = "deepseek/deepseek-v4-flash";
 const REAL_BASE_URL: &str = "https://api.deepseek.com/v1";
 
+/// Where the model actually lives for this run.
+///
+/// Third-party agents keep their own credentials, so a journey that drives one
+/// has to hand it the same backend the built-in agent got. Exposing it here is
+/// what lets those cases run in both modes without knowing which one they are in.
+#[derive(Debug, Clone)]
+pub struct ModelBackend {
+    pub base_url: String,
+    pub api_key: String,
+    /// Provider-qualified, as the daemon reports it: `provider/model`.
+    pub model_id: String,
+}
+
+impl ModelBackend {
+    /// The model id without the provider prefix, for agents that name their
+    /// providers themselves.
+    pub fn bare_id(&self) -> &str {
+        self.model_id
+            .split_once('/')
+            .map(|(_, id)| id)
+            .unwrap_or(&self.model_id)
+    }
+}
+
 pub struct Journey {
     pub daemon: Daemon,
     pub client: Client,
     pub mock: Option<Arc<MockLlm>>,
     pub workspace: WorkspaceInfo,
     pub mode: Mode,
+    pub model: ModelBackend,
     /// Kept alive so the temporary tree outlives the test.
     _home: tempfile::TempDir,
     project: PathBuf,
@@ -76,22 +101,26 @@ impl Journey {
         };
 
         let mut config = Config::default();
-        let (provider, base_url, api_key) = match &mock {
-            Some(mock) => (
-                "deepseek".to_string(),
-                Some(mock.base_url.clone()),
-                Some("sk-mock".to_string()),
-            ),
-            None => (
-                "deepseek".to_string(),
-                Some(REAL_BASE_URL.to_string()),
-                Some(real_api_key()?),
-            ),
+        let model = ModelBackend {
+            base_url: match &mock {
+                Some(mock) => mock.base_url.clone(),
+                None => REAL_BASE_URL.to_string(),
+            },
+            api_key: match &mock {
+                Some(_) => "sk-mock".to_string(),
+                None => real_api_key()?,
+            },
+            // The mock accepts any id; using the real one keeps the two modes
+            // as close as possible.
+            model_id: REAL_MODEL.to_string(),
         };
-        config
-            .agents
-            .providers
-            .insert(provider, ProviderConfig { api_key, base_url });
+        config.agents.providers.insert(
+            "deepseek".to_string(),
+            ProviderConfig {
+                api_key: Some(model.api_key.clone()),
+                base_url: Some(model.base_url.clone()),
+            },
+        );
         adjust(&mut config);
         config.save(&data_dir.join("config.json"))?;
 
@@ -122,6 +151,7 @@ impl Journey {
             mock,
             workspace,
             mode,
+            model,
             _home: home,
             project,
         })
@@ -132,27 +162,18 @@ impl Journey {
     }
 
     pub fn model_id(&self) -> String {
-        match self.mode {
-            // The mock accepts any id; using the real one keeps the two modes
-            // as close as possible.
-            Mode::Mock | Mode::Real => REAL_MODEL.to_string(),
-        }
+        self.model.model_id.clone()
     }
 
-    pub fn mock(&self) -> &MockLlm {
-        self.mock
-            .as_ref()
-            .expect("this case is mock-only; guard it with mode.is_mock()")
-    }
-
-    /// Opens a session on the built-in agent, ready to receive a prompt.
-    pub async fn session(&self, agent_id: &str) -> Result<String> {
+    /// Opens a session on a specific agent and model, for cases that drive a
+    /// third-party agent naming its own provider.
+    pub async fn session_with_model(&self, agent_id: &str, model_id: &str) -> Result<String> {
         let reply = self
             .client
             .call(Request::SessionCreate {
                 workspace_id: self.workspace.id.clone(),
                 agent_id: agent_id.to_string(),
-                model_id: Some(self.model_id()),
+                model_id: Some(model_id.to_string()),
                 mode_id: None,
                 title: None,
             })
@@ -169,6 +190,17 @@ impl Journey {
             }
             other => anyhow::bail!("expected a session, got {other:?}"),
         }
+    }
+
+    pub fn mock(&self) -> &MockLlm {
+        self.mock
+            .as_ref()
+            .expect("this case is mock-only; guard it with mode.is_mock()")
+    }
+
+    /// Opens a session on an agent, ready to receive a prompt.
+    pub async fn session(&self, agent_id: &str) -> Result<String> {
+        self.session_with_model(agent_id, &self.model_id()).await
     }
 
     pub async fn send(&self, session_id: &str, text: &str) -> Result<()> {

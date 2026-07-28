@@ -14,6 +14,14 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The adapter journey drives a real OpenCode. Without it the case skips
+      # itself and the one non-stdio agent goes untested.
+      - run: |
+          npm install --prefix "$HOME/.opencode" opencode-ai
+          echo "$HOME/.opencode/node_modules/.bin" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # Journeys default to the mock model, so this stays offline and free.

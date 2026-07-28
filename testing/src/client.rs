@@ -183,6 +183,50 @@ impl Client {
         }
     }
 
+    /// Drives several sessions at once, returning each one's events separately.
+    ///
+    /// Sequential draining would pass even if two agents shared a stream, so
+    /// the only way to catch crossed wiring is to have both turns in flight.
+    pub async fn drain_turns(
+        &self,
+        sessions: &[&str],
+    ) -> Result<std::collections::HashMap<String, Vec<SessionEvent>>> {
+        let mut collected: std::collections::HashMap<String, Vec<SessionEvent>> = sessions
+            .iter()
+            .map(|id| (id.to_string(), Vec::new()))
+            .collect();
+        let mut pending: std::collections::HashSet<String> =
+            sessions.iter().map(|id| id.to_string()).collect();
+
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        let mut events = self.events.lock().await;
+        while !pending.is_empty() {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("timed out with {} turns still running", pending.len());
+            }
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Some(event)) => {
+                    let settled = matches!(
+                        event.event,
+                        SessionEvent::TurnCompleted { .. }
+                            | SessionEvent::TurnFailed { .. }
+                            | SessionEvent::TurnCanceled { .. }
+                    );
+                    if let Some(bucket) = collected.get_mut(&event.session_id) {
+                        bucket.push(event.event);
+                        if settled {
+                            pending.remove(&event.session_id);
+                        }
+                    }
+                }
+                Ok(None) => bail!("the event stream closed mid-turn"),
+                Err(_) => bail!("timed out waiting for the turns to end"),
+            }
+        }
+        Ok(collected)
+    }
+
     /// Waits for one event matching a predicate, discarding others.
     pub async fn wait_for<F>(&self, predicate: F) -> Result<SessionEvent>
     where

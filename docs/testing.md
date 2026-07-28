@@ -219,7 +219,7 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 
 自检项：可执行权限、内置 agent 二进制可用、数据目录创建、单实例锁、卸载残留清理，以及**安装目录内不存在 `node` / `node.exe` / `node_modules`**（PC 端零 Node 运行时，见 [desktop-client.md](./desktop-client.md) §4.1）。
 
-外部 agent（OpenCode 等）由**测试环境预装**，不随分发包安装——这正是要验证的行为之一：装了就出现在选择器里，没装就不出现，且不影响其他 agent。
+外部 agent（OpenCode 等）由**测试环境预装**，不随分发包安装——这正是要验证的行为之一：装了就出现在选择器里，没装就不出现，且不影响其他 agent。CI 里装法是 `npm install --prefix ~/.opencode opencode-ai` 后把它的 `.bin` 加进 PATH；本地没装时相关用例跳过并打印原因，其余照跑。
 
 **成本控制**（仅 J-real）：flash 档模型、提示词短、设 `max_tokens` 上限；记录每轮 token 消耗，异常增长要查。
 
@@ -243,12 +243,15 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 | 套件 | 位置 | 跑的是什么 | 需要什么 |
 |------|------|-----------|---------|
 | Rust 单元与集成 | `cargo test --workspace` | 协议、daemon 各模块、agent、旅程（daemon + agent + mock 模型） | 无 |
+| 第三方 agent 旅程 | `testing/tests/opencode.rs` | **真实 OpenCode 进程**接同一个模型后端，事件归一化后进同一条时间线 | PATH 上有 `opencode`，否则跳过并打印原因 |
 | relay | `apps/relay && npm test` | 帧转发、契约、边界检查、wire 摘要 | 无 |
 | 工作台 | `packages/web && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |
 | **全栈旅程** | `packages/web/src/e2e/journey.test.ts` | **真实 daemon + 真实 agent + 脚本化模型**，用的是工作台自己的客户端 | `cargo build -p genet-daemon` |
 | 跨栈配对 | 控制面仓库的 `test/pairing.test.ts`、`test/relay.test.ts` | daemon 自己走设备码配对，浏览器经 relay 连回来 | 同上 |
 
 全栈旅程这一条是分量最重的：其他前端测试都把 socket 假掉了，而"事件发到了一个没人监听的 topic"在假 socket 下和"没有事件"长得一模一样。它上线的第一天就抓到了这个 bug。
+
+第三方 agent 那条同样不能省。OpenCode 是唯一形状不同的 adapter——HTTP 服务加独立事件流，而不是 stdio 子进程；只有让它真的跑起来，才知道归一化层是抽象而不是内置 agent 的别名。它接的模型后端与内置 agent 完全一致（mock 模式下配置文件里指向 mock 服务，真实模式下指向 DeepSeek），因此两种模式共用同一份用例。
 
 ---
 

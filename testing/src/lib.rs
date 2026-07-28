@@ -10,5 +10,5 @@ pub mod harness;
 pub mod mock_llm;
 
 pub use client::{Client, EventsExt};
-pub use harness::{Journey, Mode};
+pub use harness::{Journey, Mode, ModelBackend};
 pub use mock_llm::{MockLlm, Scripted, Turn};

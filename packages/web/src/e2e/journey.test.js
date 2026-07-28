@@ -1,0 +1,266 @@
+// @vitest-environment node
+import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { WebSocket } from "ws";
+import { Client } from "../protocol/client";
+import { applySequenced, assistantText, emptyTimeline, fromSnapshot } from "../session/timeline";
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+const DAEMON = path.join(REPO, "target/debug/genet-daemon");
+/**
+ * The workbench's own client, against a real daemon and a real agent.
+ *
+ * Every other test in this package mocks the socket, which is the right call
+ * for behaviour but blind to anything about the wire: an event addressed to a
+ * topic nobody listens on looks identical to no event at all. This is the test
+ * that has to notice.
+ *
+ * The model is the only thing faked, because that is the one part that costs
+ * money and refuses to be deterministic.
+ */
+describe.skipIf(!existsSync(DAEMON))("a session, end to end", () => {
+    let model;
+    let daemon;
+    let client;
+    let dataDir;
+    let workspaceDir;
+    let workspaceId;
+    beforeAll(async () => {
+        model = await startMockModel();
+        dataDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-data-"));
+        workspaceDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-work-"));
+        writeFileSync(path.join(workspaceDir, "notes.md"), "hello\n");
+        const started = await startDaemon(dataDir);
+        daemon = started.process;
+        client = new Client({
+            url: `ws://127.0.0.1:${started.port}/ws?token=${started.token}`,
+            socketFactory: (url) => new WebSocket(url),
+            clientName: "e2e",
+        });
+        client.connect();
+        await waitFor(() => client.connectionState === "ready");
+        // The key the user would type in settings, pointed at the fake model.
+        await client.call({
+            type: "settings.setProvider",
+            payload: { providerId: "deepseek", apiKey: "sk-test", baseUrl: model.origin },
+        });
+        const workspace = await client.call({
+            type: "workspace.open",
+            payload: { root: workspaceDir },
+        });
+        if (workspace?.type !== "workspace")
+            throw new Error("the workspace would not open");
+        workspaceId = workspace.data.id;
+    }, 30_000);
+    afterAll(async () => {
+        client?.close();
+        daemon?.kill("SIGKILL");
+        await model?.stop();
+        rmSync(dataDir, { recursive: true, force: true });
+        rmSync(workspaceDir, { recursive: true, force: true });
+    });
+    it("offers the built-in agent with the models the key unlocked", async () => {
+        const reply = await client.call({ type: "agent.list" });
+        expect(reply?.type).toBe("agents");
+        if (reply?.type !== "agents")
+            return;
+        const builtin = reply.data.find((agent) => agent.builtin);
+        expect(builtin, "the shipped agent should always be listed").toBeTruthy();
+        expect(builtin.probe.state).toBe("ready");
+        // Ids are provider-qualified, which is what the session has to send back.
+        expect(builtin.catalog.models.map((entry) => entry.id)).toContain("deepseek/deepseek-v4-flash");
+    });
+    it("streams a reply back to the browser's timeline", async () => {
+        model.script({ text: "读完了，没发现问题。" });
+        const session = await client.call({
+            type: "session.create",
+            payload: {
+                workspaceId,
+                agentId: "genet",
+                modelId: "deepseek/deepseek-v4-flash",
+                modeId: null,
+                title: null,
+            },
+        });
+        if (session?.type !== "session")
+            throw new Error("the session would not start");
+        let timeline = emptyTimeline();
+        const { snapshot, replayed } = await client.subscribe(session.data.id, {
+            onEvent: (event) => {
+                timeline = applySequenced(timeline, event);
+            },
+            onResync: () => { },
+        });
+        timeline = replayed.reduce(applySequenced, fromSnapshot(snapshot));
+        await client.call({
+            type: "session.send",
+            payload: { sessionId: session.data.id, text: "看看 notes.md", attachments: [] },
+        });
+        await waitFor(() => assistantText(timeline).includes("读完了"), 20_000);
+        expect(timeline.status).toBe("idle");
+        expect(timeline.lastError).toBeNull();
+    }, 30_000);
+    it("runs a tool the model asks for, and the file really changes", async () => {
+        model.script({ tool: { name: "write", arguments: { path: "result.txt", content: "DONE\n" } } }, { text: "写好了。" });
+        const session = await client.call({
+            type: "session.create",
+            payload: {
+                workspaceId,
+                agentId: "genet",
+                modelId: "deepseek/deepseek-v4-flash",
+                modeId: null,
+                title: null,
+            },
+        });
+        if (session?.type !== "session")
+            throw new Error("the session would not start");
+        let timeline = emptyTimeline();
+        await client.subscribe(session.data.id, {
+            onEvent: (event) => {
+                timeline = applySequenced(timeline, event);
+            },
+            onResync: () => { },
+        });
+        await client.call({
+            type: "session.send",
+            payload: { sessionId: session.data.id, text: "写个 result.txt", attachments: [] },
+        });
+        await waitFor(() => assistantText(timeline).includes("写好了"), 20_000);
+        expect(readFileSync(path.join(workspaceDir, "result.txt"), "utf8").trim()).toBe("DONE");
+        const toolCall = timeline.items.find((item) => item.type === "toolCall");
+        expect(toolCall, "the browser should see the tool call, not just its effect").toBeTruthy();
+    }, 30_000);
+    it("serves the panels from the same connection", async () => {
+        const tree = await client.call({ type: "file.tree", payload: { workspaceId, path: null, depth: 1 } });
+        expect(tree?.type).toBe("fileTree");
+        if (tree?.type === "fileTree") {
+            expect(tree.data.children?.map((child) => child.name)).toContain("notes.md");
+        }
+        const read = await client.call({
+            type: "file.read",
+            payload: { workspaceId, path: "notes.md" },
+        });
+        expect(read?.type === "fileContent" && read.data.content).toContain("hello");
+        const terminal = await client.call({ type: "pty.open", payload: { workspaceId, cols: 80, rows: 24 } });
+        expect(terminal?.type).toBe("pty");
+        if (terminal?.type === "pty") {
+            const output = new Promise((resolve) => {
+                const stop = client.onPty((id, data) => {
+                    if (id !== terminal.data.ptyId || data === null)
+                        return;
+                    stop();
+                    resolve(data);
+                });
+            });
+            await client.call({
+                type: "pty.write",
+                payload: { ptyId: terminal.data.ptyId, data: "echo hi\n" },
+            });
+            expect(await output).toBeTruthy();
+            await client.call({ type: "pty.close", payload: { ptyId: terminal.data.ptyId } });
+        }
+    }, 20_000);
+});
+/**
+ * An OpenAI-compatible endpoint that says what it is told to.
+ *
+ * Only the streaming shape matters here: the agent's parsing of it is covered
+ * in Rust. What this exists for is to let a whole turn happen without a network
+ * or a bill.
+ */
+async function startMockModel() {
+    const queue = [];
+    const server = createServer((request, response) => {
+        if (!request.url?.endsWith("/chat/completions")) {
+            response.writeHead(404).end();
+            return;
+        }
+        // Drain the request body; the agent is entitled to a reader.
+        request.resume();
+        const turn = queue.shift() ?? { text: "好的。" };
+        response.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            connection: "keep-alive",
+        });
+        const send = (delta, finish = null) => {
+            response.write(`data: ${JSON.stringify({
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                model: "deepseek-v4-flash",
+                choices: [{ index: 0, delta, finish_reason: finish }],
+            })}\n\n`);
+        };
+        if (turn.tool) {
+            send({
+                tool_calls: [
+                    {
+                        index: 0,
+                        id: "call_1",
+                        type: "function",
+                        function: { name: turn.tool.name, arguments: JSON.stringify(turn.tool.arguments) },
+                    },
+                ],
+            });
+            send({}, "tool_calls");
+        }
+        else {
+            // In two pieces, because a reply that arrives whole would not prove the
+            // deltas are being stitched together anywhere along the way.
+            const text = turn.text ?? "好的。";
+            const split = Math.ceil(text.length / 2);
+            send({ content: text.slice(0, split) });
+            send({ content: text.slice(split) });
+            send({}, "stop");
+        }
+        response.write(`data: ${JSON.stringify({
+            choices: [],
+            usage: { prompt_tokens: 40, completion_tokens: 12 },
+        })}\n\n`);
+        response.write("data: [DONE]\n\n");
+        response.end();
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    return {
+        origin: `http://127.0.0.1:${port}`,
+        script: (...turns) => queue.push(...turns),
+        stop: () => new Promise((resolve) => {
+            server.closeAllConnections?.();
+            server.close(() => resolve());
+        }),
+    };
+}
+function startDaemon(dataDir) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(DAEMON, {
+            env: { ...process.env, GENEHUB_DATA_DIR: dataDir, GENEHUB_LOG: "warn" },
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        const timer = setTimeout(() => reject(new Error("the daemon never reported a port")), 15_000);
+        child.stderr?.on("data", (chunk) => process.stderr.write(`[daemon] ${chunk}`));
+        child.stdout?.on("data", (chunk) => {
+            for (const line of chunk.toString().split("\n").filter(Boolean)) {
+                const frame = JSON.parse(line);
+                if (frame.event !== "listening")
+                    continue;
+                clearTimeout(timer);
+                resolve({ process: child, port: frame.port, token: frame.token });
+            }
+        });
+    });
+}
+async function waitFor(check, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (check())
+            return;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error("timed out waiting for the daemon to get there");
+}
