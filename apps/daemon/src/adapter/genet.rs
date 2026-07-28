@@ -28,6 +28,17 @@ use crate::config::ProviderConfig;
 const BINARY: &str = "genet-agent";
 const EVENT_CAPACITY: usize = 1024;
 
+/// Environment the agent would otherwise read credentials from.
+const PROVIDER_ENV: [&str; 7] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "GENET_AGENT_FAKE_PROVIDER",
+];
+
 /// Thinking levels the agent accepts, exposed as this adapter's "modes".
 const THINKING_LEVELS: [&str; 7] = [
     "off", "minimal", "low", "medium", "high", "xhigh", "max",
@@ -139,6 +150,14 @@ impl AgentAdapter for GenetAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+
+        // Under the daemon, `models.json` is the only source of models. The
+        // agent also picks up provider keys straight from its environment when
+        // it runs standalone, and inheriting those here would mean a key left
+        // in someone's shell quietly overrides what the user configured.
+        for key in PROVIDER_ENV {
+            command.env_remove(key);
+        }
 
         if let Some(model) = config.model_id.as_ref() {
             command.arg("--model").arg(model);
@@ -356,6 +375,17 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
     let Some(kind) = frame.get("type").and_then(Value::as_str) else {
         return;
     };
+
+    // Streaming events ride inside a `message_update` envelope that also
+    // carries a snapshot of the whole draft message. We want the event; the
+    // snapshot would just re-send everything on every token.
+    if kind == "message_update" {
+        if let Some(inner) = frame.get("assistantMessageEvent") {
+            translate_frame(inner, state, events);
+        }
+        return;
+    }
+
     let Some(turn_id) = state.id.clone() else {
         // Frames outside a turn (responses to control commands) carry no
         // timeline meaning.
@@ -634,8 +664,10 @@ fn detail_from_call(name: &str, arguments: &Value) -> ToolCallDetail {
             query: search_query(name, arguments),
             matches: Vec::new(),
         },
+        // Same shape as the settled call below, so the fallback renderer does
+        // not have to handle two layouts for the same tool.
         _ => ToolCallDetail::Unknown {
-            raw: arguments.clone(),
+            raw: json!({ "arguments": arguments.clone() }),
         },
     }
 }
@@ -881,6 +913,15 @@ mod tests {
         out
     }
 
+    /// Wraps an event the way the agent actually sends it.
+    fn update(event: Value) -> Value {
+        json!({
+            "type": "message_update",
+            "message": {"role": "assistant"},
+            "assistantMessageEvent": event,
+        })
+    }
+
     #[test]
     fn a_streamed_reply_becomes_an_item_then_deltas_then_a_final_item() {
         let (tx, mut rx) = broadcast::channel(64);
@@ -888,10 +929,10 @@ mod tests {
 
         for frame in [
             json!({"type": "agent_start"}),
-            json!({"type": "text_start"}),
-            json!({"type": "text_delta", "delta": "he"}),
-            json!({"type": "text_delta", "delta": "llo"}),
-            json!({"type": "text_end", "content": "hello"}),
+            update(json!({"type": "text_start"})),
+            update(json!({"type": "text_delta", "delta": "he"})),
+            update(json!({"type": "text_delta", "delta": "llo"})),
+            update(json!({"type": "text_end", "content": "hello"})),
             json!({"type": "agent_end"}),
         ] {
             translate_frame(&frame, &mut state, &tx);
@@ -931,9 +972,9 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(64);
         let mut state = state_with_turn();
         translate_frame(
-            &json!({"type": "toolcall_end", "toolCall": {
+            &update(json!({"type": "toolcall_end", "toolCall": {
                 "id": "call_1", "name": "bash", "arguments": {"command": "ls -a"}
-            }}),
+            }})),
             &mut state,
             &tx,
         );
@@ -961,9 +1002,9 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(64);
         let mut state = state_with_turn();
         translate_frame(
-            &json!({"type": "toolcall_end", "toolCall": {
+            &update(json!({"type": "toolcall_end", "toolCall": {
                 "id": "c", "name": "bash", "arguments": {"command": "false"}
-            }}),
+            }})),
             &mut state,
             &tx,
         );
@@ -996,9 +1037,9 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(64);
         let mut state = state_with_turn();
         translate_frame(
-            &json!({"type": "toolcall_end", "toolCall": {
+            &update(json!({"type": "toolcall_end", "toolCall": {
                 "id": "c", "name": "teleport", "arguments": {"destination": "mars"}
-            }}),
+            }})),
             &mut state,
             &tx,
         );
@@ -1108,7 +1149,7 @@ mod tests {
     fn frames_arriving_outside_a_turn_are_ignored() {
         let (tx, mut rx) = broadcast::channel(64);
         let mut state = TurnState::default();
-        translate_frame(&json!({"type": "text_start"}), &mut state, &tx);
+        translate_frame(&update(json!({"type": "text_start"})), &mut state, &tx);
         assert!(drain(&mut rx).is_empty());
     }
 
