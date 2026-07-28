@@ -7,3 +7,4 @@ target/
 *.sqlite-shm
 .env
 .DS_Store
+*.tsbuildinfo

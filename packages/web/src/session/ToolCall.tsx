@@ -1,0 +1,166 @@
+import type { ToolCallDetail, ToolStatus } from "@genehub/proto";
+import { useState } from "react";
+
+/**
+ * Tool calls get a renderer per shape, and `unknown` gets a readable fallback.
+ *
+ * The fallback is not a nicety. A new agent will call tools we have never heard
+ * of, and showing raw JSON is the difference between "that agent looks broken"
+ * and "that tool has no custom view yet" (`architecture.md` §4).
+ */
+export function ToolCallView({
+  name,
+  status,
+  detail,
+}: {
+  name: string;
+  status: ToolStatus;
+  detail: ToolCallDetail;
+}) {
+  return (
+    <div className="rounded-lg border border-line bg-surface" data-testid="tool-call">
+      <header className="flex items-center gap-2 border-b border-line px-3 py-2 text-xs">
+        <StatusDot status={status} />
+        <span className="font-mono text-fg">{name}</span>
+        <span className="text-muted">{summarize(detail)}</span>
+      </header>
+      <div className="px-3 py-2 text-[13px]">
+        <Body detail={detail} />
+      </div>
+    </div>
+  );
+}
+
+function StatusDot({ status }: { status: ToolStatus }) {
+  const colour =
+    status === "ok"
+      ? "bg-ok"
+      : status === "error"
+        ? "bg-danger"
+        : status === "running"
+          ? "bg-accent animate-pulse"
+          : "bg-muted";
+  return <i className={`h-2 w-2 shrink-0 rounded-full ${colour}`} aria-label={status} role="img" />;
+}
+
+function summarize(detail: ToolCallDetail): string {
+  switch (detail.kind) {
+    case "shell":
+      return detail.command;
+    case "read":
+    case "edit":
+    case "write":
+      return detail.path;
+    case "search":
+      return detail.query;
+    case "fetch":
+      return detail.url;
+    case "plan":
+      return "计划";
+    case "subAgent":
+      return detail.agent;
+    case "unknown":
+      return "";
+  }
+}
+
+function Body({ detail }: { detail: ToolCallDetail }) {
+  switch (detail.kind) {
+    case "shell":
+      return (
+        <Pre>
+          {detail.output || "（暂无输出）"}
+          {detail.exitCode !== null && detail.exitCode !== 0 ? `\n退出码 ${detail.exitCode}` : ""}
+        </Pre>
+      );
+
+    case "read":
+      return (
+        <Pre>
+          {detail.content}
+          {detail.truncated ? "\n…（已截断）" : ""}
+        </Pre>
+      );
+
+    case "write":
+      return <Pre>{detail.content}</Pre>;
+
+    case "edit":
+      return <Diff diff={detail.diff} />;
+
+    case "search":
+      return detail.matches.length === 0 ? (
+        <p className="text-muted">没有匹配</p>
+      ) : (
+        <ul className="space-y-0.5 font-mono text-xs">
+          {detail.matches.slice(0, 50).map((match, index) => (
+            <li key={`${match.path}:${match.line ?? index}`} className="truncate">
+              <span className="text-accent">{match.path}</span>
+              {match.line !== null && match.line !== undefined ? `:${match.line}` : ""}
+              {match.preview ? <span className="text-muted"> {match.preview}</span> : null}
+            </li>
+          ))}
+        </ul>
+      );
+
+    case "fetch":
+      return <Pre>{detail.summary}</Pre>;
+
+    case "plan":
+      return <Pre>{detail.markdown}</Pre>;
+
+    case "subAgent":
+      return <p className="text-muted">{detail.prompt}</p>;
+
+    case "unknown":
+      return <Unknown raw={detail.raw} />;
+  }
+}
+
+function Pre({ children }: { children: React.ReactNode }) {
+  return (
+    <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-fg">
+      {children}
+    </pre>
+  );
+}
+
+/** Line-level colouring. Enough to read a change; not a merge tool. */
+function Diff({ diff }: { diff: string }) {
+  return (
+    <pre className="max-h-80 overflow-auto font-mono text-xs" data-testid="diff">
+      {diff.split("\n").map((line, index) => (
+        <div
+          key={index}
+          className={
+            line.startsWith("+")
+              ? "bg-ok/10 text-ok"
+              : line.startsWith("-")
+                ? "bg-danger/10 text-danger"
+                : line.startsWith("@@")
+                  ? "text-muted"
+                  : ""
+          }
+        >
+          {line || " "}
+        </div>
+      ))}
+    </pre>
+  );
+}
+
+function Unknown({ raw }: { raw: unknown }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        className="text-xs text-accent"
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? "收起原始数据" : "展开原始数据"}
+      </button>
+      {open ? <Pre>{JSON.stringify(raw, null, 2)}</Pre> : null}
+    </div>
+  );
+}

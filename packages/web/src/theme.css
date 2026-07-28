@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * One set of variables per theme. Switching themes flips a class on <html>;
+ * nothing recompiles and no component knows which theme is active.
+ */
+:root {
+  --bg: 251 251 253;
+  --surface: 255 255 255;
+  --raised: 244 245 247;
+  --line: 226 229 233;
+  --fg: 20 22 26;
+  --muted: 107 114 128;
+  --accent: 47 109 246;
+  --danger: 205 62 62;
+  --ok: 33 163 102;
+}
+
+.dark {
+  --bg: 16 18 22;
+  --surface: 24 27 32;
+  --raised: 32 36 42;
+  --line: 42 47 54;
+  --fg: 232 234 237;
+  --muted: 154 160 166;
+  --accent: 106 152 255;
+  --danger: 232 106 106;
+  --ok: 74 200 140;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: rgb(var(--bg));
+  color: rgb(var(--fg));
+  font:
+    14px/1.6 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei",
+    sans-serif;
+}
