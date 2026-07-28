@@ -53,8 +53,13 @@ export class FakeSocket implements WebSocketLike {
     });
   }
 
-  event(topic: string, event: SequencedEvent): void {
-    this.deliver({ type: "event", topic, payload: event });
+  /**
+   * Pushes a session event. The topic is built the way the daemon builds it,
+   * because a fake that addresses events differently from the real thing is a
+   * fake that hides exactly the bug it should be catching.
+   */
+  event(sessionId: string, event: SequencedEvent): void {
+    this.deliver({ type: "event", topic: `session:${sessionId}`, payload: event });
   }
 
   deliver(frame: ServerFrame): void {

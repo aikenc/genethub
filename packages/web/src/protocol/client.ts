@@ -30,6 +30,14 @@ export interface WebSocketLike {
   onmessage: ((event: { data: unknown }) => void) | null;
 }
 
+/**
+ * Events arrive addressed to a topic, `session:<id>`. Subscriptions are keyed
+ * by the session id itself, because that is what every caller has.
+ */
+function sessionOf(topic: string): string {
+  return topic.startsWith("session:") ? topic.slice("session:".length) : topic;
+}
+
 export class ProtocolError_ extends Error {
   constructor(public readonly detail: ProtocolError) {
     super(detail.message);
@@ -239,7 +247,7 @@ export class Client {
         return;
       }
       case "event": {
-        const subscription = this.subscriptions.get(frame.topic);
+        const subscription = this.subscriptions.get(sessionOf(frame.topic));
         if (!subscription) return;
         // Out-of-order or duplicate events are dropped rather than applied:
         // the sequence number is the only thing that decides what is new.
