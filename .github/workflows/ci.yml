@@ -19,27 +19,20 @@ jobs:
       # Journeys default to the mock model, so this stays offline and free.
       - run: cargo test --workspace
 
-  hub:
+  relay:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: apps/hub
+        working-directory: apps/relay
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # The relay case drives a real daemon through the forwarding layer; it
-      # skips itself without this, which would quietly lose the one test that
-      # covers both languages at once.
-      - run: cargo build -p genet-daemon
-        working-directory: .
       - run: npm ci
       - run: npm run typecheck
-      # Covers the two split-readiness checks from architecture.md §6.5: the
-      # dependency direction, and the forwarding role starting on its own.
+      # Covers the boundary checks from architecture.md §6.4 and the digest that
+      # keeps the contract from changing on one side only.
       - run: npm test
 
   web:
@@ -52,6 +45,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The end-to-end case drives a real daemon and a real agent. Without the
+      # binaries it skips itself, which would quietly drop the only test that
+      # covers the wire between the two languages.
+      - run: cargo build -p genet-daemon -p genet-agent
+        working-directory: .
       - run: npm ci
       - run: npm run typecheck
       - run: npm test

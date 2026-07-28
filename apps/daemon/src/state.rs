@@ -77,7 +77,10 @@ impl AppState {
                 .iter()
                 .map(|(id, provider)| ProviderInfo {
                     id: id.clone(),
-                    has_api_key: provider.api_key.as_deref().is_some_and(|key| !key.is_empty()),
+                    has_api_key: provider
+                        .api_key
+                        .as_deref()
+                        .is_some_and(|key| !key.is_empty()),
                     base_url: provider.base_url.clone(),
                 })
                 .collect(),

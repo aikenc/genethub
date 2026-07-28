@@ -1,4 +1,4 @@
-# GeneHub Desktop（PC 客户端）规格
+# 桌面端规格
 
 > 参考实现：[ref-repos/cc-switch](../../ref-repos/cc-switch)（Tauri 2：托盘、关窗驻留、轻量模式、开机自启、安装包）。  
 > 目标：有**安装过程**、能**后台常驻**、托盘可**唤醒主界面**；daemon 与默认 agent 随客户端存活。
@@ -33,7 +33,7 @@
 | `auto_launch` | 设置项「登录时启动 GeneHub」 |
 | `visible: false` 首启再 show | 先起托盘 + daemon，再弹主界面 |
 | WiX / dmg / AppImage `bundle` | Windows NSIS 或 WiX；macOS `.dmg`；Linux AppImage/deb |
-| `deep-link`（`ccswitch://`） | `genethub://` |
+| `deep-link`（`ccswitch://`） | `genehub://` |
 | `updater` 插件 | D3：应用内更新 |
 | 退出前移除托盘图标（Win 残影） | 必须照做 |
 
@@ -51,7 +51,7 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 启动（或开机自启）
   ├─ 单实例锁
   ├─ 创建托盘
-  ├─ 启动 sidecar：genet-daemon（内置 Hub 地址）
+  ├─ 启动 sidecar：genet-daemon（本机直连，无需任何服务端）
   ├─ 校验内置 agent 二进制存在且可执行
   └─ 显示主窗口（或仅托盘）
 
@@ -113,8 +113,8 @@ daemon 与 agent 都改成 Rust 之后，原先最大的两块不确定性——
 
 | 差异点 | 浏览器里 | 桌面 WebView 里 |
 |--------|----------|-----------------|
-| 连 daemon | 经 Hub 转发层的公网上行 | 直连 `127.0.0.1` 本地端口，最快且不出网 |
-| 静态资源 | Hub 提供 | 打进 app bundle，离线可用 |
+| 连 daemon | 经 relay 的公网上行 | 直连 `127.0.0.1` 本地端口，最快且不出网 |
+| 静态资源 | 服务端提供 | 打进 app bundle，离线可用 |
 | 原生能力 | 无 | 托盘、通知、自启、选目录，经 Tauri IPC 调 Rust |
 | 登录态 | Cookie / 设备会话 | 复用 daemon 本地凭证，不必再登一次 |
 
@@ -194,8 +194,8 @@ daemon 与 agent 都改成 Rust 之后，原先最大的两块不确定性——
 
 **D2**
 
-- 设备码授权接入 Hub、托盘状态与心跳
-- 开机自启、深链 `genethub://`
+- 设备码配对、托盘状态与心跳
+- 开机自启、深链 `genehub://`
 - 公钥指纹展示、重新生成认领链接
 
 **D3**

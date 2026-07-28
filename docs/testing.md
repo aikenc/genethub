@@ -1,4 +1,4 @@
-# GeneHub 测试规格
+# 测试规格
 
 > MVP 全面落地后执行。  
 > 核心原则：**一套用例，两种模式。** 全链路集成与真实模型 E2E 跑的是**同一份测试代码**，唯一区别是 LLM 后端接的是 mock 还是真实模型。  
@@ -53,7 +53,7 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 
 ## 2. 两种模式的唯一差异
 
-**除 LLM 外的一切都是真的**：真的 daemon 进程、真的 Hub、真的转发层、真的 WebSocket、真的浏览器、真的 agent 子进程、真的文件系统与 git 仓库、真的 PTY。
+**除 LLM 外的一切都是真的**：真的 daemon 进程、真的 relay、真的控制面、真的 WebSocket、真的浏览器、真的 agent 子进程、真的文件系统与 git 仓库、真的 PTY。
 
 | | J-mock | J-real |
 |---|--------|--------|
@@ -126,7 +126,7 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 | 临时用户升级为正式账号 | 机器归属、设备会话、审计一并迁移，不丢机器 |
 | 一次性链接的四种结局 | 核销一次成功；第二次失败；过期失败；撤销后失败 |
 | 撤销设备 | 撤销后该设备立即失效 |
-| 机器被 Hub 撤销 | daemon 进入 revoked 且不再重连 |
+| 机器被撤销 | daemon 不再重连；本地不残留登记信息 |
 | 手机浏览器接入 | 窄屏布局可用，能发消息、能看工具详情 |
 | 公钥指纹核对 | 首次连接显示指纹，与桌面端一致；指纹变化时告警 |
 
@@ -165,9 +165,10 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 | 重启恢复 | 重启 daemon 后打开旧会话，历史完整并能继续 |
 | 机器离线 | 前端显示离线并给出可操作提示 |
 | 三条通道 | 本地回环 / 局域网 / 转发层各自可用，且降级顺序正确 |
-| 控制面短暂不可用 | 已建立的转发连接不受影响（验证无状态验签的价值） |
+| 控制面短暂不可用 | 已建立的转发连接不受影响；新连接被拒绝而不是放行 |
+| 撤销送达 | 机主撤销机器后，relay 通过订阅流收到并断开在线连接 |
+| 契约漂移 | 两侧 wire 摘要不一致时构建失败 |
 | 转发层不解析 payload | 喂畸形/加密帧照样转发不报错 |
-| 单角色启动 | `ROLES=forward` 可独立启动 |
 | 模型接口故障 `[mock]` | 429 / 500 / 断流 / 超时各有明确的用户可见错误，不是空白 |
 
 ---
@@ -234,6 +235,20 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 4. `usage` 带 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`，可用于观测缓存命中。
 
 接口与密钥：OpenAI 兼容 `https://api.deepseek.com`（另有 Anthropic 兼容 `https://api.deepseek.com/anthropic`）；密钥 `DEEPSEEK_API_KEY` 本地放 `.env`（**已 gitignore，不得入库**），CI 用密钥托管。文档：https://api-docs.deepseek.com/zh-cn/
+
+---
+
+## 8.1 当前落地的套件
+
+| 套件 | 位置 | 跑的是什么 | 需要什么 |
+|------|------|-----------|---------|
+| Rust 单元与集成 | `cargo test --workspace` | 协议、daemon 各模块、agent、旅程（daemon + agent + mock 模型） | 无 |
+| relay | `apps/relay && npm test` | 帧转发、契约、边界检查、wire 摘要 | 无 |
+| 工作台 | `packages/web && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |
+| **全栈旅程** | `packages/web/src/e2e/journey.test.ts` | **真实 daemon + 真实 agent + 脚本化模型**，用的是工作台自己的客户端 | `cargo build -p genet-daemon` |
+| 跨栈配对 | 控制面仓库的 `test/pairing.test.ts`、`test/relay.test.ts` | daemon 自己走设备码配对，浏览器经 relay 连回来 | 同上 |
+
+全栈旅程这一条是分量最重的：其他前端测试都把 socket 假掉了，而"事件发到了一个没人监听的 topic"在假 socket 下和"没有事件"长得一模一样。它上线的第一天就抓到了这个 bug。
 
 ---
 
