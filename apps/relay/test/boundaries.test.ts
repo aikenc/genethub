@@ -28,27 +28,11 @@ function resolveLocal(file: string, specifier: string): string | null {
 }
 
 /**
- * "We could split these later" is worth nothing unless something fails when it
- * stops being true (`docs/architecture.md` §6.5).
+ * The relay's claim is that it cannot read what it carries and cannot decide
+ * who may connect. Both are only worth something if something fails when they
+ * stop being true (`docs/architecture.md` §6.5).
  */
-describe("the boundary between the two roles", () => {
-  it("keeps the forwarding layer from importing the control plane", () => {
-    const offenders: string[] = [];
-    for (const file of filesUnder(path.join(SRC, "forward"))) {
-      for (const specifier of importsOf(file)) {
-        const local = resolveLocal(file, specifier);
-        if (local?.startsWith("control")) {
-          offenders.push(`${path.relative(SRC, file)} -> ${local}`);
-        }
-      }
-    }
-    assert.deepEqual(
-      offenders,
-      [],
-      "the forwarding layer may only reach the control plane through contract/",
-    );
-  });
-
+describe("what the relay is allowed to know", () => {
   it("keeps the forwarding layer to contract and shared", () => {
     const allowed = new Set(["contract", "forward", "shared"]);
     const offenders: string[] = [];
@@ -75,7 +59,7 @@ describe("the boundary between the two roles", () => {
     }
   });
 
-  it("keeps every contract method in a shape that survives becoming a network call", () => {
+  it("keeps every contract method in a shape that survives being a network call", () => {
     const source = readFileSync(path.join(SRC, "contract/index.ts"), "utf8");
     const body = source.slice(source.indexOf("interface ChannelAuthority"));
     // `onRevoked` is deliberately excluded: it registers a callback rather than
@@ -93,7 +77,41 @@ describe("the boundary between the two roles", () => {
       assert.match(
         returns!.trim(),
         /^Promise</,
-        `${name} must be async: a synchronous method cannot cross a process boundary`,
+        `${name} must be async: it is always a network call now`,
+      );
+    }
+  });
+
+  it("has no database, and no way to grow one by accident", () => {
+    const manifest = JSON.parse(
+      readFileSync(path.join(SRC, "../package.json"), "utf8"),
+    ) as { dependencies?: Record<string, string> };
+    const dependencies = Object.keys(manifest.dependencies ?? {});
+    const storage = dependencies.filter((name) =>
+      /sqlite|postgres|mysql|redis|mongo|prisma|drizzle|knex/i.test(name),
+    );
+    assert.deepEqual(
+      storage,
+      [],
+      "a relay that stores anything is a relay someone has to trust",
+    );
+  });
+
+  it("never looks inside a payload", () => {
+    // The forwarder may read the seventeen-byte header and nothing else. A
+    // JSON.parse anywhere in here would mean it had started to understand the
+    // traffic, which is the thing users are being asked to believe it cannot do.
+    const dataPath = filesUnder(path.join(SRC, "forward")).filter(
+      // The authority client speaks JSON to the control plane, which is a
+      // different conversation entirely: it never sees a payload.
+      (file) => !file.endsWith("remote-authority.ts"),
+    );
+    for (const file of dataPath) {
+      const source = readFileSync(file, "utf8");
+      assert.doesNotMatch(
+        source,
+        /JSON\.parse|JSON\.stringify/,
+        `${path.relative(SRC, file)} must not interpret what it carries`,
       );
     }
   });

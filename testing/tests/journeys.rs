@@ -325,6 +325,73 @@ async fn a_task_with_no_credentials_says_so_instead_of_failing_silently() {
     journey.finish().await;
 }
 
+/// The other half of the case above: a user who reads that error has to be able
+/// to fix it from the same screen, and the fix has to reach the agent without a
+/// restart. A key that only takes effect after a relaunch is a key that looks
+/// broken.
+#[tokio::test]
+async fn a_key_entered_in_settings_makes_the_very_next_task_work() {
+    let journey = Journey::start_with(genehub_testing::Mode::Mock, |config| {
+        config.agents.providers.clear();
+    })
+    .await
+    .expect("journey starts");
+    mock_only!(journey);
+
+    let settings = match journey.client.call(Request::SettingsGet).await {
+        Ok(Reply::Settings(settings)) => settings,
+        other => panic!("expected settings, got {other:?}"),
+    };
+    assert!(
+        settings.providers.is_empty(),
+        "nothing should be configured yet"
+    );
+
+    let base_url = journey.mock().base_url.clone();
+    let saved = match journey
+        .client
+        .call(Request::SettingsSetProvider {
+            provider_id: "deepseek".into(),
+            api_key: Some("sk-typed-by-the-user".into()),
+            base_url: Some(base_url),
+        })
+        .await
+    {
+        Ok(Reply::Settings(settings)) => settings,
+        other => panic!("expected settings, got {other:?}"),
+    };
+    let provider = saved
+        .providers
+        .iter()
+        .find(|provider| provider.id == "deepseek")
+        .expect("the provider should be listed once it is configured");
+    assert!(provider.has_api_key);
+
+    // The key itself must not come back out.
+    let serialized = serde_json::to_string(&saved).unwrap();
+    assert!(
+        !serialized.contains("sk-typed-by-the-user"),
+        "the stored key was echoed back to the client"
+    );
+
+    script_the_task(&journey).await;
+    let session = journey.session("genet").await.expect("session opens");
+    journey.send(&session, TASK).await.expect("accepted");
+    let events = journey.client.drain_turn().await.expect("the turn ends");
+
+    assert!(
+        events.failure().is_none(),
+        "the task should run now: {:?}",
+        events.failure()
+    );
+    assert_eq!(
+        journey.read_file("result.txt").as_deref().map(str::trim),
+        Some("DONE")
+    );
+
+    journey.finish().await;
+}
+
 #[tokio::test]
 async fn model_failures_surface_as_actionable_errors() {
     let journey = Journey::start().await.expect("journey starts");

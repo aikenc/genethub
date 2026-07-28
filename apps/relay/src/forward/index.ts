@@ -75,7 +75,7 @@ export class Forwarder {
         machine.alive = false;
         machine.socket.ping();
       }
-    }, config.forward.heartbeatSeconds * 1000);
+    }, config.limits.heartbeatSeconds * 1000);
     this.heartbeat.unref?.();
   }
 
@@ -93,8 +93,8 @@ export class Forwarder {
   close(): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
     for (const machine of this.machines.values()) {
-      for (const client of machine.clients.values()) client.close(1001, "hub shutting down");
-      machine.socket.close(1001, "hub shutting down");
+      for (const client of machine.clients.values()) client.close(1001, "relay shutting down");
+      machine.socket.close(1001, "relay shutting down");
     }
     this.machines.clear();
   }
@@ -110,7 +110,7 @@ export class Forwarder {
     const ticket = bearer(request);
     if (!ticket) return reject(socket, 401, "Unauthorized");
 
-    if (this.machines.size >= config.forward.maxDaemons) {
+    if (this.machines.size >= config.limits.maxDaemons) {
       return reject(socket, 503, "Service Unavailable");
     }
 
@@ -143,7 +143,7 @@ export class Forwarder {
       if (!isBinary) return socket.close(1003, "the uplink speaks binary frames");
 
       const buffer = asBuffer(data);
-      if (buffer.length > config.forward.maxFrameBytes) {
+      if (buffer.length > config.limits.maxFrameBytes) {
         return socket.close(1009, "frame too large");
       }
       const frame = decode(buffer);
@@ -202,7 +202,7 @@ export class Forwarder {
 
     const machine = this.machines.get(grant.machineId);
     if (!machine) return reject(socket, 409, "Machine Offline");
-    if (machine.clients.size >= config.forward.maxClientsPerMachine) {
+    if (machine.clients.size >= config.limits.maxClientsPerMachine) {
       return reject(socket, 429, "Too Many Connections");
     }
 
@@ -218,7 +218,7 @@ export class Forwarder {
 
     socket.on("message", (data, isBinary) => {
       const buffer = asBuffer(data);
-      if (buffer.length > config.forward.maxFrameBytes) {
+      if (buffer.length > config.limits.maxFrameBytes) {
         return socket.close(1009, "frame too large");
       }
       if (this.machines.get(machine.machineId) !== machine) {
@@ -252,7 +252,7 @@ export class Forwarder {
    */
   private deliver(socket: WebSocket, payload: Buffer, binary: boolean): void {
     if (socket.readyState !== socket.OPEN) return;
-    if (socket.bufferedAmount > config.forward.maxBufferedBytes) {
+    if (socket.bufferedAmount > config.limits.maxBufferedBytes) {
       socket.close(1013, "too slow");
       return;
     }

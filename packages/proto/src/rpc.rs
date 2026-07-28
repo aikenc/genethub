@@ -93,6 +93,23 @@ pub enum Request {
         outcome: PermissionOutcome,
     },
 
+    // -- settings ----------------------------------------------------------
+    #[serde(rename = "settings.get")]
+    SettingsGet,
+    /// Stores a provider credential on the machine.
+    ///
+    /// Write-only by design: the value never comes back out, so a client that
+    /// gets read access later cannot exfiltrate keys it did not already have.
+    #[serde(rename = "settings.setProvider", rename_all = "camelCase")]
+    SettingsSetProvider {
+        provider_id: String,
+        /// `None` leaves the stored key alone; an empty string clears it.
+        #[serde(default)]
+        api_key: Option<String>,
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+
     // -- hub ---------------------------------------------------------------
     /// Whether this machine is paired, and how far a pairing in progress got.
     #[serde(rename = "hub.status")]
@@ -193,6 +210,7 @@ pub enum Reply {
     },
     Agents(Vec<AgentInfo>),
     HubStatus(HubStatus),
+    Settings(Settings),
     Session(SessionSummary),
     Sessions(Vec<SessionSummary>),
     Snapshot(SessionSnapshot),

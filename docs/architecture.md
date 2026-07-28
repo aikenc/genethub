@@ -1,52 +1,58 @@
 # GeneHub 架构
 
-> 本文是**全仓最上层的事实来源**。其他文档展开各自领域，冲突时以本文为准。  
-> 修订背景：内置 Agent 落地后，两条新约束改变了原设计——(1) 必须同时接入多个 coding agent；(2) 前端要自研并复刻主流工作台约 60% 的能力。
+> 本文是**本仓最上层的事实来源**。其他文档展开各自领域，冲突时以本文为准。
+
+GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设备安全访问它的开源软件。本仓包含四个可独立部署的部件与它们之间的协议。
 
 ---
 
 ## 1. 一句话架构
 
 ```
-浏览器 / 桌面 / 手机
-     │
-     │  统一会话协议（GeneHub 自有），三条路走同一套消息：
-     │   ① 127.0.0.1（桌面壳内，最常见）
-     │   ② 局域网直连
-     │   ③ 公网中转 ── app.genethub.com/relay/ws ─┐
-     ▼                                            │
-┌──────────┐                                      │  ┌──────────────────┐
-│  daemon  │ ──────── 出站 WS ────────────────────┴─►│ Hub              │
-│ （用户PC）│                                         │ 账号/机器目录/租用 │
-└────┬─────┘                                         │ + 转发层（哑管道） │
-     │  Adapter 层（每种 agent 一个）                  └──────────────────┘
-     ├─ genet    ← 自研内置 agent（stdio JSONL）
-     ├─ acp      ← 通用适配，一把覆盖一大票 CLI
-     ├─ claude   ← Claude Code CLI
-     └─ …        ← 后续
+     浏览器 / 桌面 / 手机  ← 同一份工作台前端
+              │
+              │  统一会话协议（本仓 packages/proto 定义），三条路同一套消息：
+              │   ① 127.0.0.1     桌面/手机壳内直连，最常见
+              │   ② 局域网直连     同一个 Wi-Fi
+              │   ③ 经 relay 转发  人在外面时
+              ▼
+        ┌──────────┐         出站 WS        ┌───────────┐
+        │  daemon  │ ─────────────────────► │   relay   │
+        │ （你的机器）│                        │ 只搬字节   │
+        └────┬─────┘                        └─────┬─────┘
+             │  Adapter 层（每种 agent 一个）        │ 三个问题（HTTP 契约）
+             ├─ genet    自研内置 agent              ▼
+             ├─ acp      一份适配覆盖一批 CLI    ┌──────────────┐
+             ├─ opencode 本地 HTTP + SSE        │  控制面       │
+             └─ …                              │ 本仓之外的服务 │
+                                               └──────────────┘
 ```
 
-用户 PC 上只有一个常驻进程（daemon），它按需拉起 agent 子进程；所有客户端说同一套协议，**看不见背后是哪种 agent**，也看不见走的是哪条通道。
+你的机器上只有一个常驻进程（daemon），它按需拉起 agent 子进程。所有客户端说同一套协议，**看不见背后是哪种 agent，也看不见走的是哪条通道**。
 
 ---
 
-## 2. 三条不可让步的边界
+## 2. 四条不可让步的边界
 
-这三条是整个架构的承重墙，后面所有取舍都从它们推导：
+后面所有取舍都从这四条推导。
 
 ### B1. Agent 是插件，内核不认识任何具体 agent
 
-daemon 里不允许出现 `if provider == "genet"` 这类分支散落在业务代码。具体 agent 的知识只能存在于它自己的 adapter 文件里。
+daemon 业务代码里不允许出现 `if agent == "genet"`。具体 agent 的知识只能存在于它自己的 adapter 文件里。
 
 ### B2. 客户端协议是产品资产，不是某个 agent 的协议
 
-**这是本次修订最重要的一条。** 内置 agent 目前发的是它自己形状的事件，如果 daemon 直接转发给前端，等于把某一个 agent 的线格式钉死成产品协议——接第二种 agent 时就只能做反向映射，前端还得知道"这条消息来自哪种 agent"。
+如果 daemon 直接转发某个 agent 的原始事件，等于把它的线格式钉死成产品协议——接第二种 agent 时只能做反向映射，前端还得知道"这条消息来自哪种 agent"。
 
-所以：daemon 内部定义一套与任何 agent 无关的 `TimelineItem` / `SessionEvent`，每个 adapter 负责把自家格式翻译过来。前端只认这一套。
+所以 daemon 内部定义一套与任何 agent 无关的 `TimelineItem` / `SessionEvent`，每个 adapter 负责翻译。前端只认这一套。
 
 ### B3. 一个 adapter 的抽象等于没有抽象
 
-只接自研 agent 时写出来的"抽象层"必然是自研 agent 的形状。因此 MVP 就必须跑通**两种形状截然不同**的 agent（自研 stdio JSONL + 通用 ACP），抽象才算被证伪过一次。这条决定了 roadmap 的排期，不是可以往后挪的锦上添花。
+只接自研 agent 时写出来的"抽象层"必然是自研 agent 的形状。因此 MVP 就必须跑通**两种形状截然不同**的 agent（stdio JSONL + 本地 HTTP/SSE），抽象才算被证伪过一次。这条决定了排期，不是可以往后挪的锦上添花。
+
+### B4. relay 不理解它搬运的东西
+
+relay 只认帧头里的路由信息，不 parse payload，不落库，不做鉴权决策。它有权知道的只有"谁连了谁"，这一点写在 [security-model.md](./security-model.md) 里，并由 CI 里的静态检查守住（§6.4）。
 
 ---
 
@@ -62,56 +68,37 @@ Transport       ── 怎么跟它说话（子进程 stdio / JSON-RPC / HTTP）
 Normalizer      ── 把它的事件翻成 GeneHub 的 TimelineItem
 ```
 
-### 3.2 Adapter 契约（Rust trait，草案）
+### 3.2 Adapter 契约
 
 ```rust
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
-    fn id(&self) -> &str;                       // "genet" / "acp:cursor" / "claude"
+    fn id(&self) -> &str;                       // "genet" / "acp:cursor" / "opencode"
     fn capabilities(&self) -> Capabilities;     // 支不支持中断、切模型、审批、恢复
 
-    /// 二进制在不在、能不能握手。用于机器上的 agent 发现。
-    async fn probe(&self) -> Probe;
-    /// 模型与模式清单。
-    async fn catalog(&self) -> Result<Catalog>;
+    async fn probe(&self) -> Probe;             // 二进制在不在、能不能握手
+    async fn catalog(&self) -> Result<Catalog>; // 模型与模式清单
 
     async fn start(&self, cfg: SessionConfig) -> Result<Box<dyn AgentSession>>;
     async fn resume(&self, handle: PersistHandle) -> Result<Box<dyn AgentSession>>;
-}
-
-#[async_trait]
-pub trait AgentSession: Send + Sync {
-    /// 唯一的出口：归一化之后的事件流。
-    fn events(&self) -> broadcast::Receiver<SessionEvent>;
-
-    async fn send(&self, input: PromptInput) -> Result<TurnId>;
-    async fn interrupt(&self) -> Result<()>;
-    async fn close(&self) -> Result<()>;
-
-    async fn set_model(&self, id: &str) -> Result<()>;
-    async fn set_mode(&self, id: &str) -> Result<()>;      // 权限档位也走这里
-    async fn respond_permission(&self, req: &str, r: PermissionReply) -> Result<()>;
-
-    /// 能恢复就返回句柄，不能就返回 None（daemon 自行降级为只读回放）。
-    fn persistence(&self) -> Option<PersistHandle>;
 }
 ```
 
 能力差异用 `Capabilities` 声明，**不用返回 `Unsupported` 错误来试探**：前端要在按钮渲染前就知道这个 agent 能不能切模型，而不是点了才报错。
 
-### 3.3 首批 adapter 与优先级
+### 3.3 首批 adapter
 
 | adapter | 传输 | 覆盖 | 阶段 |
 |---------|------|------|------|
 | `genet` | 子进程 + stdio JSONL | 自研内置 agent，装完即可跑 | MVP |
 | `opencode` | 本地 HTTP + SSE | OpenCode | MVP |
-| `acp` | 子进程 + ACP over stdio | 一份代码覆盖 Cursor / Copilot / Gemini / goose 等一批 CLI | MVP |
-| `claude` | 子进程 + stream-json | Claude Code，装机量最大 | M2 |
+| `acp` | 子进程 + ACP over stdio | 一份代码覆盖 Cursor / Gemini / goose 等一批 CLI | MVP |
+| `claude` | 子进程 + stream-json | Claude Code | M2 |
 | `codex` | 子进程 + JSON-RPC | Codex | M2 |
 
-MVP 三个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一批 agent**，`opencode` 则是**形状差异最大的那个**——它不是子进程 stdio 而是本地 HTTP + SSE。用它来证伪 B3 最狠：如果归一化层能同时吃下 stdio 流和 HTTP 事件流，那它多半是真抽象而不是某一种传输的马甲。
+MVP 三个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一批 agent**，`opencode` 则是**形状差异最大的那个**——它不是 stdio 而是本地 HTTP + SSE。用它证伪 B3 最狠。
 
-**外部 agent 一律不随包分发**，只检测用户自己安装的。除了体积与授权，还有一条更硬的理由：有些 agent 自带 Node 或其他运行时，打包它们等于把它们的运行时依赖变成我们的，而 PC 端零 Node 运行时是硬约束（[desktop-client.md](./desktop-client.md) §4.1）。没装就不在选择器里出现，装了就出现。
+**外部 agent 一律不随包分发**，只检测用户自己安装的。除了体积与授权，还有一条更硬的理由：有些 agent 自带 Node 或其他运行时，打包它们等于把它们的运行时依赖变成我们的，而 PC 端零 Node 运行时是硬约束（[desktop-client.md](./desktop-client.md) §4.1）。
 
 用户自定义 agent 走配置声明，不需要改代码：
 
@@ -123,7 +110,7 @@ MVP 三个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一
 
 ## 4. 归一化事件模型
 
-前端和存储只认这一套，它是 daemon 对外契约的核心。
+前端和存储只认这一套，它是 daemon 对外契约的核心，定义在 `packages/proto`。
 
 ```rust
 enum TimelineItem {
@@ -145,133 +132,95 @@ enum ToolCallDetail {                // 决定前端用哪个渲染器
     Fetch { url, summary },
     Plan  { markdown },
     SubAgent { agent, prompt, items },
-    Unknown { raw },                 // 兜底：JSON 折叠展示，永远不允许丢事件
-}
-
-enum SessionEvent {
-    TurnStarted { turn_id },
-    Item { item: TimelineItem, turn_id },
-    ItemDelta { item_id, delta },    // 流式增量
-    TurnCompleted { turn_id, usage },
-    TurnFailed { turn_id, error },
-    PermissionRequested { request },
-    PermissionResolved { request_id, outcome },
-    ModelChanged / ModeChanged { .. },
+    Unknown { raw },                 // 兜底：永远不允许丢事件
 }
 ```
 
 三条规则：
 
 1. **`Unknown` 是必需品**。新 agent 冒出没见过的工具时必须仍能展示，不能白屏，也不能丢事件。
-2. **工具名归一化在 adapter 内做**，各家自己维护映射表（`Bash`→`Shell`、`str_replace_editor`→`Edit`…）。不要试图做一张全局大表，那张表会变成所有 adapter 的耦合点。
-3. **增量与全量都要有**。`ItemDelta` 给流式打字机效果，`Item` 给最终态；断线重连时只回放 `Item`。
+2. **工具名归一化在 adapter 内做**，各家自己维护映射表。不要做一张全局大表，那会变成所有 adapter 的耦合点。
+3. **增量与全量都要有**。`ItemDelta` 给流式打字机效果，`Item` 给最终态；断线重连只回放 `Item`。
 
 ---
 
-## 5. daemon 职责边界
+## 5. 部件职责
 
-| 归 daemon | 不归 daemon |
-|-----------|-------------|
-| 会话生命周期、持久化、断线重放 | 跟模型说话（agent 的事） |
-| Adapter 注册、发现、启停 | 工具执行（agent 的事） |
-| 文件读写 / 目录树 / git 查询 | 账号与租用（Hub 的事） |
-| PTY 终端 | 流量中转（relay 的事） |
-| 审批请求的排队与投递 | 审批策略本身（各 agent 的模式） |
-| 与 Hub 的登记、与 relay 的出站连接 | |
+| 部件 | 归它 | 不归它 |
+|------|------|--------|
+| **daemon**（Rust，本仓） | 会话生命周期、持久化、断线重放；adapter 注册与启停；文件 / git / PTY；出站长连接 | 跟模型说话、执行工具（agent 的事）；身份与授权（控制面的事） |
+| **agent**（Rust，本仓） | 与模型对话、跑工具、技能装载 | 会话持久化、对外协议 |
+| **relay**（Node，本仓） | 认证过的两端之间搬字节；在线表；背压与限额 | 看 payload、存任何东西、决定谁能连 |
+| **workbench**（前端，本仓） | 会话、项目、文件、终端、**自己的设备管理** | 账号体系本身 |
+| **控制面**（本仓之外） | 身份、机器目录、票据签发、撤销 | 出现在本仓代码里 |
 
-细节见 [daemon.md](./daemon.md)。
+细节见 [daemon.md](./daemon.md)、[relay.md](./relay.md)、[web-workbench.md](./web-workbench.md)。
 
 ---
 
-## 6. 传输：转发折进 Hub，但保持哑管道（决策变更）
+## 6. relay 与控制面的边界
 
-原方案是独立部署一个第三方中转服务。改为**同域名同进程的一个转发端点**，理由与约束如下。
+### 6.1 为什么需要 relay
 
-### 6.1 为什么不能没有转发
+你的机器在 NAT 后面，没有公网入口。要让手机或另一台浏览器访问它，必须有一个双方都能连到的汇合点。这是硬需求。
 
-用户 PC 在 NAT 后面，没有公网入口。要让手机或另一台浏览器访问它，必须有一个双方都能连到的汇合点。这是硬需求，叫 relay 还是叫 Hub 只是命名。
+### 6.2 relay 为什么不做鉴权
 
-### 6.2 为什么折进 Hub
+relay 判断不了"这个票据该不该放行"——那需要账号、机器目录和撤销状态。它把这三个问题外包给一个控制面服务，自己只执行答案。
 
-| 收益 | 说明 |
-|------|------|
-| 一个域名一套证书 | 运维成本减半 |
-| 准入问题自动消失 | 独立中转认不出用户，所以本来要专门做邀请码；折进 Hub 后只有已登记机器与已授权设备能开通道 |
-| 去掉外部协议依赖 | 自己写的转发器只有一张配对表加字节搬运，不必为了搬字节背别人的配对语义 |
+好处是双向的：relay 因此可以由任何人部署（[self-hosting.md](./self-hosting.md)），而控制面无论是谁运营，都拿不到它没有能力解读的流量。
 
-### 6.3 代价与守则
-
-拆开原本是有道理的：数据面和控制面的**扩展曲线、故障半径、信任级别都不同**——带宽尖峰不该拖垮登录，中转不该有能力读明文。合并之后这三条风险仍在，靠一条守则兜住：
-
-> **转发层永远不 parse payload。** 它只认路由信息，把加密帧从一端搬到另一端。
-
-### 6.4 模块边界：合并部署，但按可拆分的方式写
-
-"以后能拆"如果只是口头承诺，半年后一定拆不动。所以边界要写成能被检查的规则。
-
-```
-apps/hub/
-├── main             组装：按 ROLES 环境变量决定本进程跑哪些角色
-├── control/         控制面：账号、机器目录、租用、审计
-├── forward/         转发层：配对表 + 帧搬运，无任何业务依赖
-├── contract/        两者之间唯一允许的接口
-└── shared/          只放配置、日志、指标这类真正共用的基础件
-```
-
-五条硬规则：
-
-| 规则 | 为什么 |
-|------|--------|
-| `forward` 不得 import `control` 的任何模块，只依赖 `contract` | 依赖方向一旦反过来就再也拆不开 |
-| `contract` 的接口必须是**可远程化形状**：异步、参数可序列化、无共享内存、无共享事务 | 今天是进程内调用，拆开时只换实现不改调用方 |
-| 两者**不共享数据库表与事务**。转发层要知道"这个票据对应哪台机器"，只能问 `contract`，不能直接查表 | 共享一张表等于共享一次部署 |
-| 转发层不持有业务数据。它自己的状态（在线连接表）是内存态，随时可丢弃重建 | 无状态才能水平扩，也才能独立重启 |
-| 单进程期就要有隔板：独立的连接上限、独立的背压与限流，不共用一个池 | 否则带宽尖峰仍会拖垮登录，合并的风险就白担了 |
-
-`contract` 的全部内容大致就这么多——面越小越拆得动：
+### 6.3 契约：relay 只能问三个问题
 
 ```ts
 interface ChannelAuthority {
   authorizeDaemon(ticket): Promise<DaemonGrant | null>;   // 机器出站登记
   authorizeClient(ticket): Promise<ClientGrant | null>;   // 客户端接入某台机器
-  reportPresence(machineId, state): Promise<void>;        // 在线状态回报控制面
-  onRevoked(handler): void;                               // 撤销指令推给转发层
+  reportPresence(machineId, state): Promise<void>;        // 在线状态回报
+  onRevoked(handler): void;                               // 订阅撤销
 }
 ```
 
-### 6.5 怎么验证还拆得开
+线上形态是四个 HTTP 端点，定义在 `apps/relay/src/contract/wire.ts`，那是**跨仓库唯一契约**。撤销走 relay 主动订阅的 SSE 流而非控制面回调：这样控制面永远不需要能连上 relay，家里那台自建 relay 也就不必有公网入口。
 
-不验证的架构约束等于没有。两件事进 CI：
+面越小越好——每加一个方法，都是又一个"relay 知道了它本不该知道的事"的机会。
 
-1. **依赖方向检查**：静态规则禁止 `forward → control` 的 import，违反即构建失败。
-2. **单角色启动冒烟**：定期以 `ROLES=forward` 单独启动，断言它能起来、能接受连接，只在需要鉴权时因为够不到控制面而拒绝。能通过，就说明没有偷偷长出隐式耦合。
+### 6.4 怎么保证 relay 保持无知
 
-真正触发拆分的信号：转发带宽或连接数开始影响控制面延迟，或者两者的发布节奏打架。到那天拆出去应该是**改配置加改 `contract` 的一处实现**，不是重写。
+不验证的架构约束等于没有。三条进 CI（`apps/relay/test/boundaries.test.ts`）：
 
-### 6.6 加密边界
+| 检查 | 防的是什么 |
+|------|-----------|
+| `forward/` 只准 import `contract/` 与 `shared/` | 依赖方向一旦反过来就再也拆不开 |
+| 数据路径上不许出现 `JSON.parse` / `JSON.stringify` | 它一旦开始理解流量，"看不到内容"就不再成立 |
+| `package.json` 里不许有任何数据库依赖 | 存东西的 relay 就是需要被信任的 relay |
 
-| 场景 | 通道 | 服务端能否读明文 |
-|------|------|------------------|
-| 自己的机器 | 转发层哑管道 | **不能**（端到端加密） |
-| 租用他人机器 | Hub 执行通道 | 能——这是租用可审计、可撤销的前提 |
+### 6.5 加密的现状，说实话
 
-诚实说明：端到端加密防的是服务端被动留存与中转节点被攻破，**防不住我们自己发一个恶意前端**。它的价值是让我们不成为一个存着客户源码的目标，不要当成万灵药宣传。
+**当前实现：** 三条通道都是传输层加密——本机走 loopback，局域网与转发走 TLS。relay 拿到的是 TLS 解密后的应用层字节，它在代码上不解析、不落库，但**技术上具备读取能力**。
 
-### 6.7 常见路径根本不走转发
+**这不等于端到端加密。** 真正的 E2EE 要求 daemon 与客户端基于对方公钥直接握手，relay 只见密文——它在路线图上（[roadmap.md](./roadmap.md)），尚未实现。
 
-桌面壳内的 WebView 直连 `127.0.0.1`，同局域网可直连内网地址。只有"人在外面用手机连家里电脑"才经过公网转发，所以这条链路的容量压力比直觉小得多。客户端按 ①→②→③ 顺序尝试，对用户不可见。
+在它落地之前，文档与产品文案里都不要出现"平台无法看到你的内容"。可以说的是：relay 不解析、不存储，代码开源且可自建。差别很大，写清楚比含糊过去更值钱。
+
+### 6.6 常见路径根本不走 relay
+
+桌面壳内的 WebView 直连 `127.0.0.1`，同局域网可直连内网地址。只有"人在外面用手机连家里电脑"才经过 relay，所以这条链路的容量压力比直觉小得多。客户端按 ①→②→③ 顺序尝试，对用户不可见。
 
 ---
 
-## 7. 前端：从 fork 改为自研（决策变更）
+## 7. 前端：一份代码，四个宿主
 
-原方案是 fork 成熟工作台再魔改，纪律是"只改主题、导航、鉴权，不碰会话与协议层"。**这条前提已经不成立**：
+| 宿主 | 怎么来的 | 连哪里 |
+|------|---------|--------|
+| 浏览器 | 直接访问 | 局域网地址或 relay 票据 |
+| 桌面（Tauri） | 系统 WebView 加载同一份产物 | 本机 daemon |
+| 手机（Tauri Mobile） | 同上 | relay，或同 Wi-Fi 直连 |
+| 自建部署 | 静态文件 | 同浏览器 |
 
-- daemon 是自研的，协议是自有的 —— fork 来的前端说的是别人的协议，魔改面必然从三处扩散到整个会话层，fork 纪律当场破产；
-- 目标本来就是"复刻最重要的 60%"，而 fork 得到的是 100% 再往下砍——砍别人的代码比写自己的更贵；
-- 顺带解掉 AGPL 衍生与观感上的抄袭风险。
+宿主差异收敛在 `packages/web/src/host/` 一个模块里，业务组件不允许出现 `if (isTauri)`。范围与移动端约束见 [web-workbench.md](./web-workbench.md)。
 
-因此改为**自研前端，按能力清单复刻约 60%**。范围、技术选型与页面结构见 [web-workbench.md](./web-workbench.md)。
+**本仓前端的范围是：会话、项目、文件、终端、以及你自己的设备管理。** 账号体系的界面不在本仓——它属于运营控制面的人，跟"用哪个 agent 干活"是两件事。
 
 ---
 
@@ -280,12 +229,11 @@ interface ChannelAuthority {
 ```
 apps/daemon      ← Rust：会话内核 + adapter 层 + 本地 WS + 出站长连接
 apps/agent       ← Rust：内置 Genet Agent（众多 adapter 中的一个后端）
-apps/hub         ← control/（账号·机器目录·租用·审计）+ forward/（哑管道）
-                    同一部署两个角色，边界与拆分规则见 §6.4
-apps/desktop     ← Tauri 2 壳 + sidecar（daemon）
-apps/mobile      ← Capacitor 壳
-packages/web     ← 自研工作台（浏览器 / 桌面 / 手机同一份产物）
+apps/relay       ← Node：转发层。无数据库、无业务、可自建
+apps/desktop     ← Tauri 2 壳；桌面与移动端共用
+packages/web     ← 工作台前端（四个宿主同一份产物）
 packages/proto   ← 会话协议的唯一定义处，生成 TS 类型与 Rust 结构
+testing/         ← 跨部件旅程测试（daemon + agent + mock 模型）
 ```
 
 `packages/proto` 单独成包是刻意的：协议只能有一处定义，否则前后端各写一遍，第三次改字段时必然对不上。
@@ -298,9 +246,9 @@ packages/proto   ← 会话协议的唯一定义处，生成 TS 类型与 Rust �
 |------|--------|------------------|
 | 1 | 定协议（`packages/proto`） | 前后端可并行，且改字段的成本此时最低 |
 | 2 | daemon 内核 + `genet` adapter | 有了可跑通的最短闭环 |
-| 3 | 前端工作台骨架 | 能看见，才谈得上验收 |
+| 3 | 工作台骨架 | 能看见，才谈得上验收 |
 | 4 | `acp` 与 `opencode` adapter | 用另外两种形状证伪抽象；此时改抽象还便宜 |
-| 5 | Hub 接入（含转发层）+ 桌面打包 | 从"能跑"到"能装能接力" |
+| 5 | relay + 配对 + 桌面打包 | 从"能跑"到"能装能接力" |
 | 6 | 全链路集成测试 → 真实模型 E2E | 见 [testing.md](./testing.md) |
 
 第 4 步刻意排在打包之前：抽象错了要在只有两个调用方时发现，等三端都装上了再改就是全链路返工。

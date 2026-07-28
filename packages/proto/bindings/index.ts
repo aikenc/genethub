@@ -33,7 +33,11 @@ export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, defaul
 /**
  * A request as it arrives on the wire: an envelope id plus the request body.
  */
-export type ClientEnvelope = { id: string, } & ({ "type": "hello", "payload": { clientName: string, protocolVersion: number, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.unpair" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.read", "payload": { workspaceId: string, path: string, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+export type ClientEnvelope = { id: string, } & ({ "type": "hello", "payload": { clientName: string, protocolVersion: number, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+/**
+ * `None` leaves the stored key alone; an empty string clears it.
+ */
+apiKey: string | null, baseUrl: string | null, } } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.unpair" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.read", "payload": { workspaceId: string, path: string, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */
@@ -122,6 +126,15 @@ export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { 
 export type ProtocolError = { code: ErrorCode, message: string, };
 
 /**
+ * A provider's configuration, minus the secret.
+ *
+ * `hasApiKey` rather than the key itself: the UI only needs to know whether
+ * to show "configured" or an empty field, and sending the value back would
+ * put it in every client's memory for no gain.
+ */
+export type ProviderInfo = { id: string, hasApiKey: boolean, baseUrl?: string, };
+
+/**
  * Successful payloads, one per request that returns something.
  */
 export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscribed", "data": { snapshot: SessionSnapshot, replayed: Array<SequencedEvent>, 
@@ -129,9 +142,13 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "fileTree", "data": FileNode } | { "type": "fileContent", "data": FileContent } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "settings", "data": Settings } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "fileTree", "data": FileNode } | { "type": "fileContent", "data": FileContent } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
 
-export type Request = { "type": "hello", "payload": { clientName: string, protocolVersion: number, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.unpair" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.read", "payload": { workspaceId: string, path: string, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+export type Request = { "type": "hello", "payload": { clientName: string, protocolVersion: number, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+/**
+ * `None` leaves the stored key alone; an empty string clears it.
+ */
+apiKey: string | null, baseUrl: string | null, } } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.unpair" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.read", "payload": { workspaceId: string, path: string, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */
@@ -167,6 +184,15 @@ seq: number, pendingPermissions: Array<PermissionRequest>, };
 export type SessionStatus = "idle" | "running" | "readOnly" | "failed" | "closed";
 
 export type SessionSummary = { id: string, workspaceId: string, agentId: string, title: string, status: SessionStatus, modelId?: string, modeId?: string, createdAtMs: number, updatedAtMs: number, archived: boolean, };
+
+/**
+ * The machine-level settings a client may see and change.
+ */
+export type Settings = { providers: Array<ProviderInfo>, 
+/**
+ * Whether the daemon accepts connections from the local network.
+ */
+lanEnabled: boolean, };
 
 /**
  * One entry in a session's timeline.

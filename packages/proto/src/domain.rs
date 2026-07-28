@@ -207,6 +207,31 @@ pub struct HelloResult {
     pub transport: TransportKind,
 }
 
+/// The machine-level settings a client may see and change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct Settings {
+    pub providers: Vec<ProviderInfo>,
+    /// Whether the daemon accepts connections from the local network.
+    pub lan_enabled: bool,
+}
+
+/// A provider's configuration, minus the secret.
+///
+/// `hasApiKey` rather than the key itself: the UI only needs to know whether
+/// to show "configured" or an empty field, and sending the value back would
+/// put it in every client's memory for no gain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ProviderInfo {
+    pub id: String,
+    pub has_api_key: bool,
+    #[ts(optional)]
+    pub base_url: Option<String>,
+}
+
 /// Where this machine stands with a Hub.
 ///
 /// One shape covers every stage of pairing so the UI polls a single call and

@@ -242,6 +242,17 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             Err(error) => failed(error),
         },
 
+        Request::SettingsGet => Handled::ok(Reply::Settings(state.settings().await)),
+
+        Request::SettingsSetProvider {
+            provider_id,
+            api_key,
+            base_url,
+        } => match state.set_provider(&provider_id, api_key, base_url).await {
+            Ok(settings) => Handled::ok(Reply::Settings(settings)),
+            Err(error) => failed(error),
+        },
+
         Request::HubStatus => match state.link.get() {
             Some(link) => Handled::ok(Reply::HubStatus(link.status().await)),
             None => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use genehub_proto::{ProviderInfo, Settings};
 use tokio::sync::{mpsc, RwLock};
 
 use crate::adapter::registry::Registry;
@@ -65,6 +66,53 @@ impl AppState {
 
     pub async fn providers(&self) -> ProviderMap {
         self.config.read().await.agents.providers.clone()
+    }
+
+    pub async fn settings(&self) -> Settings {
+        let config = self.config.read().await;
+        Settings {
+            providers: config
+                .agents
+                .providers
+                .iter()
+                .map(|(id, provider)| ProviderInfo {
+                    id: id.clone(),
+                    has_api_key: provider.api_key.as_deref().is_some_and(|key| !key.is_empty()),
+                    base_url: provider.base_url.clone(),
+                })
+                .collect(),
+            lan_enabled: config.lan_enabled,
+        }
+    }
+
+    /// Stores a provider credential and persists it.
+    ///
+    /// An empty key clears the entry rather than storing a blank one: a stored
+    /// empty string would read as "configured" everywhere and fail only at the
+    /// moment the user runs a task.
+    pub async fn set_provider(
+        &self,
+        provider_id: &str,
+        api_key: Option<String>,
+        base_url: Option<String>,
+    ) -> Result<Settings> {
+        {
+            let mut config = self.config.write().await;
+            let entry = config
+                .agents
+                .providers
+                .entry(provider_id.to_string())
+                .or_default();
+            if let Some(key) = api_key {
+                entry.api_key = (!key.is_empty()).then_some(key);
+            }
+            if let Some(url) = base_url {
+                entry.base_url = (!url.is_empty()).then_some(url);
+            }
+            config.save(&self.paths.config_file())?;
+        }
+        crate::config::restrict_to_owner(&self.paths.config_file())?;
+        Ok(self.settings().await)
     }
 
     /// Publishes the loopback address and token for same-machine clients.
