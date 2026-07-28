@@ -139,7 +139,8 @@ pub async fn stream(
         let _ = events.send(ProviderEvent::TextEnd);
     }
     for (_, call) in tool_calls {
-        let arguments = serde_json::from_str::<Value>(&call.arguments).unwrap_or_else(|_| json!({}));
+        let arguments =
+            serde_json::from_str::<Value>(&call.arguments).unwrap_or_else(|_| json!({}));
         let _ = events.send(ProviderEvent::ToolCallEnd {
             id: call.id,
             name: call.name,

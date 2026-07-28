@@ -94,7 +94,10 @@ pub fn edit(args: &Value, cwd: &Path) -> ToolResult {
             return ToolResult::error(format!("edit: edits[{index}].oldText must not be empty"));
         }
 
-        let matches: Vec<usize> = original.match_indices(&old_text).map(|(at, _)| at).collect();
+        let matches: Vec<usize> = original
+            .match_indices(&old_text)
+            .map(|(at, _)| at)
+            .collect();
         match matches.len() {
             0 => {
                 return ToolResult::error(format!(
@@ -104,8 +107,8 @@ pub fn edit(args: &Value, cwd: &Path) -> ToolResult {
             1 => {}
             count => {
                 return ToolResult::error(format!(
-                    "edit: edits[{index}].oldText matches {count} times in {raw_path}; make it unique"
-                ))
+                "edit: edits[{index}].oldText matches {count} times in {raw_path}; make it unique"
+            ))
             }
         }
 

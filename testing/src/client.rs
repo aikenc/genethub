@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use futures_util::{SinkExt, StreamExt};
-use genehub_proto::{
-    Reply, Request, SequencedEvent, ServerFrame, SessionEvent, PROTOCOL_VERSION,
-};
+use genehub_proto::{Reply, Request, SequencedEvent, ServerFrame, SessionEvent, PROTOCOL_VERSION};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::tungstenite::Message;
@@ -118,8 +116,7 @@ impl Client {
             .as_object_mut()
             .ok_or_else(|| anyhow!("a request must encode as an object"))?
             .insert("id".into(), json!(id));
-        self.outbound
-            .send(Message::Text(envelope.to_string().into()))?;
+        self.outbound.send(Message::Text(envelope.to_string()))?;
 
         match tokio::time::timeout(WAIT_TIMEOUT, rx).await {
             Ok(Ok(Ok(reply))) => Ok(reply),
@@ -147,7 +144,7 @@ impl Client {
 
     /// Sends a raw frame, for cases that need to be malformed on purpose.
     pub fn send_raw(&self, raw: &str) -> Result<()> {
-        self.outbound.send(Message::Text(raw.to_string().into()))?;
+        self.outbound.send(Message::Text(raw.to_string()))?;
         Ok(())
     }
 
@@ -162,7 +159,10 @@ impl Client {
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                bail!("timed out after {} events without a turn ending", seen.len());
+                bail!(
+                    "timed out after {} events without a turn ending",
+                    seen.len()
+                );
             }
             match tokio::time::timeout(remaining, events.recv()).await {
                 Ok(Some(event)) => {
@@ -312,10 +312,7 @@ macro_rules! expect_reply {
     ($reply:expr, $variant:path) => {
         match $reply {
             $variant(value) => value,
-            other => panic!(
-                "expected {}, got {other:?}",
-                stringify!($variant)
-            ),
+            other => panic!("expected {}, got {other:?}", stringify!($variant)),
         }
     };
 }

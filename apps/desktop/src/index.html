@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GeneHub</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #14161a;
+        --muted: #6b7280;
+        --bg: #fbfbfd;
+        --card: #fff;
+        --line: #e5e7eb;
+        --accent: #2f6df6;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root { --fg: #e8eaed; --muted: #9aa0a6; --bg: #101216; --card: #181b20; --line: #2a2f36; }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; padding: 44px 28px; background: var(--bg); color: var(--fg);
+        font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+      }
+      main { max-width: 520px; margin: 0 auto; }
+      h1 { font-size: 24px; margin: 0 0 6px; letter-spacing: -0.01em; }
+      p.sub { color: var(--muted); margin: 0 0 26px; }
+      .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 14px; }
+      .row { display: flex; justify-content: space-between; padding: 7px 0; }
+      .row span:first-child { color: var(--muted); }
+      button { font: inherit; border-radius: 10px; padding: 11px 18px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .actions { display: flex; gap: 10px; margin-top: 14px; }
+      .code { font: 600 30px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 4px; text-align: center; padding: 12px 0; }
+      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+      .on { background: #21a366; } .off { background: #9aa0a6; }
+      .hint { color: var(--muted); font-size: 13px; margin-top: 10px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>GeneHub</h1>
+      <p class="sub">这台电脑已经在后台待命，关掉窗口也不会断。</p>
+
+      <div class="card">
+        <div class="row">
+          <span>本机 daemon</span>
+          <span id="daemon"><i class="dot off"></i>检查中</span>
+        </div>
+        <div class="row">
+          <span>账号绑定</span>
+          <span id="relationship">检查中</span>
+        </div>
+      </div>
+
+      <div class="card" id="pairing-card">
+        <p style="margin-top: 0">把这台电脑加入你的账号，就能从手机和其他浏览器连它。</p>
+        <div class="actions">
+          <button class="primary" id="pair">登录并绑定这台电脑</button>
+        </div>
+        <p class="hint">会打开浏览器让你确认一串配对码；不想登录也可以先在网页上「先体验」。</p>
+      </div>
+
+      <div class="card" id="code-card" hidden>
+        <div class="code" id="code"></div>
+        <p class="hint" style="text-align: center">
+          在浏览器里确认这串码。确认后这里会自动变成「已连接」。
+        </p>
+      </div>
+    </main>
+
+    <script type="module">
+      const { invoke } = window.__TAURI__.core;
+      const { openUrl } = window.__TAURI__.opener;
+
+      const daemonEl = document.querySelector("#daemon");
+      const relationshipEl = document.querySelector("#relationship");
+      const codeCard = document.querySelector("#code-card");
+      const codeEl = document.querySelector("#code");
+      const pairButton = document.querySelector("#pair");
+
+      const RELATIONSHIP_LABELS = {
+        not_connected: "未绑定",
+        pending: "等待确认",
+        connecting: "连接中",
+        connected: "已连接",
+        active: "已连接",
+        disconnecting: "解绑中",
+        revoked: "已被撤销",
+        unknown: "未知",
+      };
+
+      async function refresh() {
+        const running = await invoke("daemon_running");
+        daemonEl.innerHTML = running
+          ? '<i class="dot on"></i>运行中'
+          : '<i class="dot off"></i>未运行';
+
+        const state = await invoke("relationship_state");
+        relationshipEl.textContent = RELATIONSHIP_LABELS[state] ?? state;
+        if (state === "connected" || state === "active") {
+          codeCard.hidden = true;
+          pairButton.disabled = true;
+          pairButton.textContent = "已绑定";
+        }
+      }
+
+      pairButton.addEventListener("click", async () => {
+        pairButton.disabled = true;
+        try {
+          const { userCode, activationUrl } = await invoke("start_pairing");
+          codeEl.textContent = userCode;
+          codeCard.hidden = false;
+          await openUrl(`${activationUrl}?code=${encodeURIComponent(userCode)}`);
+        } catch (error) {
+          relationshipEl.textContent = String(error);
+          pairButton.disabled = false;
+        }
+      });
+
+      refresh();
+      setInterval(refresh, 3000);
+    </script>
+  </body>
+</html>

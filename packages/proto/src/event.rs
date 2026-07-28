@@ -58,12 +58,16 @@ pub enum PermissionOptionKind {
 #[ts(export, export_to = "index.ts")]
 pub enum PermissionOutcome {
     #[serde(rename_all = "camelCase")]
-    Selected { option_id: String },
+    Selected {
+        option_id: String,
+    },
     /// No client was online long enough to answer. Carries the agent's default
     /// so the audit trail records what actually happened; §5 of `daemon.md`
     /// forbids resolving these silently.
     #[serde(rename_all = "camelCase")]
-    TimedOut { applied_default: String },
+    TimedOut {
+        applied_default: String,
+    },
     Canceled,
 }
 
@@ -117,10 +121,7 @@ pub enum SessionEvent {
     #[serde(rename_all = "camelCase")]
     TurnStarted { turn_id: String },
     #[serde(rename_all = "camelCase")]
-    Item {
-        turn_id: String,
-        item: TimelineItem,
-    },
+    Item { turn_id: String, item: TimelineItem },
     #[serde(rename_all = "camelCase")]
     ItemDelta {
         turn_id: String,

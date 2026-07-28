@@ -137,7 +137,9 @@ impl Session {
     }
 
     fn load(&mut self) {
-        let Some(path) = self.file.clone() else { return };
+        let Some(path) = self.file.clone() else {
+            return;
+        };
         let Ok(raw) = std::fs::read_to_string(&path) else {
             return;
         };
@@ -191,7 +193,8 @@ mod tests {
     use crate::protocol::{Content, StopReason, Usage};
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("genet-session-{tag}-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("genet-session-{tag}-{}", uuid::Uuid::new_v4()));
         create_dir_all(&dir).unwrap();
         dir
     }
@@ -206,7 +209,12 @@ mod tests {
     #[test]
     fn default_path_mangles_cwd_like_pi() {
         let path = Session::default_path(Path::new("/data"), Path::new("/home/me/proj"));
-        let dir = path.parent().unwrap().file_name().unwrap().to_string_lossy();
+        let dir = path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
         assert_eq!(dir, "---home-me-proj--");
         assert_eq!(path.extension().unwrap(), "jsonl");
     }
@@ -252,7 +260,9 @@ mod tests {
         }
         let reopened = Session::open(file, dir);
         assert_eq!(reopened.messages.len(), 1);
-        assert!(matches!(&reopened.messages[0], Message::User { content, .. } if content == "first"));
+        assert!(
+            matches!(&reopened.messages[0], Message::User { content, .. } if content == "first")
+        );
     }
 
     #[test]

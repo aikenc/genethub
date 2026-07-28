@@ -24,11 +24,14 @@ pub fn build(cwd: &Path, skills: &[Skill]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let guidelines = ["Be concise in your responses", "Show file paths clearly when working with files"]
-        .iter()
-        .map(|guideline| format!("- {guideline}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let guidelines = [
+        "Be concise in your responses",
+        "Show file paths clearly when working with files",
+    ]
+    .iter()
+    .map(|guideline| format!("- {guideline}"))
+    .collect::<Vec<_>>()
+    .join("\n");
 
     let mut prompt = format!(
         "You are an expert coding assistant operating inside GeneHub, a coding agent harness. \
@@ -93,7 +96,9 @@ mod tests {
         let prompt = build(&dir, &[]);
         assert!(prompt.contains("- bash: run a shell command"));
         assert!(prompt.contains("Guidelines:"));
-        assert!(prompt.trim_end().ends_with(&dir.to_string_lossy().to_string()));
+        assert!(prompt
+            .trim_end()
+            .ends_with(&dir.to_string_lossy().to_string()));
     }
 
     #[test]

@@ -127,8 +127,9 @@ pub struct WorkspaceEntry {
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
-            Ok(raw) => serde_json::from_str(&raw)
-                .with_context(|| format!("parsing {}", path.display())),
+            Ok(raw) => {
+                serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -251,8 +252,10 @@ mod tests {
     fn config_survives_a_save_and_load_cycle() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let mut config = Config::default();
-        config.port = 1234;
+        let mut config = Config {
+            port: 1234,
+            ..Default::default()
+        };
         config.workspaces.push(WorkspaceEntry {
             id: "w1".into(),
             name: "demo".into(),

@@ -33,13 +33,8 @@ impl Workspaces {
     }
 
     pub async fn list(&self) -> Vec<WorkspaceInfo> {
-        let mut out: Vec<WorkspaceInfo> = self
-            .entries
-            .read()
-            .await
-            .values()
-            .map(describe)
-            .collect();
+        let mut out: Vec<WorkspaceInfo> =
+            self.entries.read().await.values().map(describe).collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }

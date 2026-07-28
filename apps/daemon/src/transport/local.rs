@@ -12,9 +12,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use genehub_proto::{
-    parse_envelope, ErrorCode, NoticeLevel, SequencedEvent, ServerFrame,
-};
+use genehub_proto::{parse_envelope, ErrorCode, NoticeLevel, SequencedEvent, ServerFrame};
 use tokio::sync::{broadcast, mpsc};
 
 use super::auth;

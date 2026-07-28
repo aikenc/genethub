@@ -9,9 +9,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::Mutex;
 
-use crate::protocol::{
-    now_ms, AssistantDraft, Content, Message, StopReason, Usage,
-};
+use crate::protocol::{now_ms, AssistantDraft, Content, Message, StopReason, Usage};
 use crate::provider::{self, ProviderEvent, Request};
 use crate::rpc::Emitter;
 use crate::state::State;
@@ -66,7 +64,10 @@ pub async fn run_prompt(state: Arc<Mutex<State>>, text: String) {
             guard.stats.add(&assistant.usage);
         }
 
-        if matches!(assistant.stop_reason, StopReason::Error | StopReason::Aborted) {
+        if matches!(
+            assistant.stop_reason,
+            StopReason::Error | StopReason::Aborted
+        ) {
             emitter.send(json!({
                 "type": "turn_end",
                 "message": assistant_value,
@@ -247,7 +248,8 @@ async fn stream_assistant(
                     *draft_name = name.clone();
                     *draft_arguments = arguments.clone();
                 }
-                let tool_call = json!({ "type": "toolCall", "id": id, "name": name, "arguments": arguments });
+                let tool_call =
+                    json!({ "type": "toolCall", "id": id, "name": name, "arguments": arguments });
                 emit_update(
                     emitter,
                     &draft,
@@ -548,11 +550,7 @@ mod tests {
         assert_eq!(order.last().unwrap(), "agent_end");
         // The first message_end belongs to the echoed user prompt; the
         // assistant's failure is the last one.
-        let end = frames
-            .iter()
-            .filter(|f| f["type"] == "message_end")
-            .next_back()
-            .unwrap();
+        let end = frames.iter().rfind(|f| f["type"] == "message_end").unwrap();
         assert_eq!(end["message"]["stopReason"], "error");
         assert!(end["message"]["errorMessage"]
             .as_str()
@@ -563,7 +561,11 @@ mod tests {
     #[tokio::test]
     async fn truncated_tool_calls_are_failed_without_execution() {
         let (emitter, rx) = capture();
-        let calls = vec![("call_1".to_string(), "bash".to_string(), json!({"command": "rm -rf /"}))];
+        let calls = vec![(
+            "call_1".to_string(),
+            "bash".to_string(),
+            json!({"command": "rm -rf /"}),
+        )];
         let messages = fail_truncated_calls(&emitter, &calls);
 
         assert_eq!(messages.len(), 1);

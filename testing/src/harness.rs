@@ -63,10 +63,7 @@ impl Journey {
 
     /// Builds a journey, letting the caller adjust config before the daemon
     /// starts (used by cases that need LAN on, a tiny replay window, and so on).
-    pub async fn start_with(
-        mode: Mode,
-        adjust: impl FnOnce(&mut Config),
-    ) -> Result<Self> {
+    pub async fn start_with(mode: Mode, adjust: impl FnOnce(&mut Config)) -> Result<Self> {
         let home = tempfile::tempdir().context("creating the journey home")?;
         let data_dir = home.path().join("data");
         let project = home.path().join("project");
@@ -91,10 +88,10 @@ impl Journey {
                 Some(real_api_key()?),
             ),
         };
-        config.agents.providers.insert(
-            provider,
-            ProviderConfig { api_key, base_url },
-        );
+        config
+            .agents
+            .providers
+            .insert(provider, ProviderConfig { api_key, base_url });
         adjust(&mut config);
         config.save(&data_dir.join("config.json"))?;
 

@@ -77,7 +77,9 @@ fn load_dir(dir: &Path, root_md_files: bool) -> Vec<Skill> {
 
     let mut roots: Vec<PathBuf> = Vec::new();
     for path in candidates {
-        let Some(parent) = path.parent() else { continue };
+        let Some(parent) = path.parent() else {
+            continue;
+        };
         if roots.iter().any(|root| parent.starts_with(root)) {
             continue;
         }
@@ -120,7 +122,10 @@ fn parse_skill_file(path: &Path) -> Option<Skill> {
 
     // A skill the model cannot judge from its description is worse than absent.
     if name.is_empty() || name.len() > MAX_NAME_LENGTH {
-        eprintln!("genet-agent: skipping skill with invalid name: {}", path.display());
+        eprintln!(
+            "genet-agent: skipping skill with invalid name: {}",
+            path.display()
+        );
         return None;
     }
     if description.trim().is_empty() || description.len() > MAX_DESCRIPTION_LENGTH {
@@ -252,7 +257,11 @@ mod tests {
     #[test]
     fn skill_dir_is_discovered_and_named_from_frontmatter() {
         let dir = temp_dir("discover");
-        write_skill(&dir, "pdf", "---\nname: pdf-tools\ndescription: Work with PDFs\n---\n");
+        write_skill(
+            &dir,
+            "pdf",
+            "---\nname: pdf-tools\ndescription: Work with PDFs\n---\n",
+        );
         let skills = load_dir(&dir, false);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "pdf-tools");
@@ -262,7 +271,11 @@ mod tests {
     #[test]
     fn name_falls_back_to_parent_directory() {
         let dir = temp_dir("fallback");
-        write_skill(&dir, "brave-search", "---\ndescription: Search the web\n---\n");
+        write_skill(
+            &dir,
+            "brave-search",
+            "---\ndescription: Search the web\n---\n",
+        );
         let skills = load_dir(&dir, false);
         assert_eq!(skills[0].name, "brave-search");
     }
@@ -279,7 +292,11 @@ mod tests {
         let dir = temp_dir("nested");
         let root = dir.join("outer");
         std::fs::create_dir_all(root.join("references")).unwrap();
-        std::fs::write(root.join("SKILL.md"), "---\nname: outer\ndescription: Outer\n---\n").unwrap();
+        std::fs::write(
+            root.join("SKILL.md"),
+            "---\nname: outer\ndescription: Outer\n---\n",
+        )
+        .unwrap();
         std::fs::write(
             root.join("references").join("SKILL.md"),
             "---\nname: inner\ndescription: Inner\n---\n",

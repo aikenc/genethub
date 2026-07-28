@@ -307,7 +307,15 @@ pub fn truncate_tail(source: &str, max_lines: usize, max_bytes: usize) -> Trunca
         kept = lines[start..].join("\n");
     }
 
-    TruncationResult::build(kept, source, max_lines, max_bytes, truncated_by, false, false)
+    TruncationResult::build(
+        kept,
+        source,
+        max_lines,
+        max_bytes,
+        truncated_by,
+        false,
+        false,
+    )
 }
 
 #[cfg(test)]
@@ -328,7 +336,10 @@ mod tests {
 
     #[test]
     fn head_truncation_reports_which_limit_was_hit() {
-        let text = (1..=10).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let text = (1..=10)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = truncate_head(&text, 3, DEFAULT_MAX_BYTES);
         assert_eq!(result.content, "1\n2\n3");
         assert!(result.truncated);
@@ -350,7 +361,10 @@ mod tests {
 
     #[test]
     fn tail_truncation_keeps_the_last_lines() {
-        let text = (1..=10).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let text = (1..=10)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = truncate_tail(&text, 3, DEFAULT_MAX_BYTES);
         assert_eq!(result.content, "8\n9\n10");
         assert_eq!(result.truncated_by, Some("lines"));
@@ -359,7 +373,10 @@ mod tests {
     #[test]
     fn truncation_details_are_only_attached_when_truncated() {
         let clean = truncate_head("a", DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
-        assert!(ToolResult::ok("a").with_truncation(&clean).details.is_none());
+        assert!(ToolResult::ok("a")
+            .with_truncation(&clean)
+            .details
+            .is_none());
 
         let cut = truncate_head("a\nb\nc", 1, DEFAULT_MAX_BYTES);
         let details = ToolResult::ok("a").with_truncation(&cut).details.unwrap();

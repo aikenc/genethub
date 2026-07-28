@@ -19,9 +19,16 @@ pub enum ProviderEvent {
     ThinkingStart,
     ThinkingDelta(String),
     ThinkingEnd,
-    ToolCallStart { id: String, name: String },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
     ToolCallDelta(String),
-    ToolCallEnd { id: String, name: String, arguments: Value },
+    ToolCallEnd {
+        id: String,
+        name: String,
+        arguments: Value,
+    },
     Usage(Usage),
     Done(StopReason),
 }

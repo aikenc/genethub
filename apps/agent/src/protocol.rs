@@ -7,9 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub const THINKING_LEVELS: [&str; 7] = [
-    "off", "minimal", "low", "medium", "high", "xhigh", "max",
-];
+pub const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -334,8 +332,10 @@ mod tests {
     #[test]
     fn usage_accumulates_tokens_and_cost() {
         let mut total = Usage::default();
-        let mut one = Usage::default();
-        one.input = 10;
+        let mut one = Usage {
+            input: 10,
+            ..Default::default()
+        };
         one.total_tokens = 15;
         one.cost.total = 0.5;
         total.add(&one);

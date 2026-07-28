@@ -14,8 +14,14 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use tokio::sync::{mpsc, Mutex};
 
 pub enum PtyMessage {
-    Output { pty_id: String, data: String },
-    Closed { pty_id: String, exit_code: Option<i32> },
+    Output {
+        pty_id: String,
+        data: String,
+    },
+    Closed {
+        pty_id: String,
+        exit_code: Option<i32>,
+    },
 }
 
 struct Terminal {
@@ -56,7 +62,10 @@ impl Terminals {
         // Without this many tools emit escape sequences xterm.js cannot render.
         command.env("TERM", "xterm-256color");
 
-        let mut child = pair.slave.spawn_command(command).context("starting the shell")?;
+        let mut child = pair
+            .slave
+            .spawn_command(command)
+            .context("starting the shell")?;
         drop(pair.slave);
 
         let id = format!("pty_{}", uuid::Uuid::new_v4().simple());
@@ -184,10 +193,7 @@ mod tests {
         let (terminals, mut inbound) = Terminals::new();
         let id = terminals.open(dir.path(), 80, 24).await.unwrap();
 
-        terminals
-            .write(&id, "echo genehub-marker\n")
-            .await
-            .unwrap();
+        terminals.write(&id, "echo genehub-marker\n").await.unwrap();
         let output = collect_output(&mut inbound, "genehub-marker").await;
         assert!(output.contains("genehub-marker"), "got: {output:?}");
 

@@ -9,8 +9,8 @@ use std::time::Duration;
 use genehub_proto::{
     Reply, Request, SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnErrorCode,
 };
-use genehub_testing::{EventsExt, Journey, Scripted, Turn};
 use genehub_testing::mock_only;
+use genehub_testing::{EventsExt, Journey, Scripted, Turn};
 use serde_json::json;
 
 /// The task every journey runs: something whose result is on disk, so success
@@ -87,7 +87,9 @@ async fn streaming_output_is_visible_before_the_turn_ends() {
     if journey.mode.is_mock() {
         journey
             .mock()
-            .reply(Turn::text("a reasonably long answer that arrives in pieces"))
+            .reply(Turn::text(
+                "a reasonably long answer that arrives in pieces",
+            ))
             .await;
     }
 
@@ -305,7 +307,10 @@ async fn a_task_with_no_credentials_says_so_instead_of_failing_silently() {
     .expect("journey starts");
 
     let session = journey.session("genet").await.expect("session opens");
-    journey.send(&session, "Do something.").await.expect("accepted");
+    journey
+        .send(&session, "Do something.")
+        .await
+        .expect("accepted");
     let events = journey.client.drain_turn().await.expect("the turn ends");
 
     let failure = events
@@ -391,9 +396,10 @@ async fn the_agent_hands_the_model_a_system_prompt_and_tool_definitions() {
     let messages = request["messages"].as_array().expect("messages");
     assert_eq!(messages[0]["role"], "system");
     assert!(
-        messages
-            .iter()
-            .any(|m| m["content"].as_str().unwrap_or_default().contains("a distinctive user request")),
+        messages.iter().any(|m| m["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("a distinctive user request")),
         "the user's words must reach the model verbatim"
     );
 
@@ -403,7 +409,10 @@ async fn the_agent_hands_the_model_a_system_prompt_and_tool_definitions() {
         .filter_map(|tool| tool["function"]["name"].as_str())
         .collect();
     for expected in ["read", "write", "edit", "bash"] {
-        assert!(names.contains(&expected), "{expected} is missing: {names:?}");
+        assert!(
+            names.contains(&expected),
+            "{expected} is missing: {names:?}"
+        );
     }
 
     journey.finish().await;
@@ -517,7 +526,9 @@ async fn files_can_be_browsed_read_and_edited_through_the_workspace() {
         other => panic!("unexpected {other:?}"),
     };
     let children = tree.children.expect("an expanded root");
-    assert!(children.iter().any(|node| node.name == "src" && node.is_dir));
+    assert!(children
+        .iter()
+        .any(|node| node.name == "src" && node.is_dir));
 
     let content = match journey
         .client
@@ -653,7 +664,10 @@ async fn large_tool_output_is_truncated_and_marked() {
     journey.mock().reply(Turn::text("Done.")).await;
 
     let session = journey.session("genet").await.expect("session opens");
-    journey.send(&session, "Print a lot.").await.expect("accepted");
+    journey
+        .send(&session, "Print a lot.")
+        .await
+        .expect("accepted");
     let events = journey.client.drain_turn().await.expect("the turn ends");
 
     let tools = events.tool_calls();
@@ -688,7 +702,10 @@ async fn reconnecting_replays_the_gap_without_losing_or_repeating_events() {
     }
 
     let session = journey.session("genet").await.expect("session opens");
-    journey.send(&session, "Say hello.").await.expect("accepted");
+    journey
+        .send(&session, "Say hello.")
+        .await
+        .expect("accepted");
     let first = journey.client.drain_turn().await.expect("the turn ends");
     assert!(first.completed());
 
@@ -764,7 +781,10 @@ async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
         Reply::Subscribed {
             snapshot, reset, ..
         } => {
-            assert!(reset, "a gap we cannot fill must be admitted, not papered over");
+            assert!(
+                reset,
+                "a gap we cannot fill must be admitted, not papered over"
+            );
             assert!(
                 !snapshot.items.is_empty(),
                 "the reset has to carry the full history to be useful"
@@ -846,7 +866,10 @@ async fn a_second_client_sees_the_same_session_as_the_first() {
         .await
         .expect("subscribed");
 
-    journey.send(&session, "Say something.").await.expect("accepted");
+    journey
+        .send(&session, "Say something.")
+        .await
+        .expect("accepted");
 
     let from_first = journey.client.drain_turn().await.expect("first sees it");
     let from_second = second.drain_turn().await.expect("second sees it too");
@@ -876,7 +899,9 @@ async fn a_connection_must_say_hello_before_anything_else() {
     assert!(error.contains("Unauthorized"), "got: {error}");
 
     bare.hello("late").await.expect("hello still works");
-    bare.call(Request::AgentList).await.expect("and then it does");
+    bare.call(Request::AgentList)
+        .await
+        .expect("and then it does");
 
     bare.close().await;
     journey.finish().await;

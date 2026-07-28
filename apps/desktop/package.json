@@ -1,0 +1,19 @@
+{
+  "name": "@genethub/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GeneHub desktop shell (Tauri 2); the daemon ships as a sidecar binary",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icon": "tauri icon icons/icon.png",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-opener": "^2.2.2"
+  }
+}

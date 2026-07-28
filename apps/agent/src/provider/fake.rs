@@ -49,8 +49,10 @@ pub async fn stream(
         StopReason::ToolUse
     };
 
-    let mut usage = Usage::default();
-    usage.input = 10;
+    let mut usage = Usage {
+        input: 10,
+        ..Default::default()
+    };
     usage.output = 5;
     usage.total_tokens = 15;
     let _ = events.send(ProviderEvent::Usage(usage));
@@ -105,7 +107,10 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, ProviderEvent::ToolCallEnd { name, .. } if name == "ls")));
-        assert!(matches!(events.last(), Some(ProviderEvent::Done(StopReason::ToolUse))));
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::Done(StopReason::ToolUse))
+        ));
     }
 
     #[tokio::test]
@@ -125,6 +130,9 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, ProviderEvent::ToolCallEnd { .. })));
-        assert!(matches!(events.last(), Some(ProviderEvent::Done(StopReason::Stop))));
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::Done(StopReason::Stop))
+        ));
     }
 }

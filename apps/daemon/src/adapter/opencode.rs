@@ -14,8 +14,8 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use genehub_proto::{
-    Capabilities, Catalog, ModeInfo, ModelInfo, PermissionOutcome, ProbeState,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    Capabilities, Catalog, ModeInfo, ModelInfo, PermissionOutcome, ProbeState, SessionEvent,
+    TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::process::{Child, Command};
@@ -69,8 +69,7 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
-        let binary =
-            find_executable(BINARY).ok_or_else(|| anyhow!("OpenCode is not installed"))?;
+        let binary = find_executable(BINARY).ok_or_else(|| anyhow!("OpenCode is not installed"))?;
         let port = pick_port()?;
         let base = format!("http://127.0.0.1:{port}");
 
@@ -573,7 +572,12 @@ fn classify_message(message: &str) -> TurnError {
 }
 
 fn first_line(body: &str) -> String {
-    body.lines().next().unwrap_or_default().chars().take(300).collect()
+    body.lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(300)
+        .collect()
 }
 
 #[cfg(test)]
@@ -715,7 +719,10 @@ mod tests {
             classify_http(401, "no key").code,
             TurnErrorCode::MissingCredentials
         );
-        assert_eq!(classify_http(429, "slow down").code, TurnErrorCode::RateLimited);
+        assert_eq!(
+            classify_http(429, "slow down").code,
+            TurnErrorCode::RateLimited
+        );
         assert_eq!(classify_http(500, "boom").code, TurnErrorCode::Upstream);
     }
 }

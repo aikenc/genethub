@@ -88,8 +88,8 @@ impl Store {
 
     pub fn load_meta(&self, workspace_id: &str, session_id: &str) -> Result<SessionMeta> {
         let path = self.meta_path(workspace_id, session_id);
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let raw =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         Ok(serde_json::from_str(&raw)?)
     }
 
@@ -192,7 +192,10 @@ pub fn now_ms() -> i64 {
 
 /// A first line of user text, trimmed into something that fits a sidebar.
 pub fn title_from(text: &str) -> String {
-    let first = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("New session");
+    let first = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("New session");
     let trimmed: String = first.trim().chars().take(60).collect();
     if trimmed.is_empty() {
         "New session".to_string()

@@ -30,17 +30,17 @@ pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
     let started = child.output();
     let timeout_secs = arg_usize(args, "timeout");
     let output = match timeout_secs {
-        Some(seconds) => match tokio::time::timeout(Duration::from_secs(seconds as u64), started)
-            .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                return ToolResult::error(append_status(
-                    "",
-                    &format!("Command timed out after {seconds} seconds"),
-                ))
+        Some(seconds) => {
+            match tokio::time::timeout(Duration::from_secs(seconds as u64), started).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return ToolResult::error(append_status(
+                        "",
+                        &format!("Command timed out after {seconds} seconds"),
+                    ))
+                }
             }
-        },
+        }
         None => started.await,
     };
 
@@ -175,11 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn truncated_output_is_saved_to_a_file() {
-        let result = run(
-            &json!({"command": "seq 1 5000"}),
-            Path::new("."),
-        )
-        .await;
+        let result = run(&json!({"command": "seq 1 5000"}), Path::new(".")).await;
         let details = result.details.expect("truncated runs carry details");
         assert_eq!(details["truncation"]["truncatedBy"], "lines");
         let saved = details["fullOutputPath"].as_str().unwrap();
@@ -191,6 +187,9 @@ mod tests {
     #[test]
     fn status_lines_follow_pi_formatting() {
         assert_eq!(append_status("", "Command aborted"), "Command aborted");
-        assert_eq!(append_status("out", "Command aborted"), "out\n\nCommand aborted");
+        assert_eq!(
+            append_status("out", "Command aborted"),
+            "out\n\nCommand aborted"
+        );
     }
 }

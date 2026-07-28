@@ -91,8 +91,7 @@ pub trait AgentSession: Send + Sync {
 
     async fn set_model(&self, model_id: &str) -> Result<()>;
     async fn set_mode(&self, mode_id: &str) -> Result<()>;
-    async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome)
-        -> Result<()>;
+    async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()>;
 
     /// `None` means the daemon must fall back to read-only replay of its own log.
     fn persistence(&self) -> Option<PersistHandle> {

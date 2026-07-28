@@ -74,9 +74,7 @@ impl SingleInstance {
         if let Ok(contents) = fs::read_to_string(&path) {
             if let Ok(pid) = contents.trim().parse::<u32>() {
                 if is_running(pid) {
-                    anyhow::bail!(
-                        "another daemon is already running (pid {pid}); stop it first"
-                    );
+                    anyhow::bail!("another daemon is already running (pid {pid}); stop it first");
                 }
                 // A stale lock from a crash should not block startup forever.
                 tracing::warn!("clearing a stale lock from pid {pid}");

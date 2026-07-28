@@ -111,10 +111,7 @@ pub enum Request {
         depth: Option<u32>,
     },
     #[serde(rename = "file.read", rename_all = "camelCase")]
-    FileRead {
-        workspace_id: String,
-        path: String,
-    },
+    FileRead { workspace_id: String, path: String },
     #[serde(rename = "file.write", rename_all = "camelCase")]
     FileWrite {
         workspace_id: String,
@@ -187,11 +184,17 @@ pub enum Reply {
     FileContent(FileContent),
     GitStatus(GitStatus),
     #[serde(rename_all = "camelCase")]
-    GitDiff { diff: String },
+    GitDiff {
+        diff: String,
+    },
     #[serde(rename_all = "camelCase")]
-    GitCommit { commit: String },
+    GitCommit {
+        commit: String,
+    },
     #[serde(rename_all = "camelCase")]
-    Pty { pty_id: String },
+    Pty {
+        pty_id: String,
+    },
     /// Nothing to return, but the call succeeded.
     Ack,
 }

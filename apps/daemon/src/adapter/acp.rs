@@ -362,11 +362,7 @@ impl AgentSession for AcpSession {
         Ok(())
     }
 
-    async fn respond_permission(
-        &self,
-        request_id: &str,
-        outcome: PermissionOutcome,
-    ) -> Result<()> {
+    async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()> {
         let response = match &outcome {
             PermissionOutcome::Selected { option_id } => {
                 json!({ "outcome": { "outcome": "selected", "optionId": option_id } })
@@ -457,9 +453,7 @@ fn translate_permission(id: i64, params: &Value, events: &broadcast::Sender<Sess
                         .to_string(),
                     kind: match option.get("kind").and_then(Value::as_str) {
                         Some("allow_always") => PermissionOptionKind::AllowAlways,
-                        Some("reject_once") | Some("reject_always") => {
-                            PermissionOptionKind::Reject
-                        }
+                        Some("reject_once") | Some("reject_always") => PermissionOptionKind::Reject,
                         _ => PermissionOptionKind::AllowOnce,
                     },
                 })
@@ -618,7 +612,10 @@ fn translate_update(
 
 /// ACP describes tools by `kind` plus a list of locations and content blocks.
 fn detail_from_update(update: &Value) -> ToolCallDetail {
-    let kind = update.get("kind").and_then(Value::as_str).unwrap_or("other");
+    let kind = update
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("other");
     let path = update
         .get("locations")
         .and_then(Value::as_array)

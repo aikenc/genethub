@@ -25,8 +25,8 @@ pub fn tree(root: &Path, path: &Path, depth: u32) -> Result<FileNode> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| ".".to_string());
 
-    let metadata = std::fs::metadata(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
     if !metadata.is_dir() {
         return Ok(FileNode {
             name,

@@ -196,7 +196,10 @@ mod tests {
     #[test]
     fn grep_without_matches_says_so() {
         let dir = fixture("grep-none");
-        assert_eq!(grep(&json!({"pattern": "zzz"}), &dir).text, "No matches found");
+        assert_eq!(
+            grep(&json!({"pattern": "zzz"}), &dir).text,
+            "No matches found"
+        );
     }
 
     #[test]

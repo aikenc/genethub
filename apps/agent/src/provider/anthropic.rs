@@ -228,7 +228,10 @@ pub fn convert_messages(messages: &[Message]) -> Value {
                 });
                 // Consecutive tool results belong to one user turn.
                 match out.last_mut() {
-                    Some(last) if last["role"] == "user" && last["content"][0]["type"] == "tool_result" => {
+                    Some(last)
+                        if last["role"] == "user"
+                            && last["content"][0]["type"] == "tool_result" =>
+                    {
                         if let Some(array) = last["content"].as_array_mut() {
                             array.push(block);
                         }
@@ -375,7 +378,10 @@ mod tests {
     #[test]
     fn usage_fields_accumulate_from_both_events() {
         let mut usage = Usage::default();
-        apply_usage(&mut usage, &json!({"input_tokens": 10, "cache_read_input_tokens": 4}));
+        apply_usage(
+            &mut usage,
+            &json!({"input_tokens": 10, "cache_read_input_tokens": 4}),
+        );
         apply_usage(&mut usage, &json!({"output_tokens": 7}));
         assert_eq!(usage.input, 10);
         assert_eq!(usage.cache_read, 4);

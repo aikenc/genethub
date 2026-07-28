@@ -20,9 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, Mutex};
 
-use super::{
-    find_executable, AgentAdapter, AgentSession, PromptInput, ProviderMap, SessionConfig,
-};
+use super::{find_executable, AgentAdapter, AgentSession, PromptInput, ProviderMap, SessionConfig};
 use crate::config::ProviderConfig;
 
 const BINARY: &str = "genet-agent";
@@ -40,9 +38,7 @@ const PROVIDER_ENV: [&str; 7] = [
 ];
 
 /// Thinking levels the agent accepts, exposed as this adapter's "modes".
-const THINKING_LEVELS: [&str; 7] = [
-    "off", "minimal", "low", "medium", "high", "xhigh", "max",
-];
+const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 pub struct GenetAdapter {
     binary: Option<PathBuf>,
@@ -626,7 +622,11 @@ fn accumulate_usage(total: &mut Usage, usage: &Value) {
     total.output_tokens += field("output");
     total.cache_read_tokens += field("cacheRead");
     total.cache_write_tokens += field("cacheWrite");
-    if let Some(cost) = usage.get("cost").and_then(|c| c.get("total")).and_then(Value::as_f64) {
+    if let Some(cost) = usage
+        .get("cost")
+        .and_then(|c| c.get("total"))
+        .and_then(Value::as_f64)
+    {
         total.cost_usd = Some(total.cost_usd.unwrap_or(0.0) + cost);
     }
 }
@@ -840,11 +840,29 @@ fn api_for(provider: &str) -> &'static str {
 fn known_models(provider: &str) -> Vec<(&'static str, &'static str, bool, u64, u64)> {
     match provider {
         "anthropic" => vec![
-            ("claude-sonnet-4-20250514", "Claude Sonnet 4", true, 200_000, 8192),
-            ("claude-haiku-4-20250514", "Claude Haiku 4", false, 200_000, 8192),
+            (
+                "claude-sonnet-4-20250514",
+                "Claude Sonnet 4",
+                true,
+                200_000,
+                8192,
+            ),
+            (
+                "claude-haiku-4-20250514",
+                "Claude Haiku 4",
+                false,
+                200_000,
+                8192,
+            ),
         ],
         "deepseek" => vec![
-            ("deepseek-v4-flash", "DeepSeek V4 Flash", true, 128_000, 8192),
+            (
+                "deepseek-v4-flash",
+                "DeepSeek V4 Flash",
+                true,
+                128_000,
+                8192,
+            ),
             ("deepseek-chat", "DeepSeek Chat", false, 128_000, 8192),
         ],
         "openai" => vec![
@@ -880,8 +898,11 @@ fn write_models_file(home: &std::path::Path, providers: &ProviderMap) -> Result<
         })
         .collect();
     let path = home.join("models.json");
-    std::fs::write(&path, serde_json::to_string_pretty(&json!({ "models": models }))?)
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&json!({ "models": models }))?,
+    )
+    .with_context(|| format!("writing {}", path.display()))?;
     crate::config::restrict_to_owner(&path)?;
     Ok(())
 }

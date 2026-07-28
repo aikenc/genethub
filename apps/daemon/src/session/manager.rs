@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 
 use super::store::{now_ms, title_from, SessionMeta, Store};
 use crate::adapter::registry::Registry;
-use crate::adapter::{AgentSession, ProviderMap, PromptInput, SessionConfig};
+use crate::adapter::{AgentSession, PromptInput, ProviderMap, SessionConfig};
 
 const BROADCAST_CAPACITY: usize = 1024;
 
@@ -374,7 +374,13 @@ impl SessionManager {
     /// Stops every agent process. Called on daemon shutdown so no orphan
     /// children survive the tray exiting.
     pub async fn shutdown(&self) {
-        let sessions: Vec<Arc<Live>> = self.sessions.write().await.drain().map(|(_, v)| v).collect();
+        let sessions: Vec<Arc<Live>> = self
+            .sessions
+            .write()
+            .await
+            .drain()
+            .map(|(_, v)| v)
+            .collect();
         for live in sessions {
             live.shutdown().await;
         }
@@ -671,9 +677,7 @@ mod tests {
             &SessionEvent::ItemDelta {
                 turn_id: "t".into(),
                 item_id: "ghost".into(),
-                delta: ItemDelta::Text {
-                    delta: "x".into(),
-                },
+                delta: ItemDelta::Text { delta: "x".into() },
             },
         )
         .await;

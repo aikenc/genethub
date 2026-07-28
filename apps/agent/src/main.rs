@@ -98,7 +98,11 @@ async fn main() {
         let emitter = { state.lock().await.emitter.clone() };
         match serde_json::from_str::<Command>(&line) {
             Ok(command) => handle(&state, command).await,
-            Err(err) => emitter.send(error_response(None, "unknown", format!("invalid JSON: {err}"))),
+            Err(err) => emitter.send(error_response(
+                None,
+                "unknown",
+                format!("invalid JSON: {err}"),
+            )),
         }
     }
 
@@ -147,9 +151,7 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
         "abort" => {
             {
                 let guard = state.lock().await;
-                guard
-                    .abort
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                guard.abort.store(true, std::sync::atomic::Ordering::SeqCst);
             }
             emitter.send(response(id, kind, None));
         }
@@ -177,7 +179,11 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
             let (Some(provider), Some(model_id)) =
                 (command.str_field("provider"), command.str_field("modelId"))
             else {
-                emitter.send(error_response(id, kind, "set_model requires provider and modelId"));
+                emitter.send(error_response(
+                    id,
+                    kind,
+                    "set_model requires provider and modelId",
+                ));
                 return;
             };
             let mut guard = state.lock().await;
@@ -202,11 +208,19 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
         }
         "set_thinking_level" => {
             let Some(level) = command.str_field("level") else {
-                emitter.send(error_response(id, kind, "set_thinking_level requires 'level'"));
+                emitter.send(error_response(
+                    id,
+                    kind,
+                    "set_thinking_level requires 'level'",
+                ));
                 return;
             };
             if !THINKING_LEVELS.contains(&level.as_str()) {
-                emitter.send(error_response(id, kind, format!("unknown thinking level: {level}")));
+                emitter.send(error_response(
+                    id,
+                    kind,
+                    format!("unknown thinking level: {level}"),
+                ));
                 return;
             }
             let mut guard = state.lock().await;
@@ -281,9 +295,10 @@ fn select_model(
 ) -> Option<config::ModelConfig> {
     if let Some(reference) = requested {
         let wanted = reference.trim();
-        if let Some(model) = models.iter().find(|model| {
-            model.to_ref().reference() == wanted || model.id == wanted
-        }) {
+        if let Some(model) = models
+            .iter()
+            .find(|model| model.to_ref().reference() == wanted || model.id == wanted)
+        {
             return Some(model.clone());
         }
         eprintln!("genet-agent: requested model '{wanted}' is not configured");
@@ -327,7 +342,10 @@ mod tests {
     #[test]
     fn unknown_model_falls_back_to_the_first_configured_one() {
         let models = vec![model("anthropic", "claude")];
-        assert_eq!(select_model(&models, Some("nope/nope")).unwrap().id, "claude");
+        assert_eq!(
+            select_model(&models, Some("nope/nope")).unwrap().id,
+            "claude"
+        );
         assert!(select_model(&[], Some("nope")).is_none());
     }
 }

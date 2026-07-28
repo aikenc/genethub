@@ -61,7 +61,11 @@ pub fn diff_lines(old: &str, new: &str) -> Vec<Part> {
 /// Display diff: `+12 added`, `-12 removed`, ` 12 context`, ` … ...` elisions.
 pub fn generate_diff_string(old: &str, new: &str) -> (String, Option<usize>) {
     let parts = diff_lines(old, new);
-    let width = split_lines(old).len().max(split_lines(new).len()).to_string().len();
+    let width = split_lines(old)
+        .len()
+        .max(split_lines(new).len())
+        .to_string()
+        .len();
 
     let mut output: Vec<String> = Vec::new();
     let mut old_line = 1usize;
@@ -173,11 +177,11 @@ pub fn generate_unified_patch(path: &str, old: &str, new: &str) -> String {
     let mut hunk_new_count = 0usize;
 
     let flush = |body: &mut Vec<String>,
-                     hunks: &mut Vec<String>,
-                     old_start: usize,
-                     new_start: usize,
-                     old_count: usize,
-                     new_count: usize| {
+                 hunks: &mut Vec<String>,
+                 old_start: usize,
+                 new_start: usize,
+                 old_count: usize,
+                 new_count: usize| {
         if body.is_empty() {
             return;
         }
@@ -191,7 +195,11 @@ pub fn generate_unified_patch(path: &str, old: &str, new: &str) -> String {
     for index in 0..parts.len() {
         match &parts[index] {
             Part::Equal(lines) => {
-                let leading = if body.is_empty() { 0 } else { CONTEXT_LINES.min(lines.len()) };
+                let leading = if body.is_empty() {
+                    0
+                } else {
+                    CONTEXT_LINES.min(lines.len())
+                };
                 for line in &lines[..leading] {
                     body.push(format!(" {line}"));
                     hunk_old_count += 1;

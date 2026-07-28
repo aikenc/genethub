@@ -23,9 +23,7 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
         let mut value = |flag: &str| -> Result<String, String> {
             match inline.clone() {
                 Some(value) => Ok(value),
-                None => it
-                    .next()
-                    .ok_or_else(|| format!("{flag} expects a value")),
+                None => it.next().ok_or_else(|| format!("{flag} expects a value")),
             }
         };
 
@@ -82,7 +80,14 @@ mod tests {
 
     #[test]
     fn unsupported_flags_are_collected_not_fatal() {
-        let args = parse_str(&["--mode", "rpc", "--mcp-config", "/tmp/mcp.json", "--extension", "/tmp/ext"]);
+        let args = parse_str(&[
+            "--mode",
+            "rpc",
+            "--mcp-config",
+            "/tmp/mcp.json",
+            "--extension",
+            "/tmp/ext",
+        ]);
         assert_eq!(args.ignored.len(), 2);
         assert_eq!(args.mode.as_deref(), Some("rpc"));
     }
