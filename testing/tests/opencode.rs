@@ -39,6 +39,7 @@ async fn a_third_party_agent_reaches_the_same_timeline_as_the_built_in_one() {
     // OpenCode spends a call on naming the thread before it answers, so the
     // script needs one more reply than the visible turn suggests.
     script(&journey, &["A title", "hello from the third-party agent"]).await;
+    const PROMPT: &str = "Say hello.";
 
     let session = journey
         .session_with_model(
@@ -48,7 +49,7 @@ async fn a_third_party_agent_reaches_the_same_timeline_as_the_built_in_one() {
         .await
         .expect("a session opens on OpenCode");
     journey
-        .send(&session, "Say hello.")
+        .send(&session, PROMPT)
         .await
         .expect("prompt accepted");
     let events = journey.client.drain_turn().await.expect("the turn ends");
@@ -58,10 +59,17 @@ async fn a_third_party_agent_reaches_the_same_timeline_as_the_built_in_one() {
         "the turn should complete; saw {:?}",
         events.failure()
     );
+    let reply = events.assistant_text();
     assert!(
-        !events.assistant_text().trim().is_empty(),
+        !reply.trim().is_empty(),
         "a third-party agent's reply must arrive as normalized timeline text, \
          not as something only its own UI could render"
+    );
+    // OpenCode streams the prompt back as part of the conversation. A "not
+    // empty" assertion alone passed while the adapter was echoing it.
+    assert!(
+        !reply.contains(PROMPT),
+        "the prompt was replayed as the answer: {reply:?}"
     );
     assert!(
         events

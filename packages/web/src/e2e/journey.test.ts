@@ -157,6 +157,70 @@ describe.skipIf(!existsSync(DAEMON))("a session, end to end", () => {
     expect(toolCall, "the browser should see the tool call, not just its effect").toBeTruthy();
   }, 30_000);
 
+  /**
+   * The acceptance action behind the whole adapter layer: one piece of frontend
+   * code, two agents that share no transport, timelines of the same shape.
+   *
+   * OpenCode brings its own credentials, so it is pointed at the same fake
+   * model rather than a real one. It is otherwise the genuine article.
+   */
+  it.skipIf(!onPath("opencode"))(
+    "renders a third-party agent's turn in the same shape as the built-in one",
+    async () => {
+      writeFileSync(
+        path.join(workspaceDir, "opencode.json"),
+        JSON.stringify({
+          provider: {
+            journey: {
+              npm: "@ai-sdk/openai-compatible",
+              name: "Journey",
+              options: { baseURL: model.origin, apiKey: "sk-test" },
+              models: { "deepseek-v4-flash": { name: "Journey" } },
+            },
+          },
+        }),
+      );
+
+      const shapes = async (agentId: string, modelId: string) => {
+        const session = await client.call({
+          type: "session.create",
+          payload: { workspaceId, agentId, modelId, modeId: null, title: null },
+        });
+        if (session?.type !== "session") throw new Error(`${agentId} would not start`);
+
+        let timeline = emptyTimeline();
+        await client.subscribe(session.data.id, {
+          onEvent: (event) => {
+            timeline = applySequenced(timeline, event);
+          },
+          onResync: () => {},
+        });
+        await client.call({
+          type: "session.send",
+          payload: { sessionId: session.data.id, text: "说点什么", attachments: [] },
+        });
+        // The mock answers every unscripted turn the same way, including the
+        // extra call OpenCode makes to name the thread.
+        await waitFor(() => assistantText(timeline).includes("好的"), 60_000).catch(() => {
+          throw new Error(
+            `${agentId} never answered: status=${timeline.status} items=${JSON.stringify(timeline.items)}`,
+          );
+        });
+        return timeline;
+      };
+
+      const builtin = await shapes("genet", "deepseek/deepseek-v4-flash");
+      const thirdParty = await shapes("opencode", "journey/deepseek-v4-flash");
+
+      const kinds = (timeline: typeof builtin) =>
+        [...new Set(timeline.items.map((item) => item.type))].sort();
+      expect(kinds(thirdParty)).toEqual(kinds(builtin));
+      expect(thirdParty.status).toBe("idle");
+      expect(thirdParty.lastError).toBeNull();
+    },
+    120_000,
+  );
+
   it("serves the panels from the same connection", async () => {
     const tree = await client.call({ type: "file.tree", payload: { workspaceId, path: null, depth: 1 } });
     expect(tree?.type).toBe("fileTree");
@@ -305,6 +369,12 @@ function startDaemon(
       }
     });
   });
+}
+
+/** Whether an external agent is installed, so its case can skip rather than fail. */
+function onPath(binary: string): boolean {
+  const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  return dirs.some((dir) => existsSync(path.join(dir, binary)));
 }
 
 async function waitFor(check: () => boolean, timeoutMs = 10_000): Promise<void> {

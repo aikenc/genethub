@@ -135,6 +135,10 @@ struct TurnState {
     /// OpenCode addresses parts by id; the mapping to our item ids is kept here
     /// so repeated updates land on the same timeline entry.
     parts: std::collections::HashMap<String, String>,
+    /// Which messages belong to the assistant. Parts carry only a message id,
+    /// and OpenCode streams the user's own message back the same way it streams
+    /// the reply; without this the prompt would be echoed as an answer.
+    assistant_messages: std::collections::HashSet<String>,
     counter: u64,
 }
 
@@ -195,38 +199,58 @@ impl AgentSession for OpenCodeSession {
         let turn_state = self.turn.clone();
         let completed = turn_id.clone();
 
-        // The call blocks for the whole turn; the timeline arrives over SSE.
+        // The call blocks for the whole turn. Its body is the finished message,
+        // and it is the authority: the event stream is a separate connection
+        // that can still be in flight when this returns, which on a fast turn
+        // means the reply would otherwise arrive after the turn was declared
+        // over — or never.
         tokio::spawn(async move {
             let outcome = http.post(url).json(&body).send().await;
-            let mut state = turn_state.lock().await;
-            if state.id.as_deref() != Some(completed.as_str()) {
-                return;
-            }
-            state.id = None;
             let event = match outcome {
-                Ok(response) if response.status().is_success() => SessionEvent::TurnCompleted {
-                    turn_id: completed,
-                    usage: Usage::default(),
-                },
+                Ok(response) if response.status().is_success() => {
+                    let settled = response.json::<Value>().await.unwrap_or(Value::Null);
+                    let mut state = turn_state.lock().await;
+                    if state.id.as_deref() != Some(completed.as_str()) {
+                        return;
+                    }
+                    reconcile(&settled, &mut state, &events, &completed);
+                    state.id = None;
+                    SessionEvent::TurnCompleted {
+                        turn_id: completed,
+                        usage: usage_from_info(settled.get("info").unwrap_or(&Value::Null)),
+                    }
+                }
                 Ok(response) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
+                    let mut state = turn_state.lock().await;
+                    if state.id.as_deref() != Some(completed.as_str()) {
+                        return;
+                    }
+                    state.id = None;
                     SessionEvent::TurnFailed {
                         turn_id: completed,
                         error: classify_http(status.as_u16(), &body),
                     }
                 }
-                Err(error) => SessionEvent::TurnFailed {
-                    turn_id: completed,
-                    error: TurnError {
-                        code: if error.is_timeout() {
-                            TurnErrorCode::Timeout
-                        } else {
-                            TurnErrorCode::AgentCrashed
+                Err(error) => {
+                    let mut state = turn_state.lock().await;
+                    if state.id.as_deref() != Some(completed.as_str()) {
+                        return;
+                    }
+                    state.id = None;
+                    SessionEvent::TurnFailed {
+                        turn_id: completed,
+                        error: TurnError {
+                            code: if error.is_timeout() {
+                                TurnErrorCode::Timeout
+                            } else {
+                                TurnErrorCode::AgentCrashed
+                            },
+                            message: format!("OpenCode did not answer: {error}"),
                         },
-                        message: format!("OpenCode did not answer: {error}"),
-                    },
-                },
+                    }
+                }
             };
             let _ = events.send(event);
         });
@@ -383,68 +407,16 @@ fn translate_event(
             if part.get("sessionID").and_then(Value::as_str) != Some(remote_session) {
                 return;
             }
-            let Some(part_id) = part.get("id").and_then(Value::as_str) else {
+            // The role lives on the message, which OpenCode always announces
+            // before the parts that belong to it.
+            let message_id = part
+                .get("messageID")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !state.assistant_messages.contains(message_id) {
                 return;
-            };
-            let part_type = part.get("type").and_then(Value::as_str).unwrap_or_default();
-            let (item_id, is_new) = state.item_id_for(part_id);
-
-            match part_type {
-                "text" | "reasoning" => {
-                    let text = part
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    if is_new {
-                        let item = if part_type == "reasoning" {
-                            TimelineItem::Reasoning { id: item_id, text }
-                        } else {
-                            TimelineItem::AssistantMessage { id: item_id, text }
-                        };
-                        emit(SessionEvent::Item { turn_id, item });
-                    } else {
-                        // OpenCode resends the whole part, so the item is
-                        // replaced rather than appended to. Sending a full Item
-                        // keeps replay correct; a Text delta here would
-                        // duplicate everything received so far.
-                        let item = if part_type == "reasoning" {
-                            TimelineItem::Reasoning { id: item_id, text }
-                        } else {
-                            TimelineItem::AssistantMessage { id: item_id, text }
-                        };
-                        emit(SessionEvent::Item { turn_id, item });
-                    }
-                }
-                "tool" => {
-                    let name = part
-                        .get("tool")
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool")
-                        .to_string();
-                    let status_value = part
-                        .get("state")
-                        .and_then(|s| s.get("status"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("pending");
-                    let status = match status_value {
-                        "running" => ToolStatus::Running,
-                        "completed" => ToolStatus::Ok,
-                        "error" => ToolStatus::Error,
-                        _ => ToolStatus::Pending,
-                    };
-                    emit(SessionEvent::Item {
-                        turn_id,
-                        item: TimelineItem::ToolCall {
-                            id: item_id,
-                            name: name.clone(),
-                            status,
-                            detail: detail_from_part(&name, part),
-                        },
-                    });
-                }
-                _ => {}
             }
+            emit_part(part, &turn_id, state, events);
         }
         "session.error" => {
             let message = properties
@@ -460,8 +432,115 @@ fn translate_event(
                 error: classify_message(&message),
             });
         }
+        "message.updated" => {
+            let info = properties.get("info").unwrap_or(&Value::Null);
+            if info.get("sessionID").and_then(Value::as_str) != Some(remote_session) {
+                return;
+            }
+            if info.get("role").and_then(Value::as_str) == Some("assistant") {
+                if let Some(id) = info.get("id").and_then(Value::as_str) {
+                    state.assistant_messages.insert(id.to_string());
+                }
+            }
+        }
         "message.part.removed" | "session.idle" | "session.updated" => {}
         _ => {}
+    }
+}
+
+/// Turns one OpenCode part into a timeline item.
+///
+/// Parts are addressed by id and resent in full, so replaying the same part
+/// twice is harmless: the second copy replaces the first rather than appending
+/// to it. That property is what lets the finished message be reconciled against
+/// whatever the event stream already delivered.
+fn emit_part(
+    part: &Value,
+    turn_id: &str,
+    state: &mut TurnState,
+    events: &broadcast::Sender<SessionEvent>,
+) {
+    let Some(part_id) = part.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let part_type = part.get("type").and_then(Value::as_str).unwrap_or_default();
+    let (item_id, _) = state.item_id_for(part_id);
+    let turn_id = turn_id.to_string();
+
+    let item = match part_type {
+        "text" | "reasoning" => {
+            let text = part
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if part_type == "reasoning" {
+                TimelineItem::Reasoning { id: item_id, text }
+            } else {
+                TimelineItem::AssistantMessage { id: item_id, text }
+            }
+        }
+        "tool" => {
+            let name = part
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_string();
+            let status = match part
+                .get("state")
+                .and_then(|state| state.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("pending")
+            {
+                "running" => ToolStatus::Running,
+                "completed" => ToolStatus::Ok,
+                "error" => ToolStatus::Error,
+                _ => ToolStatus::Pending,
+            };
+            TimelineItem::ToolCall {
+                id: item_id,
+                name: name.clone(),
+                status,
+                detail: detail_from_part(&name, part),
+            }
+        }
+        _ => return,
+    };
+    let _ = events.send(SessionEvent::Item { turn_id, item });
+}
+
+/// Replays the finished message, so nothing the event stream missed is lost.
+fn reconcile(
+    settled: &Value,
+    state: &mut TurnState,
+    events: &broadcast::Sender<SessionEvent>,
+    turn_id: &str,
+) {
+    if let Some(id) = settled
+        .get("info")
+        .and_then(|info| info.get("id"))
+        .and_then(Value::as_str)
+    {
+        state.assistant_messages.insert(id.to_string());
+    }
+    let Some(parts) = settled.get("parts").and_then(Value::as_array) else {
+        return;
+    };
+    for part in parts {
+        emit_part(part, turn_id, state, events);
+    }
+}
+
+fn usage_from_info(info: &Value) -> Usage {
+    let tokens = info.get("tokens").unwrap_or(&Value::Null);
+    let count = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let cache = tokens.get("cache").cloned().unwrap_or(Value::Null);
+    Usage {
+        input_tokens: count(tokens, "input"),
+        output_tokens: count(tokens, "output"),
+        cache_read_tokens: count(&cache, "read"),
+        cache_write_tokens: count(&cache, "write"),
+        cost_usd: info.get("cost").and_then(Value::as_f64),
     }
 }
 
@@ -584,9 +663,12 @@ fn first_line(body: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A turn already told that `m1` is the assistant's message, which is the
+    /// order the real server uses.
     fn state() -> TurnState {
         TurnState {
             id: Some("t1".into()),
+            assistant_messages: ["m1".to_string()].into_iter().collect(),
             ..TurnState::default()
         }
     }
@@ -617,7 +699,7 @@ mod tests {
         for text in ["he", "hello"] {
             translate_event(
                 &json!({"type": "message.part.updated", "properties": {"part": {
-                    "id": "p1", "sessionID": "s1", "type": "text", "text": text
+                    "id": "p1", "sessionID": "s1", "messageID": "m1", "type": "text", "text": text
                 }}}),
                 "s1",
                 &mut turn,
@@ -652,13 +734,57 @@ mod tests {
         let mut turn = state();
         translate_event(
             &json!({"type": "message.part.updated", "properties": {"part": {
-                "id": "p1", "sessionID": "other", "type": "text", "text": "x"
+                "id": "p1", "sessionID": "other", "messageID": "m1", "type": "text", "text": "x"
             }}}),
             "s1",
             &mut turn,
             &tx,
         );
         assert!(drain(&mut rx).is_empty(), "the event stream is shared");
+    }
+
+    /// OpenCode streams the prompt back as parts of a user message before the
+    /// reply arrives. Treating those as output made the agent appear to answer
+    /// by repeating the question.
+    #[test]
+    fn the_users_own_message_is_not_replayed_as_the_answer() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut turn = TurnState {
+            id: Some("t1".into()),
+            ..TurnState::default()
+        };
+        let announce = |role: &str, id: &str| {
+            json!({"type": "message.updated", "properties": {"info": {
+                "id": id, "sessionID": "s1", "role": role
+            }}})
+        };
+        let part = |message: &str, part_id: &str, text: &str| {
+            json!({"type": "message.part.updated", "properties": {"part": {
+                "id": part_id, "sessionID": "s1", "messageID": message,
+                "type": "text", "text": text
+            }}})
+        };
+
+        for event in [
+            announce("user", "m_user"),
+            part("m_user", "p_user", "what is 2+2"),
+            announce("assistant", "m_reply"),
+            part("m_reply", "p_reply", "four"),
+        ] {
+            translate_event(&event, "s1", &mut turn, &tx);
+        }
+
+        let texts: Vec<String> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                SessionEvent::Item {
+                    item: TimelineItem::AssistantMessage { text, .. },
+                    ..
+                } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["four".to_string()]);
     }
 
     #[test]
