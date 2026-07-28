@@ -206,3 +206,39 @@ pub struct HelloResult {
     pub fingerprint: String,
     pub transport: TransportKind,
 }
+
+/// Where this machine stands with a Hub.
+///
+/// One shape covers every stage of pairing so the UI polls a single call and
+/// renders from what it gets back, rather than tracking the flow itself and
+/// getting out of step with the daemon after a restart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "state", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum HubStatus {
+    /// No Hub. Everything still works on this machine and over the LAN.
+    Unpaired,
+    /// A code is on screen, waiting for someone to approve it in a browser.
+    #[serde(rename_all = "camelCase")]
+    Pairing {
+        hub_url: String,
+        user_code: String,
+        verification_uri: String,
+        /// The same address with the code already filled in, for a QR code.
+        verification_uri_complete: String,
+        expires_at: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Paired {
+        hub_url: String,
+        /// The Hub's id for this machine, which is what the owner sees listed.
+        machine_id: String,
+        /// True while the outbound connection to the Hub is up. False means
+        /// remote access is down even though pairing is intact.
+        online: bool,
+    },
+    /// Pairing was attempted and did not finish. Kept until the next attempt so
+    /// the reason stays on screen instead of reverting to "unpaired".
+    #[serde(rename_all = "camelCase")]
+    Failed { hub_url: String, message: String },
+}

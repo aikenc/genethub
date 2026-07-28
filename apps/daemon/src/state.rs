@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, RwLock};
 use crate::adapter::registry::Registry;
 use crate::adapter::ProviderMap;
 use crate::config::{Config, MachineState, Paths};
+use crate::link::SharedLink;
 use crate::pty::{PtyMessage, Terminals};
 use crate::session::{SessionManager, Store};
 use crate::workspace::Workspaces;
@@ -24,6 +25,9 @@ pub struct AppState {
     pub version: String,
     /// Token loopback and LAN clients must present.
     pub token: String,
+    /// This machine's relationship with a Hub. Set once, right after the state
+    /// exists, because the link needs the state to serve relayed clients.
+    pub link: std::sync::OnceLock<SharedLink>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -54,6 +58,7 @@ impl AppState {
             terminals,
             version: env!("CARGO_PKG_VERSION").to_string(),
             token: uuid::Uuid::new_v4().simple().to_string(),
+            link: std::sync::OnceLock::new(),
         });
         Ok((state, pty_rx))
     }

@@ -242,6 +242,42 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             Err(error) => failed(error),
         },
 
+        Request::HubStatus => match state.link.get() {
+            Some(link) => Handled::ok(Reply::HubStatus(link.status().await)),
+            None => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),
+        },
+
+        Request::HubPair {
+            hub_url,
+            display_name,
+        } => {
+            let Some(link) = state.link.get() else {
+                return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
+            };
+            match link.pair(&hub_url, display_name).await {
+                Ok(status) => Handled::ok(Reply::HubStatus(status)),
+                Err(error) => {
+                    // Being already paired is the user's situation to fix, not
+                    // a fault, so it comes back as a conflict rather than a 500.
+                    let message = format!("{error:#}");
+                    let code = if message.contains("already paired") {
+                        ErrorCode::Conflict
+                    } else {
+                        ErrorCode::Internal
+                    };
+                    Handled::err(code, message)
+                }
+            }
+        }
+
+        Request::HubUnpair => match state.link.get() {
+            Some(link) => match link.unpair().await {
+                Ok(()) => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),
+                Err(error) => failed(error),
+            },
+            None => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),
+        },
+
         Request::WorkspaceList => Handled::ok(Reply::Workspaces(state.workspaces.list().await)),
 
         Request::WorkspaceOpen { root } => {

@@ -93,6 +93,23 @@ pub enum Request {
         outcome: PermissionOutcome,
     },
 
+    // -- hub ---------------------------------------------------------------
+    /// Whether this machine is paired, and how far a pairing in progress got.
+    #[serde(rename = "hub.status")]
+    HubStatus,
+    /// Begins the device code flow. Returns as soon as there is a code to show;
+    /// approval happens in a browser and completes in the background.
+    #[serde(rename = "hub.pair", rename_all = "camelCase")]
+    HubPair {
+        hub_url: String,
+        #[serde(default)]
+        display_name: Option<String>,
+    },
+    /// Drops the enrollment and the uplink with it. The machine keeps working
+    /// locally; it just stops being reachable from outside.
+    #[serde(rename = "hub.unpair")]
+    HubUnpair,
+
     // -- workspaces --------------------------------------------------------
     #[serde(rename = "workspace.list")]
     WorkspaceList,
@@ -175,6 +192,7 @@ pub enum Reply {
         reset: bool,
     },
     Agents(Vec<AgentInfo>),
+    HubStatus(HubStatus),
     Session(SessionSummary),
     Sessions(Vec<SessionSummary>),
     Snapshot(SessionSnapshot),

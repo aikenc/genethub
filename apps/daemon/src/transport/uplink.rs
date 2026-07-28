@@ -7,6 +7,7 @@
 //! client connection as far as the rest of the daemon is concerned.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,10 @@ const BACKOFF: [u64; 6] = [1, 2, 5, 10, 30, 60];
 
 pub struct Uplink {
     task: tokio::task::JoinHandle<()>,
+    /// Read by `hub.status`, so the UI can distinguish "paired but the Hub is
+    /// unreachable" from "not paired" — very different things to a user
+    /// wondering why their phone cannot see this machine.
+    online: Arc<AtomicBool>,
 }
 
 impl Uplink {
@@ -44,27 +49,37 @@ impl Uplink {
         url: String,
         ticket: String,
     ) -> Uplink {
-        let task = tokio::spawn(async move {
-            let mut attempt = 0usize;
-            loop {
-                match run(&state, &pty, &url, &ticket).await {
-                    Ok(()) => {
-                        tracing::info!("the uplink closed cleanly; reconnecting");
-                        attempt = 0;
+        let online = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn({
+            let online = online.clone();
+            async move {
+                let mut attempt = 0usize;
+                loop {
+                    match run(&state, &pty, &url, &ticket, &online).await {
+                        Ok(()) => {
+                            tracing::info!("the uplink closed cleanly; reconnecting");
+                            attempt = 0;
+                        }
+                        Err(error) => {
+                            tracing::warn!("the uplink dropped: {error:#}");
+                            attempt = (attempt + 1).min(BACKOFF.len() - 1);
+                        }
                     }
-                    Err(error) => {
-                        tracing::warn!("the uplink dropped: {error:#}");
-                        attempt = (attempt + 1).min(BACKOFF.len() - 1);
-                    }
+                    online.store(false, Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_secs(BACKOFF[attempt])).await;
                 }
-                tokio::time::sleep(Duration::from_secs(BACKOFF[attempt])).await;
             }
         });
-        Uplink { task }
+        Uplink { task, online }
     }
 
-    pub fn stop(self) {
+    pub fn is_online(&self) -> bool {
+        self.online.load(Ordering::Relaxed)
+    }
+
+    pub fn stop(&self) {
         self.task.abort();
+        self.online.store(false, Ordering::Relaxed);
     }
 }
 
@@ -74,6 +89,7 @@ async fn run(
     pty: &broadcast::Sender<ServerFrame>,
     url: &str,
     ticket: &str,
+    online: &AtomicBool,
 ) -> Result<()> {
     let mut request = url
         .into_client_request()
@@ -88,6 +104,7 @@ async fn run(
     let (socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .context("connecting to the Hub")?;
+    online.store(true, Ordering::Relaxed);
     tracing::info!("uplink established");
 
     let (sink, mut stream) = socket.split();
