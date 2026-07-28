@@ -1107,12 +1107,15 @@ async fn a_session_title_comes_from_the_first_thing_the_user_says() {
         .send(&session, "Fix the login redirect")
         .await
         .expect("accepted");
-    journey.client.drain_turn().await.expect("the turn ends");
 
+    // The title comes from the prompt, not from the model, so the answer is
+    // already knowable here. Waiting for the turn would mean waiting on a real
+    // model to finish an open-ended instruction in an empty project — which it
+    // does not, and which this case was never about.
     let summary = match journey
         .client
         .call(Request::SessionGet {
-            session_id: session,
+            session_id: session.clone(),
         })
         .await
         .unwrap()
@@ -1122,6 +1125,13 @@ async fn a_session_title_comes_from_the_first_thing_the_user_says() {
     };
     assert_eq!(summary.title, "Fix the login redirect");
 
+    journey
+        .client
+        .call(Request::SessionInterrupt {
+            session_id: session,
+        })
+        .await
+        .expect("the turn stops");
     journey.finish().await;
 }
 
