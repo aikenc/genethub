@@ -18,6 +18,7 @@ import { useWorkbench } from "../session/store";
 
 function stubClient(answers: Partial<Record<Request["type"], (payload: never) => Reply>>) {
   const calls: Request[] = [];
+  let onState: ((state: string) => void) | undefined;
   const client = {
     call: async (request: Request) => {
       calls.push(request);
@@ -25,7 +26,11 @@ function stubClient(answers: Partial<Record<Request["type"], (payload: never) =>
       if (!answer) return undefined;
       return answer((request as { payload?: never }).payload as never);
     },
-    connect: () => {},
+    connect: () => {
+      // Real sockets fire "ready" after the handshake; do the same so attach
+      // has time to register its listener before the state change arrives.
+      queueMicrotask(() => onState?.("ready"));
+    },
     close: () => {},
     subscribe: async () => ({
       snapshot: {
@@ -49,7 +54,10 @@ function stubClient(answers: Partial<Record<Request["type"], (payload: never) =>
     unsubscribe: async () => {},
     onPty: () => () => {},
     onNotice: () => () => {},
-    onStateChange: () => () => {},
+    onStateChange: (listener: (state: string) => void) => {
+      onState = listener;
+      return () => {};
+    },
   } as unknown as Client;
   return { client, calls };
 }
@@ -113,6 +121,19 @@ beforeEach(() => {
 });
 
 describe("the first run", () => {
+  it("does not ask for a project while the socket is still coming up", async () => {
+    const { client } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({ type: "workspaces", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    (client as { connect: () => void }).connect = () => {};
+    render(<App host={hostWith()} connect={() => client} />);
+
+    expect(await screen.findByText("正在连这台机器…")).toBeInTheDocument();
+    expect(screen.queryByText("先打开一个项目文件夹。")).not.toBeInTheDocument();
+  });
+
   it("asks for a project before anything else, and opens the one that is picked", async () => {
     const { client, calls } = stubClient({
       "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),

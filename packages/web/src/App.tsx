@@ -203,10 +203,26 @@ export function App({
  * What a new install shows instead of a workbench with everything greyed out.
  */
 function FirstRun({ host, onOpenSettings }: { host: Host; onOpenSettings(): void }) {
-  const { workspaces, activeWorkspaceId, agents, createSession } = useWorkbench();
+  const { workspaces, activeWorkspaceId, agents, createSession, connection } = useWorkbench();
   const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
   const builtin = agents.find((agent) => agent.builtin) ?? agents[0];
   const usable = builtin && builtin.probe.state === "ready" && builtin.catalog.models.length > 0;
+
+  // An empty catalog while the socket is still coming up (or already dead) is
+  // not "no project" — saying that sends people hunting for a folder when the
+  // real problem is they never reached the machine.
+  if (connection !== "ready") {
+    return (
+      <Splash>
+        <p className="text-sm">{connection === "closed" ? "连不上这台机器。" : "正在连这台机器…"}</p>
+        <p className="mb-3 text-xs text-muted">
+          {connection === "closed"
+            ? "确认地址里的端口能从你这边通到 daemon，或者改用和页面同一个端口的代理地址。"
+            : "连上之后会直接进到一个会话。"}
+        </p>
+      </Splash>
+    );
+  }
 
   if (!workspace) {
     return (
