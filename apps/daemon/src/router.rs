@@ -324,6 +324,43 @@ pub async fn handle(
             }
         }
 
+        Request::HubTrial {
+            hub_url,
+            display_name,
+        } => {
+            let Some(link) = state.link.get() else {
+                return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
+            };
+            match link.trial(&hub_url, display_name).await {
+                Ok((status, trial)) => Handled::ok(Reply::HubClaim {
+                    status,
+                    claim: claim_of(trial),
+                }),
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    let code = if message.contains("already paired") {
+                        ErrorCode::Conflict
+                    } else {
+                        ErrorCode::Internal
+                    };
+                    Handled::err(code, message)
+                }
+            }
+        }
+
+        Request::HubClaimLink => {
+            let Some(link) = state.link.get() else {
+                return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
+            };
+            match link.claim_link().await {
+                Ok(trial) => Handled::ok(Reply::HubClaim {
+                    status: link.status().await,
+                    claim: claim_of(trial),
+                }),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::HubUnpair => match state.link.get() {
             Some(link) => match link.unpair().await {
                 Ok(()) => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),
@@ -544,6 +581,14 @@ pub async fn handle(
             Ok(()) => Handled::ok(Reply::Ack),
             Err(error) => failed(error),
         },
+    }
+}
+
+fn claim_of(trial: crate::hub::Trial) -> genehub_proto::HubClaim {
+    genehub_proto::HubClaim {
+        claim_url: trial.claim_url,
+        recovery_key: trial.recovery_key,
+        expires_at: trial.expires_at,
     }
 }
 

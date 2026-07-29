@@ -84,6 +84,7 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 | 会话 | `session.create` / `list` / `get` / `send` / `interrupt` / `close` / `archive` |
 | 会话配置 | `session.setModel` / `setMode` / `respondPermission` |
 | 设备 | `device.list` / `invite` / `claim` / `revoke` / `remoteAttach` / `remoteDetach` |
+| 控制面 | `hub.status` / `pair` / `trial` / `claimLink` / `unpair`（可选，见 [desktop-client.md](./desktop-client.md) §8） |
 | 工作区 | `workspace.list` / `open` / `create` |
 | 文件 | `file.tree` / `read` / `write` / `watch` |
 | Git | `git.status` / `git.diff` / `git.commit` |

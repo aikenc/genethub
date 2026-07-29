@@ -99,6 +99,44 @@ impl Link {
         hub_url: &str,
         display_name: Option<String>,
     ) -> Result<HubStatus> {
+        let (status, _) = self.start(hub_url, display_name, false).await?;
+        Ok(status)
+    }
+
+    /// Pairs without anyone approving anything: the Hub mints a temporary
+    /// identity and approves this machine in the same breath.
+    ///
+    /// Returns the way back into that identity — a one-time link to open in a
+    /// browser, and a recovery key. Nothing else knows them, so a caller that
+    /// drops them has thrown away the only ways in.
+    pub async fn trial(
+        self: &Arc<Self>,
+        hub_url: &str,
+        display_name: Option<String>,
+    ) -> Result<(HubStatus, hub::Trial)> {
+        let (status, trial) = self.start(hub_url, display_name, true).await?;
+        let trial = trial.ok_or_else(|| anyhow::anyhow!("the Hub started no trial"))?;
+        Ok((status, trial))
+    }
+
+    /// A fresh link into this machine's owner, for showing as a QR code.
+    pub async fn claim_link(&self) -> Result<hub::Trial> {
+        match &*self.stage.lock().await {
+            Stage::Paired { enrollment, .. } => {
+                hub::Client::new(&enrollment.hub_url)
+                    .claim_link(enrollment)
+                    .await
+            }
+            _ => anyhow::bail!("this machine is not paired with a Hub"),
+        }
+    }
+
+    async fn start(
+        self: &Arc<Self>,
+        hub_url: &str,
+        display_name: Option<String>,
+        trial: bool,
+    ) -> Result<(HubStatus, Option<hub::Trial>)> {
         if let Stage::Paired { enrollment, .. } = &*self.stage.lock().await {
             anyhow::bail!(
                 "this machine is already paired with {}; unpair first",
@@ -109,6 +147,12 @@ impl Link {
         let client = hub::Client::new(hub_url);
         let name = display_name.unwrap_or_else(default_display_name);
         let code = client.start_pairing(&name).await?;
+        // Claimed before the waiting starts, so a failure here is reported to
+        // the caller rather than disappearing into a background task.
+        let claimed = match trial {
+            true => Some(client.claim_trial(&code).await?),
+            false => None,
+        };
 
         let task = tokio::spawn({
             let link = self.clone();
@@ -135,7 +179,7 @@ impl Link {
             task.abort();
         }
 
-        Ok(pairing_status(hub_url, &code))
+        Ok((pairing_status(hub_url, &code), claimed))
     }
 
     /// Waits for approval, enrolls, and persists the result.
@@ -303,5 +347,88 @@ mod tests {
     #[tokio::test]
     async fn unpairing_a_machine_that_was_never_paired_is_not_an_error() {
         link().unpair().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_trial_comes_back_with_the_only_ways_into_the_identity() {
+        let hub = fake_hub().await;
+        let (status, trial) = link()
+            .trial(&hub, Some("测试机".into()))
+            .await
+            .expect("the trial should start");
+
+        // Nothing on this machine keeps a copy, so a caller that drops these
+        // has thrown away the identity. They have to come back with the call.
+        assert_eq!(trial.claim_url, "http://hub.test/link/abc");
+        assert_eq!(trial.recovery_key.as_deref(), Some("rk-1"));
+        assert!(matches!(status, HubStatus::Pairing { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_hub_that_refuses_the_trial_fails_the_call_rather_than_pairing_anyway() {
+        let hub = fake_hub_refusing_trials().await;
+        let error = link()
+            .trial(&hub, Some("测试机".into()))
+            .await
+            .expect_err("the trial should fail");
+        assert!(format!("{error:#}").contains("trial"));
+    }
+
+    /// A Hub that answers the two calls a trial makes, and nothing else.
+    ///
+    /// Hand-rolled rather than mocked: what is being checked is that the daemon
+    /// reads a real HTTP reply the way the control plane writes one.
+    async fn fake_hub() -> String {
+        serve(|path| match path {
+            "/api/device-authorizations" => Some(
+                r#"{"deviceCode":"dc","userCode":"AAAA-BBBB","verificationUri":"http://hub.test/activate","verificationUriComplete":"http://hub.test/activate?code=AAAA-BBBB","expiresAt":"2030-01-01T00:00:00Z","interval":5}"#,
+            ),
+            "/api/trial" => Some(
+                r#"{"claimUrl":"http://hub.test/link/abc","recoveryKey":"rk-1","expiresAt":"2030-01-01T00:00:00Z"}"#,
+            ),
+            _ => None,
+        })
+        .await
+    }
+
+    async fn fake_hub_refusing_trials() -> String {
+        serve(|path| match path {
+            "/api/device-authorizations" => Some(
+                r#"{"deviceCode":"dc","userCode":"AAAA-BBBB","verificationUri":"http://hub.test/activate","verificationUriComplete":"http://hub.test/activate?code=AAAA-BBBB","expiresAt":"2030-01-01T00:00:00Z","interval":5}"#,
+            ),
+            _ => None,
+        })
+        .await
+    }
+
+    async fn serve(answer: fn(&str) -> Option<&'static str>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = [0u8; 2048];
+                let read = socket.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let path = request
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let response = match answer(&path) {
+                    Some(body) => format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                    None => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        origin
     }
 }

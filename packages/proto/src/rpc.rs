@@ -127,6 +127,17 @@ pub enum Request {
         #[serde(default)]
         display_name: Option<String>,
     },
+    /// Pairs with a temporary identity the Hub creates on the spot, so trying
+    /// the product does not start with a sign-up form.
+    #[serde(rename = "hub.trial", rename_all = "camelCase")]
+    HubTrial {
+        hub_url: String,
+        #[serde(default)]
+        display_name: Option<String>,
+    },
+    /// A fresh one-time link into this machine's identity, to open elsewhere.
+    #[serde(rename = "hub.claimLink")]
+    HubClaimLink,
     /// Drops the enrollment and the uplink with it. The machine keeps working
     /// locally; it just stops being reachable from outside.
     #[serde(rename = "hub.unpair")]
@@ -248,6 +259,11 @@ pub enum Reply {
     },
     Agents(Vec<AgentInfo>),
     HubStatus(HubStatus),
+    #[serde(rename_all = "camelCase")]
+    HubClaim {
+        status: HubStatus,
+        claim: HubClaim,
+    },
     #[serde(rename_all = "camelCase")]
     Devices {
         devices: Vec<DeviceInfo>,

@@ -278,6 +278,23 @@ pub enum HubStatus {
     Failed { hub_url: String, message: String },
 }
 
+/// The ways back into an identity that has no password.
+///
+/// A trial identity is reachable only through these, so whatever shows them
+/// has one chance to do it: nothing on this machine keeps a copy, and the Hub
+/// will not repeat itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct HubClaim {
+    /// One-time link, good for opening this identity in another browser.
+    pub claim_url: String,
+    /// Present only when the identity was just created.
+    #[ts(optional)]
+    pub recovery_key: Option<String>,
+    pub expires_at: String,
+}
+
 // ---------------------------------------------------------------------------
 // Devices
 //

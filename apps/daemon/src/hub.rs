@@ -25,6 +25,19 @@ pub struct PairingCode {
     pub interval: u64,
 }
 
+/// A way into an identity that has no login: a one-time link, and the key that
+/// gets it back if the link is lost.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Trial {
+    pub claim_url: String,
+    /// Only present when the identity was just created; minting another link
+    /// for an existing one does not re-issue it.
+    #[serde(default)]
+    pub recovery_key: Option<String>,
+    pub expires_at: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PollReply {
@@ -75,6 +88,51 @@ impl Client {
             ));
         }
         response.json().await.context("reading the pairing code")
+    }
+
+    /// Skips the human: takes a temporary identity and approves the pairing in
+    /// one call, for someone who just wants to see the thing work.
+    ///
+    /// The device code is what makes this safe to expose. It never leaves this
+    /// machine, so presenting it says "I am the machine that asked" — the same
+    /// thing the approval screen establishes, without the screen.
+    pub async fn claim_trial(&self, code: &PairingCode) -> Result<Trial> {
+        let response = self
+            .http
+            .post(self.url("/api/trial"))
+            .json(&serde_json::json!({ "deviceCode": code.device_code }))
+            .send()
+            .await
+            .context("asking the Hub for a trial identity")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "the Hub refused to start a trial: {}",
+                response.status()
+            ));
+        }
+        response.json().await.context("reading the trial reply")
+    }
+
+    /// A fresh one-time link into this machine's owner, proved by the uplink
+    /// credential. What the tray's "open on another device" is made of.
+    pub async fn claim_link(&self, enrollment: &Enrollment) -> Result<Trial> {
+        let response = self
+            .http
+            .post(self.url(&format!(
+                "/api/machines/{}/claim-link",
+                enrollment.daemon_id
+            )))
+            .bearer_auth(&enrollment.secret)
+            .send()
+            .await
+            .context("asking the Hub for a claim link")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "the Hub refused to mint a link: {}",
+                response.status()
+            ));
+        }
+        response.json().await.context("reading the link reply")
     }
 
     /// Step two: wait for the human. Returns the enrollment token.
