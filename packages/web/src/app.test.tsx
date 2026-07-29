@@ -84,6 +84,33 @@ describe("the app as the browser loads it", () => {
     expect(await screen.findByText(/没有可连接的机器/)).toBeInTheDocument();
   });
 
+  it("mints the link before showing the page the tray sent it to", async () => {
+    const claimLink = vi.fn(async () => null);
+    useWorkbench.setState({ claimLink });
+    let ask = () => {};
+    const host = {
+      kind: "browser" as const,
+      endpoint: async () => ({ url: ENDPOINT, via: "lan" as const, label: "测试机" }),
+      notify: () => {},
+      openExternal: () => {},
+      onClaimRequested: (listener: () => void) => {
+        ask = listener;
+        return () => {};
+      },
+    };
+
+    render(<App host={host} />);
+    await screen.findByRole("status");
+    ask();
+
+    // Landing on settings with nothing new on it would look like the menu item
+    // did nothing at all.
+    expect(claimLink).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(useWorkbench.getState().tabs.some((tab) => tab.kind === "settings")).toBe(true),
+    );
+  });
+
   it("opens one connection and keeps it across re-renders", async () => {
     render(<App />);
     await screen.findByRole("status");

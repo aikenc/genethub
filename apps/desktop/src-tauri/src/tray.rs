@@ -35,6 +35,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let status = MenuItem::with_id(app, "status", "本机状态：启动中", false, None::<&str>)?;
     app.manage(Status(Mutex::new(status.clone())));
     let pair = MenuItem::with_id(app, "pair", "连接到 Hub", true, None::<&str>)?;
+    // Permanent, not tucked into settings: an identity with no password is
+    // reachable only through a link this makes, so it is the one way back
+    // after a browser is lost (`desktop-client.md` §6).
+    let claim = MenuItem::with_id(app, "claim", "重新生成认领链接", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 GeneHub", true, None::<&str>)?;
 
     let menu = Menu::with_items(
@@ -44,6 +48,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             &PredefinedMenuItem::separator(app)?,
             &status,
             &pair,
+            &claim,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -56,9 +61,16 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
+            // Both are asked of the daemon, and the window is the only thing
+            // here holding a connection to it. The shell shows the window and
+            // says what was asked for; the workbench does the asking.
             "pair" => {
                 show_main_window(app);
                 let _ = app.emit_to("main", "genehub://pair", ());
+            }
+            "claim" => {
+                show_main_window(app);
+                let _ = app.emit_to("main", "genehub://claim", ());
             }
             "quit" => {
                 // Stopping the daemon before exiting is the whole contract of the

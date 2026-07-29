@@ -108,6 +108,18 @@ export function App({
 
   useEffect(() => host.onPairRequested?.(() => useWorkbench.getState().openTab("settings")), [host]);
 
+  useEffect(
+    () =>
+      host.onClaimRequested?.(() => {
+        // Minted first, shown second: the tray asks for this when someone has
+        // lost their way in, and landing on settings with nothing new on it
+        // would look like the menu item did nothing.
+        void useWorkbench.getState().claimLink();
+        useWorkbench.getState().openTab("settings");
+      }),
+    [host],
+  );
+
   useEffect(() => {
     if (claiming !== "idle") return;
     if (endpoint === "loading" || endpoint === null) return;

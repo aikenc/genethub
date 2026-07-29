@@ -52,6 +52,12 @@ export interface Host {
   /** The shell asking the workbench to show remote access, e.g. from a tray menu. */
   onPairRequested?(listener: () => void): () => void;
   /**
+   * The shell asking for a fresh way into this machine's identity. Separate
+   * from pairing because it is what someone reaches for after losing the
+   * browser they were signed in on, and it must not require finding a setting.
+   */
+  onClaimRequested?(listener: () => void): () => void;
+  /**
    * An unredeemed pairing invite the user arrived with, if this shell can be
    * arrived at by link at all. A desktop app cannot.
    */
@@ -170,6 +176,9 @@ export function desktopHost(): Host {
     },
     onPairRequested(listener) {
       return subscribe(tauri, "genehub://pair", listener);
+    },
+    onClaimRequested(listener) {
+      return subscribe(tauri, "genehub://claim", listener);
     },
   };
 }

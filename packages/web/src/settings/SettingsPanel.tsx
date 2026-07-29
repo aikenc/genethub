@@ -18,7 +18,19 @@ const KNOWN_PROVIDERS = [
  * credential it never saw.
  */
 export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpoint | null }) {
-  const { settings, loadSettings, setProvider, agents, hub, pair, unpair, client } = useWorkbench();
+  const {
+    settings,
+    loadSettings,
+    setProvider,
+    agents,
+    hub,
+    claim,
+    pair,
+    trial,
+    claimLink,
+    unpair,
+    client,
+  } = useWorkbench();
 
   useEffect(() => {
     if (client && !settings) void loadSettings();
@@ -74,8 +86,11 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
         <h2 className="mb-2 text-sm font-medium">远程访问</h2>
         <Pairing
           status={hub}
+          claim={claim}
           host={host}
           onPair={(hubUrl) => pair(hubUrl)}
+          onTrial={(hubUrl) => trial(hubUrl)}
+          onClaimLink={() => claimLink()}
           onUnpair={() => unpair()}
         />
       </section>

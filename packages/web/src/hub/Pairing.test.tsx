@@ -118,6 +118,76 @@ describe("connecting a machine to a Hub", () => {
     expect(screen.getByLabelText("Hub 地址")).toHaveValue("https://hub.example.com");
   });
 
+  it("offers the no-approval path only where the deployment supports it", async () => {
+    const onTrial = vi.fn(async () => null);
+    const { rerender } = render(
+      <Pairing
+        status={{ state: "unpaired" }}
+        host={host()}
+        onPair={async () => {}}
+        onUnpair={async () => {}}
+      />,
+    );
+    expect(screen.queryByText(/先体验/)).not.toBeInTheDocument();
+
+    rerender(
+      <Pairing
+        status={{ state: "unpaired" }}
+        host={host()}
+        onPair={async () => {}}
+        onTrial={onTrial}
+        onUnpair={async () => {}}
+      />,
+    );
+    await userEvent.type(screen.getByLabelText("Hub 地址"), "https://hub.example.com");
+    await userEvent.click(screen.getByText(/先体验/));
+    expect(onTrial).toHaveBeenCalledWith("https://hub.example.com");
+  });
+
+  it("shows the recovery key with the link, and only when there is one", () => {
+    const paired = {
+      state: "paired",
+      hubUrl: "https://hub.example.com",
+      machineId: "m_1",
+      online: true,
+    } as const;
+
+    const { rerender } = render(
+      <Pairing
+        status={paired}
+        claim={{
+          claimUrl: "https://hub.example.com/link/abc",
+          recoveryKey: "rk-1",
+          expiresAt: "2030-01-01T00:00:00Z",
+        }}
+        host={host()}
+        onPair={async () => {}}
+        onClaimLink={async () => {}}
+        onUnpair={async () => {}}
+      />,
+    );
+    expect(screen.getByText("https://hub.example.com/link/abc")).toBeInTheDocument();
+    expect(screen.getByText("rk-1")).toBeInTheDocument();
+
+    // Minting another link for an identity that already exists re-issues
+    // nothing, and pretending otherwise would teach people to ignore it.
+    rerender(
+      <Pairing
+        status={paired}
+        claim={{
+          claimUrl: "https://hub.example.com/link/def",
+          recoveryKey: null,
+          expiresAt: "2030-01-01T00:00:00Z",
+        }}
+        host={host()}
+        onPair={async () => {}}
+        onClaimLink={async () => {}}
+        onUnpair={async () => {}}
+      />,
+    );
+    expect(screen.queryByText(/恢复密钥/)).not.toBeInTheDocument();
+  });
+
   it("lets the owner disconnect", async () => {
     const onUnpair = vi.fn(async () => {});
     render(

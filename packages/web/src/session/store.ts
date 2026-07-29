@@ -6,6 +6,7 @@ import type {
   FileContent,
   FileNode,
   GitStatus,
+  HubClaim,
   HubStatus,
   RemoteAccess,
   PermissionOutcome,
@@ -50,6 +51,14 @@ interface WorkbenchState {
   timeline: TimelineState;
   notice: string | null;
   hub: HubStatus | null;
+  /**
+   * The last way into this machine's identity the Hub handed out.
+   *
+   * Kept here rather than in the component that asked for it: the tray can ask
+   * too, and both have to end up on the same screen. Never fetched on mount —
+   * a recovery key comes back once, so it exists only where it was minted.
+   */
+  claim: HubClaim | null;
   /** Who this machine lets in from outside. Owned by the daemon, not by us. */
   devices: DeviceInfo[];
   remote: RemoteAccess | null;
@@ -83,6 +92,10 @@ interface WorkbenchState {
   answerPermission(outcome: PermissionOutcome): Promise<void>;
   refreshHub(): Promise<void>;
   pair(hubUrl: string): Promise<void>;
+  /** Pairs with an identity the Hub makes up on the spot, nobody to approve it. */
+  trial(hubUrl: string): Promise<HubClaim | null>;
+  /** A fresh link into this machine's identity, to open on another device. */
+  claimLink(): Promise<HubClaim | null>;
   unpair(): Promise<void>;
   refreshDevices(): Promise<void>;
   invite(): Promise<DeviceInvite | null>;
@@ -105,6 +118,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   timeline: emptyTimeline(),
   notice: null,
   hub: null,
+  claim: null,
   devices: [],
   remote: null,
   tree: null,
@@ -392,6 +406,23 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       payload: { hubUrl, displayName: null },
     });
     if (reply?.type === "hubStatus") set({ hub: reply.data });
+  },
+
+  async trial(hubUrl) {
+    const reply = await require_(get().client).call({
+      type: "hub.trial",
+      payload: { hubUrl, displayName: null },
+    });
+    if (reply?.type !== "hubClaim") return null;
+    set({ hub: reply.data.status, claim: reply.data.claim });
+    return reply.data.claim;
+  },
+
+  async claimLink() {
+    const reply = await require_(get().client).call({ type: "hub.claimLink" });
+    if (reply?.type !== "hubClaim") return null;
+    set({ hub: reply.data.status, claim: reply.data.claim });
+    return reply.data.claim;
   },
 
   async unpair() {
