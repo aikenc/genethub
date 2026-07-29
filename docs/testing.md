@@ -259,11 +259,13 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 
 ## 8.1 当前落地的套件
 
+`testing/tests/opencode.rs` 与 `testing/tests/claude.rs` 这一类——真实拉起某一个具体第三方 CLI、验证它接进归一化事件层之后行为对不对——统称**专项测试**：它们不是通用旅程矩阵（§5）里"随便换个 agent 都要过"的那一批，而是**只为这一个 adapter 的私有协议细节**（Claude Code 的权限控制、OpenCode 的 HTTP+SSE 事件流……）而存在，写法上也允许比通用旅程更贴合该 CLI 自己的怪癖。共享断言收在 `testing/src/provider_suite.rs`，避免每个专项测试重新发明"turn 有没有正常结束"这类判断。
+
 | 套件 | 位置 | 跑的是什么 | 需要什么 |
 |------|------|-----------|---------|
 | Rust 单元与集成 | `cargo test --workspace` | 协议、daemon 各模块、agent、旅程（daemon + agent + mock 模型） | 无 |
-| 第三方 agent 旅程（OpenCode） | `testing/tests/opencode.rs` | **真实 OpenCode 进程**接同一个模型后端，事件归一化后进同一条时间线 | PATH 上有 `opencode`，否则跳过并打印原因 |
-| 第三方 agent 旅程（Claude Code） | `testing/tests/claude.rs` | **真实 `claude-agent-acp` 进程**接 DeepSeek 的 Anthropic 兼容端点，验证 ACP adapter 的归一化 | `JOURNEY_LLM=real` + PATH 上有 `claude-agent-acp`，否则跳过并打印原因；只在真实模式跑（mock 不实现 Anthropic 协议） |
+| 专项测试（OpenCode） | `testing/tests/opencode.rs` | **真实 OpenCode 进程**接同一个模型后端，事件归一化后进同一条时间线 | PATH 上有 `opencode`，否则跳过并打印原因 |
+| 专项测试（Claude Code） | `testing/tests/claude.rs` | **真实 `claude` 进程**（原生 `stream-json`，非 ACP wrapper）接 DeepSeek 的 Anthropic 兼容端点：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具不落盘 | `JOURNEY_LLM=real` + PATH 上有 `claude`，否则跳过并打印原因；只在真实模式跑（mock 不实现 Anthropic 协议） |
 | relay | `apps/relay && npm test` | 帧转发、契约、边界检查、wire 摘要 | 无 |
 | 工作台 | `packages/web && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |
 | **全栈旅程** | `packages/web/src/e2e/journey.test.ts` | **真实 daemon + 真实 agent + 脚本化模型**，用的是工作台自己的客户端 | `cargo build -p genet-daemon` |
@@ -271,7 +273,7 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 
 全栈旅程这一条是分量最重的：其他前端测试都把 socket 假掉了，而"事件发到了一个没人监听的 topic"在假 socket 下和"没有事件"长得一模一样。它上线的第一天就抓到了这个 bug。
 
-第三方 agent 那两条同样不能省。OpenCode 是唯一形状不同的 adapter——HTTP 服务加独立事件流，而不是 stdio 子进程；只有让它真的跑起来，才知道归一化层是抽象而不是内置 agent 的别名。它接的模型后端与内置 agent 完全一致（mock 模式下配置文件里指向 mock 服务，真实模式下指向 DeepSeek），因此两种模式共用同一份用例。Claude Code 那条只能在真实模式跑：它说的是 Anthropic Messages 协议而不是 OpenAI 兼容协议，mock 服务没有实现那一套，硬跑只会验证出「mock 也不认识这个协议」这种没意义的失败。它连的是 DeepSeek 官方的 Anthropic 兼容端点，环境变量的配法与限制见 [third-party-agents.md](./third-party-agents.md)。Codex 目前没有对应旅程测试——不是漏做，是 Codex CLI 与 DeepSeek 之间存在真实的协议缺口（Codex 只认 Responses API，DeepSeek 只有 Chat Completions），写一条注定失败或者只能测「优雅报错」的旅程价值不大，详情同样见 [third-party-agents.md](./third-party-agents.md) §4。
+两条专项测试同样不能省。OpenCode 是唯一形状不同的 adapter——HTTP 服务加独立事件流，而不是 stdio 子进程；只有让它真的跑起来，才知道归一化层是抽象而不是内置 agent 的别名。它接的模型后端与内置 agent 完全一致（mock 模式下配置文件里指向 mock 服务，真实模式下指向 DeepSeek），因此两种模式共用同一份用例。Claude Code 那条只能在真实模式跑：它说的是 Anthropic Messages 协议而不是 OpenAI 兼容协议，mock 服务没有实现那一套，硬跑只会验证出「mock 也不认识这个协议」这种没意义的失败。它连的是 DeepSeek 官方的 Anthropic 兼容端点，环境变量的配法与限制见 [third-party-agents.md](./third-party-agents.md)。它也是目前唯一验证**逐工具权限控制**（`acceptEdits` 自动放行、默认模式下人工拒绝、daemon 发起的中断真正打断生成）真实生效的地方——这条能力是换原生协议要买回来的东西，只在通用旅程矩阵里测不出来。Codex 目前没有对应专项测试——不是漏做，是 Codex CLI 与 DeepSeek 之间存在真实的协议缺口（Codex 只认 Responses API，DeepSeek 只有 Chat Completions），写一条注定失败或者只能测「优雅报错」的用例价值不大，详情同样见 [third-party-agents.md](./third-party-agents.md) §4；等它换成原生 `app-server` 适配器（[roadmap.md](./roadmap.md) M2）时，应当补一条对称的专项测试。
 
 ---
 

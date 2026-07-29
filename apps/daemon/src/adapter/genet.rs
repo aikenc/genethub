@@ -16,10 +16,11 @@ use genehub_proto::{
     SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Map, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, Mutex};
 
+use super::stdio::write_json_line;
 use super::{find_executable, AgentAdapter, AgentSession, PromptInput, ProviderMap, SessionConfig};
 use crate::config::ProviderConfig;
 
@@ -228,15 +229,8 @@ struct GenetSession {
 
 impl GenetSession {
     async fn command(&self, value: Value) -> Result<()> {
-        let mut line = serde_json::to_string(&value)?;
-        line.push('\n');
         let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(line.as_bytes())
-            .await
-            .context("writing to the agent process")?;
-        stdin.flush().await?;
-        Ok(())
+        write_json_line(&mut stdin, &value).await
     }
 }
 

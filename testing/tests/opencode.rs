@@ -9,10 +9,7 @@
 //! Everything except the model is real, as everywhere else: OpenCode is the
 //! genuine binary, and it talks to the same backend the built-in agent uses.
 
-use std::path::Path;
-
-use genehub_proto::TimelineItem;
-use genehub_testing::{EventsExt, Journey, Turn};
+use genehub_testing::{assert_normalized_reply, binary_on_path, EventsExt, Journey, Turn};
 use serde_json::json;
 
 /// OpenCode is not a dependency of this project, so a machine without it runs
@@ -20,7 +17,7 @@ use serde_json::json;
 /// (`docs/testing.md` §2.2).
 macro_rules! needs_opencode {
     ($journey:expr) => {
-        if !opencode_installed() {
+        if !binary_on_path("opencode") {
             eprintln!(
                 "skipping {}: OpenCode is not on PATH; install it to cover the adapter",
                 module_path!()
@@ -53,31 +50,9 @@ async fn a_third_party_agent_reaches_the_same_timeline_as_the_built_in_one() {
         .await
         .expect("prompt accepted");
     let events = journey.client.drain_turn().await.expect("the turn ends");
-
-    assert!(
-        events.completed(),
-        "the turn should complete; saw {:?}",
-        events.failure()
-    );
-    let reply = events.assistant_text();
-    assert!(
-        !reply.trim().is_empty(),
-        "a third-party agent's reply must arrive as normalized timeline text, \
-         not as something only its own UI could render"
-    );
-    // OpenCode streams the prompt back as part of the conversation. A "not
-    // empty" assertion alone passed while the adapter was echoing it.
-    assert!(
-        !reply.contains(PROMPT),
-        "the prompt was replayed as the answer: {reply:?}"
-    );
-    assert!(
-        events
-            .items()
-            .iter()
-            .any(|item| matches!(item, TimelineItem::UserMessage { .. })),
-        "the prompt belongs to the turn whichever agent served it"
-    );
+    // OpenCode streams the prompt back as part of the conversation, which is
+    // exactly the echo case this shared assertion exists to catch.
+    assert_normalized_reply(&events, PROMPT);
 
     journey.finish().await;
 }
@@ -175,15 +150,4 @@ async fn script(journey: &Journey, replies: &[&str]) {
     for reply in replies {
         journey.mock().reply(Turn::text(*reply)).await;
     }
-}
-
-fn opencode_installed() -> bool {
-    let Ok(path) = std::env::var("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| is_file(&dir.join("opencode")))
-}
-
-fn is_file(candidate: &Path) -> bool {
-    candidate.is_file()
 }

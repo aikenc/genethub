@@ -17,13 +17,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # The adapter journeys drive real third-party CLIs. Without them the
-      # cases skip themselves; installing costs nothing since the Claude Code
-      # one only actually runs when JOURNEY_LLM=real (docs/testing.md §8.1).
+      # The adapter journeys (docs/testing.md §8.1's "专项测试") drive real
+      # third-party CLIs. Without them the cases skip themselves; installing
+      # costs nothing since the Claude Code one only actually runs when
+      # JOURNEY_LLM=real. `claude` itself, not `claude-agent-acp`: the
+      # daemon speaks its native stream-json protocol directly
+      # (apps/daemon/src/adapter/claude.rs).
       - run: |
           npm install --prefix "$HOME/.opencode" opencode-ai
           echo "$HOME/.opencode/node_modules/.bin" >> "$GITHUB_PATH"
-          npm install --prefix "$HOME/.acp-agents" @agentclientprotocol/claude-agent-acp @agentclientprotocol/codex-acp
+          npm install --prefix "$HOME/.acp-agents" @anthropic-ai/claude-code @agentclientprotocol/codex-acp
           echo "$HOME/.acp-agents/node_modules/.bin" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings

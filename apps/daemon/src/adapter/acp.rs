@@ -18,10 +18,11 @@ use genehub_proto::{
     ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
+use super::stdio::write_json_line;
 use super::{find_executable, AgentAdapter, AgentSession, PromptInput, ProviderMap, SessionConfig};
 
 const EVENT_CAPACITY: usize = 1024;
@@ -180,12 +181,8 @@ struct AcpSession {
 
 impl AcpSession {
     async fn write(&self, value: Value) -> Result<()> {
-        let mut line = serde_json::to_string(&value)?;
-        line.push('\n');
         let mut stdin = self.stdin.lock().await;
-        stdin.write_all(line.as_bytes()).await?;
-        stdin.flush().await?;
-        Ok(())
+        write_json_line(&mut stdin, &value).await
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value> {

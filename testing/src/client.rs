@@ -183,6 +183,37 @@ impl Client {
         }
     }
 
+    /// Waits for `session_id` to ask permission for something, returning the
+    /// request's id to answer with `session.respondPermission`.
+    ///
+    /// Events for other sessions are skipped rather than treated as a
+    /// mismatch: several journeys share one client across sessions, and this
+    /// call only cares about the one it names.
+    pub async fn wait_for_permission_request(&self, session_id: &str) -> Result<String> {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        let mut events = self.events.lock().await;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("no permission request arrived");
+            }
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Some(event)) if event.session_id == session_id => match event.event {
+                    SessionEvent::PermissionRequested { request } => return Ok(request.id),
+                    SessionEvent::TurnCompleted { .. }
+                    | SessionEvent::TurnFailed { .. }
+                    | SessionEvent::TurnCanceled { .. } => {
+                        bail!("the turn ended without ever asking permission")
+                    }
+                    _ => continue,
+                },
+                Ok(Some(_)) => continue,
+                Ok(None) => bail!("the event stream closed"),
+                Err(_) => bail!("timed out waiting for a permission request"),
+            }
+        }
+    }
+
     /// Collects events until a turn settles, then returns everything seen.
     ///
     /// Waiting for the terminal event rather than a fixed sleep is what keeps
@@ -319,7 +350,7 @@ pub trait EventsExt {
     fn failure(&self) -> Option<&genehub_proto::TurnError>;
 }
 
-impl EventsExt for Vec<SessionEvent> {
+impl EventsExt for [SessionEvent] {
     fn items(&self) -> Vec<&genehub_proto::TimelineItem> {
         self.iter()
             .filter_map(|event| match event {

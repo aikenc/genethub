@@ -8,6 +8,7 @@ use genehub_proto::{AgentInfo, ProbeState};
 use tokio::sync::RwLock;
 
 use super::acp::AcpAdapter;
+use super::claude::ClaudeAdapter;
 use super::genet::GenetAdapter;
 use super::opencode::OpenCodeAdapter;
 use super::{ProviderMap, SharedAdapter};
@@ -24,18 +25,18 @@ impl Registry {
         let mut adapters: Vec<SharedAdapter> = vec![
             Arc::new(GenetAdapter::discover()),
             Arc::new(OpenCodeAdapter),
-            // Claude Code and Codex are both ACP-speaking once wrapped by their
-            // maintainers' own adapters (`claude-agent-acp`, `codex-acp`). We
-            // spawn the CLI and translate its wire format like any other
-            // adapter; which backend it talks to is that CLI's own
-            // configuration (env vars, its native config file, ChatGPT login,
-            // …), never something this daemon reaches into
-            // (`docs/architecture.md` §3, boundary B1).
-            Arc::new(AcpAdapter::new(
-                "claude",
-                "Claude Code",
-                vec!["claude-agent-acp".into()],
-            )),
+            // Claude Code is spoken natively (`adapter::claude`): its own
+            // `stream-json` stdio protocol, not the `claude-agent-acp`
+            // wrapper. Going native buys back per-tool permission control
+            // that ACP does not expose to a client; see that module's doc
+            // comment for the reverse-engineered protocol notes.
+            Arc::new(ClaudeAdapter),
+            // Codex stays on the ACP wrapper for now: its own native
+            // `app-server` JSON-RPC protocol is planned for the next
+            // version (`docs/roadmap.md`), not this one. Nothing here
+            // should remove this entry without that native adapter landing
+            // first — the ACP wrapper is a real, working integration on its
+            // own, not a placeholder.
             Arc::new(AcpAdapter::new("codex", "Codex", vec!["codex-acp".into()])),
             // A generic ACP entry so any other ACP-speaking CLI on PATH works
             // with no configuration at all.
@@ -134,15 +135,22 @@ mod tests {
         assert!(!registry.get("opencode").unwrap().builtin());
     }
 
-    /// Claude Code and Codex ship no code of ours; they are ACP-wrapped CLIs
-    /// like any custom `extends: "acp"` entry, just registered by default so
-    /// users do not have to hand-write the config (`docs/architecture.md` §3).
+    /// Both are registered by default so users never have to hand-write a
+    /// config entry just to reach a CLI this common
+    /// (`docs/architecture.md` §3). Claude Code ships no code of ours beyond
+    /// the adapter that speaks its native `stream-json` protocol
+    /// (`adapter::claude`); Codex is a plain ACP-wrapped CLI, like any
+    /// custom `extends: "acp"` entry, until its own native adapter lands.
     #[tokio::test]
-    async fn claude_and_codex_are_registered_out_of_the_box_as_ordinary_acp_agents() {
+    async fn claude_and_codex_are_registered_out_of_the_box() {
         let registry = Registry::new(&BTreeMap::new());
         let claude = registry.get("claude").expect("claude is registered");
         assert!(!claude.builtin());
         assert_eq!(claude.label(), "Claude Code");
+        // Native, not the ACP wrapper: no model catalog of our own, but real
+        // per-tool permission control.
+        assert!(claude.capabilities().permissions);
+        assert!(claude.capabilities().resume);
         let codex = registry.get("codex").expect("codex is registered");
         assert!(!codex.builtin());
         assert_eq!(codex.label(), "Codex");

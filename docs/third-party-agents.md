@@ -23,14 +23,19 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 |----|------|------|
 | `genet` | 子进程 + stdio JSONL | 我们自己写的兜底 agent，见 [builtin-agent.md](./builtin-agent.md) |
 | `opencode` | 本地 HTTP + SSE | 探测 `opencode` 二进制；模型/密钥全在它自己的 `opencode.json` |
-| `claude` | 子进程 + ACP over stdio | 探测 `claude-agent-acp`（Anthropic 官方维护的 ACP wrapper，包了 Claude Agent SDK） |
-| `codex` | 子进程 + ACP over stdio | 探测 `codex-acp`（Agent Client Protocol 官方维护的 ACP wrapper，包了 Codex CLI） |
+| `claude` | 子进程 + 原生 `stream-json` stdio | 探测 `claude` 二进制本身（`@anthropic-ai/claude-code`），daemon 直接说它的原生协议，见 §3 |
+| `codex` | 子进程 + ACP over stdio | 探测 `codex-acp`（Agent Client Protocol 官方维护的 ACP wrapper，包了 Codex CLI）；原生 `app-server` 适配器计划在下一版本，见 [roadmap.md](./roadmap.md) |
 | `acp` | 子进程 + ACP over stdio | 兜底条目，探测一个叫 `acp-agent` 的二进制；真正常用的是下面的自定义声明 |
 
-`claude` 和 `codex` 在代码里就是两个 `AcpAdapter::new(...)` 实例——和用户自己声明的 `extends: "acp"` 自定义 agent 没有本质区别，只是默认帮你注册好了，不用手写配置。这两个 wrapper 都不是我们写的，是各自官方仓库发布的 npm 包：
+`claude` 在代码里是 `adapter::claude::ClaudeAdapter`——直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。换原生协议不是图省事，是为了拿回 ACP 不暴露给客户端的能力：**逐个工具调用的权限控制**。`claude --permission-mode manual --permission-prompt-tool stdio` 会把每一次工具调用都变成一个 `control_request`/`control_response` 往返，和 daemon 自己的 `PermissionRequested`/`respondPermission` 正好对上；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `apps/daemon/src/adapter/claude.rs` 顶部的模块文档。
 
 ```bash
-npm install -g @agentclientprotocol/claude-agent-acp
+npm install -g @anthropic-ai/claude-code
+```
+
+`codex` 目前还在 ACP wrapper 上，不是我们写的，是 Agent Client Protocol 官方仓库发布的 npm 包：
+
+```bash
 npm install -g @agentclientprotocol/codex-acp
 ```
 
@@ -51,9 +56,15 @@ export ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-flash
 export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash
 ```
 
-在**启动 daemon 之前**把这几个变量设进 daemon 所在的进程环境（shell profile、systemd unit 的 `Environment=`、桌面端的启动脚本……随便哪种能让子进程继承环境的方式），daemon 拉起 `claude-agent-acp` 时这些变量就在，Claude Code 自己会用它们连 DeepSeek。
+在**启动 daemon 之前**把这几个变量设进 daemon 所在的进程环境（shell profile、systemd unit 的 `Environment=`、桌面端的启动脚本……随便哪种能让子进程继承环境的方式），daemon 拉起 `claude` 时这些变量就在，Claude Code 自己会用它们连 DeepSeek。
 
-这条路径已经用真实 DeepSeek key 端到端跑通并固化成回归测试：`testing/tests/claude.rs`，跑法见 [testing.md](./testing.md) §8.1。它验证的是「daemon 的归一化事件层对 Claude Code 和对内置 agent 是同一套代码」，不是「DeepSeek 能不能连 Claude Code」——后者是 DeepSeek 自己的产品能力，我们只是借用。
+这条路径已经用真实 DeepSeek key 端到端跑通并固化成四条回归测试：`testing/tests/claude.rs`，跑法见 [testing.md](./testing.md) §8.1。除了「归一化事件层对 Claude Code 和对内置 agent 是同一套代码」这条基本断言之外，还覆盖了换原生协议真正买回来的东西：
+
+- `acceptEdits` 模式下真实工具调用不经过一次提问就落盘；
+- daemon 自己的中断请求真的能打断一个正在生成的回合，而不只是杀掉进程；
+- 默认模式下拒绝一次权限请求，工具调用真的不会碰到文件系统。
+
+不是「DeepSeek 能不能连 Claude Code」——后者是 DeepSeek 自己的产品能力，我们只是借用。
 
 ---
 
@@ -70,6 +81,8 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash
 这是 Codex 和 DeepSeek 两个上游之间的协议缺口，不是配置能绕过去的，需要一层把 Responses API 请求翻译成 Chat Completions 的网关。GeneHub 的立场是：**daemon 不管任何 agent 内部怎么连它的模型**，所以这层翻译不会出现在这个仓库里。
 
 这不影响 `codex` agent 本身可用——它一样会被探测到、一样能用 ACP 协议接进同一套时间线；只是它连的后端得是 Codex 自己支持的（OpenAI API Key、ChatGPT 登录，或者用户自己维护、自己信任的网关）。如果哪天 Codex 支持了 Chat Completions，或者 DeepSeek 上线了 Responses 兼容端点，这里的配置和别的 agent 一样，一行环境变量的事，不需要我们改代码。
+
+这跟 `codex` 什么时候换成原生适配器是两件独立的事：Claude Code 换成原生协议（§3）买的是权限控制，不是接入新后端；Codex 计划中的原生 `app-server` 适配器（[roadmap.md](./roadmap.md)）买的也是同一件事，跟它连不连得上 DeepSeek 无关——那个网关缺口不会因为换了传输层就消失。
 
 ---
 

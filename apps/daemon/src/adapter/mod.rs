@@ -6,9 +6,11 @@
 //! and every transport above it see only those.
 
 pub mod acp;
+pub mod claude;
 pub mod genet;
 pub mod opencode;
 pub mod registry;
+pub mod stdio;
 
 use std::path::PathBuf;
 use std::sync::Arc;
