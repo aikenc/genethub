@@ -66,6 +66,11 @@ jobs:
       # covers the wire between the two languages.
       - run: cargo build -p genet-daemon -p genet-agent
         working-directory: .
+      # And the self-hosted case drives a real relay on top of that. This is
+      # the job that proves the open repository stands on its own — a relay and
+      # a folder of static files — so letting it skip would drop the claim.
+      - run: npm ci && npm run build
+        working-directory: apps/relay
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
