@@ -1,0 +1,217 @@
+// @vitest-environment node
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { WebSocket } from "ws";
+
+import { claimMachine } from "../devices/claim";
+import type { PairedMachine } from "../devices/machines";
+import { Client, type WebSocketLike } from "../protocol/client";
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+const DAEMON = path.join(REPO, "target/debug/genet-daemon");
+const RELAY = path.join(REPO, "apps/relay/dist/main.js");
+const JOIN_TOKEN = "e2e-join-token";
+
+const socketFactory = (url: string) => new WebSocket(url) as unknown as WebSocketLike;
+
+/**
+ * The whole self-hosted product, with nothing from the closed side in it: a
+ * relay that only introduces sockets, a machine that decides for itself who
+ * gets in, and the browser's own code doing the pairing.
+ *
+ * The claim covered here is the one the open-source repository exists to make —
+ * that a relay and a folder of static files are enough. Unit tests cannot make
+ * it: each piece can be perfectly correct on its own while the three of them
+ * fail to add up to a usable product.
+ */
+describe.skipIf(!existsSync(DAEMON) || !existsSync(RELAY))(
+  "reaching a machine with nothing but open-source pieces",
+  () => {
+    let relay: ChildProcess;
+    let relayOrigin: string;
+    let daemon: ChildProcess;
+    let owner: Client;
+    let dataDir: string;
+    let homeDir: string;
+    let rendezvous: string;
+
+    beforeAll(async () => {
+      const started = await startRelay();
+      relay = started.process;
+      relayOrigin = started.origin;
+
+      dataDir = mkdtempSync(path.join(tmpdir(), "genehub-selfhost-data-"));
+      homeDir = mkdtempSync(path.join(tmpdir(), "genehub-selfhost-home-"));
+      const local = await startDaemon(dataDir, path.join(homeDir, "GeneHub"));
+      daemon = local.process;
+
+      owner = new Client({
+        url: `ws://127.0.0.1:${local.port}/ws?token=${local.token}`,
+        socketFactory,
+        clientName: "owner",
+      });
+      owner.connect();
+      await waitFor(() => owner.connectionState === "ready");
+
+      const attached = await owner.call({
+        type: "device.remoteAttach",
+        payload: { relayUrl: relayOrigin, joinToken: JOIN_TOKEN },
+      });
+      if (attached?.type !== "remoteAccess" || !attached.data.rendezvousUrl) {
+        throw new Error("the machine would not attach to the relay");
+      }
+      rendezvous = attached.data.rendezvousUrl;
+
+      // Dialling out is asynchronous, and a client cannot be introduced to a
+      // machine that has not arrived yet.
+      await waitFor(async () => {
+        const status = await owner.call({ type: "device.list" });
+        return status?.type === "devices" && status.data.remote.online;
+      }, 15_000);
+    }, 40_000);
+
+    afterAll(async () => {
+      owner?.close();
+      daemon?.kill("SIGKILL");
+      relay?.kill("SIGKILL");
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(homeDir, { recursive: true, force: true });
+    });
+
+    it("lets a paired device in and keeps everyone else out", async () => {
+      const invite = await owner.call({ type: "device.invite", payload: { name: null } });
+      if (invite?.type !== "invite") throw new Error("no invite was minted");
+      expect(invite.data.rendezvousUrl).toBe(rendezvous);
+
+      const machine: PairedMachine = await claimMachine(
+        rendezvous,
+        invite.data.code,
+        "另一台电脑上的 Chrome",
+        socketFactory,
+      );
+      expect(machine.fingerprint).toMatch(/\w/);
+
+      const paired = new Client({
+        url: rendezvous,
+        credential: { deviceId: machine.deviceId, secret: machine.secret },
+        socketFactory,
+        clientName: "paired",
+      });
+      paired.connect();
+      await waitFor(() => paired.connectionState === "ready");
+
+      // Being in means being all the way in: the same workbench, over a relay
+      // that was never asked whether this was allowed.
+      const workspaces = await paired.call({ type: "workspace.list" });
+      expect(workspaces?.type).toBe("workspaces");
+      expect(paired.identity?.fingerprint).toBe(machine.fingerprint);
+
+      const stranger = new Client({ url: rendezvous, socketFactory, clientName: "stranger" });
+      stranger.connect();
+      await waitFor(() => stranger.connectionState === "closed", 15_000);
+      expect(stranger.failure?.code).toBe("unauthorized");
+
+      paired.close();
+      stranger.close();
+    }, 40_000);
+
+    it("cuts off a revoked device while it is using the connection", async () => {
+      const invite = await owner.call({ type: "device.invite", payload: { name: null } });
+      if (invite?.type !== "invite") throw new Error("no invite was minted");
+
+      const machine = await claimMachine(
+        rendezvous,
+        invite.data.code,
+        "临时设备",
+        socketFactory,
+      );
+      const guest = new Client({
+        url: rendezvous,
+        credential: { deviceId: machine.deviceId, secret: machine.secret },
+        socketFactory,
+        clientName: "guest",
+      });
+      guest.connect();
+      await waitFor(() => guest.connectionState === "ready");
+
+      await owner.call({ type: "device.revoke", payload: { deviceId: machine.deviceId } });
+
+      // The connection has to drop now. "Cannot come back later" is not what
+      // anyone pressing revoke has in mind.
+      await waitFor(() => guest.connectionState !== "ready", 15_000);
+      guest.close();
+    }, 40_000);
+  },
+);
+
+// ---------------------------------------------------------------------------
+
+async function startRelay(): Promise<{ process: ChildProcess; origin: string }> {
+  const child = spawn("node", [RELAY], {
+    env: {
+      ...process.env,
+      RELAY_MODE: "rendezvous",
+      RELAY_HOST: "127.0.0.1",
+      RELAY_PORT: "0",
+      RELAY_JOIN_TOKEN: JOIN_TOKEN,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  const origin = await new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("the relay never said where it was")), 15_000);
+    const read = (chunk: Buffer) => {
+      const found = /http:\/\/127\.0\.0\.1:(\d+)/.exec(chunk.toString());
+      if (!found) return;
+      clearTimeout(timer);
+      resolve(`http://127.0.0.1:${found[1]}`);
+    };
+    child.stdout?.on("data", read);
+    child.stderr?.on("data", read);
+  });
+
+  return { process: child, origin };
+}
+
+function startDaemon(
+  dataDir: string,
+  defaultWorkspace: string,
+): Promise<{ process: ChildProcess; port: number; token: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(DAEMON, {
+      env: {
+        ...process.env,
+        GENEHUB_DATA_DIR: dataDir,
+        GENEHUB_WORKSPACE_DIR: defaultWorkspace,
+        GENEHUB_LOG: "warn",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const timer = setTimeout(() => reject(new Error("the daemon never reported a port")), 15_000);
+    child.stderr?.on("data", (chunk) => process.stderr.write(`[daemon] ${chunk}`));
+    child.stdout?.on("data", (chunk: Buffer) => {
+      for (const line of chunk.toString().split("\n").filter(Boolean)) {
+        const frame = JSON.parse(line) as { event: string; port: number; token: string };
+        if (frame.event !== "listening") continue;
+        clearTimeout(timer);
+        resolve({ process: child, port: frame.port, token: frame.token });
+      }
+    });
+  });
+}
+
+async function waitFor(
+  check: () => boolean | Promise<boolean>,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("timed out waiting for the machine to get there");
+}

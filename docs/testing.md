@@ -270,7 +270,10 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 | relay | `apps/relay && npm test` | 帧转发、契约、边界检查、wire 摘要 | 无 |
 | 工作台 | `packages/web && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |
 | **全栈旅程** | `packages/web/src/e2e/journey.test.ts` | **真实 daemon + 真实 agent + 脚本化模型**，用的是工作台自己的客户端 | `cargo build -p genet-daemon` |
+| **自建全栈** | `packages/web/src/e2e/selfhosted.test.ts` | 只用开源件：**真实 relay（汇合模式）+ 真实 daemon + 工作台自己的配对与客户端代码**。新设备配对进来能用整套工作台，没配对的连不上，撤销当场断 | `cargo build -p genet-daemon` + `apps/relay && npm run build` |
 | 跨栈配对 | 控制面仓库的 `test/pairing.test.ts`、`test/relay.test.ts` | daemon 自己走设备码配对，浏览器经 relay 连回来 | 同上 |
+
+自建全栈那一条兑的是开源仓库存在的理由——**一个 relay 加一堆静态文件就够了**。这句话单元测试证不出来：三个件各自都对，凑在一起仍然可能不是个能用的产品。所以它跑的是真的 relay 进程、真的 daemon 进程，配对用的也是浏览器自己那份代码，没有任何闭源件参与。
 
 设备准入那一条写成的是**性质**而不是点击流程："陌生人拿不到东西"、"邀请码只值一次"、"看过一次握手不等于能再握一次"、"撤销是现在断而不是下次不让进"。错了就是别人在你的电脑上拿到一个 shell，所以它跑在真实转发路径上：进程内的汇合 relay（`testing/src/fake_relay.rs`）只做撮合，和线上那个一样不参与判断，mux 分帧也是真的。它上来就抓到一个真 bug——会话循环结束时 daemon 不往上游发 `CLOSE`，于是被撤销的设备等到的是超时而不是断开。
 

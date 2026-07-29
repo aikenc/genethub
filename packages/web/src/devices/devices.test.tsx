@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
 import type { Endpoint } from "../host";
+import type { WebSocketLike } from "../protocol/client";
 import { useWorkbench } from "../session/store";
 import { claimMachine } from "./claim";
 import { forgetMachine, listMachines, pairingLink, readPairingLink } from "./machines";
@@ -51,7 +52,7 @@ function machineSocket({ knowsCode = true }: { knowsCode?: boolean } = {}) {
       },
     };
     queueMicrotask(() => socket.onopen?.());
-    return socket as unknown as WebSocket;
+    return socket as unknown as WebSocketLike;
   };
 }
 
@@ -96,7 +97,7 @@ describe("redeeming a pairing invite", () => {
         close() {},
       };
       queueMicrotask(() => socket.onclose?.());
-      return socket as unknown as WebSocket;
+      return socket as unknown as WebSocketLike;
     };
 
     await expect(claimMachine(ENDPOINT, CODE, "手机", dead)).rejects.toThrow(/过期/);

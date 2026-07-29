@@ -1,5 +1,6 @@
 import type { ServerFrame } from "@genehub/proto";
 
+import type { WebSocketLike } from "../protocol/client";
 import { proof, randomNonce } from "./proof";
 import type { PairedMachine } from "./machines";
 
@@ -15,7 +16,7 @@ export async function claimMachine(
   endpoint: string,
   code: string,
   deviceName: string,
-  openSocket: (url: string) => WebSocket = (url) => new WebSocket(url),
+  openSocket: (url: string) => WebSocketLike = (url) => new WebSocket(url) as WebSocketLike,
 ): Promise<PairedMachine> {
   const nonce = randomNonce();
   const request = {
@@ -60,7 +61,7 @@ export async function claimMachine(
 }
 
 /** Sends once the socket is open and resolves with the first frame back. */
-function exchange(socket: WebSocket, request: string): Promise<ServerFrame> {
+function exchange(socket: WebSocketLike, request: string): Promise<ServerFrame> {
   return new Promise((resolve, reject) => {
     const fail = () => reject(new Error("连不上这台机器，链接可能已经过期"));
     socket.onerror = fail;
