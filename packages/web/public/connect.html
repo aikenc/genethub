@@ -1,0 +1,6 @@
+<!doctype html>
+<script>
+  var proto = location.protocol === "https:" ? "wss" : "ws";
+  var url = proto + "://" + location.host + "/daemon/ws?token=dd1843760c224b30a230fa4e2832b9e6";
+  location.replace("./#endpoint=" + encodeURIComponent(url));
+</script>

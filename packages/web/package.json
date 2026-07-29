@@ -1,9 +1,13 @@
 {
   "name": "@genehub/web",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
+  "license": "AGPL-3.0-or-later",
   "description": "GeneHub workbench: one build for the browser, the desktop shell and the phone shell",
+  "exports": {
+    ".": "./src/index.ts",
+    "./theme.css": "./src/theme.css"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.json --noEmit && vite build",

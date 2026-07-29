@@ -36,6 +36,12 @@
 //!   "subtype":"success","response":{"behavior":"allow"|"deny","message"?}}}`.
 //!   Leaving this unanswered (e.g. because our stdin already closed) surfaces
 //!   as a denied tool call, never a hang — confirmed empirically.
+//!   There is no wire-level "always allow this tool" reply the CLI
+//!   understands (no documented `updatedPermissions` echo for this
+//!   transport), so `AllowAlways` is enforced on our side: once picked, the
+//!   tool name is remembered for the life of the process and every later
+//!   `can_use_tool` for it is answered `allow` without ever reaching the
+//!   frontend, the same short-circuit `acceptEdits` mode already uses below.
 //! - We interrupt with `{"type":"control_request","request":{"subtype":
 //!   "interrupt"}}`; the CLI ack's it and then emits a synthetic
 //!   `{"type":"user","message":{"content":[{"type":"text","text":
@@ -48,7 +54,7 @@
 //!   "stop_reason", "usage", "errors"?, ...}` — never a bare `message_stop`,
 //!   which can be followed by more tool-result round trips.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -111,7 +117,7 @@ impl AgentAdapter for ClaudeAdapter {
             permissions: true,
             // `--resume <session-id>` is real; we just need the id back.
             resume: true,
-            attachments: false,
+            attachments: true,
         }
     }
 
@@ -209,6 +215,12 @@ impl AgentAdapter for ClaudeAdapter {
         };
         let mode = Arc::new(Mutex::new(initial_mode.to_string()));
         let stdin = Arc::new(Mutex::new(stdin));
+        // `AllowAlways` has no wire-level equivalent (see module doc), so it
+        // is enforced here: tool names the user has blanket-approved, and the
+        // request id -> tool name lookup `respond_permission` needs to learn
+        // about a fresh approval once the user answers.
+        let always_allow: Arc<Mutex<HashSet<String>>> = Arc::default();
+        let pending_tools: Arc<Mutex<HashMap<String, String>>> = Arc::default();
 
         let session = ClaudeSession {
             stdin: stdin.clone(),
@@ -218,16 +230,17 @@ impl AgentAdapter for ClaudeAdapter {
             native_session_id: native_session_id.clone(),
             mode: mode.clone(),
             next_control_id: AtomicU64::new(1),
+            always_allow: always_allow.clone(),
+            pending_tools: pending_tools.clone(),
         };
 
-        tokio::spawn(read_loop(
-            stdout,
-            events,
-            turn,
-            native_session_id,
+        let control = ControlState {
             mode,
             stdin,
-        ));
+            always_allow,
+            pending_tools,
+        };
+        tokio::spawn(read_loop(stdout, events, turn, native_session_id, control));
 
         Ok(Box::new(session))
     }
@@ -279,6 +292,19 @@ struct ClaudeSession {
     native_session_id: Arc<std::sync::Mutex<Option<String>>>,
     mode: Arc<Mutex<String>>,
     next_control_id: AtomicU64,
+    always_allow: Arc<Mutex<HashSet<String>>>,
+    pending_tools: Arc<Mutex<HashMap<String, String>>>,
+}
+
+/// Everything `handle_control_request` needs to answer Claude Code's
+/// `can_use_tool` prompts, bundled so `read_loop` doesn't carry each of these
+/// as its own parameter (they are otherwise unrelated to the rest of its
+/// frame-dispatch loop).
+struct ControlState {
+    mode: Arc<Mutex<String>>,
+    stdin: Arc<Mutex<ChildStdin>>,
+    always_allow: Arc<Mutex<HashSet<String>>>,
+    pending_tools: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ClaudeSession {
@@ -318,7 +344,7 @@ impl AgentSession for ClaudeSession {
             "type": "user",
             "message": {
                 "role": "user",
-                "content": [{ "type": "text", "text": input.text }],
+                "content": user_content_blocks(&input),
             },
         }))
         .await?;
@@ -364,8 +390,15 @@ impl AgentSession for ClaudeSession {
     }
 
     async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()> {
+        let tool_name = self.pending_tools.lock().await.remove(request_id);
         let response = match &outcome {
             PermissionOutcome::Selected { option_id } if option_id == "allow" => {
+                json!({ "behavior": "allow" })
+            }
+            PermissionOutcome::Selected { option_id } if option_id == "allow_always" => {
+                if let Some(tool_name) = tool_name {
+                    self.always_allow.lock().await.insert(tool_name);
+                }
                 json!({ "behavior": "allow" })
             }
             _ => json!({ "behavior": "deny", "message": "Denied by the user." }),
@@ -399,8 +432,7 @@ async fn read_loop(
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
     native_session_id: Arc<std::sync::Mutex<Option<String>>>,
-    mode: Arc<Mutex<String>>,
-    stdin: Arc<Mutex<ChildStdin>>,
+    control: ControlState,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     loop {
@@ -443,7 +475,7 @@ async fn read_loop(
                 translate_user_frame(&frame, &mut state, &events);
             }
             Some("control_request") => {
-                handle_control_request(&frame, &mode, &turn, &events, &stdin).await;
+                handle_control_request(&frame, &turn, &events, &control).await;
             }
             Some("result") => {
                 let mut state = turn.lock().await;
@@ -745,12 +777,32 @@ fn translate_result(
     });
 }
 
+/// Builds the `content` array for a user turn's `{"type":"user",...}` frame:
+/// the same content-block shape the Anthropic Messages API uses, which is
+/// what Claude Code's stdin protocol wraps directly (module doc). Only
+/// inline (`dataBase64`) image attachments are forwarded — that is the only
+/// shape the composer produces today (pasted screenshots); a bare `path`
+/// would need the daemon to read the file itself, which no caller needs yet.
+fn user_content_blocks(input: &PromptInput) -> Vec<Value> {
+    let mut blocks = vec![json!({ "type": "text", "text": input.text })];
+    for attachment in &input.attachments {
+        if let Some(data) = &attachment.data_base64 {
+            if attachment.mime.starts_with("image/") {
+                blocks.push(json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": attachment.mime, "data": data },
+                }));
+            }
+        }
+    }
+    blocks
+}
+
 async fn handle_control_request(
     frame: &Value,
-    mode: &Arc<Mutex<String>>,
     turn: &Arc<Mutex<TurnState>>,
     events: &broadcast::Sender<SessionEvent>,
-    stdin: &Arc<Mutex<ChildStdin>>,
+    control: &ControlState,
 ) {
     let request = frame.get("request").unwrap_or(&Value::Null);
     if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
@@ -765,19 +817,28 @@ async fn handle_control_request(
         .and_then(Value::as_str)
         .unwrap_or("a tool");
 
-    if *mode.lock().await == MODE_ACCEPT_EDITS {
-        // Auto-approve without ever bothering the frontend.
+    let auto_allow = *control.mode.lock().await == MODE_ACCEPT_EDITS
+        || control.always_allow.lock().await.contains(tool_name);
+    if auto_allow {
+        // Auto-approve without ever bothering the frontend: either the whole
+        // session is in accept-edits mode, or the user already picked
+        // "Always Allow" for this exact tool earlier in the session.
         let response = json!({
             "type": "control_response",
             "response": { "request_id": request_id, "subtype": "success",
                           "response": { "behavior": "allow" } },
         });
-        let mut stdin = stdin.lock().await;
+        let mut stdin = control.stdin.lock().await;
         if let Err(error) = write_json_line(&mut stdin, &response).await {
             tracing::warn!("failed to auto-approve a claude tool call: {error}");
         }
         return;
     }
+    control
+        .pending_tools
+        .lock()
+        .await
+        .insert(request_id.to_string(), tool_name.to_string());
 
     // The `assistant` snapshot that created this tool's timeline card always
     // arrives before the CLI asks permission for it, so the lookup below
@@ -807,6 +868,11 @@ async fn handle_control_request(
                     id: "allow".into(),
                     label: "Allow".into(),
                     kind: PermissionOptionKind::AllowOnce,
+                },
+                PermissionOption {
+                    id: "allow_always".into(),
+                    label: format!("Always Allow {tool_name}"),
+                    kind: PermissionOptionKind::AllowAlways,
                 },
                 PermissionOption {
                     id: "deny".into(),
@@ -871,6 +937,8 @@ fn detail_from_tool(name: &str, input: &Value, result: Option<&str>) -> ToolCall
 
 #[cfg(test)]
 mod tests {
+    use genehub_proto::Attachment;
+
     use super::*;
 
     fn state() -> TurnState {
@@ -886,6 +954,127 @@ mod tests {
             out.push(event);
         }
         out
+    }
+
+    /// A pasted screenshot must become an Anthropic-shaped `image` content
+    /// block — the same shape `stream-json` wraps directly (module doc).
+    #[test]
+    fn a_pasted_image_becomes_a_base64_image_block() {
+        let input = PromptInput {
+            text: "看看这个".into(),
+            attachments: vec![Attachment {
+                name: "shot.png".into(),
+                mime: "image/png".into(),
+                path: None,
+                data_base64: Some("Zm9v".into()),
+            }],
+        };
+        assert_eq!(
+            user_content_blocks(&input),
+            vec![
+                json!({ "type": "text", "text": "看看这个" }),
+                json!({ "type": "image",
+                        "source": { "type": "base64", "media_type": "image/png", "data": "Zm9v" } }),
+            ]
+        );
+    }
+
+    /// Attachments with no inline payload (a bare path) are not forwarded —
+    /// there is no caller yet that expects the daemon to read a file itself.
+    #[test]
+    fn an_attachment_without_inline_data_is_dropped_not_guessed_at() {
+        let input = PromptInput {
+            text: "".into(),
+            attachments: vec![Attachment {
+                name: "notes.pdf".into(),
+                mime: "application/pdf".into(),
+                path: Some("/tmp/notes.pdf".into()),
+                data_base64: None,
+            }],
+        };
+        assert_eq!(
+            user_content_blocks(&input),
+            vec![json!({ "type": "text", "text": "" })]
+        );
+    }
+
+    /// `cat` echoes whatever we write on its stdin, so it doubles as a cheap
+    /// stand-in for the real Claude Code child process wherever a test only
+    /// needs *something* implementing `ChildStdin` to write into — no
+    /// protocol behaviour of the fake process itself is exercised here.
+    fn fake_stdin() -> (Child, Arc<Mutex<ChildStdin>>) {
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawning `cat` as a fake stdin sink");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("stdin was piped")));
+        (child, stdin)
+    }
+
+    fn can_use_tool(request_id: &str, tool_name: &str) -> Value {
+        json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": { "subtype": "can_use_tool", "tool_name": tool_name },
+        })
+    }
+
+    /// There is no wire-level "always allow" Claude Code understands (see the
+    /// module doc), so this is enforced entirely on our side: the option must
+    /// be offered, and once picked, the *same* tool must stop bothering the
+    /// frontend without silently starting to allow other tools too.
+    #[tokio::test]
+    async fn always_allow_is_offered_then_short_circuits_only_that_tool() {
+        let (mut child, stdin) = fake_stdin();
+        let control = ControlState {
+            mode: Arc::new(Mutex::new(MODE_DEFAULT.to_string())),
+            stdin,
+            always_allow: Arc::default(),
+            pending_tools: Arc::default(),
+        };
+        let turn = Arc::new(Mutex::new(state()));
+        let (tx, mut rx) = broadcast::channel(64);
+
+        handle_control_request(&can_use_tool("req1", "Bash"), &turn, &tx, &control).await;
+        let request = drain(&mut rx)
+            .into_iter()
+            .find_map(|event| match event {
+                SessionEvent::PermissionRequested { request } => Some(request),
+                _ => None,
+            })
+            .expect("a fresh tool must still ask the frontend");
+        assert_eq!(request.options.len(), 3);
+        assert!(request
+            .options
+            .iter()
+            .any(|option| option.id == "allow_always"
+                && option.kind == PermissionOptionKind::AllowAlways));
+        assert_eq!(
+            control.pending_tools.lock().await.get("req1"),
+            Some(&"Bash".to_string())
+        );
+
+        // The user picked "Always Allow" for req1 — `respond_permission` is
+        // what would normally do this insert, exercised directly here since
+        // it lives on `ClaudeSession`, not `ControlState`.
+        control.always_allow.lock().await.insert("Bash".to_string());
+
+        handle_control_request(&can_use_tool("req2", "Bash"), &turn, &tx, &control).await;
+        assert!(
+            drain(&mut rx).is_empty(),
+            "the same tool must not ask again after Always Allow"
+        );
+
+        handle_control_request(&can_use_tool("req3", "Write"), &turn, &tx, &control).await;
+        assert!(
+            drain(&mut rx)
+                .iter()
+                .any(|event| matches!(event, SessionEvent::PermissionRequested { .. })),
+            "a different tool must still ask, Always Allow is per-tool"
+        );
+
+        let _ = child.start_kill();
     }
 
     #[test]

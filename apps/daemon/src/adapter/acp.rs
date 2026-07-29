@@ -260,7 +260,7 @@ impl AgentSession for AcpSession {
         let turn_state = self.turn.clone();
         let params = json!({
             "sessionId": session_id,
-            "prompt": [{ "type": "text", "text": input.text }],
+            "prompt": prompt_blocks(&input),
         });
 
         // `session/prompt` only returns when the whole turn is done, so it runs
@@ -428,6 +428,30 @@ async fn read_loop(
             _ => {}
         }
     }
+}
+
+/// Builds a `session/prompt` content block array from a turn's text and
+/// attachments. Only inline (`dataBase64`) image attachments are forwarded —
+/// that is the only shape the composer produces today (pasted screenshots);
+/// a bare `path` would need the daemon to read the file itself, which no
+/// caller needs yet.
+fn prompt_blocks(input: &PromptInput) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    if !input.text.is_empty() {
+        blocks.push(json!({ "type": "text", "text": input.text }));
+    }
+    for attachment in &input.attachments {
+        if let Some(data) = &attachment.data_base64 {
+            if attachment.mime.starts_with("image/") {
+                blocks.push(json!({
+                    "type": "image",
+                    "mimeType": attachment.mime,
+                    "data": data,
+                }));
+            }
+        }
+    }
+    blocks
 }
 
 fn translate_permission(id: i64, params: &Value, events: &broadcast::Sender<SessionEvent>) {
@@ -682,6 +706,8 @@ fn detail_from_update(update: &Value) -> ToolCallDetail {
 
 #[cfg(test)]
 mod tests {
+    use genehub_proto::Attachment;
+
     use super::*;
 
     fn state() -> TurnState {
@@ -697,6 +723,45 @@ mod tests {
             out.push(event);
         }
         out
+    }
+
+    /// A pasted screenshot must become an ACP `image` block, not silently
+    /// vanish because the base struct only carries text.
+    #[test]
+    fn a_pasted_image_becomes_an_image_content_block() {
+        let input = PromptInput {
+            text: "看看这个".into(),
+            attachments: vec![Attachment {
+                name: "shot.png".into(),
+                mime: "image/png".into(),
+                path: None,
+                data_base64: Some("Zm9v".into()),
+            }],
+        };
+        let blocks = prompt_blocks(&input);
+        assert_eq!(
+            blocks,
+            vec![
+                json!({ "type": "text", "text": "看看这个" }),
+                json!({ "type": "image", "mimeType": "image/png", "data": "Zm9v" }),
+            ]
+        );
+    }
+
+    /// Attachments with no inline payload (a bare path) are not forwarded —
+    /// there is no caller yet that expects the daemon to read a file itself.
+    #[test]
+    fn an_attachment_without_inline_data_is_dropped_not_guessed_at() {
+        let input = PromptInput {
+            text: "".into(),
+            attachments: vec![Attachment {
+                name: "notes.pdf".into(),
+                mime: "application/pdf".into(),
+                path: Some("/tmp/notes.pdf".into()),
+                data_base64: None,
+            }],
+        };
+        assert!(prompt_blocks(&input).is_empty());
     }
 
     /// ACP streams text with no start marker, unlike the built-in agent. Both

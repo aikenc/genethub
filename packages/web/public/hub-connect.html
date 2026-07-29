@@ -1,0 +1,13 @@
+<!doctype html>
+<script>
+  var params = new URLSearchParams(location.hash.slice(1));
+  var inner = params.get("endpoint");
+  if (!inner) {
+    document.write("no endpoint in the URL — open this via the cloud's \"打开工作台\" link, not directly");
+  } else {
+    var innerUrl = new URL(inner);
+    var proto = location.protocol === "https:" ? "wss" : "ws";
+    var fixed = proto + "://" + location.host + "/relay" + innerUrl.pathname + innerUrl.search;
+    location.replace("./#endpoint=" + encodeURIComponent(fixed));
+  }
+</script>

@@ -1,6 +1,7 @@
 import type { TimelineItem } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 
+import { attachmentPreviewUrl } from "./attachments";
 import { ToolCallView } from "./ToolCall";
 import type { TimelineState } from "./timeline";
 
@@ -48,10 +49,27 @@ function Item({ item }: { item: TimelineItem }) {
   switch (item.type) {
     case "userMessage":
       return (
-        <div className="flex justify-end">
-          <p className="max-w-[80%] whitespace-pre-wrap rounded-2xl bg-accent px-3 py-2 text-white">
-            {item.text}
-          </p>
+        <div className="flex flex-col items-end gap-1.5">
+          {item.attachments.length > 0 ? (
+            <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
+              {item.attachments.map((attachment, index) => {
+                const url = attachmentPreviewUrl(attachment);
+                return url ? (
+                  <img
+                    key={index}
+                    src={url}
+                    alt={attachment.name}
+                    className="h-28 w-28 rounded-xl border border-line object-cover"
+                  />
+                ) : null;
+              })}
+            </div>
+          ) : null}
+          {item.text ? (
+            <p className="max-w-[80%] whitespace-pre-wrap rounded-2xl bg-accent px-3 py-2 text-white">
+              {item.text}
+            </p>
+          ) : null}
         </div>
       );
 

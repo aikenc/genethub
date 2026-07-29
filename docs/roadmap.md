@@ -10,6 +10,7 @@
 | 阶段 | 名称 | 用户能得到什么 | 状态 |
 |------|------|----------------|------|
 | **MVP** | 能装、能挂、能跑、能接力 | 安装 → 托盘后台 → 真跑起一条任务 → 换设备继续 | 进行中 |
+| **自成闭环** | 不依赖任何外部服务 | 只部署 relay + 静态工作台，就能远程用自己的电脑 | 进行中 |
 | **M2** | 能带走 · 能多选 | 手机 App、设备管理、分屏 | 计划 |
 | **M3** | 能协作 | 正式账号、多人共用一台机器、会话 fork / rewind | 计划 |
 | **M4** | 能不信任中转 | 端到端加密：relay 只见密文 | 计划 |
@@ -45,7 +46,11 @@
 - 应用内自动更新（手动重装）
 - 端到端加密（M4；当前为传输层加密，见 [security-model.md](./security-model.md) §1.1）
 - 前端长尾能力：语音、定时任务、分屏、fork / rewind 等，清单见 [web-workbench.md](./web-workbench.md) §4
-- Agent 的 subagents / MCP / 真压缩 / 图片输入（见 [builtin-agent.md](./builtin-agent.md) §8）
+- Agent 的 subagents / MCP / 真压缩（见 [builtin-agent.md](./builtin-agent.md) §8）；`genet` 自身的图片输入也在此列——贴图现在能发给 claude / acp / opencode（它们各自把图片转给自己的模型），但 `genet` 的 provider 层（Anthropic / OpenAI / DeepSeek 请求构造）还不接受图片内容块
+- 会话中途动态切换 agent：`claude`、`opencode` 各自维护一份进程私有的会话状态（CLI 自己的 `--resume` id、HTTP session），把 `TimelineItem` 转存到另一个 agent 不等于真的迁移了上下文，效果只会更糟；有对话内容后前端直接锁定 agent 选择器（`ComposerControls.tsx`），而不是假装能无缝换
+- `mode` 轴的协议级拆分：`genet` 把这条轴用作思考强度，`claude`/`acp` 用作工具审批策略，目前只在前端按 `capabilities.permissions` 打了个临时标签区分（"思考" / "权限"），协议层仍是同一个 `modeId` 字段
+- OpenCode 的真实模型目录（当前 `catalog.models` 恒为空，选择器因此不出现）、各 adapter 的速度 / 质量档位、权限的历史面板
+- 「/」命令：`genet-agent` 内部已经有 `get_commands` / skill 展开，但 daemon 的 `genet` adapter 从不调用它，前端也没有发现或补全入口——`/skill:<name>` today 只有整行手打、且未经验证是否原样透传到 prompt 才可能生效；第三方 agent（claude / opencode）自己的原生 slash 命令同样没有透传
 
 ### 验收清单
 
@@ -83,6 +88,30 @@
 - [x] 真的重启 daemon 进程后历史还在并能继续对话；停止按钮端到端落 `TurnCanceled`
 - [x] 安装包体积达标：实测下载 6MB、安装后 13MB（预算 80MB / 200MB）
 - [x] 安装目录内不存在 `node` / `node.exe` / `node_modules`（打包脚本里校验，不靠自觉）
+
+---
+
+## 自成闭环 — 不依赖任何外部服务
+
+**为什么排在 M2 前面：** 在这之前，"人在外面连家里电脑"需要一个本仓之外的控制面。也就是说单独部署本仓拿不到这条核心能力，独立部署没有价值。
+
+**成功标准：** 只起 daemon + relay + 静态工作台（无数据库、无账号、无控制面），另一台设备扫码配对后经转发连上并对话成功。
+
+| 项 | 说明 |
+|---|---|
+| daemon 设备凭证 | 本机已授权设备列表（[daemon.md](./daemon.md) §4.3）；一次性配对邀请换长期凭证；逐个撤销 |
+| 双向证明 | 客户端与 daemon 用配对时的共享秘密互证，秘密不过线（[security-model.md](./security-model.md) §4.2） |
+| relay 汇合模式 | `RELAY_MODE=rendezvous`：按 id 撮合两条 socket，不问控制面、不落库（[relay.md](./relay.md) §3.1） |
+| 设备管理界面 | 配对链接 + 二维码、已授权设备、我的机器（[web-workbench.md](./web-workbench.md) §2.6） |
+| 文档 | [self-hosting.md](./self-hosting.md) 改成"relay + 静态 web 就够" |
+| CI | 一个只用本仓组件跑通全栈旅程的 job，守住"可独立部署"这条承诺 |
+
+验收清单：
+
+- [ ] 配对邀请一次性、会过期，用掉之后再用被拒
+- [ ] 撤销一台设备后它的连接立刻断，且再也连不上
+- [ ] 伪造凭证、抢占 rendezvous 槽位都被拒
+- [ ] 只用本仓组件跑通"另一台设备配对后经转发对话"
 
 ---
 

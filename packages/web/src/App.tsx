@@ -11,6 +11,7 @@ import { Timeline } from "./session/Timeline";
 import { useWorkbench } from "./session/store";
 import { Sidebar } from "./shell/Sidebar";
 import { TabBar } from "./shell/TabBar";
+import type { ExtraTab } from "./shell/tabs";
 import { TerminalPanel } from "./terminal/TerminalPanel";
 import { OpenProject } from "./workspace/OpenProject";
 
@@ -32,9 +33,15 @@ const openConnection = (endpoint: Endpoint) => new Client({ url: endpoint.url })
 export function App({
   host = detectHost(),
   connect = openConnection,
+  extraTabs = [],
 }: {
   host?: Host;
   connect?: (endpoint: Endpoint) => Client;
+  /**
+   * Pages contributed by whoever embedded this package. Passing none is the
+   * plain workbench, which is exactly what a self-hosted deployment wants.
+   */
+  extraTabs?: ExtraTab[];
 }) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">("loading");
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -43,6 +50,7 @@ export function App({
   const activeTab = workbench.tabs.find((tab) => tab.id === workbench.activeTabId);
   const session = workbench.sessions.find((item) => item.id === workbench.activeSessionId);
   const running = workbench.timeline.activeTurn !== null;
+  const currentAgent = workbench.agents.find((agent) => agent.id === session?.agentId);
 
   useEffect(() => {
     if (!pairing) return;
@@ -84,6 +92,7 @@ export function App({
       <Sidebar
         host={host}
         open={sessionsOpen}
+        extraTabs={extraTabs}
         onNavigate={() => setSessionsOpen(false)}
       />
 
@@ -140,7 +149,9 @@ export function App({
                     agentId={session?.agentId ?? null}
                     modelId={workbench.timeline.modelId}
                     modeId={workbench.timeline.modeId}
-                    onSend={(text) => void workbench.send(text)}
+                    agentLocked={workbench.timeline.items.length > 0}
+                    attachmentsSupported={currentAgent?.capabilities.attachments ?? false}
+                    onSend={(text, attachments) => void workbench.send(text, attachments)}
                     onInterrupt={() => void workbench.interrupt()}
                     onPickAgent={(id) => {
                       const workspace =
@@ -171,6 +182,13 @@ export function App({
                 <SettingsPanel host={host} endpoint={endpoint} />
               </div>
             ) : null}
+            {extraTabs.map((tab) =>
+              kind === `extra:${tab.id}` ? (
+                <div key={tab.id} className="min-h-0 flex-1 overflow-y-auto">
+                  {tab.render()}
+                </div>
+              ) : null,
+            )}
           </section>
 
           {workbench.rightPanel ? (

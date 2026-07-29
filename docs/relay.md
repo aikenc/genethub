@@ -31,10 +31,27 @@
 | 路径 | 谁连 | 凭证 |
 |------|------|------|
 | `GET /forward/daemon` (WS) | 机器上的 daemon | `Authorization: Bearer <daemonId>.<secret>` |
-| `GET /forward/client` (WS) | 浏览器 / 手机 | `?ticket=<一次性票据>` |
+| `GET /forward/client` (WS) | 浏览器 / 手机 | `?ticket=<票据>` |
 | `GET /api/health` | 运维 | 无 |
 
-客户端票据走查询串是不得已：浏览器发起 WebSocket 握手时无法设置请求头。代价用两条约束抵消——票据一次性、有效期以秒计。
+客户端票据走查询串是不得已：浏览器发起 WebSocket 握手时无法设置请求头。
+
+---
+
+## 3.1 两种模式
+
+同样两个端点，票据的含义由 `RELAY_MODE` 决定：
+
+| 模式 | 票据是什么 | 谁判断准入 |
+|------|-----------|-----------|
+| `control`（托管） | 控制面签发的一次性票据 | 控制面回答，relay 执行 |
+| `rendezvous`（自建） | 就是 rendezvous id 本身 | **daemon 自己**，relay 只负责撮合 |
+
+汇合模式下 relay 退化到最小：按 id 把两条 socket 接起来，不问任何人，不记任何事。机器挂上行连接时要出示 join token（`RELAY_JOIN_TOKEN`，票据形如 `<joinToken>.<rendezvousId>`）；客户端不需要，因为它只能连到一个已经存在的槽位。
+
+这不会让 relay 变成信任锚：客户端与 daemon 会在通道建立之后互相证明一次身份（[security-model.md](./security-model.md) §4.2），抢占槽位的人答不出来。relay 能做的最坏的事仍然是"不转发"。
+
+代码上这是**一个 `ChannelAuthority` 的另一种实现**，转发层一行都不用改——这正是把准入外包成一个接口的回报。
 
 ---
 
@@ -57,7 +74,7 @@ relay 读前十七个字节，剩下的原样转发。方向是对称的：客�
 
 ---
 
-## 5. 与控制面的契约
+## 5. 与控制面的契约（仅 `control` 模式）
 
 relay 只能问三个问题、订阅一件事，定义在 `src/contract/wire.ts`：
 
@@ -82,6 +99,8 @@ relay 只能问三个问题、订阅一件事，定义在 `src/contract/wire.ts`
 
 | 项 | 环境变量 | 默认 |
 |----|---------|------|
+| 模式 | `RELAY_MODE` | `control` |
+| 自建模式的 join token | `RELAY_JOIN_TOKEN` | 自动生成并打印 |
 | 最大在线机器数 | `RELAY_MAX_DAEMONS` | 5000 |
 | 单机最大客户端 | `RELAY_MAX_CLIENTS_PER_MACHINE` | 8 |
 | 单连接缓冲上限 | `RELAY_MAX_BUFFERED_BYTES` | 8 MiB |
@@ -94,7 +113,7 @@ relay 只能问三个问题、订阅一件事，定义在 `src/contract/wire.ts`
 
 ## 7. 自建
 
-见 [self-hosting.md](./self-hosting.md)。核心是两个环境变量：relay 监听哪里，控制面在哪里。
+见 [self-hosting.md](./self-hosting.md)。核心是两个环境变量：`RELAY_MODE=rendezvous`，以及 relay 监听哪里。不需要数据库，不需要控制面。
 
 ---
 

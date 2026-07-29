@@ -1,5 +1,6 @@
 import type {
   AgentInfo,
+  Attachment,
   FileContent,
   FileNode,
   GitStatus,
@@ -15,8 +16,13 @@ import { create } from "zustand";
 import type { Client, ConnectionState } from "../protocol/client";
 import { applySequenced, emptyTimeline, fromSnapshot, type TimelineState } from "./timeline";
 
-/** A closable work surface, not a global mode switch. */
-export type TabKind = "chat" | "files" | "terminal" | "settings";
+/**
+ * A closable work surface, not a global mode switch.
+ *
+ * `extra:*` belongs to whoever embedded the workbench; the store carries it
+ * around and never looks inside.
+ */
+export type TabKind = "chat" | "files" | "terminal" | "settings" | "devices" | `extra:${string}`;
 
 export interface WorkbenchTab {
   id: string;
@@ -64,7 +70,7 @@ interface WorkbenchState {
   activateTab(tabId: string): void;
   closeTab(tabId: string): void;
   setRightPanel(panel: RightPanel): void;
-  send(text: string): Promise<void>;
+  send(text: string, attachments?: Attachment[]): Promise<void>;
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
   setMode(modeId: string): Promise<void>;
@@ -177,6 +183,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const { snapshot, replayed } = await client.subscribe(sessionId, {
       onEvent: (event) => {
         if (get().activeSessionId !== sessionId) return;
+        if (event.event.type === "titleChanged") {
+          applyTitle(sessionId, event.event.title, set);
+        }
         set((state) => ({ timeline: applySequenced(state.timeline, event) }));
       },
       onResync: (resnapshot, events, reset) => {
@@ -184,6 +193,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         const base = reset
           ? fromSnapshot(resnapshot as SessionSnapshot)
           : get().timeline;
+        for (const event of events) {
+          if (event.event.type === "titleChanged") applyTitle(sessionId, event.event.title, set);
+        }
         set({ timeline: events.reduce(applySequenced, base) });
       },
     });
@@ -194,18 +206,19 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   openTab(kind, title) {
     const id = kind === "chat" ? `chat:${get().activeSessionId ?? "draft"}` : kind;
-    const defaults: Record<TabKind, string> = {
+    const defaults: Record<string, string> = {
       chat: "新会话",
       files: "文件",
       terminal: "终端",
       settings: "设置",
+      devices: "设备",
     };
     set((state) => {
       if (state.tabs.some((tab) => tab.id === id)) {
         return { activeTabId: id };
       }
       return {
-        tabs: [...state.tabs, { id, kind, title: title ?? defaults[kind] }],
+        tabs: [...state.tabs, { id, kind, title: title ?? defaults[kind] ?? kind }],
         activeTabId: id,
       };
     });
@@ -239,11 +252,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set({ rightPanel: panel });
   },
 
-  async send(text) {
+  async send(text, attachments = []) {
     const client = require_(get().client);
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
-    await client.call({ type: "session.send", payload: { sessionId, text, attachments: [] } });
+    await client.call({ type: "session.send", payload: { sessionId, text, attachments } });
   },
 
   async interrupt() {
@@ -445,6 +458,24 @@ async function loadSessions(client: Client, workspaceId: string, set: Setter): P
     payload: { workspaceId, includeArchived: false },
   });
   if (reply?.type === "sessions") set({ sessions: reply.data });
+}
+
+/**
+ * The daemon names a session once, from the user's first message
+ * (`SessionManager::send`), and pushes `titleChanged` at that moment. Without
+ * this the sidebar and the tab both keep showing the "新会话" placeholder
+ * they were created with until something unrelated (switching workspaces,
+ * reconnecting) happens to refetch `session.list`.
+ */
+function applyTitle(sessionId: string, title: string, set: Setter): void {
+  set((state) => ({
+    sessions: state.sessions.map((session) =>
+      session.id === sessionId ? { ...session, title } : session,
+    ),
+    tabs: state.tabs.map((tab) =>
+      tab.sessionId === sessionId ? { ...tab, title } : tab,
+    ),
+  }));
 }
 
 function currentWorkspace(state: WorkbenchState): string | null {

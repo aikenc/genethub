@@ -231,10 +231,17 @@ impl SessionManager {
 
         if needs_title {
             if let Some(title) = title_from(&text) {
-                let mut meta = live.meta.lock().await;
-                meta.title = Some(title);
-                meta.updated_at_ms = now_ms();
-                self.store.save_meta(&meta)?;
+                {
+                    let mut meta = live.meta.lock().await;
+                    meta.title = Some(title.clone());
+                    meta.updated_at_ms = now_ms();
+                    self.store.save_meta(&meta)?;
+                }
+                // Without this, the sidebar keeps showing "新会话" until
+                // something else happens to trigger a `session.list` refetch
+                // (switching workspaces, reconnecting) — the title on disk
+                // and the title on screen silently disagree until then.
+                live.publish(SessionEvent::TitleChanged { title }).await;
             }
         }
 
@@ -558,6 +565,11 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
         SessionEvent::SessionStatusChanged { status } => {
             *live.status.lock().await = *status;
         }
+        // Published straight from `SessionManager::send`, never by an agent,
+        // so it never reaches this function's caller in practice — `meta`
+        // is already updated by the time it is published. Listed anyway so
+        // this match stays exhaustive if that ever changes.
+        SessionEvent::TitleChanged { .. } => {}
     }
 }
 

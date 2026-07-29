@@ -1,6 +1,7 @@
 import type { Host } from "../host";
 import { useWorkbench } from "../session/store";
 import { OpenProject } from "../workspace/OpenProject";
+import type { ExtraTab } from "./tabs";
 
 /**
  * The left edge of the workbench.
@@ -11,10 +12,12 @@ import { OpenProject } from "../workspace/OpenProject";
 export function Sidebar({
   host,
   open,
+  extraTabs = [],
   onNavigate,
 }: {
   host: Host;
   open: boolean;
+  extraTabs?: ExtraTab[];
   onNavigate(): void;
 }) {
   const {
@@ -118,6 +121,19 @@ export function Sidebar({
         >
           终端
         </button>
+        {extraTabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            className="rounded px-2 py-1 text-xs text-muted hover:bg-sidebar-hover hover:text-fg"
+            onClick={() => {
+              openTab(`extra:${tab.id}`, tab.label);
+              onNavigate();
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
         <button
           type="button"
           aria-label="设置"

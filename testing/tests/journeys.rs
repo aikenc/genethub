@@ -1468,6 +1468,22 @@ async fn a_session_title_comes_from_the_first_thing_the_user_says() {
         .await
         .expect("accepted");
 
+    // A client watching the session must be told the title changed, not just
+    // able to find out by re-fetching — the whole point is that the sidebar
+    // repaints itself without a workspace switch or reconnect happening to
+    // trigger a `session.list` first.
+    let pushed = journey
+        .client
+        .wait_for(|event| matches!(event, SessionEvent::TitleChanged { .. }))
+        .await
+        .expect("a titleChanged event arrives");
+    assert_eq!(
+        pushed,
+        SessionEvent::TitleChanged {
+            title: "Fix the login redirect".to_string()
+        }
+    );
+
     // The title comes from the prompt, not from the model, so the answer is
     // already knowable here. Waiting for the turn would mean waiting on a real
     // model to finish an open-ended instruction in an empty project — which it

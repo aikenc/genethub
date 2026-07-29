@@ -41,6 +41,29 @@ function readPublishedTarget(): string | null {
   }
 }
 
+/**
+ * Same idea as `daemonProxy`, for the relay's client-facing socket.
+ *
+ * Only relevant when trying the full Hub journey (register → pair → connect
+ * through the forwarding layer) from a machine where only this dev server's
+ * port is forwarded: the ticket URL the control plane hands out points at the
+ * relay's own (unforwarded) port, which `hub-connect.html` rewrites to go
+ * through `/relay` on this origin instead — see that file and
+ * `.cursor/skills/try-genehub`.
+ */
+function relayProxy(): Record<string, string | ProxyOptions> {
+  const target = process.env.GENEHUB_RELAY_PROXY_TARGET;
+  if (!target) return {};
+  return {
+    "/relay": {
+      target,
+      changeOrigin: true,
+      ws: true,
+      rewrite: (path) => path.replace(/^\/relay/, ""),
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -54,7 +77,7 @@ export default defineConfig({
   base: "./",
   build: { outDir: "dist", sourcemap: true },
   server: {
-    proxy: daemonProxy(),
+    proxy: { ...daemonProxy(), ...relayProxy() },
   },
   test: {
     globals: true,

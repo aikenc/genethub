@@ -66,6 +66,10 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash
 
 不是「DeepSeek 能不能连 Claude Code」——后者是 DeepSeek 自己的产品能力，我们只是借用。
 
+`can_use_tool` 的三个选项现在是 Allow / **Always Allow** / Deny：Claude Code 的 stdio 协议本身没有「记住这次选择」的字段（见 `claude.rs` 顶部模块文档），所以 Always Allow 是 daemon 自己按工具名维护的一份进程内白名单——同一个会话里选过一次之后，同名工具不再打扰前端，换一个工具名要重新问。
+
+粘贴图片现在会作为附件随消息一起发：`claude`（Anthropic 内容块）、`opencode`（`file` part + data URL）、经 `acp` 声明的 agent（ACP `image` 内容块）都会转发；`genet` 自己的 provider 层还不接受图片，见 [roadmap.md](./roadmap.md)「明确不做」。
+
 ---
 
 ## 4. Codex + DeepSeek：目前连不上，这是 Codex/DeepSeek 两边的协议问题

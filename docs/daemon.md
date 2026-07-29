@@ -83,6 +83,7 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 | Agent | `agent.list`（含 probe 状态与 catalog）、`agent.refresh` |
 | 会话 | `session.create` / `list` / `get` / `send` / `interrupt` / `close` / `archive` |
 | 会话配置 | `session.setModel` / `setMode` / `respondPermission` |
+| 设备 | `device.list` / `invite` / `claim` / `revoke` / `remoteAttach` / `remoteDetach` |
 | 工作区 | `workspace.list` / `open` / `create` |
 | 文件 | `file.tree` / `read` / `write` / `watch` |
 | Git | `git.status` / `git.diff` / `git.commit` |
@@ -137,6 +138,20 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 
 ---
 
+## 4.3 已授权设备
+
+```
+<data>/devices.json
+```
+
+一行一台设备：id、名字、共享秘密、首次接入时间、最后活跃时间。文件权限 600。**这台机器允许谁远程连进来，这份列表说了算**——不是 relay，也不是任何服务端（[security-model.md](./security-model.md) §4）。
+
+秘密是明文存的，因为它要参与双向证明：daemon 得能算出自己那一半的应答，只存哈希就做不到。它和 `state.json` 里的机器身份是同一个量级的东西，同样是 600。
+
+配对邀请**不落盘**，只在内存里，一次性、15 分钟过期。重启 daemon 等于作废所有还没用掉的邀请，这是对的：邀请是"此刻我在等一台新设备"，不是一份长期配置。
+
+---
+
 ## 5. 权限与审批
 
 daemon 不发明自己的审批策略——各 agent 的模式（如只读/写入/放行）已经定义了行为，daemon 做三件事：
@@ -154,7 +169,7 @@ daemon 不发明自己的审批策略——各 agent 的模式（如只读/写�
 | 面 | 做法 |
 |----|------|
 | 本地端口 | 只绑 `127.0.0.1`，带一次性 token；token 存在只有当前用户可读的文件里 |
-| 远端接入 | 只走出站 relay 连接，端到端加密，配对凭证可撤销 |
+| 远端接入 | 只走出站 relay 连接；**准入由本机的已授权设备列表判断**（§4.3），逐台可撤销 |
 | 工作目录 | 文件与 git 接口限制在已登记的工作区内，拒绝路径穿越 |
 | 命令执行 | 以当前用户权限运行，不内建沙箱；隔离由部署形态负责，见 [security-model.md](./security-model.md) |
 | 撤销 | Hub 侧撤销后 daemon 进入 revoked 状态并停止重连 |
@@ -165,8 +180,8 @@ daemon 不发明自己的审批策略——各 agent 的模式（如只读/写�
 
 daemon 只跟两个外部对象打交道，而且必须当成两件完全不同的事：
 
-- **控制面**（HTTP）：设备码配对、登记这台机器、解除登记。daemon 不理解账号，也不需要理解。
-- **relay**（一条出站 WebSocket）：对面只按帧头转发，不解释内容。daemon **不能**因为"反正连的是自己人"就在这条连接上发明文控制消息——那等于把 relay 变成一个需要被信任的东西。
+- **relay**（一条出站 WebSocket）：对面只按帧头转发，不解释内容。daemon **不能**因为"反正连的是自己人"就在这条连接上发明文控制消息——那等于把 relay 变成一个需要被信任的东西。自建部署里 relay 是唯一的外部对象。
+- **控制面**（HTTP，只在托管部署里存在）：设备码配对、登记这台机器、解除登记。daemon 不理解账号，也不需要理解。它更不把准入权交出去：控制面说的话只是一份身份声明，放不放行仍然是 daemon 查自己的列表。
 
 理由与守则见 [architecture.md](./architecture.md) §6 与 [relay.md](./relay.md)。
 

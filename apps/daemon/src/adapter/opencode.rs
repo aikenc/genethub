@@ -184,9 +184,7 @@ impl AgentSession for OpenCodeSession {
             turn_id: turn_id.clone(),
         });
 
-        let mut body = json!({
-            "parts": [{ "type": "text", "text": input.text }],
-        });
+        let mut body = json!({ "parts": message_parts(&input) });
         if let Some(model) = self.model.lock().await.clone() {
             if let Some((provider, id)) = model.split_once('/') {
                 body["model"] = json!({ "providerID": provider, "modelID": id });
@@ -509,6 +507,29 @@ fn emit_part(
     let _ = events.send(SessionEvent::Item { turn_id, item });
 }
 
+/// Builds the `parts` array for `POST /session/{id}/message`. Only inline
+/// (`dataBase64`) image attachments are forwarded as `file` parts — that is
+/// the only shape the composer produces today (pasted screenshots); a bare
+/// `path` would need the daemon to read the file itself, which no caller
+/// needs yet. OpenCode's file part takes a data URL, not raw base64
+/// (`message-v2.ts`'s `FilePart.url`).
+fn message_parts(input: &PromptInput) -> Vec<Value> {
+    let mut parts = vec![json!({ "type": "text", "text": input.text })];
+    for attachment in &input.attachments {
+        if let Some(data) = &attachment.data_base64 {
+            if attachment.mime.starts_with("image/") {
+                parts.push(json!({
+                    "type": "file",
+                    "mime": attachment.mime,
+                    "filename": attachment.name,
+                    "url": format!("data:{};base64,{}", attachment.mime, data),
+                }));
+            }
+        }
+    }
+    parts
+}
+
 /// Replays the finished message, so nothing the event stream missed is lost.
 fn reconcile(
     settled: &Value,
@@ -661,6 +682,8 @@ fn first_line(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use genehub_proto::Attachment;
+
     use super::*;
 
     /// A turn already told that `m1` is the assistant's message, which is the
@@ -679,6 +702,48 @@ mod tests {
             out.push(event);
         }
         out
+    }
+
+    /// A pasted screenshot must become a `file` part with a data URL —
+    /// OpenCode's `FilePart.url` takes a URL, not raw base64.
+    #[test]
+    fn a_pasted_image_becomes_a_file_part_with_a_data_url() {
+        let input = PromptInput {
+            text: "看看这个".into(),
+            attachments: vec![Attachment {
+                name: "shot.png".into(),
+                mime: "image/png".into(),
+                path: None,
+                data_base64: Some("Zm9v".into()),
+            }],
+        };
+        assert_eq!(
+            message_parts(&input),
+            vec![
+                json!({ "type": "text", "text": "看看这个" }),
+                json!({ "type": "file", "mime": "image/png", "filename": "shot.png",
+                        "url": "data:image/png;base64,Zm9v" }),
+            ]
+        );
+    }
+
+    /// Attachments with no inline payload (a bare path) are not forwarded —
+    /// there is no caller yet that expects the daemon to read a file itself.
+    #[test]
+    fn an_attachment_without_inline_data_is_dropped_not_guessed_at() {
+        let input = PromptInput {
+            text: "".into(),
+            attachments: vec![Attachment {
+                name: "notes.pdf".into(),
+                mime: "application/pdf".into(),
+                path: Some("/tmp/notes.pdf".into()),
+                data_base64: None,
+            }],
+        };
+        assert_eq!(
+            message_parts(&input),
+            vec![json!({ "type": "text", "text": "" })]
+        );
     }
 
     #[test]

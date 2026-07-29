@@ -95,6 +95,11 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
     case "modeChanged":
       return { ...state, modeId: event.modeId };
 
+    // Not part of the timeline itself; the session list and its tab title
+    // are what change, handled by the store where it has access to them.
+    case "titleChanged":
+      return state;
+
     case "sessionStatusChanged":
       return { ...state, status: event.status };
   }

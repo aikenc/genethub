@@ -145,6 +145,13 @@ pub enum SessionEvent {
     ModelChanged { model_id: String },
     #[serde(rename_all = "camelCase")]
     ModeChanged { mode_id: String },
+    /// The session picked up a name — today only the first message's first
+    /// line, set once when a session had none (`SessionManager::send`).
+    /// Clients that show a session list must repaint it on this event rather
+    /// than only on the next full `session.list`, or the sidebar shows
+    /// "新会话" until something unrelated causes a refetch.
+    #[serde(rename_all = "camelCase")]
+    TitleChanged { title: String },
     /// The agent's own history was compacted or the session became read-only.
     #[serde(rename_all = "camelCase")]
     SessionStatusChanged { status: SessionStatus },

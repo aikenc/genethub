@@ -1,5 +1,5 @@
 import type { AgentInfo, TimelineItem } from "@genehub/proto";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -184,7 +184,7 @@ describe("the controls offered to the user", () => {
     expect(onSend).not.toHaveBeenCalled();
 
     await userEvent.type(box, "{Enter}");
-    expect(onSend).toHaveBeenCalledWith("改一下 README\n再加一段");
+    expect(onSend).toHaveBeenCalledWith("改一下 README\n再加一段", []);
   });
 
   it("refuses to send an empty prompt", async () => {
@@ -192,6 +192,42 @@ describe("the controls offered to the user", () => {
     render(<Composer {...composerProps({ onSend })} />);
     await userEvent.type(screen.getByLabelText("任务描述"), "   {Enter}");
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  /** Pasting a screenshot is the core way an image enters a conversation
+   * here (`Composer.tsx`) — no separate file picker exists yet. */
+  function pasteImage(box: HTMLElement, name = "shot.png") {
+    const file = new File(["fake-bytes"], name, { type: "image/png" });
+    fireEvent.paste(box, {
+      clipboardData: { items: [{ kind: "file", type: "image/png", getAsFile: () => file }] },
+    });
+  }
+
+  it("turns a pasted screenshot into a thumbnail and sends it as an attachment", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...composerProps({ onSend, attachmentsSupported: true })} />);
+
+    pasteImage(screen.getByLabelText("任务描述"));
+    await waitFor(() => expect(screen.getByAltText("shot.png")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByLabelText("发送"));
+    expect(onSend).toHaveBeenCalledWith(
+      "",
+      expect.arrayContaining([
+        expect.objectContaining({ name: "shot.png", mime: "image/png", dataBase64: expect.any(String) }),
+      ]),
+    );
+    // The strip clears once the message goes out, same as the draft text does.
+    expect(screen.queryByAltText("shot.png")).not.toBeInTheDocument();
+  });
+
+  it("leaves a pasted screenshot as an inert paste when the agent can't take attachments", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...composerProps({ onSend, attachmentsSupported: false })} />);
+
+    pasteImage(screen.getByLabelText("任务描述"));
+    await waitFor(() => expect(screen.getByText("当前 agent 还不支持贴图")).toBeInTheDocument());
+    expect(screen.queryByAltText("shot.png")).not.toBeInTheDocument();
   });
 
   it("turns send into stop while a turn is running", async () => {
