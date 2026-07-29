@@ -272,6 +272,7 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 | **全栈旅程** | `packages/web/src/e2e/journey.test.ts` | **真实 daemon + 真实 agent + 脚本化模型**，用的是工作台自己的客户端 | `cargo build -p genet-daemon` |
 | **自建全栈** | `packages/web/src/e2e/selfhosted.test.ts` | 只用开源件：**真实 relay（汇合模式）+ 真实 daemon + 工作台自己的配对与客户端代码**。新设备配对进来能用整套工作台，没配对的连不上，撤销当场断 | `cargo build -p genet-daemon` + `apps/relay && npm run build` |
 | 跨栈配对 | 控制面仓库的 `test/pairing.test.ts`、`test/relay.test.ts` | daemon 自己走设备码配对，浏览器经 relay 连回来 | 同上 |
+| 跨栈首启 | 控制面仓库的 `test/first-run.test.ts` | 全程没有账号、没有 cookie、没人批准任何东西：daemon 自己拿到临时身份，另一个浏览器扫链接进来，经转发层连上这台机器 | 同上 |
 
 自建全栈那一条兑的是开源仓库存在的理由——**一个 relay 加一堆静态文件就够了**。这句话单元测试证不出来：三个件各自都对，凑在一起仍然可能不是个能用的产品。所以它跑的是真的 relay 进程、真的 daemon 进程，配对用的也是浏览器自己那份代码，没有任何闭源件参与。
 
