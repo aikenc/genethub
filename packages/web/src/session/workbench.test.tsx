@@ -1,10 +1,11 @@
 import type { AgentInfo, TimelineItem } from "@genehub/proto";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { AgentControls } from "./AgentControls";
 import { Composer } from "./Composer";
+import { ComposerControls } from "./ComposerControls";
 import { PermissionCard } from "./Permission";
 import { Timeline } from "./Timeline";
 import { ToolCallView } from "./ToolCall";
@@ -116,6 +117,23 @@ describe("what the user sees in a session", () => {
   });
 });
 
+
+function composerProps(overrides: Partial<ComponentProps<typeof Composer>> = {}) {
+  return {
+    running: false,
+    agents: [agent()],
+    agentId: "genet",
+    modelId: null,
+    modeId: null,
+    onSend: () => {},
+    onInterrupt: () => {},
+    onPickAgent: () => {},
+    onPickModel: () => {},
+    onPickMode: () => {},
+    ...overrides,
+  };
+}
+
 describe("the controls offered to the user", () => {
   it("does not offer a model picker for an agent that cannot switch models", () => {
     const fixed = agent({
@@ -124,7 +142,7 @@ describe("the controls offered to the user", () => {
     });
 
     render(
-      <AgentControls
+      <ComposerControls
         agents={[fixed]}
         agentId="fixed"
         modelId={null}
@@ -142,7 +160,7 @@ describe("the controls offered to the user", () => {
 
   it("leaves an agent that is not installed out of the picker entirely", () => {
     render(
-      <AgentControls
+      <ComposerControls
         agents={[agent(), agent({ id: "opencode", label: "OpenCode", probe: { state: "notInstalled" } })]}
         agentId="genet"
         modelId={null}
@@ -159,7 +177,7 @@ describe("the controls offered to the user", () => {
 
   it("sends on enter and keeps shift+enter for a new line", async () => {
     const onSend = vi.fn();
-    render(<Composer running={false} onSend={onSend} onInterrupt={() => {}} />);
+    render(<Composer {...composerProps({ onSend })} />);
 
     const box = screen.getByLabelText("任务描述");
     await userEvent.type(box, "改一下 README{Shift>}{Enter}{/Shift}再加一段");
@@ -171,17 +189,17 @@ describe("the controls offered to the user", () => {
 
   it("refuses to send an empty prompt", async () => {
     const onSend = vi.fn();
-    render(<Composer running={false} onSend={onSend} onInterrupt={() => {}} />);
+    render(<Composer {...composerProps({ onSend })} />);
     await userEvent.type(screen.getByLabelText("任务描述"), "   {Enter}");
     expect(onSend).not.toHaveBeenCalled();
   });
 
   it("turns send into stop while a turn is running", async () => {
     const onInterrupt = vi.fn();
-    render(<Composer running onSend={() => {}} onInterrupt={onInterrupt} />);
+    render(<Composer {...composerProps({ running: true, onInterrupt })} />);
 
-    expect(screen.queryByText("发送")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByText("停止"));
+    expect(screen.queryByLabelText("发送")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText("停止"));
     expect(onInterrupt).toHaveBeenCalled();
   });
 

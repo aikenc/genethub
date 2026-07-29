@@ -103,8 +103,12 @@ beforeEach(() => {
     activeWorkspaceId: null,
     sessions: [],
     activeSessionId: null,
+    tabs: [],
+    activeTabId: null,
+    rightPanel: null,
     agents: [],
     settings: null,
+    notice: null,
   });
 });
 

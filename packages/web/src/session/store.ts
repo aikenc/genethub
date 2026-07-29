@@ -15,6 +15,18 @@ import { create } from "zustand";
 import type { Client, ConnectionState } from "../protocol/client";
 import { applySequenced, emptyTimeline, fromSnapshot, type TimelineState } from "./timeline";
 
+/** A closable work surface, not a global mode switch. */
+export type TabKind = "chat" | "files" | "terminal" | "settings";
+
+export interface WorkbenchTab {
+  id: string;
+  kind: TabKind;
+  title: string;
+  sessionId?: string;
+}
+
+export type RightPanel = "changes" | "files" | null;
+
 interface WorkbenchState {
   client: Client | null;
   connection: ConnectionState;
@@ -23,6 +35,9 @@ interface WorkbenchState {
   activeWorkspaceId: string | null;
   sessions: SessionSummary[];
   activeSessionId: string | null;
+  tabs: WorkbenchTab[];
+  activeTabId: string | null;
+  rightPanel: RightPanel;
   timeline: TimelineState;
   notice: string | null;
   hub: HubStatus | null;
@@ -45,6 +60,10 @@ interface WorkbenchState {
   setProvider(input: { providerId: string; apiKey?: string; baseUrl?: string }): Promise<void>;
   createSession(workspaceId: string, agentId: string): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
+  openTab(kind: TabKind, title?: string): void;
+  activateTab(tabId: string): void;
+  closeTab(tabId: string): void;
+  setRightPanel(panel: RightPanel): void;
   send(text: string): Promise<void>;
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
@@ -63,6 +82,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   activeWorkspaceId: null,
   sessions: [],
   activeSessionId: null,
+  tabs: [],
+  activeTabId: null,
+  rightPanel: null,
   timeline: emptyTimeline(),
   notice: null,
   hub: null,
@@ -124,12 +146,33 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const previous = get().activeSessionId;
     if (previous && previous !== sessionId) await client.unsubscribe(previous);
 
-    set({ activeSessionId: sessionId, timeline: emptyTimeline() });
+    const summary = get().sessions.find((entry) => entry.id === sessionId);
+    const tabId = `chat:${sessionId}`;
+    set((state) => {
+      const existing = state.tabs.find((tab) => tab.id === tabId);
+      const tabs = existing
+        ? state.tabs.map((tab) =>
+            tab.id === tabId ? { ...tab, title: summary?.title ?? tab.title } : tab,
+          )
+        : [
+            ...state.tabs,
+            {
+              id: tabId,
+              kind: "chat" as const,
+              title: summary?.title ?? "新会话",
+              sessionId,
+            },
+          ];
+      return {
+        activeSessionId: sessionId,
+        timeline: emptyTimeline(),
+        tabs,
+        activeTabId: tabId,
+      };
+    });
 
     const { snapshot, replayed } = await client.subscribe(sessionId, {
       onEvent: (event) => {
-        // Events for a session the user has already left would rewrite the
-        // timeline they are looking at.
         if (get().activeSessionId !== sessionId) return;
         set((state) => ({ timeline: applySequenced(state.timeline, event) }));
       },
@@ -144,6 +187,53 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
     const base = fromSnapshot(snapshot as SessionSnapshot);
     set({ timeline: replayed.reduce(applySequenced, base) });
+  },
+
+  openTab(kind, title) {
+    const id = kind === "chat" ? `chat:${get().activeSessionId ?? "draft"}` : kind;
+    const defaults: Record<TabKind, string> = {
+      chat: "新会话",
+      files: "文件",
+      terminal: "终端",
+      settings: "设置",
+    };
+    set((state) => {
+      if (state.tabs.some((tab) => tab.id === id)) {
+        return { activeTabId: id };
+      }
+      return {
+        tabs: [...state.tabs, { id, kind, title: title ?? defaults[kind] }],
+        activeTabId: id,
+      };
+    });
+  },
+
+  activateTab(tabId) {
+    const tab = get().tabs.find((entry) => entry.id === tabId);
+    if (!tab) return;
+    set({ activeTabId: tabId });
+    if (tab.kind === "chat" && tab.sessionId && tab.sessionId !== get().activeSessionId) {
+      void get().selectSession(tab.sessionId);
+    }
+  },
+
+  closeTab(tabId) {
+    const { tabs, activeTabId } = get();
+    const index = tabs.findIndex((tab) => tab.id === tabId);
+    if (index < 0) return;
+    const next = tabs.filter((tab) => tab.id !== tabId);
+    const fallback = next[Math.max(0, index - 1)] ?? next[0] ?? null;
+    set({
+      tabs: next,
+      activeTabId: activeTabId === tabId ? (fallback?.id ?? null) : activeTabId,
+    });
+    if (fallback?.kind === "chat" && fallback.sessionId) {
+      void get().selectSession(fallback.sessionId);
+    }
+  },
+
+  setRightPanel(panel) {
+    set({ rightPanel: panel });
   },
 
   async send(text) {

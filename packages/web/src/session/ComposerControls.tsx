@@ -1,13 +1,12 @@
 import type { AgentInfo } from "@genehub/proto";
 
 /**
- * Agent, model and mode pickers.
+ * Compact agent / model / mode chips that live *inside* the composer.
  *
- * Every control here is rendered from the agent's declared `Capabilities`. An
- * agent that cannot switch models simply has no model picker — the user never
- * gets offered a button that answers "unsupported" (`architecture.md` §3.2).
+ * The chat surface stays quiet: these are chrome for the next send, not a
+ * second toolbar competing with the timeline.
  */
-export function AgentControls({
+export function ComposerControls({
   agents,
   agentId,
   modelId,
@@ -30,31 +29,30 @@ export function AgentControls({
   const current = installed.find((agent) => agent.id === agentId) ?? installed[0];
 
   return (
-    <div className="flex flex-wrap items-center gap-2 border-b border-line bg-surface px-3 py-2 text-xs">
-      <Select
-        label="agent"
+    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+      <Chip
+        ariaLabel="agent"
         value={current?.id ?? ""}
         disabled={disabled}
         options={installed.map((agent) => ({ value: agent.id, label: agent.label }))}
         onChange={onPickAgent}
       />
-
       {current?.capabilities.setModel && current.catalog.models.length > 0 ? (
-        <Select
-          label="模型"
+        <Chip
+          ariaLabel="模型"
           value={modelId ?? current.catalog.defaultModel ?? ""}
           disabled={disabled}
           options={current.catalog.models.map((model) => ({
             value: model.id,
             label: model.label,
-          }))}
+          }))
+          }
           onChange={onPickModel}
         />
       ) : null}
-
       {current?.capabilities.setMode && current.catalog.modes.length > 0 ? (
-        <Select
-          label="模式"
+        <Chip
+          ariaLabel="模式"
           value={modeId ?? current.catalog.defaultMode ?? ""}
           disabled={disabled}
           options={current.catalog.modes.map((mode) => ({ value: mode.id, label: mode.label }))}
@@ -65,27 +63,27 @@ export function AgentControls({
   );
 }
 
-function Select({
-  label,
+function Chip({
+  ariaLabel,
   value,
   options,
   disabled,
   onChange,
 }: {
-  label: string;
+  ariaLabel: string;
   value: string;
   options: Array<{ value: string; label: string }>;
   disabled?: boolean;
   onChange(value: string): void;
 }) {
   return (
-    <label className="flex items-center gap-1 text-muted">
-      {label}
+    <label className="relative inline-flex max-w-[10rem] items-center">
+      <span className="sr-only">{ariaLabel}</span>
       <select
-        className="rounded border border-line bg-bg px-2 py-1 text-fg"
-        aria-label={label}
+        aria-label={ariaLabel}
+        className="appearance-none truncate rounded-full bg-transparent py-0.5 pl-2 pr-5 text-xs text-muted outline-none hover:bg-raised hover:text-fg disabled:opacity-40"
         value={value}
-        disabled={disabled}
+        disabled={disabled || options.length === 0}
         onChange={(event) => onChange(event.target.value)}
       >
         {options.map((option) => (
@@ -94,6 +92,9 @@ function Select({
           </option>
         ))}
       </select>
+      <span className="pointer-events-none absolute right-1.5 text-[9px] text-faint" aria-hidden>
+        ▾
+      </span>
     </label>
   );
 }

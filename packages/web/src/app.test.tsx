@@ -38,7 +38,16 @@ beforeEach(() => {
   sockets = 0;
   window.location.hash = `#endpoint=${ENDPOINT}`;
   vi.stubGlobal("WebSocket", CountingSocket);
-  useWorkbench.setState({ client: null, agents: [], workspaces: [], sessions: [] });
+  useWorkbench.setState({
+    client: null,
+    agents: [],
+    workspaces: [],
+    sessions: [],
+    tabs: [],
+    activeTabId: null,
+    rightPanel: null,
+    notice: null,
+  });
 });
 
 afterEach(() => {
@@ -53,7 +62,8 @@ describe("the app as the browser loads it", () => {
     // Anything at all from the workbench shell proves the tree survived; the
     // failure mode is an empty root, not a wrong pixel.
     expect(await screen.findByRole("status")).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "会话" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Changes" })).toBeInTheDocument();
   });
 
   it("opens one connection and keeps it across re-renders", async () => {
