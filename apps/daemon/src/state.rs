@@ -29,6 +29,13 @@ pub struct AppState {
     /// This machine's relationship with a Hub. Set once, right after the state
     /// exists, because the link needs the state to serve relayed clients.
     pub link: std::sync::OnceLock<SharedLink>,
+    /// Raised when a local client asks the daemon to stop.
+    ///
+    /// Signals are the natural way to say this and Windows has no equivalent
+    /// that reaches a windowless child, so the desktop shell there would have
+    /// to kill the process and skip every bit of cleanup. Asking over the same
+    /// loopback connection it already uses works the same everywhere.
+    pub shutdown: Arc<tokio::sync::Notify>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -60,6 +67,7 @@ impl AppState {
             version: env!("CARGO_PKG_VERSION").to_string(),
             token: uuid::Uuid::new_v4().simple().to_string(),
             link: std::sync::OnceLock::new(),
+            shutdown: Arc::new(tokio::sync::Notify::new()),
         });
         Ok((state, pty_rx))
     }

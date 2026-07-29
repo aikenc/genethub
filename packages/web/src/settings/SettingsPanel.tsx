@@ -21,8 +21,8 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
   const { settings, loadSettings, setProvider, agents, hub, pair, unpair, client } = useWorkbench();
 
   useEffect(() => {
-    if (!settings) void loadSettings();
-  }, [settings, loadSettings]);
+    if (client && !settings) void loadSettings();
+  }, [client, settings, loadSettings]);
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 overflow-y-auto p-4">

@@ -20,6 +20,7 @@ interface WorkbenchState {
   connection: ConnectionState;
   agents: AgentInfo[];
   workspaces: WorkspaceInfo[];
+  activeWorkspaceId: string | null;
   sessions: SessionSummary[];
   activeSessionId: string | null;
   timeline: TimelineState;
@@ -33,6 +34,7 @@ interface WorkbenchState {
 
   attach(client: Client): Promise<void>;
   openWorkspace(root: string): Promise<void>;
+  selectWorkspace(workspaceId: string): Promise<void>;
   loadTree(path?: string): Promise<void>;
   openFile(path: string): Promise<void>;
   saveFile(content: string): Promise<void>;
@@ -58,6 +60,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   connection: "connecting",
   agents: [],
   workspaces: [],
+  activeWorkspaceId: null,
   sessions: [],
   activeSessionId: null,
   timeline: emptyTimeline(),
@@ -83,8 +86,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (reply?.type !== "workspace") return;
     set((state) => ({
       workspaces: upsertBy(state.workspaces, reply.data, (w) => w.id),
+      activeWorkspaceId: reply.data.id,
+      activeSessionId: null,
+      timeline: emptyTimeline(),
     }));
     await loadSessions(client, reply.data.id, set);
+  },
+
+  async selectWorkspace(workspaceId) {
+    const client = require_(get().client);
+    set({ activeWorkspaceId: workspaceId, activeSessionId: null, timeline: emptyTimeline() });
+    await loadSessions(client, workspaceId, set);
   },
 
   async createSession(workspaceId, agentId) {
@@ -282,7 +294,10 @@ async function refreshCatalog(client: Client, set: Setter): Promise<void> {
   if (workspaces?.type === "workspaces") {
     set({ workspaces: workspaces.data });
     const first = workspaces.data[0];
-    if (first) await loadSessions(client, first.id, set);
+    if (first) {
+      set({ activeWorkspaceId: first.id });
+      await loadSessions(client, first.id, set);
+    }
   }
 }
 
@@ -296,7 +311,7 @@ async function loadSessions(client: Client, workspaceId: string, set: Setter): P
 
 function currentWorkspace(state: WorkbenchState): string | null {
   const session = state.sessions.find((entry) => entry.id === state.activeSessionId);
-  return session?.workspaceId ?? state.workspaces[0]?.id ?? null;
+  return session?.workspaceId ?? state.activeWorkspaceId ?? state.workspaces[0]?.id ?? null;
 }
 
 /** Replaces the node at `path` with a freshly loaded one, in place. */

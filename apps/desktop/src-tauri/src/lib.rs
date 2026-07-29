@@ -2,13 +2,14 @@ pub mod daemon;
 mod tray;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use tauri::{Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 
 use daemon::{Daemon, Endpoint};
 
 pub struct AppState {
-    pub daemon: Daemon,
+    pub daemon: Arc<Daemon>,
 }
 
 /// Where the workbench should connect.
@@ -28,9 +29,30 @@ fn daemon_running(state: tauri::State<'_, AppState>) -> bool {
 
 /// Restarts the daemon after a crash, without making the user reinstall.
 #[tauri::command]
-fn restart_daemon(state: tauri::State<'_, AppState>) -> Result<Endpoint, String> {
-    state.daemon.stop();
-    state.daemon.start()
+fn restart_daemon(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Endpoint, String> {
+    let restarted = state.daemon.restart();
+    announce(&app, &restarted);
+    restarted
+}
+
+/// Tells the workbench where the daemon is now, and the tray how it is doing.
+///
+/// A restart means a new port and a new token, so a client that is not told
+/// simply retries an address that will never answer again.
+fn announce(app: &tauri::AppHandle, endpoint: &Result<Endpoint, String>) {
+    match endpoint {
+        Ok(endpoint) => {
+            tray::set_status(app, "本机状态：运行中");
+            let _ = app.emit("genehub://daemon", endpoint.clone());
+        }
+        Err(error) => {
+            tray::set_status(app, "本机状态：已停止");
+            tracing_line(&format!("daemon 启动失败: {error}"));
+        }
+    }
 }
 
 /// Opens a link in the user's real browser.
@@ -110,16 +132,35 @@ pub fn run() {
             )
             .ok_or("找不到内置的 genet-daemon 可执行文件")?;
 
-            let state = AppState {
-                daemon: Daemon::new(binary, app.path().app_data_dir()?.join("GeneHub")),
-            };
-            match state.daemon.start() {
-                Ok(endpoint) => tracing_line(&format!("daemon listening on {}", endpoint.port)),
+            let daemon = Arc::new(Daemon::new(
+                binary,
+                app.path().app_data_dir()?.join("GeneHub"),
+            ));
+            let started = daemon.start();
+            match &started {
+                Ok(endpoint) => tracing_line(&format!(
+                    "daemon listening on {} ({:?})",
+                    endpoint.port,
+                    daemon.origin()
+                )),
                 Err(error) => tracing_line(&format!("daemon 启动失败: {error}")),
             }
-            app.manage(state);
+            app.manage(AppState {
+                daemon: Arc::clone(&daemon),
+            });
 
             tray::build(handle)?;
+            announce(handle, &started);
+
+            let watcher = handle.clone();
+            daemon.watch(move |change| match change {
+                daemon::Watch::Lost => {
+                    tray::set_status(&watcher, "本机状态：正在恢复…");
+                    tracing_line("daemon 不再响应，正在重启");
+                }
+                daemon::Watch::Restarted(endpoint) => announce(&watcher, &Ok(endpoint)),
+                daemon::Watch::Failed(error) => announce(&watcher, &Err(error)),
+            });
             Ok(())
         })
         .on_window_event(|window, event| {

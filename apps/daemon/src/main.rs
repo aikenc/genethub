@@ -37,13 +37,17 @@ async fn main() -> Result<()> {
     let _ = std::io::stdout().flush();
     tracing::info!("listening on 127.0.0.1:{}", daemon.port);
 
-    wait_for_shutdown().await;
+    let asked = daemon.state.shutdown.clone();
+    tokio::select! {
+        _ = wait_for_signal() => {}
+        _ = asked.notified() => tracing::info!("a local client asked us to stop"),
+    }
     tracing::info!("shutting down");
     daemon.shutdown().await;
     Ok(())
 }
 
-async fn wait_for_shutdown() {
+async fn wait_for_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};

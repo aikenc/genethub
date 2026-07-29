@@ -64,6 +64,7 @@ pub async fn serve(state: Shared, pty_tx: PtyFanout) -> Result<Listener> {
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/shutdown", axum::routing::post(shutdown))
         .route("/ws", get(upgrade))
         .with_state(Context_ {
             state: state.clone(),
@@ -97,6 +98,37 @@ struct Context_ {
 
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
+}
+
+/// Ends the daemon on request from the shell that owns this machine.
+///
+/// Restricted to loopback on top of the token: with LAN listening on, the token
+/// travels the local network, and "turn that machine off" is not a thing a
+/// borrowed token should be able to do from across the room.
+async fn shutdown(
+    State(context): State<Context_>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    if !remote.ip().is_loopback() {
+        return (StatusCode::FORBIDDEN, "shutdown is loopback only");
+    }
+    let presented = auth::extract_token(
+        params.get("token").map(|t| format!("token={t}")).as_deref(),
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+    );
+    if !presented
+        .as_deref()
+        .is_some_and(|token| auth::token_matches(&context.state.token, token))
+    {
+        return (StatusCode::UNAUTHORIZED, "invalid or missing token");
+    }
+
+    context.state.shutdown.notify_waiters();
+    (StatusCode::ACCEPTED, "stopping")
 }
 
 async fn upgrade(

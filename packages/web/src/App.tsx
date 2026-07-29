@@ -11,6 +11,7 @@ import { PermissionCard } from "./session/Permission";
 import { Timeline } from "./session/Timeline";
 import { useWorkbench } from "./session/store";
 import { TerminalPanel } from "./terminal/TerminalPanel";
+import { OpenProject } from "./workspace/OpenProject";
 
 const PANELS = [
   { id: "chat", label: "会话" },
@@ -22,7 +23,14 @@ const PANELS = [
 
 type PanelId = (typeof PANELS)[number]["id"];
 
-export function App({ host = detectHost() }: { host?: Host }) {
+export function App({
+  host = detectHost(),
+  // Injected by tests so they can drive the workbench without a real socket.
+  connect = (endpoint: Endpoint) => new Client({ url: endpoint.url }),
+}: {
+  host?: Host;
+  connect?: (endpoint: Endpoint) => Client;
+}) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">("loading");
   const [panel, setPanel] = useState<PanelId>("chat");
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -37,17 +45,25 @@ export function App({ host = detectHost() }: { host?: Host }) {
     return () => clearInterval(timer);
   }, [pairing, workbench]);
 
+  // The endpoint is asked for again whenever the shell says it moved, which is
+  // what a daemon restart looks like from here: same machine, new address.
   useEffect(() => {
-    let client: Client | null = null;
-    void host.endpoint().then((found) => {
-      setEndpoint(found);
-      if (!found) return;
-      client = new Client({ url: found.url });
-      client.connect();
-      void useWorkbench.getState().attach(client);
-    });
-    return () => client?.close();
+    const look = () => void host.endpoint().then(setEndpoint);
+    look();
+    return host.onEndpointChange?.(look);
   }, [host]);
+
+  // The tray's "connect to Hub" has to land somewhere; without this it emitted
+  // into a window that was not listening.
+  useEffect(() => host.onPairRequested?.(() => setPanel("settings")), [host]);
+
+  useEffect(() => {
+    if (endpoint === "loading" || endpoint === null) return;
+    const client = connect(endpoint);
+    client.connect();
+    void useWorkbench.getState().attach(client);
+    return () => client.close();
+  }, [endpoint, connect]);
 
   if (endpoint === "loading") return <Splash>正在查找这台机器…</Splash>;
   if (!endpoint) {
@@ -64,7 +80,7 @@ export function App({ host = detectHost() }: { host?: Host }) {
 
   return (
     <div className="flex h-full flex-col md:flex-row">
-      <Sessions open={sessionsOpen} onNavigate={() => setSessionsOpen(false)} />
+      <Sessions open={sessionsOpen} host={host} onNavigate={() => setSessionsOpen(false)} />
 
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex items-center gap-2 border-b border-line bg-surface px-3 py-2">
@@ -102,7 +118,12 @@ export function App({ host = detectHost() }: { host?: Host }) {
         {/* Panels stay mounted: a terminal that loses its scrollback every time
             someone glances at a diff is a terminal nobody uses. */}
         <Panel active={panel === "chat"}>
-          <div className="flex h-full min-h-0 flex-col">
+          {workbench.activeSessionId ? null : (
+            <FirstRun host={host} onOpenSettings={() => setPanel("settings")} />
+          )}
+          <div
+            className={`${workbench.activeSessionId ? "flex" : "hidden"} h-full min-h-0 flex-col`}
+          >
             <AgentControls
               agents={workbench.agents}
               agentId={session?.agentId ?? null}
@@ -110,8 +131,8 @@ export function App({ host = detectHost() }: { host?: Host }) {
               modeId={workbench.timeline.modeId}
               disabled={running}
               onPickAgent={(id) => {
-                const workspace = workbench.workspaces[0];
-                if (workspace) void workbench.createSession(workspace.id, id);
+                const workspace = workbench.activeWorkspaceId ?? workbench.workspaces[0]?.id;
+                if (workspace) void workbench.createSession(workspace, id);
               }}
               onPickModel={(id) => void workbench.setModel(id)}
               onPickMode={(id) => void workbench.setMode(id)}
@@ -158,16 +179,94 @@ export function App({ host = detectHost() }: { host?: Host }) {
   );
 }
 
+/**
+ * What a new install shows instead of a workbench with everything greyed out.
+ *
+ * Three things have to be true before the first message can be sent — a project
+ * to work in, a key to reach a model with, and a session — and the old empty
+ * shell said none of that: the buttons were simply disabled and the reason was
+ * somewhere else. This names the missing one and offers the action that fixes
+ * it, one step at a time.
+ */
+function FirstRun({ host, onOpenSettings }: { host: Host; onOpenSettings(): void }) {
+  const { workspaces, activeWorkspaceId, agents, createSession } = useWorkbench();
+  const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
+  const builtin = agents.find((agent) => agent.builtin) ?? agents[0];
+  // An agent with no models is an agent with no key: the catalog is built from
+  // the providers that are actually configured.
+  const usable = builtin && builtin.probe.state === "ready" && builtin.catalog.models.length > 0;
+
+  if (!workspace) {
+    return (
+      <Splash>
+        <p className="text-sm">先打开一个项目文件夹。</p>
+        <p className="mb-3 text-xs text-muted">
+          agent 只能在你打开的目录里读写，这一步同时决定了它的活动范围。
+        </p>
+        <OpenProject host={host} />
+      </Splash>
+    );
+  }
+
+  if (!usable) {
+    return (
+      <Splash>
+        <p className="text-sm">还差一个模型密钥。</p>
+        <p className="mb-3 text-xs text-muted">
+          密钥只保存在这台机器上，填好之后这里会直接可用。
+        </p>
+        <button
+          type="button"
+          className="rounded bg-accent px-3 py-1.5 text-xs text-white"
+          onClick={onOpenSettings}
+        >
+          去填密钥
+        </button>
+      </Splash>
+    );
+  }
+
+  return (
+    <Splash>
+      <p className="text-sm">{workspace.name} 已就绪。</p>
+      <p className="mb-3 text-xs text-muted">开一个会话，直接说你想做什么。</p>
+      <button
+        type="button"
+        className="rounded bg-accent px-3 py-1.5 text-xs text-white"
+        onClick={() => builtin && void createSession(workspace.id, builtin.id)}
+      >
+        新建会话
+      </button>
+    </Splash>
+  );
+}
+
 function Panel({ active, children }: { active: boolean; children: React.ReactNode }) {
   return (
     <div className={`min-h-0 flex-1 ${active ? "flex flex-col" : "hidden"}`}>{children}</div>
   );
 }
 
-function Sessions({ open, onNavigate }: { open: boolean; onNavigate(): void }) {
-  const { sessions, activeSessionId, selectSession, workspaces, agents, createSession } =
-    useWorkbench();
-  const workspace = workspaces[0];
+function Sessions({
+  open,
+  host,
+  onNavigate,
+}: {
+  open: boolean;
+  host: Host;
+  onNavigate(): void;
+}) {
+  const {
+    sessions,
+    activeSessionId,
+    selectSession,
+    workspaces,
+    activeWorkspaceId,
+    selectWorkspace,
+    agents,
+    createSession,
+  } = useWorkbench();
+  const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
   const builtin = agents.find((agent) => agent.builtin) ?? agents[0];
 
   return (
@@ -176,6 +275,24 @@ function Sessions({ open, onNavigate }: { open: boolean; onNavigate(): void }) {
         open ? "flex" : "hidden"
       } max-h-56 w-full shrink-0 flex-col border-b border-line bg-surface md:flex md:max-h-none md:w-60 md:border-b-0 md:border-r`}
     >
+      <div className="flex flex-col gap-2 border-b border-line px-3 py-2">
+        {workspaces.length > 0 ? (
+          <select
+            aria-label="项目"
+            className="w-full rounded border border-line bg-bg px-2 py-1 text-xs outline-none focus:border-accent"
+            value={workspace?.id ?? ""}
+            onChange={(event) => void selectWorkspace(event.target.value)}
+          >
+            {workspaces.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.name}
+              </option>
+            ))}
+          </select>
+        ) : null}
+        <OpenProject host={host} compact onOpened={onNavigate} />
+      </div>
+
       <div className="border-b border-line px-3 py-2">
         <button
           type="button"

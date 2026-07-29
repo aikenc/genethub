@@ -11,13 +11,16 @@ import { FileTree } from "./FileTree";
  * IDE. Anything heavier would be a second place for the file's state to live.
  */
 export function FilesPanel() {
-  const { tree, file, loadTree, openFile, saveFile } = useWorkbench();
+  const { tree, file, loadTree, openFile, saveFile, client } = useWorkbench();
   const [draft, setDraft] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Panels stay mounted from the first paint, which is before there is a
+  // daemon to ask; loading anything earlier only produces a failure nobody
+  // asked for.
   useEffect(() => {
-    if (!tree) void loadTree();
-  }, [tree, loadTree]);
+    if (client && !tree) void loadTree();
+  }, [client, tree, loadTree]);
 
   // A file arriving replaces whatever was being edited; keeping the old draft
   // would silently paste it into a different file on the next save.

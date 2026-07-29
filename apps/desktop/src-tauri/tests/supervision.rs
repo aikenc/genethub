@@ -5,8 +5,10 @@
 //! second start that spawns a duplicate. Those need the real binary.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use genethub_desktop_lib::daemon::Daemon;
+use genethub_desktop_lib::daemon::{Daemon, Origin, Watch};
 
 fn daemon_binary() -> Option<PathBuf> {
     // The desktop crate is outside the workspace, so the daemon lands in the
@@ -14,6 +16,35 @@ fn daemon_binary() -> Option<PathBuf> {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let candidate = repo.join("target/debug/genet-daemon");
     candidate.exists().then_some(candidate)
+}
+
+/// Polls until `look` finds something, or gives up.
+fn wait_for<T>(limit: Duration, mut look: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if let Some(found) = look() {
+            return Some(found);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    None
+}
+
+/// Kills the process holding a port, without going through the shell's own
+/// bookkeeping — the point is to simulate a crash it did not see coming.
+#[cfg(unix)]
+fn kill_whatever_is_listening_on(port: u16) {
+    let output = std::process::Command::new("fuser")
+        .args([&format!("{port}/tcp")])
+        .output()
+        .or_else(|_| std::process::Command::new("lsof").args(["-ti", &format!("tcp:{port}")]).output())
+        .expect("something that can find the process on a port");
+    let listing = String::from_utf8_lossy(&output.stdout);
+    for pid in listing.split_whitespace() {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", pid])
+            .status();
+    }
 }
 
 macro_rules! with_daemon {
@@ -75,6 +106,15 @@ fn stopping_leaves_nothing_behind_that_would_block_the_next_start() {
     let first = daemon.start().expect("first start");
     daemon.stop();
 
+    // Those files are removed by the daemon on its way out, so their absence is
+    // proof it was asked to stop and did, rather than being killed mid-session
+    // with agents still running.
+    assert!(
+        !dir.path().join("endpoint.json").exists(),
+        "a killed daemon would have left this behind"
+    );
+    assert!(!dir.path().join("daemon.lock").exists());
+
     // The daemon refuses to start twice on one data directory, so a restart
     // succeeding is proof the lock and the endpoint file were cleaned up.
     let restarted = Daemon::new(binary, dir.path().to_path_buf());
@@ -82,6 +122,94 @@ fn stopping_leaves_nothing_behind_that_would_block_the_next_start() {
     assert_ne!(second.port, 0);
     let _ = first;
     restarted.stop();
+}
+
+/// The case a crashed shell leaves behind.
+///
+/// Before adoption the next launch spawned a second daemon, which lost the lock
+/// race and exited without printing anything — so the shell waited twenty
+/// seconds and told the user there was no machine, while their machine was
+/// running the whole time.
+#[test]
+fn a_daemon_left_over_from_a_crashed_shell_is_adopted_rather_than_duplicated() {
+    with_daemon!(binary);
+    let dir = tempfile::tempdir().unwrap();
+
+    let survivor = Daemon::new(binary.clone(), dir.path().to_path_buf());
+    let running = survivor.start().expect("the first daemon starts");
+    assert_eq!(survivor.origin(), Some(Origin::Spawned));
+
+    // A new shell, with no memory of the process: exactly what a restart after
+    // a crash looks like.
+    let next = Daemon::new(binary, dir.path().to_path_buf());
+    let adopted = next.start().expect("the second shell finds the daemon");
+
+    assert_eq!(
+        adopted.port, running.port,
+        "it should have connected to the daemon that was already there"
+    );
+    assert_eq!(adopted.token, running.token);
+    assert_eq!(next.origin(), Some(Origin::Adopted));
+    assert!(next.is_running());
+
+    // And it can end a daemon it never spawned, or quitting would leave one.
+    next.stop();
+    assert!(!next.is_running());
+    assert!(!survivor.is_running());
+}
+
+/// A daemon killed outright, the way a crash or an OOM would do it.
+#[test]
+fn the_watchdog_brings_the_daemon_back_and_says_where_it_went() {
+    with_daemon!(binary);
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = Arc::new(Daemon::new(binary, dir.path().to_path_buf()));
+    let first = daemon.start().expect("the daemon starts");
+
+    let restarts = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&restarts);
+    daemon.watch(move |change| {
+        if let Watch::Restarted(endpoint) = change {
+            seen.lock().unwrap().push(endpoint);
+        }
+    });
+
+    kill_whatever_is_listening_on(first.port);
+
+    let restarted = wait_for(Duration::from_secs(30), || {
+        restarts.lock().unwrap().first().cloned()
+    })
+    .expect("the watchdog should have restarted the daemon");
+
+    assert_ne!(
+        restarted.port, first.port,
+        "a fresh listener means a fresh port, which is why the UI has to be told"
+    );
+    assert!(daemon.is_running());
+    daemon.stop();
+}
+
+/// Quitting has to stop the watchdog too, or the daemon comes straight back.
+#[test]
+fn stopping_on_purpose_is_not_treated_as_a_crash() {
+    with_daemon!(binary);
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = Arc::new(Daemon::new(binary, dir.path().to_path_buf()));
+    daemon.start().expect("the daemon starts");
+
+    let restarts = Arc::new(Mutex::new(0usize));
+    let seen = Arc::clone(&restarts);
+    daemon.watch(move |change| {
+        if matches!(change, Watch::Restarted(_)) {
+            *seen.lock().unwrap() += 1;
+        }
+    });
+
+    daemon.stop();
+    std::thread::sleep(Duration::from_secs(4));
+
+    assert_eq!(*restarts.lock().unwrap(), 0, "the user asked it to stop");
+    assert!(!daemon.is_running());
 }
 
 #[test]

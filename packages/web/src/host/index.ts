@@ -34,11 +34,24 @@ export interface Host {
   openExternal(url: string): void;
   /** Present only where a native picker exists. */
   pickDirectory?(): Promise<string | null>;
+  /**
+   * Announces that the endpoint has moved, and returns an unsubscribe.
+   *
+   * A restarted daemon listens on a new port with a new token, so retrying the
+   * old address forever is the one thing a client must not do. Only shells that
+   * own the daemon can know this; a browser has nothing to offer here.
+   */
+  onEndpointChange?(listener: () => void): () => void;
+  /** The shell asking the workbench to show remote access, e.g. from a tray menu. */
+  onPairRequested?(listener: () => void): () => void;
 }
 
 /** Tauri injects this; its absence is how we know we are in a browser. */
 interface TauriGlobal {
   core: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> };
+  event?: {
+    listen(name: string, handler: () => void): Promise<() => void>;
+  };
 }
 
 declare global {
@@ -111,6 +124,26 @@ export function desktopHost(): Host {
     async pickDirectory() {
       return tauri.core.invoke<string | null>("pick_directory");
     },
+    onEndpointChange(listener) {
+      return subscribe(tauri, "genehub://daemon", listener);
+    },
+    onPairRequested(listener) {
+      return subscribe(tauri, "genehub://pair", listener);
+    },
+  };
+}
+
+/** Tauri hands back the unsubscribe asynchronously; React wants it now. */
+function subscribe(tauri: TauriGlobal, name: string, listener: () => void): () => void {
+  let stop: (() => void) | undefined;
+  let cancelled = false;
+  void tauri.event?.listen(name, listener).then((unlisten) => {
+    if (cancelled) unlisten();
+    else stop = unlisten;
+  });
+  return () => {
+    cancelled = true;
+    stop?.();
   };
 }
 

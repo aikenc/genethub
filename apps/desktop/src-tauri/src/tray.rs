@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -5,6 +7,20 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use crate::AppState;
 
 pub const TRAY_ID: &str = "genethub-tray";
+
+/// The status line, kept so it can be rewritten as the daemon comes and goes.
+///
+/// It used to read "starting" forever, which is worse than showing nothing: the
+/// tray is where someone looks when the window is closed and they want to know
+/// whether their machine is still reachable.
+struct Status<R: Runtime>(Mutex<MenuItem<R>>);
+
+pub fn set_status<R: Runtime>(app: &AppHandle<R>, text: &str) {
+    if let Some(status) = app.try_state::<Status<R>>() {
+        let item = status.0.lock().expect("status lock");
+        let _ = item.set_text(text);
+    }
+}
 
 pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
@@ -17,6 +33,7 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "打开主界面", true, None::<&str>)?;
     let status = MenuItem::with_id(app, "status", "本机状态：启动中", false, None::<&str>)?;
+    app.manage(Status(Mutex::new(status.clone())));
     let pair = MenuItem::with_id(app, "pair", "连接到 Hub", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 GeneHub", true, None::<&str>)?;
 

@@ -11,14 +11,14 @@ import { useWorkbench } from "../session/store";
  * same reason — reviewing and recording a change belong in the same place.
  */
 export function ChangesPanel() {
-  const { git, diff, refreshGit, loadDiff, commit } = useWorkbench();
+  const { git, diff, refreshGit, loadDiff, commit, client } = useWorkbench();
   const [selected, setSelected] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!git) void refreshGit();
-  }, [git, refreshGit]);
+    if (client && !git) void refreshGit();
+  }, [client, git, refreshGit]);
 
   return (
     <div className="flex h-full min-h-0 flex-col md:flex-row">
