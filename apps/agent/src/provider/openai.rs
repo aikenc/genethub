@@ -43,7 +43,9 @@ pub async fn stream(
     if !response.status().is_success() {
         let status = response.status();
         let detail = response.text().await.unwrap_or_default();
-        anyhow::bail!("openai {status}: {detail}");
+        // Named after the provider the user configured, not the dialect we
+        // speak to it: "openai 401" is baffling when you typed a DeepSeek key.
+        anyhow::bail!("{} {status}: {detail}", model.provider);
     }
 
     let mut usage = Usage::default();

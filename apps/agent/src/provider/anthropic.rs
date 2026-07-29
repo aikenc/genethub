@@ -43,7 +43,7 @@ pub async fn stream(
     if !response.status().is_success() {
         let status = response.status();
         let detail = response.text().await.unwrap_or_default();
-        anyhow::bail!("anthropic {status}: {detail}");
+        anyhow::bail!("{} {status}: {detail}", model.provider);
     }
 
     let mut usage = Usage::default();

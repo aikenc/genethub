@@ -157,7 +157,6 @@ impl Client {
     pub async fn wait_for_turn_to_start(&self) -> Result<u64> {
         let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
         let mut events = self.events.lock().await;
-        let mut last = 0;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
@@ -165,10 +164,10 @@ impl Client {
             }
             match tokio::time::timeout(remaining, events.recv()).await {
                 Ok(Some(event)) => {
-                    last = event.seq;
+                    let seq = event.seq;
                     match event.event {
                         SessionEvent::Item { .. } | SessionEvent::ItemDelta { .. } => {
-                            return Ok(last)
+                            return Ok(seq)
                         }
                         SessionEvent::TurnCompleted { .. }
                         | SessionEvent::TurnFailed { .. }

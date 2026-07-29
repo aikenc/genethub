@@ -9,7 +9,7 @@ use std::time::Duration;
 use genehub_proto::{
     Reply, Request, SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnErrorCode,
 };
-use genehub_testing::mock_only;
+use genehub_testing::{mock_only, real_only};
 use genehub_testing::{EventsExt, Journey, Scripted, Turn};
 use serde_json::json;
 
@@ -387,6 +387,60 @@ async fn a_key_entered_in_settings_makes_the_very_next_task_work() {
     assert_eq!(
         journey.read_file("result.txt").as_deref().map(str::trim),
         Some("DONE")
+    );
+
+    journey.finish().await;
+}
+
+/// A real provider turning us down.
+///
+/// Every other failure case is injected by the mock, which means they all prove
+/// the same thing: that our own classification is wired up. None of them prove
+/// that a real endpoint's refusal — its status, its body, its headers — lands
+/// anywhere useful. A key that has been revoked is the most ordinary way for
+/// this product to stop working, so it gets a case against the real thing.
+#[tokio::test]
+async fn a_real_provider_that_rejects_our_key_says_so_instead_of_hanging() {
+    let journey = Journey::start().await.expect("journey starts");
+    real_only!(journey);
+
+    journey
+        .client
+        .call(Request::SettingsSetProvider {
+            provider_id: "deepseek".into(),
+            api_key: Some("sk-0000000000000000000000000000000000000000".into()),
+            base_url: None,
+        })
+        .await
+        .expect("the key is stored");
+    journey
+        .client
+        .call(Request::AgentRefresh)
+        .await
+        .expect("agents reprobed");
+
+    let session = journey.session("genet").await.expect("session opens");
+    journey
+        .send(&session, "Say hello.")
+        .await
+        .expect("accepted");
+    let events = journey.client.drain_turn().await.expect("the turn settles");
+
+    let failure = events
+        .failure()
+        .expect("a rejected key cannot look like success");
+    assert!(
+        matches!(
+            failure.code,
+            TurnErrorCode::MissingCredentials | TurnErrorCode::Upstream
+        ),
+        "a rejected key should be classified as something the user can act on, got {:?}",
+        failure
+    );
+    assert!(
+        failure.message.contains("deepseek"),
+        "the message should name the provider the user configured: {}",
+        failure.message
     );
 
     journey.finish().await;
@@ -1008,7 +1062,10 @@ async fn a_session_found_in_the_list_can_be_reopened_and_continued() {
         .iter()
         .find(|summary| summary.id == session)
         .expect("the session should be in the list");
-    assert!(!found.title.is_empty(), "a session with no title is unfindable");
+    assert!(
+        !found.title.is_empty(),
+        "a session with no title is unfindable"
+    );
 
     let (snapshot, _replayed, _reset) = match journey
         .client

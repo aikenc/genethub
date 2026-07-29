@@ -361,6 +361,21 @@ fn real_api_key() -> Result<String> {
     anyhow::bail!("DEEPSEEK_API_KEY is not set and was not found in .env")
 }
 
+/// Skips a case that needs a real provider when the mock is standing in.
+#[macro_export]
+macro_rules! real_only {
+    ($journey:expr) => {
+        if $journey.mode.is_mock() {
+            eprintln!(
+                "skipping {}: only a real provider can reject us for real",
+                module_path!()
+            );
+            $journey.finish().await;
+            return;
+        }
+    };
+}
+
 /// Skips a mock-only case in real mode, printing why.
 ///
 /// `docs/testing.md` §2.2 asks for the reason to be recorded rather than the

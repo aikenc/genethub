@@ -31,8 +31,8 @@
 | Daemon | `apps/daemon`：会话内核、本地 WS、出站长连接、文件 / git / PTY、配对 | ✅ |
 | Adapter | `genet` ✅ · `acp` ✅ · `opencode` ✅ | ✅ |
 | Relay | `apps/relay`：帧转发、契约、限额、撤销订阅 | ✅ |
-| Web | `packages/web`：会话、文件、变更、终端、设置 | ✅ |
-| Desktop | Tauri 壳：托盘、关窗驻留、单实例、sidecar daemon | ✅ |
+| Web | `packages/web`：会话、文件、变更、终端、设置、打开项目与首启引导 | ✅ |
+| Desktop | Tauri 壳：托盘、关窗驻留、单实例、sidecar daemon、看门狗与接管遗留进程 | ✅ |
 | 测试 | 跨部件集成 + 全栈旅程（浏览器客户端 → daemon → agent → 脚本化模型） | ✅ |
 | 打包 | 安装包体积实测与自动校验 | ✅ |
 | 真实模型 E2E | 用真实 API key 跑完整旅程（含外部 agent） | ✅ |
@@ -53,6 +53,8 @@
 - [x] 干净环境下用内置 agent 跑完一条任务（含至少一次工具调用）
 - [x] 流式输出、工具调用详情、diff 在工作台正常渲染
 - [x] 关主窗口后托盘仍在、daemon 仍在；退出后子进程全部结束
+- [x] 新装的机器能从界面上打开项目并填密钥，不需要知道任何命令或路径以外的东西
+- [x] daemon 被杀后自动回来，端口变化推给前端；上一个外壳留下的 daemon 被接管而不是抢锁失败
 - [x] Linux 包可安装、出现在应用列表，包内 daemon 能起来（`apps/desktop/scripts/bundle.sh` 自动校验）
 - [ ] Windows / macOS 至少一端同样过一遍
 
@@ -73,7 +75,8 @@
 
 **工程**
 
-- [x] 断线重连后事件不丢不重；超出保留窗口时明确回全量快照
+- [x] 断线重连后事件不丢不重；超出保留窗口时明确回全量快照（含回合进行中掉线）
+- [x] 真的重启 daemon 进程后历史还在并能继续对话；停止按钮端到端落 `TurnCanceled`
 - [x] 安装包体积达标：实测下载 6MB、安装后 13MB（预算 80MB / 200MB）
 - [x] 安装目录内不存在 `node` / `node.exe` / `node_modules`（打包脚本里校验，不靠自觉）
 
