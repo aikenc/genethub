@@ -24,6 +24,11 @@ pub enum Request {
     Hello {
         client_name: String,
         protocol_version: u32,
+        /// Present when the client holds a device credential for this machine.
+        /// Required on forwarded connections: the machine decides admission
+        /// itself, and a relay vouches for nobody.
+        #[serde(default)]
+        device: Option<DeviceAuth>,
     },
     /// Subscribe to a session's events. `sinceSeq` asks for a replay of
     /// everything after that sequence number.
@@ -127,6 +132,39 @@ pub enum Request {
     #[serde(rename = "hub.unpair")]
     HubUnpair,
 
+    // -- devices -----------------------------------------------------------
+    /// Who is allowed to reach this machine, and whether remote access is on.
+    #[serde(rename = "device.list")]
+    DeviceList,
+    /// Mints a one-time invite to show as a link and a QR code.
+    #[serde(rename = "device.invite", rename_all = "camelCase")]
+    DeviceInvite {
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Redeems an invite. The only request a stranger may send, and only once
+    /// per invite: everything else needs a credential this call hands out.
+    #[serde(rename = "device.claim", rename_all = "camelCase")]
+    DeviceClaim {
+        code: String,
+        device_name: String,
+        nonce: String,
+        proof: String,
+    },
+    /// Forgets a device. Its live connection drops with it.
+    #[serde(rename = "device.revoke", rename_all = "camelCase")]
+    DeviceRevoke { device_id: String },
+    /// Starts meeting clients at a rendezvous relay.
+    #[serde(rename = "device.remoteAttach", rename_all = "camelCase")]
+    DeviceRemoteAttach {
+        relay_url: String,
+        #[serde(default)]
+        join_token: Option<String>,
+    },
+    /// Stops being reachable from outside. Authorized devices stay authorized.
+    #[serde(rename = "device.remoteDetach")]
+    DeviceRemoteDetach,
+
     // -- workspaces --------------------------------------------------------
     #[serde(rename = "workspace.list")]
     WorkspaceList,
@@ -210,6 +248,14 @@ pub enum Reply {
     },
     Agents(Vec<AgentInfo>),
     HubStatus(HubStatus),
+    #[serde(rename_all = "camelCase")]
+    Devices {
+        devices: Vec<DeviceInfo>,
+        remote: RemoteAccess,
+    },
+    Invite(DeviceInvite),
+    Claimed(DeviceCredential),
+    RemoteAccess(RemoteAccess),
     Settings(Settings),
     Session(SessionSummary),
     Sessions(Vec<SessionSummary>),

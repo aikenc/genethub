@@ -18,6 +18,19 @@ export const config = {
   host: process.env.RELAY_HOST ?? "0.0.0.0",
 
   /**
+   * `rendezvous` is the self-hosted mode: no control plane, no database, and
+   * no opinion about who may connect — the machine decides that itself.
+   */
+  mode(): "control" | "rendezvous" {
+    return process.env.RELAY_MODE === "rendezvous" ? "rendezvous" : "control";
+  },
+
+  /** What a machine has to show to hang an uplink on a rendezvous relay. */
+  joinToken(): string | null {
+    return process.env.RELAY_JOIN_TOKEN ?? null;
+  },
+
+  /**
    * Where the relay asks whether a ticket is good.
    *
    * There is no default and no fallback. A relay that cannot reach a control

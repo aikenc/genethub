@@ -138,6 +138,22 @@ impl Client {
         self.call(Request::Hello {
             client_name: name.to_string(),
             protocol_version: PROTOCOL_VERSION,
+            device: None,
+        })
+        .await
+    }
+
+    /// Says hello as a device the machine paired with earlier.
+    pub async fn hello_as_device(&self, name: &str, device_id: &str, secret: &str) -> Result<Reply> {
+        let nonce = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        self.call(Request::Hello {
+            client_name: name.to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            device: Some(genehub_proto::DeviceAuth {
+                device_id: device_id.to_string(),
+                proof: genet_daemon::devices::proof("client", &nonce, secret),
+                nonce,
+            }),
         })
         .await
     }

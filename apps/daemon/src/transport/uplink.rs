@@ -32,6 +32,20 @@ const HEADER_BYTES: usize = 1 + CHANNEL_ID_BYTES;
 /// Backoff between reconnection attempts, in seconds.
 const BACKOFF: [u64; 6] = [1, 2, 5, 10, 30, 60];
 
+/// What a client arriving on this connection has to show.
+///
+/// The distinction is per-connection rather than per-machine on purpose: a
+/// machine can be enrolled with a Hub and waiting at a rendezvous relay at the
+/// same time, and the two paths must not lend each other trust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    /// Someone with the authority to say so already vouched for this client.
+    Vouched,
+    /// Nobody vouched. The client must present a credential this machine
+    /// issued, and this machine proves itself back.
+    DeviceRequired,
+}
+
 pub struct Uplink {
     task: tokio::task::JoinHandle<()>,
     /// Read by `hub.status`, so the UI can distinguish "paired but the Hub is
@@ -48,6 +62,7 @@ impl Uplink {
         pty: broadcast::Sender<ServerFrame>,
         url: String,
         ticket: String,
+        admission: Admission,
     ) -> Uplink {
         let online = Arc::new(AtomicBool::new(false));
         let task = tokio::spawn({
@@ -55,7 +70,7 @@ impl Uplink {
             async move {
                 let mut attempt = 0usize;
                 loop {
-                    match run(&state, &pty, &url, &ticket, &online).await {
+                    match run(&state, &pty, &url, &ticket, &online, admission).await {
                         Ok(()) => {
                             tracing::info!("the uplink closed cleanly; reconnecting");
                             attempt = 0;
@@ -90,6 +105,7 @@ async fn run(
     url: &str,
     ticket: &str,
     online: &AtomicBool,
+    admission: Admission,
 ) -> Result<()> {
     let mut request = url
         .into_client_request()
@@ -131,7 +147,7 @@ async fn run(
 
         match kind {
             KIND_OPEN => {
-                let opened = open_channel(state, pty, sink.clone(), channel.clone());
+                let opened = open_channel(state, pty, sink.clone(), channel.clone(), admission);
                 channels.insert(channel, opened);
             }
             KIND_TEXT => {
@@ -181,6 +197,7 @@ fn open_channel(
     pty: &broadcast::Sender<ServerFrame>,
     sink: Sink,
     channel: String,
+    admission: Admission,
 ) -> Channel {
     let (inbound, inbound_rx) = mpsc::unbounded_channel::<String>();
     let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<ServerFrame>();
@@ -199,11 +216,13 @@ fn open_channel(
         }
     });
 
-    // A relayed client is authorised by the Hub, not by the daemon's local
-    // token: it never had one. It still has to say hello like anyone else.
+    // A relayed client never had the daemon's local token, so it is admitted
+    // on other grounds: either someone with the authority vouched for it, or
+    // it presents a credential this machine issued (see `Admission`).
     let loop_task = tokio::spawn(session::drive(
         state.clone(),
         TransportKind::Forwarded,
+        admission,
         session::Channels {
             inbound: inbound_rx,
             outbound,

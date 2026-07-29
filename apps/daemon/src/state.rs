@@ -10,7 +10,9 @@ use tokio::sync::{mpsc, RwLock};
 use crate::adapter::registry::Registry;
 use crate::adapter::ProviderMap;
 use crate::config::{Config, MachineState, Paths};
+use crate::devices::Devices;
 use crate::link::SharedLink;
+use crate::remote::SharedRemote;
 use crate::pty::{PtyMessage, Terminals};
 use crate::session::{SessionManager, Store};
 use crate::workspace::Workspaces;
@@ -26,9 +28,15 @@ pub struct AppState {
     pub version: String,
     /// Token loopback and LAN clients must present.
     pub token: String,
+    /// Who may reach this machine from outside. The judge of that question is
+    /// this list, not a relay and not a control plane.
+    pub devices: Devices,
     /// This machine's relationship with a Hub. Set once, right after the state
     /// exists, because the link needs the state to serve relayed clients.
     pub link: std::sync::OnceLock<SharedLink>,
+    /// The rendezvous relay this machine waits at, if any. Set alongside the
+    /// link and for the same reason.
+    pub remote: std::sync::OnceLock<SharedRemote>,
     /// Raised when a local client asks the daemon to stop.
     ///
     /// Signals are the natural way to say this and Windows has no equivalent
@@ -45,6 +53,7 @@ impl AppState {
         paths.ensure()?;
         let config = Config::load(&paths.config_file())?;
         let machine = MachineState::load_or_create(&paths.state_file())?;
+        let devices = Devices::load(paths.devices_file());
 
         let registry = Arc::new(Registry::new(&config.agents.custom));
         let store = Store::new(paths.sessions_dir());
@@ -74,7 +83,9 @@ impl AppState {
             terminals,
             version: env!("CARGO_PKG_VERSION").to_string(),
             token: uuid::Uuid::new_v4().simple().to_string(),
+            devices,
             link: std::sync::OnceLock::new(),
+            remote: std::sync::OnceLock::new(),
             shutdown: Arc::new(tokio::sync::Notify::new()),
         });
         Ok((state, pty_rx))

@@ -209,6 +209,12 @@ pub struct HelloResult {
     /// Short human-comparable form of the daemon key, for out-of-band checking.
     pub fingerprint: String,
     pub transport: TransportKind,
+    pub machine_name: String,
+    /// The machine's half of the mutual proof, present when the client
+    /// authenticated with a device credential. A client that asked for one and
+    /// did not get it is talking to something that is not its machine.
+    #[ts(optional)]
+    pub proof: Option<String>,
 }
 
 /// The machine-level settings a client may see and change.
@@ -270,4 +276,83 @@ pub enum HubStatus {
     /// the reason stays on screen instead of reverting to "unpaired".
     #[serde(rename_all = "camelCase")]
     Failed { hub_url: String, message: String },
+}
+
+// ---------------------------------------------------------------------------
+// Devices
+//
+// Who may reach this machine from outside is decided here and nowhere else.
+// The list lives on the machine, the way `authorized_keys` does, so revoking
+// takes effect the moment it is edited and does not depend on any server
+// being reachable (`security-model.md` §4).
+
+/// One entry in the machine's authorized-devices list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub paired_at: String,
+    #[ts(optional)]
+    pub last_seen_at: Option<String>,
+    /// True while this device has a live connection to the machine.
+    pub connected: bool,
+}
+
+/// A one-time chance to become an authorized device.
+///
+/// The code is not a credential: it buys exactly one exchange, and only within
+/// its lifetime. What comes back from that exchange is the credential.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct DeviceInvite {
+    pub code: String,
+    /// Where the client should meet this machine. Absent when remote access is
+    /// off, in which case the invite is only usable over the LAN.
+    #[ts(optional)]
+    pub rendezvous_url: Option<String>,
+    pub expires_at: String,
+}
+
+/// What a client keeps after redeeming an invite.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct DeviceCredential {
+    pub device_id: String,
+    /// Shared with this machine only. Never sent again after this reply: later
+    /// connections prove knowledge of it instead (`security-model.md` §4.2).
+    pub secret: String,
+    pub machine_name: String,
+    pub fingerprint: String,
+    /// The machine's half of the mutual proof, over the nonce the client sent.
+    pub proof: String,
+}
+
+/// Whether this machine is reachable through a rendezvous relay.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RemoteAccess {
+    #[ts(optional)]
+    pub relay_url: Option<String>,
+    /// Where clients meet this machine. Unguessable, and derived from the
+    /// machine identity so it survives restarts.
+    #[ts(optional)]
+    pub rendezvous_url: Option<String>,
+    pub online: bool,
+}
+
+/// A client proving it is on the authorized list, without sending its secret.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct DeviceAuth {
+    pub device_id: String,
+    /// Fresh per connection. A nonce is never accepted twice, so intercepting
+    /// one proof buys nothing.
+    pub nonce: String,
+    pub proof: String,
 }

@@ -1339,6 +1339,7 @@ async fn a_client_speaking_another_protocol_version_is_turned_away() {
         .expect_error(Request::Hello {
             client_name: "from the future".into(),
             protocol_version: 999,
+            device: None,
         })
         .await;
     assert!(error.contains("ProtocolVersion"), "got: {error}");

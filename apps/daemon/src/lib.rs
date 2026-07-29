@@ -5,11 +5,13 @@
 
 pub mod adapter;
 pub mod config;
+pub mod devices;
 pub mod files;
 pub mod git;
 pub mod hub;
 pub mod link;
 pub mod pty;
+pub mod remote;
 pub mod router;
 pub mod session;
 pub mod state;
@@ -34,9 +36,13 @@ impl Daemon {
         let listener = transport::local::serve(state.clone(), pty.clone()).await?;
         state.publish_endpoint(listener.port)?;
 
-        let mut link = link::Link::new(state.paths.clone(), pty);
+        let mut link = link::Link::new(state.paths.clone(), pty.clone());
         link.attach(&state).await;
         let _ = state.link.set(link);
+
+        let mut remote = remote::Remote::new(state.paths.clone(), pty);
+        remote.attach(&state).await;
+        let _ = state.remote.set(remote);
 
         Ok(Daemon {
             state,
@@ -62,6 +68,9 @@ impl Daemon {
         self.state.terminals.close_all().await;
         if let Some(link) = self.state.link.get() {
             link.stop().await;
+        }
+        if let Some(remote) = self.state.remote.get() {
+            remote.stop().await;
         }
         self.listener.abort();
         let _ = std::fs::remove_file(self.state.paths.endpoint_file());

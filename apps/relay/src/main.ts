@@ -14,6 +14,7 @@ import { Hono } from "hono";
 import type { ChannelAuthority } from "./contract/index.js";
 import { Forwarder } from "./forward/index.js";
 import { RemoteAuthority } from "./forward/remote-authority.js";
+import { RendezvousAuthority, resolveJoinToken } from "./forward/rendezvous.js";
 import { config } from "./shared/config.js";
 import { log } from "./shared/log.js";
 
@@ -38,12 +39,15 @@ export async function startRelay(
     controlToken?: string | null;
   } = {},
 ): Promise<Relay> {
+  const host = options.host ?? config.host;
   const authority =
     options.authority ??
-    new RemoteAuthority(
-      options.controlOrigin ?? config.controlOrigin(),
-      options.controlToken ?? config.controlToken(),
-    );
+    (config.mode() === "rendezvous"
+      ? new RendezvousAuthority(resolveJoinToken(config.joinToken(), host))
+      : new RemoteAuthority(
+          options.controlOrigin ?? config.controlOrigin(),
+          options.controlToken ?? config.controlToken(),
+        ));
 
   const app = new Hono();
   const forwarder = new Forwarder(authority);
@@ -54,7 +58,6 @@ export async function startRelay(
 
   app.get("/api/health", (c) => c.json({ status: "ok", forward: forwarder.stats() }));
 
-  const host = options.host ?? config.host;
   const port = options.port ?? config.port;
   const server = await new Promise<Server>((resolve) => {
     const created = serve({ fetch: app.fetch, hostname: host, port }, () =>

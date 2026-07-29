@@ -64,6 +64,11 @@ impl Paths {
         self.root.join("endpoint.json")
     }
 
+    /// Who is allowed to reach this machine from outside.
+    pub fn devices_file(&self) -> PathBuf {
+        self.root.join("devices.json")
+    }
+
     pub fn sessions_dir(&self) -> PathBuf {
         self.root.join("sessions")
     }
@@ -185,6 +190,19 @@ pub struct MachineState {
     /// Set once the machine is enrolled with a Hub.
     #[serde(default)]
     pub enrollment: Option<Enrollment>,
+    /// Set once the owner points this machine at a relay to be reachable from
+    /// outside. Independent of `enrollment`: self-hosting needs no Hub.
+    #[serde(default)]
+    pub rendezvous: Option<Rendezvous>,
+}
+
+/// A relay this machine waits at, and the token it needs to hang there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rendezvous {
+    pub relay_url: String,
+    #[serde(default)]
+    pub join_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +235,7 @@ impl MachineState {
             machine_id: format!("m_{}", uuid::Uuid::new_v4().simple()),
             secret: uuid::Uuid::new_v4().simple().to_string(),
             enrollment: None,
+            rendezvous: None,
         };
         state.save(path)?;
         Ok(state)

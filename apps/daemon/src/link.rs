@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, Mutex};
 use crate::config::{Enrollment, MachineState, Paths};
 use crate::hub;
 use crate::state::AppState;
-use crate::transport::uplink::Uplink;
+use crate::transport::uplink::{Admission, Uplink};
 
 enum Stage {
     Unpaired,
@@ -252,11 +252,14 @@ fn dial(
         pty.clone(),
         enrollment.uplink_url.clone(),
         enrollment.ticket(),
+        // The Hub only opens a channel for a client it already authorized, so
+        // this path does not ask for a device credential on top.
+        Admission::Vouched,
     )
 }
 
 /// What the owner will see this machine called in their list.
-fn default_display_name() -> String {
+pub fn default_display_name() -> String {
     std::env::var("GENEHUB_MACHINE_NAME")
         .ok()
         .or_else(hostname)

@@ -1,0 +1,96 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import { RendezvousAuthority, resolveJoinToken } from "../src/forward/rendezvous.js";
+import { CLIENT_PATH, DAEMON_PATH } from "../src/contract/index.js";
+import { closed, connect, nextMessage, opened, startTestRelay } from "./harness.js";
+
+/**
+ * The self-hosted mode. What matters here is what the relay does *not* do:
+ * it never asks anyone whether a client should be let in, because in this mode
+ * there is nobody to ask. That decision belongs to the machine.
+ */
+describe("the rendezvous mode", () => {
+  it("matches a client to the machine holding the same slot", async () => {
+    const relay = await startTestRelay(new RendezvousAuthority(null));
+    const machine = opened(await connect(`${relay.wsOrigin}${DAEMON_PATH}?ticket=slot-1`));
+    const client = opened(await connect(`${relay.wsOrigin}${CLIENT_PATH}?ticket=slot-1`));
+
+    // The machine is told a channel opened, which is all the pairing there is.
+    const opening = await nextMessage(machine);
+    assert.equal(opening[0], 1);
+
+    client.close();
+    machine.close();
+    await relay.stop();
+  });
+
+  it("turns away a client naming a slot nobody is holding", async () => {
+    const relay = await startTestRelay(new RendezvousAuthority(null));
+    const result = await connect(`${relay.wsOrigin}${CLIENT_PATH}?ticket=nobody-is-here`);
+    assert.equal("error" in result && result.error, "409");
+    await relay.stop();
+  });
+
+  /**
+   * The token answers "may you use this relay", not "who are you". Getting it
+   * wrong must not look like a network fault.
+   */
+  it("requires the join token from machines when one is configured", async () => {
+    const relay = await startTestRelay(new RendezvousAuthority("let-me-in"));
+
+    const refused = await connect(`${relay.wsOrigin}${DAEMON_PATH}?ticket=wrong.slot-1`);
+    assert.equal("error" in refused && refused.error, "403");
+
+    const machine = opened(await connect(`${relay.wsOrigin}${DAEMON_PATH}?ticket=let-me-in.slot-1`));
+    machine.close();
+    await relay.stop();
+  });
+
+  /**
+   * Clients are deliberately exempt: they can only reach a slot some machine is
+   * already paying for, so demanding the token of them would mean handing it to
+   * every phone that ever connects.
+   */
+  it("does not ask clients for the join token", async () => {
+    const relay = await startTestRelay(new RendezvousAuthority("let-me-in"));
+    const machine = opened(await connect(`${relay.wsOrigin}${DAEMON_PATH}?ticket=let-me-in.slot-1`));
+    const client = opened(await connect(`${relay.wsOrigin}${CLIENT_PATH}?ticket=slot-1`));
+
+    client.close();
+    machine.close();
+    await relay.stop();
+  });
+
+  /**
+   * Squatting is possible and known: an id that leaked lets someone take the
+   * slot while the machine is away. It costs them a denial of service and buys
+   * them nothing else, because the client will ask for a proof they cannot
+   * produce (`docs/security-model.md` §4.2). This test pins the blast radius.
+   */
+  it("lets a later machine take over a slot, which is a nuisance and not an impersonation", async () => {
+    const relay = await startTestRelay(new RendezvousAuthority(null));
+    const first = opened(await connect(`${relay.wsOrigin}${DAEMON_PATH}?ticket=slot-1`));
+    const second = opened(await connect(`${relay.wsOrigin}${DAEMON_PATH}?ticket=slot-1`));
+
+    assert.equal(await closed(first), 4000);
+    second.close();
+    await relay.stop();
+  });
+
+  it("carries no ticket at all as a refusal rather than an empty slot", async () => {
+    const authority = new RendezvousAuthority(null);
+    assert.equal(await authority.authorizeDaemon(""), null);
+    assert.equal(await authority.authorizeClient(""), null);
+  });
+
+  /**
+   * Refusing to start would break `npm start` on a laptop for no gain;
+   * defaulting to "no token" would quietly leave a public relay open.
+   */
+  it("generates a join token only when the relay is reachable from elsewhere", () => {
+    assert.equal(resolveJoinToken(null, "127.0.0.1"), null);
+    assert.equal(resolveJoinToken("configured", "0.0.0.0"), "configured");
+    assert.equal(resolveJoinToken(null, "0.0.0.0")?.length, 48);
+  });
+});

@@ -15,6 +15,7 @@ use futures_util::{SinkExt, StreamExt};
 use genehub_proto::ServerFrame;
 use tokio::sync::{broadcast, mpsc};
 
+use super::uplink::Admission;
 use super::{auth, session};
 use crate::pty::PtyMessage;
 use crate::router;
@@ -182,6 +183,9 @@ async fn connection(socket: WebSocket, context: Context_, remote: IpAddr) {
     let loop_task = tokio::spawn(session::drive(
         context.state.clone(),
         router::transport_for(Some(remote)),
+        // The token was already checked during the upgrade, and it is only
+        // readable by this user on this machine.
+        Admission::Vouched,
         session::Channels {
             inbound: inbound_rx,
             outbound,

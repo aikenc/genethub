@@ -13,6 +13,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::router::{self, SideEffect};
 use crate::state::Shared;
+use crate::transport::uplink::Admission;
 
 /// Everything a transport has to provide.
 pub struct Channels {
@@ -25,12 +26,22 @@ pub struct Channels {
 }
 
 /// Runs one client connection to completion.
-pub async fn drive(state: Shared, transport: TransportKind, channels: Channels) {
+pub async fn drive(
+    state: Shared,
+    transport: TransportKind,
+    admission: Admission,
+    channels: Channels,
+) {
     let Channels {
         mut inbound,
         outbound,
         mut pty,
     } = channels;
+
+    // Subscribed before the handshake so that a revocation racing with it
+    // cannot slip through the gap.
+    let mut revocations = state.devices.subscribe_revocations();
+    let mut device: Option<String> = None;
 
     let pty_out = outbound.clone();
     let pty_task = tokio::spawn(async move {
@@ -50,7 +61,30 @@ pub async fn drive(state: Shared, transport: TransportKind, channels: Channels) 
     let mut subscriptions: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     let mut greeted = false;
 
-    while let Some(text) = inbound.recv().await {
+    loop {
+        let text = tokio::select! {
+            message = inbound.recv() => match message {
+                Some(text) => text,
+                None => break,
+            },
+            // Revoking a device has to reach the connection it is using, or
+            // "revoked" would only mean "cannot come back", which is not what
+            // anyone pressing that button intends.
+            revoked = revocations.recv() => {
+                match revoked {
+                    Ok(id) if Some(&id) == device.as_ref() => {
+                        let _ = outbound.send(ServerFrame::Notice {
+                            level: NoticeLevel::Error,
+                            message: "这台设备的授权已被撤销".into(),
+                        });
+                        break;
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        };
+
         let envelope = match parse_envelope(&text) {
             Ok(envelope) => envelope,
             Err((id, error)) => {
@@ -73,7 +107,11 @@ pub async fn drive(state: Shared, transport: TransportKind, channels: Channels) 
             continue;
         }
 
-        let handled = router::handle(&state, transport, envelope.request).await;
+        let handled = router::handle(&state, transport, admission, envelope.request).await;
+        if let Some(id) = &handled.device {
+            state.devices.mark_connected(id);
+            device = Some(id.clone());
+        }
         let frame = match handled.reply {
             Ok(reply) => {
                 greeted = true;
@@ -116,6 +154,9 @@ pub async fn drive(state: Shared, transport: TransportKind, channels: Channels) 
         task.abort();
     }
     pty_task.abort();
+    if let Some(id) = device {
+        state.devices.mark_disconnected(&id);
+    }
 }
 
 async fn forward_events(

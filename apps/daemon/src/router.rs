@@ -12,6 +12,7 @@ use genehub_proto::{
 use tokio::sync::broadcast;
 
 use crate::state::Shared;
+use crate::transport::uplink::Admission;
 use crate::{files, git};
 
 /// What a handled request may ask the connection to do beyond replying.
@@ -29,6 +30,9 @@ pub enum SideEffect {
 pub struct Handled {
     pub reply: Result<Reply, ProtocolError>,
     pub effect: SideEffect,
+    /// Set when this request authenticated the connection as a known device,
+    /// so the connection can be dropped if that device is later revoked.
+    pub device: Option<String>,
 }
 
 impl Handled {
@@ -36,6 +40,7 @@ impl Handled {
         Handled {
             reply: Ok(reply),
             effect: SideEffect::None,
+            device: None,
         }
     }
 
@@ -46,6 +51,7 @@ impl Handled {
                 message: message.into(),
             }),
             effect: SideEffect::None,
+            device: None,
         }
     }
 }
@@ -69,13 +75,21 @@ fn failed(error: anyhow::Error) -> Handled {
     Handled {
         reply: Err(ProtocolError { code, message }),
         effect: SideEffect::None,
+        device: None,
     }
 }
 
-pub async fn handle(state: &Shared, transport: TransportKind, request: Request) -> Handled {
+pub async fn handle(
+    state: &Shared,
+    transport: TransportKind,
+    admission: Admission,
+    request: Request,
+) -> Handled {
     match request {
         Request::Hello {
-            protocol_version, ..
+            protocol_version,
+            device,
+            ..
         } => {
             if protocol_version != PROTOCOL_VERSION {
                 // Refusing beats guessing: a client that speaks a different
@@ -87,13 +101,40 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
                     ),
                 );
             }
-            Handled::ok(Reply::Hello(HelloResult {
-                daemon_version: state.version.clone(),
-                protocol_version: PROTOCOL_VERSION,
-                machine_id: state.machine.machine_id.clone(),
-                fingerprint: state.machine.fingerprint(),
-                transport,
-            }))
+
+            // The credential is checked even when admission does not require
+            // one: a client that offered it wants the machine's half of the
+            // proof back, and that is the only thing telling it that it
+            // reached the real machine rather than something in its slot.
+            let authenticated = match &device {
+                Some(auth) => match state.devices.authenticate(auth) {
+                    Ok(proof) => Some((auth.device_id.clone(), proof)),
+                    Err(error) => {
+                        return Handled::err(ErrorCode::Unauthorized, format!("{error:#}"))
+                    }
+                },
+                None => None,
+            };
+            if admission == Admission::DeviceRequired && authenticated.is_none() {
+                return Handled::err(
+                    ErrorCode::Unauthorized,
+                    "this machine only accepts devices it has paired with",
+                );
+            }
+
+            Handled {
+                reply: Ok(Reply::Hello(HelloResult {
+                    daemon_version: state.version.clone(),
+                    protocol_version: PROTOCOL_VERSION,
+                    machine_id: state.machine.machine_id.clone(),
+                    fingerprint: state.machine.fingerprint(),
+                    transport,
+                    machine_name: crate::link::default_display_name(),
+                    proof: authenticated.as_ref().map(|(_, proof)| proof.clone()),
+                })),
+                effect: SideEffect::None,
+                device: authenticated.map(|(id, _)| id),
+            }
         }
 
         Request::Subscribe {
@@ -110,6 +151,7 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
                     session_id,
                     receiver,
                 },
+                device: None,
             },
             Err(error) => failed(error),
         },
@@ -117,6 +159,7 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
         Request::Unsubscribe { session_id } => Handled {
             reply: Ok(Reply::Ack),
             effect: SideEffect::Unsubscribe { session_id },
+            device: None,
         },
 
         Request::AgentList => {
@@ -289,6 +332,70 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             None => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),
         },
 
+        Request::DeviceList => Handled::ok(Reply::Devices {
+            devices: state.devices.list(),
+            remote: remote_status(state).await,
+        }),
+
+        Request::DeviceInvite { name } => {
+            let mut invite = state.devices.invite(name);
+            invite.rendezvous_url = remote_status(state).await.rendezvous_url;
+            Handled::ok(Reply::Invite(invite))
+        }
+
+        Request::DeviceClaim {
+            code,
+            device_name,
+            nonce,
+            proof,
+        } => match state.devices.claim(&code, &device_name, &nonce, &proof) {
+            Ok((mut credential, _)) => {
+                credential.machine_name = crate::link::default_display_name();
+                credential.fingerprint = state.machine.fingerprint();
+                Handled::ok(Reply::Claimed(credential))
+            }
+            // Deliberately one message for every way this can fail. Telling a
+            // stranger which part they got wrong is telling them what to try
+            // next.
+            Err(_) => Handled::err(
+                ErrorCode::Unauthorized,
+                "这个配对链接已经失效了，请在机器上重新生成一个",
+            ),
+        },
+
+        Request::DeviceRevoke { device_id } => match state.devices.revoke(&device_id) {
+            Ok(_) => Handled::ok(Reply::Devices {
+                devices: state.devices.list(),
+                remote: remote_status(state).await,
+            }),
+            Err(error) => failed(error),
+        },
+
+        Request::DeviceRemoteAttach {
+            relay_url,
+            join_token,
+        } => {
+            let Some(remote) = state.remote.get() else {
+                return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
+            };
+            match remote.set(&relay_url, join_token).await {
+                Ok(status) => Handled::ok(Reply::RemoteAccess(status)),
+                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+            }
+        }
+
+        Request::DeviceRemoteDetach => match state.remote.get() {
+            Some(remote) => match remote.clear().await {
+                Ok(status) => Handled::ok(Reply::RemoteAccess(status)),
+                Err(error) => failed(error),
+            },
+            None => Handled::ok(Reply::RemoteAccess(genehub_proto::RemoteAccess {
+                relay_url: None,
+                rendezvous_url: None,
+                online: false,
+            })),
+        },
+
         Request::WorkspaceList => Handled::ok(Reply::Workspaces(state.workspaces.list().await)),
 
         Request::WorkspaceOpen { root } => {
@@ -440,9 +547,26 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
     }
 }
 
+async fn remote_status(state: &Shared) -> genehub_proto::RemoteAccess {
+    match state.remote.get() {
+        Some(remote) => remote.status().await,
+        None => genehub_proto::RemoteAccess {
+            relay_url: None,
+            rendezvous_url: None,
+            online: false,
+        },
+    }
+}
+
 /// Requests allowed before a successful `hello`.
+///
+/// Redeeming an invite is the other one: the device doing it has no credential
+/// yet, which is the entire point of the exchange.
 pub fn needs_handshake(request: &Request) -> bool {
-    !matches!(request, Request::Hello { .. })
+    !matches!(
+        request,
+        Request::Hello { .. } | Request::DeviceClaim { .. }
+    )
 }
 
 pub fn transport_for(remote: Option<std::net::IpAddr>) -> TransportKind {
@@ -477,7 +601,8 @@ mod tests {
     fn only_hello_may_precede_the_handshake() {
         assert!(!needs_handshake(&Request::Hello {
             client_name: "web".into(),
-            protocol_version: 1
+            protocol_version: 1,
+            device: None,
         }));
         assert!(needs_handshake(&Request::AgentList));
     }
