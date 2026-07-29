@@ -1,7 +1,7 @@
 # Roadmap
 
 > 原则：先打通「最简单能用」，再补设备、协作与加密。  
-> 关联：[architecture.md](./architecture.md) · [daemon.md](./daemon.md) · [web-workbench.md](./web-workbench.md) · [security-model.md](./security-model.md)
+> 关联：[architecture.md](./architecture.md) · [daemon.md](./daemon.md) · [web-workbench.md](./web-workbench.md) · [security-model.md](./security-model.md) · [third-party-agents.md](./third-party-agents.md)
 
 ---
 
@@ -10,7 +10,7 @@
 | 阶段 | 名称 | 用户能得到什么 | 状态 |
 |------|------|----------------|------|
 | **MVP** | 能装、能挂、能跑、能接力 | 安装 → 托盘后台 → 真跑起一条任务 → 换设备继续 | 进行中 |
-| **M2** | 能带走 · 能多选 | 手机 App、设备管理、Claude Code / Codex 专用 adapter、分屏 | 计划 |
+| **M2** | 能带走 · 能多选 | 手机 App、设备管理、分屏 | 计划 |
 | **M3** | 能协作 | 正式账号、多人共用一台机器、会话 fork / rewind | 计划 |
 | **M4** | 能不信任中转 | 端到端加密：relay 只见密文 | 计划 |
 
@@ -29,7 +29,7 @@
 | 协议 | `packages/proto`：归一化 `TimelineItem` / `SessionEvent` / `ToolCallDetail`，生成两端类型 | ✅ |
 | Agent | `apps/agent`：agent loop、provider、技能、会话持久化、工具集 | ✅ |
 | Daemon | `apps/daemon`：会话内核、本地 WS、出站长连接、文件 / git / PTY、配对 | ✅ |
-| Adapter | `genet` ✅ · `acp` ✅ · `opencode` ✅ | ✅ |
+| Adapter | `genet` ✅ · `acp` ✅ · `opencode` ✅ · `claude` ✅ · `codex` ✅ | ✅ |
 | Relay | `apps/relay`：帧转发、契约、限额、撤销订阅 | ✅ |
 | Web | `packages/web`：会话、文件、变更、终端、设置、打开项目、开箱即用的首个会话 | ✅ |
 | Desktop | Tauri 壳：托盘、关窗驻留、单实例、sidecar daemon、看门狗与接管遗留进程 | ✅ |
@@ -40,7 +40,8 @@
 ### 明确不做
 
 - 手机原生 App（M2；MVP 用手机浏览器，界面已按小屏适配）
-- Claude Code / Codex 专用 adapter（M2；MVP 用通用 ACP 覆盖一批）
+- Claude Code / Codex 的原生协议适配（`stream-json` / 原生 JSON-RPC）：两家官方维护的 ACP wrapper 已经够用且经真实模型验证过，除非它们出现 ACP 覆盖不到的能力，否则不会去写、去维护一份等价的协议翻译（见 [third-party-agents.md](./third-party-agents.md)）
+- Codex 接 DeepSeek：不是我们的待办，是 Codex（只认 Responses API）与 DeepSeek（只有 Chat Completions）两个上游之间的协议缺口，见 [third-party-agents.md](./third-party-agents.md) §4
 - 应用内自动更新（手动重装）
 - 端到端加密（M4；当前为传输层加密，见 [security-model.md](./security-model.md) §1.1）
 - 前端长尾能力：语音、定时任务、分屏、fork / rewind 等，清单见 [web-workbench.md](./web-workbench.md) §4
@@ -64,6 +65,8 @@
 - [x] daemon 内核代码中不存在按 agent 名字分支的逻辑
 - [x] 未知工具类型走 `Unknown` 兜底渲染，不白屏、不丢事件
 - [x] 同一段前端代码分别驱动内置 agent 与一个真实外部 agent，渲染结果形状一致
+- [x] Claude Code（经 `claude-agent-acp`）接 DeepSeek 官方 Anthropic 兼容端点，真实模型端到端跑通并固化为回归测试（`testing/tests/claude.rs`）
+- [x] Codex（经 `codex-acp`）默认注册、探测与选择器展示正常；接 DeepSeek 的已知限制记录在案，不在本项目范围内解决
 
 **接入与安全**
 
@@ -88,7 +91,6 @@
 - Tauri Mobile 手机 App：扫码 + 已登录设备确认
 - 已登录设备列表、撤销、「信任此设备」
 - 深链 `genehub://`；桌面端开机自启
-- **`claude` 与 `codex` 专用 adapter**：装机量最大的两个，通用 ACP 覆盖不到的能力（各自的审批语义）在这里补齐
 - 工作台分屏；工具调用折叠视图
 - 托盘在线状态
 

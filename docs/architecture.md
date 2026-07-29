@@ -92,15 +92,15 @@ pub trait AgentAdapter: Send + Sync {
 |---------|------|------|------|
 | `genet` | 子进程 + stdio JSONL | 自研内置 agent，装完即可跑 | MVP |
 | `opencode` | 本地 HTTP + SSE | OpenCode | MVP |
-| `acp` | 子进程 + ACP over stdio | 一份代码覆盖 Cursor / Gemini / goose 等一批 CLI | MVP |
-| `claude` | 子进程 + stream-json | Claude Code | M2 |
-| `codex` | 子进程 + JSON-RPC | Codex | M2 |
+| `acp` | 子进程 + ACP over stdio | 一份代码覆盖 Claude Code / Codex / Cursor / Gemini / goose 等一批 CLI | MVP |
 
 MVP 三个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一批 agent**，`opencode` 则是**形状差异最大的那个**——它不是 stdio 而是本地 HTTP + SSE。用它证伪 B3 最狠。
 
+`claude`（拉起 `claude-agent-acp`）和 `codex`（拉起 `codex-acp`）就是 `acp` adapter 的两个默认注册实例，不是单独的传输实现：这两个 CLI 各自的维护方已经发布了 ACP wrapper，直接复用比照搬各自的原生协议（Claude Code 的 `stream-json`、Codex 的原生 JSON-RPC）风险更低——原生协议翻译要我们自己跟着它们的版本走，ACP 是一份公开、双方都维护的契约。详见 [third-party-agents.md](./third-party-agents.md)。
+
 **外部 agent 一律不随包分发**，只检测用户自己安装的。除了体积与授权，还有一条更硬的理由：有些 agent 自带 Node 或其他运行时，打包它们等于把它们的运行时依赖变成我们的，而 PC 端零 Node 运行时是硬约束（[desktop-client.md](./desktop-client.md) §4.1）。
 
-用户自定义 agent 走配置声明，不需要改代码：
+用户自定义 agent 走配置声明，不需要改代码，`claude` / `codex` 出厂默认注册也只是同一机制的两个固定实例：
 
 ```jsonc
 { "agents": { "goose": { "extends": "acp", "command": ["goose", "acp"] } } }

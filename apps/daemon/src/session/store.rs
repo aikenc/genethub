@@ -357,7 +357,10 @@ mod tests {
 
     #[test]
     fn titles_come_from_the_first_non_empty_line_and_stay_short() {
-        assert_eq!(title_from("\n\nhello there\nmore").as_deref(), Some("hello there"));
+        assert_eq!(
+            title_from("\n\nhello there\nmore").as_deref(),
+            Some("hello there")
+        );
         assert_eq!(title_from("   "), None, "nothing to name it after");
         assert_eq!(title_from(&"x".repeat(200)).unwrap().chars().count(), 60);
     }

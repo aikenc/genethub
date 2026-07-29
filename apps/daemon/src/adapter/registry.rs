@@ -24,8 +24,21 @@ impl Registry {
         let mut adapters: Vec<SharedAdapter> = vec![
             Arc::new(GenetAdapter::discover()),
             Arc::new(OpenCodeAdapter),
-            // A generic ACP entry so an ACP-speaking CLI on PATH works with no
-            // configuration at all.
+            // Claude Code and Codex are both ACP-speaking once wrapped by their
+            // maintainers' own adapters (`claude-agent-acp`, `codex-acp`). We
+            // spawn the CLI and translate its wire format like any other
+            // adapter; which backend it talks to is that CLI's own
+            // configuration (env vars, its native config file, ChatGPT login,
+            // …), never something this daemon reaches into
+            // (`docs/architecture.md` §3, boundary B1).
+            Arc::new(AcpAdapter::new(
+                "claude",
+                "Claude Code",
+                vec!["claude-agent-acp".into()],
+            )),
+            Arc::new(AcpAdapter::new("codex", "Codex", vec!["codex-acp".into()])),
+            // A generic ACP entry so any other ACP-speaking CLI on PATH works
+            // with no configuration at all.
             Arc::new(AcpAdapter::new(
                 "acp",
                 "ACP agent",
@@ -119,6 +132,20 @@ mod tests {
         let genet = registry.get("genet").expect("the built-in agent");
         assert!(genet.builtin());
         assert!(!registry.get("opencode").unwrap().builtin());
+    }
+
+    /// Claude Code and Codex ship no code of ours; they are ACP-wrapped CLIs
+    /// like any custom `extends: "acp"` entry, just registered by default so
+    /// users do not have to hand-write the config (`docs/architecture.md` §3).
+    #[tokio::test]
+    async fn claude_and_codex_are_registered_out_of_the_box_as_ordinary_acp_agents() {
+        let registry = Registry::new(&BTreeMap::new());
+        let claude = registry.get("claude").expect("claude is registered");
+        assert!(!claude.builtin());
+        assert_eq!(claude.label(), "Claude Code");
+        let codex = registry.get("codex").expect("codex is registered");
+        assert!(!codex.builtin());
+        assert_eq!(codex.label(), "Codex");
     }
 
     #[tokio::test]

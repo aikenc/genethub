@@ -250,12 +250,9 @@ mod tests {
         assert_eq!(answer.status(), 202);
 
         // Only now does the main loop begin waiting.
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            state.shutdown.notified(),
-        )
-        .await
-        .expect("the daemon was told to stop and must still know it");
+        tokio::time::timeout(std::time::Duration::from_secs(2), state.shutdown.notified())
+            .await
+            .expect("the daemon was told to stop and must still know it");
 
         listener.handle.abort();
     }

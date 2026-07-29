@@ -310,7 +310,7 @@ async fn completions(
 
 /// The same stream, one frame every `gap`.
 fn trickle(lines: Vec<String>, gap: Duration) -> Response {
-    let stream = futures_util::stream::iter(lines.into_iter()).then(move |line| async move {
+    let stream = futures_util::stream::iter(lines).then(move |line| async move {
         tokio::time::sleep(gap).await;
         Ok::<_, std::io::Error>(line.into_bytes())
     });

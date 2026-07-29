@@ -1063,7 +1063,10 @@ async fn a_session_found_in_the_list_can_be_reopened_and_continued() {
         .find(|summary| summary.id == session)
         .expect("the session should be in the list");
     assert!(
-        found.title.as_deref().is_some_and(|title| !title.is_empty()),
+        found
+            .title
+            .as_deref()
+            .is_some_and(|title| !title.is_empty()),
         "a session with no title is unfindable"
     );
 
