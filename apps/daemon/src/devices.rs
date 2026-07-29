@@ -281,7 +281,8 @@ pub fn proof(role: &str, nonce: &str, secret: &str) -> String {
 /// Derived from the machine identity so it survives restarts, and from the
 /// secret so it cannot be guessed by anyone who merely knows the machine id.
 pub fn rendezvous_id(machine_id: &str, machine_secret: &str) -> String {
-    let digest = Sha256::digest(format!("genehub-rendezvous:{machine_id}:{machine_secret}").as_bytes());
+    let digest =
+        Sha256::digest(format!("genehub-rendezvous:{machine_id}:{machine_secret}").as_bytes());
     digest
         .iter()
         .take(16)

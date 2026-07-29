@@ -563,10 +563,7 @@ async fn remote_status(state: &Shared) -> genehub_proto::RemoteAccess {
 /// Redeeming an invite is the other one: the device doing it has no credential
 /// yet, which is the entire point of the exchange.
 pub fn needs_handshake(request: &Request) -> bool {
-    !matches!(
-        request,
-        Request::Hello { .. } | Request::DeviceClaim { .. }
-    )
+    !matches!(request, Request::Hello { .. } | Request::DeviceClaim { .. })
 }
 
 pub fn transport_for(remote: Option<std::net::IpAddr>) -> TransportKind {

@@ -92,6 +92,13 @@ impl Client {
                     }
                 }
             }
+
+            // A closed socket answers every outstanding call. Leaving them
+            // hanging turns "the daemon hung up on us", which several cases are
+            // specifically about, into a timeout minutes later.
+            for (_, sender) in reader_pending.lock().await.drain() {
+                let _ = sender.send(Err("the connection closed".into()));
+            }
         });
 
         Ok(Client {
@@ -144,8 +151,17 @@ impl Client {
     }
 
     /// Says hello as a device the machine paired with earlier.
-    pub async fn hello_as_device(&self, name: &str, device_id: &str, secret: &str) -> Result<Reply> {
-        let nonce = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+    pub async fn hello_as_device(
+        &self,
+        name: &str,
+        device_id: &str,
+        secret: &str,
+    ) -> Result<Reply> {
+        let nonce = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
         self.call(Request::Hello {
             client_name: name.to_string(),
             protocol_version: PROTOCOL_VERSION,

@@ -121,6 +121,16 @@ export function Sidebar({
         >
           终端
         </button>
+        <button
+          type="button"
+          className="rounded px-2 py-1 text-xs text-muted hover:bg-sidebar-hover hover:text-fg"
+          onClick={() => {
+            openTab("devices");
+            onNavigate();
+          }}
+        >
+          设备
+        </button>
         {extraTabs.map((tab) => (
           <button
             key={tab.id}

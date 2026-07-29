@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 
 import { ChangesPanel } from "./changes/ChangesPanel";
+import { claimMachine, deviceName } from "./devices/claim";
+import { DevicesPanel } from "./devices/DevicesPanel";
 import { FilesPanel } from "./files/FilesPanel";
 import { detectHost, type Endpoint, type Host } from "./host";
 import { Client } from "./protocol/client";
@@ -23,7 +25,8 @@ import { OpenProject } from "./workspace/OpenProject";
  * open another one every time anything changed, which React rightly treats as
  * a runaway loop and answers by rendering nothing at all.
  */
-const openConnection = (endpoint: Endpoint) => new Client({ url: endpoint.url });
+const openConnection = (endpoint: Endpoint) =>
+  new Client({ url: endpoint.url, credential: endpoint.credential });
 
 /**
  * The workbench shell: left session tree, closable tabs, chat in the middle,
@@ -34,6 +37,7 @@ export function App({
   host = detectHost(),
   connect = openConnection,
   extraTabs = [],
+  claim = claimMachine,
 }: {
   host?: Host;
   connect?: (endpoint: Endpoint) => Client;
@@ -42,8 +46,15 @@ export function App({
    * plain workbench, which is exactly what a self-hosted deployment wants.
    */
   extraTabs?: ExtraTab[];
+  claim?: typeof claimMachine;
 }) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">("loading");
+  // Decided during the first render, not in an effect. An effect would run
+  // after the one below it has already resolved an endpoint, and the page
+  // would connect uncredentialed while the pairing was still in flight.
+  const [claiming, setClaiming] = useState<"idle" | "working" | { error: string }>(() =>
+    host.pendingPairing?.() ? "working" : "idle",
+  );
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const workbench = useWorkbench();
   const pairing = workbench.hub?.state === "pairing";
@@ -58,15 +69,39 @@ export function App({
     return () => clearInterval(timer);
   }, [pairing]);
 
+  // Redeeming a pairing link happens before anything else and instead of
+  // connecting: the invite is one-time, and the credential it returns is what
+  // the connection will need a moment later.
   useEffect(() => {
+    const invite = host.pendingPairing?.();
+    if (!invite) return;
+    let cancelled = false;
+    void claim(invite.endpoint, invite.code, deviceName())
+      .then((machine) => {
+        if (cancelled) return;
+        host.rememberPairing?.(machine);
+        setClaiming("idle");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setClaiming({ error: error instanceof Error ? error.message : String(error) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [host, claim]);
+
+  useEffect(() => {
+    if (claiming !== "idle") return;
     const look = () => void host.endpoint().then(setEndpoint);
     look();
     return host.onEndpointChange?.(look);
-  }, [host]);
+  }, [host, claiming]);
 
   useEffect(() => host.onPairRequested?.(() => useWorkbench.getState().openTab("settings")), [host]);
 
   useEffect(() => {
+    if (claiming !== "idle") return;
     if (endpoint === "loading" || endpoint === null) return;
     const client = connect(endpoint);
     client.connect();
@@ -74,6 +109,16 @@ export function App({
     return () => client.close();
   }, [endpoint, connect]);
 
+  if (claiming === "working") return <Splash>正在和这台机器配对…</Splash>;
+  if (claiming !== "idle") {
+    return (
+      <Splash>
+        <p>配对没有完成。</p>
+        <p className="text-muted">{claiming.error}</p>
+        <p className="text-xs text-faint">配对链接只能用一次，请在那台机器上重新生成一个。</p>
+      </Splash>
+    );
+  }
   if (endpoint === "loading") return <Splash>正在查找这台机器…</Splash>;
   if (!endpoint) {
     return (
@@ -180,6 +225,11 @@ export function App({
             {kind === "settings" ? (
               <div className="min-h-0 flex-1 overflow-y-auto">
                 <SettingsPanel host={host} endpoint={endpoint} />
+              </div>
+            ) : null}
+            {kind === "devices" ? (
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <DevicesPanel />
               </div>
             ) : null}
             {extraTabs.map((tab) =>

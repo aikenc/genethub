@@ -7,6 +7,8 @@
  * agent's `Capabilities` decide which controls exist (`web-workbench.md` §7).
  */
 
+import { findMachine, type PairedMachine, readPairingLink, rememberMachine } from "../devices/machines";
+
 export interface Endpoint {
   /** WebSocket URL for the daemon, direct or relayed. */
   url: string;
@@ -19,6 +21,11 @@ export interface Endpoint {
    * what makes comparing against the handshake worth anything.
    */
   fingerprint?: string;
+  /**
+   * What this browser got when it paired with the machine. A machine reached
+   * through a rendezvous relay will not talk without it.
+   */
+  credential?: { deviceId: string; secret: string };
 }
 
 export interface Notification {
@@ -44,6 +51,13 @@ export interface Host {
   onEndpointChange?(listener: () => void): () => void;
   /** The shell asking the workbench to show remote access, e.g. from a tray menu. */
   onPairRequested?(listener: () => void): () => void;
+  /**
+   * An unredeemed pairing invite the user arrived with, if this shell can be
+   * arrived at by link at all. A desktop app cannot.
+   */
+  pendingPairing?(): { code: string; endpoint: string } | null;
+  /** Records the redeemed pairing so later visits connect without one. */
+  rememberPairing?(machine: PairedMachine): void;
 }
 
 /** Tauri injects this; its absence is how we know we are in a browser. */
@@ -91,10 +105,13 @@ export function browserHost(location: Pick<Location, "hash"> = window.location):
       const fragment = new URLSearchParams(location.hash.replace(/^#/, ""));
       const url = fragment.get("endpoint");
       if (!url) return null;
+      const paired = findMachine(url);
       return {
         url,
         via: url.includes("/forward/client") ? "relay" : "lan",
-        label: new URL(url).host,
+        label: paired?.name ?? new URL(url).host,
+        fingerprint: paired?.fingerprint,
+        credential: paired ? { deviceId: paired.deviceId, secret: paired.secret } : undefined,
       };
     },
     notify({ title, body }) {
@@ -107,6 +124,15 @@ export function browserHost(location: Pick<Location, "hash"> = window.location):
     },
     openExternal(url) {
       window.open(url, "_blank", "noopener,noreferrer");
+    },
+    pendingPairing() {
+      return readPairingLink(location.hash);
+    },
+    rememberPairing(machine) {
+      rememberMachine(machine);
+      // Drops the one-time code from the address bar so a reload does not try
+      // to spend it twice, and so it stays out of the browser's history.
+      window.location.hash = `endpoint=${encodeURIComponent(machine.endpoint)}`;
     },
   };
 }

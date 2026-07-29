@@ -12,8 +12,8 @@ use crate::adapter::ProviderMap;
 use crate::config::{Config, MachineState, Paths};
 use crate::devices::Devices;
 use crate::link::SharedLink;
-use crate::remote::SharedRemote;
 use crate::pty::{PtyMessage, Terminals};
+use crate::remote::SharedRemote;
 use crate::session::{SessionManager, Store};
 use crate::workspace::Workspaces;
 

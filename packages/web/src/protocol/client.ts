@@ -7,6 +7,8 @@ import type {
   ServerFrame,
 } from "@genehub/proto";
 
+import { proof, randomNonce } from "../devices/proof";
+
 export const PROTOCOL_VERSION = 1;
 
 export type ConnectionState = "connecting" | "ready" | "reconnecting" | "closed";
@@ -14,6 +16,11 @@ export type ConnectionState = "connecting" | "ready" | "reconnecting" | "closed"
 export interface ClientOptions {
   url: string;
   clientName?: string;
+  /**
+   * Present when this browser paired with the machine earlier. Required by a
+   * machine reached through a rendezvous relay, which vouches for nobody.
+   */
+  credential?: { deviceId: string; secret: string };
   /** Injected in tests, and by the desktop host when it wants its own socket. */
   socketFactory?: (url: string) => WebSocketLike;
   /** Delay before each reconnection attempt. Also injected in tests. */
@@ -182,6 +189,8 @@ export class Client {
   // -------------------------------------------------------------------------
 
   private async handshake(): Promise<void> {
+    const credential = this.options.credential;
+    const nonce = credential ? randomNonce() : null;
     const id = String(this.nextId++);
     const frame = JSON.stringify({
       id,
@@ -189,6 +198,14 @@ export class Client {
       payload: {
         clientName: this.options.clientName ?? "genehub-web",
         protocolVersion: PROTOCOL_VERSION,
+        device:
+          credential && nonce
+            ? {
+                deviceId: credential.deviceId,
+                nonce,
+                proof: await proof("client", nonce, credential.secret),
+              }
+            : undefined,
       },
     });
     const promise = new Promise<Reply | undefined>((resolve, reject) => {
@@ -198,7 +215,21 @@ export class Client {
 
     try {
       const reply = await promise;
-      if (reply?.type === "hello") this.identity = reply.data;
+      if (reply?.type === "hello") {
+        // The machine has to prove itself too. Skipping this would leave the
+        // door open to whoever got to the rendezvous slot first: they cannot
+        // read anything, but they could impersonate the machine to the user.
+        if (credential && nonce) {
+          const expected = await proof("server", nonce, credential.secret);
+          if (reply.data.proof !== expected) {
+            throw new ProtocolError_({
+              code: "unauthorized",
+              message: "对面不是你配对过的那台机器，连接已断开",
+            });
+          }
+        }
+        this.identity = reply.data;
+      }
     } catch (error) {
       // A refused handshake is not something retrying fixes: the versions do
       // not match, or the credential is wrong. Stop, and keep the reason so the

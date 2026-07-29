@@ -203,6 +203,7 @@ fn open_channel(
     let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<ServerFrame>();
 
     let writer_channel = channel.clone();
+    let closer = sink.clone();
     let writer = tokio::spawn(async move {
         while let Some(frame) = outbound_rx.recv().await {
             let Ok(text) = serde_json::to_string(&frame) else {
@@ -232,6 +233,12 @@ fn open_channel(
 
     let task = tokio::spawn(async move {
         let _ = loop_task.await;
+        // Telling the relay the channel is over is what turns "the daemon
+        // stopped answering" into a closed socket at the other end. Without it
+        // a revoked device sits waiting for a reply that will never come, which
+        // looks like a hang rather than a revocation.
+        let framed = encode(KIND_CLOSE, &channel, b"");
+        let _ = closer.lock().await.send(Message::Binary(framed)).await;
         writer.abort();
     });
 

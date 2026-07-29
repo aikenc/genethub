@@ -1,10 +1,13 @@
 import type {
   AgentInfo,
   Attachment,
+  DeviceInfo,
+  DeviceInvite,
   FileContent,
   FileNode,
   GitStatus,
   HubStatus,
+  RemoteAccess,
   PermissionOutcome,
   SessionSnapshot,
   SessionSummary,
@@ -47,6 +50,9 @@ interface WorkbenchState {
   timeline: TimelineState;
   notice: string | null;
   hub: HubStatus | null;
+  /** Who this machine lets in from outside. Owned by the daemon, not by us. */
+  devices: DeviceInfo[];
+  remote: RemoteAccess | null;
   tree: FileNode | null;
   file: FileContent | null;
   git: GitStatus | null;
@@ -78,6 +84,11 @@ interface WorkbenchState {
   refreshHub(): Promise<void>;
   pair(hubUrl: string): Promise<void>;
   unpair(): Promise<void>;
+  refreshDevices(): Promise<void>;
+  invite(): Promise<DeviceInvite | null>;
+  revokeDevice(deviceId: string): Promise<void>;
+  attachRelay(relayUrl: string, joinToken: string): Promise<void>;
+  detachRelay(): Promise<void>;
 }
 
 export const useWorkbench = create<WorkbenchState>((set, get) => ({
@@ -94,6 +105,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   timeline: emptyTimeline(),
   notice: null,
   hub: null,
+  devices: [],
+  remote: null,
   tree: null,
   file: null,
   git: null,
@@ -384,6 +397,40 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   async unpair() {
     const reply = await require_(get().client).call({ type: "hub.unpair" });
     if (reply?.type === "hubStatus") set({ hub: reply.data });
+  },
+
+  async refreshDevices() {
+    const reply = await require_(get().client).call({ type: "device.list" });
+    if (reply?.type === "devices") set({ devices: reply.data.devices, remote: reply.data.remote });
+  },
+
+  async invite() {
+    const reply = await require_(get().client).call({
+      type: "device.invite",
+      payload: { name: null },
+    });
+    return reply?.type === "invite" ? reply.data : null;
+  },
+
+  async revokeDevice(deviceId) {
+    const reply = await require_(get().client).call({
+      type: "device.revoke",
+      payload: { deviceId },
+    });
+    if (reply?.type === "devices") set({ devices: reply.data.devices, remote: reply.data.remote });
+  },
+
+  async attachRelay(relayUrl, joinToken) {
+    const reply = await require_(get().client).call({
+      type: "device.remoteAttach",
+      payload: { relayUrl, joinToken: joinToken || null },
+    });
+    if (reply?.type === "remoteAccess") set({ remote: reply.data });
+  },
+
+  async detachRelay() {
+    const reply = await require_(get().client).call({ type: "device.remoteDetach" });
+    if (reply?.type === "remoteAccess") set({ remote: reply.data });
   },
 
   async answerPermission(outcome) {

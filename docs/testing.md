@@ -266,10 +266,13 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 | Rust 单元与集成 | `cargo test --workspace` | 协议、daemon 各模块、agent、旅程（daemon + agent + mock 模型） | 无 |
 | 专项测试（OpenCode） | `testing/tests/opencode.rs` | **真实 OpenCode 进程**接同一个模型后端，事件归一化后进同一条时间线 | PATH 上有 `opencode`，否则跳过并打印原因 |
 | 专项测试（Claude Code） | `testing/tests/claude.rs` | **真实 `claude` 进程**（原生 `stream-json`，非 ACP wrapper）接 DeepSeek 的 Anthropic 兼容端点：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具不落盘 | `JOURNEY_LLM=real` + PATH 上有 `claude`，否则跳过并打印原因；只在真实模式跑（mock 不实现 Anthropic 协议） |
+| 设备准入 | `testing/tests/devices.rs` | **真实 daemon + 进程内汇合 relay**：新设备经 relay 配对、换到凭证后重连、陌生人被拒、邀请码只能用一次、握手不能重放、撤销当场断连、重启后仍然可达且仍然认得旧设备 | 无 |
 | relay | `apps/relay && npm test` | 帧转发、契约、边界检查、wire 摘要 | 无 |
 | 工作台 | `packages/web && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |
 | **全栈旅程** | `packages/web/src/e2e/journey.test.ts` | **真实 daemon + 真实 agent + 脚本化模型**，用的是工作台自己的客户端 | `cargo build -p genet-daemon` |
 | 跨栈配对 | 控制面仓库的 `test/pairing.test.ts`、`test/relay.test.ts` | daemon 自己走设备码配对，浏览器经 relay 连回来 | 同上 |
+
+设备准入那一条写成的是**性质**而不是点击流程："陌生人拿不到东西"、"邀请码只值一次"、"看过一次握手不等于能再握一次"、"撤销是现在断而不是下次不让进"。错了就是别人在你的电脑上拿到一个 shell，所以它跑在真实转发路径上：进程内的汇合 relay（`testing/src/fake_relay.rs`）只做撮合，和线上那个一样不参与判断，mux 分帧也是真的。它上来就抓到一个真 bug——会话循环结束时 daemon 不往上游发 `CLOSE`，于是被撤销的设备等到的是超时而不是断开。
 
 全栈旅程这一条是分量最重的：其他前端测试都把 socket 假掉了，而"事件发到了一个没人监听的 topic"在假 socket 下和"没有事件"长得一模一样。它上线的第一天就抓到了这个 bug。
 

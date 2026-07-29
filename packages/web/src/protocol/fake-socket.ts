@@ -82,6 +82,7 @@ export class FakeSocket implements WebSocketLike {
         daemonVersion: "test",
         protocolVersion: 1,
         machineId: "m_test",
+        machineName: "测试机器",
         fingerprint: "AAAA-BBBB",
         transport: "loopback",
       },
