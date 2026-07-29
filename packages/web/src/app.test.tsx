@@ -66,6 +66,24 @@ describe("the app as the browser loads it", () => {
     expect(screen.getByRole("button", { name: "Changes" })).toBeInTheDocument();
   });
 
+  it("hands the empty case to whoever embedded it, when they have something to offer", async () => {
+    window.location.hash = "";
+    render(<App welcome={() => <p>先体验或登录</p>} />);
+
+    // The workbench itself cannot get anyone out of "no machine yet" — only a
+    // deployment that has accounts can. So it renders theirs, not its own
+    // dead end.
+    expect(await screen.findByText("先体验或登录")).toBeInTheDocument();
+    expect(screen.queryByText(/没有可连接的机器/)).not.toBeInTheDocument();
+  });
+
+  it("says so plainly when nothing was injected", async () => {
+    window.location.hash = "";
+    render(<App />);
+
+    expect(await screen.findByText(/没有可连接的机器/)).toBeInTheDocument();
+  });
+
   it("opens one connection and keeps it across re-renders", async () => {
     render(<App />);
     await screen.findByRole("status");

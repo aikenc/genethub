@@ -38,6 +38,7 @@ export function App({
   connect = openConnection,
   extraTabs = [],
   claim = claimMachine,
+  welcome,
 }: {
   host?: Host;
   connect?: (endpoint: Endpoint) => Client;
@@ -47,6 +48,13 @@ export function App({
    */
   extraTabs?: ExtraTab[];
   claim?: typeof claimMachine;
+  /**
+   * What to show when this browser knows of no machine yet. A deployment that
+   * can offer a way out of that — sign in, start something — puts it here.
+   * Without it the page can only say what happened, which is all a self-hosted
+   * copy honestly can say: someone has to pair a machine first.
+   */
+  welcome?: () => React.ReactNode;
 }) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">("loading");
   // Decided during the first render, not in an effect. An effect would run
@@ -121,6 +129,7 @@ export function App({
   }
   if (endpoint === "loading") return <Splash>正在查找这台机器…</Splash>;
   if (!endpoint) {
+    if (welcome) return <>{welcome()}</>;
     return (
       <Splash>
         <p>没有可连接的机器。</p>
