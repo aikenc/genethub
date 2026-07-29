@@ -72,7 +72,7 @@ impl SessionManager {
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
             agent_id: agent_id.to_string(),
-            title: title.unwrap_or_else(|| "New session".to_string()),
+            title,
             cwd,
             model_id,
             mode_id,
@@ -219,18 +219,23 @@ impl SessionManager {
             let mut items = live.items.lock().await;
             items.push(item.clone());
         }
+        // A session that already has a name keeps it: the name either came
+        // from the user or from the first thing they said, and neither gets
+        // overwritten by the second message.
         let (workspace_id, needs_title) = {
             let meta = live.meta.lock().await;
-            (meta.workspace_id.clone(), meta.title == "New session")
+            (meta.workspace_id.clone(), meta.title.is_none())
         };
         self.store
             .append_items(&workspace_id, session_id, std::slice::from_ref(&item))?;
 
         if needs_title {
-            let mut meta = live.meta.lock().await;
-            meta.title = title_from(&text);
-            meta.updated_at_ms = now_ms();
-            self.store.save_meta(&meta)?;
+            if let Some(title) = title_from(&text) {
+                let mut meta = live.meta.lock().await;
+                meta.title = Some(title);
+                meta.updated_at_ms = now_ms();
+                self.store.save_meta(&meta)?;
+            }
         }
 
         let agent = live.agent.lock().await;
@@ -599,7 +604,7 @@ mod tests {
             id: "s1".into(),
             workspace_id: "w1".into(),
             agent_id: "genet".into(),
-            title: "New session".into(),
+            title: None,
             cwd: PathBuf::from("/tmp"),
             model_id: None,
             mode_id: None,

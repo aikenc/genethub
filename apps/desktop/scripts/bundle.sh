@@ -65,7 +65,7 @@ if [[ -n "$deb" ]]; then
   dpkg-deb -x "$deb" "$staged"
   # Redirected to a file rather than piped: the daemon does not exit on its own,
   # and closing a pipe under it would make this look like a crash.
-  GENEHUB_DATA_DIR="$staged/data" timeout 15 \
+  GENEHUB_DATA_DIR="$staged/data" GENEHUB_WORKSPACE_DIR="$staged/workspace" timeout 15 \
     "$staged/usr/lib/GeneHub/bin/genet-daemon" >"$staged/out.json" 2>/dev/null || true
   if grep -q '"event":"listening"' "$staged/out.json"; then
     echo "    the packaged daemon starts and reports a port"
@@ -73,6 +73,11 @@ if [[ -n "$deb" ]]; then
     echo "FAIL: the packaged daemon did not come up" >&2
     exit 1
   fi
+
+  # A fresh install has to be able to answer "where would you run this?" itself.
+  test -d "$staged/workspace" \
+    || { echo "FAIL: a new install has no folder to work in" >&2; exit 1; }
+  echo "    a new install comes with a folder to work in"
 
   test -f "$staged/usr/share/applications/GeneHub.desktop" \
     || { echo "FAIL: no application entry, so it will not appear in the menu" >&2; exit 1; }

@@ -20,7 +20,10 @@ pub struct SessionMeta {
     pub id: String,
     pub workspace_id: String,
     pub agent_id: String,
-    pub title: String,
+    /// `None` until it has been named. Metas written before this was optional
+    /// read back as `Some`, which is the right answer for them.
+    #[serde(default)]
+    pub title: Option<String>,
     pub cwd: PathBuf,
     pub model_id: Option<String>,
     pub mode_id: Option<String>,
@@ -191,17 +194,13 @@ pub fn now_ms() -> i64 {
 }
 
 /// A first line of user text, trimmed into something that fits a sidebar.
-pub fn title_from(text: &str) -> String {
-    let first = text
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("New session");
+///
+/// `None` when there is nothing to name it after; the session stays untitled
+/// rather than being called something in a language nobody chose.
+pub fn title_from(text: &str) -> Option<String> {
+    let first = text.lines().find(|line| !line.trim().is_empty())?;
     let trimmed: String = first.trim().chars().take(60).collect();
-    if trimmed.is_empty() {
-        "New session".to_string()
-    } else {
-        trimmed
-    }
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 pub fn ensure_within(root: &Path, candidate: &Path) -> Result<PathBuf> {
@@ -246,7 +245,7 @@ mod tests {
             id: id.into(),
             workspace_id: "w1".into(),
             agent_id: "genet".into(),
-            title: "demo".into(),
+            title: Some("demo".into()),
             cwd: PathBuf::from("/tmp"),
             model_id: None,
             mode_id: None,
@@ -350,14 +349,17 @@ mod tests {
         let listed = store.list_meta().unwrap();
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].id, "s2");
-        assert_eq!(store.load_meta("w1", "s1").unwrap().title, "demo");
+        assert_eq!(
+            store.load_meta("w1", "s1").unwrap().title.as_deref(),
+            Some("demo")
+        );
     }
 
     #[test]
     fn titles_come_from_the_first_non_empty_line_and_stay_short() {
-        assert_eq!(title_from("\n\nhello there\nmore"), "hello there");
-        assert_eq!(title_from("   "), "New session");
-        assert_eq!(title_from(&"x".repeat(200)).len(), 60);
+        assert_eq!(title_from("\n\nhello there\nmore").as_deref(), Some("hello there"));
+        assert_eq!(title_from("   "), None, "nothing to name it after");
+        assert_eq!(title_from(&"x".repeat(200)).unwrap().chars().count(), 60);
     }
 
     #[test]

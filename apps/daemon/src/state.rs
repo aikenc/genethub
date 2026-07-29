@@ -53,6 +53,14 @@ impl AppState {
         let config = Arc::new(RwLock::new(config));
         let workspaces = Workspaces::new(config.clone(), paths.config_file());
         workspaces.load().await;
+        if let Some(root) = paths.default_workspace.clone() {
+            // A home directory that cannot be written to is unusual but not
+            // fatal: the user can still open a folder by hand, and refusing to
+            // start would take that from them too.
+            if let Err(error) = workspaces.ensure_default(&root).await {
+                tracing::warn!(%error, "no default workspace");
+            }
+        }
 
         let (terminals, pty_rx) = Terminals::new();
 

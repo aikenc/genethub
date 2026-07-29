@@ -30,21 +30,64 @@ fn wait_for<T>(limit: Duration, mut look: impl FnMut() -> Option<T>) -> Option<T
     None
 }
 
-/// Kills the process holding a port, without going through the shell's own
-/// bookkeeping — the point is to simulate a crash it did not see coming.
+/// Kills the process *listening* on a port, without going through the shell's
+/// own bookkeeping — the point is to simulate a crash it did not see coming.
+///
+/// Only the listener, and that distinction is not pedantic: the ports here are
+/// handed out by the OS from the ephemeral range, so a completely unrelated
+/// process can hold an outgoing connection whose local port is this one. Tools
+/// that answer "who is using this port" include those, and killing them means
+/// one test occasionally shooting another one's daemon.
 #[cfg(unix)]
 fn kill_whatever_is_listening_on(port: u16) {
-    let output = std::process::Command::new("fuser")
-        .args([&format!("{port}/tcp")])
-        .output()
-        .or_else(|_| std::process::Command::new("lsof").args(["-ti", &format!("tcp:{port}")]).output())
-        .expect("something that can find the process on a port");
-    let listing = String::from_utf8_lossy(&output.stdout);
-    for pid in listing.split_whitespace() {
+    for pid in listeners_on(port) {
         let _ = std::process::Command::new("kill")
-            .args(["-9", pid])
+            .args(["-9", &pid])
             .status();
     }
+}
+
+#[cfg(unix)]
+fn listeners_on(port: u16) -> Vec<String> {
+    // `ss` prints one row per listening socket, with `pid=NNN` in the last
+    // column: `LISTEN 0 511 127.0.0.1:41519 0.0.0.0:* users:(("x",pid=7,fd=9))`
+    if let Ok(output) = std::process::Command::new("ss")
+        .args(["-H", "-ltnp", "sport", "=", &format!(":{port}")])
+        .output()
+    {
+        let listing = String::from_utf8_lossy(&output.stdout);
+        let pids: Vec<String> = listing
+            .split("pid=")
+            .skip(1)
+            .filter_map(|rest| {
+                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                (!digits.is_empty()).then_some(digits)
+            })
+            .collect();
+        if !pids.is_empty() {
+            return pids;
+        }
+    }
+
+    std::process::Command::new("lsof")
+        .args(["-ti", &format!("tcp:{port}"), "-sTCP:LISTEN"])
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Keeps the daemon's default working folder out of whoever's home is running
+/// the suite. Every test in this binary shares one, and none of them look in
+/// it — they only need it to not be `~/GeneHub`.
+fn contain_the_default_workspace() {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let home = HOME.get_or_init(|| tempfile::tempdir().expect("a temporary home"));
+    std::env::set_var("GENEHUB_WORKSPACE_DIR", home.path().join("GeneHub"));
 }
 
 macro_rules! with_daemon {
@@ -53,6 +96,7 @@ macro_rules! with_daemon {
             eprintln!("skipping: run cargo build -p genet-daemon first");
             return;
         };
+        contain_the_default_workspace();
     };
 }
 

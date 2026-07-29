@@ -9,15 +9,25 @@ use serde::{Deserialize, Serialize};
 /// Where everything the daemon owns lives.
 ///
 /// One root keeps uninstall honest: removing it removes every trace, which is
-/// an explicit item on the install self-check in `docs/testing.md` §7.
+/// an explicit item on the install self-check in `docs/testing.md` §7. The
+/// folder the agent works in is deliberately *not* under it — that one holds
+/// the user's own files and must survive an uninstall.
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub root: PathBuf,
+    /// Where the agent works until the user points it somewhere else.
+    ///
+    /// `None` means do not invent one, which is what a test wants: an empty
+    /// machine that registers exactly the directories the test asked for.
+    pub default_workspace: Option<PathBuf>,
 }
 
 impl Paths {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Paths { root: root.into() }
+        Paths {
+            root: root.into(),
+            default_workspace: None,
+        }
     }
 
     /// `$GENEHUB_DATA_DIR`, else the platform data directory.
@@ -25,11 +35,16 @@ impl Paths {
     /// The override exists so every test can run against its own directory;
     /// shared state between tests costs far more to debug than it saves.
     pub fn discover() -> Result<Self> {
-        if let Ok(dir) = std::env::var("GENEHUB_DATA_DIR") {
-            return Ok(Paths::new(dir));
-        }
-        let base = dirs::data_dir().context("no platform data directory")?;
-        Ok(Paths::new(base.join("GeneHub")))
+        let root = match std::env::var("GENEHUB_DATA_DIR") {
+            Ok(dir) => PathBuf::from(dir),
+            Err(_) => dirs::data_dir()
+                .context("no platform data directory")?
+                .join("GeneHub"),
+        };
+        Ok(Paths {
+            root,
+            default_workspace: Some(default_workspace()?),
+        })
     }
 
     pub fn config_file(&self) -> PathBuf {
@@ -59,6 +74,18 @@ impl Paths {
         fs::create_dir_all(self.sessions_dir())?;
         Ok(())
     }
+}
+
+/// `$GENEHUB_WORKSPACE_DIR`, else `GeneHub` in the user's home.
+///
+/// It sits in the home directory rather than somewhere hidden because the user
+/// is expected to open it, drop files in it, and point their own editor at it.
+fn default_workspace() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("GENEHUB_WORKSPACE_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    let home = dirs::home_dir().context("no home directory")?;
+    Ok(home.join("GeneHub"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,6 +305,23 @@ mod tests {
         assert_eq!(loaded.port, 1234);
         assert_eq!(loaded.workspaces.len(), 1);
         assert_eq!(loaded.workspaces[0].name, "demo");
+    }
+
+    /// The two roots must never be the same tree: uninstall deletes the data
+    /// root, and the user's files are not ours to delete.
+    #[test]
+    fn the_working_folder_is_not_inside_the_data_folder() {
+        let paths = Paths {
+            root: PathBuf::from("/data/GeneHub"),
+            default_workspace: Some(PathBuf::from("/home/me/GeneHub")),
+        };
+        let workspace = paths.default_workspace.unwrap();
+        assert!(!workspace.starts_with(&paths.root));
+    }
+
+    #[test]
+    fn a_test_gets_an_empty_machine_unless_it_asks_otherwise() {
+        assert!(Paths::new("/tmp/whatever").default_workspace.is_none());
     }
 
     #[test]

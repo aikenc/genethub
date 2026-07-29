@@ -100,6 +100,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     client.onNotice((_level, message) => set({ notice: message }));
     try {
       await refreshCatalog(client, set);
+      if (get().client === client) await land(get);
       await get().refreshHub();
     } catch (error) {
       // A connection can disappear halfway through being asked things: the tab
@@ -122,12 +123,14 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       timeline: emptyTimeline(),
     }));
     await loadSessions(client, reply.data.id, set);
+    await land(get);
   },
 
   async selectWorkspace(workspaceId) {
     const client = require_(get().client);
     set({ activeWorkspaceId: workspaceId, activeSessionId: null, timeline: emptyTimeline() });
     await loadSessions(client, workspaceId, set);
+    await land(get);
   },
 
   async createSession(workspaceId, agentId) {
@@ -402,6 +405,38 @@ async function refreshCatalog(client: Client, set: Setter): Promise<void> {
       await loadSessions(client, first.id, set);
     }
   }
+}
+
+/**
+ * Puts the user in a conversation instead of in front of a button.
+ *
+ * Coming back nearly always means continuing the last thing, and a machine
+ * that has never been used should still be able to take a first message. The
+ * one case that still gets a splash screen is the one nothing here can act
+ * on: no model to run the turn with, which is a key the user has to go and
+ * paste in.
+ */
+async function land(get: () => WorkbenchState): Promise<void> {
+  const state = get();
+  if (state.activeSessionId) return;
+  const workspaceId = state.activeWorkspaceId;
+  if (!workspaceId) return;
+
+  const latest = state.sessions
+    .filter((session) => session.workspaceId === workspaceId)
+    .reduce<SessionSummary | null>(
+      (newest, session) =>
+        !newest || session.updatedAtMs > newest.updatedAtMs ? session : newest,
+      null,
+    );
+  if (latest) {
+    await get().selectSession(latest.id);
+    return;
+  }
+
+  const agent = state.agents.find((entry) => entry.builtin) ?? state.agents[0];
+  if (!agent || agent.probe.state !== "ready" || agent.catalog.models.length === 0) return;
+  await get().createSession(workspaceId, agent.id);
 }
 
 async function loadSessions(client: Client, workspaceId: string, set: Setter): Promise<void> {

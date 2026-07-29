@@ -183,7 +183,13 @@ seq: number, pendingPermissions: Array<PermissionRequest>, };
 
 export type SessionStatus = "idle" | "running" | "readOnly" | "failed" | "closed";
 
-export type SessionSummary = { id: string, workspaceId: string, agentId: string, title: string, status: SessionStatus, modelId?: string, modeId?: string, createdAtMs: number, updatedAtMs: number, archived: boolean, };
+export type SessionSummary = { id: string, workspaceId: string, agentId: string, 
+/**
+ * Absent until the session has been named — by the user, or by the daemon
+ * from the first thing they said. Clients supply their own placeholder;
+ * the daemon has no business picking a word in the user's language.
+ */
+title?: string, status: SessionStatus, modelId?: string, modeId?: string, createdAtMs: number, updatedAtMs: number, archived: boolean, };
 
 /**
  * The machine-level settings a client may see and change.

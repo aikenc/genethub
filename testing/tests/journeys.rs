@@ -1063,7 +1063,7 @@ async fn a_session_found_in_the_list_can_be_reopened_and_continued() {
         .find(|summary| summary.id == session)
         .expect("the session should be in the list");
     assert!(
-        !found.title.is_empty(),
+        found.title.as_deref().is_some_and(|title| !title.is_empty()),
         "a session with no title is unfindable"
     );
 
@@ -1454,6 +1454,12 @@ async fn a_session_title_comes_from_the_first_thing_the_user_says() {
         journey.mock().reply(Turn::text("ok")).await;
     }
     let session = journey.session("genet").await.expect("session opens");
+
+    // Nothing has been said yet, so there is nothing to name it after. The
+    // daemon leaves it unnamed rather than inventing a word in a language it
+    // has no way of knowing — that placeholder belongs to the interface.
+    assert_eq!(title_of(&journey, &session).await, None);
+
     journey
         .send(&session, "Fix the login redirect")
         .await
@@ -1463,18 +1469,10 @@ async fn a_session_title_comes_from_the_first_thing_the_user_says() {
     // already knowable here. Waiting for the turn would mean waiting on a real
     // model to finish an open-ended instruction in an empty project — which it
     // does not, and which this case was never about.
-    let summary = match journey
-        .client
-        .call(Request::SessionGet {
-            session_id: session.clone(),
-        })
-        .await
-        .unwrap()
-    {
-        Reply::Snapshot(snapshot) => snapshot.summary,
-        other => panic!("unexpected {other:?}"),
-    };
-    assert_eq!(summary.title, "Fix the login redirect");
+    assert_eq!(
+        title_of(&journey, &session).await.as_deref(),
+        Some("Fix the login redirect")
+    );
 
     journey
         .client
@@ -1484,6 +1482,21 @@ async fn a_session_title_comes_from_the_first_thing_the_user_says() {
         .await
         .expect("the turn stops");
     journey.finish().await;
+}
+
+/// What the sidebar would show for a session, straight from the daemon.
+async fn title_of(journey: &Journey, session: &str) -> Option<String> {
+    match journey
+        .client
+        .call(Request::SessionGet {
+            session_id: session.to_string(),
+        })
+        .await
+        .unwrap()
+    {
+        Reply::Snapshot(snapshot) => snapshot.summary.title,
+        other => panic!("unexpected {other:?}"),
+    }
 }
 
 #[tokio::test]

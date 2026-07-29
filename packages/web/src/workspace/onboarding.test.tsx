@@ -195,7 +195,7 @@ describe("the first run", () => {
    * settings, because it is the same thing that decides whether a turn can run.
    */
   it("points at the key when a project is open but no model is reachable", async () => {
-    const { client } = stubClient({
+    const { client, calls } = stubClient({
       "agent.list": () => ({ type: "agents", data: [UNCONFIGURED_AGENT] }),
       "workspace.list": () => ({
         type: "workspaces",
@@ -208,37 +208,30 @@ describe("the first run", () => {
     await start(client, hostWith());
 
     expect(await screen.findByText("还差一个模型密钥。")).toBeInTheDocument();
+    expect(calls.some((call) => call.type === "session.create")).toBe(false);
+
     await userEvent.click(screen.getByRole("button", { name: "去填密钥" }));
     expect(await screen.findByLabelText("DeepSeek API Key")).toBeInTheDocument();
   });
 
-  it("offers the session once the project and the key are both there", async () => {
+  /**
+   * The daemon gives a machine that has never been used a folder to work in,
+   * so by the time the interface loads the only thing between the user and a
+   * first message is a session — and there is no decision in it worth asking
+   * about.
+   */
+  it("goes straight into a conversation once the project and the key are there", async () => {
     const { client, calls } = stubClient({
       "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
       "workspace.list": () => ({
         type: "workspaces",
-        data: [{ id: "w1", name: "app", root: "/home/me/app", isGitRepo: true }],
+        data: [{ id: "w1", name: "GeneHub", root: "/home/me/GeneHub", isGitRepo: false }],
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
-      "session.create": () => ({
-        type: "session",
-        data: {
-          id: "s1",
-          workspaceId: "w1",
-          agentId: "genet",
-          title: "新会话",
-          createdAtMs: 0,
-          updatedAtMs: 0,
-          archived: false,
-          status: "idle",
-        },
-      }),
+      "session.create": () => ({ type: "session", data: session("s1", 0) }),
     });
     await start(client, hostWith());
-
-    expect(await screen.findByText("app 已就绪。")).toBeInTheDocument();
-    await userEvent.click(screen.getAllByRole("button", { name: "新建会话" })[0]!);
 
     await waitFor(() => {
       expect(calls.find((call) => call.type === "session.create")?.payload).toMatchObject({
@@ -246,5 +239,71 @@ describe("the first run", () => {
         agentId: "genet",
       });
     });
+    expect(await screen.findByPlaceholderText(/描述任务/)).toBeInTheDocument();
+    expect(screen.queryByText(/已就绪/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The daemon leaves a session unnamed until there is something to name it
+   * after, so the word on screen is this side's to choose — and it has to be
+   * in the same language as everything around it.
+   */
+  it("names a session nobody has named yet in the interface's own words", async () => {
+    const { client } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({
+        type: "workspaces",
+        data: [{ id: "w1", name: "GeneHub", root: "/home/me/GeneHub", isGitRepo: false }],
+      }),
+      "session.list": () => ({ type: "sessions", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "session.create": () => ({
+        type: "session",
+        data: { ...session("s1", 0), title: undefined },
+      }),
+    });
+    await start(client, hostWith());
+
+    await waitFor(() => expect(screen.getAllByText("新会话").length).toBeGreaterThan(0));
+  });
+
+  /** Reconnecting means continuing, not starting over. */
+  it("comes back to the conversation that was last touched", async () => {
+    const subscribed: string[] = [];
+    const { client, calls } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({
+        type: "workspaces",
+        data: [{ id: "w1", name: "app", root: "/home/me/app", isGitRepo: true }],
+      }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "session.list": () => ({
+        type: "sessions",
+        data: [session("older", 10), session("newest", 99), session("middle", 50)],
+      }),
+    });
+    (client as unknown as { subscribe: (id: string) => Promise<unknown> }).subscribe = async (
+      id,
+    ) => {
+      subscribed.push(id);
+      return { snapshot: { seq: 0, items: [], summary: session(id, 0) }, replayed: [], reset: false };
+    };
+    await start(client, hostWith());
+
+    await waitFor(() => expect(subscribed).toEqual(["newest"]));
+    expect(calls.some((call) => call.type === "session.create")).toBe(false);
   });
 });
+
+function session(id: string, updatedAtMs: number) {
+  return {
+    id,
+    workspaceId: "w1",
+    agentId: "genet",
+    title: id,
+    createdAtMs: 0,
+    updatedAtMs,
+    archived: false,
+    status: "idle" as const,
+  };
+}

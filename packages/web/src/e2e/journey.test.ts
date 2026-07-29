@@ -1,7 +1,14 @@
 // @vitest-environment node
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,16 +37,18 @@ describe.skipIf(!existsSync(DAEMON))("a session, end to end", () => {
   let daemon: ChildProcess;
   let client: Client;
   let dataDir: string;
+  let homeDir: string;
   let workspaceDir: string;
   let workspaceId: string;
 
   beforeAll(async () => {
     model = await startMockModel();
     dataDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-data-"));
+    homeDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-home-"));
     workspaceDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-work-"));
     writeFileSync(path.join(workspaceDir, "notes.md"), "hello\n");
 
-    const started = await startDaemon(dataDir);
+    const started = await startDaemon(dataDir, path.join(homeDir, "GeneHub"));
     daemon = started.process;
     client = new Client({
       url: `ws://127.0.0.1:${started.port}/ws?token=${started.token}`,
@@ -68,7 +77,23 @@ describe.skipIf(!existsSync(DAEMON))("a session, end to end", () => {
     daemon?.kill("SIGKILL");
     await model?.stop();
     rmSync(dataDir, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
     rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  /**
+   * The install has to be able to answer "where would you run this?" on its
+   * own. Otherwise the first screen is a folder picker in front of a product
+   * the user has not seen working yet.
+   */
+  it("comes with somewhere to work before the user has picked anything", async () => {
+    const reply = await client.call({ type: "workspace.list" });
+    expect(reply?.type).toBe("workspaces");
+    if (reply?.type !== "workspaces") return;
+
+    const expected = realpathSync(path.join(homeDir, "GeneHub"));
+    expect(reply.data.map((entry) => entry.root)).toContain(expected);
+    expect(existsSync(expected), "the folder is created, not just recorded").toBe(true);
   });
 
   it("offers the built-in agent with the models the key unlocked", async () => {
@@ -352,10 +377,17 @@ async function startMockModel(): Promise<MockModel> {
 
 function startDaemon(
   dataDir: string,
+  defaultWorkspace: string,
 ): Promise<{ process: ChildProcess; port: number; token: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(DAEMON, {
-      env: { ...process.env, GENEHUB_DATA_DIR: dataDir, GENEHUB_LOG: "warn" },
+      env: {
+        ...process.env,
+        GENEHUB_DATA_DIR: dataDir,
+        // Otherwise a test run leaves a folder in whoever's home ran it.
+        GENEHUB_WORKSPACE_DIR: defaultWorkspace,
+        GENEHUB_LOG: "warn",
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     const timer = setTimeout(() => reject(new Error("the daemon never reported a port")), 15_000);

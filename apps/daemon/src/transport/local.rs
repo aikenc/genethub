@@ -127,7 +127,13 @@ async fn shutdown(
         return (StatusCode::UNAUTHORIZED, "invalid or missing token");
     }
 
-    context.state.shutdown.notify_waiters();
+    // `notify_one`, not `notify_waiters`: this request can arrive before the
+    // main loop has started waiting — a shell that quits or restarts right
+    // after launch does exactly that — and a signal nobody was listening for
+    // yet must not be dropped. Answering 202 and then staying up means the
+    // shell gives up and kills us, which is the one outcome this endpoint
+    // exists to avoid.
+    context.state.shutdown.notify_one();
     (StatusCode::ACCEPTED, "stopping")
 }
 
@@ -219,5 +225,38 @@ mod tests {
             websocket_url(1234, "abc"),
             "ws://127.0.0.1:1234/ws?token=abc"
         );
+    }
+
+    /// The shell can ask a daemon to stop the instant it comes up — quitting
+    /// or restarting right after launch does exactly that. The listener is
+    /// accepting before the main loop starts waiting, so the request lands in
+    /// between; if that signal is dropped the daemon answers "stopping" and
+    /// then stays up, and the shell resorts to killing it with its agents
+    /// still running.
+    #[tokio::test]
+    async fn a_stop_asked_for_before_anyone_is_waiting_still_arrives() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+            .await
+            .unwrap();
+        let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
+
+        let answer = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/shutdown", listener.port))
+            .bearer_auth(&state.token)
+            .send()
+            .await
+            .expect("the request reaches the daemon");
+        assert_eq!(answer.status(), 202);
+
+        // Only now does the main loop begin waiting.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.shutdown.notified(),
+        )
+        .await
+        .expect("the daemon was told to stop and must still know it");
+
+        listener.handle.abort();
     }
 }

@@ -32,6 +32,25 @@ impl Workspaces {
         }
     }
 
+    /// Gives a machine that has never been used somewhere to work.
+    ///
+    /// Without this the first thing a new install can do is refuse: no
+    /// workspace means no session, which means the first screen is a file
+    /// picker in front of a product the user has not seen yet. The folder is
+    /// created if it is missing, and it is an ordinary directory — deleting it
+    /// or ignoring it costs nothing.
+    ///
+    /// Only ever runs on an empty registry, so a user who opened their own
+    /// projects never sees it appear.
+    pub async fn ensure_default(&self, root: &Path) -> Result<WorkspaceInfo> {
+        if let Some(existing) = self.list().await.into_iter().next() {
+            return Ok(existing);
+        }
+        std::fs::create_dir_all(root)
+            .with_context(|| format!("creating the default workspace at {}", root.display()))?;
+        self.open(root, None).await
+    }
+
     pub async fn list(&self) -> Vec<WorkspaceInfo> {
         let mut out: Vec<WorkspaceInfo> =
             self.entries.read().await.values().map(describe).collect();
@@ -160,6 +179,37 @@ mod tests {
         assert!(spaces.resolve(&info.id, "src/main.rs").await.is_ok());
         assert!(spaces.resolve(&info.id, "../outside").await.is_err());
         assert!(spaces.resolve(&info.id, "/etc/passwd").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_machine_that_has_never_been_used_still_has_somewhere_to_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let root = dir.path().join("GeneHub");
+
+        let created = spaces.ensure_default(&root).await.unwrap();
+        assert!(root.is_dir(), "the folder is made, not just named");
+        assert_eq!(created.name, "GeneHub");
+        assert_eq!(spaces.list().await.len(), 1);
+
+        // Restarting must not add a second one.
+        let again = spaces.ensure_default(&root).await.unwrap();
+        assert_eq!(again.id, created.id);
+        assert_eq!(spaces.list().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_user_with_their_own_project_is_not_given_a_default_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let mine = spaces.open(&project, None).await.unwrap();
+
+        let root = dir.path().join("GeneHub");
+        assert_eq!(spaces.ensure_default(&root).await.unwrap().id, mine.id);
+        assert!(!root.exists(), "nothing is created behind the user's back");
+        assert_eq!(spaces.list().await.len(), 1);
     }
 
     #[tokio::test]

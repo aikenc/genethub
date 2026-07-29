@@ -141,7 +141,7 @@ function SessionGroup({
   onSelect,
 }: {
   label: string;
-  sessions: Array<{ id: string; title: string; status: string }>;
+  sessions: Array<{ id: string; title?: string; status: string }>;
   activeId: string | null;
   onSelect(id: string): void;
 }) {

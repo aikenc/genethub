@@ -234,7 +234,9 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 | Linux | 干净容器里安装分发包，脚本驱动首启与自检 |
 | Windows / macOS | CI runner 上装包 + 冒烟；无 runner 时至少每次发版手动过一遍主旅程 |
 
-自检项：可执行权限、内置 agent 二进制可用、数据目录创建、单实例锁、卸载残留清理，以及**安装目录内不存在 `node` / `node.exe` / `node_modules`**（PC 端零 Node 运行时，见 [desktop-client.md](./desktop-client.md) §4.1）。
+自检项：可执行权限、内置 agent 二进制可用、数据目录创建、**默认工作目录被建出来**（见 [daemon.md](./daemon.md) §4.2；这条决定了新装用户第一屏是聊天还是文件选择器）、单实例锁、卸载残留清理，以及**安装目录内不存在 `node` / `node.exe` / `node_modules`**（PC 端零 Node 运行时，见 [desktop-client.md](./desktop-client.md) §4.1）。
+
+跑测试时用 `$GENEHUB_WORKSPACE_DIR` 把默认工作目录指到临时目录：任何一次测试运行都不该在跑它的人的 home 里留下文件夹。
 
 外部 agent（OpenCode 等）由**测试环境预装**，不随分发包安装——这正是要验证的行为之一：装了就出现在选择器里，没装就不出现，且不影响其他 agent。CI 里装法是 `npm install --prefix ~/.opencode opencode-ai` 后把它的 `.bin` 加进 PATH；本地没装时相关用例跳过并打印原因，其余照跑。
 

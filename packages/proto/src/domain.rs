@@ -100,7 +100,11 @@ pub struct SessionSummary {
     pub id: String,
     pub workspace_id: String,
     pub agent_id: String,
-    pub title: String,
+    /// Absent until the session has been named — by the user, or by the daemon
+    /// from the first thing they said. Clients supply their own placeholder;
+    /// the daemon has no business picking a word in the user's language.
+    #[ts(optional)]
+    pub title: Option<String>,
     pub status: crate::event::SessionStatus,
     #[ts(optional)]
     pub model_id: Option<String>,
