@@ -777,7 +777,7 @@ async fn reconnecting_replays_the_gap_without_losing_or_repeating_events() {
     assert!(first.completed());
 
     // Reconnect from the very beginning and compare what comes back.
-    let reconnected = genehub_testing::Client::connect(&journey.daemon.websocket_url())
+    let reconnected = genehub_testing::Client::connect(&journey.daemon().websocket_url())
         .await
         .expect("second connection");
     reconnected.hello("journey-2").await.expect("handshake");
@@ -832,7 +832,7 @@ async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
     journey.send(&session, "Talk.").await.expect("accepted");
     journey.client.drain_turn().await.expect("the turn ends");
 
-    let reconnected = genehub_testing::Client::connect(&journey.daemon.websocket_url())
+    let reconnected = genehub_testing::Client::connect(&journey.daemon().websocket_url())
         .await
         .expect("second connection");
     reconnected.hello("journey-2").await.expect("handshake");
@@ -866,7 +866,7 @@ async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
 
 #[tokio::test]
 async fn history_survives_a_daemon_restart_and_the_conversation_continues() {
-    let journey = Journey::start().await.expect("journey starts");
+    let mut journey = Journey::start().await.expect("journey starts");
     script_the_task(&journey).await;
 
     let session = journey.session("genet").await.expect("session opens");
@@ -876,14 +876,22 @@ async fn history_survives_a_daemon_restart_and_the_conversation_continues() {
     let before = events.items().len();
     assert!(before > 0);
 
-    // Close the session so its agent exits, then reopen from disk.
+    // The whole daemon goes away and comes back, the way it does when someone
+    // quits the app and opens it again tomorrow. Anything held only in memory
+    // dies here.
     journey
-        .client
-        .call(Request::SessionClose {
-            session_id: session.clone(),
-        })
+        .restart_daemon()
         .await
-        .expect("session closes");
+        .expect("the daemon comes back on the same data directory");
+
+    let workspaces = match journey.client.call(Request::WorkspaceList).await.unwrap() {
+        Reply::Workspaces(workspaces) => workspaces,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert!(
+        workspaces.iter().any(|w| w.id == journey.workspace.id),
+        "the project should still be registered, with the same id"
+    );
 
     let snapshot = match journey
         .client
@@ -909,6 +917,292 @@ async fn history_survives_a_daemon_restart_and_the_conversation_continues() {
         snapshot.items
     );
 
+    // And it is a conversation, not an archive: the next turn works, and the
+    // model is handed what was said before the restart.
+    if journey.mode.is_mock() {
+        journey.mock().reply(Turn::text("Still here.")).await;
+    }
+    journey
+        .client
+        .call(Request::Subscribe {
+            session_id: session.clone(),
+            since_seq: None,
+        })
+        .await
+        .expect("resubscribed");
+    journey
+        .send(&session, "What did I just ask you to do?")
+        .await
+        .expect("accepted");
+    let resumed = journey
+        .client
+        .drain_turn()
+        .await
+        .expect("the second turn ends");
+    assert!(resumed.completed(), "saw {:?}", resumed.failure());
+
+    if journey.mode.is_mock() {
+        let sent = journey.mock().requests().await;
+        let last = sent.last().expect("a request after the restart");
+        let messages = last["messages"].to_string();
+        assert!(
+            messages.contains(TASK),
+            "the reloaded session has to carry its history to the model: {messages}"
+        );
+    }
+
+    journey.finish().await;
+}
+
+/// Coming back to a session through the list, which is how anyone who did not
+/// keep the tab open gets there.
+#[tokio::test]
+async fn a_session_found_in_the_list_can_be_reopened_and_continued() {
+    let journey = Journey::start().await.expect("journey starts");
+    if journey.mode.is_mock() {
+        journey.mock().reply(Turn::text("First answer.")).await;
+    }
+
+    let session = journey.session("genet").await.expect("session opens");
+    journey
+        .send(&session, "Remember the number 7.")
+        .await
+        .expect("accepted");
+    assert!(journey
+        .client
+        .drain_turn()
+        .await
+        .expect("the turn ends")
+        .completed());
+
+    // Leave it, the way closing a tab does.
+    journey
+        .client
+        .call(Request::Unsubscribe {
+            session_id: session.clone(),
+        })
+        .await
+        .expect("unsubscribed");
+    journey
+        .client
+        .call(Request::SessionClose {
+            session_id: session.clone(),
+        })
+        .await
+        .expect("session closes");
+
+    // Find it again by listing, not by remembering the id.
+    let listed = match journey
+        .client
+        .call(Request::SessionList {
+            workspace_id: Some(journey.workspace.id.clone()),
+            include_archived: false,
+        })
+        .await
+        .unwrap()
+    {
+        Reply::Sessions(sessions) => sessions,
+        other => panic!("unexpected {other:?}"),
+    };
+    let found = listed
+        .iter()
+        .find(|summary| summary.id == session)
+        .expect("the session should be in the list");
+    assert!(!found.title.is_empty(), "a session with no title is unfindable");
+
+    let (snapshot, _replayed, _reset) = match journey
+        .client
+        .call(Request::Subscribe {
+            session_id: session.clone(),
+            since_seq: None,
+        })
+        .await
+        .unwrap()
+    {
+        Reply::Subscribed {
+            snapshot,
+            replayed,
+            reset,
+        } => (snapshot, replayed, reset),
+        other => panic!("unexpected {other:?}"),
+    };
+    assert!(
+        !snapshot.items.is_empty(),
+        "reopening should show what was said before"
+    );
+
+    if journey.mode.is_mock() {
+        journey.mock().reply(Turn::text("It was 7.")).await;
+    }
+    journey
+        .send(&session, "What number did I ask you to remember?")
+        .await
+        .expect("accepted");
+    let second = journey.client.drain_turn().await.expect("the turn ends");
+    assert!(second.completed(), "saw {:?}", second.failure());
+
+    journey.finish().await;
+}
+
+/// The stop button, all the way down.
+///
+/// The pieces were tested separately — the adapter turns an aborted stream into
+/// `TurnCanceled`, the composer calls interrupt — and the path between them was
+/// not, which is exactly where a stop button goes to die.
+#[tokio::test]
+async fn interrupting_a_running_turn_ends_it_as_canceled() {
+    let journey = Journey::start().await.expect("journey starts");
+    if journey.mode.is_mock() {
+        journey
+            .mock()
+            .reply_slowly(
+                Turn::text("This is a long answer that arrives one piece at a time."),
+                Duration::from_millis(400),
+            )
+            .await;
+    }
+
+    let session = journey.session("genet").await.expect("session opens");
+    journey
+        .send(
+            &session,
+            "Count from 1 to 500, one number per line, with a short comment on each.",
+        )
+        .await
+        .expect("accepted");
+
+    // Interrupt once the turn is visibly under way, not before: cancelling
+    // something that has not started tests nothing.
+    journey
+        .client
+        .wait_for_turn_to_start()
+        .await
+        .expect("the turn starts");
+    journey
+        .client
+        .call(Request::SessionInterrupt {
+            session_id: session.clone(),
+        })
+        .await
+        .expect("interrupt accepted");
+
+    let events = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(
+        events.canceled(),
+        "a stopped turn must say it was stopped, not completed: {:?}",
+        events.last()
+    );
+
+    // And the session is usable afterwards — a stop that wedges the agent is
+    // barely better than no stop at all.
+    let summary = match journey
+        .client
+        .call(Request::SessionGet {
+            session_id: session.clone(),
+        })
+        .await
+        .unwrap()
+    {
+        Reply::Snapshot(snapshot) => snapshot.summary,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(
+        summary.status,
+        genehub_proto::SessionStatus::Idle,
+        "the session should be idle again"
+    );
+
+    journey.finish().await;
+}
+
+/// Losing the connection while the agent is mid-answer.
+///
+/// The existing replay cases all reconnect after the turn ended, which is the
+/// easy half: the hard half is a turn that keeps producing events while nobody
+/// is listening.
+#[tokio::test]
+async fn a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns() {
+    let journey = Journey::start_in_mode(genehub_testing::Mode::Mock)
+        .await
+        .expect("journey starts");
+    journey
+        .mock()
+        .reply_slowly(
+            Turn::text("A reply that keeps arriving after the client has gone."),
+            Duration::from_millis(250),
+        )
+        .await;
+
+    let session = journey.session("genet").await.expect("session opens");
+
+    // The client that is actually watching, so its disappearance is the real
+    // thing rather than a description of one.
+    let watching = genehub_testing::Client::connect(&journey.daemon().websocket_url())
+        .await
+        .expect("a watching client");
+    watching.hello("journey-2").await.expect("handshake");
+    watching
+        .call(Request::Subscribe {
+            session_id: session.clone(),
+            since_seq: None,
+        })
+        .await
+        .expect("subscribed");
+
+    journey
+        .send(&session, "Say something long.")
+        .await
+        .expect("accepted");
+
+    let seen_up_to = watching
+        .wait_for_turn_to_start()
+        .await
+        .expect("the turn starts");
+    watching.close().await;
+
+    // The turn runs on without the client that started it — an agent that gave
+    // up when a laptop lid closed would be useless on a phone.
+    let rest = journey.client.drain_turn().await.expect("the turn ends");
+    assert!(rest.completed(), "saw {:?}", rest.failure());
+
+    let returning = genehub_testing::Client::connect(&journey.daemon().websocket_url())
+        .await
+        .expect("reconnecting");
+    returning.hello("journey-3").await.expect("handshake");
+    let (snapshot, replayed, reset) = match returning
+        .call(Request::Subscribe {
+            session_id: session.clone(),
+            since_seq: Some(seen_up_to),
+        })
+        .await
+        .unwrap()
+    {
+        Reply::Subscribed {
+            snapshot,
+            replayed,
+            reset,
+        } => (snapshot, replayed, reset),
+        other => panic!("unexpected {other:?}"),
+    };
+
+    assert!(!reset, "the gap is small enough to fill");
+    assert!(
+        replayed.iter().all(|event| event.seq > seen_up_to),
+        "replaying what the client already had would duplicate it"
+    );
+    assert!(
+        replayed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::TurnCompleted { .. })),
+        "the end of the turn is the one event it cannot afford to miss"
+    );
+    assert_eq!(
+        replayed.last().map(|event| event.seq),
+        Some(snapshot.seq),
+        "the replay should end where the snapshot begins"
+    );
+
+    returning.close().await;
     journey.finish().await;
 }
 
@@ -921,7 +1215,7 @@ async fn a_second_client_sees_the_same_session_as_the_first() {
 
     let session = journey.session("genet").await.expect("session opens");
 
-    let second = genehub_testing::Client::connect(&journey.daemon.websocket_url())
+    let second = genehub_testing::Client::connect(&journey.daemon().websocket_url())
         .await
         .expect("second connection");
     second.hello("journey-2").await.expect("handshake");
@@ -958,7 +1252,7 @@ async fn a_second_client_sees_the_same_session_as_the_first() {
 #[tokio::test]
 async fn a_connection_must_say_hello_before_anything_else() {
     let journey = Journey::start().await.expect("journey starts");
-    let bare = genehub_testing::Client::connect(&journey.daemon.websocket_url())
+    let bare = genehub_testing::Client::connect(&journey.daemon().websocket_url())
         .await
         .expect("connection");
 
@@ -977,7 +1271,7 @@ async fn a_connection_must_say_hello_before_anything_else() {
 #[tokio::test]
 async fn a_client_speaking_another_protocol_version_is_turned_away() {
     let journey = Journey::start().await.expect("journey starts");
-    let stranger = genehub_testing::Client::connect(&journey.daemon.websocket_url())
+    let stranger = genehub_testing::Client::connect(&journey.daemon().websocket_url())
         .await
         .expect("connection");
 
@@ -996,7 +1290,7 @@ async fn a_client_speaking_another_protocol_version_is_turned_away() {
 #[tokio::test]
 async fn a_connection_without_the_token_is_rejected_outright() {
     let journey = Journey::start().await.expect("journey starts");
-    let url = format!("ws://127.0.0.1:{}/ws?token=wrong", journey.daemon.port);
+    let url = format!("ws://127.0.0.1:{}/ws?token=wrong", journey.daemon().port);
     assert!(
         genehub_testing::Client::connect(&url).await.is_err(),
         "the loopback port still needs its token"
@@ -1009,7 +1303,7 @@ async fn a_connection_without_the_token_is_rejected_outright() {
 #[tokio::test]
 async fn a_malformed_frame_gets_an_error_rather_than_silence() {
     let journey = Journey::start().await.expect("journey starts");
-    let client = genehub_testing::Client::connect(&journey.daemon.websocket_url())
+    let client = genehub_testing::Client::connect(&journey.daemon().websocket_url())
         .await
         .expect("connection");
     client.hello("sloppy").await.expect("handshake");

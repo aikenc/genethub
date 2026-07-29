@@ -8,6 +8,7 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use axum::body::Body;
@@ -16,6 +17,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
@@ -28,6 +30,11 @@ pub enum Scripted {
     Status { code: u16, message: String },
     /// Frames, then the connection drops without `[DONE]`.
     Truncated(Turn),
+    /// A reply that dribbles out, so the turn is still open when the test acts.
+    ///
+    /// Interrupting or disconnecting only means anything mid-turn, and a mock
+    /// that answers instantly never leaves a mid-turn to catch.
+    Slow { turn: Turn, gap: Duration },
     /// A syntactically broken SSE payload.
     Malformed,
 }
@@ -205,6 +212,11 @@ impl MockLlm {
         self.push(Scripted::Reply(turn)).await;
     }
 
+    /// Queues a reply that takes `gap` between frames.
+    pub async fn reply_slowly(&self, turn: Turn, gap: Duration) {
+        self.push(Scripted::Slow { turn, gap }).await;
+    }
+
     /// What the agent sent the model, in order.
     pub async fn requests(&self) -> Vec<Value> {
         self.inner.lock().await.requests.clone()
@@ -284,7 +296,30 @@ async fn completions(
             lines.push("data: [DONE]\n\n".to_string());
             sse(lines)
         }
+        Scripted::Slow { turn, gap } => {
+            let mut lines: Vec<String> = turn
+                .frames()
+                .iter()
+                .map(|frame| format!("data: {frame}\n\n"))
+                .collect();
+            lines.push("data: [DONE]\n\n".to_string());
+            trickle(lines, gap)
+        }
     }
+}
+
+/// The same stream, one frame every `gap`.
+fn trickle(lines: Vec<String>, gap: Duration) -> Response {
+    let stream = futures_util::stream::iter(lines.into_iter()).then(move |line| async move {
+        tokio::time::sleep(gap).await;
+        Ok::<_, std::io::Error>(line.into_bytes())
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(stream))
+        .expect("building the SSE response")
 }
 
 fn sse(lines: Vec<String>) -> Response {

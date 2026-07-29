@@ -66,7 +66,8 @@ impl ModelBackend {
 }
 
 pub struct Journey {
-    pub daemon: Daemon,
+    /// `Option` only so a restart can take it: `shutdown` consumes the daemon.
+    daemon: Option<Daemon>,
     pub client: Client,
     pub mock: Option<Arc<MockLlm>>,
     pub workspace: WorkspaceInfo,
@@ -75,6 +76,7 @@ pub struct Journey {
     /// Kept alive so the temporary tree outlives the test.
     _home: tempfile::TempDir,
     project: PathBuf,
+    data_dir: PathBuf,
 }
 
 impl Journey {
@@ -146,7 +148,7 @@ impl Journey {
         };
 
         Ok(Journey {
-            daemon,
+            daemon: Some(daemon),
             client,
             mock,
             workspace,
@@ -154,11 +156,41 @@ impl Journey {
             model,
             _home: home,
             project,
+            data_dir,
         })
     }
 
     pub fn project(&self) -> &Path {
         &self.project
+    }
+
+    pub fn daemon(&self) -> &Daemon {
+        self.daemon.as_ref().expect("the daemon is running")
+    }
+
+    /// Stops the daemon and starts another one on the same data directory.
+    ///
+    /// This is the thing a user does without thinking — quit the app, come back
+    /// later — and the only honest way to test that sessions live on disk
+    /// rather than in memory. The new daemon mints a new token and picks a new
+    /// port, so the client has to be rebuilt too; that is also true of the real
+    /// desktop shell, which is why it tells the workbench where the daemon went.
+    pub async fn restart_daemon(&mut self) -> Result<()> {
+        if let Some(daemon) = self.daemon.take() {
+            daemon.shutdown().await;
+        }
+        let daemon = Daemon::start(Paths::new(&self.data_dir))
+            .await
+            .context("restarting the daemon")?;
+        let client = Client::connect(&daemon.websocket_url())
+            .await
+            .context("reconnecting after the restart")?;
+        client.hello("journey").await?;
+
+        let previous = std::mem::replace(&mut self.client, client);
+        previous.close().await;
+        self.daemon = Some(daemon);
+        Ok(())
     }
 
     pub fn model_id(&self) -> String {
@@ -261,7 +293,9 @@ impl Journey {
 
     pub async fn finish(self) {
         self.client.close().await;
-        self.daemon.shutdown().await;
+        if let Some(daemon) = self.daemon {
+            daemon.shutdown().await;
+        }
         if let Some(mock) = self.mock {
             if let Ok(mock) = Arc::try_unwrap(mock) {
                 mock.shutdown();

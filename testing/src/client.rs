@@ -148,6 +148,42 @@ impl Client {
         Ok(())
     }
 
+    /// Waits until the agent is visibly working, returning the last sequence
+    /// number seen on the way.
+    ///
+    /// "Mid-turn" has to mean something: interrupting or disconnecting before
+    /// the model has produced anything tests the request path and nothing else.
+    /// A timeline item is the first proof that the answer has started.
+    pub async fn wait_for_turn_to_start(&self) -> Result<u64> {
+        let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+        let mut events = self.events.lock().await;
+        let mut last = 0;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("the turn never produced anything");
+            }
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Some(event)) => {
+                    last = event.seq;
+                    match event.event {
+                        SessionEvent::Item { .. } | SessionEvent::ItemDelta { .. } => {
+                            return Ok(last)
+                        }
+                        SessionEvent::TurnCompleted { .. }
+                        | SessionEvent::TurnFailed { .. }
+                        | SessionEvent::TurnCanceled { .. } => {
+                            bail!("the turn was over before it could be caught mid-flight")
+                        }
+                        _ => continue,
+                    }
+                }
+                Ok(None) => bail!("the event stream closed"),
+                Err(_) => bail!("timed out waiting for the turn to start"),
+            }
+        }
+    }
+
     /// Collects events until a turn settles, then returns everything seen.
     ///
     /// Waiting for the terminal event rather than a fixed sleep is what keeps
@@ -280,6 +316,7 @@ pub trait EventsExt {
     fn tool_calls(&self) -> Vec<(&str, &genehub_proto::ToolCallDetail)>;
     fn assistant_text(&self) -> String;
     fn completed(&self) -> bool;
+    fn canceled(&self) -> bool;
     fn failure(&self) -> Option<&genehub_proto::TurnError>;
 }
 
@@ -340,6 +377,11 @@ impl EventsExt for Vec<SessionEvent> {
     fn completed(&self) -> bool {
         self.iter()
             .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+    }
+
+    fn canceled(&self) -> bool {
+        self.iter()
+            .any(|event| matches!(event, SessionEvent::TurnCanceled { .. }))
     }
 
     fn failure(&self) -> Option<&genehub_proto::TurnError> {
