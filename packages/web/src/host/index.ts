@@ -60,8 +60,23 @@ declare global {
   }
 }
 
+/**
+ * Cached, because which shell we are in cannot change while the page is open,
+ * and because a fresh object every call would make this unusable as a React
+ * dependency — see the note above `openConnection` in `App.tsx`.
+ *
+ * Keyed on the thing it decides from rather than cached outright, so it stays
+ * honest if the answer does change: that never happens in a real page, and it
+ * happens in every test that covers both shells.
+ */
+let detected: { desktop: boolean; host: Host } | null = null;
+
 export function detectHost(): Host {
-  return typeof window !== "undefined" && window.__TAURI__ ? desktopHost() : browserHost();
+  const desktop = typeof window !== "undefined" && !!window.__TAURI__;
+  if (!detected || detected.desktop !== desktop) {
+    detected = { desktop, host: desktop ? desktopHost() : browserHost() };
+  }
+  return detected.host;
 }
 
 /**

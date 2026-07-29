@@ -23,10 +23,20 @@ const PANELS = [
 
 type PanelId = (typeof PANELS)[number]["id"];
 
+/**
+ * Both defaults live out here, and they have to.
+ *
+ * A default written inline is a new value on every render, and both of these
+ * are effect dependencies: the effect below would tear down its connection and
+ * open another one every time anything changed, which React rightly treats as
+ * a runaway loop and answers by rendering nothing at all.
+ */
+const openConnection = (endpoint: Endpoint) => new Client({ url: endpoint.url });
+
 export function App({
   host = detectHost(),
   // Injected by tests so they can drive the workbench without a real socket.
-  connect = (endpoint: Endpoint) => new Client({ url: endpoint.url }),
+  connect = openConnection,
 }: {
   host?: Host;
   connect?: (endpoint: Endpoint) => Client;
@@ -38,12 +48,14 @@ export function App({
   const pairing = workbench.hub?.state === "pairing";
 
   // While a code is on screen, approval happens somewhere else entirely, so the
-  // only way to learn it succeeded is to ask.
+  // only way to learn it succeeded is to ask. Reading the action off the store
+  // rather than the render keeps the timer from being reset by every unrelated
+  // update — including the ones this poll itself causes.
   useEffect(() => {
     if (!pairing) return;
-    const timer = setInterval(() => void workbench.refreshHub(), 2000);
+    const timer = setInterval(() => void useWorkbench.getState().refreshHub(), 2000);
     return () => clearInterval(timer);
-  }, [pairing, workbench]);
+  }, [pairing]);
 
   // The endpoint is asked for again whenever the shell says it moved, which is
   // what a daemon restart looks like from here: same machine, new address.
@@ -95,6 +107,15 @@ export function App({
           <h1 className="truncate text-sm font-medium">{session?.title ?? "新会话"}</h1>
           <ConnectionBadge state={workbench.connection} endpoint={endpoint} />
         </header>
+
+        {workbench.notice ? (
+          <p
+            role="alert"
+            className="shrink-0 border-b border-line bg-raised px-3 py-1.5 text-xs text-danger"
+          >
+            {workbench.notice}
+          </p>
+        ) : null}
 
         <nav className="flex shrink-0 gap-1 border-b border-line bg-surface px-2" role="tablist">
           {PANELS.map((entry) => (

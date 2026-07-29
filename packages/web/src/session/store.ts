@@ -73,11 +73,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   settings: null,
 
   async attach(client) {
-    set({ client });
+    set({ client, notice: null });
     client.onStateChange((connection) => set({ connection }));
     client.onNotice((_level, message) => set({ notice: message }));
-    await refreshCatalog(client, set);
-    await get().refreshHub();
+    try {
+      await refreshCatalog(client, set);
+      await get().refreshHub();
+    } catch (error) {
+      // A connection can disappear halfway through being asked things: the tab
+      // is closing, or the daemon restarted and the shell has already pointed
+      // us at its replacement. Neither is worth reporting — but an error on the
+      // connection we are still using is, and it used to go nowhere at all.
+      if (get().client !== client) return;
+      set({ notice: error instanceof Error ? error.message : String(error) });
+    }
   },
 
   async openWorkspace(root) {
@@ -176,10 +185,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const client = require_(get().client);
     const workspaceId = currentWorkspace(get());
     if (!workspaceId) return;
-    const reply = await client.call({
-      type: "file.tree",
-      payload: { workspaceId, path: path ?? null, depth: 1 },
-    });
+    const reply = await client
+      .call({ type: "file.tree", payload: { workspaceId, path: path ?? null, depth: 1 } })
+      .catch(unattended(client, get, set));
     if (reply?.type !== "fileTree") return;
     set((state) => ({
       tree: path && state.tree ? graft(state.tree, path, reply.data) : reply.data,
@@ -209,7 +217,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const client = require_(get().client);
     const workspaceId = currentWorkspace(get());
     if (!workspaceId) return;
-    const reply = await client.call({ type: "git.status", payload: { workspaceId } });
+    const reply = await client
+      .call({ type: "git.status", payload: { workspaceId } })
+      .catch(unattended(client, get, set));
     if (reply?.type === "gitStatus") set({ git: reply.data });
   },
 
@@ -234,7 +244,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async loadSettings() {
-    const reply = await require_(get().client).call({ type: "settings.get" });
+    const client = require_(get().client);
+    const reply = await client
+      .call({ type: "settings.get" })
+      .catch(unattended(client, get, set));
     if (reply?.type === "settings") set({ settings: reply.data });
   },
 
@@ -327,6 +340,23 @@ function upsertBy<T>(list: T[], item: T, key: (value: T) => string): T[] {
   const next = list.slice();
   next[index] = item;
   return next;
+}
+
+/**
+ * Handles the failure of a request nobody is waiting on.
+ *
+ * Panels load their content when they mount — which is before there is a
+ * connection, and again after one has gone away — so these requests routinely
+ * die with the socket. That is not news and must not surface as an unhandled
+ * rejection. A failure on the connection we are still using is news, and it
+ * goes somewhere the user can see it.
+ */
+function unattended(client: Client, get: () => WorkbenchState, set: Setter) {
+  return (error: unknown): undefined => {
+    if (get().client !== client) return undefined;
+    set({ notice: error instanceof Error ? error.message : String(error) });
+    return undefined;
+  };
 }
 
 function require_(client: Client | null): Client {
