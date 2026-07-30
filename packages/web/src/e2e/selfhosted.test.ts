@@ -83,7 +83,7 @@ describe.skipIf(!existsSync(DAEMON) || !existsSync(RELAY))(
     });
 
     it("lets a paired device in and keeps everyone else out", async () => {
-      const invite = await owner.call({ type: "device.invite", payload: { name: null } });
+      const invite = await owner.call({ type: "device.invite" });
       if (invite?.type !== "invite") throw new Error("no invite was minted");
       expect(invite.data.rendezvousUrl).toBe(rendezvous);
 
@@ -120,7 +120,7 @@ describe.skipIf(!existsSync(DAEMON) || !existsSync(RELAY))(
     }, 40_000);
 
     it("cuts off a revoked device while it is using the connection", async () => {
-      const invite = await owner.call({ type: "device.invite", payload: { name: null } });
+      const invite = await owner.call({ type: "device.invite" });
       if (invite?.type !== "invite") throw new Error("no invite was minted");
 
       const machine = await claimMachine(

@@ -436,10 +436,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async invite() {
-    const reply = await require_(get().client).call({
-      type: "device.invite",
-      payload: { name: null },
-    });
+    const reply = await require_(get().client).call({ type: "device.invite" });
     return reply?.type === "invite" ? reply.data : null;
   },
 

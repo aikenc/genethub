@@ -10,7 +10,7 @@
 //! rendezvous slot in front of a client buys nothing: the impostor cannot
 //! answer, and the client refuses to go on.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -46,7 +46,6 @@ struct Device {
 /// device"; surviving a restart would turn it into a standing offer.
 struct Invite {
     code: String,
-    name: Option<String>,
     expires_at: DateTime<Utc>,
 }
 
@@ -115,7 +114,7 @@ impl Devices {
     /// Mints a one-time code. `rendezvous_url` is filled in by the caller,
     /// which is the only part of the system that knows whether this machine is
     /// currently reachable from outside.
-    pub fn invite(&self, name: Option<String>) -> DeviceInvite {
+    pub fn invite(&self) -> DeviceInvite {
         let code = random_token();
         let expires_at = Utc::now() + Duration::minutes(INVITE_LIFETIME_MINUTES);
         let mut state = self.state.lock().unwrap();
@@ -123,7 +122,6 @@ impl Devices {
         state.invites.retain(|invite| invite.expires_at > now);
         state.invites.push(Invite {
             code: code.clone(),
-            name,
             expires_at,
         });
         DeviceInvite {
@@ -163,11 +161,7 @@ impl Devices {
 
         let device = Device {
             id: format!("d_{}", random_token()),
-            name: invite
-                .name
-                .unwrap_or_else(|| device_name.trim().to_string())
-                .trim()
-                .to_string(),
+            name: device_name.trim().to_string(),
             secret: random_token(),
             paired_at: now,
             last_seen_at: None,
@@ -241,8 +235,7 @@ impl Devices {
         if nonce.len() < 16 {
             return Err(anyhow!("the challenge is too short to be random"));
         }
-        let seen: HashSet<&String> = state.seen_nonces.iter().collect();
-        if seen.contains(&nonce.to_string()) {
+        if state.seen_nonces.iter().any(|seen| seen == nonce) {
             return Err(anyhow!("this challenge has already been used"));
         }
         if state.seen_nonces.len() >= NONCE_MEMORY {
@@ -314,7 +307,7 @@ mod tests {
 
     /// The happy path, and the shape every other test leans on.
     fn claim(devices: &Devices, name: &str) -> (String, String) {
-        let invite = devices.invite(None);
+        let invite = devices.invite();
         let nonce = random_token();
         let (credential, _) = devices
             .claim(
@@ -347,7 +340,7 @@ mod tests {
     #[test]
     fn an_invite_works_exactly_once() {
         let (devices, _dir) = devices();
-        let invite = devices.invite(None);
+        let invite = devices.invite();
 
         let first = random_token();
         devices
@@ -376,7 +369,7 @@ mod tests {
     #[test]
     fn claiming_without_the_proof_is_refused() {
         let (devices, _dir) = devices();
-        let invite = devices.invite(None);
+        let invite = devices.invite();
         let nonce = random_token();
         assert!(devices
             .claim(&invite.code, "phone", &nonce, "not-the-proof")
@@ -478,7 +471,7 @@ mod tests {
     #[test]
     fn an_expired_invite_is_gone() {
         let (devices, _dir) = devices();
-        let invite = devices.invite(None);
+        let invite = devices.invite();
         {
             let mut state = devices.state.lock().unwrap();
             for entry in state.invites.iter_mut() {

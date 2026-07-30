@@ -374,8 +374,8 @@ pub async fn handle(
             remote: remote_status(state).await,
         }),
 
-        Request::DeviceInvite { name } => {
-            let mut invite = state.devices.invite(name);
+        Request::DeviceInvite => {
+            let mut invite = state.devices.invite();
             invite.rendezvous_url = remote_status(state).await.rendezvous_url;
             Handled::ok(Reply::Invite(invite))
         }

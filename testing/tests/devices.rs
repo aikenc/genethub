@@ -61,10 +61,7 @@ impl Reachable {
     /// A one-time invite, as the owner would generate one.
     async fn invite(&self) -> Result<String> {
         let invite = expect_reply!(
-            self.journey
-                .client
-                .call(Request::DeviceInvite { name: None })
-                .await?,
+            self.journey.client.call(Request::DeviceInvite).await?,
             Reply::Invite
         );
         Ok(invite.code)

@@ -148,11 +148,11 @@ pub enum Request {
     #[serde(rename = "device.list")]
     DeviceList,
     /// Mints a one-time invite to show as a link and a QR code.
-    #[serde(rename = "device.invite", rename_all = "camelCase")]
-    DeviceInvite {
-        #[serde(default)]
-        name: Option<String>,
-    },
+    ///
+    /// The new device names itself when it redeems the invite — it is the one
+    /// that knows whether it is a phone or a laptop.
+    #[serde(rename = "device.invite")]
+    DeviceInvite,
     /// Redeems an invite. The only request a stranger may send, and only once
     /// per invite: everything else needs a credential this call hands out.
     #[serde(rename = "device.claim", rename_all = "camelCase")]
