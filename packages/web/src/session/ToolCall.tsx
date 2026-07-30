@@ -114,7 +114,27 @@ function Body({ detail }: { detail: ToolCallDetail }) {
       return <Markdown text={detail.markdown} />;
 
     case "subAgent":
-      return <p className="text-muted">{detail.prompt}</p>;
+      return (
+        <div className="space-y-2">
+          <p className="text-muted">{detail.prompt}</p>
+          {detail.items.length > 0 ? (
+            // Indented, because whose work this is matters: these ran inside the
+            // sub-agent, and reading them as the main agent's own steps is exactly
+            // the confusion the nesting exists to remove.
+            <ul className="space-y-2 border-l border-line pl-3" aria-label="子 agent 的步骤">
+              {detail.items.map((item) => (
+                <li key={item.id}>
+                  {item.type === "toolCall" ? (
+                    <ToolCallView name={item.name} status={item.status} detail={item.detail} />
+                  ) : item.type === "assistantMessage" || item.type === "reasoning" ? (
+                    <p className="text-xs text-muted">{item.text}</p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      );
 
     case "unknown":
       return <Unknown raw={detail.raw} />;

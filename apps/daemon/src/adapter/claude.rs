@@ -689,6 +689,23 @@ struct TurnState {
     /// frontend's own initial render) would never see (same shape as the
     /// text-settling fix in `content_block_stop`, just for tool status).
     tool_items: HashMap<String, (String, String, Value)>,
+    /// A dispatched sub-agent's own steps, by the `tool_use_id` of the call that
+    /// dispatched it. They arrive as ordinary `assistant`/`user` frames carrying
+    /// `parent_tool_use_id`, and belong inside that call's card rather than in the
+    /// conversation — where, until this existed, a sub-agent's `Bash` and `Read`
+    /// appeared as if the main agent had run them itself.
+    subs: HashMap<String, Sub>,
+}
+
+/// What one sub-agent has done so far.
+#[derive(Default)]
+struct Sub {
+    items: Vec<TimelineItem>,
+    /// Child `tool_use_id` -> which of `items` is its card, and the input it was
+    /// called with. The input is kept because the result arrives in a frame that
+    /// does not repeat it, and rebuilding the card needs both halves.
+    at: HashMap<String, (usize, Value)>,
+    counter: u64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1193,6 +1210,143 @@ fn translate_stream_event(
     }
 }
 
+/// Opens a card for each tool the sub-agent has started, inside its parent.
+fn collect_sub_tool_calls(frame: &Value, parent: &str, state: &mut TurnState) {
+    let Some((parent_item_id, ..)) = state.tool_items.get(parent).cloned() else {
+        return;
+    };
+    for block in content_blocks(frame) {
+        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+            continue;
+        }
+        let Some(tool_use_id) = block.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let name = block
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_string();
+        let input = block.get("input").cloned().unwrap_or(Value::Null);
+        let sub = state.subs.entry(parent.to_string()).or_default();
+        if sub.at.contains_key(tool_use_id) {
+            continue;
+        }
+        sub.counter += 1;
+        let id = format!("{parent_item_id}-{}", sub.counter);
+        sub.at
+            .insert(tool_use_id.to_string(), (sub.items.len(), input.clone()));
+        sub.items.push(TimelineItem::ToolCall {
+            id,
+            detail: detail_from_tool(&name, &input, None),
+            name,
+            status: ToolStatus::Running,
+        });
+    }
+}
+
+/// Closes the sub-agent's cards as its tools finish.
+fn settle_sub_tool_results(frame: &Value, parent: &str, state: &mut TurnState) {
+    let Some(sub) = state.subs.get_mut(parent) else {
+        return;
+    };
+    for block in content_blocks(frame) {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        let Some((at, input)) = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .and_then(|id| sub.at.get(id))
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(TimelineItem::ToolCall { id, name, .. }) = sub.items.get(at) else {
+            continue;
+        };
+        let (id, name) = (id.clone(), name.clone());
+        let status = if block
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            ToolStatus::Error
+        } else {
+            ToolStatus::Ok
+        };
+        let result = tool_result_text(&block);
+        sub.items[at] = TimelineItem::ToolCall {
+            detail: detail_from_tool(&name, &input, result.as_deref()),
+            id,
+            name,
+            status,
+        };
+    }
+}
+
+/// Re-sends the parent call with everything the sub-agent has done so far.
+///
+/// Every nested step means another copy of the parent card, which is how the
+/// frontend learns anything happened at all: the card is one item, and an item is
+/// only ever replaced whole.
+fn emit_sub_agent(
+    parent: &str,
+    turn_id: &str,
+    state: &TurnState,
+    events: &broadcast::Sender<SessionEvent>,
+) {
+    let Some((id, name, input)) = state.tool_items.get(parent) else {
+        return;
+    };
+    let _ = events.send(SessionEvent::Item {
+        turn_id: turn_id.to_string(),
+        item: TimelineItem::ToolCall {
+            id: id.clone(),
+            detail: sub_agent_detail(name, input, None, state.subs.get(parent)),
+            name: name.clone(),
+            status: ToolStatus::Running,
+        },
+    });
+}
+
+/// The parent call's detail, with the sub-agent's steps spliced back in.
+///
+/// `detail_from_tool` cannot do this itself: it sees one tool call in isolation,
+/// and the nested steps live in the turn's state. Without this the tool result
+/// that closes the call would rebuild the card with an empty `items` and wipe
+/// everything the sub-agent had been seen doing.
+fn sub_agent_detail(
+    name: &str,
+    input: &Value,
+    result: Option<&str>,
+    sub: Option<&Sub>,
+) -> ToolCallDetail {
+    let detail = detail_from_tool(name, input, result);
+    match (detail, sub) {
+        (
+            ToolCallDetail::SubAgent { agent, prompt, .. },
+            Some(Sub {
+                items: collected, ..
+            }),
+        ) => ToolCallDetail::SubAgent {
+            agent,
+            prompt,
+            items: collected.clone(),
+        },
+        (detail, _) => detail,
+    }
+}
+
+fn content_blocks(frame: &Value) -> Vec<Value> {
+    frame
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// The full, already-parsed assistant message. Used only to pick up tool
 /// calls (see module doc); text/thinking already streamed from the deltas.
 fn translate_assistant_snapshot(
@@ -1203,6 +1357,17 @@ fn translate_assistant_snapshot(
     let Some(turn_id) = state.id.clone() else {
         return;
     };
+    // A sub-agent's frame. Its tool calls go inside the call that dispatched it.
+    if let Some(parent) = frame
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .filter(|parent| state.tool_items.contains_key(*parent))
+    {
+        let parent = parent.to_string();
+        collect_sub_tool_calls(frame, &parent, state);
+        emit_sub_agent(&parent, &turn_id, state, events);
+        return;
+    }
     let blocks = frame
         .get("message")
         .and_then(|message| message.get("content"))
@@ -1253,6 +1418,18 @@ fn translate_user_frame(
     let Some(turn_id) = state.id.clone() else {
         return;
     };
+    // A sub-agent's own tool results, and the prompt it was dispatched with. The
+    // prompt is already on the parent card, so only the results are threaded in.
+    if let Some(parent) = frame
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .filter(|parent| state.tool_items.contains_key(*parent))
+    {
+        let parent = parent.to_string();
+        settle_sub_tool_results(frame, &parent, state);
+        emit_sub_agent(&parent, &turn_id, state, events);
+        return;
+    }
     let blocks = frame
         .get("message")
         .and_then(|message| message.get("content"))
@@ -1286,7 +1463,12 @@ fn translate_user_frame(
                     turn_id: turn_id.clone(),
                     item: TimelineItem::ToolCall {
                         id,
-                        detail: detail_from_tool(&name, &input, result_text.as_deref()),
+                        detail: sub_agent_detail(
+                            &name,
+                            &input,
+                            result_text.as_deref(),
+                            state.subs.get(tool_use_id),
+                        ),
                         name,
                         status,
                     },
@@ -1717,6 +1899,143 @@ mod tests {
             matches!(&detail, ToolCallDetail::Plan { markdown } if markdown.starts_with("## 步骤")),
             "saw {detail:?}"
         );
+    }
+
+    /// A dispatched sub-agent's steps belong to it, not to the conversation.
+    ///
+    /// The frames below are the shape a real 2.1.220 emits (captured from an
+    /// `Agent` call that ran `Bash` then `Read`): the sub-agent's own work arrives
+    /// as ordinary `assistant`/`user` frames whose only marker is
+    /// `parent_tool_use_id`. Ignore that marker, as we used to, and the
+    /// sub-agent's `Bash` shows up in the timeline as if the main agent had run
+    /// it — with no way to tell that it was something else's doing.
+    #[test]
+    fn a_sub_agents_steps_land_inside_its_own_card_and_not_in_the_conversation() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut turn = state();
+
+        // The dispatching call.
+        translate_assistant_snapshot(
+            &json!({"message": {"content": [{
+                "type": "tool_use", "id": "tool_parent", "name": "Agent",
+                "input": {"subagent_type": "Explore", "prompt": "Find hello.txt"},
+            }]}}),
+            &mut turn,
+            &tx,
+        );
+        // Its work: one tool started, then finished.
+        translate_assistant_snapshot(
+            &json!({
+                "parent_tool_use_id": "tool_parent",
+                "message": {"content": [{
+                    "type": "tool_use", "id": "tool_child", "name": "Bash",
+                    "input": {"command": "ls /tmp"},
+                }]},
+            }),
+            &mut turn,
+            &tx,
+        );
+        translate_user_frame(
+            &json!({
+                "parent_tool_use_id": "tool_parent",
+                "message": {"content": [{
+                    "type": "tool_result", "tool_use_id": "tool_child", "content": "hello.txt",
+                }]},
+            }),
+            &mut turn,
+            &tx,
+        );
+
+        let items: Vec<_> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                SessionEvent::Item { item, .. } => Some(item),
+                _ => None,
+            })
+            .collect();
+
+        // Every one of them is the same card being replaced, never a second
+        // top-level entry: three items, one id.
+        assert_eq!(items.len(), 3, "saw {items:?}");
+        assert!(
+            items.iter().all(|item| item.id() == items[0].id()),
+            "the sub-agent's steps must not become timeline entries of their own: {items:?}"
+        );
+
+        let TimelineItem::ToolCall {
+            detail: ToolCallDetail::SubAgent { agent, items, .. },
+            ..
+        } = items.last().expect("a card")
+        else {
+            panic!("expected a sub-agent card, saw {:?}", items.last());
+        };
+        assert_eq!(agent, "Explore");
+        match &items[..] {
+            [TimelineItem::ToolCall {
+                name,
+                status,
+                detail: ToolCallDetail::Shell { command, output, .. },
+                ..
+            }] => {
+                assert_eq!(name, "Bash");
+                assert_eq!(command, "ls /tmp");
+                // Settled, not still running: the result reached the right card.
+                assert_eq!(*status, ToolStatus::Ok);
+                assert_eq!(output, "hello.txt");
+            }
+            other => panic!("expected one finished nested call, saw {other:?}"),
+        }
+    }
+
+    /// The result that closes the dispatching call must not take the sub-agent's
+    /// history with it — the card is replaced whole, so anything not carried over
+    /// disappears at exactly the moment someone would go back to read it.
+    #[test]
+    fn closing_the_dispatching_call_keeps_what_the_sub_agent_did() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut turn = state();
+        for frame in [
+            json!({"message": {"content": [{
+                "type": "tool_use", "id": "tool_parent", "name": "Task",
+                "input": {"subagent_type": "Explore", "prompt": "Find it"},
+            }]}}),
+            json!({
+                "parent_tool_use_id": "tool_parent",
+                "message": {"content": [{
+                    "type": "tool_use", "id": "tool_child", "name": "Read",
+                    "input": {"file_path": "/tmp/hello.txt"},
+                }]},
+            }),
+        ] {
+            translate_assistant_snapshot(&frame, &mut turn, &tx);
+        }
+        drain(&mut rx);
+
+        // The parent's own result: top-level, no parent id.
+        translate_user_frame(
+            &json!({"message": {"content": [{
+                "type": "tool_result", "tool_use_id": "tool_parent",
+                "content": "the answer is 42",
+            }]}}),
+            &mut turn,
+            &tx,
+        );
+
+        match &drain(&mut rx)[0] {
+            SessionEvent::Item {
+                item:
+                    TimelineItem::ToolCall {
+                        status,
+                        detail: ToolCallDetail::SubAgent { items, .. },
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(*status, ToolStatus::Ok);
+                assert_eq!(items.len(), 1, "the nested call was dropped: {items:?}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     /// A sub-agent card that says which agent and what it was asked to do, rather

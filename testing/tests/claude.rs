@@ -13,7 +13,7 @@
 //! Code's own documented way of choosing a backend, not a protocol this
 //! project owns (`docs/architecture.md` §3, boundary B1).
 
-use genehub_proto::{PermissionOutcome, Reply, Request, TimelineItem, ToolStatus};
+use genehub_proto::{PermissionOutcome, Reply, Request, TimelineItem, ToolCallDetail, ToolStatus};
 use genehub_testing::{assert_normalized_reply, binary_on_path, real_only, EventsExt, Journey};
 
 /// Claude Code's own Anthropic-compatible base URL for DeepSeek, per
@@ -348,6 +348,92 @@ async fn denying_a_permission_request_stops_the_tool_without_touching_disk() {
     assert!(
         !journey.file_exists("denied.txt"),
         "a denied Write must never reach the filesystem"
+    );
+
+    journey.finish().await;
+}
+
+/// A dispatched sub-agent's work belongs to it, and the CLI says whose work it is
+/// with nothing but a `parent_tool_use_id` on frames that otherwise look exactly
+/// like the main agent's. Miss it and the sub-agent's `Bash` appears in the
+/// conversation as if the main agent had run it.
+///
+/// Whether a sub-agent gets dispatched is the model's call, not ours, so a run
+/// where it just did the work itself is a run this cannot cover — and says so,
+/// rather than passing quietly on nothing.
+#[tokio::test]
+async fn a_sub_agents_work_stays_inside_the_call_that_dispatched_it() {
+    let journey = Journey::start().await.expect("journey starts");
+    real_only!(journey);
+    needs_claude!(journey);
+    point_claude_code_at_deepseek(&journey);
+
+    let session = journey
+        .session("claude")
+        .await
+        .expect("a session opens on Claude Code");
+    journey
+        .write_file("hello.txt", "the answer is 42\n")
+        .expect("the workspace is writable");
+    journey
+        .client
+        .call(Request::SessionSetMode {
+            session_id: session.clone(),
+            mode_id: "bypassPermissions".into(),
+        })
+        .await
+        .expect("bypassPermissions is a mode this adapter offers");
+    journey
+        .send(
+            &session,
+            "Use your Task tool with the Explore agent to report what hello.txt \
+             says. Do not read the file yourself.",
+        )
+        .await
+        .expect("prompt accepted");
+    let events = journey.client.drain_turn().await.expect("the turn ends");
+
+    let items = events.items();
+    let dispatched: Vec<_> = items
+        .iter()
+        .filter_map(|item| match item {
+            TimelineItem::ToolCall {
+                detail: ToolCallDetail::SubAgent { items, .. },
+                ..
+            } => Some(items),
+            _ => None,
+        })
+        .collect();
+    if dispatched.is_empty() {
+        eprintln!(
+            "skipping: this run answered without dispatching a sub-agent, \
+             so there was nothing to nest; saw {items:?}"
+        );
+        journey.finish().await;
+        return;
+    }
+
+    assert!(
+        dispatched.iter().any(|nested| !nested.is_empty()),
+        "a sub-agent that ran tools should have them on its own card; saw {dispatched:?}"
+    );
+    // And nowhere else. The sub-agent reads and greps; the main agent was told not
+    // to, so a top-level Read here means the nesting leaked.
+    let leaked: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                TimelineItem::ToolCall {
+                    detail: ToolCallDetail::Read { .. },
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "a sub-agent's own steps must not appear in the conversation: {leaked:?}"
     );
 
     journey.finish().await;
