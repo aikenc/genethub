@@ -73,7 +73,7 @@ impl AgentAdapter for OpenCodeAdapter {
         let port = pick_port()?;
         let base = format!("http://127.0.0.1:{port}");
 
-        let child = Command::new(&binary)
+        let mut child = Command::new(&binary)
             .arg("serve")
             .arg("--hostname")
             .arg("127.0.0.1")
@@ -87,10 +87,17 @@ impl AgentAdapter for OpenCodeAdapter {
             .spawn()
             .with_context(|| format!("spawning {}", binary.display()))?;
 
+        // What the server says about itself is worth keeping for two reasons: it
+        // is the only account of why a start failed, and a pipe nobody reads
+        // eventually fills and stops the process that is writing into it.
+        let chatter = Chatter::default();
+        chatter.watch(child.stdout.take()).await;
+        chatter.watch(child.stderr.take()).await;
+
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
             .build()?;
-        wait_until_ready(&http, &base).await?;
+        wait_until_ready(&http, &base, &mut child, &chatter).await?;
 
         let created: Value = http
             .post(format!("{base}/session"))
@@ -312,8 +319,23 @@ fn pick_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-async fn wait_until_ready(http: &reqwest::Client, base: &str) -> Result<()> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+/// How long a start may take before we call it a hang.
+///
+/// The first run on a machine is not a start, it is an install: OpenCode fetches
+/// a provider list and its own plugin runtime before it listens. Thirty seconds
+/// was enough on a warm machine and turned every fresh install into "the agent
+/// failed" — an error about our software, for someone whose only mistake was
+/// having just installed theirs. A warm start still answers in well under a
+/// second; this is only the ceiling.
+const READY_BUDGET: Duration = Duration::from_secs(180);
+
+async fn wait_until_ready(
+    http: &reqwest::Client,
+    base: &str,
+    child: &mut Child,
+    chatter: &Chatter,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + READY_BUDGET;
     let mut delay = Duration::from_millis(50);
     while std::time::Instant::now() < deadline {
         if http
@@ -325,10 +347,126 @@ async fn wait_until_ready(http: &reqwest::Client, base: &str) -> Result<()> {
         {
             return Ok(());
         }
+        // A process that has already exited is never going to answer, and sitting
+        // out the rest of the budget replaces the reason it left with a timeout.
+        if let Some(status) = child.try_wait()? {
+            chatter.settle().await;
+            return Err(anyhow!(
+                "OpenCode stopped before it was ready ({status}){}",
+                chatter.tail()
+            ));
+        }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(Duration::from_millis(500));
     }
-    Err(anyhow!("OpenCode did not become ready within 30s"))
+    Err(anyhow!(
+        "OpenCode was not ready within {}s{}",
+        READY_BUDGET.as_secs(),
+        chatter.tail()
+    ))
+}
+
+/// The last thing the child said, kept for whoever has to read the failure.
+#[derive(Default)]
+struct Chatter {
+    lines: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    /// Held so a failure can wait for the readers to finish. A process that dies
+    /// on its first line dies faster than we can read that line, and the line is
+    /// the whole reason anyone opened the error.
+    readers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl Chatter {
+    /// Enough lines to hold a stack trace, few enough that a chatty server does
+    /// not become the memory of this process.
+    const LINES: usize = 20;
+
+    async fn watch<R>(&self, from: Option<R>)
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    {
+        let Some(from) = from else { return };
+        let lines = self.lines.clone();
+        let reader = tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut reader = tokio::io::BufReader::new(from).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let mut held = lines.lock().expect("the log is never poisoned");
+                if held.len() == Self::LINES {
+                    held.pop_front();
+                }
+                held.push_back(line);
+            }
+        });
+        self.readers.lock().await.push(reader);
+    }
+
+    /// Waits for the readers to reach the end of a closed pipe, which is the only
+    /// thing left to read once the child is gone. Bounded, because a child that
+    /// left its pipes to a grandchild would otherwise hold this open forever.
+    async fn settle(&self) {
+        let readers = std::mem::take(&mut *self.readers.lock().await);
+        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            for reader in readers {
+                let _ = reader.await;
+            }
+        })
+        .await;
+    }
+
+    /// Formatted to sit at the end of a sentence, and to disappear when there is
+    /// nothing to say rather than leave a trailing colon.
+    fn tail(&self) -> String {
+        let held = self.lines.lock().expect("the log is never poisoned");
+        if held.is_empty() {
+            return String::new();
+        }
+        format!(": {}", Vec::from_iter(held.iter().cloned()).join(" / "))
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+
+    /// The case that used to cost three minutes and end in a timeout that said
+    /// nothing: the server is gone, and it said why on its way out.
+    #[tokio::test]
+    async fn a_server_that_dies_is_reported_with_what_it_said() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("echo 'cannot bind: address in use' >&2; exit 3")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let chatter = Chatter::default();
+        chatter.watch(child.stdout.take()).await;
+        chatter.watch(child.stderr.take()).await;
+
+        let started = std::time::Instant::now();
+        let error = wait_until_ready(
+            &reqwest::Client::new(),
+            // Nothing listens here, so readiness can only come from the child,
+            // and the child is on its way out.
+            "http://127.0.0.1:1",
+            &mut child,
+            &chatter,
+        )
+        .await
+        .expect_err("a dead server is not ready");
+
+        let said = error.to_string();
+        assert!(said.contains("stopped before it was ready"), "{said}");
+        assert!(
+            said.contains("address in use"),
+            "the reason it left is missing from: {said}"
+        );
+        assert!(
+            started.elapsed() < READY_BUDGET,
+            "waited out the whole budget for a process that had already exited"
+        );
+    }
 }
 
 async fn stream_events(
