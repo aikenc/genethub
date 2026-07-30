@@ -21,7 +21,10 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 case "$(uname -s)" in
   Linux) os=linux ;;
-  Darwin) os=macos ;;
+  # Naming it beats a 404 from curl. The build works — nothing is published
+  # because an unsigned macOS download is a security warning with an app behind
+  # it, so it waits for notarisation.
+  Darwin) die "no macOS build is published yet. Build from source: https://github.com/aikenc/genethub" ;;
   *) die "no build for $(uname -s). Build from source: https://github.com/aikenc/genethub" ;;
 esac
 

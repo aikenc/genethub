@@ -19,14 +19,19 @@
 
 ## 装上就用
 
-没有图形界面的机器（服务器、VM、只能 SSH 上去的盒子）：
+**Linux 与任何没有图形界面的机器**（服务器、VM、只能 SSH 上去的盒子）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/aikenc/genethub/main/scripts/install.sh | sh
 genet-daemon   # daemon + 内置 agent，不需要 Node；启动后打印连接地址与 token
 ```
 
-有图形界面的：从[发布页](https://github.com/aikenc/genethub/releases/latest)下装桌面端，托盘常驻。
+把它打印的地址在浏览器里打开就是完整工作台——和桌面端里的是同一份代码。
+
+**Windows**：从[发布页](https://github.com/aikenc/genethub/releases/latest)下安装包，托盘常驻，
+关掉窗口机器照样可达。
+
+macOS 这一版没有发布产物（等签名与公证），从源码构建可用。
 
 ## 从源码构建
 

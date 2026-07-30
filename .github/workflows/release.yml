@@ -14,32 +14,25 @@ permissions:
   contents: write
 
 jobs:
+  # Windows is the only platform that gets an installer in this version.
+  #
+  # Linux gets the pair of binaries below instead: a Linux box is usually reached
+  # over SSH, where a windowed app is no use, and where it has a graphical
+  # session the workbench opens in the browser the machine already has. That
+  # leaves the desktop shell doing nothing there that is worth a WebView
+  # dependency. macOS waits for signing and notarisation, without which the
+  # download is a security warning with an app behind it.
   installers:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
-            platform: linux
-            bundles: deb
-            # Renamed to a name that does not carry the version, so the download
-            # link can stay `releases/latest/download/<name>` forever instead of
-            # being rewritten on every release.
-            asset: GeneHub-linux-x64.deb
-            pattern: "*.deb"
-          - os: macos-14
-            platform: macos
-            bundles: dmg
-            asset: GeneHub-macos-arm64.dmg
-            pattern: "*.dmg"
-          - os: macos-13
-            platform: macos-intel
-            bundles: dmg
-            asset: GeneHub-macos-x64.dmg
-            pattern: "*.dmg"
           - os: windows-2022
             platform: windows
             bundles: nsis
+            # A name without the version in it, so the download link can stay
+            # `releases/latest/download/<name>` forever instead of being
+            # rewritten on every release.
             asset: GeneHub-windows-x64-setup.exe
             pattern: "*-setup.exe"
     runs-on: ${{ matrix.os }}
@@ -51,34 +44,24 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install the Linux WebView and tray dependencies
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-
       - run: npm ci
         working-directory: packages/web
       - run: npm ci
         working-directory: apps/desktop
 
-      # Stages the daemon and the built-in agent into the bundle, then checks the
-      # two promises the installer has to keep — no Node runtime inside, and the
-      # packaged daemon actually starts (`docs/desktop-client.md` §4.1). The
-      # checks only run where the tooling exists, which today is Linux.
+      # Stages the daemon and the built-in agent into the bundle. The checks on
+      # what ends up inside it need `dpkg-deb`, so they live in the Linux job
+      # below rather than here.
       - name: Build the installer
         shell: bash
         env:
           BUNDLES: ${{ matrix.bundles }}
         run: ./apps/desktop/scripts/bundle.sh
 
-      # `bundle.sh` unpacks the package and starts the daemon inside it, but the
-      # tooling for that only exists on Linux. Everywhere else at least prove the
-      # binary that went into the installer runs on this platform at all — a
-      # release that ships a daemon which cannot start is the failure nobody
-      # notices until a user hits it (`docs/roadmap.md` MVP 验收清单).
+      # Prove the binary that went into the installer runs on this platform at
+      # all — a release that ships a daemon which cannot start is the failure
+      # nobody notices until a user hits it (`docs/roadmap.md` MVP 验收清单).
       - name: Smoke the daemon on this platform
-        if: matrix.platform != 'linux'
         shell: bash
         run: |
           set -uo pipefail
@@ -117,9 +100,8 @@ jobs:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
 
-  # The headless pair, for machines with no graphical session — and the fallback
-  # `scripts/install.sh` downloads when nobody publishes an installer for a
-  # platform. Names here have to match what that script asks for.
+  # The pair `scripts/install.sh` downloads, and the whole of what Linux gets in
+  # this version. Names here have to match what that script asks for.
   binaries:
     strategy:
       fail-fast: false
@@ -127,10 +109,6 @@ jobs:
         include:
           - os: ubuntu-22.04
             asset: genet-linux-x64.tar.gz
-          - os: macos-14
-            asset: genet-macos-arm64.tar.gz
-          - os: macos-13
-            asset: genet-macos-x64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -144,13 +122,56 @@ jobs:
           mkdir -p dist
           tar -czf "dist/${{ matrix.asset }}" -C target/release genet-daemon genet-agent
           ls -la dist
+      # What the tarball promises: two binaries that start on a machine with no
+      # graphical session and nothing else installed.
+      - name: Check the binaries in the tarball start on their own
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          tar -xzf "dist/${{ matrix.asset }}" -C "$root"
+          GENEHUB_DATA_DIR="$root/data" GENEHUB_WORKSPACE_DIR="$root/workspace" \
+            timeout 30 "$root/genet-daemon" >"$root/out.json" 2>"$root/err.log" || true
+          grep -q '"event":"listening"' "$root/out.json" || {
+            echo "FAIL: the packed daemon did not come up" >&2
+            cat "$root/err.log" >&2
+            exit 1
+          }
+          test -d "$root/workspace" \
+            || { echo "FAIL: no folder to work in was created" >&2; exit 1; }
+          echo "the packed daemon starts and prepares a folder to work in"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
 
+  # Not published: this is where the claims about what goes *inside* an installer
+  # are checked, because `dpkg-deb` is the only tooling that can look. Losing the
+  # Linux installer as a product must not lose the only check that the bundle has
+  # no Node runtime in it and stays under the size budget.
+  bundle-checks:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: npm ci
+        working-directory: packages/web
+      - run: npm ci
+        working-directory: apps/desktop
+      - name: Build a package and check what is inside it
+        run: ./apps/desktop/scripts/bundle.sh
+        env:
+          BUNDLES: deb
+
   publish:
-    needs: [installers, binaries]
+    needs: [installers, binaries, bundle-checks]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

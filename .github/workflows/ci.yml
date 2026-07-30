@@ -6,6 +6,26 @@ on:
   pull_request:
 
 jobs:
+  # A lock file records where each tarball came from. Written on a machine with a
+  # company mirror in its npm config, it records that mirror — and then every
+  # install anywhere else fails, including the release build, which is where it
+  # was found the first time. Cheap to check, expensive to discover late.
+  lockfiles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every dependency must come from somewhere the world can reach
+        run: |
+          set -euo pipefail
+          bad="$(grep -rhoE '"resolved": "https?://[^/"]+' --include=package-lock.json . \
+            | sort -u | grep -v 'registry.npmjs.org' || true)"
+          if [ -n "$bad" ]; then
+            echo "these hosts are not the public registry:" >&2
+            echo "$bad" >&2
+            exit 1
+          fi
+          echo "all resolved URLs point at the public registry"
+
   rust:
     runs-on: ubuntu-latest
     steps:

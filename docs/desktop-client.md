@@ -3,6 +3,24 @@
 > 参考实现：[ref-repos/cc-switch](../../ref-repos/cc-switch)（Tauri 2：托盘、关窗驻留、轻量模式、开机自启、安装包）。  
 > 目标：有**安装过程**、能**后台常驻**、托盘可**唤醒主界面**；daemon 与默认 agent 随客户端存活。
 
+## 0. 这一版发到哪些平台
+
+**只有 Windows 有安装包。** 下面整篇说的是它。
+
+**Linux 这一版只有命令行**：`scripts/install.sh` 装 `genet-daemon` 与 `genet-agent`，
+daemon 启动后打印地址和 token，浏览器指过去就是同一个工作台——同一份
+`packages/web`，不少一个功能。
+
+这不是砍功能，是 Linux 机器的实际用法：多半是 SSH 进去的，窗口没有用；有图形界面
+的那些，浏览器本来就在。为一个"打开一个浏览器"的壳去背 WebKitGTK 与
+libayatana-appindicator 两个依赖（前者装不上就跑不起来，后者不少桌面根本不显示
+托盘图标），换不到任何东西。
+
+想让 Linux 机器一直可达就跑 `genet-daemon`，用 systemd user unit 或者 `nohup` 都行——
+它本来就是设计成这样活着的进程，桌面外壳只是在 Windows 上替用户做了这件事。
+
+macOS 等签名与公证：没有公证的下载是一个"安全警告后面挂着一个 App"。
+
 ---
 
 ## 1. 用户可感知行为
