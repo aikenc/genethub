@@ -78,6 +78,7 @@ const READY_AGENT: AgentInfo = {
   catalog: {
     models: [{ id: "deepseek/deepseek-v4-flash", label: "flash", reasoning: false }],
     modes: [],
+    commands: [],
     defaultModel: "deepseek/deepseek-v4-flash",
     defaultMode: undefined,
   },
@@ -85,7 +86,13 @@ const READY_AGENT: AgentInfo = {
 
 const UNCONFIGURED_AGENT: AgentInfo = {
   ...READY_AGENT,
-  catalog: { models: [], modes: [], defaultModel: undefined, defaultMode: undefined },
+  catalog: {
+    models: [],
+    modes: [],
+    commands: [],
+    defaultModel: undefined,
+    defaultMode: undefined,
+  },
 };
 
 function hostWith(overrides: Partial<Host> = {}): Host {

@@ -70,7 +70,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind,
+    Capabilities, Catalog, CommandInfo, ItemDelta, ModeInfo, ModelInfo, PermissionOption,
+    PermissionOptionKind,
     PermissionOutcome, PermissionRequest, ProbeState, SessionEvent, TimelineItem, ToolCallDetail,
     ToolStatus, TurnError, TurnErrorCode, Usage,
 };
@@ -333,6 +334,55 @@ fn models_in(hello: &Value) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// The slash commands this install has, as it listed them.
+///
+/// Running one needs nothing from us — it goes to the CLI as ordinary prompt text
+/// and the CLI recognises its own commands. The list is the part nobody outside
+/// its terminal UI can see: on a normal install this is dozens of commands and
+/// skills, and before asking for them our composer offered none of them.
+fn commands_in(hello: &Value) -> Vec<CommandInfo> {
+    let Some(commands) = hello.get("commands").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    commands
+        .iter()
+        .filter_map(|command| {
+            let name = command.get("name").and_then(Value::as_str)?;
+            let text = |field: &str| {
+                command
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            };
+            Some(CommandInfo {
+                name: name.to_string(),
+                // Some of these are a paragraph long (a skill's trigger
+                // description). Trimmed to something a menu row can hold; the
+                // frontend gets to decide how much of that it shows.
+                description: text("description").map(|description| shorten(&description, 240)),
+                argument_hint: text("argumentHint"),
+            })
+        })
+        .collect()
+}
+
+/// Cuts a string to at most `limit` characters, on a character boundary.
+fn shorten(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(limit).collect();
+    // Back off to the last sentence or clause that fits, so it reads as an ending
+    // rather than a cut cable.
+    let cut = kept
+        .rfind(['.', '。', '；', ';'])
+        .map(|at| at + kept[at..].chars().next().map_or(1, char::len_utf8))
+        .unwrap_or(kept.len());
+    format!("{}…", kept[..cut].trim_end())
+}
+
 /// Whether `--permission-mode` lists this name among its choices.
 fn mode_listed(help: &str, mode: &str) -> bool {
     let choices = help
@@ -427,8 +477,10 @@ impl AgentAdapter for ClaudeAdapter {
         };
         let hello = self.hello(&program).await;
         let models = hello.as_ref().map(models_in).unwrap_or_default();
+        let commands = hello.as_ref().map(commands_in).unwrap_or_default();
         let modes = self.modes(&program).await;
         Catalog {
+            commands,
             default_model: hello
                 .as_ref()
                 .and_then(|hello| hello.get("model"))
@@ -1548,6 +1600,63 @@ mod tests {
             None
         );
         assert_eq!(ask_mode_in(""), None);
+    }
+
+    /// The command list is the one thing about slash commands we have to get from
+    /// the CLI: running one is just prompt text, but nothing outside its own
+    /// terminal knows they exist.
+    #[test]
+    fn commands_keep_the_agents_own_wording_and_lose_the_essays() {
+        let hello = json!({
+            "commands": [
+                {
+                    "name": "code-review",
+                    "description": "Review the current diff for correctness bugs",
+                    "argumentHint": "[low|medium|high] [--fix]",
+                },
+                { "name": "context", "description": "", "argumentHint": "" },
+                { "name": "dataviz", "description": "  Charts.  " },
+                // No name: nothing anyone could type.
+                { "description": "mystery" },
+            ],
+        });
+
+        let commands = commands_in(&hello);
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.name.as_str())
+                .collect::<Vec<_>>(),
+            ["code-review", "context", "dataviz"]
+        );
+        assert_eq!(
+            commands[0].argument_hint.as_deref(),
+            Some("[low|medium|high] [--fix]")
+        );
+        // Empty strings are absent, not empty: the menu should not reserve room
+        // for a hint that is not there.
+        assert_eq!(commands[1].description, None);
+        assert_eq!(commands[1].argument_hint, None);
+
+        assert_eq!(commands[2].description.as_deref(), Some("Charts."));
+
+        assert!(commands_in(&json!({})).is_empty());
+    }
+
+    /// A skill's description is a paragraph written to make a model trigger on
+    /// it, not a menu row: dozens of trigger words, hundreds of characters. It has
+    /// to be cut somewhere, and cut so that it reads as an ending.
+    #[test]
+    fn a_paragraph_long_description_is_cut_at_a_sentence() {
+        let essay = "Use this for charts. Triggers on: chart, graph, plot, dashboard, \
+                     analytics, heatmap, legend, axis, tooltip, sparkline.";
+        assert_eq!(shorten(essay, 30), "Use this for charts.…");
+
+        // Nothing to cut at: better a hard stop than nothing at all.
+        assert_eq!(shorten("一二三四五六七八九十", 4), "一二三四…");
+        // Short enough to keep whole, and kept whole — no ellipsis on something
+        // that was not shortened.
+        assert_eq!(shorten("Compact the conversation", 240), "Compact the conversation");
     }
 
     /// The CLI compacts on its own when the context fills up. Silently, until

@@ -28,6 +28,7 @@ const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
   catalog: {
     models: [{ id: "deepseek/v4", label: "DeepSeek V4", contextWindow: 128000, reasoning: true }],
     modes: [{ id: "high", label: "Thinking: high" }],
+    commands: [],
     defaultModel: "deepseek/v4",
     defaultMode: "high",
   },

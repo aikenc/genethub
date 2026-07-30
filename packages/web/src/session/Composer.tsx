@@ -1,5 +1,5 @@
-import type { AgentInfo, Attachment } from "@genehub/proto";
-import { useState } from "react";
+import type { AgentInfo, Attachment, CommandInfo } from "@genehub/proto";
+import { useMemo, useState } from "react";
 
 import { attachmentPreviewUrl, AttachmentTooLarge, fileToAttachment, imageFilesFromClipboard } from "./attachments";
 import { ComposerControls } from "./ComposerControls";
@@ -10,6 +10,11 @@ import { ComposerControls } from "./ComposerControls";
  * Enter sends, shift+enter breaks the line. While a turn is running the send
  * control becomes stop — one affordance, because the user's intent is never
  * ambiguous. Model and mode live here too, as chips under the text.
+ *
+ * Typing `/` opens the agent's own command list, when it has one. Running a
+ * command needs nothing special — it goes out as ordinary text — so this is only
+ * about discovery, which is the whole problem: a Claude Code install has dozens
+ * of commands and skills that are invisible outside its own terminal.
  */
 export function Composer({
   running,
@@ -20,6 +25,7 @@ export function Composer({
   modeId,
   agentLocked,
   attachmentsSupported,
+  commands,
   onSend,
   onInterrupt,
   onPickAgent,
@@ -38,6 +44,8 @@ export function Composer({
    * when this is false is left as a normal, inert text paste rather than
    * silently producing an attachment the agent will never see. */
   attachmentsSupported?: boolean;
+  /** The current agent's slash commands, if it named any. */
+  commands?: CommandInfo[];
   onSend(text: string, attachments: Attachment[]): void;
   onInterrupt(): void;
   onPickAgent(id: string): void;
@@ -47,12 +55,42 @@ export function Composer({
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [pasteNotice, setPasteNotice] = useState<string | null>(null);
+  const [highlighted, setHighlighted] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+
+  // Only while the draft *is* one slash token: a command has to lead the message
+  // for the agent to treat it as one, so offering the menu mid-sentence would be
+  // offering something that does not work.
+  const typing = /^\/(\S*)$/.exec(draft)?.[1];
+  const matches = useMemo(() => {
+    if (typing === undefined || dismissed) return [];
+    const needle = typing.toLowerCase();
+    return (commands ?? [])
+      .filter((command) => command.name.toLowerCase().includes(needle))
+      // Names that start with what was typed first: with dozens of commands, a
+      // substring match on some description is not what someone typing `/co` means.
+      .sort((left, right) => {
+        const rank = (name: string) => (name.toLowerCase().startsWith(needle) ? 0 : 1);
+        return rank(left.name) - rank(right.name) || left.name.localeCompare(right.name);
+      })
+      .slice(0, 8);
+  }, [commands, typing, dismissed]);
+  const open = matches.length > 0;
+  const chosen = matches[Math.min(highlighted, matches.length - 1)];
+
+  const complete = (command: CommandInfo) => {
+    // A trailing space, so an argument can be typed straight away — and so the
+    // menu closes, the draft no longer being a bare slash token.
+    setDraft(`/${command.name} `);
+    setHighlighted(0);
+  };
 
   const send = () => {
     const text = draft.trim();
     if (!text && attachments.length === 0) return;
     setDraft("");
     setAttachments([]);
+    setDismissed(false);
     onSend(text, attachments);
   };
 
@@ -72,6 +110,37 @@ export function Composer({
 
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-4 pt-8">
+      {open ? (
+        <div className="pointer-events-auto mx-auto mb-2 max-w-chat overflow-hidden rounded-xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur">
+          <ul role="listbox" aria-label="命令">
+            {matches.map((command, index) => (
+              <li key={command.name}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={command === chosen}
+                  onMouseEnter={() => setHighlighted(index)}
+                  // The textarea keeps focus: losing it here would close the
+                  // menu before the click ever landed.
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => complete(command)}
+                  className={`flex w-full items-baseline gap-2 px-3 py-2 text-left text-xs ${
+                    command === chosen ? "bg-raised" : ""
+                  }`}
+                >
+                  <span className="shrink-0 font-mono text-fg">/{command.name}</span>
+                  {command.argumentHint ? (
+                    <span className="shrink-0 font-mono text-faint">{command.argumentHint}</span>
+                  ) : null}
+                  {command.description ? (
+                    <span className="truncate text-muted">{command.description}</span>
+                  ) : null}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       <div className="pointer-events-auto mx-auto max-w-chat rounded-2xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur">
         {attachments.length > 0 ? (
           <div className="flex flex-wrap gap-2 px-4 pt-3" aria-label="待发送的图片">
@@ -101,7 +170,11 @@ export function Composer({
           value={draft}
           disabled={disabled}
           rows={2}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            setHighlighted(0);
+            setDismissed(false);
+          }}
           onPaste={(event) => {
             const files = imageFilesFromClipboard(event.clipboardData);
             if (files.length === 0) return;
@@ -113,6 +186,27 @@ export function Composer({
             void addPastedImages(files);
           }}
           onKeyDown={(event) => {
+            if (open) {
+              // While the menu is up it owns these keys. Enter in particular:
+              // sending `/co` because the menu was showing `/code-review` would
+              // be the one outcome nobody wanted.
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                const step = event.key === "ArrowDown" ? 1 : matches.length - 1;
+                setHighlighted((current) => (current + step) % matches.length);
+                return;
+              }
+              if ((event.key === "Enter" || event.key === "Tab") && chosen) {
+                event.preventDefault();
+                complete(chosen);
+                return;
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setDismissed(true);
+                return;
+              }
+            }
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               send();

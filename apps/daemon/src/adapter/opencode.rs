@@ -63,6 +63,8 @@ impl AgentAdapter for OpenCodeAdapter {
         // running instance. Starting one just to fill a dropdown is too slow
         // for the agent picker; the session reports its models once open.
         Catalog {
+        // OpenCode has its own commands over HTTP, which we do not read yet.
+        commands: Vec::new(),
             models: Vec::<ModelInfo>::new(),
             modes: Vec::<ModeInfo>::new(),
             default_model: None,

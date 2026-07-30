@@ -281,6 +281,7 @@ export function App({
                     attachmentsSupported={
                       currentAgent?.capabilities.attachments ?? false
                     }
+                    commands={currentAgent?.catalog.commands}
                     onSend={(text, attachments) =>
                       void workbench.send(text, attachments)
                     }

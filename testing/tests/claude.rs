@@ -157,6 +157,23 @@ async fn the_model_and_mode_pickers_offer_what_this_cli_actually_accepts() {
         "every build lists acceptEdits; saw {:?}",
         claude.catalog.modes
     );
+    // Slash commands: the list is the only part of them we need from the CLI,
+    // since running one is ordinary prompt text. Outside its own terminal there
+    // was no way to learn that any of these existed.
+    assert!(
+        claude.catalog.commands.len() > 5,
+        "an install with skills lists plenty; saw {:?}",
+        claude.catalog.commands
+    );
+    assert!(
+        claude
+            .catalog
+            .commands
+            .iter()
+            .all(|command| !command.name.starts_with('/')),
+        "the slash is the composer's to draw, not part of the name"
+    );
+
     let asking = claude
         .catalog
         .default_mode

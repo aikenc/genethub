@@ -28,7 +28,7 @@ export type Capabilities = { interrupt: boolean, setModel: boolean, setMode: boo
  */
 resume: boolean, attachments: boolean, };
 
-export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, defaultModel?: string, defaultMode?: string, };
+export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, commands: Array<CommandInfo>, defaultModel?: string, defaultMode?: string, };
 
 /**
  * A request as it arrives on the wire: an envelope id plus the request body.
@@ -66,6 +66,25 @@ name: string | null, } } | { "type": "hub.status" } | { "type": "hub.pair", "pay
  * Empty means "everything currently changed".
  */
 paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } });
+
+/**
+ * A slash command the agent understands.
+ *
+ * Nothing about running one is special: it is sent as ordinary prompt text, and
+ * the agent recognises its own commands. What the agent alone can supply is the
+ * *list* — which for a Claude Code install is dozens of commands and skills that
+ * are otherwise undiscoverable outside its own terminal UI.
+ */
+export type CommandInfo = { 
+/**
+ * Without the leading slash.
+ */
+name: string, description?: string, 
+/**
+ * What to type after the name, when it takes an argument — the agent's own
+ * wording, e.g. `[low|medium|high]`.
+ */
+argumentHint?: string, };
 
 /**
  * A client proving it is on the authorized list, without sending its secret.

@@ -21,6 +21,7 @@ const AGENTS: AgentInfo[] = [
     catalog: {
       models: [],
       modes: [{ id: "medium", label: "Medium", description: undefined }],
+      commands: [],
       defaultModel: undefined,
       defaultMode: "medium",
     },
@@ -41,6 +42,7 @@ const AGENTS: AgentInfo[] = [
     catalog: {
       models: [],
       modes: [{ id: "default", label: "Default", description: undefined }],
+      commands: [],
       defaultModel: undefined,
       defaultMode: "default",
     },

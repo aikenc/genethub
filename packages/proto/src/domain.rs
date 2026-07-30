@@ -44,12 +44,34 @@ pub struct ModeInfo {
     pub description: Option<String>,
 }
 
+/// A slash command the agent understands.
+///
+/// Nothing about running one is special: it is sent as ordinary prompt text, and
+/// the agent recognises its own commands. What the agent alone can supply is the
+/// *list* — which for a Claude Code install is dozens of commands and skills that
+/// are otherwise undiscoverable outside its own terminal UI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct CommandInfo {
+    /// Without the leading slash.
+    pub name: String,
+    #[ts(optional)]
+    pub description: Option<String>,
+    /// What to type after the name, when it takes an argument — the agent's own
+    /// wording, e.g. `[low|medium|high]`.
+    #[ts(optional)]
+    pub argument_hint: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct Catalog {
     pub models: Vec<ModelInfo>,
     pub modes: Vec<ModeInfo>,
+    #[serde(default)]
+    pub commands: Vec<CommandInfo>,
     #[ts(optional)]
     pub default_model: Option<String>,
     #[ts(optional)]
