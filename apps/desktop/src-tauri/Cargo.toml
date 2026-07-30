@@ -3,7 +3,10 @@ name = "genethub-desktop"
 version = "0.1.0"
 description = "GeneHub desktop client"
 edition = "2021"
-rust-version = "1.77.2"
+# No `rust-version`: nothing here is published to crates.io, and the rest of the
+# workspace declares none either — it is built with current stable. The figure
+# Tauri's template leaves here (1.77.2) was a promise nobody checked, kept only
+# by clippy refusing standard-library calls the workspace next door uses freely.
 
 [lib]
 name = "genethub_desktop_lib"

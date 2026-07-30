@@ -26,6 +26,24 @@ jobs:
           fi
           echo "all resolved URLs point at the public registry"
 
+      # Two modules whose paths differ only in casing are one module on Windows
+      # and on a stock macOS disk. An import then resolves to whichever of them
+      # the filesystem hands over, and the build fails only on those machines —
+      # which is how `session/Timeline.tsx` beside `session/timeline.ts` got as
+      # far as a release tag before anything complained.
+      - name: No two source files may differ only in casing
+        run: |
+          set -euo pipefail
+          bad="$(git ls-files '*.ts' '*.tsx' '*.rs' \
+            | sed -E 's/\.(ts|tsx|rs)$//' \
+            | tr 'A-Z' 'a-z' | sort | uniq -d || true)"
+          if [ -n "$bad" ]; then
+            echo "these paths collide on a case-insensitive filesystem:" >&2
+            git ls-files '*.ts' '*.tsx' '*.rs' | grep -iE "^($(echo "$bad" | paste -sd'|'))\.(ts|tsx|rs)$" >&2
+            exit 1
+          fi
+          echo "no path collides on a case-insensitive filesystem"
+
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -51,7 +69,24 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # Journeys default to the mock model, so this stays offline and free.
-      - run: cargo test --workspace
+      #
+      # The failure list is repeated as annotations because reading a job's log
+      # needs admin rights on the repository: without this, a failure here says
+      # only "exit code 101" to everyone else, including whoever is looking at a
+      # red release tag. `--no-fail-fast` so one broken case does not hide the
+      # rest.
+      - name: Run the workspace tests
+        run: |
+          set -uo pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/tests.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            awk '/^failures:$/,0' /tmp/tests.log | grep -E '^\s+\S+::' | sort -u | head -20 \
+              | while IFS= read -r case; do echo "::error::failed: $case"; done
+            grep -E "^(thread|error|panicked at)" /tmp/tests.log | head -10 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            exit "$status"
+          fi
 
   relay:
     runs-on: ubuntu-latest

@@ -5,7 +5,11 @@ import { attachmentPreviewUrl } from "./attachments";
 import { ToolCallView } from "./ToolCall";
 import type { TimelineState } from "./timeline";
 
-export function Timeline({ state }: { state: TimelineState }) {
+// Named for the file rather than for the thing it draws, because `timeline.ts`
+// next to it holds the state: two modules whose names differ only in casing are
+// the same module on Windows and on a stock macOS disk, and the import that
+// resolves to the wrong one of them fails nowhere except on those machines.
+export function TimelineView({ state }: { state: TimelineState }) {
   const bottom = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);

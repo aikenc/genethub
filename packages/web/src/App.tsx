@@ -9,7 +9,7 @@ import { Client } from "./protocol/client";
 import { SettingsPanel } from "./settings/SettingsPanel";
 import { Composer } from "./session/Composer";
 import { PermissionCard } from "./session/Permission";
-import { Timeline } from "./session/Timeline";
+import { TimelineView } from "./session/TimelineView";
 import { useWorkbench } from "./session/store";
 import { Sidebar } from "./shell/Sidebar";
 import { TabBar } from "./shell/TabBar";
@@ -240,7 +240,7 @@ export function App({
                     />
                   </div>
                   <div className="min-h-0 flex-1 overflow-hidden pb-28">
-                    <Timeline state={workbench.timeline} />
+                    <TimelineView state={workbench.timeline} />
                   </div>
                   {workbench.timeline.pendingPermission ? (
                     <div className="absolute inset-x-0 bottom-28 z-20 px-4">

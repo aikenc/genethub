@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Composer } from "./Composer";
 import { ComposerControls } from "./ComposerControls";
 import { PermissionCard } from "./Permission";
-import { Timeline } from "./Timeline";
+import { TimelineView } from "./TimelineView";
 import { ToolCallView } from "./ToolCall";
 import { apply, emptyTimeline } from "./timeline";
 
@@ -48,7 +48,7 @@ describe("what the user sees in a session", () => {
       delta: { kind: "text", delta: "正在读取" },
     });
 
-    render(<Timeline state={state} />);
+    render(<TimelineView state={state} />);
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("正在读取");
   });
 
@@ -59,7 +59,7 @@ describe("what the user sees in a session", () => {
       item: { type: "reasoning", id: "r1", text: "先看看目录结构" },
     });
 
-    render(<Timeline state={state} />);
+    render(<TimelineView state={state} />);
     expect(screen.queryByText("先看看目录结构")).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByText("思考过程"));
@@ -112,7 +112,7 @@ describe("what the user sees in a session", () => {
       error: { code: "missingCredentials", message: "还没有配置模型密钥" },
     });
 
-    render(<Timeline state={state} />);
+    render(<TimelineView state={state} />);
     expect(screen.getByRole("alert")).toHaveTextContent("还没有配置模型密钥");
   });
 });
@@ -306,7 +306,7 @@ describe("a whole turn as the timeline sees it", () => {
       state = apply(state, event);
     }
 
-    render(<Timeline state={state} />);
+    render(<TimelineView state={state} />);
     expect(screen.getByText("写个文件")).toBeInTheDocument();
     expect(screen.getByTestId("tool-call")).toHaveTextContent("hello.txt");
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("写好了。");
