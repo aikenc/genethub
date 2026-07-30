@@ -66,8 +66,26 @@ export interface Host {
    * own the daemon can know this; a browser has nothing to offer here.
    */
   onEndpointChange?(listener: () => void): () => void;
+  /**
+   * This shell's own version.
+   *
+   * Absent in a browser, which is not a build of anything: the page arrived from
+   * wherever it is served, and the only version worth printing there is the one
+   * the machine reported. Present on the desktop because the thing a person
+   * reinstalls is the shell, and because it disagreeing with the daemon's number
+   * is how a half-finished upgrade shows itself.
+   */
+  appVersion?(): Promise<string | null>;
   /** The shell asking the workbench to show remote access, e.g. from a tray menu. */
   onPairRequested?(listener: () => void): () => void;
+  /**
+   * The shell asking whether a newer build exists, e.g. from a tray menu.
+   *
+   * The shell only asks; the daemon is what looks. So this carries nothing —
+   * the answer comes back over the connection the workbench already has, which
+   * is also what makes the same button work in a browser on a phone.
+   */
+  onUpdateRequested?(listener: () => void): () => void;
   /**
    * The shell asking for a fresh way into this machine's identity. Separate
    * from pairing because it is what someone reaches for after losing the
@@ -211,11 +229,17 @@ export function desktopHost(): Host {
     openLogs() {
       void tauri.core.invoke("open_logs");
     },
+    async appVersion() {
+      return tauri.core.invoke<string>("app_version");
+    },
     onEndpointChange(listener) {
       return subscribe(tauri, "genehub://daemon", listener);
     },
     onPairRequested(listener) {
       return subscribe(tauri, "genehub://pair", listener);
+    },
+    onUpdateRequested(listener) {
+      return subscribe(tauri, "genehub://update", listener);
     },
     onClaimRequested(listener) {
       return subscribe(tauri, "genehub://claim", listener);

@@ -24,9 +24,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | `genet` | 子进程 + stdio JSONL | 我们自己写的兜底 agent，见 [builtin-agent.md](./builtin-agent.md) |
 | `opencode` | 本地 HTTP + SSE | 探测 `opencode` 二进制；模型/密钥全在它自己的 `opencode.json` |
 | `claude` | 子进程 + 原生 `stream-json` stdio | 探测 `claude` 二进制本身（`@anthropic-ai/claude-code`），daemon 直接说它的原生协议，见 §3 |
-| `codex` | 子进程 + ACP over stdio | 探测 `codex-acp`（Agent Client Protocol 官方维护的 ACP wrapper，包了 Codex CLI）；原生 `app-server` 适配器计划在下一版本，见 [roadmap.md](./roadmap.md) |
-
-装了 `codex` 却没装 `codex-acp` 的人,看到的不是「未安装」——那是在说他机器上的假话。这种情况报 `Unavailable`,理由里点名缺的是桥接,以及装它的那一行命令。桥接是我们的实现细节,不该让用户自己猜出来。
+| `codex` | 子进程 + 原生 `app-server` JSON-RPC | 探测 `codex` 二进制本身，daemon 直接说它的 `app-server` 协议，见 §4 |
 | `acp` | 子进程 + ACP over stdio | 兜底条目，探测一个叫 `acp-agent` 的二进制；真正常用的是下面的自定义声明 |
 
 `claude` 在代码里是 `adapter::claude::ClaudeAdapter`——直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。换原生协议不是图省事，是为了拿回 ACP 不暴露给客户端的能力：**逐个工具调用的权限控制**。`claude --permission-mode manual --permission-prompt-tool stdio` 会把每一次工具调用都变成一个 `control_request`/`control_response` 往返，和 daemon 自己的 `PermissionRequested`/`respondPermission` 正好对上；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `apps/daemon/src/adapter/claude.rs` 顶部的模块文档。
@@ -35,13 +33,14 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 npm install -g @anthropic-ai/claude-code
 ```
 
-`codex` 目前还在 ACP wrapper 上，不是我们写的，是 Agent Client Protocol 官方仓库发布的 npm 包：
+`codex` 同理，装的就是它自己，不再需要任何桥接包（§4）：
 
 ```bash
-npm install -g @agentclientprotocol/codex-acp
+npm install -g @openai/codex
+codex login
 ```
 
-装好、能在 PATH 上找到，就会出现在 agent 选择器里；没装就不出现，不影响其他 agent（同 [testing.md](./testing.md) §4.2 的「未安装即隐藏」行为）。
+装好、能在 PATH 上找到，就会出现在 agent 选择器里；没装就不出现，不影响其他 agent（同 [testing.md](./testing.md) §4.2 的「未安装即隐藏」行为）。`codex` 多一种中间状态：装了但没登录时它会出现、但标成不可用，理由里就是上面那行 `codex login`——因为这个 CLI 在未登录时不会拒绝一个回合，只会不回话（§4）。
 
 ---
 
@@ -93,7 +92,21 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 
 ---
 
-## 4. Codex + DeepSeek：目前连不上，这是 Codex/DeepSeek 两边的协议问题
+## 4. Codex：直接说它自己的 `app-server` 协议
+
+`codex` 在代码里是 `adapter::codex::CodexAdapter`——拉起 `codex app-server`，说它自己的 JSON-RPC（stdio、双向），不经过任何 wrapper。理由和 Claude Code（§3）完全一样：**逐个工具调用的权限控制**，ACP 不把这条暴露给客户端。顺带还去掉了一个没人猜得到的安装步骤——之前注册的是 `codex-acp` 桥接包，于是装了 `codex` 的人被告知「Codex 未安装」。
+
+协议细节（版本漂移从此归我们跟：以下是对着 codex-cli 0.145.0 实测的）见 `apps/daemon/src/adapter/codex.rs` 顶部的模块文档。挑几条影响用户能看见什么的：
+
+- **三个选择器都是真的，而且一个 RPC 都不用额外发。** 这个 CLI 的 `turn/start` 参数里同时带着 model、`effort`、`approvalPolicy` 和 `sandboxPolicy`，所以「切模型」「切档位」「切模式」在我们这边只是记下来，下一回合原样带过去。首个 prompt 之前进程还没起（`session::manager::ensure_started`），这也是唯一能让那时的选择不被丢掉的接法。
+- **模型表和档位问它要。** `model/list` 回的每个模型都带自己的 `supportedReasoningEfforts`（这台机器上是 `low/medium/high/xhigh/max/ultra`）和一个默认档位，原样进选择器。校验在我们这边：它不会替我们拒绝一个不存在的模型名，只会在下一回合安静地用回原来那个。
+- **模式是两个设置的组合，不是一个开关。** 它自己的词汇是 `approvalPolicy`（`on-request` / `never`）加 `sandbox`（`read-only` / `workspace-write` / `danger-full-access`）。摆在界面上的是三档能说清含义的组合：只读、默认（工作区内可写、越界要问）、完全放行（不问且允许联网）。
+- **审批按对象分成三条请求**，都是它反过来问我们：命令执行、文件改动（都回 `{"decision":"accept"|"decline"|"cancel"}`），以及一条「问用户」的选择题（回 `{"answers":{...}}`）。它问什么我们都得回——一条不回，它就一直等。所以渲染不了的（多个问题一次问、要自由文本、MCP 的表单）也照样回，回的是「没人回答」而不是替用户选一个。
+- **没登录不会报错，会挂着。** 未登录时 `turn/start` 照样被接受、用户消息照样回显，然后什么都不发生：没有失败帧，也不退出。所以 `probe` 直接问 `codex login status`，未登录就报 `Unavailable` 并写清那一行命令，而不是让第一条 prompt 在那儿转圈。
+
+还没接的，写下来免得下次误以为漏了：`thread/resume`（所以 `capabilities.resume` 是 false，历史由 daemon 自己的日志回放）；图片附件（它要的是 `{"type":"localImage","path"}`，得先把粘贴进来的图落成文件，所以 `capabilities.attachments` 是 false，界面上就没有那个按钮）；skills（`skills/list` 能列出来，但它的调用方式是 `$name` 外加一个 `{"type":"skill"}` 输入块，不是把 `/name` 当普通文本发——所以没有把它们放进斜杠命令菜单，一个点了不生效的菜单比没有菜单更糟）；子 agent 的内部步骤（卡片会显示派了谁、派去干什么，但它自己的步骤走的是另一条 thread，还没接进来）。
+
+### 4.1 Codex + DeepSeek：目前连不上，这是 Codex/DeepSeek 两边的协议问题
 
 **结论先说：今天没有办法让 Codex CLI 直接使用 DeepSeek 作为后端，GeneHub 也不会为此写协议转换代码。**
 
@@ -105,9 +118,9 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 
 这是 Codex 和 DeepSeek 两个上游之间的协议缺口，不是配置能绕过去的，需要一层把 Responses API 请求翻译成 Chat Completions 的网关。GeneHub 的立场是：**daemon 不管任何 agent 内部怎么连它的模型**，所以这层翻译不会出现在这个仓库里。
 
-这不影响 `codex` agent 本身可用——它一样会被探测到、一样能用 ACP 协议接进同一套时间线；只是它连的后端得是 Codex 自己支持的（OpenAI API Key、ChatGPT 登录，或者用户自己维护、自己信任的网关）。如果哪天 Codex 支持了 Chat Completions，或者 DeepSeek 上线了 Responses 兼容端点，这里的配置和别的 agent 一样，一行环境变量的事，不需要我们改代码。
+这不影响 `codex` agent 本身可用——它一样会被探测到、一样接进同一套时间线；只是它连的后端得是 Codex 自己支持的（OpenAI API Key、ChatGPT 登录，或者用户自己维护、自己信任的网关）。如果哪天 Codex 支持了 Chat Completions，或者 DeepSeek 上线了 Responses 兼容端点，这里的配置和别的 agent 一样，一行环境变量的事，不需要我们改代码。
 
-这跟 `codex` 什么时候换成原生适配器是两件独立的事：Claude Code 换成原生协议（§3）买的是权限控制，不是接入新后端；Codex 计划中的原生 `app-server` 适配器（[roadmap.md](./roadmap.md)）买的也是同一件事，跟它连不连得上 DeepSeek 无关——那个网关缺口不会因为换了传输层就消失。
+这跟传输层是两件独立的事：换成原生 `app-server` 买的是权限控制和那三个选择器（§4），跟它连不连得上 DeepSeek 无关——那个网关缺口不会因为换了传输层就消失。
 
 ---
 
@@ -150,7 +163,7 @@ Allowed choices are acceptEdits, auto, bypassPermissions, default, dontAsk, plan
 
 所以这个名字是从 `claude --help` 里读出来的（每个 daemon 生命周期问一次），两个名字都不在时就干脆不传这个参数：`--permission-prompt-tool stdio` 仍然把它愿意问的都路由给我们，而一个会被拒绝的参数换不到任何东西。
 
-权限档位本身一直是我们这边执行的（见 §4），运行时从不给 CLI 发模式名，所以受影响的只有启动那一个参数。
+受影响的只有启动那一个参数。会话中途切换档位走的是它自己的 `set_permission_mode` 控制请求（§3.1），发的名字来自同一份 `--help`，所以这台机器上认的和我们发的永远是同一套词。
 
 ### Windows 上的两件事
 

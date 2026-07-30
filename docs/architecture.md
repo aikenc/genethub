@@ -95,15 +95,16 @@ pub trait AgentAdapter: Send + Sync {
 | `genet` | 子进程 + stdio JSONL | 自研内置 agent，装完即可跑 | MVP |
 | `opencode` | 本地 HTTP + SSE | OpenCode | MVP |
 | `claude` | 子进程 + 原生 `stream-json` stdio | Claude Code，直接拉起 `claude` 二进制 | MVP |
-| `acp` | 子进程 + ACP over stdio | 一份代码覆盖 Codex / Cursor / Gemini / goose 等一批 CLI | MVP |
+| `codex` | 子进程 + 原生 `app-server` JSON-RPC | Codex，直接拉起 `codex app-server` | MVP |
+| `acp` | 子进程 + ACP over stdio | 一份代码覆盖 Cursor / Gemini / goose 等一批 CLI | MVP |
 
-MVP 四个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一批 agent**，`opencode` 是**形状差异最大的那个**——它不是 stdio 而是本地 HTTP + SSE，`claude` 是**唯一一个我们绕开 ACP、直接说其原生协议的第三方 agent**。
+五个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一批 agent**，`opencode` 是**形状差异最大的那个**——它不是 stdio 而是本地 HTTP + SSE，`claude` 和 `codex` 是**我们绕开 ACP、直接说其原生协议的两个**。
 
-`codex`（拉起 `codex-acp`）是 `acp` adapter 的默认注册实例，不是单独的传输实现：这个 CLI 的维护方已经发布了 ACP wrapper，直接复用比照搬它自己的原生 `app-server` JSON-RPC 协议风险更低——原生协议翻译要我们自己跟着它的版本走，ACP 是一份公开、双方都维护的契约。`claude` 最初也是这么接的，后来换成了原生 `stream-json`：ACP 没有把 Claude Code 的逐工具权限控制（每次工具调用先问一遍，而不是要么全放行要么全不放行）暴露给客户端，这条能力只有直连它自己的协议才拿得到，`codex` 的原生 `app-server` 适配器计划在下一版本补上同样的能力（[roadmap.md](./roadmap.md)）。详见 [third-party-agents.md](./third-party-agents.md)。
+这两个为什么值得自己写一份：ACP 是一份公开、双方都维护的契约，代价小；原生协议翻译要我们自己跟着对方的版本走。但 ACP 没有把**逐工具权限控制**（每次工具调用先问一遍，而不是要么全放行要么全不放行）暴露给客户端，而这两个 CLI 自己的协议都有——`claude` 靠 `--permission-prompt-tool stdio` 的控制请求，`codex` 靠它自己反过来发的三条审批请求。`codex` 还多买回两样：它的 `model/list` 会报出每个模型自己的思考档位，而它的 `turn/start` 每回合都带 model / effort / 审批策略，所以三个选择器都是真的。两个都曾经挂在 ACP 上，也都因此让装了 CLI 的人被告知「未安装」——ACP 那条要的是另一个桥接包。详见 [third-party-agents.md](./third-party-agents.md)。
 
 **外部 agent 一律不随包分发**，只检测用户自己安装的。除了体积与授权，还有一条更硬的理由：有些 agent 自带 Node 或其他运行时，打包它们等于把它们的运行时依赖变成我们的，而 PC 端零 Node 运行时是硬约束（[desktop-client.md](./desktop-client.md) §4.1）。
 
-用户自定义 agent 走配置声明，不需要改代码，`codex` 出厂默认注册也只是同一机制的一个固定实例：
+用户自定义 agent 走配置声明，不需要改代码：
 
 ```jsonc
 { "agents": { "goose": { "extends": "acp", "command": ["goose", "acp"] } } }

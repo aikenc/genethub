@@ -144,6 +144,19 @@ fn open_window(app: tauri::AppHandle, url: String) -> Result<(), String> {
 
 const LOGIN_WINDOW: &str = "hub-login";
 
+/// This shell's own version, for the About section to print.
+///
+/// Reported separately from the daemon's even though one release ships a single
+/// number for both (`release.yml`, job `version`), because they are two
+/// executables and an upgrade that failed to replace one of them is exactly what
+/// leaves them disagreeing — `installer.nsh` exists because the daemon holds its
+/// own file open while an installer wants to overwrite it. Printing both numbers
+/// is what turns that into something a person can see rather than puzzle over.
+#[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
 #[tauri::command]
 fn notify(app: tauri::AppHandle, title: String, body: Option<String>) {
     use tauri_plugin_notification::NotificationExt;
@@ -284,6 +297,7 @@ pub fn run() {
             open_external,
             open_window,
             open_logs,
+            app_version,
             notify,
             pick_directory
         ])

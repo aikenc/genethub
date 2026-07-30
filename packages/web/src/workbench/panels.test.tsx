@@ -57,6 +57,8 @@ beforeEach(() => {
     diff: null,
     settings: null,
     log: null,
+    update: null,
+    updating: false,
   });
 });
 
@@ -493,5 +495,167 @@ describe("the settings panel", () => {
     await waitFor(() => {
       expect(calls.some((call) => call.type === "agent.refresh")).toBe(true);
     });
+  });
+});
+
+describe("the version section", () => {
+  /** A shell that knows its own build, the way the desktop one does. */
+  function desktopish(version: string, opened: string[] = []) {
+    return {
+      ...browserHost(),
+      appVersion: async () => version,
+      openExternal: (url: string) => opened.push(url),
+    };
+  }
+
+  function connected(answers: Parameters<typeof stubDaemon>[0]) {
+    const stub = stubDaemon({
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      ...answers,
+    });
+    (stub.client as { identity?: unknown }).identity = {
+      machineId: "m_1",
+      fingerprint: "AAAA-BBBB-CCCC-DDDD",
+      daemonVersion: "0.1.17",
+      protocolVersion: 1,
+      transport: "loopback",
+    };
+    install(stub.client);
+    return stub;
+  }
+
+  /**
+   * The version has to be readable without pressing anything: "which build is
+   * this" is the first question of every bug report, and for seventeen releases
+   * the answer on screen was 0.1.0 on every machine.
+   */
+  it("says which build this is before anyone asks it anything", async () => {
+    const { client, calls } = connected({});
+    void client;
+
+    render(<SettingsPanel host={desktopish("0.1.17")} />);
+
+    expect(await screen.findByTestId("app-version")).toHaveTextContent("0.1.17");
+    expect(screen.getByTestId("daemon-version")).toHaveTextContent("daemon 0.1.17");
+    // Nothing is asked until the button is pressed. An outbound call on mount is
+    // the thing this design is avoiding.
+    expect(calls.some((call) => call.type === "update.check")).toBe(false);
+  });
+
+  it("offers the way to a newer build, and says what installing costs", async () => {
+    const opened: string[] = [];
+    connected({
+      "update.check": () => ({
+        type: "update",
+        data: {
+          current: "0.1.17",
+          latest: "0.1.18",
+          newer: true,
+          url: "https://example.test/releases/tag/v0.1.18",
+        },
+      }),
+    });
+
+    render(<SettingsPanel host={desktopish("0.1.17", opened)} />);
+    await userEvent.click(await screen.findByTestId("check-update"));
+
+    expect(await screen.findByText(/有新版本 0\.1\.18/)).toBeTruthy();
+    expect(screen.getByText(/会被打断/)).toBeTruthy();
+    await userEvent.click(screen.getByTestId("open-release"));
+    expect(opened).toEqual(["https://example.test/releases/tag/v0.1.18"]);
+  });
+
+  /// The one answer worth refusing to give: reaching nothing is not the same
+  /// sentence as being up to date, and only one of the two is true.
+  it("does not report being up to date when it reached nothing", async () => {
+    connected({
+      "update.check": () => ({
+        type: "update",
+        data: {
+          current: "0.1.17",
+          newer: false,
+          problem: "asking where the newest version is: dns error",
+        },
+      }),
+    });
+
+    render(<SettingsPanel host={desktopish("0.1.17")} />);
+    await userEvent.click(await screen.findByTestId("check-update"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("dns error");
+    expect(screen.queryByText("已经是最新的了。")).toBeNull();
+  });
+
+  it("says so when there is nothing to do", async () => {
+    connected({
+      "update.check": () => ({
+        type: "update",
+        data: { current: "0.1.17", latest: "0.1.17", newer: false },
+      }),
+    });
+
+    render(<SettingsPanel host={desktopish("0.1.17")} />);
+    await userEvent.click(await screen.findByTestId("check-update"));
+
+    expect(await screen.findByText("已经是最新的了。")).toBeTruthy();
+  });
+
+  /**
+   * What every build from source looks like: the tree carries 0.0.0 and only the
+   * release workflow stamps a real number in (`scripts/version.sh`). Printing
+   * "0.0.0" would read as a release, and telling that person to go and install an
+   * installer would be telling them to replace their own tree with an older one.
+   */
+  it("calls an unreleased build what it is, and does not tell it to upgrade", async () => {
+    const stub = stubDaemon({
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "update.check": () => ({
+        type: "update",
+        data: { current: "0.0.0", latest: "0.1.18", newer: false },
+      }),
+    });
+    (stub.client as { identity?: unknown }).identity = {
+      machineId: "m_1",
+      fingerprint: "AAAA-BBBB-CCCC-DDDD",
+      daemonVersion: "0.0.0",
+      protocolVersion: 1,
+      transport: "loopback",
+    };
+    install(stub.client);
+
+    render(<SettingsPanel host={desktopish("0.0.0")} />);
+
+    expect(await screen.findByTestId("app-version")).toHaveTextContent("应用 开发版");
+    expect(screen.getByTestId("daemon-version")).toHaveTextContent("daemon 开发版");
+
+    await userEvent.click(screen.getByTestId("check-update"));
+    expect(await screen.findByText(/开发版，不跟发布版本比较/)).toBeTruthy();
+    expect(screen.queryByText(/有新版本/)).toBeNull();
+    expect(screen.queryByText("已经是最新的了。")).toBeNull();
+  });
+
+  /**
+   * The failure `installer.nsh` was written for, seen from the other end: an
+   * installer that could not replace the daemon leaves the two halves on
+   * different versions, and the app looks fine while being wrong.
+   */
+  it("points out that the two halves are on different versions", async () => {
+    connected({});
+
+    render(<SettingsPanel host={desktopish("0.1.18")} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("只装了一半");
+  });
+
+  /// A browser is not a build of anything, so there is no second number to print.
+  it("prints one version in a browser, not an empty label", async () => {
+    connected({});
+
+    render(<SettingsPanel host={browserHost()} />);
+
+    expect(await screen.findByTestId("daemon-version")).toHaveTextContent("daemon 0.1.17");
+    expect(screen.queryByTestId("app-version")).toBeNull();
   });
 });

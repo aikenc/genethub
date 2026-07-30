@@ -9,6 +9,18 @@ use genet_daemon::Daemon;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Answered before anything touches the disk: "which build is this" is a
+    // question asked of a machine that is already misbehaving, and the answer
+    // should not depend on a data directory being readable — or on a locked one
+    // belonging to the daemon that is already running.
+    //
+    // The release workflow asks it too, to prove the version it stamped into the
+    // manifests is the version the shipped binary reports (`scripts/version.sh`).
+    if std::env::args().any(|argument| argument == "--version" || argument == "-V") {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     // The data directory has to be known before logging starts, because the log
     // goes in it. Anything that fails in between is on stderr, which the desktop
     // shell keeps in the same directory.

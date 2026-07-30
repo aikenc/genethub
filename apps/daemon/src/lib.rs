@@ -18,6 +18,7 @@ pub mod router;
 pub mod session;
 pub mod state;
 pub mod transport;
+pub mod updates;
 pub mod workspace;
 
 use anyhow::Result;

@@ -7,7 +7,15 @@ members = ["apps/agent", "apps/daemon", "packages/proto", "testing"]
 exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
-version = "0.1.0"
+# Not maintained by hand, and not a claim about any release: the product's version
+# is the git tag, which `scripts/version.sh` writes in as the release is built.
+# 0.0.0 means "this build was never released", and the daemon says exactly that to
+# whoever asks (`update.check`).
+#
+# The numbers this replaced were kept in step by hand, which is to say they were
+# not: they sat at 0.1.0 through seventeen tagged releases while every installed
+# copy reported 0.1.0 to its own workbench.
+version = "0.0.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 

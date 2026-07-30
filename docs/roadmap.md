@@ -41,7 +41,7 @@
 ### 明确不做
 
 - 手机原生 App（M2；MVP 用手机浏览器，界面已按小屏适配）
-- Codex 的原生协议适配（其 `app-server` JSON-RPC）：计划在 M2 做，见下方「M2」一节；在此之前 Codex 官方维护的 ACP wrapper 已经够用且经真实探测验证过，不会为了赶在 MVP 里做而仓促写一份
+- Codex 的 `thread/resume`、图片附件、skills 菜单、子 agent 内部步骤：原生 `app-server` 适配器已经落地（`adapter::codex`），这四项是它明确没接的部分，理由和各自的代价见 [third-party-agents.md](./third-party-agents.md) §4 末尾；每一项对应的能力位都申报为 false，界面上因此没有对应控件，而不是点了不生效
 - Codex 接 DeepSeek：不是我们的待办，是 Codex（只认 Responses API）与 DeepSeek（只有 Chat Completions）两个上游之间的协议缺口，见 [third-party-agents.md](./third-party-agents.md) §4；换成原生 `app-server` 传输不会让这个缺口消失
 - 应用内自动更新（手动重装）
 - 端到端加密（M4；当前为传输层加密，见 [security-model.md](./security-model.md) §1.1）
@@ -72,7 +72,7 @@
 - [x] 未知工具类型走 `Unknown` 兜底渲染，不白屏、不丢事件
 - [x] 同一段前端代码分别驱动内置 agent 与一个真实外部 agent，渲染结果形状一致
 - [x] Claude Code（原生 `stream-json`，`adapter::claude`）接 DeepSeek 官方 Anthropic 兼容端点，真实模型端到端跑通并固化为四条回归测试（`testing/tests/claude.rs`）：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具确实没有落盘
-- [x] Codex（经 `codex-acp`）默认注册、探测与选择器展示正常；接 DeepSeek 的已知限制记录在案，不在本项目范围内解决
+- [x] Codex（原生 `app-server`，`adapter::codex`）默认注册、探测（含未登录时报出那一行命令而不是让首个 prompt 挂住）与三个选择器展示正常；接 DeepSeek 的已知限制记录在案，不在本项目范围内解决
 
 **接入与安全**
 
@@ -124,7 +124,7 @@
 - 深链 `genehub://`；桌面端开机自启
 - 工作台分屏；工具调用折叠视图
 - 托盘在线状态
-- Codex 原生 `app-server` JSON-RPC 适配器，替掉 `codex-acp` wrapper：和 Claude Code 换原生协议（MVP，`adapter::claude`）同一个理由——拿回 ACP 不暴露的逐工具权限控制。默认注册表里的 `codex` 条目原地升级，不新增 id，不需要用户改配置
+- Codex 的 `thread/resume`：原生适配器（MVP，`adapter::codex`）已经在说 `app-server`，缺的是让它自己复活一条旧 thread，而不是由 daemon 回放我们自己的日志
 
 ---
 

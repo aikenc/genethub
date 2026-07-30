@@ -1,4 +1,4 @@
-import type { ProviderInfo } from "@genehub/proto";
+import type { ProviderInfo, UpdateStatus } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
 import type { Endpoint, Host } from "../host";
@@ -104,7 +104,132 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
           onUnpair={() => unpair()}
         />
       </section>
+
+      <Version host={host} daemonVersion={client?.identity?.daemonVersion} />
     </div>
+  );
+}
+
+/**
+ * What an unstamped build calls itself.
+ *
+ * The version in the repository is 0.0.0 and the release workflow writes the tag
+ * in as it builds (`scripts/version.sh`), so this is the number every build made
+ * from source reports — and printing it as "0.0.0" would read as a real release,
+ * the very confusion the placeholder exists to avoid.
+ */
+const UNRELEASED = "0.0.0";
+
+const shown = (version: string) => (version === UNRELEASED ? "开发版" : version);
+
+/**
+ * Which build this is, and whether a newer one has been published.
+ *
+ * Two numbers rather than one because they are two executables. A release stamps
+ * one version into both (`scripts/version.sh`), so seeing them disagree means an
+ * upgrade only half landed — a real outcome on Windows, where the daemon holds
+ * its own file open while an installer wants to replace it (`installer.nsh`).
+ * Printing both is what turns that from a puzzle into a sentence.
+ *
+ * The check is a button and never a timer, and it downloads nothing: it ends in a
+ * line of text and a link. Installing stops the daemon and whatever an agent was
+ * in the middle of, and when to pay that is the user's call, not ours.
+ */
+function Version({ host, daemonVersion }: { host: Host; daemonVersion?: string }) {
+  const { update, updating, checkUpdate, client } = useWorkbench();
+  const [app, setApp] = useState<string | null>(null);
+
+  useEffect(() => {
+    void host.appVersion?.().then(setApp);
+  }, [host]);
+
+  return (
+    <section>
+      <h2 className="mb-2 text-sm font-medium">版本</h2>
+      <div className="flex flex-col gap-2 rounded bg-surface px-3 py-2 text-xs">
+        <div className="flex flex-wrap items-center gap-3">
+          {app ? <span data-testid="app-version">应用 {shown(app)}</span> : null}
+          <span className="text-muted" data-testid="daemon-version">
+            daemon {daemonVersion ? shown(daemonVersion) : "未连接"}
+          </span>
+          <button
+            type="button"
+            data-testid="check-update"
+            className="ml-auto rounded border border-line px-2 py-1 hover:border-accent disabled:opacity-40"
+            // The machine is what does the looking, so with no connection there
+            // is nothing to ask — and a button that can only answer "还没连上"
+            // should not be pressable in the first place.
+            disabled={updating || !client}
+            onClick={() => void checkUpdate()}
+          >
+            {updating ? "检查中…" : "检查更新"}
+          </button>
+        </div>
+        {/* Not for a build from source: a developer running a fresh shell against
+            an installed daemon is not a broken upgrade, and saying so would be
+            crying wolf at the one person who can tell the difference. */}
+        {app && daemonVersion && app !== daemonVersion && app !== UNRELEASED ? (
+          <p role="alert" className="text-danger">
+            两个版本不一致，上次升级大概只装了一半。重新装一遍安装包，或者从托盘退出再打开。
+          </p>
+        ) : null}
+        <Answer status={update} onOpen={(url) => host.openExternal(url)} />
+      </div>
+    </section>
+  );
+}
+
+/**
+ * What the check found.
+ *
+ * Every outcome gets a sentence, including the boring one: a button that answers
+ * nothing looks broken, and a check that reached nothing must never be allowed to
+ * read as "you are up to date".
+ */
+function Answer({
+  status,
+  onOpen,
+}: {
+  status: UpdateStatus | null;
+  onOpen(url: string): void;
+}) {
+  if (!status) return null;
+  if (status.problem) {
+    return (
+      <p role="alert" className="text-danger">
+        没查到有没有新版本：{status.problem}
+      </p>
+    );
+  }
+  // A build from source is neither behind nor "the latest": it is not on the
+  // scale at all, and "已经是最新的了" would be a claim nobody can check.
+  if (status.current === UNRELEASED) {
+    return (
+      <p className="text-muted">
+        这是从源码构建的开发版，不跟发布版本比较。最新发布是 {status.latest ?? "未知"}。
+      </p>
+    );
+  }
+  if (!status.newer) {
+    return <p className="text-muted">已经是最新的了。</p>;
+  }
+  return (
+    <p className="flex flex-wrap items-center gap-2">
+      <span>有新版本 {status.latest}。</span>
+      {status.url ? (
+        <button
+          type="button"
+          data-testid="open-release"
+          className="underline decoration-dotted hover:text-accent"
+          onClick={() => onOpen(status.url!)}
+        >
+          打开下载页
+        </button>
+      ) : null}
+      <span className="text-faint">
+        装的时候这台机器上正在跑的会话会被打断，选个合适的时候。
+      </span>
+    </p>
   );
 }
 
@@ -121,7 +246,7 @@ function Machine({
   identity,
   expected,
 }: {
-  identity: { machineId: string; fingerprint: string; daemonVersion: string } | null;
+  identity: { machineId: string; fingerprint: string } | null;
   expected?: string;
 }) {
   if (!identity) return null;
@@ -140,9 +265,11 @@ function Machine({
         <p className="text-muted">
           在别的设备上连到这台机器时，核对这串指纹是否一致；不一致说明连的不是这台机器。
         </p>
+        {/* The version used to be here too, and moved to its own section: this
+            one is about which machine answered, and a build number sat in it
+            only because there was nowhere else to print one. */}
         <div className="flex gap-3 text-muted">
           <span>{identity.machineId}</span>
-          <span>daemon {identity.daemonVersion}</span>
         </div>
         {mismatched ? (
           <p role="alert" className="text-danger">

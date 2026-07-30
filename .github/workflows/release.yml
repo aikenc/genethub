@@ -49,6 +49,13 @@ jobs:
       - run: npm ci
         working-directory: apps/desktop
 
+      # The version this release ships, taken from the tag and written into the
+      # three files that have to carry one. The tree itself says 0.0.0 and no
+      # human ever edits a version — `scripts/version.sh` explains why, and holds
+      # the whole rule so that no workflow has to repeat it.
+      - run: ./scripts/version.sh --from-tag
+        shell: bash
+
       # Stages the daemon and the built-in agent into the bundle. The checks on
       # what ends up inside it need `dpkg-deb`, so they live in the Linux job
       # below rather than here.
@@ -114,6 +121,10 @@ jobs:
           root="$(mktemp -d)"
           exe=""
           [ "${{ matrix.platform }}" = "windows" ] && exe=".exe"
+          # And that it is the build this release claims to be. Without this, a
+          # job that lost its stamping step would ship a daemon calling itself
+          # 0.0.0 — which tells every user they run an unreleased build, silently.
+          ./scripts/version.sh --verify "target/release/genet-daemon$exe" || exit 1
           GENEHUB_DATA_DIR="$root/data" GENEHUB_WORKSPACE_DIR="$root/workspace" \
             "target/release/genet-daemon$exe" >"$root/out.json" 2>"$root/err.log" &
           pid=$!
@@ -176,6 +187,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # As in the installer job: the tag is where the version comes from.
+      - run: ./scripts/version.sh --from-tag
       - run: cargo build --release -p genet-daemon -p genet-agent
       - name: Pack
         shell: bash
@@ -192,6 +205,9 @@ jobs:
           set -euo pipefail
           root="$(mktemp -d)"
           tar -xzf "dist/${{ matrix.asset }}" -C "$root"
+          # The unpacked copy, so this is a claim about what is in the tarball
+          # rather than about what was left in the build directory.
+          ./scripts/version.sh --verify "$root/genet-daemon"
           GENEHUB_DATA_DIR="$root/data" GENEHUB_WORKSPACE_DIR="$root/workspace" \
             timeout 30 "$root/genet-daemon" >"$root/out.json" 2>"$root/err.log" || true
           grep -q '"event":"listening"' "$root/out.json" || {
@@ -242,6 +258,48 @@ jobs:
           path: dist
           merge-multiple: true
       - run: ls -la dist
+      # A fixed address for "what is the newest version", so the app's 检查更新
+      # has something to ask that is not the GitHub API: 60 requests an hour is
+      # counted per address, and everyone behind one office router shares it.
+      #
+      # Named without the version for the same reason as the installer, which is
+      # what makes `releases/latest/download/latest.json` an address that never
+      # moves.
+      #
+      # Shaped like a Tauri updater manifest although nothing signs anything yet:
+      # if the shell ever grows an updater, this file at this URL is what it
+      # reads, and there is no second thing to publish. `signature` is absent
+      # rather than empty, so an updater would fail closed instead of accepting
+      # an unsigned bundle.
+      - name: Say what the newest version is, at an address that never moves
+        run: |
+          set -euo pipefail
+          node -e '
+            const tag = process.env.GITHUB_REF_NAME;
+            const repo = process.env.GITHUB_REPOSITORY;
+            const version = tag.replace(/^v/, "");
+            const release = `https://github.com/${repo}/releases`;
+            require("node:fs").writeFileSync(
+              "dist/latest.json",
+              JSON.stringify(
+                {
+                  version,
+                  pub_date: new Date().toISOString(),
+                  // Where a person goes. The installer URL is for a machine; a
+                  // human wants the notes and the checksums next to it.
+                  page: `${release}/tag/${tag}`,
+                  platforms: {
+                    "windows-x86_64": {
+                      url: `${release}/download/${tag}/GeneHub-${version}-windows-x64-setup.exe`,
+                    },
+                  },
+                },
+                null,
+                2,
+              ) + "\n",
+            );
+          '
+          cat dist/latest.json
       # Checksums, because a download that arrives corrupted should be provable
       # rather than argued about.
       - run: |

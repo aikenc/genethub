@@ -1,6 +1,10 @@
 [package]
 name = "genethub-desktop"
-version = "0.1.0"
+# Written by `scripts/version.sh` at release time, along with the workspace next
+# door and `tauri.conf.json`. A literal is unavoidable here — this crate sits
+# outside that workspace on purpose, and Cargo can neither inherit across
+# workspaces nor read another file — so a script writes it rather than a person.
+version = "0.0.0"
 description = "GeneHub desktop client"
 edition = "2021"
 # No `rust-version`: nothing here is published to crates.io, and the rest of the

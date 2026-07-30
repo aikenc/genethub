@@ -352,6 +352,21 @@ pub async fn handle(
             }
         }
 
+        Request::UpdateCheck => {
+            let url = state.config.read().await.update_manifest_url.clone();
+            if url.trim().is_empty() {
+                // Refused rather than answered with "up to date": this machine
+                // was told not to look, and the two are not the same sentence.
+                return Handled::err(
+                    ErrorCode::Unsupported,
+                    "这台机器关掉了更新检查（config.json 里的 updateManifestUrl 是空的）",
+                );
+            }
+            Handled::ok(Reply::Update(
+                crate::updates::check(&url, &state.version).await,
+            ))
+        }
+
         Request::SettingsForgetProvider { provider_id } => {
             match state.forget_provider(&provider_id).await {
                 Ok(settings) => Handled::ok(Reply::Settings(settings)),

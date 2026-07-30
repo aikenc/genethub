@@ -14,6 +14,7 @@ import type {
   SessionSnapshot,
   SessionSummary,
   Settings,
+  UpdateStatus,
   WorkspaceInfo,
 } from "@genehub/proto";
 import { create } from "zustand";
@@ -77,6 +78,17 @@ interface WorkbenchState {
   settings: Settings | null;
   /** The log being read, if the log tab has been opened. */
   log: LogTail | null;
+  /**
+   * The answer to the last update check, or null because nobody has asked.
+   *
+   * Never fetched on mount, and never on a timer: this is the one piece of state
+   * here that only exists because a person pressed something (`UpdateStatus`).
+   * It lives in the store rather than in the About section because the tray can
+   * ask too, and both have to end up on the same screen.
+   */
+  update: UpdateStatus | null;
+  /** A check is in flight. Shared, for the same reason `update` is. */
+  updating: boolean;
 
   attach(client: Client): Promise<void>;
   openWorkspace(root: string): Promise<void>;
@@ -96,6 +108,8 @@ interface WorkbenchState {
    * can open.
    */
   loadLog(name?: string): Promise<void>;
+  /** Asks the machine whether a newer build has been published. */
+  checkUpdate(): Promise<void>;
   setProvider(input: {
     providerId: string;
     apiKey?: string;
@@ -156,6 +170,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   diff: null,
   settings: null,
   log: null,
+  update: null,
+  updating: false,
 
   async attach(client) {
     set({ client, notice: null });
@@ -448,6 +464,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       }),
     );
     if (reply?.type === "log") set({ log: reply.data });
+  },
+
+  async checkUpdate() {
+    // The previous answer goes away as the next check starts, so a stale "已是
+    // 最新" cannot be read as the result of the press that just happened.
+    set({ notice: null, update: null, updating: true });
+    try {
+      const reply = await asked(set, () =>
+        require_(get().client).call({ type: "update.check" }),
+      );
+      if (reply?.type === "update") set({ update: reply.data });
+    } finally {
+      set({ updating: false });
+    }
   },
 
   async setProvider({ providerId, apiKey, baseUrl, label, dialect, models }) {

@@ -153,6 +153,19 @@ export function App({
     [host],
   );
 
+  useEffect(
+    () =>
+      host.onUpdateRequested?.(() => {
+        // Asked first and shown second, for the same reason as the claim link
+        // above: arriving on settings with nothing happening reads as a menu item
+        // that did nothing. Every outcome, including 已是最新, lands in the
+        // version section.
+        void useWorkbench.getState().checkUpdate();
+        useWorkbench.getState().openTab("settings");
+      }),
+    [host],
+  );
+
   useEffect(() => {
     if (claiming !== "idle") return;
     if (endpoint === "loading" || endpoint === null) return;

@@ -1,0 +1,1972 @@
+//! Adapter for Codex, spoken natively over its own `app-server` JSON-RPC
+//! protocol instead of through the `codex-acp` bridge.
+//!
+//! Same trade as Claude Code (`adapter::claude`), and the same thing bought:
+//! per-tool approvals, which this CLI asks for as requests of its own rather
+//! than a policy flag. What it adds on top is a model table with each model's
+//! own thinking levels, and one fewer package for the user to install — a person
+//! who installed `codex` was previously told the agent was unavailable because a
+//! bridge they had never heard of was missing.
+//!
+//! The bill for going native is version drift: these method names and frame
+//! shapes are ours to follow now. They were read off codex-cli 0.145.0 by asking
+//! the real CLI, and cross-checked against a second implementation of the same
+//! protocol (`ref-repos`), which is also where the shapes that need a live model
+//! to observe came from.
+//!
+//! Protocol notes:
+//!
+//! - Spawn `codex app-server`. Line-delimited JSON-RPC on stdio, in both
+//!   directions: an `initialize` request, then an `initialized` notification.
+//! - `clientInfo.name` is `codex_app_server_daemon` rather than our own name.
+//!   This is one of the shapes taken from the other implementation: it treats
+//!   that value as a reserved, non-originating client, on the grounds that this
+//!   CLI otherwise reads the client name as the originator of the model requests
+//!   it makes. The effect we want either way is that a person's Codex usage
+//!   stays attributed to Codex, not to us.
+//! - `thread/start` takes `{ model, cwd, approvalPolicy, sandbox }` and returns
+//!   the thread. Each prompt is then `turn/start` with `{ threadId, input,
+//!   approvalPolicy, sandboxPolicy, model?, effort? }`.
+//!
+//!   **Every turn carries all four.** That is why none of `set_model`,
+//!   `set_mode` or `set_effort` sends anything here: the choice is recorded and
+//!   the next turn carries it, which is also the only way it could work for a
+//!   choice made before the first prompt — the process does not exist yet
+//!   (`session::manager::ensure_started`).
+//! - The timeline arrives as `item/started` / `item/completed` notifications
+//!   carrying an `item` with its own id, plus `item/agentMessage/delta` and
+//!   `item/reasoning/summaryTextDelta` for the typing effect. `turn/started`
+//!   names the turn — needed to interrupt it, since `turn/interrupt` takes
+//!   `{ threadId, turnId }` — and `turn/completed` ends it.
+//!   `thread/tokenUsage/updated` carries the token counts, `turn/plan/updated`
+//!   the todo list, and a `contextCompaction` item (or `thread/compacted`)
+//!   marks the history being pruned.
+//! - Approvals are requests *from* the CLI, split by what is being approved:
+//!   `item/commandExecution/requestApproval` and
+//!   `item/fileChange/requestApproval`, both answered
+//!   `{"decision":"accept"|"decline"|"cancel"}`, and
+//!   `item/tool/requestUserInput`, which is a question rather than an approval
+//!   and is answered `{"answers":{"<question id>":{"answers":["<label>"]}}}`.
+//!   Anything it asks that we cannot render is still answered: a request left
+//!   hanging is a CLI that waits forever.
+//! - Not being logged in does not produce an error. `turn/start` is accepted,
+//!   the user's message is echoed back as an item, and then nothing happens —
+//!   no failure, no exit (verified on 0.145.0). So `probe` asks `codex login
+//!   status` instead of letting the first prompt sit there spinning.
+//! - Skills (`skills/list`) are deliberately not offered as slash commands.
+//!   This CLI invokes one as `$name` alongside a `{"type":"skill"}` input block,
+//!   so a menu that inserts `/name` as plain text would be a control that does
+//!   nothing.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
+use genehub_proto::{
+    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind,
+    PermissionOutcome, PermissionRequest, ProbeState, SessionEvent, TimelineItem, TodoEntry,
+    TodoStatus, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+};
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::{broadcast, oneshot, Mutex};
+
+use super::stdio::write_json_line;
+use super::{
+    find_executable, AgentAdapter, AgentSession, Chatter, PromptInput, ProviderMap, SessionConfig,
+};
+
+const BINARY: &str = "codex";
+const EVENT_CAPACITY: usize = 1024;
+
+/// The reserved, non-originating client name (see the module doc).
+const CLIENT_NAME: &str = "codex_app_server_daemon";
+
+/// How long a request to the CLI may go unanswered. Generous because
+/// `turn/start` is one of these and a cold start on Windows is slow.
+const CALL_TIMEOUT: Duration = Duration::from_secs(90);
+/// The one-off handshake that reads the model table.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Asking whether this install is logged in. Short: it reads a file.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+const ALLOW: &str = "allow";
+const DENY: &str = "deny";
+
+/// A mode as this CLI expresses one: an approval policy and a sandbox together,
+/// not a single switch.
+///
+/// Which is why these are presets rather than a passthrough of its own
+/// vocabulary — "on-request + workspace-write" is not something to put in front
+/// of a person, but "can edit here, asks before going further" is.
+struct Mode {
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    /// `on-request` | `never`, as the CLI names them.
+    approval: &'static str,
+    /// `read-only` | `workspace-write` | `danger-full-access`.
+    sandbox: &'static str,
+    network: bool,
+}
+
+/// `static` rather than `const` so a lookup can hand back a `'static` reference
+/// instead of copying.
+static MODES: [Mode; 3] = [
+    Mode {
+        id: "read-only",
+        label: "Read only",
+        description: "Read and plan only — asks before editing or running anything",
+        approval: "on-request",
+        sandbox: "read-only",
+        network: false,
+    },
+    Mode {
+        id: "auto",
+        label: "Default",
+        description:
+            "Edit files and run commands inside the workspace, asking before going beyond it",
+        approval: "on-request",
+        sandbox: "workspace-write",
+        network: false,
+    },
+    Mode {
+        id: "full-access",
+        label: "Full access",
+        description:
+            "Never ask, and allow network access. Only for a workspace you could afford to lose",
+        approval: "never",
+        sandbox: "danger-full-access",
+        network: true,
+    },
+];
+
+/// A session starts in the cautious-but-useful middle, the same way Codex's own
+/// CLI does, rather than in the mode that can do anything.
+const DEFAULT_MODE: &str = "auto";
+
+fn mode_named(id: &str) -> &'static Mode {
+    MODES
+        .iter()
+        .find(|mode| mode.id == id)
+        // The default, not the first entry: an unknown name must not silently
+        // become "read only" and leave someone wondering why nothing happens.
+        .unwrap_or_else(|| {
+            MODES
+                .iter()
+                .find(|mode| mode.id == DEFAULT_MODE)
+                .expect("the default mode is one of the modes")
+        })
+}
+
+/// The `sandboxPolicy` object `turn/start` wants, which is a different shape
+/// from the `sandbox` string `thread/start` takes.
+fn sandbox_policy(mode: &Mode) -> Value {
+    match mode.sandbox {
+        "read-only" => json!({ "type": "readOnly" }),
+        "danger-full-access" => json!({ "type": "dangerFullAccess" }),
+        _ => json!({ "type": "workspaceWrite", "networkAccess": mode.network }),
+    }
+}
+
+#[derive(Default)]
+pub struct CodexAdapter {
+    /// What the CLI answered when asked for its model table, read once per
+    /// daemon run: the picker wants it long before anyone opens a session, and
+    /// the only way to ask this CLI anything is to run it.
+    hello: tokio::sync::OnceCell<Option<Hello>>,
+}
+
+/// What one handshake told us about this install.
+#[derive(Clone, Default)]
+struct Hello {
+    models: Vec<ModelInfo>,
+    default_model: Option<String>,
+    /// The default model's own default thinking level, which is the only level
+    /// we can state without guessing.
+    default_effort: Option<String>,
+}
+
+impl CodexAdapter {
+    fn program(&self) -> Option<PathBuf> {
+        find_executable(BINARY)
+    }
+
+    async fn hello(&self, program: &Path) -> Option<Hello> {
+        self.hello
+            .get_or_init(|| async { discover(program).await })
+            .await
+            .clone()
+    }
+}
+
+#[async_trait]
+impl AgentAdapter for CodexAdapter {
+    fn id(&self) -> &str {
+        "codex"
+    }
+
+    fn label(&self) -> &str {
+        "Codex"
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            interrupt: true,
+            // All three are real here, and none of them costs a round trip:
+            // every `turn/start` carries the model, the level and the policy.
+            set_model: true,
+            set_effort: true,
+            set_mode: true,
+            permissions: true,
+            // `thread/resume` exists and is not wired up yet, so the daemon
+            // replays its own log rather than promising more than we do.
+            resume: false,
+            // This CLI takes an image as `{"type":"localImage","path":...}`, so
+            // forwarding a pasted screenshot means writing it to a file first.
+            // Declared false until that is done: an attach button that drops
+            // what it is given is worse than no attach button.
+            attachments: false,
+        }
+    }
+
+    async fn probe(&self) -> ProbeState {
+        let Some(program) = self.program() else {
+            return ProbeState::NotInstalled;
+        };
+        // Asked every time rather than remembered: whoever reads the reason
+        // below goes and runs `codex login`, and the picker has to notice that.
+        match logged_in(&program).await {
+            Some(false) => ProbeState::Unavailable {
+                reason: "找到了 Codex，但它还没登录：先跑 codex login（或者 \
+                         printenv OPENAI_API_KEY | codex login --with-api-key）"
+                    .into(),
+            },
+            // Logged in, or the question could not be asked at all. A slow or
+            // unusual `codex login status` is not a reason to hide a CLI that is
+            // sitting right there.
+            _ => ProbeState::Ready,
+        }
+    }
+
+    async fn catalog(&self, _providers: &ProviderMap) -> Catalog {
+        let Some(program) = self.program() else {
+            return Catalog::default();
+        };
+        let hello = self.hello(&program).await.unwrap_or_default();
+        Catalog {
+            models: hello.models,
+            modes: MODES
+                .iter()
+                .map(|mode| ModeInfo {
+                    id: mode.id.into(),
+                    label: mode.label.into(),
+                    description: Some(mode.description.into()),
+                })
+                .collect(),
+            // Its skills are invoked as `$name` with a `{"type":"skill"}` input
+            // block, not as `/name` in the prompt text (see the module doc), so
+            // they are not offered as commands that send plain text.
+            commands: Vec::new(),
+            default_model: hello.default_model,
+            default_mode: Some(DEFAULT_MODE.into()),
+            default_effort: hello.default_effort,
+        }
+    }
+
+    async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
+        let program = self
+            .program()
+            .ok_or_else(|| anyhow!("codex is not installed"))?;
+        let hello = self.hello(&program).await.unwrap_or_default();
+
+        let mut command = Command::new(&program);
+        command
+            .arg("app-server")
+            .current_dir(&config.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        super::without_a_window(&mut command);
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("spawning {}", program.display()))?;
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let stdin = child.stdin.take().expect("stdin was piped");
+
+        // Kept rather than dropped: when this CLI exits on its own, its stderr
+        // is the only account of why.
+        let said = Arc::new(Chatter::default());
+        said.watch("codex", Some(stderr)).await;
+
+        let stdin = Arc::new(Mutex::new(stdin));
+        let child = Arc::new(Mutex::new(Some(child)));
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let pending: PendingMap = Arc::default();
+        let asks: AskMap = Arc::default();
+        let turn = Arc::new(Mutex::new(TurnState::default()));
+
+        // The lists a later `set_model` / `set_effort` is checked against. The
+        // CLI does not check them for us, and a picker that "succeeds" onto a
+        // model that never took is worse than a refusal.
+        let models: Vec<String> = hello.models.iter().map(|model| model.id.clone()).collect();
+        let efforts: Vec<String> = hello
+            .models
+            .iter()
+            .flat_map(|model| model.efforts.iter())
+            .fold(Vec::new(), |mut levels, level| {
+                if !levels.contains(level) {
+                    levels.push(level.clone());
+                }
+                levels
+            });
+
+        // Chosen before the first prompt, which is the ordinary case: the
+        // process only starts when there is something to send.
+        let mode = config
+            .mode_id
+            .clone()
+            .filter(|id| MODES.iter().any(|mode| mode.id == id.as_str()))
+            .unwrap_or_else(|| DEFAULT_MODE.to_string());
+        let model = config
+            .model_id
+            .clone()
+            .filter(|id| models.contains(id))
+            .or_else(|| hello.default_model.clone());
+        let effort = config
+            .effort_id
+            .clone()
+            .filter(|id| efforts.contains(id))
+            .or_else(|| hello.default_effort.clone());
+
+        let session = CodexSession {
+            stdin: stdin.clone(),
+            events: events.clone(),
+            pending: pending.clone(),
+            asks: asks.clone(),
+            turn: turn.clone(),
+            next_id: AtomicI64::new(1),
+            child: child.clone(),
+            thread: Mutex::new(None),
+            mode: Mutex::new(mode),
+            model: Mutex::new(model),
+            effort: Mutex::new(effort),
+            models,
+            efforts,
+        };
+
+        tokio::spawn(read_loop(Reader {
+            stdout,
+            stdin,
+            events,
+            pending,
+            asks,
+            turn,
+            child,
+            said: said.clone(),
+        }));
+
+        // A handshake that got no answer is usually a CLI that already left, and
+        // what it wrote on the way out is the only account of why. Without this
+        // the session fails with "Codex did not answer initialize" and the
+        // sentence that says why is discarded by us.
+        if let Err(error) = session.handshake(&config).await {
+            said.settle().await;
+            return Err(anyhow!("{error}{}", said.tail()));
+        }
+        Ok(Box::new(session))
+    }
+}
+
+/// Runs one handshake against a throwaway process and takes its answers away.
+///
+/// A process of its own because the model table is wanted for the agent picker,
+/// which is drawn long before any session exists. Nothing here reaches a model —
+/// both `initialize` and `model/list` answer without credentials, which is also
+/// why this cannot double as a login check.
+async fn discover(program: &Path) -> Option<Hello> {
+    let mut command = Command::new(program);
+    command
+        .arg("app-server")
+        // Somewhere that exists and says nothing about any of the user's
+        // projects: this answer is cached for every workspace.
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    super::without_a_window(&mut command);
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!("could not ask codex what it supports: {error}");
+            return None;
+        }
+    };
+    let mut stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+
+    let answer = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        let mut lines = BufReader::new(stdout).lines();
+        let hello = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "clientInfo": {
+                "name": CLIENT_NAME,
+                "title": "GeneHub",
+                "version": env!("CARGO_PKG_VERSION"),
+            } },
+        });
+        write_json_line(&mut stdin, &hello).await.ok()?;
+        answered(&mut lines, 1).await?;
+        let ready = json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} });
+        write_json_line(&mut stdin, &ready).await.ok()?;
+
+        let ask = json!({ "jsonrpc": "2.0", "id": 2, "method": "model/list", "params": {} });
+        write_json_line(&mut stdin, &ask).await.ok()?;
+        let listed = answered(&mut lines, 2).await?;
+        let (default_model, default_effort) = match default_model_in(&listed) {
+            Some((model, effort)) => (Some(model), effort),
+            None => (None, None),
+        };
+        Some(Hello {
+            models: models_in(&listed),
+            default_model,
+            default_effort,
+        })
+    })
+    .await;
+
+    // It is only alive to answer that, and it does not exit on its own.
+    super::kill_tree(&mut child).await;
+
+    match answer {
+        Ok(answer) => answer,
+        Err(_) => {
+            tracing::warn!("codex did not answer a handshake in time");
+            None
+        }
+    }
+}
+
+/// Reads until the reply to `id` arrives, ignoring the notifications the CLI
+/// volunteers in the meantime.
+async fn answered<R>(lines: &mut tokio::io::Lines<BufReader<R>>, id: i64) -> Option<Value>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    while let Ok(Some(line)) = lines.next_line().await {
+        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if frame.get("id").and_then(Value::as_i64) != Some(id) {
+            continue;
+        }
+        if let Some(error) = frame.get("error") {
+            tracing::warn!("codex refused a handshake request: {error}");
+            return None;
+        }
+        return Some(frame.get("result").cloned().unwrap_or(Value::Null));
+    }
+    None
+}
+
+/// Whether this install has credentials, as the CLI itself reports them.
+///
+/// Worth its own process because of how the alternative fails: see the module
+/// doc — an unauthenticated turn is accepted and then simply never finishes.
+async fn logged_in(program: &Path) -> Option<bool> {
+    let mut command = Command::new(program);
+    command
+        .args(["login", "status"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    super::without_a_window(&mut command);
+
+    let output = tokio::time::timeout(LOGIN_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    let mut said = String::from_utf8_lossy(&output.stdout).to_string();
+    said.push_str(&String::from_utf8_lossy(&output.stderr));
+    // Phrased as "is it logged out", because that is the only sentence worth
+    // acting on. Every other wording — which account, which method — means it
+    // is usable, and a check that guessed at those would hide working installs.
+    Some(!said.contains("Not logged in"))
+}
+
+/// The models this install offers, as it listed them.
+fn models_in(listed: &Value) -> Vec<ModelInfo> {
+    let Some(models) = listed.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .filter_map(|model| {
+            // It marks the ones it does not want shown. Repeating them in a
+            // picker would offer a choice its own UI does not.
+            if model
+                .get("hidden")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            let id = model.get("id").and_then(Value::as_str)?;
+            let efforts = efforts_in(model);
+            Some(ModelInfo {
+                id: id.to_string(),
+                label: model
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .unwrap_or(id)
+                    .to_string(),
+                context_window: None,
+                reasoning: !efforts.is_empty(),
+                efforts,
+            })
+        })
+        .collect()
+}
+
+/// The thinking levels one model named, weakest first as it ordered them.
+///
+/// Each entry is an object with the level and a sentence about it; older builds
+/// listed bare strings, and both are cheap to accept.
+fn efforts_in(model: &Value) -> Vec<String> {
+    model
+        .get("supportedReasoningEfforts")
+        .and_then(Value::as_array)
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(|level| {
+                    level
+                        .get("reasoningEffort")
+                        .and_then(Value::as_str)
+                        .or_else(|| level.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The model this install would use if nobody chose, and that model's own
+/// default thinking level.
+fn default_model_in(listed: &Value) -> Option<(String, Option<String>)> {
+    let models = listed.get("data")?.as_array()?;
+    let chosen = models
+        .iter()
+        .find(|model| {
+            model
+                .get("isDefault")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .or_else(|| models.first())?;
+    let id = chosen.get("id").and_then(Value::as_str)?.to_string();
+    let effort = chosen
+        .get("defaultReasoningEffort")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some((id, effort))
+}
+
+type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
+type AskMap = Arc<Mutex<HashMap<String, Ask>>>;
+
+/// What the CLI is waiting for us to answer, and in which shape.
+enum Ask {
+    /// An approval: answered with a `decision`.
+    Decision,
+    /// A question: answered with the label of the option that was picked, keyed
+    /// by the question's own id.
+    Question {
+        question: String,
+        /// The option ids we offered, paired with the label to send back.
+        options: Vec<(String, String)>,
+    },
+}
+
+#[derive(Copy, Clone)]
+enum Kind {
+    Assistant,
+    Reasoning,
+}
+
+#[derive(Default)]
+struct TurnState {
+    /// Our own id for the turn in flight.
+    id: Option<String>,
+    /// The CLI's id for the same turn, learned from `turn/started`. Without it
+    /// there is nothing to interrupt: `turn/interrupt` is addressed to a turn.
+    codex_turn: Option<String>,
+    /// Items the timeline has already been told about, so a delta can tell
+    /// "extend that one" from "this is the first anyone has heard of it".
+    open: HashSet<String>,
+    /// The last token counts this thread reported. They arrive on their own
+    /// notification, not with the end of the turn, so they are held until there
+    /// is a completed turn to attach them to.
+    usage: Usage,
+    /// We asked for this turn to stop, so its end is a cancellation however the
+    /// CLI happens to label it.
+    interrupt_requested: bool,
+}
+
+struct CodexSession {
+    stdin: Arc<Mutex<ChildStdin>>,
+    events: broadcast::Sender<SessionEvent>,
+    pending: PendingMap,
+    asks: AskMap,
+    turn: Arc<Mutex<TurnState>>,
+    next_id: AtomicI64,
+    child: Arc<Mutex<Option<Child>>>,
+    thread: Mutex<Option<String>>,
+    mode: Mutex<String>,
+    model: Mutex<Option<String>>,
+    effort: Mutex<Option<String>>,
+    /// What this install listed, for checking a choice against.
+    models: Vec<String>,
+    efforts: Vec<String>,
+}
+
+impl CodexSession {
+    async fn write(&self, value: Value) -> Result<()> {
+        let mut stdin = self.stdin.lock().await;
+        write_json_line(&mut stdin, &value).await
+    }
+
+    async fn notify(&self, method: &str, params: Value) -> Result<()> {
+        self.write(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
+            .await
+    }
+
+    async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+        self.write(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }))
+        .await?;
+        match tokio::time::timeout(CALL_TIMEOUT, rx).await {
+            Ok(Ok(Ok(value))) => Ok(value),
+            Ok(Ok(Err(message))) => Err(anyhow!("{method} failed: {message}")),
+            Ok(Err(_)) => Err(anyhow!("{method} failed: Codex closed the connection")),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                Err(anyhow!("Codex did not answer {method}"))
+            }
+        }
+    }
+
+    /// Introduces ourselves and opens the thread this session talks to.
+    async fn handshake(&self, config: &SessionConfig) -> Result<()> {
+        self.call(
+            "initialize",
+            json!({ "clientInfo": {
+                "name": CLIENT_NAME,
+                "title": "GeneHub",
+                "version": env!("CARGO_PKG_VERSION"),
+            } }),
+        )
+        .await?;
+        self.notify("initialized", json!({})).await?;
+
+        let mode = mode_named(self.mode.lock().await.as_str());
+        let mut params = json!({
+            "cwd": config.cwd,
+            "approvalPolicy": mode.approval,
+            "sandbox": mode.sandbox,
+        });
+        if let Some(model) = self.model.lock().await.clone() {
+            params["model"] = json!(model);
+        }
+        let started = self.call("thread/start", params).await?;
+        let thread = started
+            .get("thread")
+            .and_then(|thread| thread.get("id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("thread/start did not return a thread id"))?;
+        *self.thread.lock().await = Some(thread.to_string());
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AgentSession for CodexSession {
+    fn events(&self) -> broadcast::Receiver<SessionEvent> {
+        self.events.subscribe()
+    }
+
+    async fn send(&self, input: PromptInput) -> Result<String> {
+        let thread = self
+            .thread
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow!("the Codex thread was never started"))?;
+        let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
+        {
+            let mut state = self.turn.lock().await;
+            // The token counts survive: they belong to the thread, and the CLI
+            // only re-sends them when they change.
+            let usage = state.usage.clone();
+            *state = TurnState {
+                id: Some(turn_id.clone()),
+                usage,
+                ..TurnState::default()
+            };
+        }
+        let _ = self.events.send(SessionEvent::TurnStarted {
+            turn_id: turn_id.clone(),
+        });
+
+        let mode = mode_named(self.mode.lock().await.as_str());
+        let mut params = json!({
+            "threadId": thread,
+            "input": [{ "type": "text", "text": input.text }],
+            // Sent every turn, which is what makes the three pickers work
+            // without an RPC of their own (see the module doc).
+            "approvalPolicy": mode.approval,
+            "sandboxPolicy": sandbox_policy(mode),
+        });
+        if let Some(model) = self.model.lock().await.clone() {
+            params["model"] = json!(model);
+        }
+        if let Some(effort) = self.effort.lock().await.clone() {
+            params["effort"] = json!(effort);
+        }
+
+        // The reply only says the turn was accepted; the timeline and the end of
+        // the turn arrive as notifications. A refusal, though, is this turn's
+        // failure, and nothing else is going to report it.
+        if let Err(error) = self.call("turn/start", params).await {
+            let mut state = self.turn.lock().await;
+            if state.id.as_deref() == Some(turn_id.as_str()) {
+                state.id = None;
+            }
+            let _ = self.events.send(SessionEvent::TurnFailed {
+                turn_id,
+                error: TurnError {
+                    code: TurnErrorCode::Upstream,
+                    message: error.to_string(),
+                },
+            });
+            return Err(error);
+        }
+        Ok(turn_id)
+    }
+
+    async fn interrupt(&self) -> Result<()> {
+        let thread = self.thread.lock().await.clone();
+        let codex_turn = {
+            let mut state = self.turn.lock().await;
+            state.interrupt_requested = true;
+            state.codex_turn.clone()
+        };
+        let (Some(thread), Some(codex_turn)) = (thread, codex_turn) else {
+            // Nothing running, or the CLI has not named the turn yet. Not a
+            // failure: the user pressed stop early, or late.
+            return Ok(());
+        };
+        self.call(
+            "turn/interrupt",
+            json!({ "threadId": thread, "turnId": codex_turn }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<()> {
+        let mut child = self.child.lock().await;
+        if let Some(mut child) = child.take() {
+            super::kill_tree(&mut child).await;
+        }
+        Ok(())
+    }
+
+    async fn set_model(&self, model_id: &str) -> Result<()> {
+        // Checked here because the CLI will not: it is told the model on the
+        // next turn, and an unknown name would only surface then, as a failed
+        // turn rather than a refused choice.
+        if !self.models.is_empty() && !self.models.iter().any(|known| known == model_id) {
+            return Err(anyhow!("Codex did not list a model called '{model_id}'"));
+        }
+        *self.model.lock().await = Some(model_id.to_string());
+        Ok(())
+    }
+
+    async fn set_mode(&self, mode_id: &str) -> Result<()> {
+        if !MODES.iter().any(|mode| mode.id == mode_id) {
+            return Err(anyhow!("'{mode_id}' is not one of Codex's modes"));
+        }
+        *self.mode.lock().await = mode_id.to_string();
+        Ok(())
+    }
+
+    async fn set_effort(&self, effort_id: &str) -> Result<()> {
+        if !self.efforts.is_empty() && !self.efforts.iter().any(|known| known == effort_id) {
+            return Err(anyhow!(
+                "Codex did not list a thinking level called '{effort_id}'"
+            ));
+        }
+        *self.effort.lock().await = Some(effort_id.to_string());
+        Ok(())
+    }
+
+    async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()> {
+        let ask = self.asks.lock().await.remove(request_id);
+        // The CLI asked us, so this is a JSON-RPC *response* keyed by its id.
+        let id: i64 = request_id
+            .parse()
+            .map_err(|_| anyhow!("'{request_id}' is not a Codex request id"))?;
+        let result = match ask {
+            Some(Ask::Question { question, options }) => {
+                let picked = match &outcome {
+                    PermissionOutcome::Selected { option_id } => options
+                        .iter()
+                        .find(|(id, _)| id == option_id)
+                        .map(|(_, label)| label.clone()),
+                    _ => None,
+                };
+                match picked {
+                    Some(label) => json!({ "answers": { question: { "answers": [label] } } }),
+                    // Dismissed. An empty answer set is the one reply that does
+                    // not put words in the user's mouth.
+                    None => json!({ "answers": {} }),
+                }
+            }
+            _ => json!({ "decision": decision(&outcome) }),
+        };
+        self.write(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+            .await?;
+        let _ = self.events.send(SessionEvent::PermissionResolved {
+            request_id: request_id.to_string(),
+            outcome,
+        });
+        Ok(())
+    }
+}
+
+/// `accept` | `decline` | `cancel`, as this CLI's approvals are answered.
+///
+/// There is no "always allow" on this wire, so none is offered: the mode picker
+/// is where someone stops being asked, and that at least says what it does.
+fn decision(outcome: &PermissionOutcome) -> &'static str {
+    match outcome {
+        PermissionOutcome::Selected { option_id } if option_id == ALLOW => "accept",
+        // The turn is going away, not just this one tool call.
+        PermissionOutcome::Canceled => "cancel",
+        _ => "decline",
+    }
+}
+
+fn allow_or_deny() -> Vec<PermissionOption> {
+    vec![
+        PermissionOption {
+            id: ALLOW.into(),
+            label: "Allow".into(),
+            kind: PermissionOptionKind::AllowOnce,
+        },
+        PermissionOption {
+            id: DENY.into(),
+            label: "Deny".into(),
+            kind: PermissionOptionKind::Reject,
+        },
+    ]
+}
+
+/// Everything the read loop needs, bundled because a function with eight
+/// positional arguments is a function whose call site cannot be read.
+struct Reader {
+    stdout: tokio::process::ChildStdout,
+    stdin: Arc<Mutex<ChildStdin>>,
+    events: broadcast::Sender<SessionEvent>,
+    pending: PendingMap,
+    asks: AskMap,
+    turn: Arc<Mutex<TurnState>>,
+    child: Arc<Mutex<Option<Child>>>,
+    said: Arc<Chatter>,
+}
+
+async fn read_loop(reader: Reader) {
+    let Reader {
+        stdout,
+        stdin,
+        events,
+        pending,
+        asks,
+        turn,
+        child,
+        said,
+    } = reader;
+    let mut lines = BufReader::new(stdout).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+            tracing::warn!("undecodable codex frame");
+            continue;
+        };
+        let method = frame
+            .get("method")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let id = frame.get("id").and_then(Value::as_i64);
+        let params = frame.get("params").cloned().unwrap_or(Value::Null);
+
+        match (id, method) {
+            // A reply to something we sent.
+            (Some(id), None) => {
+                if let Some(sender) = pending.lock().await.remove(&id) {
+                    let outcome = match frame.get("error") {
+                        Some(error) => Err(error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown error")
+                            .to_string()),
+                        None => Ok(frame.get("result").cloned().unwrap_or(Value::Null)),
+                    };
+                    let _ = sender.send(outcome);
+                }
+            }
+            // A request from the CLI: it is waiting on a reply keyed by this id.
+            (Some(id), Some(method)) => {
+                translate_ask(Asked {
+                    id,
+                    method,
+                    params,
+                    stdin: &stdin,
+                    asks: &asks,
+                    events: &events,
+                })
+                .await;
+            }
+            (None, Some(method)) => translate(&method, &params, &turn, &events).await,
+            (None, None) => {}
+        }
+    }
+
+    // Its stdout closed, so the CLI is gone. Nothing is going to send a
+    // `turn/completed` for a turn in flight, and a turn nobody ever ends leaves
+    // the composer spinning forever.
+    let mut state = turn.lock().await;
+    if let Some(turn_id) = state.id.take() {
+        let _ = events.send(SessionEvent::TurnFailed {
+            turn_id,
+            error: TurnError {
+                code: TurnErrorCode::AgentCrashed,
+                message: super::stopped("Codex", &child, &said).await,
+            },
+        });
+    }
+}
+
+/// One request the CLI is waiting on.
+struct Asked<'a> {
+    id: i64,
+    method: String,
+    params: Value,
+    stdin: &'a Mutex<ChildStdin>,
+    asks: &'a AskMap,
+    events: &'a broadcast::Sender<SessionEvent>,
+}
+
+async fn translate_ask(asked: Asked<'_>) {
+    let Asked {
+        id,
+        method,
+        params,
+        stdin,
+        asks,
+        events,
+    } = asked;
+    let request_id = id.to_string();
+    let item_id = params
+        .get("itemId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let reason = params
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string);
+
+    let ask = |title: String| {
+        let _ = events.send(SessionEvent::PermissionRequested {
+            request: PermissionRequest {
+                id: request_id.clone(),
+                title,
+                detail: reason.clone(),
+                tool_call_id: item_id.clone(),
+                options: allow_or_deny(),
+            },
+        });
+    };
+
+    match method.as_str() {
+        "item/commandExecution/requestApproval" => {
+            asks.lock().await.insert(request_id.clone(), Ask::Decision);
+            let command = command_text(params.get("command"));
+            ask(if command.is_empty() {
+                "Run a command?".to_string()
+            } else {
+                format!("Run `{command}`?")
+            });
+        }
+        "item/fileChange/requestApproval" => {
+            asks.lock().await.insert(request_id.clone(), Ask::Decision);
+            ask("Apply file changes?".to_string());
+        }
+        // Both names: the second is what builds before 0.143 called it.
+        "item/tool/requestUserInput" | "tool/requestUserInput" => {
+            let questions = params
+                .get("questions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            // One question, with options to choose between, is the shape our
+            // approval flow can carry. Several at once, or one wanting free
+            // text, would need a form we do not have — and half-answering is
+            // worse than saying nobody answered, which is what this does.
+            match questions.first().and_then(question_in) {
+                Some(question) if questions.len() == 1 => {
+                    let options = question.options.clone();
+                    asks.lock().await.insert(
+                        request_id.clone(),
+                        Ask::Question {
+                            question: question.id,
+                            options: options.clone(),
+                        },
+                    );
+                    let _ = events.send(SessionEvent::PermissionRequested {
+                        request: PermissionRequest {
+                            id: request_id.clone(),
+                            title: question.header,
+                            detail: Some(question.question),
+                            tool_call_id: item_id.clone(),
+                            options: options
+                                .into_iter()
+                                .map(|(id, label)| PermissionOption {
+                                    id,
+                                    label,
+                                    kind: PermissionOptionKind::AllowOnce,
+                                })
+                                .collect(),
+                        },
+                    });
+                }
+                _ => {
+                    answer(
+                        stdin,
+                        json!({ "jsonrpc": "2.0", "id": id, "result": { "answers": {} } }),
+                    )
+                    .await
+                }
+            }
+        }
+        // An MCP server asking for input through a form we cannot render.
+        // Declined rather than ignored, for the same reason as everything else
+        // here: unanswered means the CLI waits.
+        "mcpServer/elicitation/request" => {
+            answer(
+                stdin,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "action": "decline", "content": null, "_meta": null },
+                }),
+            )
+            .await;
+        }
+        // Something this build asks for that we have never seen. An error is a
+        // reply too, and it is the only one that cannot be mistaken for consent.
+        other => {
+            tracing::warn!("codex asked us something we do not answer: {other}");
+            answer(
+                stdin,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32601, "message": "GeneHub does not answer this request" },
+                }),
+            )
+            .await;
+        }
+    }
+}
+
+async fn answer(stdin: &Mutex<ChildStdin>, value: Value) {
+    let mut held = stdin.lock().await;
+    if let Err(error) = write_json_line(&mut held, &value).await {
+        tracing::warn!("could not answer codex: {error}");
+    }
+}
+
+struct Question {
+    id: String,
+    header: String,
+    question: String,
+    /// Option ids we invent (their position), paired with the label to send back.
+    options: Vec<(String, String)>,
+}
+
+fn question_in(value: &Value) -> Option<Question> {
+    let text = |field: &str| {
+        value
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    let options: Vec<(String, String)> = value
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .enumerate()
+                .filter_map(|(index, option)| {
+                    let label = option.get("label").and_then(Value::as_str)?;
+                    Some((index.to_string(), label.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if options.is_empty() {
+        return None;
+    }
+    Some(Question {
+        id: text("id")?,
+        header: text("header")?,
+        question: text("question")?,
+        options,
+    })
+}
+
+async fn translate(
+    method: &str,
+    params: &Value,
+    turn: &Mutex<TurnState>,
+    events: &broadcast::Sender<SessionEvent>,
+) {
+    let mut state = turn.lock().await;
+    match method {
+        "turn/started" => {
+            state.codex_turn = params
+                .get("turn")
+                .and_then(|turn| turn.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        "turn/completed" => finish(&mut state, params, events),
+        "thread/tokenUsage/updated" => {
+            if let Some(usage) = usage_in(params) {
+                state.usage = usage;
+            }
+        }
+        "item/started" | "item/completed" => {
+            if let Some(item) = params.get("item") {
+                item_frame(item, method == "item/completed", &mut state, events);
+            }
+        }
+        "item/agentMessage/delta" => stream(params, Kind::Assistant, &mut state, events),
+        "item/reasoning/summaryTextDelta" => stream(params, Kind::Reasoning, &mut state, events),
+        "turn/plan/updated" => plan(params, &mut state, events),
+        "thread/compacted" => {
+            if let Some(turn_id) = state.id.clone() {
+                let _ = events.send(SessionEvent::Item {
+                    turn_id,
+                    item: TimelineItem::Compaction {
+                        id: format!("compaction-{}", uuid::Uuid::new_v4().simple()),
+                        reason: "Codex pruned its own history to make room.".into(),
+                    },
+                });
+            }
+        }
+        // It volunteers these on startup, and they are about the machine rather
+        // than the conversation: on this Linux box, no bubblewrap means no
+        // sandbox. Worth a line in the log, not a card in the timeline.
+        "configWarning" => {
+            // Read outside the macro: `tracing`'s own `Value` trait is in scope
+            // inside one, and it would shadow `serde_json::Value` here.
+            let summary = params
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("no summary");
+            tracing::warn!("codex config warning: {summary}");
+        }
+        _ => {}
+    }
+}
+
+/// Closes out the turn in flight.
+fn finish(state: &mut TurnState, params: &Value, events: &broadcast::Sender<SessionEvent>) {
+    let Some(turn_id) = state.id.take() else {
+        return;
+    };
+    let turn = params.get("turn");
+    let status = turn
+        .and_then(|turn| turn.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("completed");
+    let failure = turn
+        .and_then(|turn| turn.get("error"))
+        .filter(|error| !error.is_null());
+
+    let interrupted = state.interrupt_requested
+        || matches!(status, "interrupted" | "canceled" | "cancelled" | "aborted");
+    let event = if interrupted {
+        SessionEvent::TurnCanceled { turn_id }
+    } else if let Some(error) = failure {
+        SessionEvent::TurnFailed {
+            turn_id,
+            error: TurnError {
+                code: TurnErrorCode::Upstream,
+                message: message_in(error),
+            },
+        }
+    } else if status == "failed" {
+        SessionEvent::TurnFailed {
+            turn_id,
+            error: TurnError {
+                code: TurnErrorCode::Upstream,
+                message: "Codex ended the turn without saying why. 日志里有它这一趟的全部输出。"
+                    .into(),
+            },
+        }
+    } else {
+        SessionEvent::TurnCompleted {
+            turn_id,
+            usage: state.usage.clone(),
+        }
+    };
+
+    state.codex_turn = None;
+    state.interrupt_requested = false;
+    state.open.clear();
+    let _ = events.send(event);
+}
+
+/// A failure's own account of itself, whether it arrived as a string or an
+/// object with a message in it.
+fn message_in(error: &Value) -> String {
+    error
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| {
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| error.to_string())
+}
+
+fn usage_in(params: &Value) -> Option<Usage> {
+    let last = params.get("tokenUsage")?.get("last")?;
+    let count = |field: &str| last.get(field).and_then(Value::as_u64).unwrap_or(0);
+    Some(Usage {
+        input_tokens: count("inputTokens"),
+        output_tokens: count("outputTokens"),
+        cache_read_tokens: count("cachedInputTokens"),
+        // Nothing on this wire distinguishes a cache write.
+        cache_write_tokens: 0,
+        cost_usd: None,
+    })
+}
+
+/// Streamed text for an item, which may be the first anyone has heard of it.
+fn stream(
+    params: &Value,
+    kind: Kind,
+    state: &mut TurnState,
+    events: &broadcast::Sender<SessionEvent>,
+) {
+    let Some(turn_id) = state.id.clone() else {
+        return;
+    };
+    let Some(item_id) = params.get("itemId").and_then(Value::as_str) else {
+        return;
+    };
+    let delta = params
+        .get("delta")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if delta.is_empty() {
+        return;
+    }
+    if state.open.contains(item_id) {
+        let _ = events.send(SessionEvent::ItemDelta {
+            turn_id,
+            item_id: item_id.to_string(),
+            delta: ItemDelta::Text { delta },
+        });
+        return;
+    }
+    state.open.insert(item_id.to_string());
+    let id = item_id.to_string();
+    let item = match kind {
+        Kind::Assistant => TimelineItem::AssistantMessage { id, text: delta },
+        Kind::Reasoning => TimelineItem::Reasoning { id, text: delta },
+    };
+    let _ = events.send(SessionEvent::Item { turn_id, item });
+}
+
+/// One `item/started` or `item/completed`, translated.
+///
+/// Both go out as `Item` events keyed by the CLI's own item id: an item that
+/// starts and then completes upserts in place, which is the shape the timeline
+/// and the frontend already expect.
+fn item_frame(
+    item: &Value,
+    settled: bool,
+    state: &mut TurnState,
+    events: &broadcast::Sender<SessionEvent>,
+) {
+    let Some(turn_id) = state.id.clone() else {
+        return;
+    };
+    let Some(kind) = item.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(id) = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let text_of = |field: &str| {
+        item.get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let emit = |item: TimelineItem| {
+        let _ = events.send(SessionEvent::Item {
+            turn_id: turn_id.clone(),
+            item,
+        });
+    };
+
+    match kind {
+        // Our own copy of what the user said is already on the timeline; the CLI
+        // echoing it back is not a second message.
+        "userMessage" => {}
+        // Remembered even once it has completed, and cleared with the turn: a
+        // delta that arrives after the settled frame must extend the message,
+        // not be mistaken for a new one and replace the whole text with itself.
+        "agentMessage" => {
+            state.open.insert(id.clone());
+            emit(TimelineItem::AssistantMessage {
+                id,
+                text: text_of("text"),
+            });
+        }
+        "reasoning" => {
+            state.open.insert(id.clone());
+            emit(TimelineItem::Reasoning {
+                id,
+                text: reasoning_text(item),
+            });
+        }
+        "commandExecution" => emit(TimelineItem::ToolCall {
+            id,
+            name: "Shell".into(),
+            status: tool_status(item, settled),
+            detail: ToolCallDetail::Shell {
+                command: command_text(item.get("command")),
+                output: item
+                    .get("aggregatedOutput")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                exit_code: item
+                    .get("exitCode")
+                    .and_then(Value::as_i64)
+                    .map(|code| code as i32),
+            },
+        }),
+        "fileChange" => emit(TimelineItem::ToolCall {
+            id,
+            name: "Edit".into(),
+            status: tool_status(item, settled),
+            detail: edit_detail(item),
+        }),
+        "mcpToolCall" => {
+            let tool = text_of("tool");
+            let server = text_of("server");
+            emit(TimelineItem::ToolCall {
+                id,
+                name: if server.is_empty() {
+                    tool
+                } else {
+                    format!("{server}.{tool}")
+                },
+                status: tool_status(item, settled),
+                detail: ToolCallDetail::Unknown { raw: item.clone() },
+            });
+        }
+        "webSearch" => emit(TimelineItem::ToolCall {
+            id,
+            name: "Web search".into(),
+            status: tool_status(item, settled),
+            detail: ToolCallDetail::Search {
+                query: text_of("query"),
+                // It reports what it searched for, not what it found.
+                matches: Vec::new(),
+            },
+        }),
+        // A sub-agent this turn dispatched. The card says who was asked and
+        // what for; its own steps arrive on a thread of their own, which is not
+        // plumbed through here yet, so `items` stays empty rather than the card
+        // pretending to be the whole story.
+        "collabAgentToolCall" => emit(TimelineItem::ToolCall {
+            id,
+            name: "Sub-agent".into(),
+            status: tool_status(item, settled),
+            detail: ToolCallDetail::SubAgent {
+                agent: text_of("tool"),
+                prompt: text_of("prompt"),
+                items: Vec::new(),
+            },
+        }),
+        "subAgentActivity" => {
+            let path = text_of("agentPath");
+            emit(TimelineItem::ToolCall {
+                id,
+                name: if path.is_empty() {
+                    "Sub-agent".to_string()
+                } else {
+                    path
+                },
+                status: match item.get("kind").and_then(Value::as_str) {
+                    Some("interrupted") => ToolStatus::Canceled,
+                    _ if settled => ToolStatus::Ok,
+                    _ => ToolStatus::Running,
+                },
+                detail: ToolCallDetail::Unknown { raw: item.clone() },
+            });
+        }
+        "contextCompaction" => emit(TimelineItem::Compaction {
+            id,
+            reason: "Codex pruned its own history to make room.".into(),
+        }),
+        "error" => emit(TimelineItem::Error {
+            id,
+            message: match item.get("message") {
+                Some(message) => message_in(message),
+                None => message_in(item),
+            },
+        }),
+        // Something this build emits that we have no renderer for. Shown rather
+        // than dropped, with everything it said kept in the raw payload: a
+        // missing renderer must never become a missing event
+        // (`docs/architecture.md` §3, boundary B2).
+        other => emit(TimelineItem::ToolCall {
+            id,
+            name: other.to_string(),
+            status: tool_status(item, settled),
+            detail: ToolCallDetail::Unknown { raw: item.clone() },
+        }),
+    }
+}
+
+/// A reasoning item's text, which is a summary this CLI may hand over as a
+/// string or as a list of paragraphs.
+fn reasoning_text(item: &Value) -> String {
+    for field in ["text", "summary"] {
+        match item.get(field) {
+            Some(Value::String(text)) => return text.clone(),
+            Some(Value::Array(parts)) => {
+                let joined: Vec<String> = parts
+                    .iter()
+                    .filter_map(|part| {
+                        part.as_str().map(str::to_string).or_else(|| {
+                            part.get("text").and_then(Value::as_str).map(str::to_string)
+                        })
+                    })
+                    .collect();
+                if !joined.is_empty() {
+                    return joined.join("\n\n");
+                }
+            }
+            _ => {}
+        }
+    }
+    String::new()
+}
+
+/// A command as this CLI reports it: one string, or the argv it will run.
+fn command_text(command: Option<&Value>) -> String {
+    match command {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    }
+}
+
+/// The edit a `fileChange` item describes.
+///
+/// Its `changes` have carried more than one field name across versions, so this
+/// reads whichever it finds rather than insisting on one — and falls back to the
+/// raw payload instead of showing an edit with no diff in it.
+fn edit_detail(item: &Value) -> ToolCallDetail {
+    let Some(changes) = item.get("changes").and_then(Value::as_array) else {
+        return ToolCallDetail::Unknown { raw: item.clone() };
+    };
+    let mut paths: Vec<String> = Vec::new();
+    let mut diff = String::new();
+    for change in changes {
+        if let Some(path) = change.get("path").and_then(Value::as_str) {
+            paths.push(path.to_string());
+        }
+        for field in ["unifiedDiff", "unified_diff", "diff"] {
+            if let Some(text) = change.get(field).and_then(Value::as_str) {
+                if !diff.is_empty() {
+                    diff.push('\n');
+                }
+                diff.push_str(text);
+                break;
+            }
+        }
+    }
+    if paths.is_empty() {
+        return ToolCallDetail::Unknown { raw: item.clone() };
+    }
+    ToolCallDetail::Edit {
+        path: paths.join(", "),
+        diff,
+    }
+}
+
+fn tool_status(item: &Value, settled: bool) -> ToolStatus {
+    if matches!(item.get("error"), Some(error) if !error.is_null()) {
+        return ToolStatus::Error;
+    }
+    match item.get("status").and_then(Value::as_str) {
+        Some("inProgress" | "running" | "pending") => ToolStatus::Running,
+        Some("completed" | "success") => ToolStatus::Ok,
+        Some("failed" | "error" | "errored") => ToolStatus::Error,
+        Some("canceled" | "cancelled" | "interrupted" | "aborted") => ToolStatus::Canceled,
+        // No status of its own: which frame this is says as much.
+        _ if settled => ToolStatus::Ok,
+        _ => ToolStatus::Running,
+    }
+}
+
+/// The turn's plan, re-sent in full whenever it changes.
+fn plan(params: &Value, state: &mut TurnState, events: &broadcast::Sender<SessionEvent>) {
+    let Some(turn_id) = state.id.clone() else {
+        return;
+    };
+    let Some(steps) = params.get("plan").and_then(Value::as_array) else {
+        return;
+    };
+    let items: Vec<TodoEntry> = steps
+        .iter()
+        .filter_map(|entry| {
+            let text = entry
+                .get("step")
+                .and_then(Value::as_str)
+                .or_else(|| entry.get("text").and_then(Value::as_str))?;
+            Some(TodoEntry {
+                text: text.to_string(),
+                status: match entry.get("status").and_then(Value::as_str) {
+                    Some("in_progress" | "inProgress") => TodoStatus::InProgress,
+                    Some("completed") => TodoStatus::Completed,
+                    _ => TodoStatus::Pending,
+                },
+            })
+        })
+        .collect();
+    // One list per turn, upserted in place: the whole plan arrives on every
+    // revision, and a card per revision would bury the conversation.
+    let id = format!("{turn_id}-plan");
+    let _ = events.send(SessionEvent::Item {
+        turn_id,
+        item: TimelineItem::Todo { id, items },
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> TurnState {
+        TurnState {
+            id: Some("t1".into()),
+            ..TurnState::default()
+        }
+    }
+
+    /// The three pickers are the whole reason this adapter reads `model/list`,
+    /// and a level that belongs to one model must not be offered for another.
+    #[test]
+    fn the_model_table_carries_each_models_own_thinking_levels() {
+        let listed = json!({ "data": [
+            {
+                "id": "gpt-5.6-sol",
+                "displayName": "GPT-5.6-Sol",
+                "isDefault": true,
+                "defaultReasoningEffort": "medium",
+                "supportedReasoningEfforts": [
+                    { "reasoningEffort": "low", "description": "Fast" },
+                    { "reasoningEffort": "high", "description": "Deeper" },
+                ],
+            },
+            { "id": "gpt-5.2", "supportedReasoningEfforts": [] },
+            { "id": "internal-thing", "hidden": true },
+        ] });
+
+        let models = models_in(&listed);
+        assert_eq!(models.len(), 2, "a hidden model was offered: {models:?}");
+        assert_eq!(models[0].label, "GPT-5.6-Sol");
+        assert_eq!(models[0].efforts, vec!["low", "high"]);
+        assert!(models[0].reasoning);
+        // No levels means no dial, and the control belongs nowhere near it.
+        assert!(models[1].efforts.is_empty());
+        assert!(!models[1].reasoning);
+
+        assert_eq!(
+            default_model_in(&listed),
+            Some(("gpt-5.6-sol".into(), Some("medium".into())))
+        );
+    }
+
+    /// A mode here is two of the CLI's settings at once, and `turn/start` wants
+    /// the sandbox as an object rather than the string `thread/start` takes.
+    #[test]
+    fn a_mode_is_an_approval_policy_and_a_sandbox_together() {
+        let auto = mode_named("auto");
+        assert_eq!(auto.approval, "on-request");
+        assert_eq!(
+            sandbox_policy(auto),
+            json!({ "type": "workspaceWrite", "networkAccess": false })
+        );
+
+        let full = mode_named("full-access");
+        assert_eq!(full.approval, "never");
+        assert_eq!(sandbox_policy(full), json!({ "type": "dangerFullAccess" }));
+
+        assert_eq!(
+            sandbox_policy(mode_named("read-only")),
+            json!({ "type": "readOnly" })
+        );
+        // An unknown name falls back to the mode a session starts in, not to
+        // whichever happens to be first in the list.
+        assert_eq!(mode_named("no-such-mode").id, DEFAULT_MODE);
+    }
+
+    #[test]
+    fn a_streamed_reply_opens_one_item_and_then_extends_it() {
+        let (events, mut seen) = broadcast::channel(8);
+        let mut state = state();
+        let delta = |text: &str| json!({ "itemId": "item-1", "delta": text });
+
+        stream(&delta("Hel"), Kind::Assistant, &mut state, &events);
+        stream(&delta("lo"), Kind::Assistant, &mut state, &events);
+
+        match seen.try_recv().expect("an item") {
+            SessionEvent::Item {
+                item: TimelineItem::AssistantMessage { id, text },
+                ..
+            } => {
+                assert_eq!(id, "item-1");
+                assert_eq!(text, "Hel");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match seen.try_recv().expect("a delta") {
+            SessionEvent::ItemDelta {
+                item_id,
+                delta: ItemDelta::Text { delta },
+                ..
+            } => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(delta, "lo");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// A command that ran is the one tool card someone reads output from, and
+    /// this CLI hands the command over as argv rather than a line of shell.
+    #[test]
+    fn a_command_item_becomes_a_shell_card_with_its_output_and_code() {
+        let (events, mut seen) = broadcast::channel(8);
+        let mut state = state();
+        let item = json!({
+            "type": "commandExecution",
+            "id": "call-1",
+            "status": "completed",
+            "command": ["ls", "-a"],
+            "aggregatedOutput": "README.md\n",
+            "exitCode": 0,
+        });
+
+        item_frame(&item, true, &mut state, &events);
+
+        match seen.try_recv().expect("a tool call") {
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall { status, detail, .. },
+                ..
+            } => {
+                assert_eq!(status, ToolStatus::Ok);
+                assert_eq!(
+                    detail,
+                    ToolCallDetail::Shell {
+                        command: "ls -a".into(),
+                        output: "README.md\n".into(),
+                        exit_code: Some(0),
+                    }
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// An item type nobody here has seen must still reach the screen: a missing
+    /// renderer is not a licence to drop the event.
+    #[test]
+    fn an_unknown_item_type_is_still_shown() {
+        let (events, mut seen) = broadcast::channel(8);
+        let mut state = state();
+
+        item_frame(
+            &json!({ "type": "somethingNew", "id": "x1", "note": "hello" }),
+            true,
+            &mut state,
+            &events,
+        );
+
+        match seen.try_recv().expect("an item") {
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall { name, detail, .. },
+                ..
+            } => {
+                assert_eq!(name, "somethingNew");
+                assert!(matches!(detail, ToolCallDetail::Unknown { .. }));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// We asked it to stop, so the end of this turn is a cancellation — whatever
+    /// the CLI's own label for it says.
+    #[test]
+    fn a_turn_we_interrupted_ends_as_canceled() {
+        let (events, mut seen) = broadcast::channel(8);
+        let mut state = state();
+        state.interrupt_requested = true;
+
+        finish(
+            &mut state,
+            &json!({ "turn": { "status": "completed" } }),
+            &events,
+        );
+
+        assert!(matches!(
+            seen.try_recv().expect("an end"),
+            SessionEvent::TurnCanceled { .. }
+        ));
+    }
+
+    #[test]
+    fn a_failed_turn_carries_the_reason_it_gave() {
+        let (events, mut seen) = broadcast::channel(8);
+        let mut state = state();
+
+        finish(
+            &mut state,
+            &json!({ "turn": { "status": "failed", "error": { "message": "usage limit reached" } } }),
+            &events,
+        );
+
+        match seen.try_recv().expect("an end") {
+            SessionEvent::TurnFailed { error, .. } => {
+                assert_eq!(error.message, "usage limit reached");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// Tokens arrive on a notification of their own, ahead of the turn ending,
+    /// so they have to be held until there is a completed turn to report.
+    #[test]
+    fn token_counts_ride_along_with_the_completed_turn() {
+        let (events, mut seen) = broadcast::channel(8);
+        let mut state = state();
+        state.usage = usage_in(&json!({ "tokenUsage": { "last": {
+            "inputTokens": 120,
+            "cachedInputTokens": 40,
+            "outputTokens": 7,
+        } } }))
+        .expect("usage parses");
+
+        finish(
+            &mut state,
+            &json!({ "turn": { "status": "completed" } }),
+            &events,
+        );
+
+        match seen.try_recv().expect("an end") {
+            SessionEvent::TurnCompleted { usage, .. } => {
+                assert_eq!(usage.input_tokens, 120);
+                assert_eq!(usage.cache_read_tokens, 40);
+                assert_eq!(usage.output_tokens, 7);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_plan_becomes_one_todo_list_that_is_updated_in_place() {
+        let (events, mut seen) = broadcast::channel(8);
+        let mut state = state();
+        let frame = |second: &str| {
+            json!({ "plan": [
+                { "step": "read the code", "status": "completed" },
+                { "step": "write the fix", "status": second },
+            ] })
+        };
+
+        plan(&frame("in_progress"), &mut state, &events);
+        plan(&frame("completed"), &mut state, &events);
+
+        let first = seen.try_recv().expect("a todo list");
+        let second = seen.try_recv().expect("the same list again");
+        let ids = [&first, &second].map(|event| match event {
+            SessionEvent::Item {
+                item: TimelineItem::Todo { id, .. },
+                ..
+            } => id.clone(),
+            other => panic!("unexpected {other:?}"),
+        });
+        assert_eq!(ids[0], ids[1], "a revised plan opened a second card");
+        match second {
+            SessionEvent::Item {
+                item: TimelineItem::Todo { items, .. },
+                ..
+            } => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[1].status, TodoStatus::Completed);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// The reply shape is the whole point of splitting these: an approval takes
+    /// a decision, a question takes the label that was picked.
+    #[test]
+    fn an_approval_is_answered_with_a_decision() {
+        assert_eq!(
+            decision(&PermissionOutcome::Selected {
+                option_id: ALLOW.into()
+            }),
+            "accept"
+        );
+        assert_eq!(
+            decision(&PermissionOutcome::Selected {
+                option_id: DENY.into()
+            }),
+            "decline"
+        );
+        assert_eq!(decision(&PermissionOutcome::Canceled), "cancel");
+        // Nobody was there. Declined, and the agent is told so rather than
+        // being left waiting.
+        assert_eq!(
+            decision(&PermissionOutcome::TimedOut {
+                applied_default: "deny".into()
+            }),
+            "decline"
+        );
+    }
+
+    #[test]
+    fn a_question_keeps_the_labels_it_has_to_send_back() {
+        let question = question_in(&json!({
+            "id": "q1",
+            "header": "Which database?",
+            "question": "Pick one to migrate first.",
+            "options": [{ "label": "Postgres" }, { "label": "SQLite" }],
+        }))
+        .expect("a question with options");
+        assert_eq!(question.id, "q1");
+        assert_eq!(
+            question.options,
+            vec![
+                ("0".to_string(), "Postgres".to_string()),
+                ("1".to_string(), "SQLite".to_string())
+            ]
+        );
+
+        // No options is a free-text answer, which our approval flow has no way
+        // to collect — better to say so here than to render an empty prompt.
+        assert!(question_in(&json!({ "id": "q", "header": "h", "question": "q" })).is_none());
+    }
+
+    #[test]
+    fn an_edit_falls_back_to_the_raw_payload_rather_than_an_empty_diff() {
+        let with_diff = json!({ "changes": [
+            { "path": "src/main.rs", "unifiedDiff": "@@ -1 +1 @@\n-a\n+b\n" },
+        ] });
+        assert_eq!(
+            edit_detail(&with_diff),
+            ToolCallDetail::Edit {
+                path: "src/main.rs".into(),
+                diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
+            }
+        );
+
+        let shapeless = json!({ "changes": [{ "note": "who knows" }] });
+        assert!(matches!(
+            edit_detail(&shapeless),
+            ToolCallDetail::Unknown { .. }
+        ));
+    }
+
+    /// The frontend draws its controls from this and nothing else, so every
+    /// `true` here is a promise something below actually keeps.
+    #[test]
+    fn every_declared_capability_has_something_behind_it() {
+        let declared = CodexAdapter::default().capabilities();
+        assert!(declared.interrupt, "turn/interrupt is implemented");
+        assert!(declared.set_model, "every turn carries the model");
+        assert!(declared.set_effort, "every turn carries the level");
+        assert!(declared.set_mode, "every turn carries the policy");
+        assert!(declared.permissions, "its approvals are answered here");
+        // Neither is wired up, and a control that quietly does nothing is worse
+        // than one that is not there.
+        assert!(!declared.resume, "thread/resume is not wired up");
+        assert!(!declared.attachments, "localImage is not wired up");
+    }
+}

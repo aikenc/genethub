@@ -120,6 +120,8 @@ cd packages/web && npm install && npm run build   # 产物在 dist/
 
 如果这两条对你不重要——多数个人用户不重要——自建是完整的。
 
+还有一条不在表里，因为它不是"拿不到"，而是"要不要"：有人点「检查更新」时，daemon 会去 GitHub releases 上取一个 `latest.json`。这是它唯一一处跟本仓库之外的地方说话、又跟 relay 无关的地方。不想要就把 `<data>/config.json` 里的 `updateManifestUrl` 留空，从此一次都不发；想指向自己发的版本，就填自己的地址（细节见 [daemon.md](./daemon.md) §7）。
+
 ---
 
 ## 6. 你的 relay 能看到什么

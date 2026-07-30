@@ -148,6 +148,12 @@ pub enum Request {
         name: Option<String>,
     },
 
+    // -- updates -----------------------------------------------------------
+    /// Whether a newer build has been published. Sent when a person asks, and
+    /// never on a timer — see `UpdateStatus`.
+    #[serde(rename = "update.check")]
+    UpdateCheck,
+
     // -- hub ---------------------------------------------------------------
     /// Whether this machine is paired, and how far a pairing in progress got.
     #[serde(rename = "hub.status")]
@@ -307,6 +313,7 @@ pub enum Reply {
     RemoteAccess(RemoteAccess),
     Settings(Settings),
     Log(LogTail),
+    Update(UpdateStatus),
     Session(SessionSummary),
     Sessions(Vec<SessionSummary>),
     Snapshot(SessionSnapshot),

@@ -39,6 +39,12 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     // reachable only through a link this makes, so it is the one way back
     // after a browser is lost (`desktop-client.md` §6).
     let claim = MenuItem::with_id(app, "claim", "重新生成认领链接", true, None::<&str>)?;
+    // Asked for by hand, and only from here: no timer checks on anyone's behalf,
+    // and nothing downloads itself. What this ends in is a sentence and a link on
+    // the About section of settings — the moment to install is the user's to pick,
+    // because an upgrade stops the daemon and whatever an agent was mid-way
+    // through (`installer.nsh`).
+    let update = MenuItem::with_id(app, "update", "检查更新", true, None::<&str>)?;
     // In the tray rather than only in the workbench: the times someone wants the
     // logs include the times the window will not show anything useful.
     let logs = MenuItem::with_id(app, "logs", "打开日志目录", true, None::<&str>)?;
@@ -52,6 +58,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             &status,
             &pair,
             &claim,
+            &update,
             &logs,
             &PredefinedMenuItem::separator(app)?,
             &quit,
@@ -75,6 +82,14 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             "claim" => {
                 show_main_window(app);
                 let _ = app.emit_to("main", "genehub://claim", ());
+            }
+            // Same division as those two: the shell shows the window and says
+            // what was asked for, and the workbench does the asking — the daemon
+            // is what knows how to reach the release host, and it is the same
+            // answer whether the question came from here or from a browser.
+            "update" => {
+                show_main_window(app);
+                let _ = app.emit_to("main", "genehub://update", ());
             }
             "logs" => {
                 let dir = crate::logs_dir(app);

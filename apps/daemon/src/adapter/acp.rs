@@ -34,14 +34,6 @@ pub struct AcpAdapter {
     id: String,
     label: String,
     command: Vec<String>,
-    /// The tool this bridge speaks to, when it is not the bridge itself.
-    ///
-    /// Codex is the case that made this necessary: someone installs `codex`,
-    /// looks for it in the picker, and it is not there — because what we look for
-    /// is `codex-acp`, a separate bridge they have never heard of. Reporting "not
-    /// installed" to a person who just installed it is a lie about their machine,
-    /// so when the tool is present and only the bridge is missing, we say that.
-    speaks_for: Option<String>,
 }
 
 impl AcpAdapter {
@@ -50,15 +42,7 @@ impl AcpAdapter {
             id: id.into(),
             label: label.into(),
             command,
-            speaks_for: None,
         }
-    }
-
-    /// Names the underlying CLI, so a missing bridge can be told apart from a
-    /// missing tool. `install` is the command that closes the gap.
-    pub fn bridging(mut self, tool: impl Into<String>) -> Self {
-        self.speaks_for = Some(tool.into());
-        self
     }
 
     fn program(&self) -> Option<PathBuf> {
@@ -90,21 +74,13 @@ impl AgentAdapter for AcpAdapter {
     }
 
     async fn probe(&self) -> ProbeState {
-        if self.program().is_some() {
-            return ProbeState::Ready;
-        }
-        // The bridge is missing. Whether that is worth mentioning depends on
-        // whether the tool it bridges is here: if it is, this person is looking
-        // for an agent they have installed, and the one missing piece is ours to
-        // name.
-        let bridge = self.command.first().map(String::as_str).unwrap_or_default();
-        match &self.speaks_for {
-            Some(tool) if find_executable(tool).is_some() => ProbeState::Unavailable {
-                reason: format!(
-                    "找到了 {tool}，但还缺少 GeneHub 与它对话用的桥接：npm i -g {bridge}"
-                ),
-            },
-            _ => ProbeState::NotInstalled,
+        match self.program() {
+            Some(_) => ProbeState::Ready,
+            // Every entry on this adapter now names the program it runs, so a
+            // missing one is simply not installed. The one case that needed
+            // more explaining than that — `codex` present but a bridge package
+            // missing — went away when Codex got its own adapter.
+            None => ProbeState::NotInstalled,
         }
     }
 

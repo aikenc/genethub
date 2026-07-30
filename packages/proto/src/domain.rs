@@ -255,6 +255,45 @@ pub struct HelloResult {
     pub proof: Option<String>,
 }
 
+/// Whether a newer build has been published, and where a person gets it.
+///
+/// Asked for, never volunteered. A machine that promises to keep to itself has no
+/// business making an outbound call nobody requested, and the answer is only
+/// wanted at the moment someone wonders — which is why this is a menu item and a
+/// button rather than a heartbeat.
+///
+/// Nothing here installs anything either. The workbench shows a sentence and a
+/// link; the download and the installer stay the user's decision, which is also
+/// what keeps an upgrade from interrupting an agent that is mid-turn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct UpdateStatus {
+    /// What this machine is running.
+    pub current: String,
+    /// The newest published version, when the check got an answer at all.
+    ///
+    /// Left out of the wire rather than sent as null, here and below, so that the
+    /// generated `latest?: string` describes what actually arrives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub latest: Option<String>,
+    /// True only when `latest` is genuinely later. A build from source can be
+    /// ahead of the newest release, and telling that person to upgrade would be
+    /// telling them to go backwards.
+    pub newer: bool,
+    /// Where to go and get it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub url: Option<String>,
+    /// Why there is no answer, in the words of whatever failed. The one outcome
+    /// worth refusing to render is a check that quietly says "up to date" after
+    /// reaching nothing at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub problem: Option<String>,
+}
+
 /// The machine-level settings a client may see and change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

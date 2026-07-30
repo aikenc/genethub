@@ -72,6 +72,7 @@ fn every_command_the_workbench_calls_exists_here() {
         "open_window",
         "open_logs",
         "pick_directory",
+        "app_version",
     ] {
         assert!(
             host.contains(&format!("\"{command}\"")),
@@ -215,6 +216,95 @@ fn the_bundle_carries_the_daemon_and_the_agent() {
     }
 }
 
+
+/// The product's version is the git tag, and nothing in the tree may claim to be
+/// a release.
+///
+/// Three files have to carry a literal — Cargo needs one, the installer needs one
+/// — and all three are written by `scripts/version.sh` from the tag as the release
+/// is built. In the tree they stay at 0.0.0, "never released", because the version
+/// a human maintains is the version that goes wrong: these sat at 0.1.0 through
+/// seventeen tagged releases while every installed copy reported 0.1.0 to its own
+/// workbench.
+///
+/// Checked here rather than only in the workflow: a number edited back in by hand
+/// should fail on the machine it was typed on, not one release later.
+#[test]
+fn nothing_in_the_tree_claims_to_be_a_release() {
+    const UNRELEASED: &str = "0.0.0";
+    let stamper = repo().join("scripts/version.sh");
+    let script = std::fs::read_to_string(&stamper).expect("read the stamping script");
+
+    let carriers = [
+        ("Cargo.toml", declared_version(&read(repo().join("Cargo.toml")))),
+        (
+            "apps/desktop/src-tauri/Cargo.toml",
+            declared_version(&read(repo().join("apps/desktop/src-tauri/Cargo.toml"))),
+        ),
+        (
+            "apps/desktop/src-tauri/tauri.conf.json",
+            config()["version"].as_str().unwrap_or_default().to_string(),
+        ),
+    ];
+
+    for (path, version) in carriers {
+        assert_eq!(
+            version, UNRELEASED,
+            "{path} says {version}, which is a claim about a release that this \
+             checkout cannot make — the tag is the version (scripts/version.sh)"
+        );
+        assert!(
+            script.contains(path),
+            "{path} carries a version and the stamping script does not mention it, \
+             so a release would ship whatever is written there"
+        );
+    }
+}
+
+fn read(path: PathBuf) -> String {
+    std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {}", path.display()))
+}
+
+/// The `version` of the first block in a manifest.
+fn declared_version(manifest: &str) -> String {
+    manifest
+        .lines()
+        // Stops at the dependency tables so that a dependency's version, which is
+        // written inline rather than on its own line, cannot answer either way.
+        .take_while(|line| !line.contains("dependencies]"))
+        .find_map(|line| line.strip_prefix("version = "))
+        .map(|value| value.trim().trim_matches('"').to_string())
+        .expect("a manifest with no version in it")
+}
+
+/// The tray asks and the workbench answers, which works only while both halves
+/// spell the event the same way — and nothing checks that at build time, because
+/// one side is Rust and the other is TypeScript.
+///
+/// Worth pinning for this item in particular: a menu item whose event nobody
+/// listens for is a click that does nothing, and "nothing happened" is exactly
+/// what "已经是最新的了" looks like from the outside.
+#[test]
+fn the_tray_can_ask_for_an_update_check_and_the_workbench_is_listening() {
+    let tray = std::fs::read_to_string(repo().join("apps/desktop/src-tauri/src/tray.rs"))
+        .expect("read the tray");
+    let host = std::fs::read_to_string(repo().join("packages/web/src/host/index.ts"))
+        .expect("read the host layer");
+
+    assert!(
+        tray.contains("检查更新"),
+        "the tray has no way to ask whether there is a newer build"
+    );
+    assert!(
+        tray.contains("genehub://update"),
+        "the menu item does not emit anything, so pressing it does nothing"
+    );
+    assert!(
+        host.contains("genehub://update"),
+        "the tray emits genehub://update and the workbench listens for something \
+         else, which is a menu item that silently does nothing"
+    );
+}
 
 /// The logs are what someone attaches to a report, and the tray is where they look
 /// when the window has nothing useful to show. Both halves write into one

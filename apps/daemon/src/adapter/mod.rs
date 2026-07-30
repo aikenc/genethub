@@ -7,6 +7,7 @@
 
 pub mod acp;
 pub mod claude;
+pub mod codex;
 pub mod genet;
 pub mod opencode;
 pub mod registry;
@@ -369,7 +370,7 @@ mod tests {
     #[test]
     fn every_agent_is_started_without_a_console_window() {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
-        for file in ["claude.rs", "opencode.rs", "acp.rs", "genet.rs"] {
+        for file in ["claude.rs", "codex.rs", "opencode.rs", "acp.rs", "genet.rs"] {
             let source = std::fs::read_to_string(here.join(file)).expect("read the adapter");
             assert!(
                 source.contains("without_a_window"),

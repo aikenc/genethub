@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 use super::acp::AcpAdapter;
 use super::claude::ClaudeAdapter;
+use super::codex::CodexAdapter;
 use super::genet::GenetAdapter;
 use super::opencode::OpenCodeAdapter;
 use super::{ProviderMap, SharedAdapter};
@@ -31,13 +32,11 @@ impl Registry {
             // that ACP does not expose to a client; see that module's doc
             // comment for the reverse-engineered protocol notes.
             Arc::new(ClaudeAdapter::default()),
-            // Codex stays on the ACP wrapper for now: its own native
-            // `app-server` JSON-RPC protocol is planned for the next
-            // version (`docs/roadmap.md`), not this one. Nothing here
-            // should remove this entry without that native adapter landing
-            // first — the ACP wrapper is a real, working integration on its
-            // own, not a placeholder.
-            Arc::new(AcpAdapter::new("codex", "Codex", vec!["codex-acp".into()]).bridging("codex")),
+            // Codex likewise (`adapter::codex`): its own `app-server`
+            // JSON-RPC, not `codex-acp`. Which also removes an install step
+            // nobody could guess at — this entry used to report "not
+            // installed" to anyone who had `codex` but not the bridge.
+            Arc::new(CodexAdapter::default()),
             // A generic ACP entry so any other ACP-speaking CLI on PATH works
             // with no configuration at all.
             Arc::new(AcpAdapter::new(
@@ -137,23 +136,28 @@ mod tests {
 
     /// Both are registered by default so users never have to hand-write a
     /// config entry just to reach a CLI this common
-    /// (`docs/architecture.md` §3). Claude Code ships no code of ours beyond
-    /// the adapter that speaks its native `stream-json` protocol
-    /// (`adapter::claude`); Codex is a plain ACP-wrapped CLI, like any
-    /// custom `extends: "acp"` entry, until its own native adapter lands.
+    /// (`docs/architecture.md` §3), and both are spoken natively: the only
+    /// thing either one needs installed is itself. Registering Codex through
+    /// the ACP wrapper used to mean telling someone who had `codex` that Codex
+    /// was not installed, because a bridge package was missing.
     #[tokio::test]
     async fn claude_and_codex_are_registered_out_of_the_box() {
         let registry = Registry::new(&BTreeMap::new());
         let claude = registry.get("claude").expect("claude is registered");
         assert!(!claude.builtin());
         assert_eq!(claude.label(), "Claude Code");
-        // Native, not the ACP wrapper: no model catalog of our own, but real
-        // per-tool permission control.
+        // Native, not the ACP wrapper: real per-tool permission control.
         assert!(claude.capabilities().permissions);
         assert!(claude.capabilities().resume);
         let codex = registry.get("codex").expect("codex is registered");
         assert!(!codex.builtin());
         assert_eq!(codex.label(), "Codex");
+        assert!(codex.capabilities().permissions);
+        // Three separate pickers, all of them real: this CLI takes the model,
+        // the thinking level and the approval policy on every turn.
+        assert!(codex.capabilities().set_model);
+        assert!(codex.capabilities().set_effort);
+        assert!(codex.capabilities().set_mode);
     }
 
     #[tokio::test]

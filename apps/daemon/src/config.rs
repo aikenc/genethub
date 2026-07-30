@@ -121,6 +121,13 @@ pub struct Config {
     pub workspaces: Vec<WorkspaceEntry>,
     /// How many events per session stay replayable after a disconnect.
     pub replay_window: usize,
+    /// Where to look when someone asks whether there is a newer build.
+    ///
+    /// Empty turns the check off, which is the setting for a deployment that
+    /// wants no outbound call at all — and the reason this is an address rather
+    /// than a flag is that a self-hosted copy can point it at its own file
+    /// instead of at somebody else's releases.
+    pub update_manifest_url: String,
 }
 
 impl Default for Config {
@@ -131,6 +138,7 @@ impl Default for Config {
             agents: AgentsConfig::default(),
             workspaces: Vec::new(),
             replay_window: 2048,
+            update_manifest_url: crate::updates::DEFAULT_MANIFEST_URL.to_string(),
         }
     }
 }

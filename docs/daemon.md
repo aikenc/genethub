@@ -43,6 +43,7 @@ apps/daemon/src/
 ├── files.rs          目录树、读写、监听
 ├── git.rs            status / diff / commit（调 git 命令，不引 libgit2）
 ├── pty.rs            终端会话
+├── updates.rs        有没有更新的版本（有人问才查，见 §7）
 └── pairing.rs        设备配对、Hub 登记
 ```
 
@@ -89,6 +90,7 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 | 文件 | `file.tree` / `read` / `write` / `watch` |
 | Git | `git.status` / `git.diff` / `git.commit` |
 | 终端 | `pty.open` / `write` / `resize` / `close`（输出走推送） |
+| 更新 | `update.check`（有没有更新的版本，见 §7） |
 
 **断线重连**：客户端带上最后收到的事件序号，`subscribe` 时 daemon 回补缺口；补不齐（超出保留窗口）就回全量快照并明确告知，不做静默半量。回合进行中掉线也一样：回合不会因为没人看着就停，重连时缺的那段照样补得回来。
 
@@ -211,6 +213,12 @@ daemon 只跟两个外部对象打交道，而且必须当成两件完全不同�
 - **控制面**（HTTP，只在托管部署里存在）：设备码配对、登记这台机器、解除登记。daemon 不理解账号，也不需要理解。它更不把准入权交出去：控制面说的话只是一份身份声明，放不放行仍然是 daemon 查自己的列表。
 
 理由与守则见 [architecture.md](./architecture.md) §6 与 [relay.md](./relay.md)。
+
+**第三个对象只在有人点了「检查更新」的那一刻存在。** `update.check` 去取一个固定地址上的 `latest.json`（默认是本仓库 releases 里那个不带版本号的文件名，所以地址不会变），比一比版本号就回来。没有定时器，启动时不查，也不下载任何东西——它的产物只是界面上一句话和一个链接，装不装、什么时候装是用户的事：装的时候 daemon 会被停掉，正在跑的会话跟着断（`installer.nsh`）。
+
+选文件而不是 GitHub API，是因为 API 按来源地址限 60 次/小时，而一间办公室共用一个出口地址。这个查询要么由人触发，要么不发生，所以它也不需要缓存。
+
+`config.json` 里的 `updateManifestUrl` 是这件事的开关：**留空就彻底不查**（客户端点了会被明确告知这台机器关掉了，而不是收到一句"已是最新"）；自建部署也可以指向自己的文件，不必去看别人的 releases。
 
 ---
 

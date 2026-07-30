@@ -43,6 +43,8 @@ cd apps/desktop && ./scripts/bundle.sh                 # 桌面安装包
 
 自建 relay 见 [self-hosting.md](./docs/self-hosting.md)。发布产物由 `.github/workflows/release.yml` 在打 tag 时构建：每个平台各出一个安装包，另出一份 `genet-<os>-<arch>.tar.gz` 供上面那条命令使用，附 `SHA256SUMS`（`scripts/install.sh` 校验不过就拒绝安装）。
 
+**发一个版本就是打一个 tag**，仓库里没有要跟着改的版本号：`git tag v0.1.18 && git push --tags`。产品版本号只存在于 tag 上，流水线构建前用 `scripts/version.sh` 把它写进 Cargo 和安装包配置，构建完再拿真产物核对一遍（`genet-daemon --version` 必须等于 tag）。所以从源码构建出来的那份自称 `0.0.0`，界面上显示"开发版"，也不会被催升级——它确实不是任何一个发布版本。
+
 ## 文档
 
 先读 [architecture.md](./docs/architecture.md)，它是最上层的事实来源，其他文档与它冲突时以它为准。
