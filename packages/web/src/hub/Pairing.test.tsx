@@ -176,7 +176,6 @@ describe("connecting a machine to a Hub", () => {
         status={paired}
         claim={{
           claimUrl: "https://hub.example.com/link/def",
-          recoveryKey: null,
           expiresAt: "2030-01-01T00:00:00Z",
         }}
         host={host()}

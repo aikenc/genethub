@@ -144,7 +144,9 @@ export type HubClaim = {
  */
 claimUrl: string, 
 /**
- * Present only when the identity was just created.
+ * Present only when the identity was just created. Left out of the wire
+ * rather than sent as null, so that the generated `recoveryKey?: string`
+ * describes what actually arrives.
  */
 recoveryKey?: string, expiresAt: string, };
 

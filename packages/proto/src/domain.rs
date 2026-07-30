@@ -289,7 +289,10 @@ pub enum HubStatus {
 pub struct HubClaim {
     /// One-time link, good for opening this identity in another browser.
     pub claim_url: String,
-    /// Present only when the identity was just created.
+    /// Present only when the identity was just created. Left out of the wire
+    /// rather than sent as null, so that the generated `recoveryKey?: string`
+    /// describes what actually arrives.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub recovery_key: Option<String>,
     pub expires_at: String,

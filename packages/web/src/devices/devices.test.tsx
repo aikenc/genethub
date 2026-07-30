@@ -56,6 +56,26 @@ function machineSocket({ knowsCode = true }: { knowsCode?: boolean } = {}) {
   };
 }
 
+/**
+ * Enough of a client for the store to attach to. Written out rather than left as
+ * a bare object: a stub missing a method the store calls throws inside an effect,
+ * which surfaces as an unhandled rejection and a test that passes for the wrong
+ * reason.
+ */
+function stubClient() {
+  return {
+    connect() {},
+    close() {},
+    onStateChange: () => () => {},
+    onNotice: () => () => {},
+    onEvent: () => () => {},
+    onPty: () => () => {},
+    call: async () => null,
+    subscribe: async () => ({ replayed: [], reset: false }),
+    unsubscribe: async () => {},
+  } as never;
+}
+
 beforeEach(() => {
   localStorage.clear();
   window.location.hash = "";
@@ -116,7 +136,7 @@ describe("a pairing link", () => {
 describe("the app opened from a pairing link", () => {
   it("pairs first, then connects as the device it just became", async () => {
     window.location.hash = `#claim=${CODE}&endpoint=${encodeURIComponent(ENDPOINT)}`;
-    const connect = vi.fn((_endpoint: Endpoint) => ({ connect() {}, close() {} }) as never);
+    const connect = vi.fn((_endpoint: Endpoint) => stubClient());
 
     render(
       <App
@@ -138,7 +158,7 @@ describe("the app opened from a pairing link", () => {
 
   it("says so, and connects to nothing, when the code was already used", async () => {
     window.location.hash = `#claim=${CODE}&endpoint=${encodeURIComponent(ENDPOINT)}`;
-    const connect = vi.fn(() => ({ connect() {}, close() {} }) as never);
+    const connect = vi.fn(() => stubClient());
 
     render(
       <App connect={connect} claim={() => Promise.reject(new Error("邀请码已失效"))} />,
