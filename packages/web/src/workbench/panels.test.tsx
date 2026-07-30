@@ -1,4 +1,5 @@
 import type { Reply, Request } from "@genehub/proto";
+import type { ProviderInfo } from "@genehub/proto";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -186,19 +187,41 @@ describe("the changes panel", () => {
   });
 });
 
+/** A provider row as the daemon reports it, with only the parts a test cares about. */
+function provider(over: Partial<ProviderInfo> & { id: string }): ProviderInfo {
+  return {
+    hasApiKey: false,
+    label: over.id === "deepseek" ? "DeepSeek" : over.id === "openai" ? "OpenAI" : over.id,
+    dialect: "openai",
+    custom: false,
+    models: [],
+    ...over,
+  };
+}
+
 describe("the settings panel", () => {
   it("sends a key without ever showing one back", async () => {
     let stored = false;
     const { client, calls } = stubDaemon({
       "settings.get": () => ({
         type: "settings",
-        data: { lanEnabled: false, providers: [{ id: "deepseek", hasApiKey: stored }] },
+        data: { lanEnabled: false, providers: [provider({ id: "deepseek", hasApiKey: stored })] },
       }),
       "settings.setProvider": () => {
         stored = true;
         return {
           type: "settings",
-          data: { lanEnabled: false, providers: [{ id: "deepseek", hasApiKey: true }] },
+          data: {
+            lanEnabled: false,
+            providers: [
+              provider({
+                id: "deepseek",
+                hasApiKey: true,
+                baseUrl: "https://api.deepseek.com/v1",
+                models: ["deepseek-chat", "deepseek-v4-flash"],
+              }),
+            ],
+          },
         };
       },
       "agent.refresh": () => ({ type: "agents", data: [] }),
@@ -220,6 +243,109 @@ describe("the settings panel", () => {
     // The field empties and the placeholder becomes the only trace of the key.
     await waitFor(() => expect(field).toHaveValue(""));
     expect(field).toHaveAttribute("placeholder", "已配置，输入新值可替换");
+  });
+
+  /**
+   * The answer to "配好 key 之后模型列表应该自动刷出来". The list comes from the
+   * provider, so the page has to show what came back — otherwise saving a key
+   * looks like it did nothing until you go hunting in the composer.
+   */
+  it("shows the models the provider reported, right where the key was typed", async () => {
+    const { client } = stubDaemon({
+      "settings.get": () => ({
+        type: "settings",
+        data: {
+          lanEnabled: false,
+          providers: [
+            provider({
+              id: "deepseek",
+              hasApiKey: true,
+              baseUrl: "https://api.deepseek.com/v1",
+              models: ["deepseek-chat", "deepseek-v4-flash"],
+            }),
+          ],
+        },
+      }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    install(client);
+
+    render(<SettingsPanel host={browserHost()} />);
+    expect(await screen.findByText(/2 个模型可选/)).toHaveTextContent("deepseek-v4-flash");
+    // And where the key is going, which is the part that was wrong: a DeepSeek
+    // key with an empty address used to be sent to OpenAI.
+    expect(screen.getByLabelText("DeepSeek 接口地址")).toHaveAttribute(
+      "placeholder",
+      "https://api.deepseek.com/v1",
+    );
+  });
+
+  /**
+   * A rejected key is the most ordinary way for this to stop working, and from
+   * the outside it looks identical to a broken app: an empty picker and nothing
+   * said. The provider's own words go on screen.
+   */
+  it("repeats the provider's complaint instead of leaving the list mysteriously empty", async () => {
+    const { client } = stubDaemon({
+      "settings.get": () => ({
+        type: "settings",
+        data: {
+          lanEnabled: false,
+          providers: [
+            provider({
+              id: "deepseek",
+              hasApiKey: true,
+              baseUrl: "https://api.deepseek.com/v1",
+              problem: "deepseek 返回 401 Unauthorized：Authentication Fails",
+            }),
+          ],
+        },
+      }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    install(client);
+
+    render(<SettingsPanel host={browserHost()} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("401");
+  });
+
+  /** Somewhere else to send requests, with an address that is not optional. */
+  it("takes a provider of the user's own, address and all", async () => {
+    const { client, calls } = stubDaemon({
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.setProvider": () => ({
+        type: "settings",
+        data: {
+          lanEnabled: false,
+          providers: [provider({ id: "kimi", label: "Kimi", hasApiKey: true, custom: true })],
+        },
+      }),
+      "agent.refresh": () => ({ type: "agents", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    install(client);
+
+    render(<SettingsPanel host={browserHost()} />);
+    await userEvent.click(await screen.findByRole("button", { name: "添加自定义 provider" }));
+
+    const add = screen.getByTestId("add-provider");
+    await userEvent.type(screen.getByLabelText("provider id"), "kimi");
+    // Nowhere to send it yet, so there is nothing to save.
+    expect(add).toBeDisabled();
+
+    await userEvent.type(screen.getByLabelText("provider 接口地址"), "https://api.moonshot.cn/v1");
+    await userEvent.type(screen.getByLabelText("provider API Key"), "sk-kimi");
+    await userEvent.click(add);
+
+    await waitFor(() => {
+      const sent = calls.find((call) => call.type === "settings.setProvider");
+      expect(sent?.payload).toMatchObject({
+        providerId: "kimi",
+        baseUrl: "https://api.moonshot.cn/v1",
+        apiKey: "sk-kimi",
+        dialect: "openai",
+      });
+    });
   });
 
   it("shows the fingerprint of the machine that answered", async () => {
@@ -276,7 +402,7 @@ describe("the settings panel", () => {
       }),
       "settings.setProvider": () => ({
         type: "settings",
-        data: { lanEnabled: false, providers: [{ id: "openai", hasApiKey: true }] },
+        data: { lanEnabled: false, providers: [provider({ id: "openai", hasApiKey: true })] },
       }),
       "agent.refresh": () => ({ type: "agents", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),

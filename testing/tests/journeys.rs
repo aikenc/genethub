@@ -199,6 +199,160 @@ async fn agents_that_are_not_installed_stay_out_of_the_picker() {
     journey.finish().await;
 }
 
+/// What "配好 key 就能选模型" means in practice.
+///
+/// The list is the provider's own answer, not a table we keep: a table goes
+/// stale, offers models a key has no access to, and cannot describe a provider
+/// we have never heard of. What it must not do is dump everything the provider
+/// sells — embeddings and speech models cannot hold a conversation, and a picker
+/// where most rows are unusable is worse than a short one.
+#[tokio::test]
+async fn the_picker_is_filled_from_what_the_provider_says_it_has() {
+    let journey = Journey::start().await.expect("journey starts");
+    mock_only!(journey);
+
+    let agents = match journey.client.call(Request::AgentList).await.unwrap() {
+        Reply::Agents(agents) => agents,
+        other => panic!("unexpected {other:?}"),
+    };
+    let genet = agents
+        .iter()
+        .find(|agent| agent.id == "genet")
+        .expect("the built-in agent is always listed");
+
+    let ids: Vec<&str> = genet
+        .catalog
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect();
+    assert_eq!(ids, vec![genehub_testing::REAL_MODEL]);
+    assert!(
+        !ids.iter().any(|id| id.contains("embedding")),
+        "offered something that cannot hold a conversation: {ids:?}"
+    );
+    // `DeepSeek:deepseek-v4-flash`: with more than one key configured, a bare
+    // model id does not say whose bill a turn goes on.
+    assert_eq!(
+        genet.catalog.models[0].label,
+        format!(
+            "DeepSeek:{}",
+            genehub_testing::REAL_MODEL.split_once('/').unwrap().1
+        )
+    );
+
+    journey.finish().await;
+}
+
+/// A provider we ship nothing for: someone's own gateway, a local llama.cpp, a
+/// vendor we have never heard of. It needs an address, and then it is a provider
+/// like any other — including in the picker.
+#[tokio::test]
+async fn a_provider_the_user_adds_works_like_the_ones_we_ship() {
+    let journey = Journey::start().await.expect("journey starts");
+    mock_only!(journey);
+
+    let saved = match journey
+        .client
+        .call(Request::SettingsSetProvider {
+            provider_id: "inhouse".into(),
+            api_key: Some("sk-inhouse".into()),
+            base_url: Some(journey.mock().base_url.clone()),
+            label: Some("公司内网".into()),
+            dialect: Some("openai".into()),
+            models: None,
+        })
+        .await
+    {
+        Ok(Reply::Settings(settings)) => settings,
+        other => panic!("expected settings, got {other:?}"),
+    };
+    let added = saved
+        .providers
+        .iter()
+        .find(|provider| provider.id == "inhouse")
+        .expect("an added provider is listed");
+    assert!(added.custom, "only ours are built in");
+    assert_eq!(added.label, "公司内网");
+    assert!(!added.models.is_empty(), "it was asked and it answered");
+
+    let agents = match journey.client.call(Request::AgentRefresh).await.unwrap() {
+        Reply::Agents(agents) => agents,
+        other => panic!("unexpected {other:?}"),
+    };
+    let genet = agents.iter().find(|agent| agent.id == "genet").unwrap();
+    assert!(
+        genet
+            .catalog
+            .models
+            .iter()
+            .any(|model| model.label.starts_with("公司内网:")),
+        "the added provider's models never reached the picker: {:?}",
+        genet
+            .catalog
+            .models
+            .iter()
+            .map(|m| m.label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // And it can be taken away again, which the built-in ones cannot: removing
+    // `deepseek` would leave a row that reappears on the next start.
+    journey
+        .client
+        .call(Request::SettingsForgetProvider {
+            provider_id: "inhouse".into(),
+        })
+        .await
+        .expect("an added provider can be removed");
+    journey
+        .client
+        .expect_error(Request::SettingsForgetProvider {
+            provider_id: "deepseek".into(),
+        })
+        .await;
+
+    journey.finish().await;
+}
+
+/// An endpoint that cannot list its models — a bare llama.cpp, a proxy that only
+/// forwards completions — is still usable, by writing the ids down. Without this
+/// the picker for it is permanently empty and nothing explains why.
+#[tokio::test]
+async fn models_written_by_hand_need_no_list_call() {
+    let journey = Journey::start().await.expect("journey starts");
+    mock_only!(journey);
+
+    let saved = match journey
+        .client
+        .call(Request::SettingsSetProvider {
+            provider_id: "local".into(),
+            api_key: Some("none".into()),
+            // Nothing listens here, and nothing needs to: the models are given.
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            label: Some("本地".into()),
+            dialect: None,
+            models: Some(vec!["qwen3-32b".into()]),
+        })
+        .await
+    {
+        Ok(Reply::Settings(settings)) => settings,
+        other => panic!("expected settings, got {other:?}"),
+    };
+    let local = saved
+        .providers
+        .iter()
+        .find(|provider| provider.id == "local")
+        .expect("listed");
+    assert_eq!(local.models, vec!["qwen3-32b".to_string()]);
+    assert_eq!(
+        local.problem, None,
+        "nothing was asked, so there is nothing to complain about"
+    );
+
+    journey.finish().await;
+}
+
 #[tokio::test]
 async fn capabilities_are_declared_so_the_ui_never_offers_a_dead_control() {
     let journey = Journey::start().await.expect("journey starts");
@@ -397,6 +551,9 @@ async fn a_key_entered_in_settings_makes_the_very_next_task_work() {
             provider_id: "deepseek".into(),
             api_key: Some("sk-typed-by-the-user".into()),
             base_url: Some(base_url),
+            label: None,
+            dialect: None,
+            models: None,
         })
         .await
     {
@@ -409,6 +566,24 @@ async fn a_key_entered_in_settings_makes_the_very_next_task_work() {
         .find(|provider| provider.id == "deepseek")
         .expect("the provider should be listed once it is configured");
     assert!(provider.has_api_key);
+    // Saving a key is also what fills the picker: the reply already carries the
+    // models that address reported. Anything else means the person has to guess
+    // whether it worked, or hunt for a refresh.
+    assert_eq!(
+        provider.models,
+        vec![genehub_testing::REAL_MODEL
+            .split_once('/')
+            .expect("the journey model names its provider")
+            .1
+            .to_string()],
+        "the models the provider reported did not reach the settings reply"
+    );
+    assert_eq!(provider.problem, None);
+    assert_eq!(provider.label, "DeepSeek");
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some(journey.mock().base_url.as_str())
+    );
 
     // The key itself must not come back out.
     let serialized = serde_json::to_string(&saved).unwrap();
@@ -447,15 +622,46 @@ async fn a_real_provider_that_rejects_our_key_says_so_instead_of_hanging() {
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
 
-    journey
+    let saved = match journey
         .client
         .call(Request::SettingsSetProvider {
             provider_id: "deepseek".into(),
             api_key: Some("sk-0000000000000000000000000000000000000000".into()),
+            // No address on purpose. DeepSeek is a provider we ship an address
+            // for, and this is the case that used to send the key to
+            // `api.openai.com` and blame the user for it.
             base_url: None,
+            label: None,
+            dialect: None,
+            models: None,
         })
         .await
-        .expect("the key is stored");
+    {
+        Ok(Reply::Settings(settings)) => settings,
+        other => panic!("expected settings, got {other:?}"),
+    };
+    let provider = saved
+        .providers
+        .iter()
+        .find(|provider| provider.id == "deepseek")
+        .expect("configured providers are listed");
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://api.deepseek.com/v1"),
+        "a key saved for DeepSeek must be pointed at DeepSeek"
+    );
+    // The provider's own refusal, on the screen where the key was typed. This is
+    // now where a revoked key shows up first: the picker stays empty because the
+    // provider would not tell us what it has.
+    let problem = provider
+        .problem
+        .as_deref()
+        .expect("a rejected key has to say so somewhere");
+    assert!(
+        problem.contains("deepseek"),
+        "the complaint does not name the provider: {problem}"
+    );
+    assert!(provider.models.is_empty());
     journey
         .client
         .call(Request::AgentRefresh)

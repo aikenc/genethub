@@ -238,8 +238,24 @@ pub struct Settings {
 pub struct ProviderInfo {
     pub id: String,
     pub has_api_key: bool,
+    /// The address in use, whether the user typed it or we ship it. Filled in
+    /// even when they typed nothing, so the page shows where their key is going.
     #[ts(optional)]
     pub base_url: Option<String>,
+    pub label: String,
+    /// `openai` | `anthropic`.
+    pub dialect: String,
+    /// True for a provider the user added, which is also the only kind that can
+    /// be removed again.
+    pub custom: bool,
+    /// The models this key can use, as the provider itself reported them — or
+    /// the list the user wrote by hand.
+    pub models: Vec<String>,
+    /// Why `models` is empty, in the provider's own words. The alternative is a
+    /// picker that is empty for no stated reason, which sends people to the
+    /// wrong place: a rejected key looks exactly like a bug in the app.
+    #[ts(optional)]
+    pub problem: Option<String>,
 }
 
 /// Where this machine stands with a Hub.

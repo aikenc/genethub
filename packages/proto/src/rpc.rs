@@ -113,7 +113,21 @@ pub enum Request {
         api_key: Option<String>,
         #[serde(default)]
         base_url: Option<String>,
+        /// What to call it on screen, for a provider the user is adding.
+        #[serde(default)]
+        label: Option<String>,
+        /// `openai` | `anthropic`, when the address does not belong to a
+        /// provider we already know the shape of.
+        #[serde(default)]
+        dialect: Option<String>,
+        /// Models by hand, for an endpoint that cannot list its own.
+        #[serde(default)]
+        models: Option<Vec<String>>,
     },
+
+    /// Removes a provider the user added, key and all.
+    #[serde(rename = "settings.forgetProvider", rename_all = "camelCase")]
+    SettingsForgetProvider { provider_id: String },
 
     // -- hub ---------------------------------------------------------------
     /// Whether this machine is paired, and how far a pairing in progress got.

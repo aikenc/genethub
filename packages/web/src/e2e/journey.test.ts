@@ -61,7 +61,16 @@ describe.skipIf(!existsSync(DAEMON))("a session, end to end", () => {
     // The key the user would type in settings, pointed at the fake model.
     await client.call({
       type: "settings.setProvider",
-      payload: { providerId: "deepseek", apiKey: "sk-test", baseUrl: model.origin },
+      payload: {
+        providerId: "deepseek",
+        apiKey: "sk-test",
+        baseUrl: model.origin,
+        label: null,
+        dialect: null,
+        // Left out on purpose: the daemon asks the address above what it has, and
+        // that answer is what fills the picker in a real install.
+        models: null,
+      },
     });
 
     const workspace = await client.call({
@@ -303,6 +312,18 @@ async function startMockModel(): Promise<MockModel> {
   const queue: Scripted[] = [];
 
   const server: Server = createServer((request, response) => {
+    // The daemon asks a provider what it has before offering a picker; an
+    // endpoint that cannot answer this has no models to choose from.
+    if (request.url?.endsWith("/models")) {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json" }).end(
+        JSON.stringify({
+          object: "list",
+          data: [{ id: "deepseek-v4-flash" }, { id: "text-embedding-3-small" }],
+        }),
+      );
+      return;
+    }
     if (!request.url?.endsWith("/chat/completions")) {
       response.writeHead(404).end();
       return;

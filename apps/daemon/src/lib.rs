@@ -10,6 +10,7 @@ pub mod files;
 pub mod git;
 pub mod hub;
 pub mod link;
+pub mod provider;
 pub mod pty;
 pub mod remote;
 pub mod router;

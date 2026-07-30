@@ -134,7 +134,19 @@ pub struct AgentsConfig {
 #[serde(rename_all = "camelCase", default)]
 pub struct ProviderConfig {
     pub api_key: Option<String>,
+    /// Empty for a provider we ship an address for; see `crate::provider`.
     pub base_url: Option<String>,
+    /// What to call it on screen. Only a provider the user added needs this.
+    pub label: Option<String>,
+    /// `openai` | `anthropic`. Which wire protocol the address speaks, which is
+    /// not decided by whose name is on it: most services copy Chat Completions.
+    pub dialect: Option<String>,
+    /// Models the user listed by hand.
+    ///
+    /// For an endpoint that does not implement a list call — a local llama.cpp,
+    /// a gateway that only proxies — this is the only way to have anything in
+    /// the picker. Non-empty means we do not ask.
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

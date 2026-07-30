@@ -13,6 +13,6 @@ pub mod provider_suite;
 
 pub use client::{Client, EventsExt};
 pub use fake_relay::FakeRelay;
-pub use harness::{Journey, Mode, ModelBackend};
+pub use harness::{Journey, Mode, ModelBackend, REAL_MODEL};
 pub use mock_llm::{MockLlm, Scripted, Turn};
 pub use provider_suite::{assert_normalized_reply, binary_on_path};

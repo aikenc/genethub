@@ -824,77 +824,48 @@ struct ConfiguredModel {
     reasoning: bool,
 }
 
-/// Maps provider credentials onto the models we offer for them.
+/// Turns configured providers into the models the picker offers.
 ///
-/// The list is deliberately small and explicit rather than fetched: an agent
-/// picker that hangs on a network call is worse than one that shows a few
-/// well-known models.
+/// Nothing is invented here any more. The provider list arrives already resolved
+/// (`AppState::providers`): an address, and the models that address reported or
+/// the user wrote down. A provider with a key but no models contributes nothing
+/// and the settings page is where it says why — an agent picker is the wrong
+/// place to explain a rejected key.
 fn configured_models(providers: &ProviderMap) -> Vec<ConfiguredModel> {
     let mut models = Vec::new();
     for (provider, config) in providers {
         if config.api_key.as_deref().unwrap_or_default().is_empty() {
             continue;
         }
-        for (id, label, reasoning, context, max_tokens) in known_models(provider) {
+        // No address means no request we could honestly make. It used to mean
+        // "send it to OpenAI and see".
+        let Some(base_url) = config.base_url.clone().filter(|url| !url.is_empty()) else {
+            continue;
+        };
+        let label = config.label.clone().unwrap_or_else(|| provider.clone());
+        for id in &config.models {
             models.push(ConfiguredModel {
                 provider: provider.clone(),
-                id: id.to_string(),
-                label: label.to_string(),
-                api: api_for(provider).to_string(),
-                base_url: config.base_url.clone(),
+                id: id.clone(),
+                // `DeepSeek:deepseek-v4-flash`. The provider is in the name
+                // because with several keys configured the model id alone does
+                // not say whose bill this is going on, and prettified names
+                // ("DeepSeek V4 Flash") do not say what to type anywhere else.
+                label: format!("{label}:{id}"),
+                api: config
+                    .dialect
+                    .clone()
+                    .unwrap_or_else(|| "openai".to_string()),
+                base_url: Some(base_url.clone()),
                 api_key: config.api_key.clone(),
-                context_window: Some(context),
-                max_tokens: Some(max_tokens),
-                reasoning,
+                // Not in any provider's list response, so not claimed.
+                context_window: None,
+                max_tokens: None,
+                reasoning: crate::provider::reasons(id),
             });
         }
     }
     models
-}
-
-fn api_for(provider: &str) -> &'static str {
-    match provider {
-        "anthropic" => "anthropic",
-        _ => "openai",
-    }
-}
-
-fn known_models(provider: &str) -> Vec<(&'static str, &'static str, bool, u64, u64)> {
-    match provider {
-        "anthropic" => vec![
-            (
-                "claude-sonnet-4-20250514",
-                "Claude Sonnet 4",
-                true,
-                200_000,
-                8192,
-            ),
-            (
-                "claude-haiku-4-20250514",
-                "Claude Haiku 4",
-                false,
-                200_000,
-                8192,
-            ),
-        ],
-        "deepseek" => vec![
-            (
-                "deepseek-v4-flash",
-                "DeepSeek V4 Flash",
-                true,
-                128_000,
-                8192,
-            ),
-            ("deepseek-chat", "DeepSeek Chat", false, 128_000, 8192),
-        ],
-        "openai" => vec![
-            ("gpt-4o-mini", "GPT-4o mini", false, 128_000, 4096),
-            ("gpt-4o", "GPT-4o", false, 128_000, 4096),
-        ],
-        // A provider we do not have a list for still works: the user's own
-        // model id is accepted verbatim by the agent.
-        _ => vec![],
-    }
 }
 
 /// Writes the agent's `models.json`.
@@ -1266,28 +1237,65 @@ mod tests {
         assert_eq!(matches[1].path, "sub/");
     }
 
+    /// The provider list reaching an adapter is already resolved, so these are
+    /// the two ways a provider can contribute nothing: no key, or nowhere to
+    /// send it.
     #[test]
-    fn only_providers_with_a_key_reach_the_model_list() {
+    fn a_provider_needs_both_a_key_and_an_address_to_offer_anything() {
         let providers = provider_map(vec![
             (
                 "deepseek",
                 ProviderConfig {
                     api_key: Some("sk-test".into()),
-                    base_url: Some("http://127.0.0.1:1/v1".into()),
+                    base_url: Some("https://api.deepseek.com/v1".into()),
+                    label: Some("DeepSeek".into()),
+                    models: vec!["deepseek-chat".into()],
+                    ..Default::default()
                 },
             ),
             (
                 "anthropic",
                 ProviderConfig {
-                    api_key: None,
-                    base_url: None,
+                    models: vec!["claude-sonnet-4-20250514".into()],
+                    ..Default::default()
+                },
+            ),
+            (
+                "kimi",
+                ProviderConfig {
+                    api_key: Some("sk-test".into()),
+                    models: vec!["kimi-k2".into()],
+                    ..Default::default()
                 },
             ),
         ]);
         let models = configured_models(&providers);
-        assert!(!models.is_empty());
-        assert!(models.iter().all(|m| m.provider == "deepseek"));
-        assert!(models.iter().all(|m| m.api == "openai"));
+        assert!(
+            models.iter().all(|m| m.provider == "deepseek"),
+            "offered a model we cannot reach: {:?}",
+            models.iter().map(|m| m.id.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].api, "openai");
+    }
+
+    /// What the picker shows. With two providers configured, `deepseek-chat`
+    /// alone does not say whose key is about to be spent.
+    #[test]
+    fn a_model_is_named_after_the_provider_and_its_own_id() {
+        let providers = provider_map(vec![(
+            "deepseek",
+            ProviderConfig {
+                api_key: Some("sk-test".into()),
+                base_url: Some("https://api.deepseek.com/v1".into()),
+                label: Some("DeepSeek".into()),
+                models: vec!["deepseek-v4-flash".into()],
+                ..Default::default()
+            },
+        )]);
+        let models = configured_models(&providers);
+        assert_eq!(models[0].label, "DeepSeek:deepseek-v4-flash");
+        assert!(models[0].reasoning, "v4-flash reasons");
     }
 
     #[test]
@@ -1298,6 +1306,8 @@ mod tests {
             ProviderConfig {
                 api_key: Some("sk-test".into()),
                 base_url: Some("http://127.0.0.1:9/v1".into()),
+                models: vec!["deepseek-v4-flash".into()],
+                ..Default::default()
             },
         )]);
         write_models_file(dir.path(), &providers).unwrap();

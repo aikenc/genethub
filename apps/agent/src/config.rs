@@ -124,7 +124,13 @@ fn env_models() -> Vec<ModelConfig> {
             id,
             name: None,
             api: Some("anthropic".into()),
-            base_url: std::env::var("ANTHROPIC_BASE_URL").ok(),
+            // Here the provider really is Anthropic, so its own address is the
+            // right default — unlike in the provider code, which only knows a
+            // protocol and must be told where to speak it.
+            base_url: Some(
+                std::env::var("ANTHROPIC_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
+            ),
             api_key: None,
             api_key_env: Some("ANTHROPIC_API_KEY".into()),
             context_window: Some(200_000),
@@ -140,7 +146,10 @@ fn env_models() -> Vec<ModelConfig> {
             id,
             name: None,
             api: Some("openai".into()),
-            base_url: std::env::var("OPENAI_BASE_URL").ok(),
+            base_url: Some(
+                std::env::var("OPENAI_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            ),
             api_key: None,
             api_key_env: Some("OPENAI_API_KEY".into()),
             context_window: Some(128_000),

@@ -43,7 +43,20 @@ device: DeviceAuth | null, } } | { "type": "subscribe", "payload": { sessionId: 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
-apiKey: string | null, baseUrl: string | null, } } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, nonce: string, proof: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.read", "payload": { workspaceId: string, path: string, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+apiKey: string | null, baseUrl: string | null, 
+/**
+ * What to call it on screen, for a provider the user is adding.
+ */
+label: string | null, 
+/**
+ * `openai` | `anthropic`, when the address does not belong to a
+ * provider we already know the shape of.
+ */
+dialect: string | null, 
+/**
+ * Models by hand, for an endpoint that cannot list its own.
+ */
+models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payload": { providerId: string, } } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, nonce: string, proof: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.read", "payload": { workspaceId: string, path: string, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */
@@ -214,7 +227,32 @@ export type ProtocolError = { code: ErrorCode, message: string, };
  * to show "configured" or an empty field, and sending the value back would
  * put it in every client's memory for no gain.
  */
-export type ProviderInfo = { id: string, hasApiKey: boolean, baseUrl?: string, };
+export type ProviderInfo = { id: string, hasApiKey: boolean, 
+/**
+ * The address in use, whether the user typed it or we ship it. Filled in
+ * even when they typed nothing, so the page shows where their key is going.
+ */
+baseUrl?: string, label: string, 
+/**
+ * `openai` | `anthropic`.
+ */
+dialect: string, 
+/**
+ * True for a provider the user added, which is also the only kind that can
+ * be removed again.
+ */
+custom: boolean, 
+/**
+ * The models this key can use, as the provider itself reported them — or
+ * the list the user wrote by hand.
+ */
+models: Array<string>, 
+/**
+ * Why `models` is empty, in the provider's own words. The alternative is a
+ * picker that is empty for no stated reason, which sends people to the
+ * wrong place: a rejected key looks exactly like a bug in the app.
+ */
+problem?: string, };
 
 /**
  * Whether this machine is reachable through a rendezvous relay.
@@ -246,7 +284,20 @@ device: DeviceAuth | null, } } | { "type": "subscribe", "payload": { sessionId: 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
-apiKey: string | null, baseUrl: string | null, } } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, nonce: string, proof: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.read", "payload": { workspaceId: string, path: string, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+apiKey: string | null, baseUrl: string | null, 
+/**
+ * What to call it on screen, for a provider the user is adding.
+ */
+label: string | null, 
+/**
+ * `openai` | `anthropic`, when the address does not belong to a
+ * provider we already know the shape of.
+ */
+dialect: string | null, 
+/**
+ * Models by hand, for an endpoint that cannot list its own.
+ */
+models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payload": { providerId: string, } } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, nonce: string, proof: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.read", "payload": { workspaceId: string, path: string, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */

@@ -179,11 +179,35 @@ pub struct MockLlm {
     handle: tokio::task::JoinHandle<()>,
 }
 
+/// The one model this mock has, taken from what journeys ask for.
+fn mock_model_id() -> &'static str {
+    crate::harness::REAL_MODEL
+        .split_once('/')
+        .map(|(_, id)| id)
+        .unwrap_or(crate::harness::REAL_MODEL)
+}
+
+/// What this "provider" has. Shaped like OpenAI's answer, embeddings entry and
+/// all: the daemon filters those out and a test should see it happen.
+async fn models() -> Json<Value> {
+    Json(json!({
+        "object": "list",
+        "data": [
+            { "id": mock_model_id(), "object": "model" },
+            { "id": "text-embedding-3-small", "object": "model" },
+        ],
+    }))
+}
+
 impl MockLlm {
     pub async fn start() -> Result<Self> {
         let inner = Arc::new(Mutex::new(Inner::default()));
         let app = Router::new()
             .route("/chat/completions", post(completions))
+            // The daemon asks a provider what it has before it offers a picker,
+            // so a mock that cannot answer this is a mock that has no models —
+            // and every journey would run against an empty catalog.
+            .route("/models", axum::routing::get(models))
             .with_state(inner.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

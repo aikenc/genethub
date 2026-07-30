@@ -11,8 +11,6 @@ use super::{reasoning_effort, ProviderEvent, Request, SseBuffer};
 use crate::config::ModelConfig;
 use crate::protocol::{Content, Message, StopReason, Usage};
 
-const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-
 #[derive(Default, Clone)]
 struct PartialToolCall {
     id: String,
@@ -29,7 +27,21 @@ pub async fn stream(
     let key = model
         .resolved_key()
         .ok_or_else(|| anyhow::anyhow!("no API key configured for {}", model.provider))?;
-    let base = model.base_url.clone().unwrap_or(DEFAULT_BASE_URL.into());
+    // No default. This code speaks a protocol, not to a company: DeepSeek, Kimi,
+    // OpenRouter, vLLM and a local llama.cpp all arrive here. Falling back to
+    // OpenAI's address when the caller gave none is how a DeepSeek key was sent
+    // to `api.openai.com`, and the person who typed it was told their key was
+    // invalid by a company they had never signed up with.
+    let base = model
+        .base_url
+        .clone()
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} 没有配置接口地址，不知道该把请求发去哪里",
+                model.provider
+            )
+        })?;
     let body = build_body(model, &request);
 
     let response = reqwest::Client::new()
@@ -187,8 +199,13 @@ fn build_body(model: &ModelConfig, request: &Request) -> Value {
         );
     }
 
-    if let Some(effort) = reasoning_effort(&request.thinking_level) {
-        body["reasoning_effort"] = json!(effort);
+    // Only to a model that reasons. OpenAI rejects the entire request with a 400
+    // when a plain chat model is asked for an effort level, so asking everything
+    // would break the models most people pick first.
+    if model.reasoning.unwrap_or(false) {
+        if let Some(effort) = reasoning_effort(&request.thinking_level) {
+            body["reasoning_effort"] = json!(effort);
+        }
     }
 
     body
@@ -346,19 +363,56 @@ mod tests {
         assert_eq!(converted[1]["content"], "a\nb");
     }
 
-    #[test]
-    fn function_tools_are_wrapped_for_the_chat_api() {
-        let request = Request {
+    fn asking(level: &str) -> Request {
+        Request {
             system_prompt: "sys".into(),
             messages: vec![],
             tools: crate::tools::definitions(),
-            thinking_level: "medium".into(),
-        };
-        let body = build_body(&model(), &request);
+            thinking_level: level.into(),
+        }
+    }
+
+    #[test]
+    fn function_tools_are_wrapped_for_the_chat_api() {
+        let body = build_body(&model(), &asking("medium"));
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "read");
-        assert_eq!(body["reasoning_effort"], "medium");
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    /// Asking a plain chat model for a thinking effort is not ignored by OpenAI,
+    /// it is a 400 on the whole request — so the model has to say it reasons
+    /// before we ask. The thinking control is set to "medium" by default, which
+    /// means without this every request to `gpt-4o` failed.
+    #[test]
+    fn only_a_reasoning_model_is_asked_to_reason() {
+        let mut reasoner = model();
+        reasoner.reasoning = Some(true);
+        assert_eq!(
+            build_body(&reasoner, &asking("medium"))["reasoning_effort"],
+            "medium"
+        );
+
+        let plain = model();
+        assert_eq!(
+            build_body(&plain, &asking("medium"))["reasoning_effort"],
+            Value::Null
+        );
+    }
+
+    /// A provider that only speaks this protocol has no address of its own to
+    /// fall back to. Sending the request anyway is how one company's key reached
+    /// another company's servers.
+    #[tokio::test]
+    async fn a_model_with_no_address_is_refused_rather_than_guessed_at() {
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let error = stream(&model(), asking("off"), events)
+            .await
+            .expect_err("there is nowhere to send this");
+        assert!(
+            format!("{error:#}").contains("接口地址"),
+            "unclear refusal: {error:#}"
+        );
     }
 
     #[test]

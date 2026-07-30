@@ -9,6 +9,9 @@
  */
 import { createServer, type Server } from "node:http";
 
+/** The single model this stand-in reports having. */
+export const MODEL = "deepseek-v4-flash";
+
 export interface MockModel {
   baseUrl: string;
   /** How many completions have been asked for, in order. */
@@ -21,6 +24,17 @@ export async function startMockModel(reply: string): Promise<MockModel> {
   const prompts: string[] = [];
 
   const server = createServer((request, response) => {
+    // Which models this "provider" has. The daemon asks before it offers a
+    // picker, and a mock that answers every path with an event stream leaves it
+    // parsing SSE as JSON — an empty picker, and a conversation that never
+    // starts, which is exactly what a real endpoint behaving this way would do.
+    if (request.url?.endsWith("/models")) {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ object: "list", data: [{ id: MODEL }] }));
+      return;
+    }
+
     let body = "";
     request.on("data", (chunk) => (body += chunk));
     request.on("end", () => {

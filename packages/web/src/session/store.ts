@@ -78,7 +78,17 @@ interface WorkbenchState {
   loadDiff(path?: string): Promise<void>;
   commit(message: string, paths?: string[]): Promise<void>;
   loadSettings(): Promise<void>;
-  setProvider(input: { providerId: string; apiKey?: string; baseUrl?: string }): Promise<void>;
+  setProvider(input: {
+    providerId: string;
+    apiKey?: string;
+    baseUrl?: string;
+    label?: string;
+    dialect?: string;
+    /** Written by hand, for an endpoint that cannot list its own models. */
+    models?: string[];
+  }): Promise<void>;
+  /** Removes a provider the user added. */
+  forgetProvider(providerId: string): Promise<void>;
   createSession(workspaceId: string, agentId: string): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
   openTab(kind: TabKind, title?: string): void;
@@ -401,13 +411,37 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (reply?.type === "settings") set({ settings: reply.data });
   },
 
-  async setProvider({ providerId, apiKey, baseUrl }) {
-    const reply = await require_(get().client).call({
-      type: "settings.setProvider",
-      payload: { providerId, apiKey: apiKey ?? null, baseUrl: baseUrl ?? null },
-    });
+  async setProvider({ providerId, apiKey, baseUrl, label, dialect, models }) {
+    set({ notice: null });
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "settings.setProvider",
+        payload: {
+          providerId,
+          apiKey: apiKey ?? null,
+          baseUrl: baseUrl ?? null,
+          label: label ?? null,
+          dialect: dialect ?? null,
+          models: models ?? null,
+        },
+      }),
+    );
     if (reply?.type === "settings") set({ settings: reply.data });
-    // A key that just landed can change which agents are usable.
+    // A key that just landed can change which agents are usable, and it is what
+    // fills the model picker.
+    const agents = await require_(get().client).call({ type: "agent.refresh" });
+    if (agents?.type === "agents") set({ agents: agents.data });
+  },
+
+  async forgetProvider(providerId) {
+    set({ notice: null });
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "settings.forgetProvider",
+        payload: { providerId },
+      }),
+    );
+    if (reply?.type === "settings") set({ settings: reply.data });
     const agents = await require_(get().client).call({ type: "agent.refresh" });
     if (agents?.type === "agents") set({ agents: agents.data });
   },

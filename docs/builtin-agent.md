@@ -183,10 +183,34 @@ agent_end                {messages}
 
 | 来源 | 用途 |
 |------|------|
-| 环境变量 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` 等 | 直接可用 |
-| 配置文件（agent 数据目录下 `models.json`） | 桌面端设置页写入，声明 provider、baseUrl、模型清单 |
+| 环境变量 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` 等 | 独立运行时直接可用 |
+| 配置文件（agent 数据目录下 `models.json`） | daemon 每次启动会话时写入，声明 provider、baseUrl、模型清单 |
 
 无任何凭证时：`get_available_models` 返回空数组，`prompt` 以明确错误消息结束当前 turn，提示去设置页填 Key——**不要静默失败**。
+
+### 7.1 「某个 provider 在哪个地址」只有一个地方回答
+
+由 daemon 的 `provider.rs` 回答，写进 `models.json`；agent 侧**没有默认地址**。
+
+之前有:agent 的 OpenAI 兼容代码在没拿到地址时回退到 `https://api.openai.com/v1`。于是只填了 DeepSeek Key、没填地址的人，收到的是 OpenAI 说"Incorrect API key provided: sk-dfd…"，还附一个他从没注册过的控制台链接。**把一家的密钥发到另一家的服务器上,这不是用户配错,是我们的默认值错**。所以那个回退删掉了:这份代码说的是一种协议(DeepSeek、Kimi、OpenRouter、vLLM、本地 llama.cpp 都走它)，不是一家公司；没人告诉它地址，它就报错，不猜。
+
+我们自带地址的 provider 只有三个(`deepseek` / `openai` / `anthropic`)。自带地址买到的只有两件事:一个显示名，和一个不用用户去查的地址。它不是准入——任何 id 都能用，只要给地址。
+
+### 7.2 模型列表向 provider 现问
+
+`GET {baseUrl}/models`(Anthropic 方言是 `{baseUrl}/v1/models` 加它自己的头)，OpenAI 兼容的服务基本都实现这个调用。
+
+原来是一张硬编码表。它在 provider 发布任何东西的第二天就过期，描述不了我们没听说过的服务，还会列出用户这把 Key 根本没权限的模型。现问的代价是一次网络请求落在"显示模型列表"这条路上，所以:超时 4 秒，按「Key + 地址 + 方言」缓存(改任何一项自动重问，因此不需要刷新按钮)，失败缓存 1 分钟(不然一把被拒的 Key 会让每次打开设置页都重新等一遍超时)。
+
+返回的列表会滤掉不能对话的东西——OpenAI 会把 embeddings、语音、图像、审核模型一起给出来，六十行里五十行选了没用。滤是按名字猜的，认不出来的名字保留。
+
+列表里只有 id。上下文窗口和"会不会思考"不在任何 provider 的返回里，所以不再声称知道:上下文窗口留空，「是否推理模型」按 id 猜，而它只决定一件事——请求里要不要带 `reasoning_effort`。这件事必须猜对方向:OpenAI 对一个普通对话模型收到 effort 参数的反应是整个请求 400，而思考档位默认是 medium，所以过去每一次发给 `gpt-4o` 的请求都是失败的。
+
+不能列出自己模型的地址(裸 llama.cpp、只转发 completions 的网关)照样能用:在设置里手写模型 id，写了就不问。
+
+### 7.3 模型显示名是 `<Provider>:<model-id>`
+
+`DeepSeek:deepseek-v4-flash`,不是 `DeepSeek V4 Flash`。同时配了两把 Key 时，光看 `deepseek-chat` 说不出这一轮花谁的钱；而美化过的名字("DeepSeek V4 Flash")在别的任何地方都不能拿来输入。
 
 ---
 

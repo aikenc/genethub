@@ -8,7 +8,6 @@ use super::{thinking_budget, ProviderEvent, Request, SseBuffer};
 use crate::config::ModelConfig;
 use crate::protocol::{Content, Message, StopReason, Usage};
 
-const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 
 /// Which content block the stream is currently inside, so `content_block_stop`
@@ -28,7 +27,19 @@ pub async fn stream(
     let key = model
         .resolved_key()
         .ok_or_else(|| anyhow::anyhow!("no API key configured for {}", model.provider))?;
-    let base = model.base_url.clone().unwrap_or(DEFAULT_BASE_URL.into());
+    // Named by the caller, always. See the note in `openai.rs`: this file also
+    // serves anything that copies Anthropic's shape, including DeepSeek's own
+    // Anthropic-compatible endpoint.
+    let base = model
+        .base_url
+        .clone()
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} 没有配置接口地址，不知道该把请求发去哪里",
+                model.provider
+            )
+        })?;
     let body = build_body(model, &request);
 
     let response = reqwest::Client::new()

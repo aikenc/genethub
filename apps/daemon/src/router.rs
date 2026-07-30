@@ -293,10 +293,23 @@ pub async fn handle(
             provider_id,
             api_key,
             base_url,
-        } => match state.set_provider(&provider_id, api_key, base_url).await {
+            label,
+            dialect,
+            models,
+        } => match state
+            .set_provider(&provider_id, api_key, base_url, label, dialect, models)
+            .await
+        {
             Ok(settings) => Handled::ok(Reply::Settings(settings)),
             Err(error) => failed(error),
         },
+
+        Request::SettingsForgetProvider { provider_id } => {
+            match state.forget_provider(&provider_id).await {
+                Ok(settings) => Handled::ok(Reply::Settings(settings)),
+                Err(error) => failed(error),
+            }
+        }
 
         Request::HubStatus => match state.link.get() {
             Some(link) => Handled::ok(Reply::HubStatus(link.status().await)),

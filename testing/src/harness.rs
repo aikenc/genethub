@@ -38,7 +38,11 @@ impl Mode {
 }
 
 /// The model used in real mode, and the key it needs.
-const REAL_MODEL: &str = "deepseek/deepseek-v4-flash";
+///
+/// Public because the mock reports having this same model when the daemon asks
+/// it for a list: the picker a journey chooses from is built from that answer,
+/// so the two have to agree.
+pub const REAL_MODEL: &str = "deepseek/deepseek-v4-flash";
 const REAL_BASE_URL: &str = "https://api.deepseek.com/v1";
 
 /// Where the model actually lives for this run.
@@ -121,6 +125,11 @@ impl Journey {
             ProviderConfig {
                 api_key: Some(model.api_key.clone()),
                 base_url: Some(model.base_url.clone()),
+                // Left empty on purpose: the daemon asks the address for its
+                // models, and in mock mode that address is the mock. Writing the
+                // list here instead would leave discovery — the thing every real
+                // install depends on for its picker — untested.
+                ..Default::default()
             },
         );
         adjust(&mut config);
