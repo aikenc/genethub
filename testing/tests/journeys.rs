@@ -610,6 +610,60 @@ async fn a_key_entered_in_settings_makes_the_very_next_task_work() {
     journey.finish().await;
 }
 
+/// A key that was given and refused.
+///
+/// The turn has to say what the provider said. Left to itself the agent says
+/// "add an API key in settings" — to someone who just did that, which reads as
+/// the app not having noticed. Covered in mock mode as well as against the real
+/// thing below, because this is the message CI can check.
+#[tokio::test]
+async fn a_key_the_provider_will_not_accept_says_that_and_not_add_a_key() {
+    let journey = Journey::start_with(genehub_testing::Mode::Mock, |config| {
+        config.agents.providers.clear();
+    })
+    .await
+    .expect("journey starts");
+    mock_only!(journey);
+
+    // A key, and an address where nothing is listening: the provider cannot be
+    // asked what it has, which is the same shape as a refusal.
+    journey
+        .client
+        .call(Request::SettingsSetProvider {
+            provider_id: "deepseek".into(),
+            api_key: Some("sk-nope".into()),
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            label: None,
+            dialect: None,
+            models: None,
+        })
+        .await
+        .expect("the key is stored");
+
+    let session = journey.session("genet").await.expect("session opens");
+    journey
+        .send(&session, "Say hello.")
+        .await
+        .expect("accepted");
+    let events = journey.client.drain_turn().await.expect("the turn settles");
+
+    let failure = events
+        .failure()
+        .expect("a turn with nothing to run on cannot look like success");
+    assert!(
+        failure.message.contains("deepseek"),
+        "the failure does not name the provider that refused: {}",
+        failure.message
+    );
+    assert!(
+        !failure.message.contains("Add an API key"),
+        "told to add a key they already added: {}",
+        failure.message
+    );
+
+    journey.finish().await;
+}
+
 /// A real provider turning us down.
 ///
 /// Every other failure case is injected by the mock, which means they all prove

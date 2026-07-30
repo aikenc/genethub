@@ -141,6 +141,11 @@ pub struct ProviderConfig {
     /// `openai` | `anthropic`. Which wire protocol the address speaks, which is
     /// not decided by whose name is on it: most services copy Chat Completions.
     pub dialect: Option<String>,
+    /// Why this provider produced no models, in its own words.
+    ///
+    /// Never stored: it describes one attempt to reach a service, not a setting.
+    #[serde(skip)]
+    pub problem: Option<String>,
     /// Models the user listed by hand.
     ///
     /// For an endpoint that does not implement a list call — a local llama.cpp,

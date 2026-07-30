@@ -375,7 +375,14 @@ async fn finish_without_model(
     emitter: &Emitter,
     produced: &mut Vec<Value>,
 ) {
-    let text = "No model is configured. Add an API key in GeneHub settings (or set ANTHROPIC_API_KEY / OPENAI_API_KEY) and try again.";
+    // The provider's own words when there are any: "add an API key" is the
+    // wrong sentence for someone whose key was just refused.
+    let text = crate::config::no_model_reason().unwrap_or_else(|| {
+        "No model is configured. Add an API key in GeneHub settings (or set \
+         ANTHROPIC_API_KEY / OPENAI_API_KEY) and try again."
+            .to_string()
+    });
+    let text = text.as_str();
     let mut draft = AssistantDraft::new("none", "none", "none");
     draft.content.push(Content::text(text));
     draft.stop_reason = StopReason::Error;

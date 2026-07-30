@@ -868,6 +868,20 @@ fn configured_models(providers: &ProviderMap) -> Vec<ConfiguredModel> {
     models
 }
 
+/// Why there are no models to offer, when a key has been given.
+///
+/// The agent is what tells the user a turn cannot run, and left to itself it
+/// says "add an API key in settings" — to someone who just did, and whose key
+/// was rejected. Blaming the user for our state is the same mistake as sending
+/// their DeepSeek key to OpenAI, so the provider's own refusal travels with the
+/// models file.
+fn why_none(providers: &ProviderMap) -> Option<String> {
+    providers
+        .values()
+        .filter(|config| !config.api_key.as_deref().unwrap_or_default().is_empty())
+        .find_map(|config| config.problem.clone())
+}
+
 /// Writes the agent's `models.json`.
 ///
 /// This is the single seam that swaps a real provider for the test mock: only
@@ -893,7 +907,7 @@ fn write_models_file(home: &std::path::Path, providers: &ProviderMap) -> Result<
     let path = home.join("models.json");
     std::fs::write(
         &path,
-        serde_json::to_string_pretty(&json!({ "models": models }))?,
+        serde_json::to_string_pretty(&json!({ "models": models, "problem": why_none(providers) }))?,
     )
     .with_context(|| format!("writing {}", path.display()))?;
     crate::config::restrict_to_owner(&path)?;

@@ -63,6 +63,9 @@ impl ModelConfig {
 struct ModelsFile {
     #[serde(default)]
     models: Vec<ModelConfig>,
+    /// Why the list is empty, from whoever wrote this file.
+    #[serde(default)]
+    problem: Option<String>,
 }
 
 /// Where sessions and `models.json` live.
@@ -82,6 +85,19 @@ pub fn load_models() -> Vec<ModelConfig> {
     let mut models = load_models_file(&data_dir().join("models.json"));
     models.extend(env_models());
     dedupe(models)
+}
+
+/// What to tell the user when there is nothing to run the turn with.
+///
+/// The daemon knows: it asked the provider and was turned down. Without this the
+/// agent falls back to "add an API key", which is wrong for the most common case
+/// — a key that was added and rejected.
+pub fn no_model_reason() -> Option<String> {
+    let raw = std::fs::read_to_string(data_dir().join("models.json")).ok()?;
+    serde_json::from_str::<ModelsFile>(&raw)
+        .ok()?
+        .problem
+        .filter(|reason| !reason.is_empty())
 }
 
 fn load_models_file(path: &Path) -> Vec<ModelConfig> {

@@ -153,6 +153,11 @@ impl AppState {
                 } else {
                     config.models.clone()
                 };
+                let problem = if config.models.is_empty() {
+                    discovered.get(&id).and_then(|found| found.problem.clone())
+                } else {
+                    None
+                };
                 (
                     id,
                     ProviderConfig {
@@ -160,6 +165,7 @@ impl AppState {
                         label: Some(resolved.label),
                         dialect: Some(resolved.dialect.as_str().to_string()),
                         models,
+                        problem,
                         ..config
                     },
                 )
