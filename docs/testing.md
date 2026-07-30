@@ -231,8 +231,9 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 
 | 平台 | 做法 |
 |------|------|
-| Linux | 干净容器里安装分发包，脚本驱动首启与自检 |
-| Windows / macOS | CI runner 上装包 + 冒烟；无 runner 时至少每次发版手动过一遍主旅程 |
+| Linux | 干净容器里安装分发包，脚本驱动首启与自检（`apps/desktop/scripts/bundle.sh` 里做，构建即校验） |
+| 无图形界面的机器 | `scripts/install.sh` 装 daemon + 内置 agent，用例见 §8.1「安装脚本」 |
+| Windows / macOS | 发布流水线（`.github/workflows/release.yml`）在各自的 runner 上构建安装包，并冒烟"daemon 在这个平台起得来、工作目录建出来了"。**装包之后**的首启仍要每次发版手动过一遍主旅程——runner 上没有能点托盘的人 |
 
 自检项：可执行权限、内置 agent 二进制可用、数据目录创建、**默认工作目录被建出来**（见 [daemon.md](./daemon.md) §4.2；这条决定了新装用户第一屏是聊天还是文件选择器）、单实例锁、卸载残留清理，以及**安装目录内不存在 `node` / `node.exe` / `node_modules`**（PC 端零 Node 运行时，见 [desktop-client.md](./desktop-client.md) §4.1）。
 
@@ -266,6 +267,7 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 | Rust 单元与集成 | `cargo test --workspace` | 协议、daemon 各模块、agent、旅程（daemon + agent + mock 模型） | 无 |
 | 专项测试（OpenCode） | `testing/tests/opencode.rs` | **真实 OpenCode 进程**接同一个模型后端，事件归一化后进同一条时间线 | PATH 上有 `opencode`，否则跳过并打印原因 |
 | 专项测试（Claude Code） | `testing/tests/claude.rs` | **真实 `claude` 进程**（原生 `stream-json`，非 ACP wrapper）接 DeepSeek 的 Anthropic 兼容端点：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具不落盘 | `JOURNEY_LLM=real` + PATH 上有 `claude`，否则跳过并打印原因；只在真实模式跑（mock 不实现 Anthropic 协议） |
+| 安装脚本 | `testing/tests/install.rs` | **真的跑 `scripts/install.sh`**：真 curl、真 tar、真 sha256sum、真目录。装完的二进制可执行且真能跑；校验和对不上、或者发布里没有 `SHA256SUMS`，都拒绝安装而不是留下半截文件 | 无（Linux arm64 上跳过并打印原因） |
 | 设备准入 | `testing/tests/devices.rs` | **真实 daemon + 进程内汇合 relay**：新设备经 relay 配对、换到凭证后重连、陌生人被拒、邀请码只能用一次、握手不能重放、撤销当场断连、重启后仍然可达且仍然认得旧设备 | 无 |
 | relay | `apps/relay && npm test` | 帧转发、契约、边界检查、wire 摘要 | 无 |
 | 工作台 | `packages/web && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |

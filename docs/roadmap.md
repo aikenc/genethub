@@ -63,7 +63,9 @@
 - [x] 重新连上落回最近动过的那个会话，而不是一块空白加一个按钮
 - [x] daemon 被杀后自动回来，端口变化推给前端；上一个外壳留下的 daemon 被接管而不是抢锁失败
 - [x] Linux 包可安装、出现在应用列表，包内 daemon 能起来（`apps/desktop/scripts/bundle.sh` 自动校验）
-- [ ] Windows / macOS 至少一端同样过一遍
+- [x] 无图形界面的机器也能装：`scripts/install.sh` 只装 daemon + 内置 agent，校验 `SHA256SUMS`，装不成不留半截二进制（`testing/tests/install.rs`）
+- [x] 打 tag 就有安装包：`.github/workflows/release.yml` 四个平台各出一个，附校验和
+- [ ] Windows / macOS 的安装包**装完之后**过一遍主旅程：发布流水线只验到"这个平台上 daemon 能起来、工作目录被建出来"，装包与首启仍要手动过（[testing.md](./testing.md) §7）
 
 **抽象是否成立**
 

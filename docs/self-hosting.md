@@ -10,6 +10,15 @@
 
 只有第三种情况才有本文。
 
+那台"自己的电脑"如果根本没有图形界面（服务器、VM），装法是：
+
+```bash
+curl -fsSL https://genehub.dev/install.sh | sh   # daemon + 内置 agent，不需要 Node
+genet-daemon
+```
+
+脚本会校验 `SHA256SUMS`，对不上就拒绝安装，不会给你留一个半截的二进制。装完的 daemon 和桌面端里那个是同一个，下面的配对步骤完全一样。
+
 ---
 
 ## 1. 自建形态：两个东西

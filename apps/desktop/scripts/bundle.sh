@@ -16,8 +16,14 @@ cargo build --release --manifest-path "$repo/Cargo.toml" -p genet-daemon -p gene
 
 echo "==> staging binaries"
 mkdir -p "$here/../src-tauri/bin"
+# The shell looks for the platform's own name at runtime (`bundled_binary` in
+# `src-tauri/src/lib.rs`), so the suffix has to survive the copy.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*) exe=".exe" ;;
+  *) exe="" ;;
+esac
 for binary in genet-daemon genet-agent; do
-  cp "$repo/target/release/$binary" "$here/../src-tauri/bin/$binary"
+  cp "$repo/target/release/$binary$exe" "$here/../src-tauri/bin/$binary$exe"
 done
 
 # AppImage is left out of the default because its tooling is downloaded at

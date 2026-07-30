@@ -17,7 +17,18 @@
 
 不需要 relay 也能用：在电脑前是本机直连，同一个 Wi-Fi 下是局域网直连。
 
-## 快速开始
+## 装上就用
+
+没有图形界面的机器（服务器、VM、只能 SSH 上去的盒子）：
+
+```bash
+curl -fsSL https://genehub.dev/install.sh | sh   # daemon + 内置 agent，不需要 Node
+genet-daemon                                     # 打印出连接地址与 token
+```
+
+有图形界面的：从[发布页](https://github.com/genethub/genethub/releases/latest)下装桌面端，托盘常驻。
+
+## 从源码构建
 
 ```bash
 cargo build --release -p genet-daemon -p genet-agent   # 守护进程与内置 agent
@@ -25,7 +36,7 @@ cd packages/web && npm install && npm run build        # 工作台
 cd apps/desktop && ./scripts/bundle.sh                 # 桌面安装包
 ```
 
-自建 relay 见 [self-hosting.md](./docs/self-hosting.md)。
+自建 relay 见 [self-hosting.md](./docs/self-hosting.md)。发布产物由 `.github/workflows/release.yml` 在打 tag 时构建：每个平台各出一个安装包，另出一份 `genet-<os>-<arch>.tar.gz` 供上面那条命令使用，附 `SHA256SUMS`（`scripts/install.sh` 校验不过就拒绝安装）。
 
 ## 文档
 
@@ -54,7 +65,7 @@ cd apps/desktop && ./scripts/bundle.sh                 # 桌面安装包
 | 客户端协议 | 自有归一化模型，不让任何 agent 的线格式外泄成产品协议 |
 | 前端 | 一份产物跑四个宿主，宿主差异收敛在 `packages/web/src/host/` |
 | 转发 | relay 独立成服务，不解析 payload、不落库、可自建 |
-| 身份 | 账号与机器目录不在本仓，relay 通过一个小契约向控制面提问 |
+| 身份 | 本仓不需要账号：准入由每台机器自己判，配对时发一份设备凭证。relay 只按 id 撮合两条连接 |
 | 加密现状 | 传输层加密；端到端加密尚未实现，见 [security-model.md](./docs/security-model.md) |
 | 安装包 | 下载 ≤ 80MB，安装后 ≤ 200MB，PC 端不依赖 Node 运行时 |
 
@@ -72,4 +83,4 @@ cd apps/desktop && ./scripts/bundle.sh                 # 桌面安装包
 
 ## 许可
 
-AGPL-3.0-or-later。`packages/proto` 与 adapter 相关目录为 Apache-2.0，方便第三方对接。
+AGPL-3.0-or-later，整仓一致。
