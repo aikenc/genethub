@@ -75,7 +75,8 @@ impl AgentAdapter for OpenCodeAdapter {
         let port = pick_port()?;
         let base = format!("http://127.0.0.1:{port}");
 
-        let mut child = Command::new(&binary)
+        let mut command = Command::new(&binary);
+        command
             .arg("serve")
             .arg("--hostname")
             .arg("127.0.0.1")
@@ -85,7 +86,9 @@ impl AgentAdapter for OpenCodeAdapter {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        super::without_a_window(&mut command);
+        let mut child = command
             .spawn()
             .with_context(|| format!("spawning {}", binary.display()))?;
 
@@ -96,8 +99,16 @@ impl AgentAdapter for OpenCodeAdapter {
         chatter.watch("opencode", child.stdout.take()).await;
         chatter.watch("opencode", child.stderr.take()).await;
 
+        // No overall timeout, deliberately. A prompt POST here blocks for the whole
+        // turn, and a real coding task runs longer than any number we could pick —
+        // five minutes used to be that number, which means we cut off a turn the
+        // agent was still working on and called it a timeout. The event stream is
+        // held open even longer than that, and idle.
+        //
+        // What is bounded is reaching the server at all: it is on loopback, so a
+        // connect that does not happen immediately is not going to happen.
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
+            .connect_timeout(Duration::from_secs(10))
             .build()?;
         wait_until_ready(&http, &base, &mut child, &chatter).await?;
 
@@ -279,8 +290,9 @@ impl AgentSession for OpenCodeSession {
     async fn close(&self) -> Result<()> {
         let mut child = self.child.lock().await;
         if let Some(mut child) = child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            // The tree: on Windows this handle is the `.cmd` shim, and the HTTP
+            // server with the open port is its child.
+            super::kill_tree(&mut child).await;
         }
         Ok(())
     }
@@ -447,6 +459,11 @@ async fn stream_events(
             translate_event(&value, &remote_session, &mut state, &events);
         }
     }
+    // Worth a line: with the stream gone, a turn produces nothing at all until the
+    // prompt call returns with the finished message, and "it did not stream" is
+    // otherwise indistinguishable from "it is stuck".
+    tracing::warn!("the OpenCode event stream for {remote_session} ended; \
+                    replies will arrive only when each turn finishes");
 }
 
 fn sse_data(frame: &str) -> Option<String> {

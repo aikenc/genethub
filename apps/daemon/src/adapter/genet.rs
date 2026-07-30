@@ -177,6 +177,7 @@ impl AgentAdapter for GenetAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        super::without_a_window(&mut command);
 
         // Under the daemon, `models.json` is the only source of models. The
         // agent also picks up provider keys straight from its environment when

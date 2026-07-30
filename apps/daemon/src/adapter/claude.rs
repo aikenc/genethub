@@ -15,10 +15,17 @@
 //! against Claude Code 2.1.220, see the investigation behind this file):
 //!
 //! - Spawn with `--print --input-format stream-json --output-format
-//!   stream-json --include-partial-messages --verbose --permission-mode
-//!   manual --permission-prompt-tool stdio`. `manual` plus `stdio` is what
-//!   forces every tool call through us rather than either auto-running or
-//!   blocking on a TTY prompt that does not exist here.
+//!   stream-json --include-partial-messages --verbose --permission-prompt-tool
+//!   stdio`, plus a `--permission-mode` naming "ask me about every tool" —
+//!   which is what forces every tool call through us rather than either
+//!   auto-running or blocking on a TTY prompt that does not exist here.
+//!
+//!   **That mode's name is not the same in every build**, and this cost a user
+//!   a working Claude Code: 2.1.220 calls it `manual` and rejects `default`,
+//!   while another build of the same version line calls it `default` and
+//!   rejects `manual`. Either one hardcoded is a CLI that refuses to start for
+//!   half the installs. So the name is read out of `claude --help` — see
+//!   `ask_mode`.
 //! - Each user turn is one `{"type":"user","message":{...}}` line on stdin;
 //!   the process stays alive across turns.
 //! - Output is a mix of `{"type":"stream_event","event":{...}}` (the raw
@@ -90,6 +97,9 @@ const MODE_ACCEPT_EDITS: &str = "acceptEdits";
 
 #[derive(Default)]
 pub struct ClaudeAdapter {
+    /// What this CLI calls the "ask me about every tool" permission mode, read
+    /// from its own help once per daemon run.
+    ask_mode: tokio::sync::OnceCell<Option<String>>,
     /// A CLI to run instead of the one on `PATH`.
     ///
     /// Only ever set by tests, and a field rather than an environment variable
@@ -103,6 +113,7 @@ impl ClaudeAdapter {
     fn with_program(program: PathBuf) -> Self {
         ClaudeAdapter {
             program: Some(program),
+            ..ClaudeAdapter::default()
         }
     }
 
@@ -112,6 +123,73 @@ impl ClaudeAdapter {
             None => find_executable(BINARY),
         }
     }
+
+    /// What this build calls "ask me about every tool".
+    ///
+    /// Asked once and remembered: `--help` costs a process launch, and the answer
+    /// cannot change without the CLI being replaced under us.
+    async fn ask_mode(&self, program: &std::path::Path) -> Option<String> {
+        self.ask_mode
+            .get_or_init(|| async {
+                let help = Command::new(program)
+                    .arg("--help")
+                    .output()
+                    .await
+                    .ok()
+                    .map(|out| {
+                        // Some builds print help on stderr. Both are cheap to read
+                        // and only one of them has to contain the choices.
+                        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+                        text.push_str(&String::from_utf8_lossy(&out.stderr));
+                        text
+                    })
+                    .unwrap_or_default();
+                ask_mode_in(&help).map(str::to_string)
+            })
+            .await
+            .clone()
+    }
+}
+
+/// Picks the "ask about everything" mode out of a `--help` listing.
+///
+/// Both names mean the same thing and no build accepts both, so this is a
+/// question of vocabulary, not behaviour. `default` is preferred only because it
+/// is the newer name; when neither appears the caller passes no flag at all
+/// rather than guessing.
+fn ask_mode_in(help: &str) -> Option<&'static str> {
+    let listed = |name: &str| {
+        help.contains(&format!("\"{name}\""))
+            || help.contains(&format!("'{name}'"))
+            || help.contains(&format!(" {name},"))
+    };
+    // Only where the CLI is actually listing permission modes. "default" is a
+    // word that appears all over a help text.
+    let choices = help
+        .split("--permission-mode")
+        .nth(1)
+        .map(|rest| rest.chars().take(400).collect::<String>())
+        .unwrap_or_default();
+    let listed_in_choices = |name: &str| {
+        choices.contains(&format!("\"{name}\""))
+            || choices.contains(&format!("'{name}'"))
+            || choices.contains(&format!(" {name},"))
+    };
+    if listed_in_choices("default") {
+        return Some("default");
+    }
+    if listed_in_choices("manual") {
+        return Some("manual");
+    }
+    // A build that documents the flag without listing its choices: the two names
+    // may still be mentioned elsewhere in the text.
+    if listed("default") {
+        return Some("default");
+    }
+    if listed("manual") {
+        return Some("manual");
+    }
+    None
 }
 
 #[async_trait]
@@ -181,8 +259,6 @@ impl AgentAdapter for ClaudeAdapter {
                 "stream-json",
                 "--include-partial-messages",
                 "--verbose",
-                "--permission-mode",
-                "manual",
                 "--permission-prompt-tool",
                 "stdio",
             ])
@@ -191,6 +267,22 @@ impl AgentAdapter for ClaudeAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        super::without_a_window(&mut command);
+
+        match self.ask_mode(&program).await {
+            Some(mode) => {
+                command.args(["--permission-mode", &mode]);
+            }
+            // A build that names this something we have never seen. Its own
+            // configured default is a better guess than a name it will reject:
+            // starting without the flag at least gets a session, and
+            // `--permission-prompt-tool stdio` still routes whatever it does ask
+            // about through us.
+            None => tracing::warn!(
+                "claude --help lists no permission mode we recognise; \
+                 starting without --permission-mode"
+            ),
+        }
 
         if let Some(session_id) = config
             .resume
@@ -417,8 +509,9 @@ impl AgentSession for ClaudeSession {
     async fn close(&self) -> Result<()> {
         let mut child = self.child.lock().await;
         if let Some(mut child) = child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            // The tree: on Windows this handle is an npm `.cmd` shim and the CLI
+            // itself is its child, which would otherwise outlive the session.
+            super::kill_tree(&mut child).await;
         }
         Ok(())
     }
@@ -1008,6 +1101,44 @@ mod tests {
             id: Some("t1".into()),
             ..TurnState::default()
         }
+    }
+
+    /// The bug this file's `ask_mode` exists for, in both directions.
+    ///
+    /// One build of Claude Code accepts `manual` and rejects `default`; another
+    /// accepts `default` and rejects `manual`. Hardcoding either is a CLI that
+    /// refuses to start for half the installs — which is exactly what happened:
+    /// `option '--permission-mode <mode>' argument 'manual' is invalid`.
+    #[test]
+    fn the_permission_mode_is_whichever_name_this_build_knows() {
+        // 2.1.220, verbatim.
+        let manual_build = "  --permission-mode <mode>              Permission mode to use for the \
+             session\n                                        (choices: \"acceptEdits\", \"auto\",\n\
+             \"bypassPermissions\", \"manual\",\n                                        \"dontAsk\", \
+             \"plan\")";
+        assert_eq!(ask_mode_in(manual_build), Some("manual"));
+
+        // What the user's build reported when it refused the other name.
+        let default_build = "  --permission-mode <mode>  Permission mode (choices: \"acceptEdits\", \
+             \"auto\", \"bypassPermissions\", \"default\", \"dontAsk\", \"plan\")";
+        assert_eq!(ask_mode_in(default_build), Some("default"));
+
+        // A build naming it something else: no flag beats a rejected flag.
+        assert_eq!(
+            ask_mode_in("  --permission-mode <mode>  (choices: \"loose\", \"strict\")"),
+            None
+        );
+        assert_eq!(ask_mode_in(""), None);
+    }
+
+    /// "default" is an ordinary English word in a help text, and picking it up
+    /// from an unrelated line would put us back to passing a name this build does
+    /// not accept.
+    #[test]
+    fn a_mode_is_only_read_from_the_flag_that_lists_modes() {
+        let help = "  --model <name>  The model to use (default: sonnet)\n  \
+             --permission-mode <mode>  (choices: \"acceptEdits\", \"manual\", \"plan\")";
+        assert_eq!(ask_mode_in(help), Some("manual"));
     }
 
     /// The whole reason this file changed: a CLI that will not run said so on its

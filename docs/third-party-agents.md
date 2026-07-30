@@ -117,3 +117,31 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash
 | 它一句话都没说 | `…（退出码 7），而且它什么都没说。日志里有它这一趟的全部输出。` |
 
 每一行同时进日志（`target: "agent"`），所以失败消息里的二十行不够时，剩下的都在 `<data>/logs/daemon.log`。
+
+---
+
+## 9. 别人的 CLI 不是一个稳定的接口
+
+同一个版本号下的 Claude Code 有两套权限模式的名字:一套认 `manual`、拒绝 `default`,另一套认 `default`、拒绝 `manual`。写死任何一个,都等于对一半的安装说「启动失败」——这件事真的发生了:
+
+```
+error: option '--permission-mode <mode>' argument 'manual' is invalid.
+Allowed choices are acceptEdits, auto, bypassPermissions, default, dontAsk, plan.
+```
+
+所以这个名字是从 `claude --help` 里读出来的（每个 daemon 生命周期问一次），两个名字都不在时就干脆不传这个参数：`--permission-prompt-tool stdio` 仍然把它愿意问的都路由给我们，而一个会被拒绝的参数换不到任何东西。
+
+权限档位本身一直是我们这边执行的（见 §4），运行时从不给 CLI 发模式名，所以受影响的只有启动那一个参数。
+
+### Windows 上的两件事
+
+| 事 | 为什么 |
+|----|--------|
+| 起进程时屏蔽控制台窗口 | 这些都是控制台程序，从 GUI 里起会给它开一个窗口：每开一次会话闪一个黑框，而且这个框会一直挂在屏幕上。桌面壳早就对 daemon 这么做了，daemon 也得对它起的东西这么做 |
+| 结束时杀进程树 | npm 装的 CLI 在 Windows 上是 `.cmd` 外壳，我们手里的句柄是 `cmd.exe`，真正的 agent 是它的子进程。只杀手里的那个，会留下一个还在跑的 HTTP 服务和一个占着的端口——每开一次会话留一个 |
+
+### 超时是我们自己定的，就得由我们自己解释
+
+OpenCode 的 HTTP 客户端曾经带着 300 秒总超时，而那个 POST 是**整轮对话**：一个跑得久一点的编码任务会被我们掐断，然后报成「超时」——agent 那边其实还在干活。现在只对「连上 loopback」设上限（10 秒，连不上就是连不上），对话本身不设。
+
+事件流断掉也会记一行：流没了之后，回合不再是流式的，答案只在这一轮结束时整段出现——「没有流式」和「卡住了」在屏幕上长得一模一样。

@@ -225,6 +225,47 @@ async fn exit_code(child: &Mutex<Option<tokio::process::Child>>) -> Option<i32> 
     None
 }
 
+/// Starts a child process without giving it a console window.
+///
+/// Every agent here is a console program, and on Windows starting one from a GUI
+/// app opens a window for it — a black box that flashes up on every session, and
+/// stays on screen for as long as the agent runs. The desktop shell already does
+/// this for the daemon; the daemon has to do it for what it starts.
+///
+/// A no-op everywhere else, so callers do not need a `cfg`.
+pub fn without_a_window(command: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
+/// Ends a child and everything it started.
+///
+/// On Windows an npm-installed CLI is a `.cmd` shim, so the process we hold is
+/// `cmd.exe` and the agent itself is its child. Killing what we hold leaves the
+/// real thing running — a language server or an HTTP server with an open port,
+/// once per session, for as long as the machine is up.
+pub async fn kill_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        // `/T` is the whole point: the tree, not the shim. Failure is not worth
+        // reporting — the direct kill below is still coming.
+        let _ = tokio::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
 /// Finds an executable on `PATH`, honouring `PATHEXT` on Windows.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     if name.contains(std::path::MAIN_SEPARATOR) {
@@ -302,6 +343,22 @@ mod tests {
         let message = stopped("GeneHub Agent", &child, &said).await;
         assert!(message.contains("退出码 7"), "{message}");
         assert!(message.contains("日志"), "nowhere to look next: {message}");
+    }
+
+    /// Windows-only behaviour that Linux CI cannot exercise, guarded at the source
+    /// level instead: an agent started without this flag opens a console window on
+    /// every session, and the person who sees it is not the person who can run a
+    /// test for it.
+    #[test]
+    fn every_agent_is_started_without_a_console_window() {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
+        for file in ["claude.rs", "opencode.rs", "acp.rs", "genet.rs"] {
+            let source = std::fs::read_to_string(here.join(file)).expect("read the adapter");
+            assert!(
+                source.contains("without_a_window"),
+                "{file} starts a program without suppressing its console window"
+            );
+        }
     }
 
     #[test]

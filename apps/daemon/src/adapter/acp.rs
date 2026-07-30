@@ -143,6 +143,7 @@ impl AgentAdapter for AcpAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        super::without_a_window(&mut command);
 
         let mut child = command
             .spawn()
@@ -377,8 +378,9 @@ impl AgentSession for AcpSession {
     async fn close(&self) -> Result<()> {
         let mut child = self.child.lock().await;
         if let Some(mut child) = child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            // The tree: on Windows this handle is an npm `.cmd` shim and the CLI
+            // itself is its child, which would otherwise outlive the session.
+            super::kill_tree(&mut child).await;
         }
         Ok(())
     }

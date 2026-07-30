@@ -143,6 +143,8 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 | Key 被拒 | 设置页显示 provider 原话,模型列表空着但有理由;不静默 |
 | 自定义 provider | 自己加的 provider 能进选择器(名字 `<Provider>:<id>`)、能删;自带的三个不能删 |
 | 只填 Key 不填地址 | 请求发到**这个 provider 自己的**地址;断言不会落到别家(这条曾经把 DeepSeek 的 Key 发给了 OpenAI) |
+| CLI 的参数名不通用 | 两个真实 `--help` 文本（一个只认 `manual`、一个只认 `default`）各自选对名字；都不认时不传这个参数。真实模式下拿本机真的 CLI 兜底 |
+| 起进程不弹窗 | 源码级断言：每个起第三方程序的适配器都调了 `without_a_window`（Windows 才有的行为，Linux CI 跑不出来，但看见黑框的人也跑不了测试） |
 | CLI 起不来 | 拿一个必然拒绝启动的假 CLI：失败消息里有**退出码**和**它自己说的那句话**，不是"stopped unexpectedly"；提示写不进去（管道已关）时是同一句话，不是 `Broken pipe` |
 | 一句话都没说的进程 | 有退出码，并且指向日志，不是一句话说完就没了 |
 | 隔着一台设备看日志 | `log.tail` 从连接上取回文件末尾（手机上没法打开 PC 的路径）；列出目录里的几个文件 |

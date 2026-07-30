@@ -687,7 +687,20 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
         SessionEvent::TurnCompleted { .. } | SessionEvent::TurnCanceled { .. } => {
             *live.status.lock().await = SessionStatus::Idle;
         }
-        SessionEvent::TurnFailed { .. } => {
+        SessionEvent::TurnFailed { error, .. } => {
+            // Logged here rather than in each adapter, because every agent's
+            // failures pass through this one place — and until they were written
+            // down, a log could show an agent starting cleanly and then nothing at
+            // all, while the user was looking at an error on screen.
+            let meta = live.meta.lock().await;
+            tracing::warn!(
+                "turn failed in {} ({}): {:?} {}",
+                meta.id,
+                meta.agent_id,
+                error.code,
+                error.message
+            );
+            drop(meta);
             // Failed, not closed: the user can send again.
             *live.status.lock().await = SessionStatus::Idle;
         }
