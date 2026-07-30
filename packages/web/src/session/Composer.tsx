@@ -42,10 +42,10 @@ export function Composer({
   modeId: string | null;
   effortId?: string | null;
   agentLocked?: boolean;
-  /** Whether the current agent forwards attachments anywhere (only claude,
-   * acp and opencode do today — see `docs/roadmap.md`). Pasting an image
-   * when this is false is left as a normal, inert text paste rather than
-   * silently producing an attachment the agent will never see. */
+  /** Whether the current agent forwards attachments anywhere (claude, codex,
+   * acp and opencode do today; genet does not — see `docs/roadmap.md`).
+   * Pasting an image when this is false is left as a normal, inert text paste
+   * rather than silently producing an attachment the agent will never see. */
   attachmentsSupported?: boolean;
   /** The current agent's slash commands, if it named any. */
   commands?: CommandInfo[];

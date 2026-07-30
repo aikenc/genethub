@@ -53,6 +53,12 @@
 //!   the user's message is echoed back as an item, and then nothing happens —
 //!   no failure, no exit (verified on 0.145.0). So `probe` asks `codex login
 //!   status` instead of letting the first prompt sit there spinning.
+//! - Resume is `thread/resume` with the id we got from `thread/start`, stored in
+//!   the daemon's `PersistHandle`. An archived thread is unarchived once and
+//!   tried again; anything else fails the start so the session stays on the
+//!   daemon's own read-only replay rather than silently opening a blank thread.
+//! - Images are `{"type":"localImage","path":...}`: a pasted screenshot is
+//!   written under the session scratch directory first, then that path is sent.
 //! - Skills (`skills/list`) are deliberately not offered as slash commands.
 //!   This CLI invokes one as `$name` alongside a `{"type":"skill"}` input block,
 //!   so a menu that inserts `/name` as plain text would be a control that does
@@ -79,7 +85,8 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
 use super::{
-    find_executable, AgentAdapter, AgentSession, Chatter, PromptInput, ProviderMap, SessionConfig,
+    find_executable, AgentAdapter, AgentSession, Chatter, PersistHandle, PromptInput, ProviderMap,
+    SessionConfig,
 };
 
 const BINARY: &str = "codex";
@@ -225,14 +232,11 @@ impl AgentAdapter for CodexAdapter {
             set_effort: true,
             set_mode: true,
             permissions: true,
-            // `thread/resume` exists and is not wired up yet, so the daemon
-            // replays its own log rather than promising more than we do.
-            resume: false,
-            // This CLI takes an image as `{"type":"localImage","path":...}`, so
-            // forwarding a pasted screenshot means writing it to a file first.
-            // Declared false until that is done: an attach button that drops
-            // what it is given is worse than no attach button.
-            attachments: false,
+            // `thread/resume` with the id we stored from `thread/start`.
+            resume: true,
+            // Pasted screenshots are written under the session scratch dir and
+            // sent as `localImage` paths — that is the only shape this CLI takes.
+            attachments: true,
         }
     }
 
@@ -356,12 +360,15 @@ impl AgentAdapter for CodexAdapter {
             turn: turn.clone(),
             next_id: AtomicI64::new(1),
             child: child.clone(),
-            thread: Mutex::new(None),
+            // `std`, not `tokio`: `persistence()` is synchronous, and this value
+            // is only ever held for a single field read or write.
+            thread: std::sync::Mutex::new(None),
             mode: Mutex::new(mode),
             model: Mutex::new(model),
             effort: Mutex::new(effort),
             models,
             efforts,
+            scratch_dir: config.scratch_dir.clone(),
         };
 
         tokio::spawn(read_loop(Reader {
@@ -635,13 +642,15 @@ struct CodexSession {
     turn: Arc<Mutex<TurnState>>,
     next_id: AtomicI64,
     child: Arc<Mutex<Option<Child>>>,
-    thread: Mutex<Option<String>>,
+    thread: std::sync::Mutex<Option<String>>,
     mode: Mutex<String>,
     model: Mutex<Option<String>>,
     effort: Mutex<Option<String>>,
     /// What this install listed, for checking a choice against.
     models: Vec<String>,
     efforts: Vec<String>,
+    /// Where pasted images are written before `localImage` can name them.
+    scratch_dir: PathBuf,
 }
 
 impl CodexSession {
@@ -677,7 +686,7 @@ impl CodexSession {
         }
     }
 
-    /// Introduces ourselves and opens the thread this session talks to.
+    /// Introduces ourselves and opens — or reopens — the thread this session talks to.
     async fn handshake(&self, config: &SessionConfig) -> Result<()> {
         self.call(
             "initialize",
@@ -689,6 +698,12 @@ impl CodexSession {
         )
         .await?;
         self.notify("initialized", json!({})).await?;
+
+        if let Some(thread_id) = resume_thread_id(&config.resume) {
+            self.reopen(&thread_id).await?;
+            *self.thread.lock().expect("the thread id is never poisoned") = Some(thread_id);
+            return Ok(());
+        }
 
         let mode = mode_named(self.mode.lock().await.as_str());
         let mut params = json!({
@@ -705,9 +720,53 @@ impl CodexSession {
             .and_then(|thread| thread.get("id"))
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("thread/start did not return a thread id"))?;
-        *self.thread.lock().await = Some(thread.to_string());
+        *self.thread.lock().expect("the thread id is never poisoned") = Some(thread.to_string());
         Ok(())
     }
+
+    /// Brings a previously started thread back into this process.
+    ///
+    /// Archived threads are unarchived once and tried again: Codex archives on
+    /// its own schedule, and a session the user is still looking at is not
+    /// something we should refuse just because it was tidied away.
+    async fn reopen(&self, thread_id: &str) -> Result<()> {
+        match self
+            .call("thread/resume", json!({ "threadId": thread_id }))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if archived_thread(&error.to_string(), thread_id) => {
+                self.call("thread/unarchive", json!({ "threadId": thread_id }))
+                    .await
+                    .with_context(|| format!("unarchiving Codex thread {thread_id}"))?;
+                self.call("thread/resume", json!({ "threadId": thread_id }))
+                    .await
+                    .with_context(|| {
+                        format!("resuming Codex thread {thread_id} after unarchive")
+                    })?;
+                Ok(())
+            }
+            Err(error) => Err(error).with_context(|| format!("resuming Codex thread {thread_id}")),
+        }
+    }
+}
+
+/// The thread id a previous run of this session left behind, when it is ours.
+fn resume_thread_id(resume: &Option<PersistHandle>) -> Option<String> {
+    resume
+        .as_ref()
+        .filter(|handle| handle.agent_id == "codex")
+        .and_then(|handle| handle.value.get("threadId"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether a resume failure is "this thread was archived", in the wording this
+/// CLI uses today. Matched loosely: the id is in the sentence either way.
+fn archived_thread(message: &str, thread_id: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("archived") && message.contains(thread_id)
 }
 
 #[async_trait]
@@ -720,7 +779,7 @@ impl AgentSession for CodexSession {
         let thread = self
             .thread
             .lock()
-            .await
+            .expect("the thread id is never poisoned")
             .clone()
             .ok_or_else(|| anyhow!("the Codex thread was never started"))?;
         let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
@@ -740,9 +799,10 @@ impl AgentSession for CodexSession {
         });
 
         let mode = mode_named(self.mode.lock().await.as_str());
+        let input_blocks = turn_input(&input, &self.scratch_dir)?;
         let mut params = json!({
             "threadId": thread,
-            "input": [{ "type": "text", "text": input.text }],
+            "input": input_blocks,
             // Sent every turn, which is what makes the three pickers work
             // without an RPC of their own (see the module doc).
             "approvalPolicy": mode.approval,
@@ -776,7 +836,11 @@ impl AgentSession for CodexSession {
     }
 
     async fn interrupt(&self) -> Result<()> {
-        let thread = self.thread.lock().await.clone();
+        let thread = self
+            .thread
+            .lock()
+            .expect("the thread id is never poisoned")
+            .clone();
         let codex_turn = {
             let mut state = self.turn.lock().await;
             state.interrupt_requested = true;
@@ -864,6 +928,127 @@ impl AgentSession for CodexSession {
         });
         Ok(())
     }
+
+    fn persistence(&self) -> Option<PersistHandle> {
+        let thread_id = self
+            .thread
+            .lock()
+            .expect("the thread id is never poisoned")
+            .clone()?;
+        Some(PersistHandle {
+            agent_id: "codex".into(),
+            value: json!({ "threadId": thread_id }),
+        })
+    }
+}
+
+/// The `input` array for `turn/start`: text plus any pasted images, which this
+/// CLI only accepts as paths on disk.
+fn turn_input(input: &PromptInput, scratch: &Path) -> Result<Vec<Value>> {
+    let mut blocks = Vec::new();
+    if !input.text.is_empty() {
+        blocks.push(json!({ "type": "text", "text": input.text }));
+    }
+    let images: Vec<&_> = input
+        .attachments
+        .iter()
+        .filter(|attachment| {
+            attachment.data_base64.is_some() && attachment.mime.starts_with("image/")
+        })
+        .collect();
+    if !images.is_empty() {
+        let dir = scratch.join("attachments");
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        for (index, attachment) in images.into_iter().enumerate() {
+            let data = attachment
+                .data_base64
+                .as_deref()
+                .expect("filtered to attachments with data");
+            let bytes = decode_base64(data).context("decoding a pasted image")?;
+            let ext = extension_for(&attachment.mime);
+            let path = dir.join(format!("{}-{index}.{ext}", uuid::Uuid::new_v4().simple()));
+            std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+            blocks.push(json!({ "type": "localImage", "path": path }));
+        }
+    }
+    if blocks.is_empty() {
+        // The composer refuses to send with neither text nor attachments, so
+        // this is a protocol quirk rather than a user action — still give the
+        // CLI something rather than an empty `input`.
+        blocks.push(json!({ "type": "text", "text": "" }));
+    }
+    Ok(blocks)
+}
+
+fn extension_for(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
+/// Standard base64 (with optional padding and whitespace), as the composer
+/// produces for a pasted screenshot. Kept local so a single adapter does not
+/// drag a crate into the daemon for one decode site.
+fn decode_base64(input: &str) -> Result<Vec<u8>> {
+    const TABLE: [i8; 256] = {
+        let mut table = [-1_i8; 256];
+        let mut i = 0;
+        while i < 26 {
+            table[b'A' as usize + i] = i as i8;
+            table[b'a' as usize + i] = (26 + i) as i8;
+            i += 1;
+        }
+        i = 0;
+        while i < 10 {
+            table[b'0' as usize + i] = (52 + i) as i8;
+            i += 1;
+        }
+        table[b'+' as usize] = 62;
+        table[b'/' as usize] = 63;
+        table
+    };
+
+    let cleaned: Vec<u8> = input
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if !cleaned.len().is_multiple_of(4) {
+        return Err(anyhow!("base64 length is not a multiple of 4"));
+    }
+    let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);
+    for chunk in cleaned.chunks_exact(4) {
+        let pad = chunk.iter().filter(|&&byte| byte == b'=').count();
+        if pad > 2 {
+            return Err(anyhow!("base64 padding is longer than two characters"));
+        }
+        let mut values = [0u32; 4];
+        for (i, &byte) in chunk.iter().enumerate() {
+            if byte == b'=' {
+                if i < 2 {
+                    return Err(anyhow!("base64 padding in the wrong place"));
+                }
+                values[i] = 0;
+                continue;
+            }
+            let value = TABLE[byte as usize];
+            if value < 0 {
+                return Err(anyhow!("base64 has an invalid character"));
+            }
+            values[i] = value as u32;
+        }
+        let triple = (values[0] << 18) | (values[1] << 12) | (values[2] << 6) | values[3];
+        out.push(((triple >> 16) & 0xff) as u8);
+        if pad < 2 {
+            out.push(((triple >> 8) & 0xff) as u8);
+        }
+        if pad < 1 {
+            out.push((triple & 0xff) as u8);
+        }
+    }
+    Ok(out)
 }
 
 /// `accept` | `decline` | `cancel`, as this CLI's approvals are answered.
@@ -1964,9 +2149,72 @@ mod tests {
         assert!(declared.set_effort, "every turn carries the level");
         assert!(declared.set_mode, "every turn carries the policy");
         assert!(declared.permissions, "its approvals are answered here");
-        // Neither is wired up, and a control that quietly does nothing is worse
-        // than one that is not there.
-        assert!(!declared.resume, "thread/resume is not wired up");
-        assert!(!declared.attachments, "localImage is not wired up");
+        assert!(declared.resume, "thread/resume is wired up");
+        assert!(declared.attachments, "localImage is wired up");
+    }
+
+    #[test]
+    fn a_resume_handle_only_counts_when_it_is_ours_and_names_a_thread() {
+        assert_eq!(resume_thread_id(&None), None);
+        assert_eq!(
+            resume_thread_id(&Some(PersistHandle {
+                agent_id: "claude".into(),
+                value: json!({ "threadId": "t1" }),
+            })),
+            None
+        );
+        assert_eq!(
+            resume_thread_id(&Some(PersistHandle {
+                agent_id: "codex".into(),
+                value: json!({ "threadId": "" }),
+            })),
+            None
+        );
+        assert_eq!(
+            resume_thread_id(&Some(PersistHandle {
+                agent_id: "codex".into(),
+                value: json!({ "threadId": "thread_abc" }),
+            })),
+            Some("thread_abc".into())
+        );
+    }
+
+    #[test]
+    fn an_archived_thread_is_recognised_from_the_error_wording() {
+        assert!(archived_thread(
+            "session thread_abc is archived. Run `codex unarchive thread_abc`",
+            "thread_abc"
+        ));
+        assert!(!archived_thread("thread_abc not found", "thread_abc"));
+        assert!(!archived_thread("session other is archived", "thread_abc"));
+    }
+
+    #[test]
+    fn a_pasted_image_becomes_a_local_image_path_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = PromptInput {
+            text: "look".into(),
+            attachments: vec![genehub_proto::Attachment {
+                name: "shot.png".into(),
+                mime: "image/png".into(),
+                path: None,
+                // "hi" in standard base64.
+                data_base64: Some("aGk=".into()),
+            }],
+        };
+
+        let blocks = turn_input(&input, dir.path()).expect("input builds");
+        assert_eq!(blocks[0], json!({ "type": "text", "text": "look" }));
+        let path = blocks[1]["path"].as_str().expect("a path");
+        assert!(path.ends_with(".png"), "{path}");
+        assert_eq!(std::fs::read(path).expect("file written"), b"hi");
+        assert_eq!(blocks[1]["type"], "localImage");
+    }
+
+    #[test]
+    fn base64_decodes_the_composers_padded_payload() {
+        assert_eq!(decode_base64("aGk=").expect("decodes"), b"hi");
+        assert_eq!(decode_base64("YQ==").expect("decodes"), b"a");
+        assert!(decode_base64("!!!").is_err());
     }
 }

@@ -6,6 +6,7 @@
 //! real abstraction rather than a rename of one transport
 //! (`docs/architecture.md` §3.3).
 
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +23,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, Mutex};
 
 use super::{
-    find_executable, AgentAdapter, AgentSession, Chatter, PromptInput, ProviderMap, SessionConfig,
+    find_executable, AgentAdapter, AgentSession, Chatter, PersistHandle, PromptInput, ProviderMap,
+    SessionConfig,
 };
 
 const BINARY: &str = "opencode";
@@ -116,19 +118,11 @@ impl AgentAdapter for OpenCodeAdapter {
             .build()?;
         wait_until_ready(&http, &base, &mut child, &chatter).await?;
 
-        let created: Value = http
-            .post(format!("{base}/session"))
-            .json(&json!({}))
-            .send()
-            .await
-            .context("creating an OpenCode session")?
-            .json()
-            .await?;
-        let remote_session = created
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("OpenCode did not return a session id"))?
-            .to_string();
+        // Prefer the session a previous run of this GeneHub session left behind.
+        // OpenCode keeps those on disk across `serve` restarts; without this we
+        // declared `resume: true`, stored an id, and then quietly opened a blank
+        // conversation on every first prompt after a restart.
+        let remote_session = open_session(&http, &base, &config.cwd, &config.resume).await?;
 
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let turn = Arc::new(Mutex::new(TurnState::default()));
@@ -332,6 +326,70 @@ impl AgentSession for OpenCodeSession {
 fn pick_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     Ok(listener.local_addr()?.port())
+}
+
+/// Opens the OpenCode session this GeneHub session should talk to.
+///
+/// When a previous run left a `PersistHandle`, that id is asked for first —
+/// OpenCode keeps sessions on disk across `serve` restarts, which is the whole
+/// of what `capabilities.resume` promised. A missing id falls through to a
+/// fresh session rather than failing the start: the daemon still has the
+/// timeline, and a blank OpenCode context is better than a session that cannot
+/// send at all.
+async fn open_session(
+    http: &reqwest::Client,
+    base: &str,
+    cwd: &Path,
+    resume: &Option<PersistHandle>,
+) -> Result<String> {
+    if let Some(session_id) = resume_session_id(resume) {
+        let response = http
+            .get(format!("{base}/session/{session_id}"))
+            .query(&[("directory", cwd.to_string_lossy().as_ref())])
+            .send()
+            .await
+            .with_context(|| format!("looking up OpenCode session {session_id}"))?;
+        if response.status().is_success() {
+            let body: Value = response
+                .json()
+                .await
+                .with_context(|| format!("reading OpenCode session {session_id}"))?;
+            if let Some(found) = body.get("id").and_then(Value::as_str) {
+                return Ok(found.to_string());
+            }
+            return Ok(session_id);
+        }
+        tracing::warn!(
+            "OpenCode session {session_id} was not found ({}); starting a new one",
+            response.status()
+        );
+    }
+
+    let created: Value = http
+        .post(format!("{base}/session"))
+        .json(&json!({}))
+        .send()
+        .await
+        .context("creating an OpenCode session")?
+        .json()
+        .await
+        .context("reading the new OpenCode session")?;
+    created
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("OpenCode did not return a session id"))
+}
+
+/// The OpenCode session id a previous run left behind, when it is ours.
+fn resume_session_id(resume: &Option<PersistHandle>) -> Option<String> {
+    resume
+        .as_ref()
+        .filter(|handle| handle.agent_id == "opencode")
+        .and_then(|handle| handle.value.get("sessionId"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 /// How long a start may take before we call it a hang.
@@ -1016,5 +1074,34 @@ mod tests {
             TurnErrorCode::RateLimited
         );
         assert_eq!(classify_http(500, "boom").code, TurnErrorCode::Upstream);
+    }
+
+    /// `capabilities.resume` is only honest if a stored id is actually what we
+    /// ask OpenCode for. The rest of `open_session` needs a live server; this
+    /// is the part that decides whether that path is taken at all.
+    #[test]
+    fn a_resume_handle_only_counts_when_it_is_ours_and_names_a_session() {
+        assert_eq!(resume_session_id(&None), None);
+        assert_eq!(
+            resume_session_id(&Some(PersistHandle {
+                agent_id: "claude".into(),
+                value: json!({ "sessionId": "s1" }),
+            })),
+            None
+        );
+        assert_eq!(
+            resume_session_id(&Some(PersistHandle {
+                agent_id: "opencode".into(),
+                value: json!({ "sessionId": "" }),
+            })),
+            None
+        );
+        assert_eq!(
+            resume_session_id(&Some(PersistHandle {
+                agent_id: "opencode".into(),
+                value: json!({ "sessionId": "ses_abc" }),
+            })),
+            Some("ses_abc".into())
+        );
     }
 }

@@ -88,7 +88,7 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 
 `can_use_tool` 的三个选项现在是 Allow / **Always Allow** / Deny：Claude Code 的 stdio 协议本身没有「记住这次选择」的字段（见 `claude.rs` 顶部模块文档），所以 Always Allow 是 daemon 自己按工具名维护的一份进程内白名单——同一个会话里选过一次之后，同名工具不再打扰前端，换一个工具名要重新问。
 
-粘贴图片现在会作为附件随消息一起发：`claude`（Anthropic 内容块）、`opencode`（`file` part + data URL）、经 `acp` 声明的 agent（ACP `image` 内容块）都会转发；`genet` 自己的 provider 层还不接受图片，见 [roadmap.md](./roadmap.md)「明确不做」。
+粘贴图片现在会作为附件随消息一起发：`claude`（Anthropic 内容块）、`codex`（先落到 scratch 再发 `localImage` 路径）、`opencode`（`file` part + data URL）、经 `acp` 声明的 agent（ACP `image` 内容块）都会转发；`genet` 自己的 provider 层还不接受图片，见 [roadmap.md](./roadmap.md)「明确不做」。
 
 ---
 
@@ -104,7 +104,9 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 - **审批按对象分成三条请求**，都是它反过来问我们：命令执行、文件改动（都回 `{"decision":"accept"|"decline"|"cancel"}`），以及一条「问用户」的选择题（回 `{"answers":{...}}`）。它问什么我们都得回——一条不回，它就一直等。所以渲染不了的（多个问题一次问、要自由文本、MCP 的表单）也照样回，回的是「没人回答」而不是替用户选一个。
 - **没登录不会报错，会挂着。** 未登录时 `turn/start` 照样被接受、用户消息照样回显，然后什么都不发生：没有失败帧，也不退出。所以 `probe` 直接问 `codex login status`，未登录就报 `Unavailable` 并写清那一行命令，而不是让第一条 prompt 在那儿转圈。
 
-还没接的，写下来免得下次误以为漏了：`thread/resume`（所以 `capabilities.resume` 是 false，历史由 daemon 自己的日志回放）；图片附件（它要的是 `{"type":"localImage","path"}`，得先把粘贴进来的图落成文件，所以 `capabilities.attachments` 是 false，界面上就没有那个按钮）；skills（`skills/list` 能列出来，但它的调用方式是 `$name` 外加一个 `{"type":"skill"}` 输入块，不是把 `/name` 当普通文本发——所以没有把它们放进斜杠命令菜单，一个点了不生效的菜单比没有菜单更糟）；子 agent 的内部步骤（卡片会显示派了谁、派去干什么，但它自己的步骤走的是另一条 thread，还没接进来）。
+已经接上的两样：`thread/resume`（`PersistHandle` 里存 `threadId`，进程重启后先 `thread/resume`；若 CLI 说线程已归档，会先 `thread/unarchive` 再试一次），以及贴图（粘贴的截图先落到会话 scratch 目录，再以 `{"type":"localImage","path"}` 发出去）。
+
+还没接的，写下来免得下次误以为漏了：skills（`skills/list` 能列出来，但它的调用方式是 `$name` 外加一个 `{"type":"skill"}` 输入块，不是把 `/name` 当普通文本发——所以没有把它们放进斜杠命令菜单，一个点了不生效的菜单比没有菜单更糟）；子 agent 的内部步骤（卡片会显示派了谁、派去干什么，但它自己的步骤走的是另一条 thread，还没接进来）。
 
 ### 4.1 Codex + DeepSeek：目前连不上，这是 Codex/DeepSeek 两边的协议问题
 

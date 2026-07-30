@@ -158,6 +158,8 @@ mod tests {
         assert!(codex.capabilities().set_model);
         assert!(codex.capabilities().set_effort);
         assert!(codex.capabilities().set_mode);
+        assert!(codex.capabilities().resume);
+        assert!(codex.capabilities().attachments);
     }
 
     #[tokio::test]

@@ -41,7 +41,7 @@
 ### 明确不做
 
 - 手机原生 App（M2；MVP 用手机浏览器，界面已按小屏适配）
-- Codex 的 `thread/resume`、图片附件、skills 菜单、子 agent 内部步骤：原生 `app-server` 适配器已经落地（`adapter::codex`），这四项是它明确没接的部分，理由和各自的代价见 [third-party-agents.md](./third-party-agents.md) §4 末尾；每一项对应的能力位都申报为 false，界面上因此没有对应控件，而不是点了不生效
+- Codex 的 skills 菜单、子 agent 内部步骤：原生 `app-server` 适配器已经落地（`adapter::codex`），`thread/resume` 和贴图也已接上；这两项是它明确还没接的部分，理由见 [third-party-agents.md](./third-party-agents.md) §4 末尾；对应能力位不申报，界面上因此没有对应控件，而不是点了不生效
 - Codex 接 DeepSeek：不是我们的待办，是 Codex（只认 Responses API）与 DeepSeek（只有 Chat Completions）两个上游之间的协议缺口，见 [third-party-agents.md](./third-party-agents.md) §4；换成原生 `app-server` 传输不会让这个缺口消失
 - 应用内自动更新（手动重装）
 - 端到端加密（M4；当前为传输层加密，见 [security-model.md](./security-model.md) §1.1）
@@ -124,8 +124,6 @@
 - 深链 `genehub://`；桌面端开机自启
 - 工作台分屏；工具调用折叠视图
 - 托盘在线状态
-- Codex 的 `thread/resume`：原生适配器（MVP，`adapter::codex`）已经在说 `app-server`，缺的是让它自己复活一条旧 thread，而不是由 daemon 回放我们自己的日志
-
 ---
 
 ## M3 — 能协作
