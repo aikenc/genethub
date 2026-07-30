@@ -13,7 +13,7 @@
 //! Code's own documented way of choosing a backend, not a protocol this
 //! project owns (`docs/architecture.md` §3, boundary B1).
 
-use genehub_proto::{PermissionOutcome, Request, TimelineItem, ToolStatus};
+use genehub_proto::{PermissionOutcome, Reply, Request, TimelineItem, ToolStatus};
 use genehub_testing::{assert_normalized_reply, binary_on_path, real_only, EventsExt, Journey};
 
 /// Claude Code's own Anthropic-compatible base URL for DeepSeek, per
@@ -109,6 +109,112 @@ async fn accept_edits_mode_lets_a_real_tool_call_through_without_a_prompt() {
         journey.file_exists("greeting.txt"),
         "the Write tool call should have reached the real filesystem"
     );
+
+    journey.finish().await;
+}
+
+/// The composer's pickers are drawn from the catalog, so the catalog has to be
+/// this CLI's own answer rather than a list we made up: every model id here came
+/// out of an `initialize` handshake and goes back to the same CLI in a
+/// `set_model`, and every mode id is a name its `--help` listed.
+///
+/// This is the whole reason to ask instead of hardcoding — a hardcoded
+/// `--permission-mode manual` already cost one user a working Claude Code.
+#[tokio::test]
+async fn the_model_and_mode_pickers_offer_what_this_cli_actually_accepts() {
+    let journey = Journey::start().await.expect("journey starts");
+    real_only!(journey);
+    needs_claude!(journey);
+    point_claude_code_at_deepseek(&journey);
+
+    let Reply::Agents(agents) = journey
+        .client
+        .call(Request::AgentList)
+        .await
+        .expect("the agent list is served")
+    else {
+        panic!("expected the agent list");
+    };
+    let claude = agents
+        .iter()
+        .find(|agent| agent.id == "claude")
+        .expect("claude is registered");
+
+    assert!(
+        claude.capabilities.set_model,
+        "switching model is a control request this CLI answers"
+    );
+    assert!(
+        !claude.catalog.models.is_empty(),
+        "the handshake should have brought back this install's model list"
+    );
+    assert!(
+        claude
+            .catalog
+            .modes
+            .iter()
+            .any(|mode| mode.id == "acceptEdits"),
+        "every build lists acceptEdits; saw {:?}",
+        claude.catalog.modes
+    );
+    let asking = claude
+        .catalog
+        .default_mode
+        .as_deref()
+        .expect("a build we can talk to names its asking mode");
+    assert!(
+        asking == "default" || asking == "manual",
+        "a session must start in the mode that asks, not one that acts: {asking}"
+    );
+
+    // And the switches are real: the CLI is asked, and it either agrees or the
+    // control fails — a picker that moved while nothing changed would be a lie.
+    //
+    // After a first turn, because that is when the process exists at all: until
+    // something is sent, a choice is only recorded (`ensure_started`).
+    let session = journey
+        .session("claude")
+        .await
+        .expect("a session opens on Claude Code");
+    journey
+        .send(&session, "Reply with exactly one word: pong")
+        .await
+        .expect("prompt accepted");
+    journey
+        .client
+        .drain_turn()
+        .await
+        .expect("the first turn ends");
+
+    let model = claude.catalog.models[0].id.clone();
+    journey
+        .client
+        .call(Request::SessionSetModel {
+            session_id: session.clone(),
+            model_id: model.clone(),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("the CLI's own model '{model}' is accepted: {error}"));
+    journey
+        .client
+        .call(Request::SessionSetMode {
+            session_id: session.clone(),
+            mode_id: "plan".into(),
+        })
+        .await
+        .expect("plan is a mode this build lists");
+    // The CLI itself will not catch this: asked for a model it has never heard
+    // of, it answers `success`, says "Set model to <whatever you typed>" and goes
+    // on using the one it already had. Passing that through as success is how a
+    // picker ends up showing a model nobody is talking to.
+    journey
+        .client
+        .call(Request::SessionSetModel {
+            session_id: session.clone(),
+            model_id: "not-a-model-this-cli-has".into(),
+        })
+        .await
+        .expect_err("a model this install never offered must be refused, not pretended");
 
     journey.finish().await;
 }

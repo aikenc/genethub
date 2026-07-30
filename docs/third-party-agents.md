@@ -60,11 +60,24 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash
 
 在**启动 daemon 之前**把这几个变量设进 daemon 所在的进程环境（shell profile、systemd unit 的 `Environment=`、桌面端的启动脚本……随便哪种能让子进程继承环境的方式），daemon 拉起 `claude` 时这些变量就在，Claude Code 自己会用它们连 DeepSeek。
 
-这条路径已经用真实 DeepSeek key 端到端跑通并固化成四条回归测试：`testing/tests/claude.rs`，跑法见 [testing.md](./testing.md) §8.1。除了「归一化事件层对 Claude Code 和对内置 agent 是同一套代码」这条基本断言之外，还覆盖了换原生协议真正买回来的东西：
+这条路径已经用真实 DeepSeek key 端到端跑通并固化成回归测试：`testing/tests/claude.rs`，跑法见 [testing.md](./testing.md) §8.1。除了「归一化事件层对 Claude Code 和对内置 agent 是同一套代码」这条基本断言之外，还覆盖了换原生协议真正买回来的东西：
 
 - `acceptEdits` 模式下真实工具调用不经过一次提问就落盘；
 - daemon 自己的中断请求真的能打断一个正在生成的回合，而不只是杀掉进程；
-- 默认模式下拒绝一次权限请求，工具调用真的不会碰到文件系统。
+- 默认模式下拒绝一次权限请求，工具调用真的不会碰到文件系统；
+- 模型和模式选择器里列出来的每一项，都是这台机器上的 CLI 自己报的、并且它真的会接受。
+
+### 3.1 模型和模式：问 CLI，不写死
+
+Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它握一次手问出来的：
+
+- 模型：一个 `{"subtype":"initialize"}` 控制请求，它会回自己的模型别名表（`default`、`opus`、`sonnet`……，带 `displayName` 和是否支持 effort 档位）。这些别名原样进选择器，切换时原样发回 `set_model`——列表和参数是同一个来源，就不存在「我们以为它有」这种事。某个别名背后到底是哪个模型，仍然是 Claude Code 自己的事（环境变量、它自己的配置文件），我们只显示不决定（[architecture.md](./architecture.md) §3 边界 B1）。
+- 模式：从 `claude --help` 的 `--permission-mode` 选项里读这台机器接受哪些名字，只提供其中我们能说清含义的：默认（逐个询问）、`acceptEdits`、`plan`、`bypassPermissions`。2.1.220 还接受 `auto` 和 `dontAsk`，但 CLI 里外都没有一句话说这两个跟上面几个有什么区别——说不清效果的开关比没有这个开关更糟，所以先不放。
+- 会话中途切换走的都是原生控制请求（`set_model` / `set_permission_mode`），并且**等它回话**：控制请求失败就报错，不会让选择器动了而实际什么都没变。
+
+有一个例外要写下来：这个 CLI 不校验模型名。给它一个根本不存在的模型，它照样回 `success`、打印一句 "Set model to <你输入的东西>"，然后继续用原来那个模型。所以校验在我们这边——只有它自己列过的别名才发得出去。
+
+`acceptEdits` 是另一个例外方向：除了告诉 CLI，daemon 自己也拦着不问（按工具名的白名单那套机制）。旧版本 CLI 万一不认 `set_permission_mode`，用户选的「不要再问我」也还是成立的。
 
 不是「DeepSeek 能不能连 Claude Code」——后者是 DeepSeek 自己的产品能力，我们只是借用。
 

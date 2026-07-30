@@ -70,7 +70,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, ItemDelta, ModeInfo, PermissionOption, PermissionOptionKind,
+    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind,
     PermissionOutcome, PermissionRequest, ProbeState, SessionEvent, TimelineItem, ToolCallDetail,
     ToolStatus, TurnError, TurnErrorCode, Usage,
 };
@@ -88,18 +88,53 @@ use super::{
 const BINARY: &str = "claude";
 const EVENT_CAPACITY: usize = 1024;
 
-/// Our own permission policy, applied before the user ever sees a
-/// `can_use_tool` request. The names mirror what the CLI itself calls these
-/// ideas in `permission_suggestions[].mode`, so a user reading either surface
+/// Permission modes, named as the CLI names them on the wire — these go into
+/// `--permission-mode` and `set_permission_mode` unchanged, and appear in the
+/// CLI's own `permission_suggestions[].mode`, so a user reading either surface
 /// sees the same word for the same thing.
 const MODE_DEFAULT: &str = "default";
 const MODE_ACCEPT_EDITS: &str = "acceptEdits";
+const MODE_PLAN: &str = "plan";
+const MODE_BYPASS: &str = "bypassPermissions";
+
+/// The modes we offer, of the ones this CLI accepts.
+///
+/// Not every name in its `--permission-mode` list is here: 2.1.220 also accepts
+/// `auto` and `dontAsk`, and nothing in the CLI or its help says what either one
+/// does differently from these. A switch whose effect we cannot state is worse
+/// than no switch, so they are left out until someone can describe them.
+const MODES: [(&str, &str, &str); 3] = [
+    (
+        MODE_ACCEPT_EDITS,
+        "Accept edits",
+        "Apply file edits and commands without asking",
+    ),
+    (
+        MODE_PLAN,
+        "Plan",
+        "Read and plan only — no edits and no commands",
+    ),
+    (
+        MODE_BYPASS,
+        "Bypass permissions",
+        "Never ask about anything. Only for a workspace you could afford to lose",
+    ),
+];
+
+/// How long the CLI gets to answer a control request before we give up on it.
+/// Generous because a cold start on Windows is slow, and every caller here would
+/// rather wait than be told a lie about what the CLI supports.
+const CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Default)]
 pub struct ClaudeAdapter {
-    /// What this CLI calls the "ask me about every tool" permission mode, read
-    /// from its own help once per daemon run.
-    ask_mode: tokio::sync::OnceCell<Option<String>>,
+    /// `claude --help`, read once per daemon run: it is the only place this CLI
+    /// says which permission modes the build accepts, and the answer cannot
+    /// change without the binary being replaced under us.
+    help: tokio::sync::OnceCell<String>,
+    /// What the CLI answered to an `initialize` control request — its model list,
+    /// its slash commands, its sub-agents. Also asked once per daemon run.
+    hello: tokio::sync::OnceCell<Option<Value>>,
     /// A CLI to run instead of the one on `PATH`.
     ///
     /// Only ever set by tests, and a field rather than an environment variable
@@ -124,14 +159,11 @@ impl ClaudeAdapter {
         }
     }
 
-    /// What this build calls "ask me about every tool".
-    ///
-    /// Asked once and remembered: `--help` costs a process launch, and the answer
-    /// cannot change without the CLI being replaced under us.
-    async fn ask_mode(&self, program: &std::path::Path) -> Option<String> {
-        self.ask_mode
+    /// This build's own help text, read once and remembered.
+    async fn help(&self, program: &std::path::Path) -> &str {
+        self.help
             .get_or_init(|| async {
-                let help = Command::new(program)
+                Command::new(program)
                     .arg("--help")
                     .output()
                     .await
@@ -143,12 +175,175 @@ impl ClaudeAdapter {
                         text.push_str(&String::from_utf8_lossy(&out.stderr));
                         text
                     })
-                    .unwrap_or_default();
-                ask_mode_in(&help).map(str::to_string)
+                    .unwrap_or_default()
             })
+            .await
+    }
+
+    /// The permission modes to offer for this build: the ones it accepts, of the
+    /// ones we can describe.
+    async fn modes(&self, program: &std::path::Path) -> Vec<ModeInfo> {
+        let help = self.help(program).await;
+        let mut modes = Vec::new();
+        // Whatever this build calls "ask about everything" leads, because it is
+        // the one that asks — a session should start in the cautious mode and be
+        // moved out of it deliberately.
+        if let Some(ask) = ask_mode_in(help) {
+            modes.push(ModeInfo {
+                id: ask.into(),
+                label: "Default".into(),
+                description: Some("Ask before every tool call".into()),
+            });
+        }
+        for (id, label, description) in MODES {
+            if mode_listed(help, id) {
+                modes.push(ModeInfo {
+                    id: id.into(),
+                    label: label.into(),
+                    description: Some(description.into()),
+                });
+            }
+        }
+        modes
+    }
+
+    /// The CLI's answer to an `initialize` control request, asked once per daemon
+    /// run against a throwaway process.
+    ///
+    /// It has to be a process of its own: the model list is wanted for the agent
+    /// picker, which is drawn long before anyone opens a session, and there is no
+    /// way to ask this CLI anything without running it. The cost is one launch
+    /// per daemon lifetime, and `initialize` reaches no model — it only reports
+    /// what this install is configured with.
+    async fn hello(&self, program: &std::path::Path) -> Option<Value> {
+        self.hello
+            .get_or_init(|| async { initialize(program).await })
             .await
             .clone()
     }
+}
+
+/// Runs one `initialize` control request and takes the answer away with it.
+async fn initialize(program: &std::path::Path) -> Option<Value> {
+    let mut command = Command::new(program);
+    command
+        .args([
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ])
+        // Somewhere that exists and says nothing about any of the user's
+        // projects: this answer is cached for every workspace.
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    super::without_a_window(&mut command);
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!("could not ask claude what it supports: {error}");
+            return None;
+        }
+    };
+    let mut stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    let request = json!({
+        "type": "control_request",
+        "request_id": "genehub_initialize",
+        "request": { "subtype": "initialize" },
+    });
+    if let Err(error) = write_json_line(&mut stdin, &request).await {
+        tracing::warn!("could not ask claude what it supports: {error}");
+        return None;
+    }
+
+    let answer = tokio::time::timeout(CONTROL_TIMEOUT, async {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if frame.get("type").and_then(Value::as_str) != Some("control_response") {
+                continue;
+            }
+            let Some(response) = frame.get("response") else {
+                continue;
+            };
+            if response.get("subtype").and_then(Value::as_str) != Some("success") {
+                let why = response
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason given")
+                    .to_string();
+                tracing::warn!("claude refused an initialize handshake: {why}");
+                return None;
+            }
+            return response.get("response").cloned();
+        }
+        None
+    })
+    .await;
+
+    // The process is only alive to answer this one question, and it does not exit
+    // on its own: `--print` waits for a prompt it is never going to get.
+    super::kill_tree(&mut child).await;
+
+    match answer {
+        Ok(answer) => answer,
+        Err(_) => {
+            tracing::warn!("claude did not answer an initialize handshake in time");
+            None
+        }
+    }
+}
+
+/// The models this CLI says it can be pointed at, as it names them.
+///
+/// These are the CLI's own aliases (`default`, `opus`, `sonnet`, …), not model
+/// names we invented: `set_model` is answered by the same CLI that listed them,
+/// so anything here is a value it will accept. Which model an alias resolves to
+/// stays this CLI's business — its env vars and its config file — and is shown
+/// rather than decided (`docs/architecture.md` §3, boundary B1).
+fn models_in(hello: &Value) -> Vec<ModelInfo> {
+    let Some(models) = hello.get("models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .filter_map(|model| {
+            let id = model.get("value").and_then(Value::as_str)?;
+            let flag = |name: &str| model.get(name).and_then(Value::as_bool).unwrap_or(false);
+            Some(ModelInfo {
+                id: id.to_string(),
+                label: model
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .unwrap_or(id)
+                    .to_string(),
+                context_window: None,
+                reasoning: flag("supportsEffort") || flag("supportsAdaptiveThinking"),
+            })
+        })
+        .collect()
+}
+
+/// Whether `--permission-mode` lists this name among its choices.
+fn mode_listed(help: &str, mode: &str) -> bool {
+    let choices = help
+        .split("--permission-mode")
+        .nth(1)
+        .map(|rest| rest.chars().take(400).collect::<String>())
+        .unwrap_or_default();
+    choices.contains(&format!("\"{mode}\""))
+        || choices.contains(&format!("'{mode}'"))
+        || choices.contains(&format!(" {mode},"))
+        || choices.contains(&format!(" {mode} "))
 }
 
 /// Picks the "ask about everything" mode out of a `--help` listing.
@@ -205,10 +400,12 @@ impl AgentAdapter for ClaudeAdapter {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             interrupt: true,
-            // Model choice is this CLI's own business (env vars, its config
-            // file); advertising models we did not configure would be a
-            // control we cannot actually back.
-            set_model: false,
+            // Switching between them is a control request this CLI answers;
+            // *which* models there are is still its own business (env vars, its
+            // config file) and the catalog only ever repeats the list it gave us.
+            // An install whose handshake told us nothing lists none, and the
+            // frontend draws no picker for an empty list.
+            set_model: true,
             set_mode: true,
             permissions: true,
             // `--resume <session-id>` is real; we just need the id back.
@@ -225,22 +422,26 @@ impl AgentAdapter for ClaudeAdapter {
     }
 
     async fn catalog(&self, _providers: &ProviderMap) -> Catalog {
+        let Some(program) = self.program() else {
+            return Catalog::default();
+        };
+        let hello = self.hello(&program).await;
+        let models = hello.as_ref().map(models_in).unwrap_or_default();
+        let modes = self.modes(&program).await;
         Catalog {
-            models: Vec::new(),
-            modes: vec![
-                ModeInfo {
-                    id: MODE_DEFAULT.into(),
-                    label: "Default".into(),
-                    description: Some("Ask before every tool call".into()),
-                },
-                ModeInfo {
-                    id: MODE_ACCEPT_EDITS.into(),
-                    label: "Accept edits".into(),
-                    description: Some("Apply file edits and commands without asking".into()),
-                },
-            ],
-            default_model: None,
-            default_mode: Some(MODE_DEFAULT.into()),
+            default_model: hello
+                .as_ref()
+                .and_then(|hello| hello.get("model"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                // Which model is current is the CLI's to decide; when it does not
+                // say, the first entry it listed is its own recommendation.
+                .or_else(|| models.first().map(|model| model.id.clone())),
+            // Whichever name this build uses for "ask about everything", which
+            // `modes` puts first — a session starts cautious.
+            default_mode: modes.first().map(|mode| mode.id.clone()),
+            models,
+            modes,
         }
     }
 
@@ -269,9 +470,43 @@ impl AgentAdapter for ClaudeAdapter {
             .kill_on_drop(true);
         super::without_a_window(&mut command);
 
-        match self.ask_mode(&program).await {
+        // A session created earlier and resumed now (or one whose mode was set
+        // before its first prompt lazily started the process — see
+        // `session::manager::ensure_started`) must not silently forget which mode
+        // it was in. And the mode has to be in force from the first turn, which
+        // means the launch flag: a session in `plan` that started in the asking
+        // mode could edit a file before any `set_permission_mode` landed.
+        // What this install said it had: which model to launch with, and the only
+        // list a later `set_model` can be checked against. The CLI will not check
+        // it for us — asked for a model it has never heard of, it answers
+        // `success` and carries on with the one it already had.
+        let models: Vec<String> = self
+            .hello(&program)
+            .await
+            .as_ref()
+            .map(models_in)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+
+        let help = self.help(&program).await.to_string();
+        let ask_mode = ask_mode_in(&help).map(str::to_string);
+        let initial_mode = config
+            .mode_id
+            .clone()
+            .filter(|id| MODES.iter().any(|(mode, ..)| mode == id) || Some(id) == ask_mode.as_ref())
+            .or_else(|| ask_mode.clone())
+            .unwrap_or_else(|| MODE_DEFAULT.to_string());
+        // Only a name this build actually lists: an unlisted one is not ignored,
+        // it makes the CLI refuse to start (which is how a hardcoded `manual`
+        // once cost a user their Claude Code entirely).
+        match Some(initial_mode.as_str())
+            .filter(|mode| mode_listed(&help, mode))
+            .or(ask_mode.as_deref())
+        {
             Some(mode) => {
-                command.args(["--permission-mode", &mode]);
+                command.args(["--permission-mode", mode]);
             }
             // A build that names this something we have never seen. Its own
             // configured default is a better guess than a name it will reject:
@@ -282,6 +517,24 @@ impl AgentAdapter for ClaudeAdapter {
                 "claude --help lists no permission mode we recognise; \
                  starting without --permission-mode"
             ),
+        }
+
+        // A model picked before the first prompt, which is the ordinary case: the
+        // process only starts when there is something to send (see
+        // `session::manager::ensure_started`), so without this the choice would be
+        // recorded and then quietly dropped.
+        //
+        // Only an alias this install listed. Anything else is not ours to pass on:
+        // a session's stored model may well name a provider's model rather than
+        // one of this CLI's aliases (how Claude Code reaches a model is its own
+        // business — `docs/architecture.md` §3, boundary B1), and passing that as
+        // `--model` would either be ignored or stop it from starting.
+        if let Some(model) = config
+            .model_id
+            .as_deref()
+            .filter(|model| models.iter().any(|known| known == model))
+        {
+            command.args(["--model", model]);
         }
 
         if let Some(session_id) = config
@@ -316,15 +569,7 @@ impl AgentAdapter for ClaudeAdapter {
         // holds its lock for a single field read or write, never across an
         // `.await`.
         let native_session_id: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
-        // A session created earlier and resumed now (or one whose mode was
-        // set before its first prompt lazily started the process — see
-        // `session::manager::ensure_started`) must not silently forget which
-        // mode it was in.
-        let initial_mode = match config.mode_id.as_deref() {
-            Some(MODE_ACCEPT_EDITS) => MODE_ACCEPT_EDITS,
-            _ => MODE_DEFAULT,
-        };
-        let mode = Arc::new(Mutex::new(initial_mode.to_string()));
+        let mode = Arc::new(Mutex::new(initial_mode));
         let stdin = Arc::new(Mutex::new(stdin));
         // `AllowAlways` has no wire-level equivalent (see module doc), so it
         // is enforced here: tool names the user has blanket-approved, and the
@@ -332,6 +577,7 @@ impl AgentAdapter for ClaudeAdapter {
         // about a fresh approval once the user answers.
         let always_allow: Arc<Mutex<HashSet<String>>> = Arc::default();
         let pending_tools: Arc<Mutex<HashMap<String, String>>> = Arc::default();
+        let awaiting: Awaiting = Arc::default();
 
         let session = ClaudeSession {
             stdin: stdin.clone(),
@@ -344,6 +590,8 @@ impl AgentAdapter for ClaudeAdapter {
             next_control_id: AtomicU64::new(1),
             always_allow: always_allow.clone(),
             pending_tools: pending_tools.clone(),
+            awaiting: awaiting.clone(),
+            models,
         };
 
         let control = ControlState {
@@ -360,6 +608,7 @@ impl AgentAdapter for ClaudeAdapter {
             control,
             child,
             said,
+            awaiting,
         ));
 
         Ok(Box::new(session))
@@ -417,7 +666,19 @@ struct ClaudeSession {
     next_control_id: AtomicU64,
     always_allow: Arc<Mutex<HashSet<String>>>,
     pending_tools: Arc<Mutex<HashMap<String, String>>>,
+    /// Control requests we have sent and want the answer to.
+    awaiting: Awaiting,
+    /// The model ids this install offered, which are the only ones a `set_model`
+    /// can be checked against.
+    models: Vec<String>,
 }
+
+/// `request_id` -> whoever is waiting for that `control_response`.
+///
+/// Only for the requests whose answer changes what we tell the caller: a
+/// `set_model` the CLI rejected has to reach the user as a failed control rather
+/// than a picker that quietly moved and changed nothing.
+type Awaiting = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<(), String>>>>>;
 
 /// Everything `handle_control_request` needs to answer Claude Code's
 /// `can_use_tool` prompts, bundled so `read_loop` doesn't carry each of these
@@ -442,6 +703,68 @@ impl ClaudeSession {
             self.next_control_id.fetch_add(1, Ordering::SeqCst)
         )
     }
+
+    /// Sends a control request and waits for the CLI's answer to it.
+    ///
+    /// Waiting is the point: these back the pickers in the composer, and a
+    /// control that reports success while the CLI ignored it is worse than one
+    /// that fails — the user would go on believing they had switched.
+    async fn ask(&self, subtype: &str, request: Value) -> Result<(), String> {
+        let request_id = self.control_request_id();
+        let (tell, told) = tokio::sync::oneshot::channel();
+        self.awaiting
+            .lock()
+            .await
+            .insert(request_id.clone(), tell);
+
+        let mut body = json!({ "subtype": subtype });
+        if let (Some(body), Some(request)) = (body.as_object_mut(), request.as_object()) {
+            body.extend(request.clone());
+        }
+        let sent = self
+            .write(json!({
+                "type": "control_request",
+                "request_id": request_id,
+                "request": body,
+            }))
+            .await;
+        if let Err(error) = sent {
+            self.awaiting.lock().await.remove(&request_id);
+            return Err(super::stopped("Claude Code", &self.child, &self.said).await + &format!(" ({error})"));
+        }
+
+        match tokio::time::timeout(CONTROL_TIMEOUT, told).await {
+            Ok(Ok(answer)) => answer,
+            // The read loop is gone, which means so is the CLI.
+            Ok(Err(_)) => Err(super::stopped("Claude Code", &self.child, &self.said).await),
+            Err(_) => {
+                self.awaiting.lock().await.remove(&request_id);
+                Err(format!("no answer to {subtype} in {CONTROL_TIMEOUT:?}"))
+            }
+        }
+    }
+}
+
+/// Hands a `control_response` to whoever sent the request it answers.
+async fn settle_control_response(frame: &Value, awaiting: &Awaiting) {
+    let response = frame.get("response").unwrap_or(&Value::Null);
+    let Some(request_id) = response.get("request_id").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(tell) = awaiting.lock().await.remove(request_id) else {
+        // An ack nobody is waiting for — `interrupt` sends one of these, and its
+        // answer is the turn ending rather than this frame.
+        return;
+    };
+    let answer = match response.get("subtype").and_then(Value::as_str) {
+        Some("success") => Ok(()),
+        _ => Err(response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("no reason given")
+            .to_string()),
+    };
+    let _ = tell.send(answer);
 }
 
 #[async_trait]
@@ -516,13 +839,50 @@ impl AgentSession for ClaudeSession {
         Ok(())
     }
 
-    async fn set_model(&self, _model_id: &str) -> Result<()> {
-        Err(anyhow!("this agent manages its own model selection"))
+    async fn set_model(&self, model_id: &str) -> Result<()> {
+        // The CLI will not check this for us. Asked for a model it has never
+        // heard of it answers `success`, prints "Set model to <whatever you
+        // typed>" and goes on using the model it already had — so without this,
+        // picking a model that does not exist would look like it worked and
+        // silently change nothing.
+        if !self.models.iter().any(|model| model == model_id) {
+            return Err(anyhow!(
+                "'{model_id}' is not a model this Claude Code offers ({})",
+                if self.models.is_empty() {
+                    "it listed none".to_string()
+                } else {
+                    self.models.join(", ")
+                }
+            ));
+        }
+        // Which model is in play stays the CLI's own state from here; it reports
+        // it on the next turn's `assistant` frames.
+        self.ask("set_model", json!({ "model": model_id }))
+            .await
+            .map_err(|why| anyhow!("claude would not switch to '{model_id}': {why}"))
     }
 
     async fn set_mode(&self, mode_id: &str) -> Result<()> {
-        if mode_id != MODE_DEFAULT && mode_id != MODE_ACCEPT_EDITS {
+        let known = mode_id == MODE_DEFAULT
+            || mode_id == "manual"
+            || MODES.iter().any(|(mode, ..)| *mode == mode_id);
+        if !known {
             return Err(anyhow!("unknown mode '{mode_id}'"));
+        }
+        // The CLI is the one that has to change behaviour: `plan` and
+        // `bypassPermissions` are decisions about what it does before it ever
+        // asks us anything, and there is nothing we could enforce on this side.
+        if let Err(why) = self.ask("set_permission_mode", json!({ "mode": mode_id })).await {
+            // Accept-edits is the exception, because it is also a promise we can
+            // keep ourselves: `handle_control_request` allows without asking. A
+            // build too old for the control request still gets the behaviour.
+            if mode_id != MODE_ACCEPT_EDITS {
+                return Err(anyhow!("claude would not switch to '{mode_id}': {why}"));
+            }
+            tracing::warn!(
+                "claude refused set_permission_mode ({why}); \
+                 approving edits on our side instead"
+            );
         }
         *self.mode.lock().await = mode_id.to_string();
         let _ = self.events.send(SessionEvent::ModeChanged {
@@ -576,6 +936,7 @@ impl AgentSession for ClaudeSession {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn read_loop(
     stdout: tokio::process::ChildStdout,
     events: broadcast::Sender<SessionEvent>,
@@ -584,6 +945,7 @@ async fn read_loop(
     control: ControlState,
     child: Arc<Mutex<Option<Child>>>,
     said: Arc<Chatter>,
+    awaiting: Awaiting,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     loop {
@@ -628,6 +990,7 @@ async fn read_loop(
             Some("control_request") => {
                 handle_control_request(&frame, &turn, &events, &control).await;
             }
+            Some("control_response") => settle_control_response(&frame, &awaiting).await,
             Some("result") => {
                 let mut state = turn.lock().await;
                 translate_result(&frame, &mut state, &events);
@@ -1129,6 +1492,61 @@ mod tests {
             None
         );
         assert_eq!(ask_mode_in(""), None);
+    }
+
+    /// Every offered mode has to be a name the CLI will accept, or picking it
+    /// either fails a control request or — at launch — stops the session from
+    /// starting at all.
+    #[test]
+    fn only_modes_this_build_lists_are_offered() {
+        let help = "  --permission-mode <mode>  Permission mode (choices: \"acceptEdits\", \
+             \"auto\", \"bypassPermissions\", \"default\", \"dontAsk\", \"plan\")";
+        for mode in [MODE_ACCEPT_EDITS, MODE_PLAN, MODE_BYPASS, "default"] {
+            assert!(mode_listed(help, mode), "{mode} is listed by this build");
+        }
+        // Offered by the CLI, deliberately not by us: nothing says what they do
+        // (see `MODES`). This is not the same as "not listed".
+        assert!(MODES.iter().all(|(mode, ..)| *mode != "auto" && *mode != "dontAsk"));
+
+        // A leaner build, and the one that matters: `plan` here would be a flag
+        // that makes the CLI refuse to start.
+        let older = "  --permission-mode <mode>  (choices: \"acceptEdits\", \"manual\")";
+        assert!(mode_listed(older, MODE_ACCEPT_EDITS));
+        assert!(!mode_listed(older, MODE_PLAN));
+        assert!(!mode_listed("", MODE_ACCEPT_EDITS));
+    }
+
+    /// The model list is the CLI's own, and every id in it has to be one the CLI
+    /// will take back in a `set_model`: `value`, never the resolved name it
+    /// happens to print beside it.
+    #[test]
+    fn models_are_the_aliases_the_cli_offered_not_the_names_it_resolved_them_to() {
+        // 2.1.220's answer to `initialize`, trimmed to the fields we read.
+        let hello = json!({
+            "model": "sonnet",
+            "models": [
+                {
+                    "value": "default",
+                    "resolvedModel": "k3-256k[1m]",
+                    "displayName": "Default (recommended)",
+                    "supportsEffort": true,
+                    "supportsAdaptiveThinking": true,
+                },
+                { "value": "sonnet", "displayName": "Sonnet", "supportsEffort": false },
+                // No `value`: nothing we could send back, so nothing to offer.
+                { "displayName": "Mystery" },
+            ],
+        });
+        let models = models_in(&hello);
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["default", "sonnet"]
+        );
+        assert_eq!(models[0].label, "Default (recommended)");
+        assert!(models[0].reasoning, "it said it supports effort levels");
+        assert!(!models[1].reasoning);
+
+        assert!(models_in(&json!({})).is_empty(), "no list, no picker");
     }
 
     /// "default" is an ordinary English word in a help text, and picking it up
