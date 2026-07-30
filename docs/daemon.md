@@ -139,6 +139,24 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 
 `$GENEHUB_WORKSPACE_DIR` 可以改这个位置。它存在的理由和 `$GENEHUB_DATA_DIR` 一样：跑测试的人的 home 目录不该因为跑了一次测试而多出一个文件夹。
 
+### 4.4 日志
+
+```
+<data>/logs/daemon.log      daemon 自己写，4MB 滚动一份 .log.1
+<data>/logs/startup.log     桌面壳捕获的 daemon stderr，每次启动清空
+<data>/logs/shell.log       桌面壳自己的启动记录
+```
+
+三件事值得写下来，因为它们各自修掉了一个「查不出来」：
+
+**日志由 daemon 自己写，不靠启动它的人重定向。** 需要看日志的人经常不在那台机器前面——手机上拿到一个 `C:\Users\...\logs\daemon.log` 是没用的。文件在 daemon 手里，它才能通过同一条连接把内容递过去（`log.tail`，见 §3）。
+
+**stderr 只在有人看的时候写。** stderr 是终端时（有人自己在命令行里跑）照常输出；是管道时（桌面壳、systemd 接着）只写文件，否则同一批行会在同一个目录里存两份。
+
+**第三方 agent 的 stderr 会留下来。** 以前它走 `tracing::debug!`，而默认级别是 `info`——CLI 临死前说的那句话被我们自己丢掉了，用户看到的是「Claude Code stopped unexpectedly.」，这句话对每一种原因都成立、对每一种原因都没用。现在每一行都进日志（`target: "agent"`），最后二十行还会拼进那条失败消息里：退出码 + 它自己的说法。
+
+`$GENEHUB_LOG` 控制级别（默认 `info`），和 `RUST_LOG` 同样的语法。
+
 ---
 
 ## 4.3 已授权设备

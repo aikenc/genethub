@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { ChangesPanel } from "../changes/ChangesPanel";
 import { FilesPanel } from "../files/FilesPanel";
+import { LogsPanel } from "../logs/LogsPanel";
 import type { Client } from "../protocol/client";
 import { SettingsPanel } from "../settings/SettingsPanel";
 import { useWorkbench } from "../session/store";
@@ -49,7 +50,83 @@ function install(client: Client) {
 }
 
 beforeEach(() => {
-  useWorkbench.setState({ tree: null, file: null, git: null, diff: null, settings: null });
+  useWorkbench.setState({
+    tree: null,
+    file: null,
+    git: null,
+    diff: null,
+    settings: null,
+    log: null,
+  });
+});
+
+describe("the log panel", () => {
+  /// The point of reading logs over the connection: the machine's path is no use
+  /// to the phone that is holding the error.
+  it("shows what the machine has been saying, from wherever it is being read", async () => {
+    const { client, calls } = stubDaemon({
+      "log.tail": () => ({
+        type: "log",
+        data: {
+          name: "daemon.log",
+          path: "C:\\Users\\me\\AppData\\Roaming\\GeneHub\\logs\\daemon.log",
+          text: "WARN claude: Invalid API key · Please run /login",
+          files: [
+            { name: "daemon.log", bytes: 2048 },
+            { name: "startup.log", bytes: 120 },
+          ],
+        },
+      }),
+    });
+    install(client);
+
+    render(<LogsPanel />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("log-text").textContent).toContain("Invalid API key"),
+    );
+    expect(calls.some((call) => call.type === "log.tail")).toBe(true);
+    // Both files are offered: the daemon's own log, and what it said before it
+    // could log anything.
+    expect(screen.getByText(/startup\.log/)).toBeTruthy();
+  });
+
+  it("asks again for the file it is already showing when refreshed", async () => {
+    const { client, calls } = stubDaemon({
+      "log.tail": () => ({
+        type: "log",
+        data: { name: "startup.log", path: "/tmp/logs/startup.log", text: "one", files: [] },
+      }),
+    });
+    install(client);
+    render(<LogsPanel />);
+    await waitFor(() => expect(screen.getByTestId("log-text").textContent).toContain("one"));
+
+    await userEvent.click(screen.getByTestId("refresh-log"));
+
+    const asked = calls.filter((call) => call.type === "log.tail");
+    expect(asked.length).toBe(2);
+    expect((asked[1] as { payload: { name: string | null } }).payload.name).toBe("startup.log");
+  });
+
+  /// Desktop only. In a browser the button would do nothing, and a control that
+  /// does nothing is worse than no control.
+  it("offers to open the directory only where there is one to open", async () => {
+    const { client } = stubDaemon({
+      "log.tail": () => ({
+        type: "log",
+        data: { name: "daemon.log", path: "/tmp/logs/daemon.log", text: "", files: [] },
+      }),
+    });
+    install(client);
+
+    const { unmount } = render(<LogsPanel />);
+    expect(screen.queryByText("打开日志目录")).toBeNull();
+    unmount();
+
+    render(<LogsPanel onOpenDirectory={() => {}} />);
+    expect(screen.getByText("打开日志目录")).toBeTruthy();
+  });
 });
 
 describe("the files panel", () => {

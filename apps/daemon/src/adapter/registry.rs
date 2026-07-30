@@ -30,7 +30,7 @@ impl Registry {
             // wrapper. Going native buys back per-tool permission control
             // that ACP does not expose to a client; see that module's doc
             // comment for the reverse-engineered protocol notes.
-            Arc::new(ClaudeAdapter),
+            Arc::new(ClaudeAdapter::default()),
             // Codex stays on the ACP wrapper for now: its own native
             // `app-server` JSON-RPC protocol is planned for the next
             // version (`docs/roadmap.md`), not this one. Nothing here

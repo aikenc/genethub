@@ -21,7 +21,9 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, Mutex};
 
 use super::stdio::write_json_line;
-use super::{find_executable, AgentAdapter, AgentSession, PromptInput, ProviderMap, SessionConfig};
+use super::{
+    find_executable, AgentAdapter, AgentSession, Chatter, PromptInput, ProviderMap, SessionConfig,
+};
 use crate::config::ProviderConfig;
 
 const BINARY: &str = "genet-agent";
@@ -198,27 +200,25 @@ impl AgentAdapter for GenetAdapter {
         let stderr = child.stderr.take().expect("stderr was piped");
         let stdin = child.stdin.take().expect("stdin was piped");
 
+        let child = Arc::new(Mutex::new(Some(child)));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let turn = Arc::new(Mutex::new(TurnState::default()));
+
+        // stderr is kept as well as drained: a full pipe would block the process,
+        // and what it wrote on the way out is the only account of why it left.
+        let said = Arc::new(Chatter::default());
+        said.watch("genet-agent", Some(stderr)).await;
 
         let session = GenetSession {
             stdin: Mutex::new(stdin),
             events: events.clone(),
             turn: turn.clone(),
-            child: Mutex::new(Some(child)),
+            child: child.clone(),
+            said: said.clone(),
             session_file,
         };
 
-        // stderr is drained separately: the agent logs diagnostics there and a
-        // full pipe would block the process.
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "genet-agent", "{line}");
-            }
-        });
-
-        tokio::spawn(translate_stream(stdout, events, turn));
+        tokio::spawn(translate_stream(stdout, events, turn, child, said));
 
         Ok(Box::new(session))
     }
@@ -251,7 +251,10 @@ struct GenetSession {
     stdin: Mutex<ChildStdin>,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
-    child: Mutex<Option<Child>>,
+    /// Shared with the stream reader, which needs the exit code to explain a crash.
+    child: Arc<Mutex<Option<Child>>>,
+    /// What the agent said, for a prompt that cannot be written because it is gone.
+    said: Arc<Chatter>,
     session_file: PathBuf,
 }
 
@@ -277,12 +280,21 @@ impl AgentSession for GenetSession {
                 ..TurnState::default()
             };
         }
-        self.command(json!({
-            "id": turn_id,
-            "type": "prompt",
-            "message": input.text,
-        }))
-        .await?;
+        // A pipe that is already closed fails with "Broken pipe", which says
+        // nothing about why the agent is gone. What it said on the way out does.
+        if let Err(broken) = self
+            .command(json!({
+                "id": turn_id,
+                "type": "prompt",
+                "message": input.text,
+            }))
+            .await
+        {
+            let why = super::stopped("GeneHub Agent", &self.child, &self.said).await;
+            tracing::warn!("{why} (writing the prompt failed: {broken})");
+            self.turn.lock().await.id = None;
+            anyhow::bail!(why);
+        }
         Ok(turn_id)
     }
 
@@ -349,6 +361,8 @@ async fn translate_stream(
     stdout: tokio::process::ChildStdout,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
+    child: Arc<Mutex<Option<Child>>>,
+    said: Arc<Chatter>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     loop {
@@ -376,14 +390,17 @@ async fn translate_stream(
     }
 
     // The process died. If a turn was in flight the client is still waiting for
-    // it, so fail it explicitly rather than leaving a spinner forever.
+    // it, so fail it explicitly rather than leaving a spinner forever — and say
+    // what the process said, which is the part that can be acted on.
+    let why = super::stopped("GeneHub Agent", &child, &said).await;
+    tracing::warn!("{why}");
     let mut state = turn.lock().await;
     if let Some(turn_id) = state.id.take() {
         let _ = events.send(SessionEvent::TurnFailed {
             turn_id,
             error: TurnError {
                 code: TurnErrorCode::AgentCrashed,
-                message: "The agent process stopped unexpectedly.".into(),
+                message: why,
             },
         });
     }

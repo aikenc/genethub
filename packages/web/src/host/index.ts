@@ -51,6 +51,14 @@ export interface Host {
   /** Present only where a native picker exists. */
   pickDirectory?(): Promise<string | null>;
   /**
+   * Reveals the log directory in the file manager.
+   *
+   * Desktop only, and deliberately not a fallback: the logs are on the machine,
+   * and a browser on a phone has nothing it could open. The workbench reads logs
+   * over the connection instead (`log.tail`), which works from anywhere.
+   */
+  openLogs?(): void;
+  /**
    * Announces that the endpoint has moved, and returns an unsubscribe.
    *
    * A restarted daemon listens on a new port with a new token, so retrying the
@@ -199,6 +207,9 @@ export function desktopHost(): Host {
     },
     async pickDirectory() {
       return tauri.core.invoke<string | null>("pick_directory");
+    },
+    openLogs() {
+      void tauri.core.invoke("open_logs");
     },
     onEndpointChange(listener) {
       return subscribe(tauri, "genehub://daemon", listener);

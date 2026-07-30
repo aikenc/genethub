@@ -8,6 +8,7 @@ import type {
   GitStatus,
   HubClaim,
   HubStatus,
+  LogTail,
   RemoteAccess,
   PermissionOutcome,
   SessionSnapshot,
@@ -26,7 +27,14 @@ import { applySequenced, emptyTimeline, fromSnapshot, type TimelineState } from 
  * `extra:*` belongs to whoever embedded the workbench; the store carries it
  * around and never looks inside.
  */
-export type TabKind = "chat" | "files" | "terminal" | "settings" | "devices" | `extra:${string}`;
+export type TabKind =
+  | "chat"
+  | "files"
+  | "terminal"
+  | "settings"
+  | "devices"
+  | "logs"
+  | `extra:${string}`;
 
 export interface WorkbenchTab {
   id: string;
@@ -67,6 +75,8 @@ interface WorkbenchState {
   git: GitStatus | null;
   diff: string | null;
   settings: Settings | null;
+  /** The log being read, if the log tab has been opened. */
+  log: LogTail | null;
 
   attach(client: Client): Promise<void>;
   openWorkspace(root: string): Promise<void>;
@@ -78,6 +88,14 @@ interface WorkbenchState {
   loadDiff(path?: string): Promise<void>;
   commit(message: string, paths?: string[]): Promise<void>;
   loadSettings(): Promise<void>;
+  /**
+   * Fetches the end of a log file.
+   *
+   * Over the connection rather than off the disk, because the browser asking may
+   * be on a phone: a path under the machine's data directory is not something it
+   * can open.
+   */
+  loadLog(name?: string): Promise<void>;
   setProvider(input: {
     providerId: string;
     apiKey?: string;
@@ -136,6 +154,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   git: null,
   diff: null,
   settings: null,
+  log: null,
 
   async attach(client) {
     set({ client, notice: null });
@@ -256,6 +275,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       terminal: "终端",
       settings: "设置",
       devices: "设备",
+      logs: "日志",
     };
     set((state) => {
       if (state.tabs.some((tab) => tab.id === id)) {
@@ -409,6 +429,16 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       .call({ type: "settings.get" })
       .catch(unattended(client, get, set));
     if (reply?.type === "settings") set({ settings: reply.data });
+  },
+
+  async loadLog(name) {
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "log.tail",
+        payload: { name: name ?? null },
+      }),
+    );
+    if (reply?.type === "log") set({ log: reply.data });
   },
 
   async setProvider({ providerId, apiKey, baseUrl, label, dialect, models }) {

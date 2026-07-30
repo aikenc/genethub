@@ -129,6 +129,20 @@ pub enum Request {
     #[serde(rename = "settings.forgetProvider", rename_all = "camelCase")]
     SettingsForgetProvider { provider_id: String },
 
+    /// The end of a log file on this machine.
+    ///
+    /// Served over the connection rather than pointed at, because the person who
+    /// needs it is often not sitting at the machine: a path under
+    /// `C:\\Users\\...\\GeneHub\\logs` is no use on a phone. `name` is a file in
+    /// the log directory and nothing else — see `logs::tail`.
+    #[serde(rename = "log.tail", rename_all = "camelCase")]
+    LogTail {
+        /// Omitted means the daemon's own log, which is what an error is about
+        /// almost every time.
+        #[serde(default)]
+        name: Option<String>,
+    },
+
     // -- hub ---------------------------------------------------------------
     /// Whether this machine is paired, and how far a pairing in progress got.
     #[serde(rename = "hub.status")]
@@ -287,6 +301,7 @@ pub enum Reply {
     Claimed(DeviceCredential),
     RemoteAccess(RemoteAccess),
     Settings(Settings),
+    Log(LogTail),
     Session(SessionSummary),
     Sessions(Vec<SessionSummary>),
     Snapshot(SessionSnapshot),

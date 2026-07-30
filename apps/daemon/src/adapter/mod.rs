@@ -14,13 +14,14 @@ pub mod stdio;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use genehub_proto::{
     Attachment, Capabilities, Catalog, PermissionOutcome, ProbeState, SessionEvent,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 
 use crate::config::ProviderConfig;
 
@@ -103,6 +104,127 @@ pub trait AgentSession: Send + Sync {
 
 pub type SharedAdapter = Arc<dyn AgentAdapter>;
 
+/// The last thing a child process said, kept for whoever has to read the failure.
+///
+/// Every adapter here starts a program somebody else wrote, and when one of those
+/// exits, its own account of why is on its stderr. That used to go to
+/// `tracing::debug!` — below the default filter — so the message a user saw was
+/// "Claude Code stopped unexpectedly." and the sentence that said why was
+/// discarded by us before anyone could read it.
+///
+/// Two destinations, because they answer different questions: the log file keeps
+/// everything for afterwards, and the last few lines go into the failure itself,
+/// where the person is already looking.
+#[derive(Default)]
+pub struct Chatter {
+    lines: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    /// Held so a failure can wait for the readers to finish. A process that dies
+    /// on its first line dies faster than we can read that line, and the line is
+    /// the whole reason anyone opened the error.
+    readers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl Chatter {
+    /// Enough lines to hold a stack trace, few enough that a chatty server does
+    /// not become the memory of this process.
+    const LINES: usize = 20;
+
+    /// Reads a pipe, keeping the last lines and logging every one of them.
+    ///
+    /// `target` names the program in the log, so a file with three agents in it
+    /// can still be read.
+    pub async fn watch<R>(&self, target: &'static str, from: Option<R>)
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    {
+        let Some(from) = from else { return };
+        let lines = self.lines.clone();
+        let reader = tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut reader = tokio::io::BufReader::new(from).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                // At info, not debug. The default filter is info, and a
+                // diagnostic nobody can see without setting an environment
+                // variable first is not a diagnostic.
+                tracing::info!(target: "agent", "{target}: {line}");
+                let mut held = lines.lock().expect("the log is never poisoned");
+                if held.len() == Self::LINES {
+                    held.pop_front();
+                }
+                held.push_back(line);
+            }
+        });
+        self.readers.lock().await.push(reader);
+    }
+
+    /// Waits for the readers to reach the end of a closed pipe, which is the only
+    /// thing left to read once the child is gone. Bounded, because a child that
+    /// left its pipes to a grandchild would otherwise hold this open forever.
+    pub async fn settle(&self) {
+        let readers = std::mem::take(&mut *self.readers.lock().await);
+        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            for reader in readers {
+                let _ = reader.await;
+            }
+        })
+        .await;
+    }
+
+    /// Formatted to sit at the end of a sentence, and to disappear when there is
+    /// nothing to say rather than leave a trailing colon.
+    pub fn tail(&self) -> String {
+        let held = self.lines.lock().expect("the log is never poisoned");
+        if held.is_empty() {
+            return String::new();
+        }
+        format!(": {}", Vec::from_iter(held.iter().cloned()).join(" / "))
+    }
+}
+
+/// How a child process that stopped on its own should be described.
+///
+/// "Claude Code stopped unexpectedly." was the whole message, on every cause:
+/// a missing credential, a CLI too old for the flags we pass, a shim that could
+/// not find node. All three look identical to the person reading it, and none of
+/// them can be acted on. The exit code and the last lines it wrote are what
+/// separate them, and both are already in hand here.
+pub async fn stopped(label: &str, child: &Mutex<Option<tokio::process::Child>>, said: &Chatter) -> String {
+    said.settle().await;
+    let mut message = match exit_code(child).await {
+        Some(code) => format!("{label} 退出了（退出码 {code}）"),
+        None => format!("{label} 意外退出了"),
+    };
+    message.push_str(&said.tail());
+    if said.tail().is_empty() {
+        // Nothing said, and the reason has to be findable anyway. The log holds
+        // more than the last twenty lines, including everything before this turn.
+        message.push_str("，而且它什么都没说。日志里有它这一趟的全部输出。");
+    }
+    message
+}
+
+/// The exit code of a child that has already stopped writing.
+///
+/// Polled rather than awaited, and briefly: stdout closing is not quite the same
+/// as the process being gone, and a child that closed its pipes but kept running
+/// must not hold this lock — `stop()` needs it to kill the thing.
+async fn exit_code(child: &Mutex<Option<tokio::process::Child>>) -> Option<i32> {
+    for _ in 0..20 {
+        {
+            let mut held = child.lock().await;
+            match held.as_mut()?.try_wait() {
+                Ok(Some(status)) => return status.code(),
+                // Still there: give it a moment. The lock is released first,
+                // because `stop()` may be the reason it is about to go.
+                Ok(None) => {}
+                Err(_) => return None,
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    None
+}
+
 /// Finds an executable on `PATH`, honouring `PATHEXT` on Windows.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     if name.contains(std::path::MAIN_SEPARATOR) {
@@ -133,6 +255,54 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure a user actually saw was "Claude Code stopped unexpectedly." and
+    /// nothing else — on a missing credential, on a flag the CLI did not know, on a
+    /// shim that could not find node. This is the fix for that: the exit code and
+    /// what the process said have to be in the sentence.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_stops_is_described_with_its_code_and_its_last_words() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("echo 'Invalid API key · Please run /login' >&2; exit 1")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let said = Chatter::default();
+        said.watch("claude", child.stderr.take()).await;
+        let child = Mutex::new(Some(child));
+
+        let message = stopped("Claude Code", &child, &said).await;
+        assert!(
+            message.contains("Invalid API key"),
+            "the reason it left is missing from: {message}"
+        );
+        assert!(
+            message.contains("退出码 1"),
+            "the exit code is missing from: {message}"
+        );
+    }
+
+    /// Silence is a state too, and the message has to leave somewhere to look
+    /// rather than trailing off.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_says_nothing_still_points_at_the_log() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let said = Chatter::default();
+        said.watch("genet-agent", child.stderr.take()).await;
+        let child = Mutex::new(Some(child));
+
+        let message = stopped("GeneHub Agent", &child, &said).await;
+        assert!(message.contains("退出码 7"), "{message}");
+        assert!(message.contains("日志"), "nowhere to look next: {message}");
+    }
 
     #[test]
     fn absolute_paths_resolve_only_when_they_exist() {

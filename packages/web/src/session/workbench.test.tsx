@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { useWorkbench } from "./store";
 import { Composer } from "./Composer";
 import { ComposerControls } from "./ComposerControls";
 import { PermissionCard } from "./Permission";
@@ -311,5 +312,26 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.getByTestId("tool-call")).toHaveTextContent("hello.txt");
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("写好了。");
     expect(state.status).toBe("idle");
+  });
+});
+
+describe("a turn that failed", () => {
+  /// A failure says one line. What the agent wrote on its way out, and everything
+  /// before it, is in the log — which used to be both unreachable and unmentioned,
+  /// so "Claude Code stopped unexpectedly." was the end of the road.
+  it("offers the log, and opens it in a tab", async () => {
+    useWorkbench.setState({ tabs: [], activeTabId: null });
+    const state = apply(emptyTimeline(), {
+      type: "turnFailed",
+      turnId: "t1",
+      error: { code: "agentCrashed", message: "Claude Code 退出了（退出码 1）: Invalid API key" },
+    });
+
+    render(<TimelineView state={state} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Invalid API key");
+
+    await userEvent.click(screen.getByText("查看日志"));
+
+    expect(useWorkbench.getState().tabs.map((tab) => tab.kind)).toContain("logs");
   });
 });

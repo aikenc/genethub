@@ -101,3 +101,19 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash
 ```
 
 `extends` 目前只认 `"acp"`；`command` 是完整的可执行文件 + 参数列表。凭证同样是那个 CLI 自己的事——不在这份配置里出现，也不会出现。
+
+---
+
+## 8. 第三方 CLI 起不来的时候
+
+外部 CLI 退出的原因只有它自己知道，而它说这句话的地方是 stderr。以前那些行走 `tracing::debug!`（默认级别 `info`，即被丢弃），用户看到的是一句「Claude Code stopped unexpectedly.」——凭据没配、CLI 版本不认识我们传的参数、Windows 上的 shim 找不到 node，三种情况长得一模一样，而且没有一种能据此往下走。
+
+现在每个适配器都留着子进程的最后二十行（`adapter::Chatter`），并且：
+
+| 情形 | 用户看到的 |
+|------|-----------|
+| 进程中途死了 | `Claude Code 退出了（退出码 1）: <它自己说的话>` |
+| 进程已经死了，提示写不进去 | 同一句话，而不是 `Broken pipe (os error 32)` |
+| 它一句话都没说 | `…（退出码 7），而且它什么都没说。日志里有它这一趟的全部输出。` |
+
+每一行同时进日志（`target: "agent"`），所以失败消息里的二十行不够时，剩下的都在 `<data>/logs/daemon.log`。

@@ -258,6 +258,34 @@ pub struct ProviderInfo {
     pub problem: Option<String>,
 }
 
+/// The end of one log file, and where it came from.
+///
+/// The path is included even though the text makes it redundant on the machine
+/// itself: on the desktop it is what someone attaches to a bug report or opens in
+/// an editor, and knowing which file they are reading matters when there are
+/// several.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct LogTail {
+    pub name: String,
+    pub path: String,
+    pub text: String,
+    /// Every log in the directory, newest first, with its size in bytes.
+    pub files: Vec<LogEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct LogEntry {
+    pub name: String,
+    /// A number on the wire. Declared as one here too: the generated `bigint`
+    /// would be a type that never matches what `JSON.parse` actually produces.
+    #[ts(type = "number")]
+    pub bytes: u64,
+}
+
 /// Where this machine stands with a Hub.
 ///
 /// One shape covers every stage of pairing so the UI polls a single call and

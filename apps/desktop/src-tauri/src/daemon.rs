@@ -204,16 +204,33 @@ impl Daemon {
         }
     }
 
-    /// Where the daemon's own complaints go. Missing is not worth failing over:
-    /// no log is better than no daemon.
+    /// Where anything the daemon says outside its own log goes.
+    ///
+    /// The daemon writes `logs/daemon.log` itself, and does not also write to a
+    /// piped stderr, so this file holds only the things that happen before or
+    /// outside logging: a panic, a loader error, a data directory it cannot
+    /// create. Those are precisely the failures where the log is empty.
+    ///
+    /// Truncated per start, because it is about this launch. Missing is not worth
+    /// failing over: no log is better than no daemon.
     fn log(&self) -> Option<std::fs::File> {
-        std::fs::File::create(self.data_dir.join("daemon.log")).ok()
+        let dir = self.data_dir.join("logs");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::File::create(dir.join("startup.log")).ok()
     }
 
     /// The last thing the daemon said before it gave up, if it said anything.
+    ///
+    /// Both files: a process that died before logging left its reason on stderr,
+    /// and one that died after left it in the log.
     fn last_words(&self) -> Option<String> {
-        let text = std::fs::read_to_string(self.data_dir.join("daemon.log")).ok()?;
-        let tail: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+        let dir = self.data_dir.join("logs");
+        let text = [dir.join("startup.log"), dir.join("daemon.log")]
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tail: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
         let tail = tail[tail.len().saturating_sub(3)..].join("; ");
         (!tail.is_empty()).then_some(tail)
     }

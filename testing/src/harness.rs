@@ -84,6 +84,13 @@ pub struct Journey {
 }
 
 impl Journey {
+    /// Where the daemon keeps its logs, for tests about reading them back.
+    pub fn logs_dir(&self) -> PathBuf {
+        self.data_dir.join("logs")
+    }
+}
+
+impl Journey {
     pub async fn start() -> Result<Self> {
         Journey::start_with(Mode::from_env(), |_| {}).await
     }

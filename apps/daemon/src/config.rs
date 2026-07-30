@@ -73,10 +73,25 @@ impl Paths {
         self.root.join("sessions")
     }
 
+    /// One directory for everything anyone would ask for when something is
+    /// wrong: the daemon's log, and whatever the desktop shell writes.
+    ///
+    /// Its own directory rather than files loose in the data dir, because the
+    /// thing the tray opens has to be a place a person can look at without
+    /// picking their way past session state and a lock file.
+    pub fn logs_dir(&self) -> PathBuf {
+        self.root.join("logs")
+    }
+
+    pub fn log_file(&self) -> PathBuf {
+        self.logs_dir().join("daemon.log")
+    }
+
     pub fn ensure(&self) -> Result<()> {
         fs::create_dir_all(&self.root)
             .with_context(|| format!("creating data directory {}", self.root.display()))?;
         fs::create_dir_all(self.sessions_dir())?;
+        fs::create_dir_all(self.logs_dir())?;
         Ok(())
     }
 }

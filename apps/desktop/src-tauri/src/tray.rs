@@ -39,6 +39,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     // reachable only through a link this makes, so it is the one way back
     // after a browser is lost (`desktop-client.md` §6).
     let claim = MenuItem::with_id(app, "claim", "重新生成认领链接", true, None::<&str>)?;
+    // In the tray rather than only in the workbench: the times someone wants the
+    // logs include the times the window will not show anything useful.
+    let logs = MenuItem::with_id(app, "logs", "打开日志目录", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 GeneHub", true, None::<&str>)?;
 
     let menu = Menu::with_items(
@@ -49,6 +52,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             &status,
             &pair,
             &claim,
+            &logs,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -71,6 +75,14 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             "claim" => {
                 show_main_window(app);
                 let _ = app.emit_to("main", "genehub://claim", ());
+            }
+            "logs" => {
+                let dir = crate::logs_dir(app);
+                let _ = std::fs::create_dir_all(&dir);
+                use tauri_plugin_opener::OpenerExt;
+                let _ = app
+                    .opener()
+                    .open_path(dir.to_string_lossy().to_string(), None::<&str>);
             }
             "quit" => {
                 // Stopping the daemon before exiting is the whole contract of the

@@ -76,6 +76,31 @@ fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Reveals the log directory in the file manager.
+///
+/// The tray has this too, and for the same reason: when something is wrong the
+/// files are what someone attaches to a report, and asking a person to find
+/// `%APPDATA%\\GeneHub\\logs` by hand is asking them not to bother.
+#[tauri::command]
+fn open_logs(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = logs_dir(&app);
+    let _ = std::fs::create_dir_all(&dir);
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+/// Where both halves write. Derived rather than remembered so the tray can ask
+/// for it before, and after, the daemon has managed to start.
+pub fn logs_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> PathBuf {
+    use tauri::Manager;
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("GeneHub").join("logs"))
+        .unwrap_or_else(|_| PathBuf::from("logs"))
+}
+
 /// Opens a link in a window of this app.
 ///
 /// Signing in happens here rather than in the system browser. Being bounced out
@@ -175,7 +200,11 @@ pub fn run() {
             let handle = app.handle();
             let data_dir = app.path().app_data_dir()?.join("GeneHub");
             let _ = std::fs::create_dir_all(&data_dir);
-            log_to(data_dir.join("shell.log"));
+            // The same `logs/` the daemon writes into. One place to open, and one
+            // place to attach to a report: the shell's account of the startup and
+            // the daemon's account of the rest belong next to each other.
+            let _ = std::fs::create_dir_all(data_dir.join("logs"));
+            log_to(data_dir.join("logs").join("shell.log"));
             tracing_line(&format!("数据目录 {}", data_dir.display()));
 
             let name = if cfg!(windows) {
@@ -254,6 +283,7 @@ pub fn run() {
             restart_daemon,
             open_external,
             open_window,
+            open_logs,
             notify,
             pick_directory
         ])

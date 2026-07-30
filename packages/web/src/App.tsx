@@ -5,6 +5,7 @@ import { claimMachine, deviceName } from "./devices/claim";
 import { DevicesPanel } from "./devices/DevicesPanel";
 import { FilesPanel } from "./files/FilesPanel";
 import { detectHost, type Endpoint, type Host } from "./host";
+import { LogsPanel } from "./logs/LogsPanel";
 import { Client } from "./protocol/client";
 import { SettingsPanel } from "./settings/SettingsPanel";
 import { Composer } from "./session/Composer";
@@ -227,9 +228,19 @@ export function App({
         {workbench.notice ? (
           <p
             role="alert"
-            className="shrink-0 border-b border-line bg-raised px-3 py-1.5 text-xs text-danger"
+            className="flex shrink-0 items-center gap-2 border-b border-line bg-raised px-3 py-1.5 text-xs text-danger"
           >
-            {workbench.notice}
+            <span className="min-w-0 flex-1">{workbench.notice}</span>
+            {/* Every error gets a way to the log. What a failure can say in one
+                line is rarely the whole story, and the rest is already written
+                down — it was just somewhere nobody could reach. */}
+            <button
+              type="button"
+              className="shrink-0 underline decoration-dotted hover:text-fg"
+              onClick={() => workbench.openTab("logs")}
+            >
+              查看日志
+            </button>
           </p>
         ) : null}
 
@@ -306,6 +317,11 @@ export function App({
             {kind === "settings" ? (
               <div className="min-h-0 flex-1 overflow-y-auto">
                 <SettingsPanel host={host} endpoint={endpoint} />
+              </div>
+            ) : null}
+            {kind === "logs" ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <LogsPanel onOpenDirectory={host.openLogs} />
               </div>
             ) : null}
             {kind === "devices" ? (

@@ -23,7 +23,9 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
-use super::{find_executable, AgentAdapter, AgentSession, PromptInput, ProviderMap, SessionConfig};
+use super::{
+    find_executable, AgentAdapter, AgentSession, Chatter, PromptInput, ProviderMap, SessionConfig,
+};
 
 const EVENT_CAPACITY: usize = 1024;
 const PROTOCOL_VERSION: i64 = 1;
@@ -149,16 +151,15 @@ impl AgentAdapter for AcpAdapter {
         let stderr = child.stderr.take().expect("stderr was piped");
         let stdin = child.stdin.take().expect("stdin was piped");
 
+        let child = Arc::new(Mutex::new(Some(child)));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let turn = Arc::new(Mutex::new(TurnState::default()));
 
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "acp-agent", "{line}");
-            }
-        });
+        // Kept: a bridge that exits explains itself on stderr, and that used to
+        // be logged below the default filter and then thrown away.
+        let said = Arc::new(Chatter::default());
+        said.watch("acp", Some(stderr)).await;
 
         let session = AcpSession {
             stdin: Mutex::new(stdin),
@@ -166,7 +167,9 @@ impl AgentAdapter for AcpAdapter {
             pending: pending.clone(),
             turn: turn.clone(),
             next_id: AtomicI64::new(1),
-            child: Mutex::new(Some(child)),
+            child: child.clone(),
+            said: said.clone(),
+            label: self.label.clone(),
             acp_session: Mutex::new(None),
         };
 
@@ -203,7 +206,11 @@ struct AcpSession {
     pending: PendingMap,
     turn: Arc<Mutex<TurnState>>,
     next_id: AtomicI64,
-    child: Mutex<Option<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
+    /// What the bridge said on its way out, for the turn that was waiting on it.
+    said: Arc<Chatter>,
+    /// The agent's name as the user knows it, for the same failure.
+    label: String,
     acp_session: Mutex<Option<String>>,
 }
 
@@ -305,6 +312,9 @@ impl AgentSession for AcpSession {
         .await?;
 
         let completed_turn = turn_id.clone();
+        let child = self.child.clone();
+        let said = self.said.clone();
+        let label = self.label.clone();
         tokio::spawn(async move {
             let outcome = rx.await;
             let mut state = turn_state.lock().await;
@@ -337,11 +347,14 @@ impl AgentSession for AcpSession {
                         message,
                     },
                 },
+                // The bridge went away mid-turn. Its exit code and last words are
+                // the difference between "the CLI is not set up" and "we passed
+                // it a flag it does not know", which read identically otherwise.
                 Err(_) => SessionEvent::TurnFailed {
                     turn_id: completed_turn,
                     error: TurnError {
                         code: TurnErrorCode::AgentCrashed,
-                        message: "The agent process stopped unexpectedly.".into(),
+                        message: super::stopped(&label, &child, &said).await,
                     },
                 },
             };

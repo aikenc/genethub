@@ -9,16 +9,22 @@ use genet_daemon::Daemon;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // The data directory has to be known before logging starts, because the log
+    // goes in it. Anything that fails in between is on stderr, which the desktop
+    // shell keeps in the same directory.
+    let paths = Paths::discover()?;
+    paths.ensure()?;
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("GENEHUB_LOG")
                 .unwrap_or_else(|_| "info".into()),
         )
-        .with_writer(std::io::stderr)
+        .with_writer(Tee::new(genet_daemon::logs::LogFile::open(
+            paths.log_file(),
+        )))
         .init();
-
-    let paths = Paths::discover()?;
-    paths.ensure()?;
+    tracing::info!("log: {}", paths.log_file().display());
     let _lock = SingleInstance::acquire(&paths)?;
 
     let daemon = Daemon::start(paths).await?;
@@ -45,6 +51,57 @@ async fn main() -> Result<()> {
     tracing::info!("shutting down");
     daemon.shutdown().await;
     Ok(())
+}
+
+/// Writes to the log file, and to stderr when someone is watching it.
+///
+/// The file is the destination that matters: it is what a client on another
+/// device can be handed (`log.tail`), and what survives the process.
+///
+/// stderr is added only when it is a terminal, i.e. when a person ran this and is
+/// reading along. When it is a pipe, the far end is the desktop shell or a service
+/// manager, which is already keeping the file — and writing both would put two
+/// copies of every line in the same directory.
+#[derive(Clone)]
+struct Tee {
+    file: genet_daemon::logs::LogFile,
+    watched: bool,
+}
+
+impl Tee {
+    fn new(file: genet_daemon::logs::LogFile) -> Self {
+        use std::io::IsTerminal;
+        Tee {
+            file,
+            watched: std::io::stderr().is_terminal(),
+        }
+    }
+}
+
+impl Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.watched {
+            // Ignored on purpose: a stderr that has gone away must not stop the
+            // file from being written.
+            let _ = std::io::stderr().write_all(buf);
+        }
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.watched {
+            let _ = std::io::stderr().flush();
+        }
+        self.file.flush()
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Tee {
+    type Writer = Tee;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
 }
 
 async fn wait_for_signal() {

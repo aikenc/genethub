@@ -21,7 +21,9 @@ use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, Mutex};
 
-use super::{find_executable, AgentAdapter, AgentSession, PromptInput, ProviderMap, SessionConfig};
+use super::{
+    find_executable, AgentAdapter, AgentSession, Chatter, PromptInput, ProviderMap, SessionConfig,
+};
 
 const BINARY: &str = "opencode";
 const EVENT_CAPACITY: usize = 1024;
@@ -91,8 +93,8 @@ impl AgentAdapter for OpenCodeAdapter {
         // is the only account of why a start failed, and a pipe nobody reads
         // eventually fills and stops the process that is writing into it.
         let chatter = Chatter::default();
-        chatter.watch(child.stdout.take()).await;
-        chatter.watch(child.stderr.take()).await;
+        chatter.watch("opencode", child.stdout.take()).await;
+        chatter.watch("opencode", child.stderr.take()).await;
 
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
@@ -366,65 +368,6 @@ async fn wait_until_ready(
     ))
 }
 
-/// The last thing the child said, kept for whoever has to read the failure.
-#[derive(Default)]
-struct Chatter {
-    lines: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
-    /// Held so a failure can wait for the readers to finish. A process that dies
-    /// on its first line dies faster than we can read that line, and the line is
-    /// the whole reason anyone opened the error.
-    readers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
-}
-
-impl Chatter {
-    /// Enough lines to hold a stack trace, few enough that a chatty server does
-    /// not become the memory of this process.
-    const LINES: usize = 20;
-
-    async fn watch<R>(&self, from: Option<R>)
-    where
-        R: tokio::io::AsyncRead + Unpin + Send + 'static,
-    {
-        let Some(from) = from else { return };
-        let lines = self.lines.clone();
-        let reader = tokio::spawn(async move {
-            use tokio::io::AsyncBufReadExt;
-            let mut reader = tokio::io::BufReader::new(from).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let mut held = lines.lock().expect("the log is never poisoned");
-                if held.len() == Self::LINES {
-                    held.pop_front();
-                }
-                held.push_back(line);
-            }
-        });
-        self.readers.lock().await.push(reader);
-    }
-
-    /// Waits for the readers to reach the end of a closed pipe, which is the only
-    /// thing left to read once the child is gone. Bounded, because a child that
-    /// left its pipes to a grandchild would otherwise hold this open forever.
-    async fn settle(&self) {
-        let readers = std::mem::take(&mut *self.readers.lock().await);
-        let _ = tokio::time::timeout(Duration::from_secs(1), async {
-            for reader in readers {
-                let _ = reader.await;
-            }
-        })
-        .await;
-    }
-
-    /// Formatted to sit at the end of a sentence, and to disappear when there is
-    /// nothing to say rather than leave a trailing colon.
-    fn tail(&self) -> String {
-        let held = self.lines.lock().expect("the log is never poisoned");
-        if held.is_empty() {
-            return String::new();
-        }
-        format!(": {}", Vec::from_iter(held.iter().cloned()).join(" / "))
-    }
-}
-
 #[cfg(test)]
 mod start_tests {
     use super::*;
@@ -441,8 +384,8 @@ mod start_tests {
             .spawn()
             .expect("sh runs");
         let chatter = Chatter::default();
-        chatter.watch(child.stdout.take()).await;
-        chatter.watch(child.stderr.take()).await;
+        chatter.watch("opencode", child.stdout.take()).await;
+        chatter.watch("opencode", child.stderr.take()).await;
 
         let started = std::time::Instant::now();
         let error = wait_until_ready(

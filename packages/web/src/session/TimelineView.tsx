@@ -2,13 +2,34 @@ import type { TimelineItem } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 
 import { attachmentPreviewUrl } from "./attachments";
-import { ToolCallView } from "./ToolCall";
+import { useWorkbench } from "./store";
 import type { TimelineState } from "./timeline";
+import { ToolCallView } from "./ToolCall";
 
 // Named for the file rather than for the thing it draws, because `timeline.ts`
 // next to it holds the state: two modules whose names differ only in casing are
 // the same module on Windows and on a stock macOS disk, and the import that
 // resolves to the wrong one of them fails nowhere except on those machines.
+/**
+ * The way from a failure to the rest of the story.
+ *
+ * A turn that failed says one line; what the agent wrote on its way out, and
+ * everything before it, is in the log. Reachable from here rather than described
+ * as a path, because the reader may be on a phone.
+ */
+function LogLink() {
+  const openTab = useWorkbench((state) => state.openTab);
+  return (
+    <button
+      type="button"
+      className="mt-1 text-xs underline decoration-dotted hover:text-fg"
+      onClick={() => openTab("logs")}
+    >
+      查看日志
+    </button>
+  );
+}
+
 export function TimelineView({ state }: { state: TimelineState }) {
   const bottom = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -36,12 +57,13 @@ export function TimelineView({ state }: { state: TimelineState }) {
       ))}
 
       {state.lastError ? (
-        <p
+        <div
           className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-danger"
           role="alert"
         >
-          {state.lastError.message}
-        </p>
+          <p>{state.lastError.message}</p>
+          <LogLink />
+        </div>
       ) : null}
 
       <div ref={bottom} />
@@ -110,9 +132,10 @@ function Item({ item }: { item: TimelineItem }) {
 
     case "error":
       return (
-        <p className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-danger">
-          {item.message}
-        </p>
+        <div className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-danger">
+          <p>{item.message}</p>
+          <LogLink />
+        </div>
       );
   }
 }

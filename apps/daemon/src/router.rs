@@ -304,6 +304,25 @@ pub async fn handle(
             Err(error) => failed(error),
         },
 
+        Request::LogTail { name } => {
+            let dir = state.paths.logs_dir();
+            // The daemon's own log by default: nearly every error someone opens
+            // this for is the daemon's or an agent's, and both land there.
+            let name = name.unwrap_or_else(|| "daemon.log".to_string());
+            match crate::logs::tail(&dir, &name, crate::logs::DEFAULT_TAIL_BYTES) {
+                Ok(text) => Handled::ok(Reply::Log(genehub_proto::LogTail {
+                    path: dir.join(&name).display().to_string(),
+                    name,
+                    text,
+                    files: crate::logs::list(&dir)
+                        .into_iter()
+                        .map(|(name, bytes)| genehub_proto::LogEntry { name, bytes })
+                        .collect(),
+                })),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::SettingsForgetProvider { provider_id } => {
             match state.forget_provider(&provider_id).await {
                 Ok(settings) => Handled::ok(Reply::Settings(settings)),

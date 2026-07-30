@@ -153,8 +153,10 @@ async fn interrupting_claude_code_ends_the_turn_as_canceled() {
     // is silently swallowed rather than queued (confirmed by hand against
     // the real CLI: a request 3s in is honored every time, one sent at t=0
     // is not). Give it a moment to actually be generating before we ask it
-    // to stop.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // to stop — three seconds, which is the figure that was measured, not the
+    // two it used to wait: at two it is occasionally swallowed and the turn runs
+    // to completion, failing this for a reason that has nothing to do with us.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     journey
         .client
         .call(Request::SessionInterrupt {

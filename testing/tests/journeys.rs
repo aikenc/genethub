@@ -1867,3 +1867,57 @@ async fn tool_calls_move_through_their_states_rather_than_appearing_finished() {
 
     journey.finish().await;
 }
+
+/// A log has to be reachable from wherever the person is, which for a phone means
+/// over the connection: a path under `%APPDATA%` is not something they can open.
+/// Until now the only account of an agent crash was one sentence with no reason in
+/// it, and the file that had the reason was unreachable and unmentioned.
+#[tokio::test]
+async fn the_log_can_be_read_from_whatever_device_saw_the_error() {
+    let journey = Journey::start().await.expect("journey starts");
+
+    // The daemon logs to this file; in-process tests do not install a subscriber,
+    // so the line under test is the serving, not the writing.
+    std::fs::create_dir_all(journey.logs_dir()).expect("the log directory is there");
+    std::fs::write(
+        journey.logs_dir().join("daemon.log"),
+        "INFO listening\nWARN claude: Invalid API key\n",
+    )
+    .expect("a log to read");
+
+    let reply = journey
+        .client
+        .call(Request::LogTail { name: None })
+        .await
+        .expect("the log comes back");
+    let Reply::Log(log) = reply else {
+        panic!("not a log: {reply:?}");
+    };
+    assert!(
+        log.text.contains("Invalid API key"),
+        "the log is missing what it was opened for: {}",
+        log.text
+    );
+    assert_eq!(log.name, "daemon.log");
+    assert!(
+        log.files.iter().any(|file| file.name == "daemon.log"),
+        "the listing does not mention the file it just served"
+    );
+}
+
+/// Anyone paired with this machine can ask for a log. That is a diagnostic, not a
+/// way to read the disk, and the difference is one `..` away.
+#[tokio::test]
+async fn a_log_request_cannot_reach_outside_the_log_directory() {
+    let journey = Journey::start().await.expect("journey starts");
+
+    for attempt in ["../config.json", "../../.ssh/id_rsa"] {
+        let refused = journey
+            .client
+            .call(Request::LogTail {
+                name: Some(attempt.into()),
+            })
+            .await;
+        assert!(refused.is_err(), "{attempt} was served");
+    }
+}

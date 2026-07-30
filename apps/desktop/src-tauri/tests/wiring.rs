@@ -70,6 +70,7 @@ fn every_command_the_workbench_calls_exists_here() {
         "notify",
         "open_external",
         "open_window",
+        "open_logs",
         "pick_directory",
     ] {
         assert!(
@@ -212,4 +213,32 @@ fn the_bundle_carries_the_daemon_and_the_agent() {
             "{icon} is listed but missing"
         );
     }
+}
+
+
+/// The logs are what someone attaches to a report, and the tray is where they look
+/// when the window has nothing useful to show. Both halves write into one
+/// directory so that opening it shows the whole story rather than one side of it.
+#[test]
+fn the_logs_are_one_directory_the_tray_can_open() {
+    let shell = std::fs::read_to_string(repo().join("apps/desktop/src-tauri/src/lib.rs"))
+        .expect("read the shell");
+    let tray = std::fs::read_to_string(repo().join("apps/desktop/src-tauri/src/tray.rs"))
+        .expect("read the tray");
+    let supervisor = std::fs::read_to_string(repo().join("apps/desktop/src-tauri/src/daemon.rs"))
+        .expect("read the supervisor");
+
+    assert!(
+        tray.contains("打开日志目录"),
+        "the tray has no way to the logs"
+    );
+    assert!(
+        shell.contains(r#"join("logs").join("shell.log")"#),
+        "the shell writes its log outside the directory the tray opens"
+    );
+    assert!(
+        supervisor.contains("startup.log"),
+        "the daemon's stderr and its own log file would land on the same path, \
+         and the shell truncates on every start"
+    );
 }

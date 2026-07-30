@@ -74,7 +74,7 @@ use tokio::sync::{broadcast, Mutex};
 
 use super::stdio::write_json_line;
 use super::{
-    find_executable, AgentAdapter, AgentSession, PersistHandle, PromptInput, ProviderMap,
+    find_executable, AgentAdapter, AgentSession, Chatter, PersistHandle, PromptInput, ProviderMap,
     SessionConfig,
 };
 
@@ -88,11 +88,29 @@ const EVENT_CAPACITY: usize = 1024;
 const MODE_DEFAULT: &str = "default";
 const MODE_ACCEPT_EDITS: &str = "acceptEdits";
 
-pub struct ClaudeAdapter;
+#[derive(Default)]
+pub struct ClaudeAdapter {
+    /// A CLI to run instead of the one on `PATH`.
+    ///
+    /// Only ever set by tests, and a field rather than an environment variable
+    /// because `PATH` is process-wide: a test that changed it would change it for
+    /// every other test running at the same time.
+    program: Option<PathBuf>,
+}
 
 impl ClaudeAdapter {
+    #[cfg(test)]
+    fn with_program(program: PathBuf) -> Self {
+        ClaudeAdapter {
+            program: Some(program),
+        }
+    }
+
     fn program(&self) -> Option<PathBuf> {
-        find_executable(BINARY)
+        match &self.program {
+            Some(explicit) => Some(explicit.clone()),
+            None => find_executable(BINARY),
+        }
     }
 }
 
@@ -191,13 +209,14 @@ impl AgentAdapter for ClaudeAdapter {
         let stderr = child.stderr.take().expect("stderr was piped");
         let stdin = child.stdin.take().expect("stdin was piped");
 
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "claude-agent", "{line}");
-            }
-        });
+        // Kept, not dropped. When this CLI exits on its own, its stderr is the
+        // only account of why — and it used to go to `tracing::debug!`, under the
+        // default filter, which is how "Claude Code stopped unexpectedly." became
+        // the entire error message.
+        let said = Arc::new(Chatter::default());
+        said.watch("claude", Some(stderr)).await;
 
+        let child = Arc::new(Mutex::new(Some(child)));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let turn = Arc::new(Mutex::new(TurnState::default()));
         // A plain `std::sync::Mutex`, not `tokio::sync::Mutex`: `persistence()`
@@ -226,7 +245,8 @@ impl AgentAdapter for ClaudeAdapter {
             stdin: stdin.clone(),
             events: events.clone(),
             turn: turn.clone(),
-            child: Mutex::new(Some(child)),
+            child: child.clone(),
+            said: said.clone(),
             native_session_id: native_session_id.clone(),
             mode: mode.clone(),
             next_control_id: AtomicU64::new(1),
@@ -240,7 +260,15 @@ impl AgentAdapter for ClaudeAdapter {
             always_allow,
             pending_tools,
         };
-        tokio::spawn(read_loop(stdout, events, turn, native_session_id, control));
+        tokio::spawn(read_loop(
+            stdout,
+            events,
+            turn,
+            native_session_id,
+            control,
+            child,
+            said,
+        ));
 
         Ok(Box::new(session))
     }
@@ -288,7 +316,10 @@ struct ClaudeSession {
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
-    child: Mutex<Option<Child>>,
+    /// Shared with `read_loop`, which needs the exit code to explain a crash.
+    child: Arc<Mutex<Option<Child>>>,
+    /// What the CLI said, for a prompt that cannot be written because it is gone.
+    said: Arc<Chatter>,
     native_session_id: Arc<std::sync::Mutex<Option<String>>>,
     mode: Arc<Mutex<String>>,
     next_control_id: AtomicU64,
@@ -340,14 +371,32 @@ impl AgentSession for ClaudeSession {
             turn_id: turn_id.clone(),
         });
 
-        self.write(json!({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": user_content_blocks(&input),
-            },
-        }))
-        .await?;
+        // A CLI that already exited leaves a closed pipe, and the write fails with
+        // "Broken pipe (os error 32)" — which is as much use to the reader as
+        // "stopped unexpectedly" was. What it said before it closed is the answer,
+        // so this failure gets the same treatment as a crash mid-turn.
+        if let Err(broken) = self
+            .write(json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": user_content_blocks(&input),
+                },
+            }))
+            .await
+        {
+            let why = super::stopped("Claude Code", &self.child, &self.said).await;
+            tracing::warn!("{why} (writing the prompt failed: {broken})");
+            self.turn.lock().await.id = None;
+            let _ = self.events.send(SessionEvent::TurnFailed {
+                turn_id: turn_id.clone(),
+                error: TurnError {
+                    code: TurnErrorCode::AgentCrashed,
+                    message: why.clone(),
+                },
+            });
+            anyhow::bail!(why);
+        }
         Ok(turn_id)
     }
 
@@ -440,6 +489,8 @@ async fn read_loop(
     turn: Arc<Mutex<TurnState>>,
     native_session_id: Arc<std::sync::Mutex<Option<String>>>,
     control: ControlState,
+    child: Arc<Mutex<Option<Child>>>,
+    said: Arc<Chatter>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     loop {
@@ -492,13 +543,17 @@ async fn read_loop(
         }
     }
 
+    // Gathered before the lock on the turn: it waits on the process and on the
+    // stderr readers, and holding the turn through that would stall an interrupt.
+    let why = super::stopped("Claude Code", &child, &said).await;
+    tracing::warn!("{why}");
     let mut state = turn.lock().await;
     if let Some(turn_id) = state.id.take() {
         let _ = events.send(SessionEvent::TurnFailed {
             turn_id,
             error: TurnError {
                 code: TurnErrorCode::AgentCrashed,
-                message: "Claude Code stopped unexpectedly.".into(),
+                message: why,
             },
         });
     }
@@ -953,6 +1008,73 @@ mod tests {
             id: Some("t1".into()),
             ..TurnState::default()
         }
+    }
+
+    /// The whole reason this file changed: a CLI that will not run said so on its
+    /// stderr, and we logged that below the default filter and reported
+    /// "Claude Code stopped unexpectedly." — which is true of every cause and
+    /// useful for none of them.
+    ///
+    /// A stand-in CLI rather than the real one, because the failure being covered
+    /// is "the CLI refuses to start", and a working install cannot produce it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cli_that_refuses_to_run_reaches_the_user_with_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("claude");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'Invalid API key · Please run /login' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let adapter = ClaudeAdapter::with_program(fake);
+        let session = adapter
+            .start(SessionConfig {
+                session_id: "s1".into(),
+                cwd: dir.path().to_path_buf(),
+                model_id: None,
+                mode_id: None,
+                scratch_dir: dir.path().to_path_buf(),
+                providers: Default::default(),
+                resume: None,
+            })
+            .await
+            .expect("spawning a CLI that exits is still a spawn that worked");
+
+        let mut events = session.events();
+        // Two ways this surfaces, depending on how quickly the CLI went: the write
+        // hits a closed pipe, or it lands and the turn dies with the process. Both
+        // have to carry the reason, so either is accepted here and neither is
+        // allowed to be vague.
+        let message = match session
+            .send(PromptInput {
+                text: "hi".into(),
+                attachments: Vec::new(),
+            })
+            .await
+        {
+            Err(refused) => refused.to_string(),
+            Ok(_) => {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        if let Ok(SessionEvent::TurnFailed { error, .. }) = events.recv().await {
+                            return error.message;
+                        }
+                    }
+                })
+                .await
+                .expect("a CLI that exited does not leave the turn running forever")
+            }
+        };
+
+        assert!(
+            message.contains("Invalid API key"),
+            "the CLI said why it would not run and the user was not told: {message}"
+        );
+        assert!(message.contains("退出码 1"), "no exit code in: {message}");
     }
 
     fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
