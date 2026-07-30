@@ -208,6 +208,8 @@ agent_end                {messages}
 
 不能列出自己模型的地址(裸 llama.cpp、只转发 completions 的网关)照样能用:在设置里手写模型 id，写了就不问。
 
+拿不到列表的原因跟着 `models.json` 一起交给 agent(顶层 `problem` 字段)。因为"这一轮跑不起来"这句话是 agent 说的,而它自己只会说「去设置里添加 API Key」——对一个刚刚添加过、Key 被拒的人来说,这句话等于"这软件没注意到我做了什么"。拿我们的状态去指责用户,和把他的 DeepSeek Key 发给 OpenAI 是同一类错误。这个字段不落盘:它描述的是一次尝试,不是一项设置。
+
 ### 7.3 模型显示名是 `<Provider>:<model-id>`
 
 `DeepSeek:deepseek-v4-flash`,不是 `DeepSeek V4 Flash`。同时配了两把 Key 时，光看 `deepseek-chat` 说不出这一轮花谁的钱；而美化过的名字("DeepSeek V4 Flash")在别的任何地方都不能拿来输入。
