@@ -267,7 +267,8 @@ impl Daemon {
     }
 
     fn responding(&self) -> bool {
-        self.endpoint().is_some_and(|endpoint| health(endpoint.port))
+        self.endpoint()
+            .is_some_and(|endpoint| health(endpoint.port))
     }
 
     fn forget(&self) {

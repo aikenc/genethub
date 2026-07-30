@@ -81,6 +81,29 @@ jobs:
             exit "$status"
           fi
 
+      # An upgrade has to stop what it is about to overwrite, and a `taskkill` on
+      # a name nothing is called stops nothing — silently, with the same "Error
+      # opening file for writing" at the other end. v0.1.7 killed `GeneHub.exe`,
+      # the name in the Start menu, while the process is `genethub-desktop.exe`.
+      # Only the build knows which is which, so it is asked here rather than
+      # assumed in a comment.
+      - name: The installer stops processes that exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          names="$(grep -oE '/IM [A-Za-z0-9._-]+\.exe' apps/desktop/src-tauri/installer.nsh \
+            | sed 's|/IM ||' | sort -u)"
+          test -n "$names" || { echo "::error::the installer hook stops nothing"; exit 1; }
+          for name in $names; do
+            found="$(find apps/desktop/src-tauri/target/release target/release \
+              -maxdepth 1 -name "$name" -print -quit 2>/dev/null || true)"
+            test -n "$found" || {
+              echo "::error::installer.nsh stops '$name', but no executable of that name is built"
+              exit 1
+            }
+            echo "ok: $name -> $found"
+          done
+
       # Prove the binary that went into the installer runs on this platform at
       # all — a release that ships a daemon which cannot start is the failure
       # nobody notices until a user hits it (`docs/roadmap.md` MVP 验收清单).

@@ -117,13 +117,7 @@ fn the_windows_installer_stops_the_daemon_before_replacing_it() {
 #[test]
 fn the_installer_stops_the_supervisor_before_the_thing_it_supervises() {
     let script = installer_hook();
-    // Derived from the config, because that is what names the installed
-    // executable: renaming the product would otherwise leave the hook killing a
-    // process that no longer exists, silently.
-    let exe = format!(
-        "/IM {}.exe",
-        config()["productName"].as_str().expect("productName")
-    );
+    let exe = format!("/IM {}.exe", installed_exe());
     // The kill lines, not any mention of the names: the comment above them
     // explains this in prose and would otherwise decide the ordering.
     let app = script
@@ -152,6 +146,30 @@ fn the_installer_stops_the_supervisor_before_the_thing_it_supervises() {
         supervisor.contains("fn watch"),
         "nothing supervises the daemon any more, so this test's premise is stale"
     );
+}
+
+/// The name the installed executable actually has.
+///
+/// Not the product name. `productName` is what the Start menu and the installer
+/// title show; the process is named after the Cargo binary unless
+/// `mainBinaryName` overrides it. v0.1.7 shipped a hook that killed
+/// `GeneHub.exe`, which exists on no machine, and the upgrade failed with the
+/// same "Error opening file for writing" it was written to prevent — while a
+/// test asserting the product name passed.
+fn installed_exe() -> String {
+    if let Some(name) = config()["mainBinaryName"].as_str() {
+        return name.to_string();
+    }
+    let cargo = std::fs::read_to_string(repo().join("apps/desktop/src-tauri/Cargo.toml"))
+        .expect("read Cargo.toml");
+    let package = cargo.find("[package]").expect("no [package] section");
+    cargo[package..]
+        .lines()
+        .find_map(|line| line.strip_prefix("name = "))
+        .expect("the package has no name")
+        .trim()
+        .trim_matches('"')
+        .to_string()
 }
 
 fn installer_hook() -> String {

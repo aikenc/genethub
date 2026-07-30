@@ -91,13 +91,18 @@ fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
 fn open_window(app: tauri::AppHandle, url: String) -> Result<(), String> {
     let parsed = tauri::Url::parse(&url).map_err(|error| error.to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(format!("refusing to open {}: not a web address", parsed.scheme()));
+        return Err(format!(
+            "refusing to open {}: not a web address",
+            parsed.scheme()
+        ));
     }
 
     // Reused rather than stacked: pressing the button twice should bring the
     // window forward, not leave a pile of half-finished logins behind.
     if let Some(existing) = app.get_webview_window(LOGIN_WINDOW) {
-        existing.navigate(parsed).map_err(|error| error.to_string())?;
+        existing
+            .navigate(parsed)
+            .map_err(|error| error.to_string())?;
         let _ = existing.show();
         let _ = existing.set_focus();
         return Ok(());
@@ -188,7 +193,10 @@ pub fn run() {
                     .resource_dir()
                     .map(|dir| dir.join("bin").join(name))
                     .unwrap_or_else(|_| PathBuf::from(name));
-                tracing_line(&format!("找不到内置的 {name}，期望在 {}", expected.display()));
+                tracing_line(&format!(
+                    "找不到内置的 {name}，期望在 {}",
+                    expected.display()
+                ));
                 expected
             });
 
@@ -277,7 +285,11 @@ fn tracing_line(message: &str) {
     eprintln!("[genehub] {message}");
     let path = LOG.lock().expect("log lock").clone();
     if let Some(path) = path {
-        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+        {
             use std::io::Write;
             let _ = writeln!(file, "{message}");
         }

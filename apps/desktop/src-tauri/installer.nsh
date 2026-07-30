@@ -27,8 +27,12 @@
 !macro StopGeneHubProcesses
   DetailPrint "正在停止 GeneHub 后台进程…"
 
-  ; The supervisor first, or it revives what comes next.
-  nsExec::Exec 'taskkill /F /T /IM GeneHub.exe'
+  ; The supervisor first, or it revives what comes next. And it is called
+  ; `genethub-desktop.exe`, not `GeneHub.exe`: the product name is what the Start
+  ; menu shows, the Cargo binary name is what the process is called. v0.1.7
+  ; shipped a hook that killed the friendly name — a process no machine has — and
+  ; the install failed exactly as before.
+  nsExec::Exec 'taskkill /F /T /IM genethub-desktop.exe'
   Pop $0
   nsExec::Exec 'taskkill /F /T /IM genet-daemon.exe'
   Pop $0
