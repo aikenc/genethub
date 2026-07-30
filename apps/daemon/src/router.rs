@@ -65,6 +65,8 @@ fn failed(error: anyhow::Error) -> Handled {
     let message = format!("{error:#}");
     let code = if message.contains("escapes the workspace") {
         ErrorCode::Forbidden
+    } else if message.contains("already running") {
+        ErrorCode::Conflict
     } else if message.contains("no such") {
         ErrorCode::NotFound
     } else if message.contains("does not") || message.contains("not supported") {

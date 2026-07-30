@@ -176,13 +176,13 @@ async fn forward_events(
             }
             Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(missed)) => {
-                // Say so rather than leaving a hole: the client can resubscribe
-                // with its last sequence number and get a clean answer.
-                let _ = outbound.send(ServerFrame::Notice {
-                    level: NoticeLevel::Warning,
-                    message: format!(
-                        "{missed} events were dropped for {session_id}; reconnect to resync"
-                    ),
+                // Naming the session and the size of the hole, so the client can
+                // close it. This used to be a sentence in English asking the
+                // person to reconnect, which left the gap on screen for anyone
+                // who did not, and read as an error to everyone who did.
+                let _ = outbound.send(ServerFrame::Desync {
+                    session_id: session_id.clone(),
+                    missed,
                 });
             }
         }

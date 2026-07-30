@@ -140,6 +140,67 @@ describe("the daemon connection", () => {
     expect(resyncs).toEqual([{ replayed: [3], reset: false }]);
   });
 
+  /**
+   * The daemon dropping events used to arrive as a sentence in English asking
+   * the person to reconnect. Anyone who did not reconnect kept a timeline with a
+   * hole in it — a half-finished answer that never moved again — and anyone who
+   * did read it as something being broken.
+   */
+  it("closes a gap the daemon reports, without asking the person to do anything", async () => {
+    const { client, queue } = await connected();
+
+    const seen: number[] = [];
+    const resyncs: number[][] = [];
+    const notices: string[] = [];
+    client.onNotice((_level, message) => notices.push(message));
+    const subscribing = client.subscribe("s1", {
+      onEvent: (e) => seen.push(e.seq),
+      onResync: (_snapshot, replayed) => resyncs.push(replayed.map((e) => e.seq)),
+    });
+
+    const socket = queue.latest();
+    socket.reply(socket.lastOf("subscribe").id, {
+      type: "subscribed",
+      data: { snapshot: snapshot(), replayed: [], reset: false },
+    });
+    await subscribing;
+    socket.event("s1", event(1, "one"));
+    expect(seen).toEqual([1]);
+
+    // Events 2 and 3 never arrive; the daemon says so instead.
+    socket.deliver({ type: "desync", sessionId: "s1", missed: 2 });
+    await settle();
+
+    const asked = socket.lastOf("subscribe");
+    expect(asked.payload).toEqual({ sessionId: "s1", sinceSeq: 1 });
+
+    socket.reply(asked.id, {
+      type: "subscribed",
+      data: {
+        snapshot: snapshot(),
+        replayed: [event(2, "two"), event(3, "three")],
+        reset: false,
+      },
+    });
+    await settle();
+
+    expect(resyncs).toEqual([[2, 3]]);
+    expect(notices).toEqual([]);
+  });
+
+  /** A gap on a session nobody is watching is not worth a request. */
+  it("ignores a gap reported for a session it is not subscribed to", async () => {
+    const { client, queue } = await connected();
+    const socket = queue.latest();
+    const before = socket.sent.length;
+
+    socket.deliver({ type: "desync", sessionId: "someone-elses", missed: 9 });
+    await settle();
+
+    expect(socket.sent.length).toBe(before);
+    expect(client.connectionState).toBe("ready");
+  });
+
   it("passes on the daemon's admission that a gap was too old to fill", async () => {
     const { client, queue } = await connected();
     let resetSeen: boolean | null = null;

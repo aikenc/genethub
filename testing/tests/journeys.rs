@@ -264,6 +264,49 @@ async fn switching_the_thinking_mode_takes_effect_on_the_built_in_agent() {
     journey.finish().await;
 }
 
+/// Two windows on one session are two send buttons, and hiding one of them is
+/// not the same as there being one. A prompt that arrives mid-turn has to be
+/// refused: an agent handed a second question while answering the first does not
+/// fail, it interleaves the two into one confused conversation.
+#[tokio::test]
+async fn a_prompt_arriving_mid_turn_is_refused_rather_than_interleaved() {
+    let journey = Journey::start().await.expect("journey starts");
+    mock_only!(journey);
+
+    // Trickled, so the first turn is still open when the second prompt lands.
+    journey
+        .mock()
+        .reply_slowly(Turn::text("Working on it."), Duration::from_millis(120))
+        .await;
+
+    let session = journey.session("genet").await.expect("session opens");
+    journey.send(&session, "First.").await.expect("accepted");
+    let refused = journey
+        .send(&session, "Second.")
+        .await
+        .expect_err("the second prompt should not be accepted mid-turn");
+    let said = format!("{refused:#}");
+    assert!(
+        said.contains("conflict") || said.contains("already running"),
+        "refused, but for an unclear reason: {said}"
+    );
+
+    // And the refusal must not have cost the turn that was already running.
+    let events = journey.client.drain_turn().await.expect("the turn ends");
+    assert!(events.completed(), "the first turn did not finish");
+
+    // Once it is over the session takes prompts again: the guard is about
+    // overlap, not a session that stops working after one question.
+    journey.mock().reply(Turn::text("Ready.")).await;
+    journey
+        .send(&session, "Third.")
+        .await
+        .expect("a prompt after the turn ends is accepted");
+    journey.client.drain_turn().await.expect("the turn ends");
+
+    journey.finish().await;
+}
+
 #[tokio::test]
 async fn an_unknown_tool_still_renders_instead_of_disappearing() {
     let journey = Journey::start().await.expect("journey starts");

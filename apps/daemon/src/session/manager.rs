@@ -7,6 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
@@ -198,6 +199,12 @@ impl SessionManager {
         Ok((snapshot, events, reset, receiver))
     }
 
+    /// Hands a prompt to the agent, one turn at a time.
+    ///
+    /// The single-turn rule is enforced here rather than in the UI that hides the
+    /// send button, because two windows on the same session are two UIs, and an
+    /// agent that receives a second prompt mid-turn does not fail cleanly — it
+    /// interleaves two conversations into one.
     pub async fn send(
         &self,
         session_id: &str,
@@ -206,7 +213,34 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<String> {
         let live = self.live(session_id).await?;
-        self.ensure_started(&live, providers).await?;
+        {
+            let mut status = live.status.lock().await;
+            if *status == SessionStatus::Running {
+                return Err(anyhow!("a turn is already running in this session"));
+            }
+            // Claimed before the handover, not after it: a second send arriving
+            // while the first is still being handed over has to lose the race
+            // rather than join it.
+            *status = SessionStatus::Running;
+        }
+        let started = self.start_turn(&live, session_id, text, attachments, providers).await;
+        if started.is_err() {
+            // Nothing is running after all, and a session stuck on Running would
+            // refuse every later prompt.
+            *live.status.lock().await = SessionStatus::Idle;
+        }
+        started
+    }
+
+    async fn start_turn(
+        &self,
+        live: &Arc<Live>,
+        session_id: &str,
+        text: String,
+        attachments: Vec<Attachment>,
+        providers: &ProviderMap,
+    ) -> Result<String> {
+        self.ensure_started(live, providers).await?;
 
         // Record the prompt before handing it over: if the agent dies on the
         // next line, the user's question is still in the log.
@@ -260,7 +294,6 @@ impl SessionManager {
             item,
         })
         .await;
-        *live.status.lock().await = SessionStatus::Running;
         Ok(turn_id)
     }
 
@@ -462,6 +495,65 @@ impl Live {
     }
 }
 
+/// How long an approval may sit with nobody in a position to answer it.
+///
+/// Counted only while no client is subscribed. Someone looking at the approval
+/// card is allowed to think for as long as they like — denying a tool call under
+/// an attentive person's cursor is worse than waiting. But with every window
+/// closed the card is on no screen at all, and the turn, the agent process and
+/// whatever the tool was about to do all wait forever
+/// (`docs/testing.md` §4.2).
+const UNATTENDED_GRACE: Duration = Duration::from_secs(120);
+
+/// How often the grace is reconsidered. Coarse on purpose: this is a deadline,
+/// not a stopwatch, and it runs once per outstanding approval.
+const UNATTENDED_TICK: Duration = Duration::from_secs(5);
+
+/// Answers an approval that nobody can see, once waiting stops being plausible.
+///
+/// It answers through the same door a person does, so the agent hears one denial
+/// on the channel it is listening to and the timeline gets one resolution — the
+/// alternative is a state where the daemon believes it is resolved and the agent
+/// is still blocked.
+async fn deny_when_no_one_can_answer(live: Arc<Live>, request_id: String, grace: Duration) {
+    let mut unattended = Duration::ZERO;
+    loop {
+        tokio::time::sleep(UNATTENDED_TICK).await;
+
+        let outstanding = live
+            .pending_permissions
+            .lock()
+            .await
+            .iter()
+            .any(|request| request.id == request_id);
+        if !outstanding {
+            return;
+        }
+        if live.events.receiver_count() > 0 {
+            // Someone is watching, so the clock goes back to zero: a person who
+            // steps away for a minute and comes back should still find the card.
+            unattended = Duration::ZERO;
+            continue;
+        }
+        unattended += UNATTENDED_TICK;
+        if unattended < grace {
+            continue;
+        }
+
+        let agent = live.agent.lock().await;
+        let Some(agent) = agent.as_ref() else { return };
+        // The default is named in the outcome rather than implied, because the
+        // audit trail has to say what was applied and by whom.
+        let outcome = PermissionOutcome::TimedOut {
+            applied_default: "deny".into(),
+        };
+        if let Err(error) = agent.respond_permission(&request_id, outcome).await {
+            tracing::warn!("could not deny the unattended approval {request_id}: {error}");
+        }
+        return;
+    }
+}
+
 /// Folds adapter events into session state, then republishes them.
 async fn pump_events(
     live: Arc<Live>,
@@ -480,6 +572,14 @@ async fn pump_events(
         };
 
         apply(&live, &event).await;
+
+        if let SessionEvent::PermissionRequested { request } = &event {
+            tokio::spawn(deny_when_no_one_can_answer(
+                live.clone(),
+                request.id.clone(),
+                UNATTENDED_GRACE,
+            ));
+        }
 
         let settle = matches!(
             event,
@@ -789,6 +889,135 @@ mod tests {
             .unwrap()
             .pending_permissions
             .is_empty());
+    }
+
+    /// Stands in for an agent that has asked for approval and is waiting. It only
+    /// has to record the answer: whether the agent then denies or allows is the
+    /// adapter's business, tested where the adapters are.
+    struct WaitingAgent {
+        answers: Arc<Mutex<Vec<(String, PermissionOutcome)>>>,
+        events: broadcast::Sender<SessionEvent>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentSession for WaitingAgent {
+        fn events(&self) -> broadcast::Receiver<SessionEvent> {
+            self.events.subscribe()
+        }
+        async fn send(&self, _input: PromptInput) -> Result<String> {
+            Ok("t".into())
+        }
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn set_model(&self, _model_id: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn set_mode(&self, _mode_id: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn respond_permission(
+            &self,
+            request_id: &str,
+            outcome: PermissionOutcome,
+        ) -> Result<()> {
+            self.answers
+                .lock()
+                .await
+                .push((request_id.to_string(), outcome));
+            Ok(())
+        }
+    }
+
+    async fn waiting_on_approval() -> (Arc<Live>, Arc<Mutex<Vec<(String, PermissionOutcome)>>>) {
+        let live = Arc::new(Live::new(meta()));
+        let answers = Arc::new(Mutex::new(Vec::new()));
+        let (events, _) = broadcast::channel(8);
+        *live.agent.lock().await = Some(Box::new(WaitingAgent {
+            answers: answers.clone(),
+            events,
+        }));
+        apply(
+            &live,
+            &SessionEvent::PermissionRequested {
+                request: PermissionRequest {
+                    id: "p1".into(),
+                    title: "Write file".into(),
+                    detail: None,
+                    tool_call_id: None,
+                    options: vec![],
+                },
+            },
+        )
+        .await;
+        (live, answers)
+    }
+
+    /// The window is closed, the tray is still there, and the agent is blocked on
+    /// a question that is on nobody's screen. Left alone this waits until the
+    /// daemon exits, holding the turn and the agent process with it.
+    #[tokio::test]
+    async fn an_approval_no_one_can_see_is_denied_rather_than_waited_on_forever() {
+        let (live, answers) = waiting_on_approval().await;
+
+        deny_when_no_one_can_answer(live.clone(), "p1".into(), Duration::from_millis(1)).await;
+
+        let answers = answers.lock().await;
+        assert_eq!(answers.len(), 1, "the agent was never answered");
+        assert_eq!(answers[0].0, "p1");
+        // Named, not implied: the audit trail has to distinguish this from a
+        // person who chose to deny.
+        assert!(
+            matches!(
+                &answers[0].1,
+                PermissionOutcome::TimedOut { applied_default } if applied_default == "deny"
+            ),
+            "answered with {:?} instead of a recorded timeout",
+            answers[0].1
+        );
+    }
+
+    /// The opposite mistake, and the worse one: denying a tool call while someone
+    /// is sitting there reading the request. Thinking is not idleness.
+    #[tokio::test]
+    async fn an_approval_someone_is_looking_at_is_left_alone() {
+        let (live, answers) = waiting_on_approval().await;
+        let _watching = live.events.subscribe();
+
+        let verdict = tokio::time::timeout(
+            Duration::from_millis(200),
+            deny_when_no_one_can_answer(live.clone(), "p1".into(), Duration::from_millis(1)),
+        )
+        .await;
+
+        assert!(
+            verdict.is_err(),
+            "gave up on a request that a subscribed client could still answer"
+        );
+        assert!(answers.lock().await.is_empty());
+    }
+
+    /// And it has to stop watching once the question is answered, or every
+    /// approval leaves a task behind for the life of the session.
+    #[tokio::test]
+    async fn the_watch_ends_when_the_approval_is_answered() {
+        let (live, answers) = waiting_on_approval().await;
+        live.pending_permissions.lock().await.clear();
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            deny_when_no_one_can_answer(live.clone(), "p1".into(), Duration::from_millis(1)),
+        )
+        .await
+        .expect("the watch should return once nothing is pending");
+
+        assert!(
+            answers.lock().await.is_empty(),
+            "answered a request that had already been resolved"
+        );
     }
 
     #[tokio::test]

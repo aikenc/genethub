@@ -289,20 +289,35 @@ export class Client {
 
   /** Asks for the gap on every open session. */
   private async resubscribe(): Promise<void> {
-    for (const [sessionId, subscription] of this.subscriptions) {
-      const reply = await this.call({
-        type: "subscribe",
-        payload: { sessionId, sinceSeq: subscription.seq },
-      }).catch(() => undefined);
-      if (reply?.type !== "subscribed") continue;
-
-      for (const event of reply.data.replayed) subscription.seq = event.seq;
-      subscription.onResync(
-        reply.data.snapshot,
-        reply.data.replayed,
-        reply.data.reset,
-      );
+    for (const sessionId of [...this.subscriptions.keys()]) {
+      await this.fillGap(sessionId);
     }
+  }
+
+  /**
+   * Asks for whatever happened on one session since the last sequence number
+   * this client saw.
+   *
+   * The same request serves a reconnect and a dropped-events notice, because
+   * they are the same situation: this client's view stops at some sequence
+   * number and the daemon's does not.
+   */
+  private async fillGap(sessionId: string): Promise<void> {
+    const subscription = this.subscriptions.get(sessionId);
+    if (!subscription) return;
+
+    const reply = await this.call({
+      type: "subscribe",
+      payload: { sessionId, sinceSeq: subscription.seq },
+    }).catch(() => undefined);
+    if (reply?.type !== "subscribed") return;
+
+    for (const event of reply.data.replayed) subscription.seq = event.seq;
+    subscription.onResync(
+      reply.data.snapshot,
+      reply.data.replayed,
+      reply.data.reset,
+    );
   }
 
   private receive(raw: string): void {
@@ -351,6 +366,12 @@ export class Client {
       case "notice":
         for (const listener of this.noticeListeners)
           listener(frame.level, frame.message);
+        return;
+      case "desync":
+        // The daemon fell behind and dropped events for this session. Nothing
+        // to tell the person: the hole is closable from here, with the same
+        // request used after a reconnect.
+        void this.fillGap(frame.sessionId);
         return;
     }
   }

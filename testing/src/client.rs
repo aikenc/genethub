@@ -90,6 +90,12 @@ impl Client {
                     ServerFrame::Notice { message, .. } => {
                         let _ = notice_tx.send(message);
                     }
+                    // Loud on purpose. The real client closes the gap; a test
+                    // client that did the same would paper over dropped events
+                    // and turn a lost assertion into a mysterious one.
+                    ServerFrame::Desync { session_id, missed } => {
+                        panic!("the daemon dropped {missed} events for {session_id}");
+                    }
                 }
             }
 

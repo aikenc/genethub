@@ -358,6 +358,20 @@ pub enum ServerFrame {
     /// Unsolicited notice, e.g. the machine was revoked by the Hub.
     #[serde(rename = "notice", rename_all = "camelCase")]
     Notice { level: NoticeLevel, message: String },
+    /// This connection fell behind and events for a session were dropped.
+    ///
+    /// Addressed to the client rather than to the person: a hole in a timeline is
+    /// not something to apologise for in prose, it is something to go and fetch.
+    /// The client already knows how — the same `subscribe` with its last sequence
+    /// number that it does after a reconnect.
+    #[serde(rename = "desync", rename_all = "camelCase")]
+    Desync {
+        session_id: String,
+        // JSON has one number type, and this travels as JSON: calling it a
+        // bigint on the other side would describe a value that cannot arrive.
+        #[ts(type = "number")]
+        missed: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

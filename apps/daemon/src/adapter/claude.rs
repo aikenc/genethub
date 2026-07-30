@@ -401,6 +401,13 @@ impl AgentSession for ClaudeSession {
                 }
                 json!({ "behavior": "allow" })
             }
+            // What the agent is told matters: it writes its own next sentence out
+            // of this. "Denied by the user" when no user was there sends it off
+            // apologising for a decision nobody made.
+            PermissionOutcome::TimedOut { .. } => json!({
+                "behavior": "deny",
+                "message": "No one was available to approve this, so it was denied.",
+            }),
             _ => json!({ "behavior": "deny", "message": "Denied by the user." }),
         };
         // `request_id` here is the control request's own id: the read loop

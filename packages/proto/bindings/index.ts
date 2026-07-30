@@ -265,7 +265,7 @@ export type SequencedEvent = { seq: number, sessionId: string, event: SessionEve
 /**
  * Anything the daemon sends to a client.
  */
-export type ServerFrame = { "type": "result", id: string, ok: boolean, payload?: Reply, error?: ProtocolError, } | { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, };
+export type ServerFrame = { "type": "result", id: string, ok: boolean, payload?: Reply, error?: ProtocolError, } | { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "desync", sessionId: string, missed: number, };
 
 export type SessionEvent = { "type": "turnStarted", turnId: string, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnCompleted", turnId: string, usage: Usage, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
 
