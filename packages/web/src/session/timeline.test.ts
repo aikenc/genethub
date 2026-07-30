@@ -1,7 +1,7 @@
-import type { SessionEvent, TimelineItem } from "@genehub/proto";
+import type { SessionEvent, SessionSnapshot, TimelineItem } from "@genehub/proto";
 import { describe, expect, it } from "vitest";
 
-import { apply, applySequenced, assistantText, emptyTimeline } from "./timeline";
+import { apply, applySequenced, assistantText, emptyTimeline, fromSnapshot } from "./timeline";
 
 function run(events: SessionEvent[]) {
   return events.reduce(apply, emptyTimeline());
@@ -146,6 +146,40 @@ describe("the session timeline", () => {
       outcome: { outcome: "canceled" },
     });
     expect(other.pendingPermission?.id).toBe("p1");
+  });
+
+  it("comes back from a snapshot still waiting for the approval the agent is waiting for", () => {
+    // A reconnect too old to replay leaves only the snapshot. Ignoring the
+    // pending request there was a hang with no way out: the session sat paused
+    // for an approval whose card never appeared again.
+    const state = fromSnapshot({
+      summary: {
+        id: "s1",
+        title: "t",
+        agentId: "claude",
+        workspaceId: "w1",
+        status: "running",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+        modelId: null,
+        modeId: null,
+      },
+      items: [],
+      seq: 42,
+      pendingPermissions: [
+        {
+          id: "p1",
+          turnId: "t1",
+          title: "写文件",
+          detail: null,
+          options: [{ id: "allow", label: "允许", kind: "allowOnce" }],
+          toolCallId: null,
+        },
+      ],
+    } as unknown as SessionSnapshot);
+
+    expect(state.pendingPermission?.id).toBe("p1");
+    expect(state.seq).toBe(42);
   });
 
   it("refuses to go backwards when a replayed event is older than what it has", () => {

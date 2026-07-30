@@ -89,6 +89,31 @@ fn every_command_the_workbench_calls_exists_here() {
     }
 }
 
+/// An upgrade replaces files the running daemon is holding open, and Windows
+/// refuses. The installer has to stop what we ship before it writes.
+#[test]
+fn the_windows_installer_stops_the_daemon_before_replacing_it() {
+    let config = config();
+    let hook = config["bundle"]["windows"]["nsis"]["installerHooks"]
+        .as_str()
+        .expect("no installer hooks: an upgrade will fail on a running daemon");
+    let script = std::fs::read_to_string(repo().join("apps/desktop/src-tauri").join(hook))
+        .expect("the hook file named in the config is missing");
+
+    assert!(
+        script.contains("NSIS_HOOK_PREINSTALL"),
+        "the hook runs nowhere before the install"
+    );
+    // Every executable staged into the bundle is a file the installer will
+    // overwrite, so every one of them has to be stopped first.
+    for binary in ["genet-daemon.exe", "genet-agent.exe"] {
+        assert!(
+            script.contains(binary),
+            "{binary} ships in the bundle but the installer never stops it"
+        );
+    }
+}
+
 /// The binaries the installer promises are inside it. Named in one place here
 /// and in `scripts/bundle.sh`, which is where they are staged.
 #[test]

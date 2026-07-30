@@ -41,6 +41,16 @@ export function fromSnapshot(snapshot: SessionSnapshot): TimelineState {
     ...emptyTimeline(),
     items: snapshot.items,
     status: snapshot.summary.status,
+    // The request the agent is waiting on. Dropping it was a hang the user could
+    // not get out of: after a reconnect too old to replay, the snapshot is all
+    // there is, so a session paused for approval came back with no card to
+    // approve and a turn that would never move again. There is at most one at a
+    // time today; the first is taken rather than asserted about, because the
+    // wrong one on screen is better than none.
+    // Optional access: an older daemon, or a hand-built snapshot, simply has
+    // no such array — and losing the whole session view over a missing field
+    // is worse than the hang this fixes.
+    pendingPermission: snapshot.pendingPermissions?.[0] ?? null,
     modelId: snapshot.summary.modelId ?? null,
     modeId: snapshot.summary.modeId ?? null,
     seq: snapshot.seq,

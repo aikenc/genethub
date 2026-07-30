@@ -44,6 +44,11 @@
     "resources": {
       "bin/": "bin/"
     },
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer.nsh"
+      }
+    },
     "shortDescription": "在自己的电脑上跑 agent",
     "longDescription": "GeneHub 桌面端：内置 daemon 与默认 agent，托盘常驻，手机与浏览器随时遥控这台电脑。"
   }

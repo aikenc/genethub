@@ -85,12 +85,27 @@ describe("the rendezvous mode", () => {
   });
 
   /**
-   * Refusing to start would break `npm start` on a laptop for no gain;
-   * defaulting to "no token" would quietly leave a public relay open.
+   * On loopback there is nothing to protect. Reachable from elsewhere with no
+   * token, it would be an open relay — and the previous behaviour, generating
+   * one and printing it, left a live secret in the log and taught operators to
+   * find their token by reading logs.
    */
-  it("generates a join token only when the relay is reachable from elsewhere", () => {
+  it("will not listen where others can reach it without a token", () => {
     assert.equal(resolveJoinToken(null, "127.0.0.1"), null);
     assert.equal(resolveJoinToken("configured", "0.0.0.0"), "configured");
-    assert.equal(resolveJoinToken(null, "0.0.0.0")?.length, 48);
+    assert.throws(() => resolveJoinToken(null, "0.0.0.0"), /RELAY_JOIN_TOKEN/);
+  });
+
+  /** A wrong token must not be distinguishable by how long the refusal took. */
+  it("compares the join token without leaking how much of it matched", async () => {
+    const authority = new RendezvousAuthority("let-me-in");
+    // Lengths differ, which `timingSafeEqual` refuses to compare at all: the
+    // digest in between is what keeps this a refusal instead of a crash.
+    assert.equal(await authority.authorizeDaemon("l.slot-1"), null);
+    assert.equal(await authority.authorizeDaemon("let-me-in-and-more.slot-1"), null);
+    assert.deepEqual(await authority.authorizeDaemon("let-me-in.slot-1"), {
+      machineId: "slot-1",
+      daemonId: "slot-1",
+    });
   });
 });

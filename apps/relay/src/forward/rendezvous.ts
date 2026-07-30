@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import type { ChannelAuthority, ClientGrant, DaemonGrant } from "../contract/index.js";
 import { log } from "../shared/log.js";
@@ -26,7 +26,7 @@ export class RendezvousAuthority implements ChannelAuthority {
   async authorizeDaemon(ticket: string): Promise<DaemonGrant | null> {
     const [presented, id] = split(ticket);
     if (!id) return null;
-    if (this.joinToken && presented !== this.joinToken) return null;
+    if (this.joinToken && !sameSecret(presented, this.joinToken)) return null;
     return { machineId: id, daemonId: id };
   }
 
@@ -42,6 +42,18 @@ export class RendezvousAuthority implements ChannelAuthority {
   onRevoked(): void {}
 }
 
+/**
+ * Compares in a time that does not depend on how much of it matched.
+ *
+ * Hashed first so the lengths always agree: `timingSafeEqual` throws on a
+ * mismatch, and refusing early on length is itself an answer.
+ */
+function sameSecret(presented: string | null, expected: string): boolean {
+  if (presented === null) return false;
+  const digest = (value: string) => createHash("sha256").update(value).digest();
+  return timingSafeEqual(digest(presented), digest(expected));
+}
+
 /** `<joinToken>.<rendezvousId>`, or just the id when no token is configured. */
 function split(ticket: string): [string | null, string | null] {
   const at = ticket.lastIndexOf(".");
@@ -50,19 +62,24 @@ function split(ticket: string): [string | null, string | null] {
 }
 
 /**
- * Generates a join token when the operator did not set one.
+ * The token this relay will require of machines, or none on a laptop.
  *
- * Refusing to start would break `npm start` on a laptop for no security gain,
- * and defaulting to "no token" would quietly turn a public relay into an open
- * one. Printing a generated token does neither.
+ * A relay bound to a public address without one is an open relay, so it refuses
+ * to start rather than defaulting to "anyone". It used to generate one and print
+ * it, which put a live secret in the log — the one file that gets copied into a
+ * central store, shared in a paste, and kept long after the relay is gone. It
+ * also meant the operator learned their token by reading logs instead of setting
+ * it, so `docs/self-hosting.md` already said this had to be configured.
+ *
+ * On loopback there is nothing to protect: only this machine can reach it.
  */
 export function resolveJoinToken(configured: string | null, host: string): string | null {
   if (configured) return configured;
   const loopback = host === "127.0.0.1" || host === "::1" || host === "localhost";
   if (loopback) return null;
-  const generated = randomBytes(24).toString("hex");
-  log.warn("relay: no RELAY_JOIN_TOKEN was set, so one was generated for this run", {
-    joinToken: generated,
-  });
-  return generated;
+  throw new Error(
+    `relay: refusing to listen on ${host} with no RELAY_JOIN_TOKEN — any machine ` +
+      `could then hold a slot on it. Set one (e.g. RELAY_JOIN_TOKEN=$(openssl rand -hex 24)) ` +
+      `and give the same value to your machines, or bind 127.0.0.1 for local use.`,
+  );
 }

@@ -100,7 +100,17 @@ jobs:
             || { echo "FAIL: no folder to work in was created" >&2; exit 1; }
           echo "the daemon starts on ${{ matrix.platform }} and prepares a workspace"
 
-      - name: Give the artifact a stable name
+      # Two names for one file, on purpose:
+      #
+      # The version-free one is what a link can point at forever
+      # (`releases/latest/download/<name>`), which is what the install script and
+      # the docs use.
+      #
+      # The versioned one is what a person downloads. A browser that has seen
+      # `GeneHub-windows-x64-setup.exe` before saves the next one as `(1)`, and
+      # then nobody — including whoever is debugging with them — can tell which
+      # version is in which file.
+      - name: Name the artifact, twice
         shell: bash
         run: |
           set -euo pipefail
@@ -108,12 +118,18 @@ jobs:
           test -n "$found" || { echo "no installer matched ${{ matrix.pattern }}" >&2; exit 1; }
           mkdir -p dist
           cp "$found" "dist/${{ matrix.asset }}"
+          version="${GITHUB_REF_NAME#v}"
+          case "$version" in
+            # Not a tag build: there is no version to put in a name.
+            *[!0-9.]*|"") echo "no version in '$GITHUB_REF_NAME', keeping one name" ;;
+            *) cp "$found" "dist/$(echo '${{ matrix.asset }}' | sed "s/^GeneHub-/GeneHub-$version-/")" ;;
+          esac
           ls -la dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          path: dist/*
 
   # The pair `scripts/install.sh` downloads, and the whole of what Linux gets in
   # this version. Names here have to match what that script asks for.

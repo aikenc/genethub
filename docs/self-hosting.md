@@ -54,7 +54,7 @@ npm start
 | `RELAY_MODE` | `control` | `rendezvous` 是自建模式；`control` 是问控制面的模式 |
 | `RELAY_PORT` | 8787 | 监听端口 |
 | `RELAY_HOST` | 127.0.0.1 | 对外提供服务时设成 `0.0.0.0` |
-| `RELAY_JOIN_TOKEN` | 自动生成并打印 | 机器挂上来时要出示。绑非 loopback 地址时必须显式配置 |
+| `RELAY_JOIN_TOKEN` | loopback 上不需要 | 机器挂上来时要出示。**绑非 loopback 地址时必须显式配置**，不配就拒绝启动——没有它,任何人都能在你的 relay 上占一个槽位 |
 | `RELAY_MAX_DAEMONS` | 5000 | 在线机器上限 |
 | `RELAY_MAX_CLIENTS_PER_MACHINE` | 8 | 单机客户端上限 |
 | `RELAY_MAX_BUFFERED_BYTES` | 8 MiB | 单连接缓冲上限，超了就断这一个慢读者 |
