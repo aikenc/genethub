@@ -223,7 +223,9 @@ impl SessionManager {
             // rather than join it.
             *status = SessionStatus::Running;
         }
-        let started = self.start_turn(&live, session_id, text, attachments, providers).await;
+        let started = self
+            .start_turn(&live, session_id, text, attachments, providers)
+            .await;
         if started.is_err() {
             // Nothing is running after all, and a session stuck on Running would
             // refuse every later prompt.

@@ -956,8 +956,7 @@ mod tests {
     #[test]
     fn the_installer_stages_the_agent_under_that_same_name() {
         let script = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../desktop/scripts/bundle.sh"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/scripts/bundle.sh"),
         )
         .expect("the bundling script");
         assert!(
