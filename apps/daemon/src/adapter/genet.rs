@@ -334,9 +334,6 @@ impl AgentSession for GenetSession {
             "modelId": id,
         }))
         .await?;
-        let _ = self.events.send(SessionEvent::ModelChanged {
-            model_id: model_id.to_string(),
-        });
         Ok(())
     }
 
@@ -352,9 +349,6 @@ impl AgentSession for GenetSession {
         }
         self.command(json!({ "type": "set_thinking_level", "level": effort_id }))
             .await?;
-        let _ = self.events.send(SessionEvent::EffortChanged {
-            effort_id: effort_id.to_string(),
-        });
         Ok(())
     }
 

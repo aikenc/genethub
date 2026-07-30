@@ -306,9 +306,6 @@ impl AgentSession for OpenCodeSession {
             return Err(anyhow!("model id must be 'provider/id', got '{model_id}'"));
         }
         *self.model.lock().await = Some(model_id.to_string());
-        let _ = self.events.send(SessionEvent::ModelChanged {
-            model_id: model_id.to_string(),
-        });
         Ok(())
     }
 

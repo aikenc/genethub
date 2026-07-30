@@ -1029,9 +1029,6 @@ impl AgentSession for ClaudeSession {
             );
         }
         *self.mode.lock().await = mode_id.to_string();
-        let _ = self.events.send(SessionEvent::ModeChanged {
-            mode_id: mode_id.to_string(),
-        });
         Ok(())
     }
 

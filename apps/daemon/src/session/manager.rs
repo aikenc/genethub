@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    Attachment, ItemDelta, PermissionOutcome, PermissionRequest, SequencedEvent, SessionEvent,
-    SessionSnapshot, SessionStatus, SessionSummary, TimelineItem, ToolStatus,
+    Attachment, Catalog, ItemDelta, PermissionOutcome, PermissionRequest, SequencedEvent,
+    SessionEvent, SessionSnapshot, SessionStatus, SessionSummary, TimelineItem, ToolStatus,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 
@@ -382,45 +382,123 @@ impl SessionManager {
         }
     }
 
-    pub async fn set_model(&self, session_id: &str, model_id: &str) -> Result<()> {
+    /// What this session's agent says it offers, for checking a choice against
+    /// when there is no process to ask.
+    ///
+    /// Before the first prompt there is no agent running — the ordinary case, not
+    /// an edge one — and without this a value nobody ever offered was stored, and
+    /// then announced, as if it had taken.
+    async fn offered(&self, live: &Arc<Live>, providers: &ProviderMap) -> Result<Catalog> {
+        let agent_id = live.meta.lock().await.agent_id.clone();
+        let adapter = self.registry.require(&agent_id)?;
+        Ok(adapter.catalog(providers).await)
+    }
+
+    /// Records a model choice, once whoever has to accept it has.
+    ///
+    /// Order matters both ways. The running agent goes first, so a value it
+    /// refuses is not left recorded as if it had taken (Claude Code's own model
+    /// list is the only thing that can reject a model name, and it does). And the
+    /// event goes out even when there is no process yet — which is the ordinary
+    /// case, since one only starts on the first prompt. Without it a client that
+    /// renders the picker from session state watched its own choice spring back:
+    /// the pick reached us, nothing said so, and the next repaint drew the old
+    /// value again.
+    pub async fn set_model(
+        &self,
+        session_id: &str,
+        model_id: &str,
+        providers: &ProviderMap,
+    ) -> Result<()> {
         let live = self.live(session_id).await?;
+        match live.agent.lock().await.as_ref() {
+            Some(agent) => agent.set_model(model_id).await?,
+            None => {
+                let offered = self.offered(&live, providers).await?;
+                listed(
+                    "model",
+                    model_id,
+                    offered.models.iter().map(|model| model.id.as_str()),
+                )?;
+            }
+        }
         {
             let mut meta = live.meta.lock().await;
             meta.model_id = Some(model_id.to_string());
             meta.updated_at_ms = now_ms();
             self.store.save_meta(&meta)?;
         }
-        if let Some(agent) = live.agent.lock().await.as_ref() {
-            agent.set_model(model_id).await?;
-        }
+        live.publish(SessionEvent::ModelChanged {
+            model_id: model_id.to_string(),
+        })
+        .await;
         Ok(())
     }
 
-    pub async fn set_effort(&self, session_id: &str, effort_id: &str) -> Result<()> {
+    /// Same shape as `set_model`, and for the same two reasons.
+    pub async fn set_effort(
+        &self,
+        session_id: &str,
+        effort_id: &str,
+        providers: &ProviderMap,
+    ) -> Result<()> {
         let live = self.live(session_id).await?;
+        match live.agent.lock().await.as_ref() {
+            Some(agent) => agent.set_effort(effort_id).await?,
+            None => {
+                let offered = self.offered(&live, providers).await?;
+                listed(
+                    "effort level",
+                    effort_id,
+                    offered
+                        .models
+                        .iter()
+                        .flat_map(|model| model.efforts.iter().map(String::as_str)),
+                )?;
+            }
+        }
         {
             let mut meta = live.meta.lock().await;
             meta.effort_id = Some(effort_id.to_string());
             meta.updated_at_ms = now_ms();
             self.store.save_meta(&meta)?;
         }
-        if let Some(agent) = live.agent.lock().await.as_ref() {
-            agent.set_effort(effort_id).await?;
-        }
+        live.publish(SessionEvent::EffortChanged {
+            effort_id: effort_id.to_string(),
+        })
+        .await;
         Ok(())
     }
 
-    pub async fn set_mode(&self, session_id: &str, mode_id: &str) -> Result<()> {
+    /// Same shape as `set_model`, and for the same two reasons.
+    pub async fn set_mode(
+        &self,
+        session_id: &str,
+        mode_id: &str,
+        providers: &ProviderMap,
+    ) -> Result<()> {
         let live = self.live(session_id).await?;
+        match live.agent.lock().await.as_ref() {
+            Some(agent) => agent.set_mode(mode_id).await?,
+            None => {
+                let offered = self.offered(&live, providers).await?;
+                listed(
+                    "mode",
+                    mode_id,
+                    offered.modes.iter().map(|mode| mode.id.as_str()),
+                )?;
+            }
+        }
         {
             let mut meta = live.meta.lock().await;
             meta.mode_id = Some(mode_id.to_string());
             meta.updated_at_ms = now_ms();
             self.store.save_meta(&meta)?;
         }
-        if let Some(agent) = live.agent.lock().await.as_ref() {
-            agent.set_mode(mode_id).await?;
-        }
+        live.publish(SessionEvent::ModeChanged {
+            mode_id: mode_id.to_string(),
+        })
+        .await;
         Ok(())
     }
 
@@ -775,6 +853,22 @@ async fn flush_turn(live: &Arc<Live>, store: &Store) {
 /// an item we have never seen is dropped rather than creating a phantom entry.
 #[allow(dead_code)]
 fn _doc_only(_: ToolStatus) {}
+
+/// Refuses a value the agent never offered.
+///
+/// An empty list means the agent named nothing on that axis — not that everything
+/// is allowed — but there is then no picker to have chosen from either, so the
+/// value is left to whoever sent it rather than guessed at here.
+fn listed<'a>(axis: &str, value: &str, offered: impl Iterator<Item = &'a str>) -> Result<()> {
+    let offered: Vec<&str> = offered.collect();
+    if offered.is_empty() || offered.contains(&value) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "'{value}' is not a {axis} this agent offers ({})",
+        offered.join(", ")
+    )
+}
 
 #[cfg(test)]
 mod tests {

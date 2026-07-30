@@ -401,9 +401,6 @@ impl AgentSession for AcpSession {
             json!({ "sessionId": session_id, "modeId": mode_id }),
         )
         .await?;
-        let _ = self.events.send(SessionEvent::ModeChanged {
-            mode_id: mode_id.to_string(),
-        });
         Ok(())
     }
 

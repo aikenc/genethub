@@ -93,6 +93,23 @@ describe("the session timeline", () => {
     expect(state.items).toEqual([]);
   });
 
+  /**
+   * The chips draw themselves from this state, so an announced choice has to land
+   * here — a pick that changed nothing visible is what "the dropdown will not let
+   * me select anything" actually looked like.
+   */
+  it("takes up the model, mode and thinking level the daemon announces", () => {
+    const state = run([
+      { type: "modelChanged", modelId: "deepseek/v4" },
+      { type: "modeChanged", modeId: "plan" },
+      { type: "effortChanged", effortId: "xhigh" },
+    ]);
+
+    expect(state.modelId).toBe("deepseek/v4");
+    expect(state.modeId).toBe("plan");
+    expect(state.effortId).toBe("xhigh");
+  });
+
   it("clears the previous failure when a new turn starts", () => {
     const state = run([
       { type: "turnStarted", turnId: "t1" },

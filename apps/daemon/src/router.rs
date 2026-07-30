@@ -261,26 +261,47 @@ pub async fn handle(
         Request::SessionSetModel {
             session_id,
             model_id,
-        } => match state.sessions.set_model(&session_id, &model_id).await {
-            Ok(()) => Handled::ok(Reply::Ack),
-            Err(error) => failed(error),
-        },
+        } => {
+            let providers = state.providers().await;
+            match state
+                .sessions
+                .set_model(&session_id, &model_id, &providers)
+                .await
+            {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
 
         Request::SessionSetMode {
             session_id,
             mode_id,
-        } => match state.sessions.set_mode(&session_id, &mode_id).await {
-            Ok(()) => Handled::ok(Reply::Ack),
-            Err(error) => failed(error),
-        },
+        } => {
+            let providers = state.providers().await;
+            match state
+                .sessions
+                .set_mode(&session_id, &mode_id, &providers)
+                .await
+            {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
 
         Request::SessionSetEffort {
             session_id,
             effort_id,
-        } => match state.sessions.set_effort(&session_id, &effort_id).await {
-            Ok(()) => Handled::ok(Reply::Ack),
-            Err(error) => failed(error),
-        },
+        } => {
+            let providers = state.providers().await;
+            match state
+                .sessions
+                .set_effort(&session_id, &effort_id, &providers)
+                .await
+            {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
 
         Request::SessionRespondPermission {
             session_id,

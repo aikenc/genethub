@@ -10,6 +10,14 @@
  */
 :root,
 .dark {
+  /*
+   * Not decoration: this is what the engine draws its own widgets from. Without
+   * it a `<select>`'s popup, the scrollbars and every other native control come
+   * out in the platform's light scheme — which put our light-grey option text on
+   * a white popup, unreadable, and made those colours flip whenever the OS or
+   * the WebView changed its mind about which scheme was in force.
+   */
+  color-scheme: dark;
   --bg: 24 27 26;
   --surface: 30 33 32;
   --raised: 39 42 41;
@@ -49,6 +57,16 @@ body {
 * {
   scrollbar-width: thin;
   scrollbar-color: rgb(var(--faint)) transparent;
+}
+
+/*
+ * The rows of an open `<select>` are drawn by the engine, and several will not
+ * take the `select`'s own colours for them — a chip styled `bg-transparent` then
+ * opened onto a popup with no background of its own.
+ */
+option {
+  background: rgb(var(--surface));
+  color: rgb(var(--fg));
 }
 
 button:focus-visible,

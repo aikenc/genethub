@@ -438,6 +438,64 @@ async fn switching_the_thinking_level_takes_effect_on_the_built_in_agent() {
     journey.finish().await;
 }
 
+/// A picker draws itself from session state, so a choice that is only *stored*
+/// looks like a choice that failed: the click lands, nothing says so, and the
+/// next repaint puts the old value back. Which is what the chips did — visibly
+/// springing back — because nothing announced a pick made before the first
+/// prompt, and before the first prompt is when no agent process exists yet.
+#[tokio::test]
+async fn a_choice_made_before_the_first_prompt_is_announced_and_not_only_stored() {
+    let journey = Journey::start().await.expect("journey starts");
+    let session = journey.session("genet").await.expect("session opens");
+
+    // Nothing sent yet: this is the ordinary case, not an edge one. The process
+    // only starts when there is something to send.
+    journey
+        .client
+        .call(Request::SessionSetEffort {
+            session_id: session.clone(),
+            effort_id: "high".into(),
+        })
+        .await
+        .expect("a level can be chosen before saying anything");
+
+    let announced = journey
+        .client
+        .wait_for(|event| matches!(event, SessionEvent::EffortChanged { .. }))
+        .await
+        .expect("the choice is announced to every client watching this session");
+    assert!(
+        matches!(&announced, SessionEvent::EffortChanged { effort_id } if effort_id == "high"),
+        "saw {announced:?}"
+    );
+
+    let snapshot = match journey
+        .client
+        .call(Request::SessionGet {
+            session_id: session.clone(),
+        })
+        .await
+        .unwrap()
+    {
+        Reply::Snapshot(snapshot) => snapshot,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(snapshot.summary.effort_id.as_deref(), Some("high"));
+
+    // And a value nobody offered is refused rather than stored, so a second
+    // window does not repaint itself around something that never took.
+    journey
+        .client
+        .call(Request::SessionSetEffort {
+            session_id: session.clone(),
+            effort_id: "as-hard-as-you-can".into(),
+        })
+        .await
+        .expect_err("an unknown level is refused");
+
+    journey.finish().await;
+}
+
 /// Sessions and clients from before the split named the level on the `mode`
 /// axis, and reopening one of those must not silently drop back to the default.
 #[tokio::test]
