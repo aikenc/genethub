@@ -52,11 +52,23 @@ jobs:
       # Stages the daemon and the built-in agent into the bundle. The checks on
       # what ends up inside it need `dpkg-deb`, so they live in the Linux job
       # below rather than here.
+      # The error lines are repeated as annotations because reading a job's log
+      # needs admin rights on the repository, and a Windows-only failure cannot
+      # be reproduced on the machine this is developed on. Without it, a red
+      # release says only "exit code 1".
       - name: Build the installer
         shell: bash
         env:
           BUNDLES: ${{ matrix.bundles }}
-        run: ./apps/desktop/scripts/bundle.sh
+        run: |
+          set -uo pipefail
+          ./apps/desktop/scripts/bundle.sh 2>&1 | tee /tmp/bundle.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -iE "^(error|failed|thread .* panicked)|error\[|error:" /tmp/bundle.log \
+              | tail -15 | while IFS= read -r line; do echo "::error::$line"; done
+            exit "$status"
+          fi
 
       # Prove the binary that went into the installer runs on this platform at
       # all — a release that ships a daemon which cannot start is the failure

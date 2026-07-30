@@ -68,6 +68,12 @@ jobs:
           echo "$HOME/.acp-agents/node_modules/.bin" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The journeys start real daemon and agent processes, and `cargo test` does
+      # not build another package's executables — it only compiles them as test
+      # harnesses. Without this the cases panic on a missing binary, which is what
+      # they did on every cold cache while a warm one kept the job green: a false
+      # pass that survived until a release tag.
+      - run: cargo build --workspace --bins
       # Journeys default to the mock model, so this stays offline and free.
       #
       # The failure list is repeated as annotations because reading a job's log

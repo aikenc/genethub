@@ -264,7 +264,7 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 
 | 套件 | 位置 | 跑的是什么 | 需要什么 |
 |------|------|-----------|---------|
-| Rust 单元与集成 | `cargo test --workspace` | 协议、daemon 各模块、agent、旅程（daemon + agent + mock 模型） | 无 |
+| Rust 单元与集成 | `cargo test --workspace` | 协议、daemon 各模块、agent、旅程（daemon + agent + mock 模型） | **先 `cargo build --workspace --bins`**：旅程要真的拉起 daemon 与 agent 进程，而 `cargo test` 只会把别的包编成测试壳，不会产出可执行文件 |
 | 专项测试（OpenCode） | `testing/tests/opencode.rs` | **真实 OpenCode 进程**接同一个模型后端，事件归一化后进同一条时间线 | PATH 上有 `opencode`，否则跳过并打印原因 |
 | 专项测试（Claude Code） | `testing/tests/claude.rs` | **真实 `claude` 进程**（原生 `stream-json`，非 ACP wrapper）接 DeepSeek 的 Anthropic 兼容端点：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具不落盘 | `JOURNEY_LLM=real` + PATH 上有 `claude`，否则跳过并打印原因；只在真实模式跑（mock 不实现 Anthropic 协议） |
 | 安装脚本 | `testing/tests/install.rs` | **真的跑 `scripts/install.sh`**：真 curl、真 tar、真 sha256sum、真目录。装完的二进制可执行且真能跑；校验和对不上、或者发布里没有 `SHA256SUMS`，都拒绝安装而不是留下半截文件 | 无（Linux arm64 上跳过并打印原因） |

@@ -322,8 +322,11 @@ fn agent_binary() -> Result<PathBuf> {
         "genet-agent"
     });
     if !candidate.is_file() {
+        // `cargo test` compiles other packages as test harnesses without ever
+        // producing their executables, so this is the normal state of a fresh
+        // checkout rather than a broken one — say what to run.
         anyhow::bail!(
-            "the agent binary is missing at {}; run `cargo build --workspace` first",
+            "the agent binary is missing at {}; run `cargo build --workspace --bins` first",
             candidate.display()
         );
     }
