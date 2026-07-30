@@ -179,6 +179,11 @@ export function App({
   if (endpoint === "loading") return <Splash>正在查找这台机器…</Splash>;
   if (!endpoint) {
     if (welcome) return <>{welcome()}</>;
+    // Inside the desktop app there is nothing for the user to choose: this
+    // machine is the machine, and its absence means the daemon did not start.
+    // Telling someone to "点桌面端「连接」" while they are looking at the
+    // desktop app is how a broken install reads as a missing step.
+    if (host.kind === "desktop") return <DaemonTrouble host={host} />;
     return (
       <Splash>
         <p>没有可连接的机器。</p>
@@ -480,5 +485,50 @@ function Splash({ children }: { children: React.ReactNode }) {
     <div className="flex h-full flex-col items-center justify-center gap-1 p-6 text-center">
       {children}
     </div>
+  );
+}
+
+/**
+ * The desktop app when its daemon is not there.
+ *
+ * Everything this app does runs through that process, so this screen is the
+ * whole product being down. It says what went wrong in the shell's own words —
+ * a path, a port, a permission — because the person reading it is the only one
+ * who can see that machine.
+ */
+function DaemonTrouble({ host }: { host: Host }) {
+  const [why, setWhy] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+
+  useEffect(() => {
+    void host.problem?.().then(setWhy);
+  }, [host]);
+
+  return (
+    <Splash>
+      <p>本机的 daemon 没有起来。</p>
+      {why ? (
+        <p className="max-w-lg text-xs text-muted [overflow-wrap:anywhere]">{why}</p>
+      ) : null}
+      {host.retry ? (
+        <button
+          type="button"
+          disabled={retrying}
+          onClick={() => {
+            setRetrying(true);
+            void host
+              .retry?.()
+              .then(() => host.problem?.().then(setWhy))
+              .finally(() => setRetrying(false));
+          }}
+          className="mt-2 rounded-md border border-line px-3 py-1.5 text-xs text-fg hover:border-accent disabled:opacity-50"
+        >
+          {retrying ? "正在重启…" : "重试"}
+        </button>
+      ) : null}
+      <p className="pt-2 text-xs text-faint">
+        重启这个 App 也可以。一直是这样的话，日志在数据目录的 shell.log 与 daemon.log。
+      </p>
+    </Splash>
   );
 }

@@ -27,6 +27,15 @@ fn daemon_running(state: tauri::State<'_, AppState>) -> bool {
     state.daemon.is_running()
 }
 
+/// Why there is no endpoint, for the window to show.
+///
+/// The window is the only place a desktop user can be told anything: this is a
+/// GUI process, so everything written to stderr goes to a stream nobody reads.
+#[tauri::command]
+fn daemon_problem(state: tauri::State<'_, AppState>) -> Option<String> {
+    state.daemon.problem()
+}
+
 /// Restarts the daemon after a crash, without making the user reinstall.
 #[tauri::command]
 fn restart_daemon(
@@ -159,20 +168,31 @@ pub fn run() {
         }))
         .setup(|app| {
             let handle = app.handle();
-            let binary = bundled_binary(
-                handle,
-                if cfg!(windows) {
-                    "genet-daemon.exe"
-                } else {
-                    "genet-daemon"
-                },
-            )
-            .ok_or("找不到内置的 genet-daemon 可执行文件")?;
+            let data_dir = app.path().app_data_dir()?.join("GeneHub");
+            let _ = std::fs::create_dir_all(&data_dir);
+            log_to(data_dir.join("shell.log"));
+            tracing_line(&format!("数据目录 {}", data_dir.display()));
 
-            let daemon = Arc::new(Daemon::new(
-                binary,
-                app.path().app_data_dir()?.join("GeneHub"),
-            ));
+            let name = if cfg!(windows) {
+                "genet-daemon.exe"
+            } else {
+                "genet-daemon"
+            };
+            // A missing binary used to end `setup`, which means the app does not
+            // open at all — the one failure mode with nowhere to put an
+            // explanation. Now it opens and says so: `start` fails naming the
+            // path it looked at, which is what someone would need to check.
+            let binary = bundled_binary(handle, name).unwrap_or_else(|| {
+                let expected = app
+                    .path()
+                    .resource_dir()
+                    .map(|dir| dir.join("bin").join(name))
+                    .unwrap_or_else(|_| PathBuf::from(name));
+                tracing_line(&format!("找不到内置的 {name}，期望在 {}", expected.display()));
+                expected
+            });
+
+            let daemon = Arc::new(Daemon::new(binary, data_dir));
             let started = daemon.start();
             match &started {
                 Ok(endpoint) => tracing_line(&format!(
@@ -213,6 +233,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             daemon_endpoint,
             daemon_running,
+            daemon_problem,
             restart_daemon,
             open_external,
             open_window,
@@ -230,6 +251,26 @@ pub fn run() {
         });
 }
 
+/// Where the shell's own account of the startup goes.
+///
+/// Set once the data directory is known. A packaged GUI app has no console, so
+/// without a file the answer to "it does not start" is "nobody can tell you why"
+/// — and the person who can read this file is the only one who can see that
+/// machine.
+static LOG: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+fn log_to(path: PathBuf) {
+    let _ = std::fs::write(&path, "");
+    *LOG.lock().expect("log lock") = Some(path);
+}
+
 fn tracing_line(message: &str) {
     eprintln!("[genehub] {message}");
+    let path = LOG.lock().expect("log lock").clone();
+    if let Some(path) = path {
+        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+            use std::io::Write;
+            let _ = writeln!(file, "{message}");
+        }
+    }
 }

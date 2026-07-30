@@ -73,6 +73,10 @@ pub struct Daemon {
     /// Whether the daemon is supposed to be up. Cleared by `stop`, so the
     /// watchdog does not restart something the user asked to end.
     wanted: AtomicBool,
+    /// Why the last start failed, for the window to show. A GUI app writes its
+    /// diagnostics to a stream nobody is reading, so without this the only
+    /// symptom of a daemon that cannot start is an app that looks idle.
+    problem: Mutex<Option<String>>,
 }
 
 impl Daemon {
@@ -85,11 +89,21 @@ impl Daemon {
             origin: Mutex::new(None),
             adopted_pid: Mutex::new(None),
             wanted: AtomicBool::new(false),
+            problem: Mutex::new(None),
         }
     }
 
     pub fn endpoint(&self) -> Option<Endpoint> {
         self.endpoint.lock().expect("endpoint lock").clone()
+    }
+
+    /// Why there is no daemon, in words a user can pass on.
+    pub fn problem(&self) -> Option<String> {
+        self.problem.lock().expect("problem lock").clone()
+    }
+
+    fn remember_problem(&self, problem: Option<String>) {
+        *self.problem.lock().expect("problem lock") = problem;
     }
 
     pub fn origin(&self) -> Option<Origin> {
@@ -103,6 +117,12 @@ impl Daemon {
     /// shows "no machine found" on every cold start, which reads as a broken
     /// install.
     pub fn start(&self) -> Result<Endpoint, String> {
+        let started = self.try_start();
+        self.remember_problem(started.as_ref().err().cloned());
+        started
+    }
+
+    fn try_start(&self) -> Result<Endpoint, String> {
         self.wanted.store(true, Ordering::SeqCst);
         if let Some(endpoint) = self.endpoint() {
             if self.responding() {
@@ -130,7 +150,14 @@ impl Daemon {
             .env("GENEHUB_DATA_DIR", &self.data_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            // Kept rather than discarded: when a start times out, the reason the
+            // daemon gives is the only thing that explains it, and on a windowless
+            // child there is nowhere else for it to go. Truncated each start, so
+            // it describes this run and not a year of them.
+            .stderr(match self.log() {
+                Some(file) => Stdio::from(file),
+                None => Stdio::null(),
+            });
 
         #[cfg(windows)]
         {
@@ -166,9 +193,29 @@ impl Daemon {
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                Err("daemon 启动超时".to_string())
+                Err(match self.last_words() {
+                    Some(said) => format!("daemon 启动超时（{}）：{said}", self.binary.display()),
+                    None => format!(
+                        "daemon 启动超时，而且它什么都没说：{}",
+                        self.binary.display()
+                    ),
+                })
             }
         }
+    }
+
+    /// Where the daemon's own complaints go. Missing is not worth failing over:
+    /// no log is better than no daemon.
+    fn log(&self) -> Option<std::fs::File> {
+        std::fs::File::create(self.data_dir.join("daemon.log")).ok()
+    }
+
+    /// The last thing the daemon said before it gave up, if it said anything.
+    fn last_words(&self) -> Option<String> {
+        let text = std::fs::read_to_string(self.data_dir.join("daemon.log")).ok()?;
+        let tail: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+        let tail = tail[tail.len().saturating_sub(3)..].join("; ");
+        (!tail.is_empty()).then_some(tail)
     }
 
     /// An endpoint published by a daemon that is still alive and answering.

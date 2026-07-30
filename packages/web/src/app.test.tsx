@@ -86,6 +86,37 @@ describe("the app as the browser loads it", () => {
     expect(await screen.findByText(/没有可连接的机器/)).toBeInTheDocument();
   });
 
+  it("blames the daemon, not the user, when the desktop app has no machine", async () => {
+    // In the desktop app there is nothing to choose: this machine is the
+    // machine. Telling someone to go and press 「连接」 while they are looking at
+    // the thing that has that button is how a failed start reads as a step they
+    // forgot — which is exactly what a packaged build did.
+    const retry = vi.fn(async () => {});
+    const problem = vi.fn(async () => "daemon 启动超时（C:\\Program Files\\GeneHub\\bin\\genet-daemon.exe）");
+    render(
+      <App
+        host={{
+          kind: "desktop",
+          endpoint: async () => null,
+          notify: () => {},
+          openExternal: () => {},
+          problem,
+          retry,
+        }}
+      />,
+    );
+
+    expect(await screen.findByText(/daemon 没有起来/)).toBeInTheDocument();
+    expect(screen.getByText(/genet-daemon\.exe/)).toBeInTheDocument();
+    expect(screen.queryByText(/没有可连接的机器/)).not.toBeInTheDocument();
+
+    screen.getByRole("button", { name: "重试" }).click();
+    await waitFor(() => expect(retry).toHaveBeenCalled());
+    // Asked again afterwards: a retry that leaves a stale reason on screen is
+    // indistinguishable from one that did nothing.
+    await waitFor(() => expect(problem).toHaveBeenCalledTimes(2));
+  });
+
   it("mints the link before showing the page the tray sent it to", async () => {
     const claimLink = vi.fn(async () => null);
     useWorkbench.setState({ claimLink });

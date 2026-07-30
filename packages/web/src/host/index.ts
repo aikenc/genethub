@@ -73,9 +73,26 @@ export interface Host {
   pendingPairing?(): { code: string; endpoint: string } | null;
   /** Records the redeemed pairing so later visits connect without one. */
   rememberPairing?(machine: PairedMachine): void;
+  /**
+   * Why there is no endpoint, when the shell is the one that was supposed to
+   * provide it. A desktop app with no machine to connect to is broken rather
+   * than waiting for the user to choose, and the difference has to reach the
+   * screen: the alternative is an app that looks idle while its daemon failed.
+   */
+  problem?(): Promise<string | null>;
+  /** Tries again after `problem()`. Returns once it has an answer either way. */
+  retry?(): Promise<void>;
 }
 
-/** Tauri injects this; its absence is how we know we are in a browser. */
+/**
+ * Tauri injects this; its absence is how we know we are in a browser.
+ *
+ * Only when `withGlobalTauri` is on, which is why the desktop config sets it and
+ * a test there pins it: without it this object is missing, the packaged app
+ * decides it is a browser, and it goes looking for an address in the URL of a
+ * page that has no URL — which is a first run that says "没有可连接的机器" on a
+ * machine whose daemon is running perfectly.
+ */
 interface TauriGlobal {
   core: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> };
   event?: {
@@ -191,6 +208,15 @@ export function desktopHost(): Host {
     },
     onClaimRequested(listener) {
       return subscribe(tauri, "genehub://claim", listener);
+    },
+    async problem() {
+      return tauri.core.invoke<string | null>("daemon_problem");
+    },
+    async retry() {
+      // The error is read back through `problem()` rather than thrown: this is
+      // called from a button whose job is to leave the screen truthful, not to
+      // produce a value.
+      await tauri.core.invoke("restart_daemon").catch(() => undefined);
     },
   };
 }
