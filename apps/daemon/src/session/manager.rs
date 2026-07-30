@@ -6,7 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -309,6 +309,33 @@ impl SessionManager {
         }
         let meta = live.meta.lock().await.clone();
         let adapter = self.registry.require(&meta.agent_id)?;
+
+        // One start of this kind of agent at a time.
+        //
+        // Third-party CLIs do first-run work in one place for the whole machine:
+        // OpenCode migrates a SQLite database under the user's data directory,
+        // and two servers doing that at once lose the race — one exits on a
+        // failed `CREATE TABLE` and the person is told "OpenCode stopped before
+        // it was ready", with a SQL statement attached. Opening two sessions and
+        // asking both a question is an ordinary thing to do, and whether it
+        // works must not depend on which process reaches the schema first.
+        //
+        // Only the start, and only per kind: different agents still come up in
+        // parallel, and once a process is running it is out of this path
+        // entirely.
+        let gate = {
+            let mut gates = STARTING.lock().await;
+            gates
+                .entry(meta.agent_id.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _starting = gate.lock().await;
+        // Whoever held the gate may have been starting this very session.
+        if live.agent.lock().await.is_some() {
+            return Ok(());
+        }
+
         let scratch = self.store.scratch_dir(&meta.workspace_id, &meta.id);
         std::fs::create_dir_all(&scratch)?;
 
@@ -496,6 +523,14 @@ impl Live {
         *self.status.lock().await = SessionStatus::Closed;
     }
 }
+
+/// One first start at a time, per kind of agent, for the whole process.
+///
+/// Scoped to the process rather than to a manager because what it protects is
+/// not ours: the state a third-party CLI sets up on first run belongs to the
+/// machine, not to whoever asked it to start. See `ensure_started`.
+static STARTING: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// How long an approval may sit with nobody in a position to answer it.
 ///

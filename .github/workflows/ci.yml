@@ -94,7 +94,12 @@ jobs:
             # Not `\S+::\S+`: integration test names have no module path.
             awk '/^failures:$/,0' /tmp/tests.log | grep -E '^ {4}\S+$' | sort -u | head -20 \
               | while IFS= read -r case; do echo "::error::failed:$case"; done
-            grep -E "^(thread|error|panicked at)" /tmp/tests.log | head -10 \
+            # `-A1`, because a panic prints its location on one line and the
+            # reason on the next. Without it a failure reads "panicked at
+            # opencode.rs:81" and the sentence that says why — the only part
+            # worth reading — is in a log nobody outside the repository can
+            # open. That cost a round trip on a race we could have read in one.
+            grep -E -A1 "^(thread|error|panicked at)" /tmp/tests.log | head -20 \
               | while IFS= read -r line; do echo "::error::$line"; done
             exit "$status"
           fi
