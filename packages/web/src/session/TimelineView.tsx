@@ -1,6 +1,8 @@
 import type { TimelineItem } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 
+import { Markdown } from "./Markdown";
+
 import { attachmentPreviewUrl } from "./attachments";
 import { useWorkbench } from "./store";
 import type { TimelineState } from "./timeline";
@@ -101,9 +103,9 @@ function Item({ item }: { item: TimelineItem }) {
 
     case "assistantMessage":
       return (
-        <p className="whitespace-pre-wrap" data-testid="assistant-message">
-          {item.text}
-        </p>
+        <div data-testid="assistant-message">
+          <Markdown text={item.text} />
+        </div>
       );
 
     case "reasoning":
@@ -148,7 +150,11 @@ function Reasoning({ text }: { text: string }) {
       <button type="button" onClick={() => setOpen((value) => !value)} className="text-accent">
         {open ? "收起思考过程" : "思考过程"}
       </button>
-      {open ? <p className="mt-1 whitespace-pre-wrap">{text}</p> : null}
+      {open ? (
+        <div className="mt-1">
+          <Markdown text={text} />
+        </div>
+      ) : null}
     </div>
   );
 }

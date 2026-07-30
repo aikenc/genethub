@@ -966,10 +966,9 @@ async fn read_loop(
         };
 
         match frame.get("type").and_then(Value::as_str) {
-            Some("system") if frame.get("subtype").and_then(Value::as_str) == Some("init") => {
-                if let Some(id) = frame.get("session_id").and_then(Value::as_str) {
-                    *native_session_id.lock().unwrap() = Some(id.to_string());
-                }
+            Some("system") => {
+                let mut state = turn.lock().await;
+                translate_system_frame(&frame, &mut state, &events, &native_session_id);
             }
             Some("stream_event") => {
                 let mut state = turn.lock().await;
@@ -1012,6 +1011,43 @@ async fn read_loop(
                 message: why,
             },
         });
+    }
+}
+
+/// The CLI's out-of-band frames about itself: which session this is, and when it
+/// dropped part of the conversation to make room.
+fn translate_system_frame(
+    frame: &Value,
+    state: &mut TurnState,
+    events: &broadcast::Sender<SessionEvent>,
+    native_session_id: &std::sync::Mutex<Option<String>>,
+) {
+    match frame.get("subtype").and_then(Value::as_str) {
+        Some("init") => {
+            if let Some(id) = frame.get("session_id").and_then(Value::as_str) {
+                *native_session_id.lock().unwrap() = Some(id.to_string());
+            }
+        }
+        // Worth a line in the timeline: it is the explanation for an agent that
+        // stops remembering something said earlier, which otherwise reads as the
+        // agent losing the thread for no reason.
+        Some("compact_boundary") => {
+            let Some(turn_id) = state.id.clone() else {
+                return;
+            };
+            let id = state.next_item_id();
+            let reason = frame
+                .get("compact_metadata")
+                .and_then(|meta| meta.get("trigger"))
+                .and_then(Value::as_str)
+                .unwrap_or("auto")
+                .to_string();
+            let _ = events.send(SessionEvent::Item {
+                turn_id,
+                item: TimelineItem::Compaction { id, reason },
+            });
+        }
+        _ => {}
     }
 }
 
@@ -1447,6 +1483,26 @@ fn detail_from_tool(name: &str, input: &Value, result: Option<&str>) -> ToolCall
         "TaskCreate" | "TaskList" | "TaskUpdate" => ToolCallDetail::Plan {
             markdown: result.unwrap_or_default().to_string(),
         },
+        // The plan itself, which is the whole point of plan mode: the CLI asks
+        // permission for this tool and the answer decides whether it starts
+        // working, so the plan has to be on screen and readable — not folded into
+        // an "unknown tool" card as raw JSON, which is where it used to land.
+        "ExitPlanMode" => ToolCallDetail::Plan {
+            markdown: str_field("plan"),
+        },
+        // A sub-agent. Its own steps arrive tagged with this call's
+        // `parent_tool_use_id` and are not threaded in here yet, so `items` stays
+        // empty and the card shows what it was sent away to do.
+        "Task" | "Agent" => ToolCallDetail::SubAgent {
+            agent: input
+                .get("subagent_type")
+                .or_else(|| input.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or("sub-agent")
+                .to_string(),
+            prompt: str_field("prompt"),
+            items: Vec::new(),
+        },
         _ => ToolCallDetail::Unknown {
             raw: json!({ "name": name, "input": input }),
         },
@@ -1492,6 +1548,94 @@ mod tests {
             None
         );
         assert_eq!(ask_mode_in(""), None);
+    }
+
+    /// The CLI compacts on its own when the context fills up. Silently, until
+    /// now — and an agent that has quietly forgotten the first half of the
+    /// conversation looks like an agent that has lost the thread.
+    #[test]
+    fn compaction_leaves_a_mark_in_the_timeline() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut turn = state();
+        let session_id = std::sync::Mutex::new(None);
+
+        translate_system_frame(
+            &json!({
+                "type": "system",
+                "subtype": "compact_boundary",
+                "compact_metadata": { "trigger": "auto", "pre_tokens": 152_000 },
+            }),
+            &mut turn,
+            &tx,
+            &session_id,
+        );
+
+        match &drain(&mut rx)[0] {
+            SessionEvent::Item {
+                item: TimelineItem::Compaction { reason, .. },
+                ..
+            } => assert_eq!(reason, "auto"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// The session id is the whole of `--resume`: without it, reopening a session
+    /// silently starts a new conversation with the same name.
+    #[test]
+    fn the_init_frame_is_where_a_resumable_session_id_comes_from() {
+        let (tx, _rx) = broadcast::channel(64);
+        let session_id = std::sync::Mutex::new(None);
+        translate_system_frame(
+            &json!({ "type": "system", "subtype": "init", "session_id": "sess_abc" }),
+            &mut state(),
+            &tx,
+            &session_id,
+        );
+        assert_eq!(session_id.lock().unwrap().as_deref(), Some("sess_abc"));
+    }
+
+    /// Plan mode's whole payoff is reading the plan before answering the request
+    /// to act on it. As an "unknown tool" card — which is where `ExitPlanMode`
+    /// landed — the plan was raw JSON with the newlines escaped.
+    #[test]
+    fn a_plan_is_offered_as_a_plan_and_not_as_unknown_json() {
+        let detail = detail_from_tool(
+            "ExitPlanMode",
+            &json!({ "plan": "## 步骤\n1. 读代码\n2. 改" }),
+            None,
+        );
+        assert!(
+            matches!(&detail, ToolCallDetail::Plan { markdown } if markdown.starts_with("## 步骤")),
+            "saw {detail:?}"
+        );
+    }
+
+    /// A sub-agent card that says which agent and what it was asked to do, rather
+    /// than a JSON blob whose interesting field is a long prompt on one line.
+    #[test]
+    fn a_task_call_is_a_sub_agent_named_after_the_agent_it_dispatched() {
+        let detail = detail_from_tool(
+            "Task",
+            &json!({
+                "subagent_type": "Explore",
+                "description": "find the router",
+                "prompt": "Where are the RPC handlers?",
+            }),
+            None,
+        );
+        let ToolCallDetail::SubAgent {
+            agent,
+            prompt,
+            items,
+        } = detail
+        else {
+            panic!("expected a sub-agent");
+        };
+        assert_eq!(agent, "Explore");
+        assert_eq!(prompt, "Where are the RPC handlers?");
+        // Its own steps arrive tagged with this call's `parent_tool_use_id`, which
+        // is not threaded in yet — an empty list, not a wrong one.
+        assert!(items.is_empty());
     }
 
     /// Every offered mode has to be a name the CLI will accept, or picking it

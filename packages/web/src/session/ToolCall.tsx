@@ -1,4 +1,6 @@
 import type { ToolCallDetail, ToolStatus } from "@genehub/proto";
+
+import { Markdown } from "./Markdown";
 import { useState } from "react";
 
 /**
@@ -107,7 +109,9 @@ function Body({ detail }: { detail: ToolCallDetail }) {
       return <Pre>{detail.summary}</Pre>;
 
     case "plan":
-      return <Pre>{detail.markdown}</Pre>;
+      // A plan is written as markdown, and it is the one tool output someone is
+      // meant to read end to end before answering a permission request about it.
+      return <Markdown text={detail.markdown} />;
 
     case "subAgent":
       return <p className="text-muted">{detail.prompt}</p>;
