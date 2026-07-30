@@ -5,13 +5,15 @@
 # box you only ever reach over SSH. It is also the fallback when there is no
 # installer for someone's platform yet.
 #
-#   curl -fsSL https://genehub.dev/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/aikenc/genethub/main/scripts/install.sh | sh
+#
+# A deployment that offers a friendlier address serves this same file from it.
 #
 # POSIX sh on purpose: piping into `sh` is how people will run it, and that is
 # not always bash.
 set -eu
 
-base="${GENEHUB_DOWNLOAD_BASE:-https://github.com/genethub/genethub/releases/latest/download}"
+base="${GENEHUB_DOWNLOAD_BASE:-https://github.com/aikenc/genethub/releases/latest/download}"
 bin_dir="${GENEHUB_BIN_DIR:-$HOME/.local/bin}"
 
 say() { printf '%s\n' "$*"; }
@@ -20,7 +22,7 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=macos ;;
-  *) die "no build for $(uname -s). Build from source: https://github.com/genethub/genethub" ;;
+  *) die "no build for $(uname -s). Build from source: https://github.com/aikenc/genethub" ;;
 esac
 
 case "$(uname -m)" in
@@ -31,7 +33,7 @@ esac
 
 # Linux is published for x64 only so far. Saying so beats a 404 from curl.
 if [ "$os" = linux ] && [ "$arch" != x64 ]; then
-  die "no Linux $arch build yet. Build from source: https://github.com/genethub/genethub"
+  die "no Linux $arch build yet. Build from source: https://github.com/aikenc/genethub"
 fi
 
 asset="genet-$os-$arch.tar.gz"

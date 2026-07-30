@@ -22,11 +22,11 @@
 没有图形界面的机器（服务器、VM、只能 SSH 上去的盒子）：
 
 ```bash
-curl -fsSL https://genehub.dev/install.sh | sh   # daemon + 内置 agent，不需要 Node
-genet-daemon                                     # 打印出连接地址与 token
+curl -fsSL https://raw.githubusercontent.com/aikenc/genethub/main/scripts/install.sh | sh
+genet-daemon   # daemon + 内置 agent，不需要 Node；启动后打印连接地址与 token
 ```
 
-有图形界面的：从[发布页](https://github.com/genethub/genethub/releases/latest)下装桌面端，托盘常驻。
+有图形界面的：从[发布页](https://github.com/aikenc/genethub/releases/latest)下装桌面端，托盘常驻。
 
 ## 从源码构建
 
