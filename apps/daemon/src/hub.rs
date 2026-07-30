@@ -27,16 +27,11 @@ pub struct PairingCode {
 
 /// A way into an identity that has no login: a one-time link, and the key that
 /// gets it back if the link is lost.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Trial {
-    pub claim_url: String,
-    /// Only present when the identity was just created; minting another link
-    /// for an existing one does not re-issue it.
-    #[serde(default)]
-    pub recovery_key: Option<String>,
-    pub expires_at: String,
-}
+///
+/// This is the protocol type, deserialized straight from the Hub's answer.
+/// Copying it into a local struct only to copy it back out again would give two
+/// places for the field names to drift apart.
+pub use genehub_proto::HubClaim as Trial;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

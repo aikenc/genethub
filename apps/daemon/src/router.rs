@@ -334,7 +334,7 @@ pub async fn handle(
             match link.trial(&hub_url, display_name).await {
                 Ok((status, trial)) => Handled::ok(Reply::HubClaim {
                     status,
-                    claim: claim_of(trial),
+                    claim: trial,
                 }),
                 Err(error) => {
                     let message = format!("{error:#}");
@@ -355,7 +355,7 @@ pub async fn handle(
             match link.claim_link().await {
                 Ok(trial) => Handled::ok(Reply::HubClaim {
                     status: link.status().await,
-                    claim: claim_of(trial),
+                    claim: trial,
                 }),
                 Err(error) => failed(error),
             }
@@ -581,14 +581,6 @@ pub async fn handle(
             Ok(()) => Handled::ok(Reply::Ack),
             Err(error) => failed(error),
         },
-    }
-}
-
-fn claim_of(trial: crate::hub::Trial) -> genehub_proto::HubClaim {
-    genehub_proto::HubClaim {
-        claim_url: trial.claim_url,
-        recovery_key: trial.recovery_key,
-        expires_at: trial.expires_at,
     }
 }
 

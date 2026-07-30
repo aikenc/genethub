@@ -2,6 +2,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
+import { Client } from "./protocol/client";
+import { socketQueue } from "./protocol/fake-socket";
 import { useWorkbench } from "./session/store";
 
 /**
@@ -109,6 +111,55 @@ describe("the app as the browser loads it", () => {
     await waitFor(() =>
       expect(useWorkbench.getState().tabs.some((tab) => tab.kind === "settings")).toBe(true),
     );
+  });
+
+  it("says why the tray's link could not be minted", async () => {
+    // The common case for this: a machine that was never connected to a Hub, so
+    // there is no identity to share. Swallowing that leaves a menu item that
+    // looks broken rather than one that explained itself.
+    useWorkbench.setState({
+      claimLink: async () => {
+        throw new Error("这台机器还没有连到 Hub");
+      },
+    });
+    let ask = () => {};
+    const host = {
+      kind: "browser" as const,
+      endpoint: async () => ({ url: ENDPOINT, via: "lan" as const, label: "测试机" }),
+      notify: () => {},
+      openExternal: () => {},
+      onClaimRequested: (listener: () => void) => {
+        ask = listener;
+        return () => {};
+      },
+    };
+
+    render(<App host={host} />);
+    await screen.findByRole("status");
+    ask();
+
+    expect(await screen.findByText("这台机器还没有连到 Hub")).toBeInTheDocument();
+  });
+
+  it("says the device was revoked rather than sending someone to check ports", async () => {
+    // Driven through the real client: the socket connects, the machine refuses
+    // the handshake, and the reason has to survive all the way to the screen.
+    // The generic advice — "make sure the port is reachable" — is actively
+    // misleading here, because the port is plainly fine.
+    const queue = socketQueue();
+    render(
+      <App connect={(endpoint) => new Client({ url: endpoint.url, socketFactory: queue.factory })} />,
+    );
+
+    await waitFor(() => expect(queue.sockets.length).toBe(1));
+    const socket = queue.latest();
+    socket.open();
+    await waitFor(() => socket.lastOf("hello"));
+    socket.fail(socket.lastOf("hello").id, "unauthorized", "这个设备已经不在这台机器的授权列表里");
+
+    expect(await screen.findByText("这个设备已经不在这台机器的授权列表里")).toBeInTheDocument();
+    expect(screen.getByText(/重新配对/)).toBeInTheDocument();
+    expect(screen.queryByText(/确认地址里的端口/)).not.toBeInTheDocument();
   });
 
   it("opens one connection and keeps it across re-renders", async () => {

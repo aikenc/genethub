@@ -88,6 +88,10 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
           status={hub}
           claim={claim}
           host={host}
+          // Empty in a build of this repository alone, which has no Hub to
+          // suggest. A deployment that runs one bakes it in, and then "先体验"
+          // is a single click instead of an address to look up.
+          defaultHubUrl={import.meta.env.VITE_GENEHUB_HUB_URL ?? ""}
           onPair={(hubUrl) => pair(hubUrl)}
           onTrial={(hubUrl) => trial(hubUrl)}
           onClaimLink={() => claimLink()}

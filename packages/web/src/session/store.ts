@@ -129,7 +129,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   async attach(client) {
     set({ client, notice: null });
-    client.onStateChange((connection) => set({ connection }));
+    client.onStateChange((connection) => {
+      set({ connection });
+      // A connection that was refused knows why — wrong credential, revoked
+      // device, protocol mismatch — and none of those are fixed by waiting. Say
+      // it, instead of leaving a spinner and a guess about ports.
+      if (connection === "closed" && client.failure) set({ notice: client.failure.message });
+    });
     client.onNotice((_level, message) => set({ notice: message }));
     try {
       await refreshCatalog(client, set);

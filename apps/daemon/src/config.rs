@@ -102,7 +102,6 @@ pub struct Config {
     /// Off by default. Listening beyond loopback is a decision the user makes,
     /// not something that happens because they installed the app.
     pub lan_enabled: bool,
-    pub hub_url: Option<String>,
     pub agents: AgentsConfig,
     pub workspaces: Vec<WorkspaceEntry>,
     /// How many events per session stay replayable after a disconnect.
@@ -114,7 +113,6 @@ impl Default for Config {
         Config {
             port: 0,
             lan_enabled: false,
-            hub_url: None,
             agents: AgentsConfig::default(),
             workspaces: Vec::new(),
             replay_window: 2048,

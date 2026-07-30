@@ -113,8 +113,17 @@ export function App({
       host.onClaimRequested?.(() => {
         // Minted first, shown second: the tray asks for this when someone has
         // lost their way in, and landing on settings with nothing new on it
-        // would look like the menu item did nothing.
-        void useWorkbench.getState().claimLink();
+        // would look like the menu item did nothing. A machine that was never
+        // connected to a Hub has no identity to hand out, and saying that is the
+        // difference between a menu item that failed and one that is broken.
+        void useWorkbench
+          .getState()
+          .claimLink()
+          .catch((error: unknown) =>
+            useWorkbench.setState({
+              notice: error instanceof Error ? error.message : String(error),
+            }),
+          );
         useWorkbench.getState().openTab("settings");
       }),
     [host],
@@ -292,7 +301,8 @@ export function App({
  * What a new install shows instead of a workbench with everything greyed out.
  */
 function FirstRun({ host, onOpenSettings }: { host: Host; onOpenSettings(): void }) {
-  const { workspaces, activeWorkspaceId, agents, createSession, connection } = useWorkbench();
+  const { workspaces, activeWorkspaceId, agents, createSession, connection, client } =
+    useWorkbench();
   const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
   const builtin = agents.find((agent) => agent.builtin) ?? agents[0];
   const usable = builtin && builtin.probe.state === "ready" && builtin.catalog.models.length > 0;
@@ -301,14 +311,26 @@ function FirstRun({ host, onOpenSettings }: { host: Host; onOpenSettings(): void
   // not "no project" — saying that sends people hunting for a folder when the
   // real problem is they never reached the machine.
   if (connection !== "ready") {
+    // A refused handshake carries its own reason, and it is never "check the
+    // port": the credential was revoked, or the two sides are different
+    // versions. Showing the generic advice then sends people to fix the one
+    // thing that is already working.
+    const refused = connection === "closed" ? client?.failure : null;
     return (
       <Splash>
         <p className="text-sm">{connection === "closed" ? "连不上这台机器。" : "正在连这台机器…"}</p>
         <p className="mb-3 text-xs text-muted">
-          {connection === "closed"
-            ? "确认地址里的端口能从你这边通到 daemon，或者改用和页面同一个端口的代理地址。"
-            : "连上之后会直接进到一个会话。"}
+          {refused
+            ? refused.message
+            : connection === "closed"
+              ? "确认地址里的端口能从你这边通到 daemon，或者改用和页面同一个端口的代理地址。"
+              : "连上之后会直接进到一个会话。"}
         </p>
+        {refused?.code === "unauthorized" ? (
+          <p className="text-xs text-faint">
+            这台机器可能已经把这个设备撤销了。到「设备」页把它忘掉，再重新配对一次。
+          </p>
+        ) : null}
       </Splash>
     );
   }

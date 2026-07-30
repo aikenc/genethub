@@ -127,7 +127,10 @@ impl Link {
                     .claim_link(enrollment)
                     .await
             }
-            _ => anyhow::bail!("this machine is not paired with a Hub"),
+            // Worth spelling out: this is what the tray's "mint another link"
+            // hits on a machine that was never connected to a Hub, and the
+            // message is the only thing the user will see.
+            _ => anyhow::bail!("这台机器还没有连到 Hub，没有可分享的身份；先在设置里连一个"),
         }
     }
 
@@ -153,6 +156,18 @@ impl Link {
             true => Some(client.claim_trial(&code).await?),
             false => None,
         };
+
+        // Nobody has to approve a trial — the Hub already did, in the call
+        // above — so there is nothing to wait for in the background. Finishing
+        // here is what makes the difference between handing back a machine that
+        // is paired and handing back a screen that asks for a code no one will
+        // ever type. It also means a failed enrollment is reported to the caller
+        // instead of leaving the machine stuck half-paired.
+        if let Some(claim) = claimed {
+            let outcome = self.complete(&client, &code).await;
+            self.settle(hub_url, outcome).await;
+            return Ok((self.status().await, Some(claim)));
+        }
 
         let task = tokio::spawn({
             let link = self.clone();
@@ -358,10 +373,20 @@ mod tests {
             .expect("the trial should start");
 
         // Nothing on this machine keeps a copy, so a caller that drops these
-        // has thrown away the identity. They have to come back with the call.
+        // has thrown away the identity. They have to come back with the call —
+        // and they do even though enrolling cannot finish here, because this
+        // `Link` has no daemon behind it. That is the property worth pinning:
+        // the way back in must survive a failed enrollment, or someone ends up
+        // with an identity they cannot reach and a machine that is not in it.
         assert_eq!(trial.claim_url, "http://hub.test/link/abc");
         assert_eq!(trial.recovery_key.as_deref(), Some("rk-1"));
-        assert!(matches!(status, HubStatus::Pairing { .. }));
+
+        // And nobody is left staring at a code to type: a trial was approved by
+        // the Hub in the same breath as it was asked for.
+        assert!(
+            !matches!(status, HubStatus::Pairing { .. }),
+            "a trial has nothing for anyone to approve, so it must not ask"
+        );
     }
 
     #[tokio::test]
