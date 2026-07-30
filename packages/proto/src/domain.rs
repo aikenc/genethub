@@ -329,8 +329,13 @@ pub struct DeviceInfo {
 #[ts(export, export_to = "index.ts")]
 pub struct DeviceInvite {
     pub code: String,
-    /// Where the client should meet this machine. Absent when remote access is
-    /// off, in which case the invite is only usable over the LAN.
+    /// Where the client should meet this machine.
+    ///
+    /// Absent when remote access is off, and then there is nowhere to send
+    /// anyone: this machine does not know its own address on the network, so an
+    /// invite without this cannot be turned into a link. The workbench asks for
+    /// a relay first for that reason. Pairing over a LAN alone would need the
+    /// address to come from somewhere else, and nothing supplies it today.
     #[ts(optional)]
     pub rendezvous_url: Option<String>,
     pub expires_at: String,

@@ -631,14 +631,29 @@ mod tests {
         assert_eq!(transport_for(None), TransportKind::Forwarded);
     }
 
+    /// Two requests may arrive before a handshake, and it matters that this list
+    /// is exactly two: everything before `hello` runs for a caller nobody has
+    /// authenticated yet.
     #[test]
-    fn only_hello_may_precede_the_handshake() {
+    fn only_hello_and_redeeming_an_invite_may_precede_the_handshake() {
         assert!(!needs_handshake(&Request::Hello {
             client_name: "web".into(),
             protocol_version: 1,
             device: None,
         }));
+        // The device doing this has no credential yet, which is the whole point
+        // of the exchange — requiring one first would make pairing impossible.
+        assert!(!needs_handshake(&Request::DeviceClaim {
+            code: "invite".into(),
+            device_name: "手机上的浏览器".into(),
+            nonce: "n".into(),
+            proof: "p".into(),
+        }));
+
         assert!(needs_handshake(&Request::AgentList));
+        // Named on purpose: it is the one that would hand a stranger the list of
+        // authorized devices.
+        assert!(needs_handshake(&Request::DeviceList));
     }
 
     #[test]

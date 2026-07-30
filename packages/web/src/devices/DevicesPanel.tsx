@@ -148,6 +148,9 @@ function ThisMachine({
           </button>
         </div>
         {!attached ? (
+          // Not an arbitrary rule: a machine does not know its own address on
+          // the network, so without a meeting point there is nothing to put in
+          // a link.
           <p className="text-xs text-muted">先开启远程访问，配对链接才有地方可去。</p>
         ) : null}
         {link ? (
