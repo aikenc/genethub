@@ -46,19 +46,22 @@ describe("connecting a machine to a Hub", () => {
     expect(onPair).toHaveBeenCalledWith("https://hub.example.com");
   });
 
-  it("puts the code on screen and sends the user to the real browser to approve it", async () => {
+  const PAIRING = {
+    state: "pairing",
+    hubUrl: "https://hub.example.com",
+    userCode: "VCL9-47CG",
+    verificationUri: "https://hub.example.com/activate",
+    verificationUriComplete: "https://hub.example.com/activate?code=VCL9-47CG",
+    expiresAt: "2026-01-01T00:00:00Z",
+  } as const;
+
+  it("approves the code in a window of this app rather than throwing the user out", async () => {
+    const openWindow = vi.fn();
     const openExternal = vi.fn();
     render(
       <Pairing
-        status={{
-          state: "pairing",
-          hubUrl: "https://hub.example.com",
-          userCode: "VCL9-47CG",
-          verificationUri: "https://hub.example.com/activate",
-          verificationUriComplete: "https://hub.example.com/activate?code=VCL9-47CG",
-          expiresAt: "2026-01-01T00:00:00Z",
-        }}
-        host={host({ openExternal })}
+        status={PAIRING}
+        host={host({ openWindow, openExternal })}
         onPair={async () => {}}
         onUnpair={async () => {}}
       />,
@@ -66,10 +69,28 @@ describe("connecting a machine to a Hub", () => {
 
     expect(screen.getByTestId("user-code")).toHaveTextContent("VCL9-47CG");
     await userEvent.click(screen.getByText("打开授权页面"));
-    // Opening it inside this window would be a second, signed-out browser.
-    expect(openExternal).toHaveBeenCalledWith(
-      "https://hub.example.com/activate?code=VCL9-47CG",
+
+    // Being bounced out to the system browser and back is the worst minute of a
+    // first install, and this app is a browser already.
+    expect(openWindow).toHaveBeenCalledWith("https://hub.example.com/activate?code=VCL9-47CG");
+    expect(openExternal).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a plain link where the shell has no window of its own", async () => {
+    // A browser: a tab is already a window of this app, and pretending
+    // otherwise would mean the button does nothing there.
+    const openExternal = vi.fn();
+    render(
+      <Pairing
+        status={PAIRING}
+        host={host({ kind: "browser", openExternal })}
+        onPair={async () => {}}
+        onUnpair={async () => {}}
+      />,
     );
+
+    await userEvent.click(screen.getByText("打开授权页面"));
+    expect(openExternal).toHaveBeenCalledWith("https://hub.example.com/activate?code=VCL9-47CG");
   });
 
   it("tells the difference between not paired and paired but unreachable", () => {

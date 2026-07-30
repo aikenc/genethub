@@ -57,9 +57,8 @@ fn announce(app: &tauri::AppHandle, endpoint: &Result<Endpoint, String>) {
 
 /// Opens a link in the user's real browser.
 ///
-/// Pairing sends them to the Hub to approve a code, and that has to happen
-/// where their session already is — inside this window it would be a second,
-/// signed-out browser.
+/// For links that are about the wider world — documentation, a release page.
+/// Anything that is part of getting signed in goes to `open_window` instead.
 #[tauri::command]
 fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -67,6 +66,44 @@ fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
         .open_url(url, None::<&str>)
         .map_err(|error| error.to_string())
 }
+
+/// Opens a link in a window of this app.
+///
+/// Signing in happens here rather than in the system browser. Being bounced out
+/// of an app you just installed, to a browser, to come back and find out whether
+/// it worked, is the worst minute of the whole journey — and this app is a
+/// browser already, so there is nothing to be gained by borrowing another one.
+///
+/// The window is plain and separate on purpose: the page loaded in it is a web
+/// page from the Hub, and it has no business reaching the workbench's own
+/// window. It carries its own cookies, so a session started here is still there
+/// the next time this window opens.
+#[tauri::command]
+fn open_window(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|error| error.to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("refusing to open {}: not a web address", parsed.scheme()));
+    }
+
+    // Reused rather than stacked: pressing the button twice should bring the
+    // window forward, not leave a pile of half-finished logins behind.
+    if let Some(existing) = app.get_webview_window(LOGIN_WINDOW) {
+        existing.navigate(parsed).map_err(|error| error.to_string())?;
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    tauri::WebviewWindowBuilder::new(&app, LOGIN_WINDOW, tauri::WebviewUrl::External(parsed))
+        .title("登录 GeneHub")
+        .inner_size(480.0, 680.0)
+        .resizable(true)
+        .build()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+const LOGIN_WINDOW: &str = "hub-login";
 
 #[tauri::command]
 fn notify(app: tauri::AppHandle, title: String, body: Option<String>) {
@@ -178,6 +215,7 @@ pub fn run() {
             daemon_running,
             restart_daemon,
             open_external,
+            open_window,
             notify,
             pick_directory
         ])

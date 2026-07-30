@@ -5,6 +5,16 @@ import { QrCode } from "../devices/QrCode";
 import type { Host } from "../host";
 
 /**
+ * Approving a pairing means signing in, and where that happens is the shell's
+ * call. The desktop app opens a window of its own; being thrown out to the
+ * system browser and back is the worst minute of a first install.
+ */
+function openSignIn(host: Host, url: string): void {
+  if (host.openWindow) host.openWindow(url);
+  else host.openExternal(url);
+}
+
+/**
  * Connecting this machine to a Hub, so a phone or another browser can reach it.
  *
  * Everything here renders from `HubStatus`, which the daemon owns. The UI never
@@ -85,14 +95,14 @@ export function Pairing({
   if (status.state === "pairing") {
     return (
       <section className="space-y-3 rounded-lg border border-accent/50 bg-accent/5 p-4 text-center">
-        <p className="text-sm text-muted">在浏览器里打开下面的地址，输入这个配对码：</p>
+        <p className="text-sm text-muted">打开下面的地址，输入这个配对码：</p>
         <p className="font-mono text-3xl tracking-[0.3em]" data-testid="user-code">
           {status.userCode}
         </p>
         <button
           type="button"
           className="rounded bg-accent px-4 py-2 text-sm text-white"
-          onClick={() => host.openExternal(status.verificationUriComplete)}
+          onClick={() => openSignIn(host, status.verificationUriComplete)}
         >
           打开授权页面
         </button>

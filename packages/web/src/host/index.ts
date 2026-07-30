@@ -39,6 +39,15 @@ export interface Host {
   endpoint(): Promise<Endpoint | null>;
   notify(notification: Notification): void;
   openExternal(url: string): void;
+  /**
+   * Opens a page that is part of getting signed in.
+   *
+   * Separate from `openExternal` because the answer differs by shell: a browser
+   * opens a tab, but a desktop app opens a window of its own rather than
+   * throwing the user out to a different browser and back. Absent means "no
+   * difference here" and callers fall back to `openExternal`.
+   */
+  openWindow?(url: string): void;
   /** Present only where a native picker exists. */
   pickDirectory?(): Promise<string | null>;
   /**
@@ -167,6 +176,9 @@ export function desktopHost(): Host {
     },
     openExternal(url) {
       void tauri.core.invoke("open_external", { url });
+    },
+    openWindow(url) {
+      void tauri.core.invoke("open_window", { url });
     },
     async pickDirectory() {
       return tauri.core.invoke<string | null>("pick_directory");

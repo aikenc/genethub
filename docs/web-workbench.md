@@ -226,7 +226,8 @@ interface Host {
   readonly kind: "browser" | "desktop";
   endpoint(): Promise<Endpoint | null>;      // 桌面问壳要本机端口，浏览器读 URL 片段
   notify(n: Notification): void;
-  openExternal(url: string): void;
+  openExternal(url: string): void;           // 文档、发布页这类"外面的世界"
+  openWindow?(url: string): void;            // 登录这类"还在本应用里"；缺失时退回上一行
   pickDirectory?(): Promise<string | null>;  // 可选能力，缺失即不渲染入口
 }
 ```
