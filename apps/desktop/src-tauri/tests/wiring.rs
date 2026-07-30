@@ -93,12 +93,7 @@ fn every_command_the_workbench_calls_exists_here() {
 /// refuses. The installer has to stop what we ship before it writes.
 #[test]
 fn the_windows_installer_stops_the_daemon_before_replacing_it() {
-    let config = config();
-    let hook = config["bundle"]["windows"]["nsis"]["installerHooks"]
-        .as_str()
-        .expect("no installer hooks: an upgrade will fail on a running daemon");
-    let script = std::fs::read_to_string(repo().join("apps/desktop/src-tauri").join(hook))
-        .expect("the hook file named in the config is missing");
+    let script = installer_hook();
 
     assert!(
         script.contains("NSIS_HOOK_PREINSTALL"),
@@ -112,6 +107,60 @@ fn the_windows_installer_stops_the_daemon_before_replacing_it() {
             "{binary} ships in the bundle but the installer never stops it"
         );
     }
+}
+
+/// The shell restarts the daemon about a second after it dies, on purpose: that
+/// is what keeps a machine reachable. It also means an installer that stops the
+/// daemon and not its supervisor gets a brand-new daemon holding the file it is
+/// about to write — the same failure, one second later, which is exactly what
+/// happened when this hook was first written.
+#[test]
+fn the_installer_stops_the_supervisor_before_the_thing_it_supervises() {
+    let script = installer_hook();
+    // Derived from the config, because that is what names the installed
+    // executable: renaming the product would otherwise leave the hook killing a
+    // process that no longer exists, silently.
+    let exe = format!(
+        "/IM {}.exe",
+        config()["productName"].as_str().expect("productName")
+    );
+    // The kill lines, not any mention of the names: the comment above them
+    // explains this in prose and would otherwise decide the ordering.
+    let app = script
+        .find(&exe)
+        .expect("the app itself is never stopped, so it will revive the daemon");
+    let daemon = script
+        .find("/IM genet-daemon.exe")
+        .expect("the daemon is never stopped");
+    assert!(
+        app < daemon,
+        "the daemon is stopped before its supervisor, which will simply start another one"
+    );
+
+    // And the wait afterwards asks the file rather than guessing a duration: how
+    // long a handle takes to close, a scanner to let go, or a respawn to finish
+    // are not knowable from here.
+    assert!(
+        script.contains("FileOpen"),
+        "the hook sleeps for a guessed interval instead of checking that the file \
+         it is about to write is free"
+    );
+
+    let supervisor = std::fs::read_to_string(repo().join("apps/desktop/src-tauri/src/daemon.rs"))
+        .expect("read the supervisor");
+    assert!(
+        supervisor.contains("fn watch"),
+        "nothing supervises the daemon any more, so this test's premise is stale"
+    );
+}
+
+fn installer_hook() -> String {
+    let config = config();
+    let hook = config["bundle"]["windows"]["nsis"]["installerHooks"]
+        .as_str()
+        .expect("no installer hooks: an upgrade will fail on a running daemon");
+    std::fs::read_to_string(repo().join("apps/desktop/src-tauri").join(hook))
+        .expect("the hook file named in the config is missing")
 }
 
 /// The binaries the installer promises are inside it. Named in one place here
