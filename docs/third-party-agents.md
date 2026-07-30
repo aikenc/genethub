@@ -25,6 +25,8 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | `opencode` | 本地 HTTP + SSE | 探测 `opencode` 二进制；模型/密钥全在它自己的 `opencode.json` |
 | `claude` | 子进程 + 原生 `stream-json` stdio | 探测 `claude` 二进制本身（`@anthropic-ai/claude-code`），daemon 直接说它的原生协议，见 §3 |
 | `codex` | 子进程 + ACP over stdio | 探测 `codex-acp`（Agent Client Protocol 官方维护的 ACP wrapper，包了 Codex CLI）；原生 `app-server` 适配器计划在下一版本，见 [roadmap.md](./roadmap.md) |
+
+装了 `codex` 却没装 `codex-acp` 的人,看到的不是「未安装」——那是在说他机器上的假话。这种情况报 `Unavailable`,理由里点名缺的是桥接,以及装它的那一行命令。桥接是我们的实现细节,不该让用户自己猜出来。
 | `acp` | 子进程 + ACP over stdio | 兜底条目，探测一个叫 `acp-agent` 的二进制；真正常用的是下面的自定义声明 |
 
 `claude` 在代码里是 `adapter::claude::ClaudeAdapter`——直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。换原生协议不是图省事，是为了拿回 ACP 不暴露给客户端的能力：**逐个工具调用的权限控制**。`claude --permission-mode manual --permission-prompt-tool stdio` 会把每一次工具调用都变成一个 `control_request`/`control_response` 往返，和 daemon 自己的 `PermissionRequested`/`respondPermission` 正好对上；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `apps/daemon/src/adapter/claude.rs` 顶部的模块文档。

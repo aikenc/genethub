@@ -310,7 +310,7 @@ export function App({
             ) : null}
             {kind === "devices" ? (
               <div className="min-h-0 flex-1 overflow-y-auto">
-                <DevicesPanel />
+                <DevicesPanel host={host} />
               </div>
             ) : null}
             {extraTabs.map((tab) =>

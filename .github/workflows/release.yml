@@ -60,6 +60,14 @@ jobs:
         shell: bash
         env:
           BUNDLES: ${{ matrix.bundles }}
+          # The Hub this build suggests. Only published builds get one: a copy
+          # someone compiles from this repository has no business defaulting to
+          # somebody else's service, and the field stays empty there.
+          #
+          # Without it, a first run asks the person to type an address they have
+          # no way of knowing, and "先体验" — the one click that is supposed to
+          # make a phone able to reach this machine — cannot even be pressed.
+          VITE_GENEHUB_HUB_URL: ${{ vars.GENEHUB_HUB_URL || 'https://relay.genethub.com' }}
         run: |
           set -uo pipefail
           # The runner's shell already has `-e`, which would end this script at

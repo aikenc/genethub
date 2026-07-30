@@ -1,6 +1,8 @@
 import type { DeviceInfo, DeviceInvite, RemoteAccess } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
+import type { Host } from "../host";
+import { Claim } from "../hub/Claim";
 import { useWorkbench } from "../session/store";
 import { forgetMachine, listMachines, pairingLink, type PairedMachine } from "./machines";
 import { QrCode } from "./QrCode";
@@ -14,7 +16,14 @@ import { QrCode } from "./QrCode";
  * storage: it is a memory of what this browser paired with, and it decides
  * nothing. Merging them would suggest a directory exists somewhere. None does.
  */
-export function DevicesPanel({ origin = window.location.origin }: { origin?: string }) {
+export function DevicesPanel({
+  origin = window.location.origin,
+  host,
+}: {
+  origin?: string;
+  /** Only needed to open the generated link; the page works without it. */
+  host?: Host;
+}) {
   const { devices, remote, refreshDevices, invite, revokeDevice, attachRelay, detachRelay } =
     useWorkbench();
   const [machines, setMachines] = useState<PairedMachine[]>(() => listMachines());
@@ -25,6 +34,7 @@ export function DevicesPanel({ origin = window.location.origin }: { origin?: str
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4 md:p-6">
+      <OnAPhone host={host} />
       <ThisMachine
         devices={devices}
         remote={remote}
@@ -36,6 +46,60 @@ export function DevicesPanel({ origin = window.location.origin }: { origin?: str
       />
       <MyMachines machines={machines} onForget={(id) => setMachines(forgetMachine(id))} />
     </div>
+  );
+}
+
+/**
+ * The one thing people come to this page for: a link, and a code to point a
+ * phone at.
+ *
+ * It sits at the top and not in settings because it is not a setting — it is the
+ * answer to "how do I use this from the sofa". Where the link comes from depends
+ * on how this machine is reachable, and the two cases are genuinely different:
+ * through a Hub, the link signs the other browser into the same identity; on
+ * your own relay, it pairs the other device with this machine directly. Below,
+ * as it always has.
+ */
+function OnAPhone({ host }: { host?: Host }) {
+  const { hub, claim, claimLink, openTab } = useWorkbench();
+  const [busy, setBusy] = useState(false);
+  const paired = hub?.state === "paired";
+
+  return (
+    <section className="space-y-3 rounded-lg border border-line bg-surface p-4">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-medium">在手机上打开</h2>
+          <p className="text-xs text-muted">
+            {paired
+              ? "扫码或把链接发到另一台设备，看到的是同一个工作台。"
+              : "先把这台机器连上 Hub，手机才有地方找到它。"}
+          </p>
+        </div>
+        {paired ? (
+          <button
+            type="button"
+            className="shrink-0 rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-40"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void claimLink().finally(() => setBusy(false));
+            }}
+          >
+            生成链接和二维码
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="shrink-0 rounded border border-line px-3 py-1.5 text-xs hover:border-accent"
+            onClick={() => openTab("settings")}
+          >
+            去连接 Hub
+          </button>
+        )}
+      </div>
+      {claim && host ? <Claim claim={claim} host={host} /> : null}
+    </section>
   );
 }
 

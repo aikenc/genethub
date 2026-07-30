@@ -87,3 +87,56 @@ describe("a session's title arriving after the first message", () => {
     expect(useWorkbench.getState().tabs.find((t) => t.sessionId === "s2")?.title).toBe("新会话");
   });
 });
+
+/**
+ * The user's report was "对话发送后没反应". The daemon had in fact refused the
+ * send and said why; the click handler dropped the rejection on the floor, so
+ * the only trace was an unhandled rejection in a console nobody has open.
+ */
+describe("an action the user asked for that fails", () => {
+  function refusingClient(message: string) {
+    return {
+      call: async () => {
+        throw new Error(message);
+      },
+      subscribe: async () => ({ snapshot: { seq: 0, items: [], summary: SESSION }, replayed: [], reset: false }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+  }
+
+  it("says why instead of looking like the button did nothing", async () => {
+    useWorkbench.setState({
+      client: refusingClient("claude 启动失败：找不到可执行文件"),
+      activeSessionId: "s1",
+    });
+
+    await useWorkbench.getState().send("hello");
+
+    expect(useWorkbench.getState().notice).toBe("claude 启动失败：找不到可执行文件");
+  });
+
+  it("does not leave the last failure sitting there during the next attempt", async () => {
+    const client = {
+      call: async () => undefined,
+      subscribe: async () => ({ snapshot: { seq: 0, items: [], summary: SESSION }, replayed: [], reset: false }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({ client, activeSessionId: "s1", notice: "上一次的错误" });
+
+    await useWorkbench.getState().send("hello");
+
+    expect(useWorkbench.getState().notice).toBeNull();
+  });
+
+  it("reports a session that could not be opened, rather than staying empty", async () => {
+    useWorkbench.setState({
+      client: refusingClient("no adapter registered for 'codex'"),
+      sessions: [],
+    });
+
+    await useWorkbench.getState().createSession("w1", "codex");
+
+    expect(useWorkbench.getState().notice).toBe("no adapter registered for 'codex'");
+    expect(useWorkbench.getState().sessions).toEqual([]);
+  });
+});

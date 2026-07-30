@@ -192,6 +192,16 @@ pub fn run() {
                 expected
             });
 
+            // Before the daemon, deliberately. Starting it waits up to twenty
+            // seconds for it to report a port, and on a first run that wait is
+            // real: two brand-new unsigned executables get scanned, and a
+            // firewall may be asking about one of them. Building the tray after
+            // that meant the first-ever launch had no tray at all for as long as
+            // it took — the one moment someone is looking for reassurance that
+            // something is running. The status line already says "启动中"; this
+            // is what it was written for.
+            tray::build(handle)?;
+
             let daemon = Arc::new(Daemon::new(binary, data_dir));
             let started = daemon.start();
             match &started {
@@ -206,7 +216,6 @@ pub fn run() {
                 daemon: Arc::clone(&daemon),
             });
 
-            tray::build(handle)?;
             announce(handle, &started);
 
             let watcher = handle.clone();

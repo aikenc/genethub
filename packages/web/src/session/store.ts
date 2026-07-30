@@ -173,11 +173,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async createSession(workspaceId, agentId) {
-    const client = require_(get().client);
-    const reply = await client.call({
-      type: "session.create",
-      payload: { workspaceId, agentId, modelId: null, modeId: null, title: null },
-    });
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "session.create",
+        payload: { workspaceId, agentId, modelId: null, modeId: null, title: null },
+      }),
+    );
     if (reply?.type !== "session") return;
     set((state) => ({ sessions: [reply.data, ...state.sessions] }));
     await get().selectSession(reply.data.id);
@@ -286,31 +287,41 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async send(text, attachments = []) {
-    const client = require_(get().client);
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
-    await client.call({ type: "session.send", payload: { sessionId, text, attachments } });
+    // The previous complaint goes away as the next attempt starts, so a stale
+    // line does not get read as a description of what just happened.
+    set({ notice: null });
+    await asked(set, () =>
+      require_(get().client).call({
+        type: "session.send",
+        payload: { sessionId, text, attachments },
+      }),
+    );
   },
 
   async interrupt() {
-    const client = require_(get().client);
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
-    await client.call({ type: "session.interrupt", payload: { sessionId } });
+    await asked(set, () =>
+      require_(get().client).call({ type: "session.interrupt", payload: { sessionId } }),
+    );
   },
 
   async setModel(modelId) {
-    const client = require_(get().client);
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
-    await client.call({ type: "session.setModel", payload: { sessionId, modelId } });
+    await asked(set, () =>
+      require_(get().client).call({ type: "session.setModel", payload: { sessionId, modelId } }),
+    );
   },
 
   async setMode(modeId) {
-    const client = require_(get().client);
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
-    await client.call({ type: "session.setMode", payload: { sessionId, modeId } });
+    await asked(set, () =>
+      require_(get().client).call({ type: "session.setMode", payload: { sessionId, modeId } }),
+    );
   },
 
   /**
@@ -468,14 +479,15 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async answerPermission(outcome) {
-    const client = require_(get().client);
     const sessionId = get().activeSessionId;
     const request = get().timeline.pendingPermission;
     if (!sessionId || !request) return;
-    await client.call({
-      type: "session.respondPermission",
-      payload: { sessionId, requestId: request.id, outcome },
-    });
+    await asked(set, () =>
+      require_(get().client).call({
+        type: "session.respondPermission",
+        payload: { sessionId, requestId: request.id, outcome },
+      }),
+    );
   },
 }));
 
@@ -594,6 +606,24 @@ function unattended(client: Client, get: () => WorkbenchState, set: Setter) {
     set({ notice: error instanceof Error ? error.message : String(error) });
     return undefined;
   };
+}
+
+/**
+ * Runs something the user just asked for, and says why if it does not happen.
+ *
+ * Every one of these is called from a click handler, with nobody awaiting the
+ * promise. A rejection there lands in the console — which no user has open — and
+ * on screen it looks like the button did nothing. "I pressed send and nothing
+ * happened" is the least debuggable report a person can give, and it was ours to
+ * prevent: the daemon had already said what was wrong.
+ */
+async function asked<T>(set: Setter, run: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await run();
+  } catch (error) {
+    set({ notice: error instanceof Error ? error.message : String(error) });
+    return undefined;
+  }
 }
 
 function require_(client: Client | null): Client {

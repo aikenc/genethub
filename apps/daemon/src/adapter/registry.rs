@@ -37,7 +37,9 @@ impl Registry {
             // should remove this entry without that native adapter landing
             // first — the ACP wrapper is a real, working integration on its
             // own, not a placeholder.
-            Arc::new(AcpAdapter::new("codex", "Codex", vec!["codex-acp".into()])),
+            Arc::new(
+                AcpAdapter::new("codex", "Codex", vec!["codex-acp".into()]).bridging("codex"),
+            ),
             // A generic ACP entry so any other ACP-speaking CLI on PATH works
             // with no configuration at all.
             Arc::new(AcpAdapter::new(

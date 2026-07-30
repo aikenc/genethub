@@ -210,3 +210,55 @@ describe("the devices panel", () => {
     expect(screen.getByText("手机")).toBeInTheDocument();
   });
 });
+
+/**
+ * "我要有个按钮给我生成一个手机可访问的二维码" — the code and the link both
+ * existed, three clicks deep in settings and only after typing a Hub address.
+ * This is about the button being where someone looks for it.
+ */
+describe("opening this machine on a phone", () => {
+  it("hands over a link and a code from the devices page", async () => {
+    let minted = 0;
+    useWorkbench.setState({
+      client: { call: async () => null } as never,
+      hub: { state: "paired", hubUrl: "https://hub.example.com", machineId: "m_1", online: true },
+      claimLink: async () => {
+        minted += 1;
+        useWorkbench.setState({
+          claim: { claimUrl: "https://hub.example.com/claim/xyz", recoveryKey: null },
+        } as never);
+        return null as never;
+      },
+    } as never);
+
+    const { DevicesPanel } = await import("./DevicesPanel");
+    render(
+      <DevicesPanel
+        origin="https://work.example.com"
+        host={{ kind: "browser", openExternal: () => {}, endpoint: async () => null } as never}
+      />,
+    );
+
+    screen.getByRole("button", { name: "生成链接和二维码" }).click();
+
+    await waitFor(() =>
+      expect(screen.getByText("https://hub.example.com/claim/xyz")).toBeInTheDocument(),
+    );
+    expect(minted).toBe(1);
+    expect(screen.getByRole("img", { name: "配对二维码" })).toBeInTheDocument();
+  });
+
+  it("points at the one missing step instead of a dead button", async () => {
+    useWorkbench.setState({
+      client: { call: async () => null } as never,
+      hub: { state: "unpaired" },
+      claim: null,
+    } as never);
+
+    const { DevicesPanel } = await import("./DevicesPanel");
+    render(<DevicesPanel origin="https://work.example.com" />);
+
+    expect(screen.getByRole("button", { name: "去连接 Hub" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "生成链接和二维码" })).toBeNull();
+  });
+});

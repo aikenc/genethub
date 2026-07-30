@@ -25,6 +25,25 @@ use super::{find_executable, AgentAdapter, AgentSession, PromptInput, ProviderMa
 use crate::config::ProviderConfig;
 
 const BINARY: &str = "genet-agent";
+
+/// The file name to look for beside the daemon.
+///
+/// On Windows that name ends in `.exe`, and the suffix is not decoration: the
+/// installer ships `genet-agent.exe`, so a sibling lookup for `genet-agent`
+/// matches nothing, `PATH` does not contain the install directory either, and
+/// the agent this product is named after reports itself as not installed on
+/// every Windows machine. Which is exactly what shipped.
+///
+/// The platform is a parameter so the Windows answer can be checked from a test
+/// running anywhere — the bug only existed on the platform the tests did not run
+/// on.
+fn agent_file_name(windows: bool) -> String {
+    if windows {
+        format!("{BINARY}.exe")
+    } else {
+        BINARY.to_string()
+    }
+}
 const EVENT_CAPACITY: usize = 1024;
 
 /// Environment the agent would otherwise read credentials from.
@@ -47,11 +66,20 @@ pub struct GenetAdapter {
 
 impl GenetAdapter {
     pub fn discover() -> Self {
+        Self::discover_beside(
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf)),
+        )
+    }
+
+    /// `beside` is where the daemon itself lives, taken as an argument so a test
+    /// can point it at a directory it controls.
+    fn discover_beside(beside: Option<PathBuf>) -> Self {
         // Next to the daemon first: that is where the installer puts it, and it
         // must win over any unrelated binary of the same name on PATH.
-        let sibling = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join(BINARY)))
+        let sibling = beside
+            .map(|dir| dir.join(agent_file_name(cfg!(windows))))
             .filter(|path| path.is_file());
         let binary = std::env::var("GENET_AGENT_COMMAND")
             .ok()
@@ -912,6 +940,60 @@ pub fn provider_map(entries: Vec<(&str, ProviderConfig)>) -> ProviderMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this pins shipped: the built-in agent reported "not installed" on
+    /// every Windows machine, because we looked beside the daemon for a name the
+    /// installer never writes. The platform where it broke is the one the test
+    /// suite does not run on, so the platform is a parameter.
+    #[test]
+    fn on_windows_the_agent_is_looked_for_by_its_real_file_name() {
+        assert_eq!(agent_file_name(true), "genet-agent.exe");
+        assert_eq!(agent_file_name(false), "genet-agent");
+    }
+
+    /// And the name has to be the one the installer actually stages, which lives
+    /// in a shell script this test reads rather than trusts.
+    #[test]
+    fn the_installer_stages_the_agent_under_that_same_name() {
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../desktop/scripts/bundle.sh"),
+        )
+        .expect("the bundling script");
+        assert!(
+            script.contains("for binary in genet-daemon genet-agent"),
+            "the installer no longer stages the agent under this name"
+        );
+        assert!(
+            script.contains(r#"bin/$binary$exe"#),
+            "the installer dropped the platform suffix, so the lookup will miss"
+        );
+    }
+
+    /// Found beside the daemon, which is where an installed copy is — and the
+    /// only place it is, since the install directory is not on PATH.
+    #[test]
+    fn an_agent_next_to_the_daemon_is_found() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let planted = dir.path().join(agent_file_name(cfg!(windows)));
+        std::fs::write(&planted, "").expect("plant the agent");
+
+        let adapter = GenetAdapter::discover_beside(Some(dir.path().to_path_buf()));
+        assert_eq!(adapter.binary.as_deref(), Some(planted.as_path()));
+    }
+
+    /// An empty directory is not a failure to report at startup: it means this
+    /// copy was built without the agent, and the picker simply will not offer it.
+    #[test]
+    fn nothing_beside_the_daemon_and_nothing_on_path_means_not_installed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let adapter = GenetAdapter::discover_beside(Some(dir.path().to_path_buf()));
+        // PATH may legitimately have one on a developer machine; the assertion is
+        // only that an empty sibling directory contributes nothing.
+        if let Some(found) = adapter.binary {
+            assert!(!found.starts_with(dir.path()), "invented {found:?}");
+        }
+    }
 
     fn state_with_turn() -> TurnState {
         TurnState {
