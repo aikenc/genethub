@@ -526,24 +526,38 @@ function DaemonTrouble({ host }: { host: Host }) {
       {why ? (
         <p className="max-w-lg text-xs text-muted [overflow-wrap:anywhere]">{why}</p>
       ) : null}
-      {host.retry ? (
-        <button
-          type="button"
-          disabled={retrying}
-          onClick={() => {
-            setRetrying(true);
-            void host
-              .retry?.()
-              .then(() => host.problem?.().then(setWhy))
-              .finally(() => setRetrying(false));
-          }}
-          className="mt-2 rounded-md border border-line px-3 py-1.5 text-xs text-fg hover:border-accent disabled:opacity-50"
-        >
-          {retrying ? "正在重启…" : "重试"}
-        </button>
-      ) : null}
+      <div className="mt-2 flex gap-2">
+        {host.retry ? (
+          <button
+            type="button"
+            disabled={retrying}
+            onClick={() => {
+              setRetrying(true);
+              void host
+                .retry?.()
+                .then(() => host.problem?.().then(setWhy))
+                .finally(() => setRetrying(false));
+            }}
+            className="rounded-md border border-line px-3 py-1.5 text-xs text-fg hover:border-accent disabled:opacity-50"
+          >
+            {retrying ? "正在重启…" : "重试"}
+          </button>
+        ) : null}
+        {/* The one screen where the workbench cannot fetch a log for you: there
+            is no daemon to ask. Opening the directory is the only way left, and
+            this is the screen where someone most needs it. */}
+        {host.openLogs ? (
+          <button
+            type="button"
+            onClick={() => host.openLogs?.()}
+            className="rounded-md border border-line px-3 py-1.5 text-xs text-fg hover:border-accent"
+          >
+            打开日志目录
+          </button>
+        ) : null}
+      </div>
       <p className="pt-2 text-xs text-faint">
-        重启这个 App 也可以。一直是这样的话，日志在数据目录的 shell.log 与 daemon.log。
+        重启这个 App 也可以。一直是这样的话，日志目录里的 shell.log 与 daemon.log 说得出原因。
       </p>
     </Splash>
   );

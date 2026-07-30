@@ -92,6 +92,7 @@ describe("the app as the browser loads it", () => {
     // the thing that has that button is how a failed start reads as a step they
     // forgot — which is exactly what a packaged build did.
     const retry = vi.fn(async () => {});
+    const openLogs = vi.fn();
     const problem = vi.fn(async () => "daemon 启动超时（C:\\Program Files\\GeneHub\\bin\\genet-daemon.exe）");
     render(
       <App
@@ -100,6 +101,7 @@ describe("the app as the browser loads it", () => {
           endpoint: async () => null,
           notify: () => {},
           openExternal: () => {},
+          openLogs,
           problem,
           retry,
         }}
@@ -115,6 +117,11 @@ describe("the app as the browser loads it", () => {
     // Asked again afterwards: a retry that leaves a stale reason on screen is
     // indistinguishable from one that did nothing.
     await waitFor(() => expect(problem).toHaveBeenCalledTimes(2));
+
+    // The one screen with no daemon to fetch a log from, which is why the
+    // directory has to be openable from here.
+    screen.getByRole("button", { name: "打开日志目录" }).click();
+    expect(openLogs).toHaveBeenCalled();
   });
 
   it("mints the link before showing the page the tray sent it to", async () => {
