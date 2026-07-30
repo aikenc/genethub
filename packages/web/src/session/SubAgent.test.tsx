@@ -1,4 +1,4 @@
-import type { ToolCallDetail } from "@genehub/proto";
+import type { TimelineItem, ToolCallDetail } from "@genehub/proto";
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
@@ -10,8 +10,12 @@ import { ToolCallView } from "./ToolCall";
  * stalled one — and its steps, if they showed at all, showed as the main agent's.
  */
 describe("a sub-agent's card", () => {
-  const detail = (items: ToolCallDetail extends { items: infer I } ? I : never) =>
-    ({ kind: "subAgent", agent: "Explore", prompt: "Find hello.txt", items }) as ToolCallDetail;
+  const detail = (items: TimelineItem[]): ToolCallDetail => ({
+    kind: "subAgent",
+    agent: "Explore",
+    prompt: "Find hello.txt",
+    items,
+  });
 
   it("shows what it has done so far, as its own work", () => {
     render(

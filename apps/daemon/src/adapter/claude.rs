@@ -71,9 +71,8 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, CommandInfo, ItemDelta, ModeInfo, ModelInfo, PermissionOption,
-    PermissionOptionKind,
-    PermissionOutcome, PermissionRequest, ProbeState, SessionEvent, TimelineItem, ToolCallDetail,
-    ToolStatus, TurnError, TurnErrorCode, Usage,
+    PermissionOptionKind, PermissionOutcome, PermissionRequest, ProbeState, SessionEvent,
+    TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -781,10 +780,7 @@ impl ClaudeSession {
     async fn ask(&self, subtype: &str, request: Value) -> Result<(), String> {
         let request_id = self.control_request_id();
         let (tell, told) = tokio::sync::oneshot::channel();
-        self.awaiting
-            .lock()
-            .await
-            .insert(request_id.clone(), tell);
+        self.awaiting.lock().await.insert(request_id.clone(), tell);
 
         let mut body = json!({ "subtype": subtype });
         if let (Some(body), Some(request)) = (body.as_object_mut(), request.as_object()) {
@@ -799,7 +795,8 @@ impl ClaudeSession {
             .await;
         if let Err(error) = sent {
             self.awaiting.lock().await.remove(&request_id);
-            return Err(super::stopped("Claude Code", &self.child, &self.said).await + &format!(" ({error})"));
+            return Err(super::stopped("Claude Code", &self.child, &self.said).await
+                + &format!(" ({error})"));
         }
 
         match tokio::time::timeout(CONTROL_TIMEOUT, told).await {
@@ -941,7 +938,10 @@ impl AgentSession for ClaudeSession {
         // The CLI is the one that has to change behaviour: `plan` and
         // `bypassPermissions` are decisions about what it does before it ever
         // asks us anything, and there is nothing we could enforce on this side.
-        if let Err(why) = self.ask("set_permission_mode", json!({ "mode": mode_id })).await {
+        if let Err(why) = self
+            .ask("set_permission_mode", json!({ "mode": mode_id }))
+            .await
+        {
             // Accept-edits is the exception, because it is also a promise we can
             // keep ourselves: `handle_control_request` allows without asking. A
             // build too old for the control request still gets the behaviour.
@@ -1772,7 +1772,8 @@ mod tests {
         assert_eq!(ask_mode_in(manual_build), Some("manual"));
 
         // What the user's build reported when it refused the other name.
-        let default_build = "  --permission-mode <mode>  Permission mode (choices: \"acceptEdits\", \
+        let default_build =
+            "  --permission-mode <mode>  Permission mode (choices: \"acceptEdits\", \
              \"auto\", \"bypassPermissions\", \"default\", \"dontAsk\", \"plan\")";
         assert_eq!(ask_mode_in(default_build), Some("default"));
 
@@ -1838,7 +1839,10 @@ mod tests {
         assert_eq!(shorten("一二三四五六七八九十", 4), "一二三四…");
         // Short enough to keep whole, and kept whole — no ellipsis on something
         // that was not shortened.
-        assert_eq!(shorten("Compact the conversation", 240), "Compact the conversation");
+        assert_eq!(
+            shorten("Compact the conversation", 240),
+            "Compact the conversation"
+        );
     }
 
     /// The CLI compacts on its own when the context fills up. Silently, until
@@ -1974,7 +1978,10 @@ mod tests {
             [TimelineItem::ToolCall {
                 name,
                 status,
-                detail: ToolCallDetail::Shell { command, output, .. },
+                detail:
+                    ToolCallDetail::Shell {
+                        command, output, ..
+                    },
                 ..
             }] => {
                 assert_eq!(name, "Bash");
@@ -2078,7 +2085,9 @@ mod tests {
         }
         // Offered by the CLI, deliberately not by us: nothing says what they do
         // (see `MODES`). This is not the same as "not listed".
-        assert!(MODES.iter().all(|(mode, ..)| *mode != "auto" && *mode != "dontAsk"));
+        assert!(MODES
+            .iter()
+            .all(|(mode, ..)| *mode != "auto" && *mode != "dontAsk"));
 
         // A leaner build, and the one that matters: `plan` here would be a flag
         // that makes the CLI refuse to start.
@@ -2111,7 +2120,10 @@ mod tests {
         });
         let models = models_in(&hello);
         assert_eq!(
-            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
             ["default", "sonnet"]
         );
         assert_eq!(models[0].label, "Default (recommended)");
@@ -2178,17 +2190,15 @@ mod tests {
             .await
         {
             Err(refused) => refused.to_string(),
-            Ok(_) => {
-                tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                    loop {
-                        if let Ok(SessionEvent::TurnFailed { error, .. }) = events.recv().await {
-                            return error.message;
-                        }
+            Ok(_) => tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Ok(SessionEvent::TurnFailed { error, .. }) = events.recv().await {
+                        return error.message;
                     }
-                })
-                .await
-                .expect("a CLI that exited does not leave the turn running forever")
-            }
+                }
+            })
+            .await
+            .expect("a CLI that exited does not leave the turn running forever"),
         };
 
         assert!(

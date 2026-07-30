@@ -112,9 +112,9 @@ impl AgentAdapter for AcpAdapter {
         // an empty model list is what makes the frontend hide the picker
         // instead of offering a control that cannot work.
         Catalog {
-        // ACP does have a command list (`available_commands_update` on the
-        // session), which we do not read yet.
-        commands: Vec::new(),
+            // ACP does have a command list (`available_commands_update` on the
+            // session), which we do not read yet.
+            commands: Vec::new(),
             models: Vec::<ModelInfo>::new(),
             modes: vec![
                 ModeInfo {

@@ -188,7 +188,11 @@ impl Chatter {
 /// not find node. All three look identical to the person reading it, and none of
 /// them can be acted on. The exit code and the last lines it wrote are what
 /// separate them, and both are already in hand here.
-pub async fn stopped(label: &str, child: &Mutex<Option<tokio::process::Child>>, said: &Chatter) -> String {
+pub async fn stopped(
+    label: &str,
+    child: &Mutex<Option<tokio::process::Child>>,
+    said: &Chatter,
+) -> String {
     said.settle().await;
     let mut message = match exit_code(child).await {
         Some(code) => format!("{label} 退出了（退出码 {code}）"),

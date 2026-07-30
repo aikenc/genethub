@@ -180,7 +180,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("daemon.log"), "first\nsecond\nthird\n").unwrap();
         let text = tail(dir.path(), "daemon.log", 12).unwrap();
-        assert!(text.ends_with("third\n"), "not the end of the file: {text:?}");
+        assert!(
+            text.ends_with("third\n"),
+            "not the end of the file: {text:?}"
+        );
         assert!(
             !text.contains("firs"),
             "a half line was served as if it were a line: {text:?}"

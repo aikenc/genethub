@@ -147,8 +147,8 @@ impl AgentAdapter for GenetAdapter {
             })
             .collect();
         Catalog {
-        // Our own agent has no slash commands to offer.
-        commands: Vec::new(),
+            // Our own agent has no slash commands to offer.
+            commands: Vec::new(),
             default_model: models.first().map(|m| m.id.clone()),
             models,
             modes,
