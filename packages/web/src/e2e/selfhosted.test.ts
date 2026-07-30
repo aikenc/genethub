@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,13 +10,25 @@ import { WebSocket } from "ws";
 import { claimMachine } from "../devices/claim";
 import type { PairedMachine } from "../devices/machines";
 import { Client, type WebSocketLike } from "../protocol/client";
+import {
+  applySequenced,
+  assistantText,
+  emptyTimeline,
+} from "../session/timeline";
+import { startMockModel, type MockModel } from "./mock-model";
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+const REPO = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../..",
+);
 const DAEMON = path.join(REPO, "target/debug/genet-daemon");
+const AGENT = path.join(REPO, "target/debug/genet-agent");
 const RELAY = path.join(REPO, "apps/relay/dist/main.js");
 const JOIN_TOKEN = "e2e-join-token";
+const REPLY = "已经看过了，这个仓库编译得过。";
 
-const socketFactory = (url: string) => new WebSocket(url) as unknown as WebSocketLike;
+const socketFactory = (url: string) =>
+  new WebSocket(url) as unknown as WebSocketLike;
 
 /**
  * The whole self-hosted product, with nothing from the closed side in it: a
@@ -28,142 +40,287 @@ const socketFactory = (url: string) => new WebSocket(url) as unknown as WebSocke
  * it: each piece can be perfectly correct on its own while the three of them
  * fail to add up to a usable product.
  */
-describe.skipIf(!existsSync(DAEMON) || !existsSync(RELAY))(
-  "reaching a machine with nothing but open-source pieces",
-  () => {
-    let relay: ChildProcess;
-    let relayOrigin: string;
-    let daemon: ChildProcess;
-    let owner: Client;
-    let dataDir: string;
-    let homeDir: string;
-    let rendezvous: string;
+describe.skipIf(
+  !existsSync(DAEMON) || !existsSync(AGENT) || !existsSync(RELAY),
+)("reaching a machine with nothing but open-source pieces", () => {
+  let relay: ChildProcess;
+  let relayOrigin: string;
+  let daemon: ChildProcess;
+  let owner: Client;
+  let model: MockModel;
+  let dataDir: string;
+  let homeDir: string;
+  let rendezvous: string;
 
-    beforeAll(async () => {
-      const started = await startRelay();
-      relay = started.process;
-      relayOrigin = started.origin;
+  beforeAll(async () => {
+    const started = await startRelay();
+    relay = started.process;
+    relayOrigin = started.origin;
 
-      dataDir = mkdtempSync(path.join(tmpdir(), "genehub-selfhost-data-"));
-      homeDir = mkdtempSync(path.join(tmpdir(), "genehub-selfhost-home-"));
-      const local = await startDaemon(dataDir, path.join(homeDir, "GeneHub"));
-      daemon = local.process;
+    dataDir = mkdtempSync(path.join(tmpdir(), "genehub-selfhost-data-"));
+    homeDir = mkdtempSync(path.join(tmpdir(), "genehub-selfhost-home-"));
+    model = await startMockModel(REPLY);
+    writeConfig(dataDir, model.baseUrl);
+    const local = await startDaemon(dataDir, path.join(homeDir, "GeneHub"));
+    daemon = local.process;
 
-      owner = new Client({
-        url: `ws://127.0.0.1:${local.port}/ws?token=${local.token}`,
-        socketFactory,
-        clientName: "owner",
-      });
-      owner.connect();
-      await waitFor(() => owner.connectionState === "ready");
+    owner = new Client({
+      url: `ws://127.0.0.1:${local.port}/ws?token=${local.token}`,
+      socketFactory,
+      clientName: "owner",
+    });
+    owner.connect();
+    await waitFor(() => owner.connectionState === "ready");
 
-      const attached = await owner.call({
-        type: "device.remoteAttach",
-        payload: { relayUrl: relayOrigin, joinToken: JOIN_TOKEN },
-      });
-      if (attached?.type !== "remoteAccess" || !attached.data.rendezvousUrl) {
-        throw new Error("the machine would not attach to the relay");
-      }
-      rendezvous = attached.data.rendezvousUrl;
+    const attached = await owner.call({
+      type: "device.remoteAttach",
+      payload: { relayUrl: relayOrigin, joinToken: JOIN_TOKEN },
+    });
+    if (attached?.type !== "remoteAccess" || !attached.data.rendezvousUrl) {
+      throw new Error("the machine would not attach to the relay");
+    }
+    rendezvous = attached.data.rendezvousUrl;
 
-      // Dialling out is asynchronous, and a client cannot be introduced to a
-      // machine that has not arrived yet.
-      await waitFor(async () => {
-        const status = await owner.call({ type: "device.list" });
-        return status?.type === "devices" && status.data.remote.online;
-      }, 15_000);
-    }, 40_000);
+    // Dialling out is asynchronous, and a client cannot be introduced to a
+    // machine that has not arrived yet.
+    await waitFor(async () => {
+      const status = await owner.call({ type: "device.list" });
+      return status?.type === "devices" && status.data.remote.online;
+    }, 15_000);
+  }, 40_000);
 
-    afterAll(async () => {
-      owner?.close();
-      daemon?.kill("SIGKILL");
-      relay?.kill("SIGKILL");
-      rmSync(dataDir, { recursive: true, force: true });
-      rmSync(homeDir, { recursive: true, force: true });
+  afterAll(async () => {
+    owner?.close();
+    daemon?.kill("SIGKILL");
+    relay?.kill("SIGKILL");
+    await model?.close();
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  /** Everything a new browser does on its own: claim an invite, then connect. */
+  async function pairedClient(name: string): Promise<Client> {
+    const invite = await owner.call({ type: "device.invite" });
+    if (invite?.type !== "invite") throw new Error("no invite was minted");
+    const machine = await claimMachine(
+      rendezvous,
+      invite.data.code,
+      name,
+      socketFactory,
+    );
+    const client = new Client({
+      url: rendezvous,
+      credential: { deviceId: machine.deviceId, secret: machine.secret },
+      socketFactory,
+      clientName: name,
+    });
+    client.connect();
+    await waitFor(() => client.connectionState === "ready", 20_000);
+    return client;
+  }
+
+  it("lets a paired device in and keeps everyone else out", async () => {
+    const invite = await owner.call({ type: "device.invite" });
+    if (invite?.type !== "invite") throw new Error("no invite was minted");
+    expect(invite.data.rendezvousUrl).toBe(rendezvous);
+
+    const machine: PairedMachine = await claimMachine(
+      rendezvous,
+      invite.data.code,
+      "另一台电脑上的 Chrome",
+      socketFactory,
+    );
+    expect(machine.fingerprint).toMatch(/\w/);
+
+    const paired = new Client({
+      url: rendezvous,
+      credential: { deviceId: machine.deviceId, secret: machine.secret },
+      socketFactory,
+      clientName: "paired",
+    });
+    paired.connect();
+    await waitFor(() => paired.connectionState === "ready");
+
+    // Being in means being all the way in: the same workbench, over a relay
+    // that was never asked whether this was allowed.
+    const workspaces = await paired.call({ type: "workspace.list" });
+    expect(workspaces?.type).toBe("workspaces");
+    expect(paired.identity?.fingerprint).toBe(machine.fingerprint);
+
+    const stranger = new Client({
+      url: rendezvous,
+      socketFactory,
+      clientName: "stranger",
+    });
+    stranger.connect();
+    await waitFor(() => stranger.connectionState === "closed", 15_000);
+    expect(stranger.failure?.code).toBe("unauthorized");
+
+    paired.close();
+    stranger.close();
+  }, 40_000);
+
+  it("holds a conversation over the relay, streamed the whole way", async () => {
+    // The point of the product, over the only path a self-hosted deployment
+    // has. Every test above stops at "the socket was allowed", which is a
+    // long way short of "someone can use this": the relay has to carry
+    // subscriptions and streamed deltas, not just a request and a reply.
+    const guest = await pairedClient("远程浏览器");
+
+    const workspaces = await guest.call({ type: "workspace.list" });
+    if (workspaces?.type !== "workspaces" || !workspaces.data[0]) {
+      throw new Error("the machine offered no workspace to work in");
+    }
+
+    const created = await guest.call({
+      type: "session.create",
+      payload: {
+        workspaceId: workspaces.data[0].id,
+        agentId: "genet",
+        modelId: null,
+        modeId: null,
+        title: null,
+      },
+    });
+    if (created?.type !== "session") throw new Error("no session was created");
+    const sessionId = created.data.id;
+
+    // Reduced with the same code the workbench uses, so what is asserted is
+    // what someone would have seen on screen.
+    let timeline = emptyTimeline();
+    let deltas = 0;
+    await guest.subscribe(sessionId, {
+      onEvent: (event) => {
+        if (event.event.type === "itemDelta") deltas += 1;
+        timeline = applySequenced(timeline, event);
+      },
+      onResync: () => {},
     });
 
-    it("lets a paired device in and keeps everyone else out", async () => {
-      const invite = await owner.call({ type: "device.invite" });
-      if (invite?.type !== "invite") throw new Error("no invite was minted");
-      expect(invite.data.rendezvousUrl).toBe(rendezvous);
+    await guest.call({
+      type: "session.send",
+      payload: { sessionId, text: "这个仓库能编译吗？", attachments: [] },
+    });
+    await waitFor(
+      () => timeline.status === "idle" && timeline.items.length > 1,
+      30_000,
+    );
 
-      const machine: PairedMachine = await claimMachine(
-        rendezvous,
-        invite.data.code,
-        "另一台电脑上的 Chrome",
-        socketFactory,
-      );
-      expect(machine.fingerprint).toMatch(/\w/);
+    expect(timeline.lastError).toBeNull();
+    expect(assistantText(timeline)).toContain(REPLY);
+    // Arriving in pieces is the part a request/response transport would
+    // quietly break: it would still "work", just with nothing to watch.
+    expect(deltas).toBeGreaterThan(1);
 
-      const paired = new Client({
-        url: rendezvous,
-        credential: { deviceId: machine.deviceId, secret: machine.secret },
-        socketFactory,
-        clientName: "paired",
-      });
-      paired.connect();
-      await waitFor(() => paired.connectionState === "ready");
+    // And the history is on the machine, not in that browser: a second device
+    // opening the same session sees the conversation that already happened.
+    const second = await pairedClient("另一台设备");
+    const { snapshot } = await second.subscribe(sessionId, {
+      onEvent: () => {},
+      onResync: () => {},
+    });
+    const said = JSON.stringify(snapshot);
+    expect(said).toContain("这个仓库能编译吗？");
+    expect(said).toContain(REPLY);
 
-      // Being in means being all the way in: the same workbench, over a relay
-      // that was never asked whether this was allowed.
-      const workspaces = await paired.call({ type: "workspace.list" });
-      expect(workspaces?.type).toBe("workspaces");
-      expect(paired.identity?.fingerprint).toBe(machine.fingerprint);
+    guest.close();
+    second.close();
+  }, 60_000);
 
-      const stranger = new Client({ url: rendezvous, socketFactory, clientName: "stranger" });
-      stranger.connect();
-      await waitFor(() => stranger.connectionState === "closed", 15_000);
-      expect(stranger.failure?.code).toBe("unauthorized");
+  it("comes back on its own after the relay restarts", async () => {
+    // A self-hosted relay is someone's small server: it gets restarted, and
+    // it gets restarted without anyone touching the machine. If coming back
+    // needs a visit to the desktop app, remote access is not dependable.
+    relay.kill("SIGKILL");
+    await waitFor(async () => {
+      const status = await owner.call({ type: "device.list" });
+      return status?.type === "devices" && !status.data.remote.online;
+    }, 20_000);
 
-      paired.close();
-      stranger.close();
-    }, 40_000);
+    const restarted = await startRelay(Number(new URL(relayOrigin).port));
+    relay = restarted.process;
 
-    it("cuts off a revoked device while it is using the connection", async () => {
-      const invite = await owner.call({ type: "device.invite" });
-      if (invite?.type !== "invite") throw new Error("no invite was minted");
+    await waitFor(async () => {
+      const status = await owner.call({ type: "device.list" });
+      return status?.type === "devices" && status.data.remote.online;
+    }, 30_000);
 
-      const machine = await claimMachine(
-        rendezvous,
-        invite.data.code,
-        "临时设备",
-        socketFactory,
-      );
-      const guest = new Client({
-        url: rendezvous,
-        credential: { deviceId: machine.deviceId, secret: machine.secret },
-        socketFactory,
-        clientName: "guest",
-      });
-      guest.connect();
-      await waitFor(() => guest.connectionState === "ready");
+    // Not just dialled in: usable, by a device paired before the outage.
+    const guest = await pairedClient("重连后的浏览器");
+    expect((await guest.call({ type: "workspace.list" }))?.type).toBe(
+      "workspaces",
+    );
+    guest.close();
+  }, 70_000);
 
-      await owner.call({ type: "device.revoke", payload: { deviceId: machine.deviceId } });
+  it("cuts off a revoked device while it is using the connection", async () => {
+    const invite = await owner.call({ type: "device.invite" });
+    if (invite?.type !== "invite") throw new Error("no invite was minted");
 
-      // The connection has to drop now. "Cannot come back later" is not what
-      // anyone pressing revoke has in mind.
-      await waitFor(() => guest.connectionState !== "ready", 15_000);
-      guest.close();
-    }, 40_000);
-  },
-);
+    const machine = await claimMachine(
+      rendezvous,
+      invite.data.code,
+      "临时设备",
+      socketFactory,
+    );
+    const guest = new Client({
+      url: rendezvous,
+      credential: { deviceId: machine.deviceId, secret: machine.secret },
+      socketFactory,
+      clientName: "guest",
+    });
+    guest.connect();
+    await waitFor(() => guest.connectionState === "ready");
+
+    await owner.call({
+      type: "device.revoke",
+      payload: { deviceId: machine.deviceId },
+    });
+
+    // The connection has to drop now. "Cannot come back later" is not what
+    // anyone pressing revoke has in mind.
+    await waitFor(() => guest.connectionState !== "ready", 15_000);
+    guest.close();
+  }, 40_000);
+});
 
 // ---------------------------------------------------------------------------
 
-async function startRelay(): Promise<{ process: ChildProcess; origin: string }> {
+/**
+ * Providers live in the daemon's config file, so a conversation can be held
+ * without a key to a real model. Written before the daemon starts: it reads
+ * this once.
+ */
+function writeConfig(dataDir: string, modelBaseUrl: string): void {
+  writeFileSync(
+    path.join(dataDir, "config.json"),
+    JSON.stringify({
+      agents: {
+        providers: { deepseek: { apiKey: "sk-mock", baseUrl: modelBaseUrl } },
+      },
+    }),
+  );
+}
+
+async function startRelay(
+  port = 0,
+): Promise<{ process: ChildProcess; origin: string }> {
   const child = spawn("node", [RELAY], {
     env: {
       ...process.env,
       RELAY_MODE: "rendezvous",
       RELAY_HOST: "127.0.0.1",
-      RELAY_PORT: "0",
+      RELAY_PORT: String(port),
       RELAY_JOIN_TOKEN: JOIN_TOKEN,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
   const origin = await new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("the relay never said where it was")), 15_000);
+    const timer = setTimeout(
+      () => reject(new Error("the relay never said where it was")),
+      15_000,
+    );
     const read = (chunk: Buffer) => {
       const found = /http:\/\/127\.0\.0\.1:(\d+)/.exec(chunk.toString());
       if (!found) return;
@@ -188,14 +345,26 @@ function startDaemon(
         GENEHUB_DATA_DIR: dataDir,
         GENEHUB_WORKSPACE_DIR: defaultWorkspace,
         GENEHUB_LOG: "warn",
+        // Installed side by side in production; in a test the agent is wherever
+        // cargo put it.
+        GENET_AGENT_COMMAND: AGENT,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const timer = setTimeout(() => reject(new Error("the daemon never reported a port")), 15_000);
-    child.stderr?.on("data", (chunk) => process.stderr.write(`[daemon] ${chunk}`));
+    const timer = setTimeout(
+      () => reject(new Error("the daemon never reported a port")),
+      15_000,
+    );
+    child.stderr?.on("data", (chunk) =>
+      process.stderr.write(`[daemon] ${chunk}`),
+    );
     child.stdout?.on("data", (chunk: Buffer) => {
       for (const line of chunk.toString().split("\n").filter(Boolean)) {
-        const frame = JSON.parse(line) as { event: string; port: number; token: string };
+        const frame = JSON.parse(line) as {
+          event: string;
+          port: number;
+          token: string;
+        };
         if (frame.event !== "listening") continue;
         clearTimeout(timer);
         resolve({ process: child, port: frame.port, token: frame.token });
