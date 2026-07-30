@@ -21,16 +21,26 @@ const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
     interrupt: true,
     setModel: true,
     setMode: true,
+    setEffort: false,
     permissions: false,
     resume: true,
     attachments: false,
   },
   catalog: {
-    models: [{ id: "deepseek/v4", label: "DeepSeek V4", contextWindow: 128000, reasoning: true }],
-    modes: [{ id: "high", label: "Thinking: high" }],
+    models: [
+      {
+        id: "deepseek/v4",
+        label: "DeepSeek V4",
+        contextWindow: 128000,
+        reasoning: true,
+        efforts: ["low", "high"],
+      },
+    ],
+    modes: [],
     commands: [],
     defaultModel: "deepseek/v4",
-    defaultMode: "high",
+    defaultMode: undefined,
+    defaultEffort: "high",
   },
   ...overrides,
 });
@@ -149,9 +159,11 @@ describe("the controls offered to the user", () => {
         agentId="fixed"
         modelId={null}
         modeId={null}
+      effortId={null}
         onPickAgent={() => {}}
         onPickModel={() => {}}
         onPickMode={() => {}}
+      onPickEffort={() => {}}
       />,
     );
 
@@ -167,9 +179,11 @@ describe("the controls offered to the user", () => {
         agentId="genet"
         modelId={null}
         modeId={null}
+      effortId={null}
         onPickAgent={() => {}}
         onPickModel={() => {}}
         onPickMode={() => {}}
+      onPickEffort={() => {}}
       />,
     );
 

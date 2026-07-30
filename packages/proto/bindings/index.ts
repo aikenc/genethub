@@ -21,14 +21,20 @@ dataBase64?: string, };
  * might fail: a user should never be offered a model picker by an agent that
  * cannot switch models (`architecture.md` §3.2).
  */
-export type Capabilities = { interrupt: boolean, setModel: boolean, setMode: boolean, permissions: boolean, 
+export type Capabilities = { interrupt: boolean, setModel: boolean, 
+/**
+ * How hard the model should think. A separate switch from `set_model`
+ * because it is a separate axis: the same model runs at any of its levels,
+ * and which levels exist is the model's own business (`ModelInfo::efforts`).
+ */
+setEffort: boolean, setMode: boolean, permissions: boolean, 
 /**
  * The agent can rehydrate a past session itself. When false the daemon
  * falls back to read-only replay from its own log.
  */
 resume: boolean, attachments: boolean, };
 
-export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, commands: Array<CommandInfo>, defaultModel?: string, defaultMode?: string, };
+export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, commands: Array<CommandInfo>, defaultModel?: string, defaultMode?: string, defaultEffort?: string, };
 
 /**
  * A request as it arrives on the wire: an envelope id plus the request body.
@@ -39,7 +45,7 @@ export type ClientEnvelope = { id: string, } & ({ "type": "hello", "payload": { 
  * Required on forwarded connections: the machine decides admission
  * itself, and a relay vouches for nobody.
  */
-device: DeviceAuth | null, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+device: DeviceAuth | null, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -245,7 +251,13 @@ files: Array<LogEntry>, };
 
 export type ModeInfo = { id: string, label: string, description?: string, };
 
-export type ModelInfo = { id: string, label: string, contextWindow?: number, reasoning: boolean, };
+export type ModelInfo = { id: string, label: string, contextWindow?: number, reasoning: boolean, 
+/**
+ * The thinking levels this model accepts, in the order it named them —
+ * weakest first, because that is how a slider reads. Empty means this model
+ * has no such dial, and the control belongs nowhere near it.
+ */
+efforts: Array<string>, };
 
 export type NoticeLevel = "info" | "warning" | "error";
 
@@ -325,7 +337,7 @@ export type Request = { "type": "hello", "payload": { clientName: string, protoc
  * Required on forwarded connections: the machine decides admission
  * itself, and a relay vouches for nobody.
  */
-device: DeviceAuth | null, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+device: DeviceAuth | null, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -368,7 +380,7 @@ export type SequencedEvent = { seq: number, sessionId: string, event: SessionEve
  */
 export type ServerFrame = { "type": "result", id: string, ok: boolean, payload?: Reply, error?: ProtocolError, } | { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "desync", sessionId: string, missed: number, };
 
-export type SessionEvent = { "type": "turnStarted", turnId: string, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnCompleted", turnId: string, usage: Usage, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
+export type SessionEvent = { "type": "turnStarted", turnId: string, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnCompleted", turnId: string, usage: Usage, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
 
 /**
  * Everything a client needs to render a session from scratch.
@@ -388,7 +400,7 @@ export type SessionSummary = { id: string, workspaceId: string, agentId: string,
  * from the first thing they said. Clients supply their own placeholder;
  * the daemon has no business picking a word in the user's language.
  */
-title?: string, status: SessionStatus, modelId?: string, modeId?: string, createdAtMs: number, updatedAtMs: number, archived: boolean, };
+title?: string, status: SessionStatus, modelId?: string, modeId?: string, effortId?: string, createdAtMs: number, updatedAtMs: number, archived: boolean, };
 
 /**
  * The machine-level settings a client may see and change.

@@ -12,8 +12,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOutcome, ProbeState,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    Capabilities, Catalog, ItemDelta, ModelInfo, PermissionOutcome, ProbeState, SessionEvent,
+    TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -111,8 +111,13 @@ impl AgentAdapter for GenetAdapter {
         Capabilities {
             interrupt: true,
             set_model: true,
-            // Thinking level is this agent's only mode axis.
-            set_mode: true,
+            // Thinking level, which is this agent's only such dial. It used to be
+            // declared as a *mode*, which put it on the same axis as Claude's
+            // tool-approval policy — one chip meaning two unrelated things
+            // depending on which agent you were talking to.
+            set_effort: true,
+            // No permission modes: it has no approval flow to have policy about.
+            set_mode: false,
             // No approval flow of its own yet, so the frontend must not render
             // approval controls for it.
             permissions: false,
@@ -136,14 +141,9 @@ impl AgentAdapter for GenetAdapter {
                 label: model.label,
                 context_window: model.context_window,
                 reasoning: model.reasoning,
-            })
-            .collect();
-        let modes = THINKING_LEVELS
-            .iter()
-            .map(|level| ModeInfo {
-                id: (*level).to_string(),
-                label: format!("Thinking: {level}"),
-                description: None,
+                // Every model, because the level is applied by the agent rather
+                // than asked of the provider.
+                efforts: THINKING_LEVELS.iter().map(|l| (*l).to_string()).collect(),
             })
             .collect();
         Catalog {
@@ -151,8 +151,9 @@ impl AgentAdapter for GenetAdapter {
             commands: Vec::new(),
             default_model: models.first().map(|m| m.id.clone()),
             models,
-            modes,
-            default_mode: Some("medium".to_string()),
+            modes: Vec::new(),
+            default_mode: None,
+            default_effort: Some("medium".to_string()),
         }
     }
 
@@ -192,8 +193,11 @@ impl AgentAdapter for GenetAdapter {
         if let Some(model) = config.model_id.as_ref() {
             command.arg("--model").arg(model);
         }
-        if let Some(mode) = config.mode_id.as_ref() {
-            command.arg("--thinking").arg(mode);
+        // `mode_id` as the fallback: sessions from before thinking moved onto its
+        // own axis recorded the level there, and reopening one should not quietly
+        // drop back to the default.
+        if let Some(level) = config.effort_id.as_ref().or(config.mode_id.as_ref()) {
+            command.arg("--thinking").arg(level);
         }
 
         let mut child = command
@@ -337,13 +341,19 @@ impl AgentSession for GenetSession {
     }
 
     async fn set_mode(&self, mode_id: &str) -> Result<()> {
-        if !THINKING_LEVELS.contains(&mode_id) {
-            return Err(anyhow!("unknown thinking level '{mode_id}'"));
+        // Kept accepting the old name so a client that still sends it — and a
+        // session that stored its level under `mode` — keeps working.
+        self.set_effort(mode_id).await
+    }
+
+    async fn set_effort(&self, effort_id: &str) -> Result<()> {
+        if !THINKING_LEVELS.contains(&effort_id) {
+            return Err(anyhow!("unknown thinking level '{effort_id}'"));
         }
-        self.command(json!({ "type": "set_thinking_level", "level": mode_id }))
+        self.command(json!({ "type": "set_thinking_level", "level": effort_id }))
             .await?;
-        let _ = self.events.send(SessionEvent::ModeChanged {
-            mode_id: mode_id.to_string(),
+        let _ = self.events.send(SessionEvent::EffortChanged {
+            effort_id: effort_id.to_string(),
         });
         Ok(())
     }

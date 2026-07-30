@@ -13,17 +13,22 @@ const AGENTS: AgentInfo[] = [
     capabilities: {
       interrupt: true,
       setModel: true,
-      setMode: true,
+      // Thinking, which for our own agent is the only such dial it has.
+      setMode: false,
+      setEffort: true,
       permissions: false,
       resume: true,
       attachments: false,
     },
     catalog: {
-      models: [],
-      modes: [{ id: "medium", label: "Medium", description: undefined }],
+      models: [
+        { id: "deepseek/v4", label: "DeepSeek V4", reasoning: true, efforts: ["low", "high"] },
+      ],
+      modes: [],
       commands: [],
-      defaultModel: undefined,
-      defaultMode: "medium",
+      defaultModel: "deepseek/v4",
+      defaultMode: undefined,
+      defaultEffort: "low",
     },
   },
   {
@@ -35,6 +40,7 @@ const AGENTS: AgentInfo[] = [
       interrupt: true,
       setModel: false,
       setMode: true,
+      setEffort: false,
       permissions: true,
       resume: true,
       attachments: false,
@@ -63,10 +69,12 @@ describe("the agent picker once a conversation has started", () => {
         agentId="genet"
         modelId={null}
         modeId={null}
+      effortId={null}
         agentLocked={false}
         onPickAgent={vi.fn()}
         onPickModel={vi.fn()}
         onPickMode={vi.fn()}
+        onPickEffort={() => {}}
       />,
     );
     expect(screen.getByLabelText("agent")).toBeEnabled();
@@ -79,10 +87,12 @@ describe("the agent picker once a conversation has started", () => {
         agentId="genet"
         modelId={null}
         modeId={null}
+      effortId={null}
         agentLocked={true}
         onPickAgent={vi.fn()}
         onPickModel={vi.fn()}
         onPickMode={vi.fn()}
+        onPickEffort={() => {}}
       />,
     );
     expect(screen.getByLabelText("agent")).toBeDisabled();
@@ -90,38 +100,85 @@ describe("the agent picker once a conversation has started", () => {
 });
 
 /**
- * genet's `mode` axis is thinking effort; claude/acp reuse the same axis for
- * tool-approval policy. Nothing else in the payload says which is which, so
- * the chip must read `capabilities.permissions` to caption itself correctly.
+ * Thinking used to ride on the `mode` axis for our own agent while claude used
+ * that same axis for tool-approval policy — one chip that meant two unrelated
+ * things depending on who you were talking to, and the only way to tell was a
+ * capability flag. Thinking now has its own axis, so each chip means one thing.
  */
-describe("the mode chip's caption", () => {
-  it("reads '思考' for an agent without permissions (genet)", () => {
+describe("the thinking and permission chips", () => {
+  const controls = (agentId: string) =>
     render(
       <ComposerControls
         agents={AGENTS}
-        agentId="genet"
+        agentId={agentId}
         modelId={null}
         modeId={null}
+        effortId={null}
         onPickAgent={vi.fn()}
         onPickModel={vi.fn()}
         onPickMode={vi.fn()}
+        onPickEffort={vi.fn()}
       />,
     );
-    expect(screen.getByText("思考")).toBeInTheDocument();
+
+  it("offers thinking from the levels the model named", () => {
+    controls("genet");
+
+    const thinking = screen.getByLabelText("思考强度");
+    expect([...thinking.querySelectorAll("option")].map((option) => option.value)).toEqual([
+      "low",
+      "high",
+    ]);
+    // No permission chip: our own agent has no approval flow to have a policy about.
+    expect(screen.queryByLabelText("模式")).not.toBeInTheDocument();
   });
 
-  it("reads '权限' for an agent with permissions (claude)", () => {
+  it("offers permissions where they exist, and no thinking where the model has none", () => {
+    controls("claude");
+
+    expect(screen.getByText("权限")).toBeInTheDocument();
+    // This fixture's claude lists no levels, so the control that would pretend to
+    // set one is absent rather than empty.
+    expect(screen.queryByLabelText("思考强度")).not.toBeInTheDocument();
+  });
+
+  it("says '默认' rather than naming a level nobody chose", () => {
+    // Claude Code never reports which level it is on. Showing the weakest one as
+    // if it were in force would be a wrong answer dressed as a known one.
+    const agents = AGENTS.map((agent) =>
+      agent.id === "claude"
+        ? {
+            ...agent,
+            capabilities: { ...agent.capabilities, setEffort: true },
+            catalog: {
+              ...agent.catalog,
+              models: [{ id: "default", label: "Default", reasoning: true, efforts: ["low", "max"] }],
+              defaultModel: "default",
+              defaultEffort: undefined,
+            },
+          }
+        : agent,
+    );
     render(
       <ComposerControls
-        agents={AGENTS}
+        agents={agents}
         agentId="claude"
         modelId={null}
         modeId={null}
+        effortId={null}
         onPickAgent={vi.fn()}
         onPickModel={vi.fn()}
         onPickMode={vi.fn()}
+        onPickEffort={vi.fn()}
       />,
     );
-    expect(screen.getByText("权限")).toBeInTheDocument();
+
+    const thinking = screen.getByLabelText("思考强度");
+    expect([...thinking.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
+      "默认",
+      "low",
+      "max",
+    ]);
+    expect((thinking as HTMLSelectElement).value).toBe("");
   });
 });

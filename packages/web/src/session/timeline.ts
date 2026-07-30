@@ -19,6 +19,7 @@ export interface TimelineState {
   usage: Usage | null;
   modelId: string | null;
   modeId: string | null;
+  effortId: string | null;
   seq: number;
 }
 
@@ -32,6 +33,7 @@ export function emptyTimeline(): TimelineState {
     usage: null,
     modelId: null,
     modeId: null,
+    effortId: null,
     seq: 0,
   };
 }
@@ -53,6 +55,7 @@ export function fromSnapshot(snapshot: SessionSnapshot): TimelineState {
     pendingPermission: snapshot.pendingPermissions?.[0] ?? null,
     modelId: snapshot.summary.modelId ?? null,
     modeId: snapshot.summary.modeId ?? null,
+    effortId: snapshot.summary.effortId ?? null,
     seq: snapshot.seq,
   };
 }
@@ -104,6 +107,9 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
 
     case "modeChanged":
       return { ...state, modeId: event.modeId };
+
+    case "effortChanged":
+      return { ...state, effortId: event.effortId };
 
     // Not part of the timeline itself; the session list and its tab title
     // are what change, handled by the store where it has access to them.

@@ -32,6 +32,10 @@ pub struct SessionConfig {
     pub cwd: PathBuf,
     pub model_id: Option<String>,
     pub mode_id: Option<String>,
+    /// How hard to think, when the agent has such a dial. Passed at launch for
+    /// the same reason the model is: the process only starts on the first prompt,
+    /// so a level chosen before that would otherwise be recorded and dropped.
+    pub effort_id: Option<String>,
     /// Where the adapter may keep agent-private state for this session.
     pub scratch_dir: PathBuf,
     /// Provider credentials, keyed by provider id.
@@ -94,6 +98,15 @@ pub trait AgentSession: Send + Sync {
 
     async fn set_model(&self, model_id: &str) -> Result<()>;
     async fn set_mode(&self, mode_id: &str) -> Result<()>;
+
+    /// How hard to think. Refused by default: an agent with no such dial should
+    /// say so rather than accept the call and ignore it, which would leave a
+    /// control on screen that quietly does nothing.
+    async fn set_effort(&self, effort_id: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "this agent has no effort levels to set ({effort_id})"
+        ))
+    }
     async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()>;
 
     /// `None` means the daemon must fall back to read-only replay of its own log.

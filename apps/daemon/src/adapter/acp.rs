@@ -78,6 +78,7 @@ impl AgentAdapter for AcpAdapter {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
+            set_effort: false,
             interrupt: true,
             // ACP has no model switching in the base protocol.
             set_model: false,
@@ -112,6 +113,7 @@ impl AgentAdapter for AcpAdapter {
         // an empty model list is what makes the frontend hide the picker
         // instead of offering a control that cannot work.
         Catalog {
+            default_effort: None,
             // ACP does have a command list (`available_commands_update` on the
             // session), which we do not read yet.
             commands: Vec::new(),

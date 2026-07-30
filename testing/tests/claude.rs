@@ -174,6 +174,20 @@ async fn the_model_and_mode_pickers_offer_what_this_cli_actually_accepts() {
         "the slash is the composer's to draw, not part of the name"
     );
 
+    // Thinking levels, the second axis: per model, because that is how the CLI
+    // reports them.
+    let levels = claude
+        .catalog
+        .models
+        .iter()
+        .find(|model| !model.efforts.is_empty())
+        .map(|model| model.efforts.clone())
+        .expect("a model that takes effort levels names them");
+    assert!(
+        claude.capabilities.set_effort,
+        "a build that names levels can be switched between them"
+    );
+
     let asking = claude
         .catalog
         .default_mode
@@ -232,6 +246,26 @@ async fn the_model_and_mode_pickers_offer_what_this_cli_actually_accepts() {
         })
         .await
         .expect_err("a model this install never offered must be refused, not pretended");
+
+    // The same on the effort axis, and the same reason: `effort: "nonsense"` also
+    // comes back `success` from the CLI while it keeps thinking exactly as before.
+    let level = levels.last().expect("at least one level").clone();
+    journey
+        .client
+        .call(Request::SessionSetEffort {
+            session_id: session.clone(),
+            effort_id: level.clone(),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("the CLI's own level '{level}' is accepted: {error}"));
+    journey
+        .client
+        .call(Request::SessionSetEffort {
+            session_id: session.clone(),
+            effort_id: "as-hard-as-you-can".into(),
+        })
+        .await
+        .expect_err("a level this install never offered must be refused, not pretended");
 
     journey.finish().await;
 }

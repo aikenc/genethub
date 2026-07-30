@@ -60,7 +60,11 @@ describe("an agent's reply", () => {
 
   it("puts a code block behind a copy button rather than in the prose", async () => {
     const write = vi.fn(async () => {});
-    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText: write } });
+    // Only the clipboard: replacing the whole of `navigator` would drop every
+    // property that lives on its prototype, which is most of them.
+    vi.stubGlobal("navigator", Object.create(navigator, {
+      clipboard: { value: { writeText: write } },
+    }));
 
     render(<Markdown text={"跑这个：\n\n```bash\nnpm install -g @anthropic-ai/claude-code\n```"} />);
 

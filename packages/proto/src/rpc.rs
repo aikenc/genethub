@@ -91,6 +91,11 @@ pub enum Request {
     },
     #[serde(rename = "session.setMode", rename_all = "camelCase")]
     SessionSetMode { session_id: String, mode_id: String },
+    #[serde(rename = "session.setEffort", rename_all = "camelCase")]
+    SessionSetEffort {
+        session_id: String,
+        effort_id: String,
+    },
     #[serde(rename = "session.respondPermission", rename_all = "camelCase")]
     SessionRespondPermission {
         session_id: String,

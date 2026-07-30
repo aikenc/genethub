@@ -71,12 +71,15 @@ const READY_AGENT: AgentInfo = {
     interrupt: true,
     setModel: true,
     setMode: true,
+    setEffort: false,
     permissions: true,
     resume: true,
     attachments: false,
   },
   catalog: {
-    models: [{ id: "deepseek/deepseek-v4-flash", label: "flash", reasoning: false }],
+    models: [
+      { id: "deepseek/deepseek-v4-flash", label: "flash", reasoning: false, efforts: [] },
+    ],
     modes: [],
     commands: [],
     defaultModel: "deepseek/deepseek-v4-flash",

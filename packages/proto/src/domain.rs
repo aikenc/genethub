@@ -14,6 +14,11 @@ use ts_rs::TS;
 pub struct Capabilities {
     pub interrupt: bool,
     pub set_model: bool,
+    /// How hard the model should think. A separate switch from `set_model`
+    /// because it is a separate axis: the same model runs at any of its levels,
+    /// and which levels exist is the model's own business (`ModelInfo::efforts`).
+    #[serde(default)]
+    pub set_effort: bool,
     pub set_mode: bool,
     pub permissions: bool,
     /// The agent can rehydrate a past session itself. When false the daemon
@@ -32,6 +37,11 @@ pub struct ModelInfo {
     #[ts(type = "number")]
     pub context_window: Option<u64>,
     pub reasoning: bool,
+    /// The thinking levels this model accepts, in the order it named them —
+    /// weakest first, because that is how a slider reads. Empty means this model
+    /// has no such dial, and the control belongs nowhere near it.
+    #[serde(default)]
+    pub efforts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -76,6 +86,9 @@ pub struct Catalog {
     pub default_model: Option<String>,
     #[ts(optional)]
     pub default_mode: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub default_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -132,6 +145,9 @@ pub struct SessionSummary {
     pub model_id: Option<String>,
     #[ts(optional)]
     pub mode_id: Option<String>,
+    #[ts(optional)]
+    #[serde(default)]
+    pub effort_id: Option<String>,
     #[ts(type = "number")]
     pub created_at_ms: i64,
     #[ts(type = "number")]

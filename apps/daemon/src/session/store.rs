@@ -27,6 +27,10 @@ pub struct SessionMeta {
     pub cwd: PathBuf,
     pub model_id: Option<String>,
     pub mode_id: Option<String>,
+    /// Metas written before this existed read back as `None`, which is the right
+    /// answer for them: no level was ever chosen.
+    #[serde(default)]
+    pub effort_id: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     #[serde(default)]
@@ -45,6 +49,7 @@ impl SessionMeta {
             status,
             model_id: self.model_id.clone(),
             mode_id: self.mode_id.clone(),
+            effort_id: self.effort_id.clone(),
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
             archived: self.archived,
@@ -242,6 +247,7 @@ mod tests {
 
     fn meta(id: &str) -> SessionMeta {
         SessionMeta {
+            effort_id: None,
             id: id.into(),
             workspace_id: "w1".into(),
             agent_id: "genet".into(),

@@ -42,6 +42,7 @@ impl AgentAdapter for OpenCodeAdapter {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
+            set_effort: false,
             interrupt: true,
             set_model: true,
             set_mode: false,
@@ -63,6 +64,7 @@ impl AgentAdapter for OpenCodeAdapter {
         // running instance. Starting one just to fill a dropdown is too slow
         // for the agent picker; the session reports its models once open.
         Catalog {
+            default_effort: None,
             // OpenCode has its own commands over HTTP, which we do not read yet.
             commands: Vec::new(),
             models: Vec::<ModelInfo>::new(),

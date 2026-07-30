@@ -277,6 +277,7 @@ export function App({
                     agentId={session?.agentId ?? null}
                     modelId={workbench.timeline.modelId}
                     modeId={workbench.timeline.modeId}
+                    effortId={workbench.timeline.effortId}
                     agentLocked={workbench.timeline.items.length > 0}
                     attachmentsSupported={
                       currentAgent?.capabilities.attachments ?? false
@@ -295,6 +296,7 @@ export function App({
                     }}
                     onPickModel={(id) => void workbench.setModel(id)}
                     onPickMode={(id) => void workbench.setMode(id)}
+                    onPickEffort={(id) => void workbench.setEffort(id)}
                   />
                 </>
               ) : (

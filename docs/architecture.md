@@ -86,6 +86,8 @@ pub trait AgentAdapter: Send + Sync {
 
 能力差异用 `Capabilities` 声明，**不用返回 `Unsupported` 错误来试探**：前端要在按钮渲染前就知道这个 agent 能不能切模型，而不是点了才报错。
 
+模型、**思考强度**、**模式**是三条独立的轴，不要混用。思考强度是「想多久」（`ModelInfo.efforts` 里由模型自己报出档位，`session.setEffort` 切换）；模式是「动手前问不问」（`Catalog.modes`，`session.setMode`）。这两件事曾经共用一个 `modeId` 字段——内置 agent 拿它当思考档位，Claude 拿它当工具审批策略——于是同一个控件在不同 agent 下是两个毫不相干的意思，唯一的区分办法是去读另一个能力位。一条轴一件事之后，前端不需要知道是哪个 agent 就能把控件画对。
+
 ### 3.3 首批 adapter
 
 | adapter | 传输 | 覆盖 | 阶段 |

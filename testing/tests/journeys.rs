@@ -378,13 +378,30 @@ async fn capabilities_are_declared_so_the_ui_never_offers_a_dead_control() {
                 agent.id
             );
         }
+        if !agent.capabilities.set_effort {
+            let named: Vec<_> = agent
+                .catalog
+                .models
+                .iter()
+                .filter(|model| !model.efforts.is_empty())
+                .map(|model| model.id.clone())
+                .collect();
+            assert!(
+                named.is_empty(),
+                "{} says it cannot set effort yet its models name levels: {named:?}",
+                agent.id
+            );
+        }
     }
 
     journey.finish().await;
 }
 
+/// Thinking is its own axis. It used to ride on `mode`, which is where the
+/// third-party agents keep their tool-approval policy — one field meaning two
+/// unrelated things depending on which agent answered.
 #[tokio::test]
-async fn switching_the_thinking_mode_takes_effect_on_the_built_in_agent() {
+async fn switching_the_thinking_level_takes_effect_on_the_built_in_agent() {
     let journey = Journey::start().await.expect("journey starts");
     if journey.mode.is_mock() {
         journey.mock().reply(Turn::text("ok")).await;
@@ -395,12 +412,12 @@ async fn switching_the_thinking_mode_takes_effect_on_the_built_in_agent() {
 
     journey
         .client
-        .call(Request::SessionSetMode {
+        .call(Request::SessionSetEffort {
             session_id: session.clone(),
-            mode_id: "low".into(),
+            effort_id: "low".into(),
         })
         .await
-        .expect("the built-in agent supports modes");
+        .expect("the built-in agent has thinking levels");
 
     let snapshot = match journey
         .client
@@ -413,7 +430,34 @@ async fn switching_the_thinking_mode_takes_effect_on_the_built_in_agent() {
         Reply::Snapshot(snapshot) => snapshot,
         other => panic!("unexpected {other:?}"),
     };
-    assert_eq!(snapshot.summary.mode_id.as_deref(), Some("low"));
+    assert_eq!(snapshot.summary.effort_id.as_deref(), Some("low"));
+    // And nothing landed on the other axis: a session that records its thinking
+    // level as a *mode* is the confusion this split exists to end.
+    assert_eq!(snapshot.summary.mode_id, None);
+
+    journey.finish().await;
+}
+
+/// Sessions and clients from before the split named the level on the `mode`
+/// axis, and reopening one of those must not silently drop back to the default.
+#[tokio::test]
+async fn the_built_in_agent_still_answers_to_the_old_name_for_thinking() {
+    let journey = Journey::start().await.expect("journey starts");
+    if journey.mode.is_mock() {
+        journey.mock().reply(Turn::text("ok")).await;
+    }
+    let session = journey.session("genet").await.expect("session opens");
+    journey.send(&session, "hello").await.expect("accepted");
+    journey.client.drain_turn().await.expect("the turn ends");
+
+    journey
+        .client
+        .call(Request::SessionSetMode {
+            session_id: session.clone(),
+            mode_id: "high".into(),
+        })
+        .await
+        .expect("the old name still reaches the thinking level");
 
     journey.finish().await;
 }

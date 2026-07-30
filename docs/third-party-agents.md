@@ -75,6 +75,8 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 - 模式：从 `claude --help` 的 `--permission-mode` 选项里读这台机器接受哪些名字，只提供其中我们能说清含义的：默认（逐个询问）、`acceptEdits`、`plan`、`bypassPermissions`。2.1.220 还接受 `auto` 和 `dontAsk`，但 CLI 里外都没有一句话说这两个跟上面几个有什么区别——说不清效果的开关比没有这个开关更糟，所以先不放。
 - 会话中途切换走的都是原生控制请求（`set_model` / `set_permission_mode`），并且**等它回话**：控制请求失败就报错，不会让选择器动了而实际什么都没变。
 
+思考强度（effort）：`initialize` 回的模型表里每个模型都带自己的档位（`supportedEffortLevels`，这台机器上是 `low/medium/high/xhigh/max`），启动时按 `--effort` 传，会话中途用 `set_model` 控制请求只发 `effort` 字段切换——不带模型，因为在哪个模型上是 CLI 自己的状态（它自己的 `/model` 命令也能改），带上反而会把它悄悄改回去。校验依然在我们这边：`effort: "nonsense"` 它同样回 `success`，然后继续用原来的档位。
+
 派出去的子 agent（`Task`/`Agent` 工具）：它的步骤会以普通 `assistant`/`user` 帧回来，唯一的标记是帧上的 `parent_tool_use_id`。我们按这个标记把它们收进派它出去的那次调用的卡片里（`ToolCallDetail::SubAgent.items`）。不认这个标记的话，子 agent 的 `Bash`、`Read` 会以主 agent 的名义出现在对话里，而看的人没有任何办法分辨。流式增量帧不带这个标记，所以子 agent 的文字不会混进主对话。
 
 斜杠命令也是同一次握手带回来的：`initialize` 会回这台机器上所有命令和 skill（名字、说明、参数提示），composer 里输入 `/` 就是这份表。执行不需要任何协议——命令就是普通 prompt 文本，CLI 自己认；缺的从来只是「有哪些」这份清单，而它在 CLI 自己的终端界面之外是看不到的。

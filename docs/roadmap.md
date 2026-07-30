@@ -48,9 +48,8 @@
 - 前端长尾能力：语音、定时任务、分屏、fork / rewind 等，清单见 [web-workbench.md](./web-workbench.md) §4
 - Agent 的 subagents / MCP / 真压缩（见 [builtin-agent.md](./builtin-agent.md) §8）；`genet` 自身的图片输入也在此列——贴图现在能发给 claude / acp / opencode（它们各自把图片转给自己的模型），但 `genet` 的 provider 层（Anthropic / OpenAI / DeepSeek 请求构造）还不接受图片内容块
 - 会话中途动态切换 agent：`claude`、`opencode` 各自维护一份进程私有的会话状态（CLI 自己的 `--resume` id、HTTP session），把 `TimelineItem` 转存到另一个 agent 不等于真的迁移了上下文，效果只会更糟；有对话内容后前端直接锁定 agent 选择器（`ComposerControls.tsx`），而不是假装能无缝换
-- `mode` 轴的协议级拆分：`genet` 把这条轴用作思考强度，`claude`/`acp` 用作工具审批策略，目前只在前端按 `capabilities.permissions` 打了个临时标签区分（"思考" / "权限"），协议层仍是同一个 `modeId` 字段
 - OpenCode 的真实模型目录（当前 `catalog.models` 恒为空，选择器因此不出现）、各 adapter 的速度 / 质量档位、权限的历史面板
-- 「/」命令：`genet-agent` 内部已经有 `get_commands` / skill 展开，但 daemon 的 `genet` adapter 从不调用它，前端也没有发现或补全入口——`/skill:<name>` today 只有整行手打、且未经验证是否原样透传到 prompt 才可能生效；第三方 agent（claude / opencode）自己的原生 slash 命令同样没有透传
+- 「/」命令的其余半边：Claude Code 的命令表已经透传（`initialize` 握手拿到，composer 里输入 `/` 就是这份表），但 `genet-agent` 自己的 `get_commands` / skill 展开仍然没接上，OpenCode 的命令表也还没读
 
 ### 验收清单
 

@@ -109,7 +109,11 @@ describe("the app as the browser loads it", () => {
     );
 
     expect(await screen.findByText(/daemon 没有起来/)).toBeInTheDocument();
-    expect(screen.getByText(/genet-daemon\.exe/)).toBeInTheDocument();
+    // Awaited, not read straight away: the heading is on screen as soon as there
+    // is no endpoint, while the reason has to come back from `problem()` — and
+    // asserting it synchronously passed or failed depending on how loaded the
+    // machine was.
+    expect(await screen.findByText(/genet-daemon\.exe/)).toBeInTheDocument();
     expect(screen.queryByText(/没有可连接的机器/)).not.toBeInTheDocument();
 
     screen.getByRole("button", { name: "重试" }).click();

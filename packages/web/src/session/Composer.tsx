@@ -23,6 +23,7 @@ export function Composer({
   agentId,
   modelId,
   modeId,
+  effortId,
   agentLocked,
   attachmentsSupported,
   commands,
@@ -31,6 +32,7 @@ export function Composer({
   onPickAgent,
   onPickModel,
   onPickMode,
+  onPickEffort,
 }: {
   running: boolean;
   disabled?: boolean;
@@ -38,6 +40,7 @@ export function Composer({
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
+  effortId?: string | null;
   agentLocked?: boolean;
   /** Whether the current agent forwards attachments anywhere (only claude,
    * acp and opencode do today — see `docs/roadmap.md`). Pasting an image
@@ -51,6 +54,7 @@ export function Composer({
   onPickAgent(id: string): void;
   onPickModel(id: string): void;
   onPickMode(id: string): void;
+  onPickEffort?(id: string): void;
 }) {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -220,11 +224,13 @@ export function Composer({
             agentId={agentId}
             modelId={modelId}
             modeId={modeId}
+            effortId={effortId ?? null}
             disabled={disabled || running}
             agentLocked={agentLocked}
             onPickAgent={onPickAgent}
             onPickModel={onPickModel}
             onPickMode={onPickMode}
+            onPickEffort={onPickEffort ?? (() => {})}
           />
           {running ? (
             <button

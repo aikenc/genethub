@@ -102,6 +102,8 @@ genet-agent --mode rpc
 | `get_available_models` | 已配置模型 | `{models: [...]}` |
 | `set_model` | 切模型 | 完整 `Model` 对象 |
 | `set_thinking_level` | 记录思考档位 | 无 |
+
+思考档位在协议里走的是 effort 轴（`ModelInfo.efforts` + `session.setEffort`），不是 `mode`——`mode` 留给「动手前问不问」那类策略，而这个 agent 没有审批流程，也就没有模式可选。旧会话把档位记在 `mode` 上，启动时仍然认这个名字，重开一个旧会话不会悄悄掉回默认档。
 | `get_session_stats` | token / 成本 | `{tokens, cost}` |
 | `get_commands` | 斜杠命令（MVP 只返回 skills） | `{commands: [...]}` |
 | `set_auto_compaction` | 记录开关 | 无 |

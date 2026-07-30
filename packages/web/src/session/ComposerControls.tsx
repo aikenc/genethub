@@ -11,16 +11,19 @@ export function ComposerControls({
   agentId,
   modelId,
   modeId,
+  effortId,
   disabled,
   agentLocked,
   onPickAgent,
   onPickModel,
   onPickMode,
+  onPickEffort,
 }: {
   agents: AgentInfo[];
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
+  effortId: string | null;
   disabled?: boolean;
   /**
    * True once the session has said anything. Picking a different agent here
@@ -35,9 +38,17 @@ export function ComposerControls({
   onPickAgent(id: string): void;
   onPickModel(id: string): void;
   onPickMode(id: string): void;
+  onPickEffort(id: string): void;
 }) {
   const installed = agents.filter((agent) => agent.probe.state === "ready");
   const current = installed.find((agent) => agent.id === agentId) ?? installed[0];
+  const model =
+    current?.catalog.models.find((candidate) => candidate.id === modelId) ??
+    current?.catalog.models.find((candidate) => candidate.id === current?.catalog.defaultModel) ??
+    current?.catalog.models[0];
+  // The levels belong to the model, not to the agent: on Claude Code each model
+  // names its own, and a model with none should not be offered the control.
+  const efforts = model?.efforts ?? [];
 
   return (
     <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
@@ -62,18 +73,35 @@ export function ComposerControls({
           onChange={onPickModel}
         />
       ) : null}
+      {current?.capabilities.setEffort && efforts.length > 0 ? (
+        <Chip
+          ariaLabel="思考强度"
+          label="思考"
+          value={effortId ?? current.catalog.defaultEffort ?? ""}
+          disabled={disabled}
+          options={[
+            // Only when nothing is chosen and the agent did not say what its own
+            // default is: showing the weakest level as if it were in force would
+            // be a wrong answer rather than an unknown one (Claude Code does not
+            // report which level it is on).
+            ...(effortId ?? current.catalog.defaultEffort
+              ? []
+              : [{ value: "", label: "默认" }]),
+            ...efforts.map((effort) => ({ value: effort, label: effort })),
+          ]}
+          onChange={(value) => {
+            // The placeholder is not a level anyone can be switched to.
+            if (value) onPickEffort(value);
+          }}
+        />
+      ) : null}
       {current?.capabilities.setMode && current.catalog.modes.length > 0 ? (
         <Chip
-          // The protocol has one `mode` axis, but adapters load two different
-          // things onto it: genet's modes are thinking-effort levels, while
-          // claude/acp reuse it for tool-approval policy (default /
-          // acceptEdits). Both used to render as an unlabelled "模式" chip,
-          // reading as the same control on every agent when it isn't —
-          // `capabilities.permissions` (true only for the approval-policy
-          // kind) tells them apart as a stopgap until the protocol splits
-          // this into two real fields (tracked in `docs/roadmap.md`).
+          // Modes are now only ever tool-approval policy: the thinking axis moved
+          // to `efforts`, so this chip no longer means two different things
+          // depending on which agent you were talking to.
           ariaLabel="模式"
-          label={current.capabilities.permissions ? "权限" : "思考"}
+          label={current.capabilities.permissions ? "权限" : "模式"}
           value={modeId ?? current.catalog.defaultMode ?? ""}
           disabled={disabled}
           options={current.catalog.modes.map((mode) => ({ value: mode.id, label: mode.label }))}

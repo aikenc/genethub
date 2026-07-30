@@ -117,6 +117,7 @@ interface WorkbenchState {
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
   setMode(modeId: string): Promise<void>;
+  setEffort(effortId: string): Promise<void>;
   answerPermission(outcome: PermissionOutcome): Promise<void>;
   refreshHub(): Promise<void>;
   pair(hubUrl: string): Promise<void>;
@@ -351,6 +352,14 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (!sessionId) return;
     await asked(set, () =>
       require_(get().client).call({ type: "session.setMode", payload: { sessionId, modeId } }),
+    );
+  },
+
+  async setEffort(effortId) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    await asked(set, () =>
+      require_(get().client).call({ type: "session.setEffort", payload: { sessionId, effortId } }),
     );
   },
 

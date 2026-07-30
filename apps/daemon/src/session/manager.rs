@@ -70,6 +70,7 @@ impl SessionManager {
 
         let now = now_ms();
         let meta = SessionMeta {
+            effort_id: None,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
             agent_id: agent_id.to_string(),
@@ -345,6 +346,7 @@ impl SessionManager {
                 cwd: meta.cwd.clone(),
                 model_id: meta.model_id.clone(),
                 mode_id: meta.mode_id.clone(),
+                effort_id: meta.effort_id.clone(),
                 scratch_dir: scratch,
                 providers: providers.clone(),
                 resume: meta.persist.clone(),
@@ -390,6 +392,20 @@ impl SessionManager {
         }
         if let Some(agent) = live.agent.lock().await.as_ref() {
             agent.set_model(model_id).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn set_effort(&self, session_id: &str, effort_id: &str) -> Result<()> {
+        let live = self.live(session_id).await?;
+        {
+            let mut meta = live.meta.lock().await;
+            meta.effort_id = Some(effort_id.to_string());
+            meta.updated_at_ms = now_ms();
+            self.store.save_meta(&meta)?;
+        }
+        if let Some(agent) = live.agent.lock().await.as_ref() {
+            agent.set_effort(effort_id).await?;
         }
         Ok(())
     }
@@ -712,6 +728,10 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             let mut meta = live.meta.lock().await;
             meta.mode_id = Some(mode_id.clone());
         }
+        SessionEvent::EffortChanged { effort_id } => {
+            let mut meta = live.meta.lock().await;
+            meta.effort_id = Some(effort_id.clone());
+        }
         SessionEvent::SessionStatusChanged { status } => {
             *live.status.lock().await = *status;
         }
@@ -763,6 +783,7 @@ mod tests {
 
     fn meta() -> SessionMeta {
         SessionMeta {
+            effort_id: None,
             id: "s1".into(),
             workspace_id: "w1".into(),
             agent_id: "genet".into(),

@@ -274,6 +274,14 @@ pub async fn handle(
             Err(error) => failed(error),
         },
 
+        Request::SessionSetEffort {
+            session_id,
+            effort_id,
+        } => match state.sessions.set_effort(&session_id, &effort_id).await {
+            Ok(()) => Handled::ok(Reply::Ack),
+            Err(error) => failed(error),
+        },
+
         Request::SessionRespondPermission {
             session_id,
             request_id,

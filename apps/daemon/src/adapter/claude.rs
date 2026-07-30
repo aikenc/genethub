@@ -328,6 +328,23 @@ fn models_in(hello: &Value) -> Vec<ModelInfo> {
                     .to_string(),
                 context_window: None,
                 reasoning: flag("supportsEffort") || flag("supportsAdaptiveThinking"),
+                // Only when it says it takes them. A level sent to a model that
+                // has none is a control that pretends to work.
+                efforts: if flag("supportsEffort") {
+                    model
+                        .get("supportedEffortLevels")
+                        .and_then(Value::as_array)
+                        .map(|levels| {
+                            levels
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
             })
         })
         .collect()
@@ -448,6 +465,7 @@ impl AgentAdapter for ClaudeAdapter {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
+            set_effort: true,
             interrupt: true,
             // Switching between them is a control request this CLI answers;
             // *which* models there are is still its own business (env vars, its
@@ -479,6 +497,10 @@ impl AgentAdapter for ClaudeAdapter {
         let commands = hello.as_ref().map(commands_in).unwrap_or_default();
         let modes = self.modes(&program).await;
         Catalog {
+            // Which level it is on right now is not in anything it tells us, and
+            // guessing would put a wrong answer on screen — the picker offers
+            // "default" for exactly this reason.
+            default_effort: None,
             commands,
             default_model: hello
                 .as_ref()
@@ -541,6 +563,24 @@ impl AgentAdapter for ClaudeAdapter {
             .map(|model| model.id)
             .collect();
 
+        // Every level any of its models named. The CLI does not check these either
+        // — `effort: "nonsense"` also comes back `success` — so this list is what
+        // a later `set_effort` gets checked against.
+        let efforts: Vec<String> = self
+            .hello(&program)
+            .await
+            .as_ref()
+            .map(models_in)
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|model| model.efforts)
+            .fold(Vec::new(), |mut levels, level| {
+                if !levels.contains(&level) {
+                    levels.push(level);
+                }
+                levels
+            });
+
         let help = self.help(&program).await.to_string();
         let ask_mode = ask_mode_in(&help).map(str::to_string);
         let initial_mode = config
@@ -586,6 +626,16 @@ impl AgentAdapter for ClaudeAdapter {
             .filter(|model| models.iter().any(|known| known == model))
         {
             command.args(["--model", model]);
+        }
+
+        // Same reason as `--model` above: chosen before the first prompt, and the
+        // process does not exist until then.
+        if let Some(effort) = config
+            .effort_id
+            .as_deref()
+            .filter(|effort| efforts.iter().any(|known| known == effort))
+        {
+            command.args(["--effort", effort]);
         }
 
         if let Some(session_id) = config
@@ -643,6 +693,7 @@ impl AgentAdapter for ClaudeAdapter {
             pending_tools: pending_tools.clone(),
             awaiting: awaiting.clone(),
             models,
+            efforts,
         };
 
         let control = ControlState {
@@ -734,6 +785,9 @@ struct ClaudeSession {
     next_control_id: AtomicU64,
     always_allow: Arc<Mutex<HashSet<String>>>,
     pending_tools: Arc<Mutex<HashMap<String, String>>>,
+    /// The thinking levels this install named, for the same reason `models` is
+    /// kept: the CLI answers `success` to levels that do not exist.
+    efforts: Vec<String>,
     /// Control requests we have sent and want the answer to.
     awaiting: Awaiting,
     /// The model ids this install offered, which are the only ones a `set_model`
@@ -926,6 +980,27 @@ impl AgentSession for ClaudeSession {
         self.ask("set_model", json!({ "model": model_id }))
             .await
             .map_err(|why| anyhow!("claude would not switch to '{model_id}': {why}"))
+    }
+
+    async fn set_effort(&self, effort_id: &str) -> Result<()> {
+        // Checked here for the same reason models are: asked for `effort: "very"`
+        // the CLI answers `success` and keeps thinking exactly as hard as before.
+        if !self.efforts.iter().any(|effort| effort == effort_id) {
+            return Err(anyhow!(
+                "'{effort_id}' is not an effort level this Claude Code offers ({})",
+                if self.efforts.is_empty() {
+                    "it listed none".to_string()
+                } else {
+                    self.efforts.join(", ")
+                }
+            ));
+        }
+        // No model in the request: the level applies to whichever model is in
+        // play, and which one that is can change under us (its own `/model`
+        // command). Sending a model here would quietly undo that.
+        self.ask("set_model", json!({ "effort": effort_id }))
+            .await
+            .map_err(|why| anyhow!("claude would not think '{effort_id}': {why}"))
     }
 
     async fn set_mode(&self, mode_id: &str) -> Result<()> {
@@ -1785,6 +1860,34 @@ mod tests {
         assert_eq!(ask_mode_in(""), None);
     }
 
+    /// How hard to think is a second axis, and the CLI reports it per model —
+    /// which levels exist is the model's answer, not ours.
+    #[test]
+    fn effort_levels_come_from_the_model_that_says_it_takes_them() {
+        let models = models_in(&json!({
+            "models": [
+                {
+                    "value": "default",
+                    "displayName": "Default (recommended)",
+                    "supportsEffort": true,
+                    "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+                },
+                // Says it has no such dial: offering one anyway would put a
+                // control on screen that changes nothing.
+                {
+                    "value": "plain",
+                    "displayName": "Plain",
+                    "supportsEffort": false,
+                    "supportedEffortLevels": ["low", "high"],
+                },
+            ],
+        }));
+
+        assert_eq!(models[0].efforts, ["low", "medium", "high", "xhigh", "max"]);
+        assert!(models[0].reasoning);
+        assert!(models[1].efforts.is_empty(), "saw {:?}", models[1].efforts);
+    }
+
     /// The command list is the one thing about slash commands we have to get from
     /// the CLI: running one is just prompt text, but nothing outside its own
     /// terminal knows they exist.
@@ -2166,6 +2269,7 @@ mod tests {
         let adapter = ClaudeAdapter::with_program(fake);
         let session = adapter
             .start(SessionConfig {
+                effort_id: None,
                 session_id: "s1".into(),
                 cwd: dir.path().to_path_buf(),
                 model_id: None,
