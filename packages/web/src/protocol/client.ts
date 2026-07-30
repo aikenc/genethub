@@ -11,10 +11,21 @@ import { proof, randomNonce } from "../devices/proof";
 
 export const PROTOCOL_VERSION = 1;
 
-export type ConnectionState = "connecting" | "ready" | "reconnecting" | "closed";
+export type ConnectionState =
+  "connecting" | "ready" | "reconnecting" | "closed";
 
 export interface ClientOptions {
   url: string;
+  /**
+   * Where to dial on a *retry*, when the address above cannot be used twice.
+   *
+   * A forwarding ticket is spent by the connection that used it, so a client
+   * that redialled `url` would fail every attempt after the first — one wifi
+   * hiccup and the session is over with no sign of why. Absent means the
+   * address keeps working, which is true of a loopback port and of a pairing
+   * credential.
+   */
+  redial?: () => Promise<string>;
   clientName?: string;
   /**
    * Present when this browser paired with the machine earlier. Required by a
@@ -83,8 +94,12 @@ export class Client {
   private readonly pending = new Map<string, Pending>();
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly stateListeners = new Set<(state: ConnectionState) => void>();
-  private readonly ptyListeners = new Set<(ptyId: string, data: string | null) => void>();
-  private readonly noticeListeners = new Set<(level: string, message: string) => void>();
+  private readonly ptyListeners = new Set<
+    (ptyId: string, data: string | null) => void
+  >();
+  private readonly noticeListeners = new Set<
+    (level: string, message: string) => void
+  >();
   private nextId = 1;
   private attempt = 0;
   private stopped = false;
@@ -118,8 +133,28 @@ export class Client {
 
   connect(): void {
     if (this.stopped) return;
-    const factory = this.options.socketFactory ?? ((url: string) => new WebSocket(url) as WebSocketLike);
-    const socket = factory(this.options.url);
+    const { url, redial } = this.options;
+    if (this.attempt === 0 || !redial) {
+      this.dial(url);
+      return;
+    }
+
+    // Asking where to dial can itself fail — the control plane that mints the
+    // address may be the thing that is down. That is a dropped connection like
+    // any other, so it backs off and asks again rather than giving up here.
+    void redial().then(
+      (fresh) => {
+        if (!this.stopped) this.dial(fresh);
+      },
+      () => this.dropped(),
+    );
+  }
+
+  private dial(url: string): void {
+    const factory =
+      this.options.socketFactory ??
+      ((at: string) => new WebSocket(at) as WebSocketLike);
+    const socket = factory(url);
     this.socket = socket;
 
     socket.onopen = () => {
@@ -165,7 +200,11 @@ export class Client {
   async subscribe(
     sessionId: string,
     handlers: Pick<Subscription, "onEvent" | "onResync">,
-  ): Promise<{ snapshot: unknown; replayed: SequencedEvent[]; reset: boolean }> {
+  ): Promise<{
+    snapshot: unknown;
+    replayed: SequencedEvent[];
+    reset: boolean;
+  }> {
     const subscription: Subscription = { seq: 0, ...handlers };
     this.subscriptions.set(sessionId, subscription);
 
@@ -178,7 +217,11 @@ export class Client {
       throw new Error(`unexpected reply to subscribe: ${reply?.type}`);
     }
     for (const event of reply.data.replayed) subscription.seq = event.seq;
-    return { snapshot: reply.data.snapshot, replayed: reply.data.replayed, reset: reply.data.reset };
+    return {
+      snapshot: reply.data.snapshot,
+      replayed: reply.data.replayed,
+      reset: reply.data.reset,
+    };
   }
 
   async unsubscribe(sessionId: string): Promise<void> {
@@ -254,7 +297,11 @@ export class Client {
       if (reply?.type !== "subscribed") continue;
 
       for (const event of reply.data.replayed) subscription.seq = event.seq;
-      subscription.onResync(reply.data.snapshot, reply.data.replayed, reply.data.reset);
+      subscription.onResync(
+        reply.data.snapshot,
+        reply.data.replayed,
+        reply.data.reset,
+      );
     }
   }
 
@@ -275,7 +322,10 @@ export class Client {
         else {
           pending.reject(
             new ProtocolError_(
-              frame.error ?? { code: "internal", message: "the daemon reported a failure" },
+              frame.error ?? {
+                code: "internal",
+                message: "the daemon reported a failure",
+              },
             ),
           );
         }
@@ -292,13 +342,15 @@ export class Client {
         return;
       }
       case "pty":
-        for (const listener of this.ptyListeners) listener(frame.ptyId, frame.data);
+        for (const listener of this.ptyListeners)
+          listener(frame.ptyId, frame.data);
         return;
       case "ptyClosed":
         for (const listener of this.ptyListeners) listener(frame.ptyId, null);
         return;
       case "notice":
-        for (const listener of this.noticeListeners) listener(frame.level, frame.message);
+        for (const listener of this.noticeListeners)
+          listener(frame.level, frame.message);
         return;
     }
   }
@@ -308,7 +360,9 @@ export class Client {
     this.setState("reconnecting");
     this.socket = null;
 
-    const backoff = this.options.backoffMs ?? ((attempt) => Math.min(1000 * 2 ** attempt, 15_000));
+    const backoff =
+      this.options.backoffMs ??
+      ((attempt) => Math.min(1000 * 2 ** attempt, 15_000));
     const delay = backoff(this.attempt++);
     setTimeout(() => this.connect(), delay);
   }

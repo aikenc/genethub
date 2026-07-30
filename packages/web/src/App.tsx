@@ -25,8 +25,8 @@ import { OpenProject } from "./workspace/OpenProject";
  * open another one every time anything changed, which React rightly treats as
  * a runaway loop and answers by rendering nothing at all.
  */
-const openConnection = (endpoint: Endpoint) =>
-  new Client({ url: endpoint.url, credential: endpoint.credential });
+const openConnection = (endpoint: Endpoint, redial: () => Promise<string>) =>
+  new Client({ url: endpoint.url, redial, credential: endpoint.credential });
 
 /**
  * The workbench shell: left session tree, closable tabs, chat in the middle,
@@ -41,7 +41,13 @@ export function App({
   welcome,
 }: {
   host?: Host;
-  connect?: (endpoint: Endpoint) => Client;
+  /**
+   * `redial` asks the shell where to connect *now*, and is used for retries.
+   * Some addresses cannot be used twice — a forwarding ticket is spent by the
+   * connection that used it — so a client that kept redialling the first one
+   * would give up for good at the first dropped socket.
+   */
+  connect?: (endpoint: Endpoint, redial: () => Promise<string>) => Client;
   /**
    * Pages contributed by whoever embedded this package. Passing none is the
    * plain workbench, which is exactly what a self-hosted deployment wants.
@@ -56,24 +62,35 @@ export function App({
    */
   welcome?: () => React.ReactNode;
 }) {
-  const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">("loading");
+  const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">(
+    "loading",
+  );
   // Decided during the first render, not in an effect. An effect would run
   // after the one below it has already resolved an endpoint, and the page
   // would connect uncredentialed while the pairing was still in flight.
-  const [claiming, setClaiming] = useState<"idle" | "working" | { error: string }>(() =>
-    host.pendingPairing?.() ? "working" : "idle",
-  );
+  const [claiming, setClaiming] = useState<
+    "idle" | "working" | { error: string }
+  >(() => (host.pendingPairing?.() ? "working" : "idle"));
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const workbench = useWorkbench();
   const pairing = workbench.hub?.state === "pairing";
-  const activeTab = workbench.tabs.find((tab) => tab.id === workbench.activeTabId);
-  const session = workbench.sessions.find((item) => item.id === workbench.activeSessionId);
+  const activeTab = workbench.tabs.find(
+    (tab) => tab.id === workbench.activeTabId,
+  );
+  const session = workbench.sessions.find(
+    (item) => item.id === workbench.activeSessionId,
+  );
   const running = workbench.timeline.activeTurn !== null;
-  const currentAgent = workbench.agents.find((agent) => agent.id === session?.agentId);
+  const currentAgent = workbench.agents.find(
+    (agent) => agent.id === session?.agentId,
+  );
 
   useEffect(() => {
     if (!pairing) return;
-    const timer = setInterval(() => void useWorkbench.getState().refreshHub(), 2000);
+    const timer = setInterval(
+      () => void useWorkbench.getState().refreshHub(),
+      2000,
+    );
     return () => clearInterval(timer);
   }, [pairing]);
 
@@ -92,7 +109,9 @@ export function App({
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setClaiming({ error: error instanceof Error ? error.message : String(error) });
+        setClaiming({
+          error: error instanceof Error ? error.message : String(error),
+        });
       });
     return () => {
       cancelled = true;
@@ -106,7 +125,11 @@ export function App({
     return host.onEndpointChange?.(look);
   }, [host, claiming]);
 
-  useEffect(() => host.onPairRequested?.(() => useWorkbench.getState().openTab("settings")), [host]);
+  useEffect(
+    () =>
+      host.onPairRequested?.(() => useWorkbench.getState().openTab("settings")),
+    [host],
+  );
 
   useEffect(
     () =>
@@ -132,11 +155,14 @@ export function App({
   useEffect(() => {
     if (claiming !== "idle") return;
     if (endpoint === "loading" || endpoint === null) return;
-    const client = connect(endpoint);
+    const client = connect(
+      endpoint,
+      async () => (await host.endpoint())?.url ?? endpoint.url,
+    );
     client.connect();
     void useWorkbench.getState().attach(client);
     return () => client.close();
-  }, [endpoint, connect]);
+  }, [endpoint, connect, host]);
 
   if (claiming === "working") return <Splash>正在和这台机器配对…</Splash>;
   if (claiming !== "idle") {
@@ -144,7 +170,9 @@ export function App({
       <Splash>
         <p>配对没有完成。</p>
         <p className="text-muted">{claiming.error}</p>
-        <p className="text-xs text-faint">配对链接只能用一次，请在那台机器上重新生成一个。</p>
+        <p className="text-xs text-faint">
+          配对链接只能用一次，请在那台机器上重新生成一个。
+        </p>
       </Splash>
     );
   }
@@ -154,7 +182,9 @@ export function App({
     return (
       <Splash>
         <p>没有可连接的机器。</p>
-        <p className="text-muted">在桌面端点「连接」，或者从「我的机器」页面打开工作台。</p>
+        <p className="text-muted">
+          在桌面端点「连接」，或者从「我的机器」页面打开工作台。
+        </p>
       </Splash>
     );
   }
@@ -181,7 +211,9 @@ export function App({
           >
             ☰
           </button>
-          <span className="truncate text-xs text-muted">{session?.title ?? "工作台"}</span>
+          <span className="truncate text-xs text-muted">
+            {session?.title ?? "工作台"}
+          </span>
           <ConnectionBadge state={workbench.connection} endpoint={endpoint} />
         </div>
 
@@ -202,7 +234,10 @@ export function App({
               workbench.activeSessionId ? (
                 <>
                   <div className="hidden items-center justify-end border-b border-line px-3 py-1 md:flex">
-                    <ConnectionBadge state={workbench.connection} endpoint={endpoint} />
+                    <ConnectionBadge
+                      state={workbench.connection}
+                      endpoint={endpoint}
+                    />
                   </div>
                   <div className="min-h-0 flex-1 overflow-hidden pb-28">
                     <Timeline state={workbench.timeline} />
@@ -212,7 +247,9 @@ export function App({
                       <div className="mx-auto max-w-chat">
                         <PermissionCard
                           request={workbench.timeline.pendingPermission}
-                          onAnswer={(outcome) => void workbench.answerPermission(outcome)}
+                          onAnswer={(outcome) =>
+                            void workbench.answerPermission(outcome)
+                          }
                         />
                       </div>
                     </div>
@@ -225,20 +262,29 @@ export function App({
                     modelId={workbench.timeline.modelId}
                     modeId={workbench.timeline.modeId}
                     agentLocked={workbench.timeline.items.length > 0}
-                    attachmentsSupported={currentAgent?.capabilities.attachments ?? false}
-                    onSend={(text, attachments) => void workbench.send(text, attachments)}
+                    attachmentsSupported={
+                      currentAgent?.capabilities.attachments ?? false
+                    }
+                    onSend={(text, attachments) =>
+                      void workbench.send(text, attachments)
+                    }
                     onInterrupt={() => void workbench.interrupt()}
                     onPickAgent={(id) => {
                       const workspace =
-                        workbench.activeWorkspaceId ?? workbench.workspaces[0]?.id;
-                      if (workspace) void workbench.createSession(workspace, id);
+                        workbench.activeWorkspaceId ??
+                        workbench.workspaces[0]?.id;
+                      if (workspace)
+                        void workbench.createSession(workspace, id);
                     }}
                     onPickModel={(id) => void workbench.setModel(id)}
                     onPickMode={(id) => void workbench.setMode(id)}
                   />
                 </>
               ) : (
-                <FirstRun host={host} onOpenSettings={() => workbench.openTab("settings")} />
+                <FirstRun
+                  host={host}
+                  onOpenSettings={() => workbench.openTab("settings")}
+                />
               )
             ) : null}
 
@@ -287,7 +333,11 @@ export function App({
                 </button>
               </div>
               <div className="min-h-0 flex-1">
-                {workbench.rightPanel === "changes" ? <ChangesPanel /> : <FilesPanel />}
+                {workbench.rightPanel === "changes" ? (
+                  <ChangesPanel />
+                ) : (
+                  <FilesPanel />
+                )}
               </div>
             </aside>
           ) : null}
@@ -300,12 +350,28 @@ export function App({
 /**
  * What a new install shows instead of a workbench with everything greyed out.
  */
-function FirstRun({ host, onOpenSettings }: { host: Host; onOpenSettings(): void }) {
-  const { workspaces, activeWorkspaceId, agents, createSession, connection, client } =
-    useWorkbench();
-  const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
+function FirstRun({
+  host,
+  onOpenSettings,
+}: {
+  host: Host;
+  onOpenSettings(): void;
+}) {
+  const {
+    workspaces,
+    activeWorkspaceId,
+    agents,
+    createSession,
+    connection,
+    client,
+  } = useWorkbench();
+  const workspace =
+    workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
   const builtin = agents.find((agent) => agent.builtin) ?? agents[0];
-  const usable = builtin && builtin.probe.state === "ready" && builtin.catalog.models.length > 0;
+  const usable =
+    builtin &&
+    builtin.probe.state === "ready" &&
+    builtin.catalog.models.length > 0;
 
   // An empty catalog while the socket is still coming up (or already dead) is
   // not "no project" — saying that sends people hunting for a folder when the
@@ -318,7 +384,9 @@ function FirstRun({ host, onOpenSettings }: { host: Host; onOpenSettings(): void
     const refused = connection === "closed" ? client?.failure : null;
     return (
       <Splash>
-        <p className="text-sm">{connection === "closed" ? "连不上这台机器。" : "正在连这台机器…"}</p>
+        <p className="text-sm">
+          {connection === "closed" ? "连不上这台机器。" : "正在连这台机器…"}
+        </p>
         <p className="mb-3 text-xs text-muted">
           {refused
             ? refused.message
@@ -351,7 +419,9 @@ function FirstRun({ host, onOpenSettings }: { host: Host; onOpenSettings(): void
     return (
       <Splash>
         <p className="text-sm">还差一个模型密钥。</p>
-        <p className="mb-3 text-xs text-muted">密钥只保存在这台机器上，填好之后这里会直接可用。</p>
+        <p className="mb-3 text-xs text-muted">
+          密钥只保存在这台机器上，填好之后这里会直接可用。
+        </p>
         <button
           type="button"
           className="rounded-md bg-accent px-3 py-1.5 text-xs text-white"
@@ -378,7 +448,13 @@ function FirstRun({ host, onOpenSettings }: { host: Host; onOpenSettings(): void
   );
 }
 
-function ConnectionBadge({ state, endpoint }: { state: string; endpoint: Endpoint }) {
+function ConnectionBadge({
+  state,
+  endpoint,
+}: {
+  state: string;
+  endpoint: Endpoint;
+}) {
   const label =
     state === "ready"
       ? endpoint.via === "loopback"

@@ -225,6 +225,8 @@ WebSocket（自有会话协议）
 interface Host {
   readonly kind: "browser" | "desktop";
   endpoint(): Promise<Endpoint | null>;      // 桌面问壳要本机端口，浏览器读 URL 片段
+                                             // 会被再问一次：重连时地址可能已经变了，
+                                             // 一次性的转发票据更是必须重新要一张
   notify(n: Notification): void;
   openExternal(url: string): void;           // 文档、发布页这类"外面的世界"
   openWindow?(url: string): void;            // 登录这类"还在本应用里"；缺失时退回上一行

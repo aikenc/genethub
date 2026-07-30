@@ -19,9 +19,17 @@ function event(seq: number, text: string): SequencedEvent {
 /** Lets queued microtasks run, which is how the client's awaits progress. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-async function connected(): Promise<{ client: Client; socket: FakeSocket; queue: ReturnType<typeof socketQueue> }> {
+async function connected(): Promise<{
+  client: Client;
+  socket: FakeSocket;
+  queue: ReturnType<typeof socketQueue>;
+}> {
   const queue = socketQueue();
-  const client = new Client({ url: "ws://test", socketFactory: queue.factory, backoffMs: () => 0 });
+  const client = new Client({
+    url: "ws://test",
+    socketFactory: queue.factory,
+    backoffMs: () => 0,
+  });
   client.connect();
   queue.latest().open();
   await settle();
@@ -33,7 +41,10 @@ async function connected(): Promise<{ client: Client; socket: FakeSocket; queue:
 describe("the daemon connection", () => {
   it("says hello before anything else, and only then reports itself ready", async () => {
     const queue = socketQueue();
-    const client = new Client({ url: "ws://test", socketFactory: queue.factory });
+    const client = new Client({
+      url: "ws://test",
+      socketFactory: queue.factory,
+    });
     client.connect();
     queue.latest().open();
     await settle();
@@ -48,7 +59,11 @@ describe("the daemon connection", () => {
 
   it("holds a request typed during a blip and sends it when the socket returns", async () => {
     const queue = socketQueue();
-    const client = new Client({ url: "ws://test", socketFactory: queue.factory, backoffMs: () => 0 });
+    const client = new Client({
+      url: "ws://test",
+      socketFactory: queue.factory,
+      backoffMs: () => 0,
+    });
     client.connect();
 
     // Nothing is open yet; this must not throw and must not be lost.
@@ -66,7 +81,10 @@ describe("the daemon connection", () => {
 
   it("turns a refused request into a rejection carrying the daemon's reason", async () => {
     const { client, socket } = await connected();
-    const pending = client.call({ type: "session.get", payload: { sessionId: "nope" } });
+    const pending = client.call({
+      type: "session.get",
+      payload: { sessionId: "nope" },
+    });
     socket.fail(socket.lastOf("session.get").id, "notFound", "no such session");
 
     await expect(pending).rejects.toThrow("no such session");
@@ -111,7 +129,11 @@ describe("the daemon connection", () => {
 
     second.reply(resubscribe.id, {
       type: "subscribed",
-      data: { snapshot: snapshot(), replayed: [event(3, "three")], reset: false },
+      data: {
+        snapshot: snapshot(),
+        replayed: [event(3, "three")],
+        reset: false,
+      },
     });
     await settle();
 
@@ -153,7 +175,10 @@ describe("the daemon connection", () => {
   it("ignores an event it has already applied", async () => {
     const { client, queue } = await connected();
     const seen: number[] = [];
-    const subscribing = client.subscribe("s1", { onEvent: (e) => seen.push(e.seq), onResync: () => {} });
+    const subscribing = client.subscribe("s1", {
+      onEvent: (e) => seen.push(e.seq),
+      onResync: () => {},
+    });
     const socket = queue.latest();
     socket.reply(socket.lastOf("subscribe").id, {
       type: "subscribed",
@@ -170,13 +195,19 @@ describe("the daemon connection", () => {
 
   it("stops trying when the handshake itself is refused", async () => {
     const queue = socketQueue();
-    const client = new Client({ url: "ws://test", socketFactory: queue.factory, backoffMs: () => 0 });
+    const client = new Client({
+      url: "ws://test",
+      socketFactory: queue.factory,
+      backoffMs: () => 0,
+    });
     client.connect();
     queue.latest().open();
     await settle();
 
     // A version mismatch is not a blip; retrying would loop forever.
-    queue.latest().fail(queue.latest().lastOf("hello").id, "protocolVersion", "speak v1");
+    queue
+      .latest()
+      .fail(queue.latest().lastOf("hello").id, "protocolVersion", "speak v1");
     await settle();
 
     expect(client.connectionState).toBe("closed");
@@ -187,7 +218,10 @@ describe("the daemon connection", () => {
   it("hands terminal output straight to whoever is listening", async () => {
     const { socket } = await connected();
     const chunks: Array<string | null> = [];
-    const client = new Client({ url: "ws://test", socketFactory: () => socket });
+    const client = new Client({
+      url: "ws://test",
+      socketFactory: () => socket,
+    });
     client.onPty((_id, data) => chunks.push(data));
     client.connect();
     socket.open();
@@ -199,6 +233,67 @@ describe("the daemon connection", () => {
     socket.deliver({ type: "ptyClosed", ptyId: "p1", exitCode: 0 });
 
     expect(chunks).toEqual(["hello", null]);
+  });
+
+  it("asks again where to dial, so an address good for one use survives a drop", async () => {
+    // A forwarding ticket is spent by the connection that used it. Remembering
+    // the first address would mean every reconnect replays a spent one, and a
+    // remote session would end at the first wifi hiccup with no way back except
+    // starting over from the machine list.
+    const queue = socketQueue();
+    let minted = 1;
+    const client = new Client({
+      url: "ws://test/?ticket=1",
+      redial: () => Promise.resolve(`ws://test/?ticket=${++minted}`),
+      socketFactory: queue.factory,
+      backoffMs: () => 0,
+    });
+
+    client.connect();
+    await settle();
+    queue.latest().open();
+    await settle();
+    queue.latest().acceptHandshake();
+    await settle();
+
+    queue.latest().close();
+    await settle();
+    await settle();
+
+    expect(queue.urls).toEqual(["ws://test/?ticket=1", "ws://test/?ticket=2"]);
+    expect(client.connectionState).not.toBe("closed");
+    client.close();
+  });
+
+  it("keeps retrying when it cannot even find out where to dial", async () => {
+    // The thing that mints the address can be the thing that is down. Treating
+    // that as fatal would turn a control-plane blip into a session the user has
+    // to rebuild by hand.
+    const queue = socketQueue();
+    let attempts = 0;
+    const client = new Client({
+      url: "ws://test/?ticket=1",
+      redial: () => {
+        attempts += 1;
+        return attempts === 1
+          ? Promise.reject(new Error("hub is down"))
+          : Promise.resolve("ws://test/?ticket=2");
+      },
+      socketFactory: queue.factory,
+      backoffMs: () => 0,
+    });
+
+    client.connect();
+    queue.latest().close();
+    await settle();
+    // The first retry could not even find out where to go, and that must not be
+    // the end of it.
+    expect(attempts).toBe(1);
+
+    await settle();
+    await settle();
+    expect(queue.urls).toEqual(["ws://test/?ticket=1", "ws://test/?ticket=2"]);
+    client.close();
   });
 
   it("does not reconnect after it has been closed on purpose", async () => {

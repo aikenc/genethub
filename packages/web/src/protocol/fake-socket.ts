@@ -94,16 +94,21 @@ export class FakeSocket implements WebSocketLike {
 export function socketQueue(): {
   factory: (url: string) => WebSocketLike;
   sockets: FakeSocket[];
+  /** Every address dialled, in order. A reconnect may not reuse a spent one. */
+  urls: string[];
   latest(): FakeSocket;
 } {
   const sockets: FakeSocket[] = [];
+  const urls: string[] = [];
   return {
-    factory: () => {
+    factory: (url) => {
+      urls.push(url);
       const socket = new FakeSocket();
       sockets.push(socket);
       return socket;
     },
     sockets,
+    urls,
     latest() {
       const socket = sockets[sockets.length - 1];
       if (!socket) throw new Error("nothing has connected yet");
