@@ -189,6 +189,12 @@ jobs:
           names="$(grep -oE '^!define GH_[A-Z]+_EXE "[^"]+"' apps/desktop/src-tauri/installer.nsh \
             | sed 's/.*"\(.*\)"/\1/')"
           test -n "$names" || { echo "::error::the installer hook stops nothing"; exit 1; }
+          # The daemon is the same `genet` binary every client runs, so it is
+          # stopped by the pid in its lock file — never by image name, which
+          # would kill CLI clients with it (`genethub-cli.md` §2).
+          grep -q 'taskkill /F /T /PID' apps/desktop/src-tauri/installer.nsh             || { echo "::error::the installer no longer stops the daemon by its lock-file pid"; exit 1; }
+          grep -q 'daemon.lock' apps/desktop/src-tauri/installer.nsh             || { echo "::error::the installer does not read the daemon's lock file"; exit 1; }
+          ! grep -q 'IM genet' apps/desktop/src-tauri/installer.nsh             || { echo "::error::the installer kills genet by image name — that takes CLI clients down with the daemon"; exit 1; }
           channel="$(./scripts/channel.sh --show)"
           for name in $names; do
             found="$(find apps/desktop/src-tauri/target/release target/release \
@@ -223,9 +229,9 @@ jobs:
           # And that it is the build this release claims to be. Without this, a
           # job that lost its stamping step would ship a daemon calling itself
           # 0.0.0 — which tells every user they run an unreleased build, silently.
-          ./scripts/version.sh --verify "target/release/$DAEMON_BINARY$exe" || exit 1
+          ./scripts/version.sh --verify "target/release/$CLI_BINARY$exe" || exit 1
           env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
-            "target/release/$DAEMON_BINARY$exe" >"$root/out.json" 2>"$root/err.log" &
+            "target/release/$CLI_BINARY$exe" daemon run >"$root/out.json" 2>"$root/err.log" &
           pid=$!
           for _ in $(seq 1 30); do
             grep -q '"event":"listening"' "$root/out.json" && break
@@ -307,7 +313,7 @@ jobs:
           ./scripts/version.sh --from-tag
           ./scripts/channel.sh --from-tag
         shell: bash
-      - run: cargo build --release -p genet-daemon -p genet-agent --target ${{ matrix.target }}
+      - run: cargo build --release -p genet-cli -p genet-agent --target ${{ matrix.target }}
       - name: Pack
         shell: bash
         env:
@@ -317,7 +323,7 @@ jobs:
           . scripts/channel.env
           mkdir -p dist
           tar -czf "dist/$TARBALL_PREFIX-linux-x64.tar.gz" \
-            -C "target/${{ matrix.target }}/release" "$DAEMON_BINARY" "$AGENT_BINARY"
+            -C "target/${{ matrix.target }}/release" "$CLI_BINARY" "$AGENT_BINARY"
           ls -la dist
       # What the tarball promises: two binaries that start on a machine with no
       # graphical session and nothing else installed — including no particular
@@ -334,20 +340,20 @@ jobs:
           tar -xzf "dist/$TARBALL_PREFIX-linux-x64.tar.gz" -C "$root"
           # The unpacked copy, so this is a claim about what is in the tarball
           # rather than about what was left in the build directory.
-          ./scripts/version.sh --verify "$root/$DAEMON_BINARY"
+          ./scripts/version.sh --verify "$root/$CLI_BINARY"
           # Static-pie prints "statically linked" and exits 0; a fully static
           # binary may exit 1 with "not a dynamic executable". Either is fine.
           # What is not fine is a list of .so dependencies on the host glibc.
-          ldd "$root/$DAEMON_BINARY" >/tmp/ldd.out 2>&1 || true
+          ldd "$root/$CLI_BINARY" >/tmp/ldd.out 2>&1 || true
           if grep -qiE 'not a dynamic|statically linked' /tmp/ldd.out; then
-            echo "$DAEMON_BINARY is statically linked"
+            echo "$CLI_BINARY is statically linked"
           else
-            echo "FAIL: $DAEMON_BINARY is dynamically linked; old glibc hosts will break:" >&2
+            echo "FAIL: $CLI_BINARY is dynamically linked; old glibc hosts will break:" >&2
             cat /tmp/ldd.out >&2
             exit 1
           fi
           env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
-            timeout 30 "$root/$DAEMON_BINARY" >"$root/out.json" 2>"$root/err.log" || true
+            timeout 30 "$root/$CLI_BINARY" daemon run >"$root/out.json" 2>"$root/err.log" || true
           grep -q '"event":"listening"' "$root/out.json" || {
             echo "FAIL: the packed daemon did not come up" >&2
             cat "$root/err.log" >&2

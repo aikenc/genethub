@@ -38,7 +38,7 @@ testing/              ← 跨部件旅程测试
 ```
 安装包（NSIS/WiX · dmg · AppImage）
 ├── Tauri WebView → 工作台
-├── sidecar: genet-daemon（关窗后仍运行）
+├── sidecar: genet daemon run（CLI 与 daemon 同一二进制；关窗后仍运行）
 ├── genet-agent（由 daemon 的 genet adapter 按需拉起）
 ├── 系统托盘：打开主界面 / 状态 / 退出
 └── 默认配置：本机直连，无需任何服务端

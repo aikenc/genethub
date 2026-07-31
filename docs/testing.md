@@ -285,8 +285,8 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 | 设备准入 | `testing/tests/devices.rs` | **真实 daemon + 进程内汇合 relay**：新设备经 relay 配对、换到凭证后重连、陌生人被拒、邀请码只能用一次、握手不能重放、撤销当场断连、重启后仍然可达且仍然认得旧设备 | 无 |
 | relay | `apps/relay && npm test` | 帧转发、契约、边界检查、wire 摘要 | 无 |
 | 工作台 | `packages/web && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |
-| **全栈旅程** | `packages/web/src/e2e/journey.test.ts` | **真实 daemon + 真实 agent + 脚本化模型**，用的是工作台自己的客户端 | `cargo build -p genet-daemon` |
-| **自建全栈** | `packages/web/src/e2e/selfhosted.test.ts` | 只用开源件：**真实 relay（汇合模式）+ 真实 daemon + 真实 agent + 工作台自己的配对与客户端代码**。新设备配对进来能用整套工作台并**经转发跑完一轮流式对话**，历史留在机器上（第二台设备订阅同一会话就看得到），relay 被 kill 后 daemon 自己回来，没配对的连不上，撤销当场断 | `cargo build -p genet-daemon -p genet-agent` + `apps/relay && npm run build` |
+| **全栈旅程** | `packages/web/src/e2e/journey.test.ts` | **真实 daemon + 真实 agent + 脚本化模型**，用的是工作台自己的客户端 | `cargo build -p genet-cli` |
+| **自建全栈** | `packages/web/src/e2e/selfhosted.test.ts` | 只用开源件：**真实 relay（汇合模式）+ 真实 daemon + 真实 agent + 工作台自己的配对与客户端代码**。新设备配对进来能用整套工作台并**经转发跑完一轮流式对话**，历史留在机器上（第二台设备订阅同一会话就看得到），relay 被 kill 后 daemon 自己回来，没配对的连不上，撤销当场断 | `cargo build -p genet-cli -p genet-agent` + `apps/relay && npm run build` |
 | 跨栈配对 | 控制面仓库的 `test/pairing.test.ts`、`test/relay.test.ts` | daemon 自己走设备码配对，浏览器经 relay 连回来 | 同上 |
 | 跨栈首启 | 控制面仓库的 `test/first-run.test.ts` | 全程没有账号、没有 cookie、没人批准任何东西：daemon 自己拿到临时身份，另一个浏览器扫链接进来，经转发层连上这台机器 | 同上 |
 

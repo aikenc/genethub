@@ -21,7 +21,7 @@ const REPO = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../..",
 );
-const DAEMON = path.join(REPO, "target/debug/genet-daemon");
+const DAEMON = path.join(REPO, "target/debug/genet");
 const AGENT = path.join(REPO, "target/debug/genet-agent");
 const RELAY = path.join(REPO, "apps/relay/dist/main.js");
 const JOIN_TOKEN = "e2e-join-token";
@@ -339,7 +339,7 @@ function startDaemon(
   defaultWorkspace: string,
 ): Promise<{ process: ChildProcess; port: number; token: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(DAEMON, {
+    const child = spawn(DAEMON, ["daemon", "run"], {
       env: {
         ...process.env,
         GENEHUB_DATA_DIR: dataDir,

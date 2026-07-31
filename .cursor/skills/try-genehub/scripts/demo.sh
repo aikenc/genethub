@@ -29,7 +29,7 @@ DAEMON_PORT="${GENEHUB_DEMO_DAEMON_PORT:-47100}"
 WEB_PORT="${GENEHUB_DEMO_WEB_PORT:-5173}"
 CLOUD_PORT="${GENEHUB_DEMO_CLOUD_PORT:-47210}"
 RELAY_PORT="${GENEHUB_DEMO_RELAY_PORT:-47211}"
-DAEMON_BIN="$REPO/target/release/genet-daemon"
+DAEMON_BIN="$REPO/target/release/genet"
 AGENT_BIN="$REPO/target/release/genet-agent"
 WEB_DIR="$REPO/packages/web"
 RELAY_DIR="$REPO/apps/relay"
@@ -37,7 +37,7 @@ CLOUD_DIR="$CLOUD_REPO/server"
 
 # IMPORTANT: never `pkill -f` a path-based pattern here. The shell wrapper
 # that runs this very script also carries that path in its own argv, so a
-# pattern like "target/release/genet-daemon" self-matches and kills the
+# pattern like "target/release/genet" self-matches and kills the
 # script mid-run. Track PIDs explicitly instead.
 DAEMON_PID_FILE="$DEMO_DIR/daemon.pid"
 WEB_PID_FILE="$DEMO_DIR/web.pid"
@@ -80,8 +80,8 @@ build_binaries() {
   # until you notice a feature that was definitely added is missing at
   # runtime. cargo no-ops quickly when nothing changed, so this costs nothing
   # in the common case.
-  log "building genet-daemon and genet-agent (release)"
-  cargo build --release --manifest-path "$REPO/Cargo.toml" -p genet-daemon -p genet-agent
+  log "building genet and genet-agent (release)"
+  cargo build --release --manifest-path "$REPO/Cargo.toml" -p genet-cli -p genet-agent
 }
 
 write_config() {
@@ -142,7 +142,7 @@ start_daemon() {
   free_port "$DAEMON_PORT"
   log "starting daemon on port $DAEMON_PORT"
   GENEHUB_DATA_DIR="$DATA_DIR" GENEHUB_WORKSPACE_DIR="$WORKSPACE_DIR" \
-    setsid "$DAEMON_BIN" >"$DEMO_DIR/daemon.log" 2>&1 < /dev/null &
+    setsid "$DAEMON_BIN" daemon run >"$DEMO_DIR/daemon.log" 2>&1 < /dev/null &
   echo $! > "$DAEMON_PID_FILE"
   stat -c %Y "$DAEMON_BIN" > "$DEMO_DIR/daemon.bin.mtime"
   for _ in $(seq 1 20); do

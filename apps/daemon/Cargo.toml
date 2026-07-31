@@ -5,9 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "GeneHub daemon: session kernel, agent adapters and client transports"
 
-[[bin]]
-name = "genet-daemon"
-path = "src/main.rs"
+# No [[bin]] here: the daemon is a library, run through the `genet` binary
+# (`apps/cli`) as `genet daemon run` — one file that is both the client and
+# the resident process (`genethub-cli.md` §2).
 
 [dependencies]
 genehub-proto = { path = "../../packages/proto" }

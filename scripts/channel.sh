@@ -50,8 +50,10 @@ value() {
     official:desktop_binary)      printf '%s' genethub-desktop ;;
     beta:desktop_binary)          printf '%s' genethub-desktop-beta ;;
 
-    official:daemon_binary)       printf '%s' genet-daemon ;;
-    beta:daemon_binary)           printf '%s' genet-daemon-beta ;;
+    # The one binary that is both the CLI and the daemon (`genet daemon
+    # run`) — the merge retired a separate daemon binary (`genethub-cli.md`).
+    official:cli_binary)          printf '%s' genet ;;
+    beta:cli_binary)              printf '%s' genet-beta ;;
 
     official:agent_binary)        printf '%s' genet-agent ;;
     beta:agent_binary)            printf '%s' genet-agent-beta ;;
@@ -151,7 +153,8 @@ pub const PRODUCT: &str = "$(value product "$channel")";
 pub const DATA_DIR_NAME: &str = "$(value data_dir_name "$channel")";
 /// The folder the agent works in until the user points it somewhere else.
 pub const WORKSPACE_DIR_NAME: &str = "$(value workspace_dir_name "$channel")";
-pub const DAEMON_BINARY: &str = "$(value daemon_binary "$channel")";
+/// The one binary: CLI to agents, daemon as \`genet daemon run\`.
+pub const CLI_BINARY: &str = "$(value cli_binary "$channel")";
 pub const AGENT_BINARY: &str = "$(value agent_binary "$channel")";
 /// Where the agent keeps its sessions and \`models.json\`, under the home dir.
 pub const AGENT_HOME_DIR: &str = "$(value agent_home_dir "$channel")";
@@ -218,7 +221,8 @@ pub const PRODUCT: &str = "$(value product "$channel")";
 /// identifier (which channel.sh also stamps), and the daemon's own
 /// \`dirs::data_dir()\` root follows DATA_DIR_NAME in its copy of this module.
 pub const DATA_DIR_NAME: &str = "$(value data_dir_name "$channel")";
-pub const DAEMON_BINARY: &str = "$(value daemon_binary "$channel")";
+/// What the shell spawns (with \`daemon run\`): the merged CLI+daemon binary.
+pub const CLI_BINARY: &str = "$(value cli_binary "$channel")";
 /// The override the shell passes to the daemon it spawns — has to stay the
 /// name the daemon reads (\`apps/daemon/src/channel.rs\`), or the shell and
 /// the daemon disagree about where the data lives and the shell ends up
@@ -250,7 +254,7 @@ shell_env() {
 CHANNEL=$(value channel "$channel")
 PRODUCT="$(value product "$channel")"
 DESKTOP_BINARY=$(value desktop_binary "$channel")
-DAEMON_BINARY=$(value daemon_binary "$channel")
+CLI_BINARY=$(value cli_binary "$channel")
 AGENT_BINARY=$(value agent_binary "$channel")
 ENV_DATA_DIR=$(value env_data_dir "$channel")
 ENV_WORKSPACE_DIR=$(value env_workspace_dir "$channel")
@@ -263,10 +267,10 @@ EOF
 
 stamp() {
   local channel="$1"
-  local product identifier daemon_binary agent_binary desktop_binary
+  local product identifier cli_binary agent_binary desktop_binary
   product="$(value product "$channel")"
   identifier="$(value identifier "$channel")"
-  daemon_binary="$(value daemon_binary "$channel")"
+  cli_binary="$(value cli_binary "$channel")"
   agent_binary="$(value agent_binary "$channel")"
   desktop_binary="$(value desktop_binary "$channel")"
 
@@ -288,16 +292,19 @@ stamp() {
   # The binaries' own names. Crate (package) names stay put — source packages
   # are shared between channels by design; only what the process is called
   # changes.
-  rewrite "$repo/apps/daemon/Cargo.toml" \
-    '/^\[\[bin\]\]/,/^\[/ s/^name = ".*"$/name = "'"$daemon_binary"'"/'
+  rewrite "$repo/apps/cli/Cargo.toml" \
+    '/^\[\[bin\]\]/,/^\[/ s/^name = ".*"$/name = "'"$cli_binary"'"/'
   rewrite "$repo/apps/agent/Cargo.toml" \
     '/^\[\[bin\]\]/,/^\[/ s/^name = ".*"$/name = "'"$agent_binary"'"/'
 
-  # The installer kills processes by image name, and only this channel's.
+  # The installer stops the supervisor by image name and the daemon by the
+  # pid in its lock file — the daemon is the same `genet` binary every client
+  # runs, so a name match would kill clients with it (`genethub-cli.md` §2).
   rewrite "$repo/apps/desktop/src-tauri/installer.nsh" \
     -e 's/^!define GH_DESKTOP_EXE ".*"$/!define GH_DESKTOP_EXE "'"$desktop_binary"'.exe"/' \
-    -e 's/^!define GH_DAEMON_EXE ".*"$/!define GH_DAEMON_EXE "'"$daemon_binary"'.exe"/' \
-    -e 's/^!define GH_AGENT_EXE ".*"$/!define GH_AGENT_EXE "'"$agent_binary"'.exe"/'
+    -e 's/^!define GH_CLI_EXE ".*"$/!define GH_CLI_EXE "'"$cli_binary"'.exe"/' \
+    -e 's/^!define GH_AGENT_EXE ".*"$/!define GH_AGENT_EXE "'"$agent_binary"'.exe"/' \
+    -e 's/^!define GH_DATA_DIR_NAME ".*"$/!define GH_DATA_DIR_NAME "'"$(value data_dir_name "$channel")"'"/'
 
   # install.sh is served to users on its own, so its channel travels inside it
   # as one assignment this script rewrites.

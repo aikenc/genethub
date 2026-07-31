@@ -135,7 +135,7 @@ jobs:
       # The end-to-end case drives a real daemon and a real agent. Without the
       # binaries it skips itself, which would quietly drop the only test that
       # covers the wire between the two languages.
-      - run: cargo build -p genet-daemon -p genet-agent
+      - run: cargo build -p genet-cli -p genet-agent
         working-directory: .
       # And the self-hosted case drives a real relay on top of that. This is
       # the job that proves the open repository stands on its own — a relay and
@@ -159,6 +159,6 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
       # The supervision tests drive the real daemon binary; without it they skip
       # themselves, which would leave the one thing the shell does untested.
-      - run: cargo build -p genet-daemon
+      - run: cargo build -p genet-cli
       - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings

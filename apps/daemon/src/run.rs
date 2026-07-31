@@ -1,26 +1,22 @@
-//! genet-daemon — the one resident process on a user's machine.
+//! The daemon's foreground entry point — what `genet daemon run` executes.
+//!
+//! This lived in `apps/daemon/src/main.rs` while the daemon was its own
+//! binary. The merge (`genethub-cli.md` §2) made the daemon a mode of the
+//! `genet` binary rather than a file of its own, so the logic moved here for
+//! the CLI's dispatcher to call.
 
 use std::fs;
 use std::io::Write;
 
 use anyhow::{Context, Result};
-use genet_daemon::config::Paths;
-use genet_daemon::Daemon;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Answered before anything touches the disk: "which build is this" is a
-    // question asked of a machine that is already misbehaving, and the answer
-    // should not depend on a data directory being readable — or on a locked one
-    // belonging to the daemon that is already running.
-    //
-    // The release workflow asks it too, to prove the version it stamped into the
-    // manifests is the version the shipped binary reports (`scripts/version.sh`).
-    if std::env::args().any(|argument| argument == "--version" || argument == "-V") {
-        println!("{}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
+use crate::config::Paths;
+use crate::Daemon;
 
+/// Runs the daemon in the foreground until a signal or a local client asks it
+/// to stop. The listening line goes to stdout for whoever spawned us — the
+/// desktop shell reads it to learn the endpoint without racing the file write.
+pub async fn run() -> Result<()> {
     // The data directory has to be known before logging starts, because the log
     // goes in it. Anything that fails in between is on stderr, which the desktop
     // shell keeps in the same directory.
@@ -29,12 +25,10 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env(genet_daemon::channel::ENV_LOG)
+            tracing_subscriber::EnvFilter::try_from_env(crate::channel::ENV_LOG)
                 .unwrap_or_else(|_| "info".into()),
         )
-        .with_writer(Tee::new(genet_daemon::logs::LogFile::open(
-            paths.log_file(),
-        )))
+        .with_writer(Tee::new(crate::logs::LogFile::open(paths.log_file())))
         .init();
     tracing::info!("log: {}", paths.log_file().display());
     let _lock = SingleInstance::acquire(&paths)?;
@@ -76,12 +70,12 @@ async fn main() -> Result<()> {
 /// copies of every line in the same directory.
 #[derive(Clone)]
 struct Tee {
-    file: genet_daemon::logs::LogFile,
+    file: crate::logs::LogFile,
     watched: bool,
 }
 
 impl Tee {
-    fn new(file: genet_daemon::logs::LogFile) -> Self {
+    fn new(file: crate::logs::LogFile) -> Self {
         use std::io::IsTerminal;
         Tee {
             file,
@@ -144,14 +138,12 @@ struct SingleInstance {
 impl SingleInstance {
     fn acquire(paths: &Paths) -> Result<Self> {
         let path = paths.lock_file();
-        if let Ok(contents) = fs::read_to_string(&path) {
-            if let Ok(pid) = contents.trim().parse::<u32>() {
-                if is_running(pid) {
-                    anyhow::bail!("another daemon is already running (pid {pid}); stop it first");
-                }
-                // A stale lock from a crash should not block startup forever.
-                tracing::warn!("clearing a stale lock from pid {pid}");
+        if let Some(pid) = crate::lifecycle::lock_pid(paths) {
+            if crate::lifecycle::pid_alive(pid) {
+                anyhow::bail!("another daemon is already running (pid {pid}); stop it first");
             }
+            // A stale lock from a crash should not block startup forever.
+            tracing::warn!("clearing a stale lock from pid {pid}");
         }
         fs::write(&path, std::process::id().to_string())
             .with_context(|| format!("writing {}", path.display()))?;
@@ -163,25 +155,4 @@ impl Drop for SingleInstance {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
-}
-
-#[cfg(unix)]
-fn is_running(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
-        || unsafe { libc_kill(pid as i32, 0) == 0 }
-}
-
-#[cfg(unix)]
-unsafe fn libc_kill(pid: i32, signal: i32) -> i32 {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    kill(pid, signal)
-}
-
-#[cfg(not(unix))]
-fn is_running(_pid: u32) -> bool {
-    // Without a cheap probe, assume the lock is stale rather than refusing to
-    // start: a daemon that will not launch is worse than a rare double start.
-    false
 }

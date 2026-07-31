@@ -393,9 +393,9 @@ pub fn run() {
             tracing_line(&format!("数据目录 {}", data_dir.display()));
 
             let name = if cfg!(windows) {
-                format!("{}.exe", channel::DAEMON_BINARY)
+                format!("{}.exe", channel::CLI_BINARY)
             } else {
-                channel::DAEMON_BINARY.to_string()
+                channel::CLI_BINARY.to_string()
             };
             // A missing binary used to end `setup`, which means the app does not
             // open at all — the one failure mode with nowhere to put an

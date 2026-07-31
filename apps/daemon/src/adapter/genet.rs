@@ -972,7 +972,7 @@ mod tests {
         )
         .expect("the bundling script");
         assert!(
-            script.contains(r#"for binary in "$DAEMON_BINARY" "$AGENT_BINARY""#),
+            script.contains(r#"for binary in "$CLI_BINARY" "$AGENT_BINARY""#),
             "the installer no longer stages the agent under its stamped name"
         );
         assert!(

@@ -91,7 +91,7 @@ async fn fetch(url: &str) -> Result<Manifest> {
             reqwest::header::USER_AGENT,
             format!(
                 "{}/{}",
-                crate::channel::DAEMON_BINARY,
+                crate::channel::CLI_BINARY,
                 env!("CARGO_PKG_VERSION")
             ),
         )
@@ -335,7 +335,7 @@ async fn fetch_installer(state: &Shared, version: &str, url: &str, target: &Path
             reqwest::header::USER_AGENT,
             format!(
                 "{}/{}",
-                crate::channel::DAEMON_BINARY,
+                crate::channel::CLI_BINARY,
                 env!("CARGO_PKG_VERSION")
             ),
         )

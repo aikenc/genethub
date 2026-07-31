@@ -2,7 +2,7 @@
 ;
 ; The daemon is meant to outlive the window: closing the app leaves it running so
 ; the machine stays reachable. So by the time an upgrade wants to replace
-; `bin\genet-daemon.exe`, the old one is holding that file open, and the install
+; `bin\genet.exe`, the old one is holding that file open, and the install
 ; stops with "Error opening file for writing" — on the machine of someone who did
 ; nothing wrong and now has a half-installed app.
 ;
@@ -28,11 +28,12 @@
 ; thing that differs between the official and beta channels, and the two
 ; install side by side on one machine: each channel's installer must stop its
 ; own processes and leave the other line's alone. `scripts/channel.sh`
-; rewrites these three lines for a beta build; nothing else here changes.
+; rewrites these four lines for a beta build; nothing else here changes.
 
 !define GH_DESKTOP_EXE "genethub-desktop.exe"
-!define GH_DAEMON_EXE "genet-daemon.exe"
+!define GH_CLI_EXE "genet.exe"
 !define GH_AGENT_EXE "genet-agent.exe"
+!define GH_DATA_DIR_NAME "GeneHub"
 
 !macro StopGeneHubProcesses
   DetailPrint "正在停止 GeneHub 后台进程…"
@@ -52,8 +53,26 @@
   ; explicitly, and its agents go down with it.
   nsExec::Exec 'taskkill /F /IM ${GH_DESKTOP_EXE}'
   Pop $0
-  nsExec::Exec 'taskkill /F /T /IM ${GH_DAEMON_EXE}'
-  Pop $0
+
+  ; The daemon is the same `genet.exe` every CLI client runs, so killing it by
+  ; image name would take a running `genet session send --wait` down with it —
+  ; possibly the very client that ignited this update. The lock file names the
+  ; one process that is the daemon (`genethub-cli.md` §2); `/T` takes its
+  ; agents along, and a stale lock only wastes one taskkill on a pid that is
+  ; already gone.
+  ;
+  ; The data directory is the channel's own, so each line's installer reads
+  ; its own lock and leaves the other line's daemon alone. A daemon started
+  ; with the data-dir override pointed elsewhere is out of reach here — the
+  ; same blind spot the old image-name kill had for renamed installs.
+  IfFileExists "$APPDATA\${GH_DATA_DIR_NAME}\daemon.lock" 0 genehub_no_lock
+    FileOpen $3 "$APPDATA\${GH_DATA_DIR_NAME}\daemon.lock" r
+    FileRead $3 $4
+    FileClose $3
+    DetailPrint "正在停止 daemon (pid $4)…"
+    nsExec::Exec 'taskkill /F /T /PID $4'
+    Pop $0
+  genehub_no_lock:
   nsExec::Exec 'taskkill /F /T /IM ${GH_AGENT_EXE}'
   Pop $0
 
@@ -62,9 +81,9 @@
   ; machine reaches the normal error instead of hanging here forever.
   StrCpy $1 0
   genehub_wait:
-    IfFileExists "$INSTDIR\bin\${GH_DAEMON_EXE}" 0 genehub_ready
+    IfFileExists "$INSTDIR\bin\${GH_CLI_EXE}" 0 genehub_ready
     ClearErrors
-    FileOpen $2 "$INSTDIR\bin\${GH_DAEMON_EXE}" a
+    FileOpen $2 "$INSTDIR\bin\${GH_CLI_EXE}" a
     IfErrors genehub_retry
     FileClose $2
     Goto genehub_ready

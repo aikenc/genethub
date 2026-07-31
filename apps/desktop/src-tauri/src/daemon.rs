@@ -145,8 +145,11 @@ impl Daemon {
     }
 
     fn spawn(&self) -> Result<Endpoint, String> {
+        // The daemon is the CLI binary in its other shape (`genethub-cli.md`
+        // §2): same file every client runs, `daemon run` is the resident one.
         let mut command = Command::new(&self.binary);
         command
+            .args(["daemon", "run"])
             .env(crate::channel::ENV_DATA_DIR, &self.data_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

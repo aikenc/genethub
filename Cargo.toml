@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/agent", "apps/daemon", "packages/proto", "testing"]
+members = ["apps/agent", "apps/cli", "apps/daemon", "packages/proto", "testing"]
 # The Tauri shell stays out of the workspace on purpose: it drags in a large,
 # slow-to-build native dependency tree that would otherwise be rebuilt whenever
 # the daemon changes.

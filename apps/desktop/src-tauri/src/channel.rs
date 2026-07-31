@@ -17,7 +17,8 @@ pub const PRODUCT: &str = "GeneHub";
 /// identifier (which channel.sh also stamps), and the daemon's own
 /// `dirs::data_dir()` root follows DATA_DIR_NAME in its copy of this module.
 pub const DATA_DIR_NAME: &str = "GeneHub";
-pub const DAEMON_BINARY: &str = "genet-daemon";
+/// What the shell spawns (with `daemon run`): the merged CLI+daemon binary.
+pub const CLI_BINARY: &str = "genet";
 /// The override the shell passes to the daemon it spawns — has to stay the
 /// name the daemon reads (`apps/daemon/src/channel.rs`), or the shell and
 /// the daemon disagree about where the data lives and the shell ends up

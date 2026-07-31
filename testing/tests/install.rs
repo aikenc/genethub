@@ -36,7 +36,7 @@ fn installing_puts_both_binaries_where_the_path_can_find_them() {
         stderr(&output)
     );
 
-    for binary in ["genet-daemon", "genet-agent"] {
+    for binary in ["genet", "genet-agent"] {
         let path = bin.join(binary);
         assert!(path.is_file(), "{binary} was not installed");
         let mode = fs::metadata(&path).expect("stat").permissions().mode();
@@ -57,7 +57,7 @@ fn installing_puts_both_binaries_where_the_path_can_find_them() {
         "no PATH hint in:\n{said}"
     );
     assert!(
-        said.contains("genet-daemon"),
+        said.contains("genet daemon start"),
         "did not say what to run:\n{said}"
     );
 }
@@ -86,7 +86,7 @@ fn a_download_that_does_not_match_its_checksum_is_not_installed() {
         "unhelpful refusal: {}",
         stderr(&output)
     );
-    assert!(!bin.join("genet-daemon").exists(), "installed anyway");
+    assert!(!bin.join("genet").exists(), "installed anyway");
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn fake_release() -> TempDir {
     // Stand-ins rather than the real binaries: what is under test is the script,
     // and building the daemon here would make this test depend on a build it
     // does not care about.
-    for binary in ["genet-daemon", "genet-agent"] {
+    for binary in ["genet", "genet-agent"] {
         let path = staged.join(binary);
         fs::write(&path, "#!/bin/sh\necho ok\n").expect("write a stand-in");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -144,7 +144,7 @@ fn fake_release() -> TempDir {
         .arg(&asset)
         .arg("-C")
         .arg(&staged)
-        .arg("genet-daemon")
+        .arg("genet")
         .arg("genet-agent")
         .status()
         .expect("run tar");

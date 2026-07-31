@@ -19,7 +19,7 @@ import { Client, type WebSocketLike } from "../protocol/client";
 import { applySequenced, assistantText, emptyTimeline, fromSnapshot } from "../session/timeline";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
-const DAEMON = path.join(REPO, "target/debug/genet-daemon");
+const DAEMON = path.join(REPO, "target/debug/genet");
 
 /**
  * The workbench's own client, against a real daemon and a real agent.
@@ -401,7 +401,7 @@ function startDaemon(
   defaultWorkspace: string,
 ): Promise<{ process: ChildProcess; port: number; token: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(DAEMON, {
+    const child = spawn(DAEMON, ["daemon", "run"], {
       env: {
         ...process.env,
         GENEHUB_DATA_DIR: dataDir,

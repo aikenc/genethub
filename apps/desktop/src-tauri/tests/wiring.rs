@@ -146,13 +146,44 @@ fn the_windows_installer_stops_the_daemon_before_replacing_it() {
     // overwrite, so every one of them has to be stopped first. The names come
     // from the defines, not literals: the two channels install side by side,
     // and scripts/channel.sh rewrites the defines for a beta build.
-    for define in ["GH_DAEMON_EXE", "GH_AGENT_EXE"] {
-        let exe = nsis_define(&script, define);
-        assert!(
-            script.contains(&format!("/T /IM ${{{define}}}")),
-            "{define} ({exe}) ships in the bundle but the installer never stops it"
-        );
-    }
+    //
+    // The daemon is the exception, and the exception is the point: it is the
+    // same `genet` binary every CLI client runs, so it is stopped by the pid
+    // in its lock file — an image-name kill would take a running
+    // `genet session send --wait` down with it (`genethub-cli.md` §2).
+    let agent = nsis_define(&script, "GH_AGENT_EXE");
+    assert!(
+        script.contains("/T /IM ${GH_AGENT_EXE}"),
+        "genet-agent ({agent}) ships in the bundle but the installer never stops it"
+    );
+    assert!(
+        script.contains("/F /T /PID"),
+        "the daemon is not stopped by its lock-file pid any more"
+    );
+    assert!(
+        script.contains("daemon.lock"),
+        "the installer does not read the daemon's lock file to find its pid"
+    );
+    assert!(
+        !script.contains("/IM ${GH_CLI_EXE}"),
+        "the daemon is killed by image name again — that takes CLI clients down with it"
+    );
+
+    // The lock lives in the daemon's own data directory, so the define has to
+    // name the same directory the daemon's channel constants do — a drift here
+    // is the installer reading the other channel's lock, or nobody's.
+    let daemon_channel = read(repo().join("apps/daemon/src/channel.rs"));
+    let data_dir = daemon_channel
+        .lines()
+        .find_map(|line| line.strip_prefix("pub const DATA_DIR_NAME: &str = "))
+        .expect("the daemon's channel has no DATA_DIR_NAME")
+        .trim()
+        .trim_matches(|c| c == '"' || c == ';');
+    assert_eq!(
+        nsis_define(&script, "GH_DATA_DIR_NAME"),
+        data_dir,
+        "the installer looks for daemon.lock somewhere the daemon does not write it"
+    );
 }
 
 /// The shell restarts the daemon about a second after it dies, on purpose: that
@@ -173,12 +204,14 @@ fn the_installer_stops_the_supervisor_before_the_thing_it_supervises() {
     );
 
     // The kill lines, not any mention of the names: the comment above them
-    // explains this in prose and would otherwise decide the ordering.
+    // explains this in prose and would otherwise decide the ordering. The
+    // daemon's stop is the lock-file pid kill — it is the same binary as every
+    // CLI client, so there is no image name to look for (`genethub-cli.md` §2).
     let app = script
         .find("/IM ${GH_DESKTOP_EXE}")
         .expect("the app itself is never stopped, so it will revive the daemon");
     let daemon = script
-        .find("/IM ${GH_DAEMON_EXE}")
+        .find("/F /T /PID")
         .expect("the daemon is never stopped");
     assert!(
         app < daemon,
@@ -243,9 +276,11 @@ fn the_hook_does_not_kill_the_installer_that_is_running_it() {
          the installer the user started from inside the app"
     );
     // The daemon still goes down with everything it spawned: an agent holds its
-    // own executable open exactly the way the daemon does.
+    // own executable open exactly the way the daemon does. The tree kill hangs
+    // on the lock-file pid rather than an image name, because the daemon's
+    // image name belongs to every CLI client too (`genethub-cli.md` §2).
     assert!(
-        script.contains("/F /T /IM ${GH_DAEMON_EXE}"),
+        script.contains("/F /T /PID"),
         "the daemon is stopped without its children, so an agent it started \
          will still be holding a file the installer wants to write"
     );
@@ -447,7 +482,7 @@ fn nothing_in_the_tree_claims_to_be_beta() {
         ("env_download_base", "GENEHUB_DOWNLOAD_BASE"),
         ("env_bin_dir", "GENEHUB_BIN_DIR"),
         ("identifier", "com.genethub.desktop"),
-        ("daemon_binary", "genet-daemon"),
+        ("cli_binary", "genet"),
         ("agent_binary", "genet-agent"),
         ("desktop_binary", "genethub-desktop"),
     ] {

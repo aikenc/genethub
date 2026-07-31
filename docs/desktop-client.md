@@ -7,7 +7,7 @@
 
 **只有 Windows 有安装包。** 下面整篇说的是它。
 
-**Linux 这一版只有命令行**：`scripts/install.sh` 装 `genet-daemon` 与 `genet-agent`，
+**Linux 这一版只有命令行**：`scripts/install.sh` 装 `genet`（CLI 与 daemon 同一二进制）与 `genet-agent`，
 daemon 启动后打印地址和 token，浏览器指过去就是同一个工作台——同一份
 `packages/web`，不少一个功能。
 
@@ -16,7 +16,7 @@ daemon 启动后打印地址和 token，浏览器指过去就是同一个工作�
 libayatana-appindicator 两个依赖（前者装不上就跑不起来，后者不少桌面根本不显示
 托盘图标），换不到任何东西。
 
-想让 Linux 机器一直可达就跑 `genet-daemon`，用 systemd user unit 或者 `nohup` 都行——
+想让 Linux 机器一直可达就跑 `genet daemon run`（或 `genet daemon start` 后台拉起），用 systemd user unit 或者 `nohup` 都行——
 它本来就是设计成这样活着的进程，桌面外壳只是在 Windows 上替用户做了这件事。
 
 macOS 等签名与公证：没有公证的下载是一个"安全警告后面挂着一个 App"。
@@ -74,12 +74,12 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 ```
 安装
   └─ 写入 Program Files / Applications + 快捷方式
-       + sidecar 资源（genet-daemon、genet-agent，两个静态二进制）
+       + sidecar 资源（genet、genet-agent，两个静态二进制）
 
 启动（或开机自启）
   ├─ 单实例锁
   ├─ 创建托盘
-  ├─ 启动 sidecar：genet-daemon（本机直连，无需任何服务端）
+  ├─ 启动 sidecar：genet daemon run（本机直连，无需任何服务端）
   ├─ 校验内置 agent 二进制存在且可执行
   └─ 显示主窗口（或仅托盘）
 
@@ -124,7 +124,7 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 | 项 | 实测（未压缩） | 说明 |
 |----|----------------|------|
 | Tauri 壳（含工作台静态产物） | 5.3 MB | 用系统 WebView，不带 Chromium；前端资源编译进二进制 |
-| `genet-daemon` | 4.4 MB | Rust 二进制 |
+| `genet` | 4.4 MB | Rust 二进制 |
 | `genet-agent` | 3.9 MB | 同上 |
 | 图标与桌面项 | < 10 KB | |
 

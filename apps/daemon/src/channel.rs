@@ -17,7 +17,8 @@ pub const PRODUCT: &str = "GeneHub";
 pub const DATA_DIR_NAME: &str = "GeneHub";
 /// The folder the agent works in until the user points it somewhere else.
 pub const WORKSPACE_DIR_NAME: &str = "GeneHub";
-pub const DAEMON_BINARY: &str = "genet-daemon";
+/// The one binary: CLI to agents, daemon as `genet daemon run`.
+pub const CLI_BINARY: &str = "genet";
 pub const AGENT_BINARY: &str = "genet-agent";
 /// Where the agent keeps its sessions and `models.json`, under the home dir.
 pub const AGENT_HOME_DIR: &str = ".genet-agent";

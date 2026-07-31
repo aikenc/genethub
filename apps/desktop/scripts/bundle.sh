@@ -16,7 +16,7 @@ repo="$(cd "$here/../../.." && pwd)"
 # packaging here agrees with the names cargo just built. The defaults are for
 # a local build nobody stamped — official, because that is what the tree says.
 CHANNEL=official
-DAEMON_BINARY=genet-daemon
+CLI_BINARY=genet
 AGENT_BINARY=genet-agent
 ENV_DATA_DIR=GENEHUB_DATA_DIR
 ENV_WORKSPACE_DIR=GENEHUB_WORKSPACE_DIR
@@ -26,7 +26,7 @@ DESKTOP_FILE=GeneHub.desktop
 [ -f "$repo/scripts/channel.env" ] && . "$repo/scripts/channel.env"
 
 echo "==> building the daemon and the built-in agent ($CHANNEL)"
-cargo build --release --manifest-path "$repo/Cargo.toml" -p genet-daemon -p genet-agent
+cargo build --release --manifest-path "$repo/Cargo.toml" -p genet-cli -p genet-agent
 
 echo "==> staging binaries"
 # Cleaned first: the previous build's staged binaries are still here, and a
@@ -39,7 +39,7 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*) exe=".exe" ;;
   *) exe="" ;;
 esac
-for binary in "$DAEMON_BINARY" "$AGENT_BINARY"; do
+for binary in "$CLI_BINARY" "$AGENT_BINARY"; do
   cp "$repo/target/release/$binary$exe" "$here/../src-tauri/bin/$binary$exe"
 done
 
@@ -102,7 +102,7 @@ if [[ -n "$deb" ]]; then
   # kept too — a daemon that cannot start says why, and "did not come up" with
   # no reason attached is a debugging session, not a check.
   env "$ENV_DATA_DIR=$staged/data" "$ENV_WORKSPACE_DIR=$staged/workspace" timeout 15 \
-    "$staged/usr/lib/$LIB_DIR_NAME/bin/$DAEMON_BINARY" >"$staged/out.json" 2>"$staged/err.log" || true
+    "$staged/usr/lib/$LIB_DIR_NAME/bin/$CLI_BINARY" daemon run >"$staged/out.json" 2>"$staged/err.log" || true
   if grep -q '"event":"listening"' "$staged/out.json"; then
     echo "    the packaged daemon starts and reports a port"
   else

@@ -23,7 +23,7 @@
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/aikenc/genethub/main/scripts/install.sh | sh
-genet-daemon   # daemon + 内置 agent，不需要 Node；启动后打印连接地址与 token
+genet daemon run   # daemon + 内置 agent，不需要 Node；启动后打印连接地址与 token（genet 同时也是 CLI）
 ```
 
 预编译包是 **musl 静态链接**的，不依赖宿主机 glibc 版本。把它打印的地址在浏览器里打开就是完整工作台——和桌面端里的是同一份代码。
@@ -36,14 +36,14 @@ macOS 这一版没有发布产物（等签名与公证），从源码构建可�
 ## 从源码构建
 
 ```bash
-cargo build --release -p genet-daemon -p genet-agent   # 守护进程与内置 agent
+cargo build --release -p genet-cli -p genet-agent       # CLI/守护进程（同一二进制）与内置 agent
 cd packages/web && npm install && npm run build        # 工作台
 cd apps/desktop && ./scripts/bundle.sh                 # 桌面安装包
 ```
 
 自建 relay 见 [self-hosting.md](./docs/self-hosting.md)。发布产物由 `.github/workflows/release.yml` 在打 tag 时构建：每个平台各出一个安装包，另出一份 `genet-<os>-<arch>.tar.gz` 供上面那条命令使用，附 `SHA256SUMS`（`scripts/install.sh` 校验不过就拒绝安装）。
 
-**发一个版本就是打一个 tag**，仓库里没有要跟着改的版本号：`git tag v0.1.18 && git push --tags`。产品版本号只存在于 tag 上，流水线构建前用 `scripts/version.sh` 把它写进 Cargo 和安装包配置，构建完再拿真产物核对一遍（`genet-daemon --version` 必须等于 tag）。所以从源码构建出来的那份自称 `0.0.0`，界面上显示"开发版"，也不会被催升级——它确实不是任何一个发布版本。
+**发一个版本就是打一个 tag**，仓库里没有要跟着改的版本号：`git tag v0.1.18 && git push --tags`。产品版本号只存在于 tag 上，流水线构建前用 `scripts/version.sh` 把它写进 Cargo 和安装包配置，构建完再拿真产物核对一遍（`genet --version` 必须等于 tag）。所以从源码构建出来的那份自称 `0.0.0`，界面上显示"开发版"，也不会被催升级——它确实不是任何一个发布版本。
 
 ## 文档
 

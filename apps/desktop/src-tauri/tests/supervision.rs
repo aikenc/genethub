@@ -14,7 +14,7 @@ fn daemon_binary() -> Option<PathBuf> {
     // The desktop crate is outside the workspace, so the daemon lands in the
     // workspace's own target directory rather than this crate's.
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let candidate = repo.join("target/debug/genet-daemon");
+    let candidate = repo.join("target/debug/genet");
     candidate.exists().then_some(candidate)
 }
 
@@ -93,7 +93,7 @@ fn contain_the_default_workspace() {
 macro_rules! with_daemon {
     ($binary:ident) => {
         let Some($binary) = daemon_binary() else {
-            eprintln!("skipping: run cargo build -p genet-daemon first");
+            eprintln!("skipping: run cargo build -p genet-cli first");
             return;
         };
         contain_the_default_workspace();
@@ -260,7 +260,7 @@ fn stopping_on_purpose_is_not_treated_as_a_crash() {
 fn a_binary_that_is_not_there_fails_with_something_a_user_can_act_on() {
     let dir = tempfile::tempdir().unwrap();
     let daemon = Daemon::new(
-        PathBuf::from("/nonexistent/genet-daemon"),
+        PathBuf::from("/nonexistent/genet"),
         dir.path().into(),
     );
     let error = daemon.start().expect_err("this cannot succeed");

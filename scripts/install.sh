@@ -28,13 +28,13 @@ if [ "$channel" = beta ]; then
   base="${GENEHUB_BETA_DOWNLOAD_BASE:-https://relay-beta.genethub.com/download/beta}"
   bin_dir="${GENEHUB_BETA_BIN_DIR:-$HOME/.local/bin}"
   tarball_prefix=genet-beta
-  daemon_binary=genet-daemon-beta
+  cli_binary=genet-beta
   agent_binary=genet-agent-beta
 else
   base="${GENEHUB_DOWNLOAD_BASE:-https://github.com/aikenc/genethub/releases/latest/download}"
   bin_dir="${GENEHUB_BIN_DIR:-$HOME/.local/bin}"
   tarball_prefix=genet
-  daemon_binary=genet-daemon
+  cli_binary=genet
   agent_binary=genet-agent
 fi
 
@@ -100,7 +100,7 @@ got="$(digest "$tmp/$asset")"
 say "==> installing into $bin_dir"
 mkdir -p "$tmp/unpacked" "$bin_dir"
 tar -xzf "$tmp/$asset" -C "$tmp/unpacked"
-for binary in "$daemon_binary" "$agent_binary"; do
+for binary in "$cli_binary" "$agent_binary"; do
   found="$(find "$tmp/unpacked" -name "$binary" -type f -print | head -n 1)"
   [ -n "$found" ] || die "$binary is missing from $asset"
   # Replaced rather than written in place: overwriting a running binary is what
@@ -112,7 +112,7 @@ done
 
 say ""
 say "Installed:"
-say "  $bin_dir/$daemon_binary"
+say "  $bin_dir/$cli_binary"
 say "  $bin_dir/$agent_binary"
 
 case ":$PATH:" in
@@ -125,7 +125,9 @@ case ":$PATH:" in
 esac
 
 say ""
-say "Start it:"
-say "  $daemon_binary"
+say "Start the daemon, then connect this machine to the hub:"
+say "  $cli_binary daemon start"
+say "  $cli_binary hub login --wait"
 say ""
-say "It prints the address and token to connect a workbench to."
+say "'$cli_binary daemon endpoint' prints the address and token to connect a"
+say "workbench to."
