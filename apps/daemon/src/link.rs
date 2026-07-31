@@ -8,7 +8,7 @@
 use std::sync::{Arc, Weak};
 
 use anyhow::Result;
-use genehub_proto::{HubStatus, ServerFrame};
+use genehub_proto::{HubMachine, HubStatus, HubTicket, ServerFrame};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::config::{Enrollment, MachineState, Paths};
@@ -131,6 +131,34 @@ impl Link {
             // hits on a machine that was never connected to a Hub, and the
             // message is the only thing the user will see.
             _ => anyhow::bail!("这台机器还没有连到 Hub，没有可分享的身份；先在设置里连一个"),
+        }
+    }
+
+    /// The owner's other machines, so a client can offer to switch to one.
+    ///
+    /// An empty list for a machine with no Hub, rather than an error: "nowhere
+    /// else to go" is the truth on a self-hosted machine, and a switcher that
+    /// refuses to draw is not an improvement over one with a single entry.
+    pub async fn machines(&self) -> Result<Vec<HubMachine>> {
+        match &*self.stage.lock().await {
+            Stage::Paired { enrollment, .. } => {
+                hub::Client::new(&enrollment.hub_url)
+                    .machines(enrollment)
+                    .await
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// A one-time address for reaching one of them.
+    pub async fn connect(&self, machine_id: &str) -> Result<HubTicket> {
+        match &*self.stage.lock().await {
+            Stage::Paired { enrollment, .. } => {
+                hub::Client::new(&enrollment.hub_url)
+                    .ticket(enrollment, machine_id)
+                    .await
+            }
+            _ => anyhow::bail!("这台机器还没有连到 Hub，没法替你去连别的机器"),
         }
     }
 

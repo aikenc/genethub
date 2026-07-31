@@ -7,7 +7,43 @@
  * agent's `Capabilities` decide which controls exist (`web-workbench.md` §7).
  */
 
-import { findMachine, type PairedMachine, readPairingLink, rememberMachine } from "../devices/machines";
+import type { HubMachine } from "@genehub/proto";
+
+import {
+  findMachine,
+  listMachines,
+  type PairedMachine,
+  readPairingLink,
+  rememberMachine,
+} from "../devices/machines";
+import { Client, type WebSocketLike } from "../protocol/client";
+
+/**
+ * A machine this client can control.
+ *
+ * Deliberately says nothing about accounts. "Which machines am I allowed to
+ * drive" is a question a self-hosted copy asks too — it answers it from the
+ * machines this browser paired with — and a deployment that has accounts
+ * answers the same question from a better source. Putting a user on this type
+ * would make the switcher an account feature, which is exactly the coupling
+ * this indirection exists to avoid.
+ */
+export interface Target {
+  id: string;
+  label: string;
+  /**
+   * The machine this shell is running on. Not a mode: it is one entry in the
+   * list, distinguished only by being the one that stays reachable with the
+   * network off.
+   */
+  kind: "local" | "remote";
+  /** Only where the source knows. Absent means "no idea", not "offline". */
+  online?: boolean;
+  fingerprint?: string;
+}
+
+/** The local machine's entry, for shells that have one. */
+export const LOCAL_TARGET = "local";
 
 export interface Endpoint {
   /** WebSocket URL for the daemon, direct or relayed. */
@@ -59,6 +95,23 @@ export interface Host {
   readonly kind: "browser" | "desktop";
   /** Where to connect on startup, or null when the user has to choose. */
   endpoint(): Promise<Endpoint | null>;
+  /**
+   * Every machine this client can drive, for the switcher in the sidebar.
+   *
+   * Optional so that a host with exactly one machine — a test double, an
+   * embedder that only ever points at one daemon — stays a two-method object
+   * and gets no switcher rather than a list of one.
+   */
+  targets?(): Promise<Target[]>;
+  /**
+   * Switches to one of them, returning where to connect.
+   *
+   * Called again on every reconnect rather than once per switch, because a
+   * forwarding ticket is spent by the connection that used it: a host that
+   * mints one here must mint a fresh one each time, and one that does not
+   * simply returns the same address.
+   */
+  openTarget?(id: string): Promise<Endpoint>;
   notify(notification: Notification): void;
   openExternal(url: string): void;
   /**
@@ -199,14 +252,26 @@ export function browserHost(location: Pick<Location, "hash"> = window.location):
       const fragment = new URLSearchParams(location.hash.replace(/^#/, ""));
       const url = fragment.get("endpoint");
       if (!url) return null;
-      const paired = findMachine(url);
-      return {
-        url,
-        via: url.includes("/forward/client") ? "relay" : "lan",
-        label: paired?.name ?? new URL(url).host,
-        fingerprint: paired?.fingerprint,
-        credential: paired ? { deviceId: paired.deviceId, secret: paired.secret } : undefined,
-      };
+      return reach(findMachine(url), url);
+    },
+    async targets() {
+      // Every paired machine is remote here. The browser is not running on any
+      // of them; even the one on this very computer is reached the same way.
+      return listMachines().map((machine) => ({
+        id: machine.machineId,
+        label: machine.name,
+        kind: "remote" as const,
+        fingerprint: machine.fingerprint,
+      }));
+    },
+    async openTarget(id) {
+      const machine = listMachines().find((entry) => entry.machineId === id);
+      if (!machine) throw new Error("这台机器不在本地名册里，可能已经被忘掉了。");
+      // The address bar follows the switch, so a reload stays on the machine
+      // the user is looking at rather than jumping back to the one they
+      // arrived on.
+      window.location.hash = `endpoint=${encodeURIComponent(machine.endpoint)}`;
+      return reach(machine, machine.endpoint);
     },
     notify({ title, body }) {
       if (typeof Notification === "undefined") return;
@@ -236,18 +301,85 @@ export function browserHost(location: Pick<Location, "hash"> = window.location):
  * the loopback port and token and hands them over rather than making the user
  * pair with their own machine.
  */
-export function desktopHost(): Host {
+export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Host {
   const tauri = window.__TAURI__!;
+  const local = async (): Promise<Endpoint | null> => {
+    const found = await tauri.core.invoke<DaemonEndpoint | null>("daemon_endpoint");
+    if (!found) return null;
+    return {
+      url: `ws://127.0.0.1:${found.port}/ws?token=${found.token}`,
+      via: "loopback",
+      label: "这台电脑",
+      fingerprint: found.fingerprint,
+    };
+  };
   return {
     kind: "desktop",
-    async endpoint() {
-      const found = await tauri.core.invoke<DaemonEndpoint | null>("daemon_endpoint");
-      if (!found) return null;
+    endpoint: local,
+    async targets() {
+      // This computer first, and always present even when its daemon is down —
+      // dropping it would make a failed start look like the machine no longer
+      // exists, and the row is where "离线" gets said.
+      const here = await local().catch(() => null);
+      const paired = listMachines().map((machine) => ({
+        id: machine.machineId,
+        label: machine.name,
+        kind: "remote" as const,
+        fingerprint: machine.fingerprint,
+      }));
+      const known = [here?.fingerprint, ...paired.map((target) => target.fingerprint)];
+
+      // Everything the Hub knows about, on top. Silently absent when it cannot
+      // be asked: the local rows are the ones that still work with the network
+      // down, and burying them under an error about an account server is the
+      // wrong trade at the moment somebody is trying to open their own laptop.
+      const account = here ? await hubMachines(here.url, socketFactory).catch(() => []) : [];
+      return [
+        { id: LOCAL_TARGET, label: "这台电脑", kind: "local" as const, online: here !== null },
+        ...paired,
+        // By fingerprint, because the Hub's ids and the ids a local pairing
+        // recorded are different namespaces for the same computers. The one
+        // this app is running on is in the account's list too, and showing it
+        // twice would offer a second row that reaches the daemon underfoot by
+        // going out to a relay and back.
+        ...account
+          .filter((machine) => !known.includes(machine.fingerprint))
+          .map((machine) => ({
+            id: machine.id,
+            label: machine.name,
+            kind: "remote" as const,
+            online: machine.online,
+            fingerprint: machine.fingerprint,
+          })),
+      ];
+    },
+    async openTarget(id) {
+      if (id === LOCAL_TARGET) {
+        const here = await local();
+        if (!here) throw new Error("这台电脑上的后台进程没有在运行。");
+        return here;
+      }
+      const machine = listMachines().find((entry) => entry.machineId === id);
+      if (machine) return reach(machine, machine.endpoint);
+
+      // Not in the local roster, so it came from the account. The ticket is
+      // minted through this machine's own daemon, which means switching keeps
+      // working after the connection to the *other* machine drops — the one
+      // moment a client that asked the far end would have nobody to ask.
+      const here = await local();
+      if (!here) throw new Error("这台电脑上的后台进程没有在运行，没法替你去连别的机器。");
+      const ticket = await onDaemon(
+        here.url,
+        (client) => client.call({ type: "hub.connect", payload: { machineId: id } }),
+        socketFactory,
+      );
+      if (ticket?.type !== "hubTicket") throw new Error("这台机器不在你的账号下。");
+      const account = await hubMachines(here.url, socketFactory).catch(() => []);
       return {
-        url: `ws://127.0.0.1:${found.port}/ws?token=${found.token}`,
-        via: "loopback",
-        label: "这台电脑",
-        fingerprint: found.fingerprint,
+        url: ticket.data.url,
+        via: "relay",
+        label: account.find((entry) => entry.id === id)?.name ?? "远程机器",
+        fingerprint: ticket.data.fingerprint,
       };
     },
     notify(notification) {
@@ -309,6 +441,72 @@ export function desktopHost(): Host {
       // produce a value.
       await tauri.core.invoke("restart_daemon").catch(() => undefined);
     },
+  };
+}
+
+/**
+ * The account's machines, asked of this machine's own daemon.
+ *
+ * The daemon is the only thing here that can ask: it holds the uplink
+ * credential, and this app deliberately holds no account credential of its own
+ * — it is the open-source workbench, and account code is not shipped inside it
+ * (`genethub-cloud/desktop/README.md`). An empty list is the honest answer for
+ * a machine that was never paired with a Hub.
+ */
+async function hubMachines(
+  url: string,
+  socketFactory?: (url: string) => WebSocketLike,
+): Promise<HubMachine[]> {
+  const reply = await onDaemon(url, (client) => client.call({ type: "hub.machines" }), socketFactory);
+  return reply?.type === "hubMachines" ? reply.data : [];
+}
+
+/**
+ * Runs one exchange on a connection of its own, and hangs up.
+ *
+ * Not the workbench's connection, because that one has moved: after switching
+ * to another machine it points there, and these questions are for the daemon on
+ * this computer. A socket that lives for one request costs a handshake on a
+ * loopback port and saves keeping a second live client in sync with the first.
+ */
+async function onDaemon<T>(
+  url: string,
+  exchange: (client: Client) => Promise<T>,
+  socketFactory?: (url: string) => WebSocketLike,
+): Promise<T> {
+  const client = new Client({ url, clientName: "genehub-app", ...(socketFactory ? { socketFactory } : {}) });
+  const gaveUp = new Promise<never>((_, reject) => {
+    // Waiting out a blip forever is right for the workbench and wrong here:
+    // this is one question asked while somebody holds a menu open. The first
+    // failed dial is the answer.
+    const stop = client.onStateChange((state) => {
+      if (state !== "reconnecting") return;
+      stop();
+      reject(new Error("这台电脑上的后台进程没有回应。"));
+    });
+  });
+  client.connect();
+  try {
+    return await Promise.race([exchange(client), gaveUp]);
+  } finally {
+    client.close();
+  }
+}
+
+/**
+ * What it takes to reach a machine we paired with.
+ *
+ * The credential has to ride along: a machine reached through a rendezvous
+ * relay will not answer without it, and it is the one thing the address alone
+ * cannot carry.
+ */
+function reach(paired: PairedMachine | null, url: string): Endpoint {
+  return {
+    url,
+    via: url.includes("/forward/client") ? "relay" : "lan",
+    label: paired?.name ?? new URL(url).host,
+    fingerprint: paired?.fingerprint,
+    credential: paired ? { deviceId: paired.deviceId, secret: paired.secret } : undefined,
   };
 }
 

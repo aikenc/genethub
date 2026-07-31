@@ -191,6 +191,62 @@ fn the_installer_stops_the_supervisor_before_the_thing_it_supervises() {
     );
 }
 
+/// An upgrade is one operation, and the NSIS template's default is two.
+///
+/// Left alone, the template finds the previous version in the registry and
+/// offers only 「先卸载再安装」: it runs the old uninstaller, then installs. Two
+/// steps that can fail apart, on a machine that ends up with neither version if
+/// the second one does. `/UPDATE` is the template's own way to say "over the
+/// top", and `/P` with `/R` is what turns the rest into a progress bar that
+/// puts the app back — the same three flags Tauri's updater passes.
+#[test]
+fn an_upgrade_installs_over_the_top_instead_of_uninstalling_first() {
+    let shell = read(repo().join("apps/desktop/src-tauri/src/lib.rs"));
+    for flag in ["\"/UPDATE\"", "\"/P\"", "\"/R\""] {
+        assert!(
+            shell.contains(flag),
+            "the installer is started without {flag}, so Windows will ask the \
+             user to uninstall the running version first — and an update that \
+             needs a wizard walked through is one that stops half way"
+        );
+    }
+}
+
+/// The failure this whole arrangement is shaped around.
+///
+/// `install_update` starts the installer, which makes it a child of this app,
+/// and the hook below kills the app so its files can be replaced. Ask for the
+/// process tree there and the kill reaches the installer that is running the
+/// hook: the update dies mid-flight, having already stopped everything.
+#[test]
+fn the_hook_does_not_kill_the_installer_that_is_running_it() {
+    let script = installer_hook();
+    let exe = format!("/IM {}.exe", installed_exe());
+    let line = script
+        .lines()
+        .find(|line| line.contains(&exe))
+        .expect("the app itself is never stopped, so it will revive the daemon");
+    assert!(
+        !line.contains("/T"),
+        "the hook kills the app's whole process tree ({line}), which includes \
+         the installer the user started from inside the app"
+    );
+    // The daemon still goes down with everything it spawned: an agent holds its
+    // own executable open exactly the way the daemon does.
+    assert!(
+        script.contains("/F /T /IM genet-daemon.exe"),
+        "the daemon is stopped without its children, so an agent it started \
+         will still be holding a file the installer wants to write"
+    );
+
+    let shell = read(repo().join("apps/desktop/src-tauri/src/lib.rs"));
+    assert!(
+        shell.contains("app.exit(0)"),
+        "the shell waits to be killed by the installer instead of leaving on \
+         its own, which is the race this hook can no longer settle"
+    );
+}
+
 /// The name the installed executable actually has.
 ///
 /// Not the product name. `productName` is what the Start menu and the installer

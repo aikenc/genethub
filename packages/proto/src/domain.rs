@@ -473,6 +473,43 @@ pub struct HubClaim {
     pub expires_at: String,
 }
 
+/// Another machine belonging to whoever owns this one.
+///
+/// The Hub knows this list; nothing on this machine does. It is fetched
+/// through the daemon rather than by the UI directly, and that is the whole
+/// design: the client stays one program that talks to one daemon, and the
+/// account remains something only the server side knows about.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct HubMachine {
+    /// The Hub's id, which is also what `HubStatus::Paired` reports for this
+    /// machine — so a client can tell which entry is the one it is sitting on.
+    pub id: String,
+    pub name: String,
+    pub online: bool,
+    pub fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_seen_at: Option<String>,
+}
+
+/// A one-time way to reach one of those machines through the forwarding layer.
+///
+/// Spent by the connection that uses it, so a client that needs to reconnect
+/// asks for another rather than replaying this one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct HubTicket {
+    pub url: String,
+    pub expires_at: String,
+    /// The target machine's key fingerprint, learned from the Hub rather than
+    /// from the connection — which is what makes comparing the two worth
+    /// anything.
+    pub fingerprint: String,
+}
+
 // ---------------------------------------------------------------------------
 // Devices
 //

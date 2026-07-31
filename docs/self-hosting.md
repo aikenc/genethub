@@ -104,6 +104,23 @@ cd packages/web && npm install && npm run build   # 产物在 dist/
 
 一人多设备就是每台设备各配对一次。团队共用一个 relay 也是同样的做法：成员各自把自己的电脑配对给自己的设备，relay 不知道谁是谁。
 
+### 多台机器怎么切
+
+配对过的机器都进同一个目标切换器，**本机也在里面**，就是延迟最低、断网也还在的那一项。桌面端不是"只能看本机"：装了 App 的那台电脑上，一样能切到你配对过的另一台。
+
+切换器里换一台，工作台的项目树和会话就换成那台的——工作空间存在各自的机器上，不存在一份跨机的总目录，界面也就不会假装有一份。
+
+配对了 Hub 之后还多一份来源：Hub 那边记着的机器名单。App 不自己去问，它问脚下这个 daemon（`hub.machines`），由 daemon 拿上行凭证去问 Hub；切过去时票据也是 daemon 铸的（`hub.connect`）。你自己的 Hub 只要实现这两个端点就同样能用：
+
+```
+GET  /api/machines/{daemonId}/directory   Authorization: Bearer <上行凭证>
+POST /api/machines/{daemonId}/tickets     Authorization: Bearer <上行凭证>
+```
+
+没有 Hub 的机器答一个空列表，切换器里就只有本地那些，一切照常。
+
+绕这一圈不是为了好看：这样 App 里就不必装任何账号相关的代码，官方发的安装包和你自己编译出来的是同一份东西。
+
 ---
 
 ## 5. 自建与托管版的差别

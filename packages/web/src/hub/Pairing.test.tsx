@@ -1,9 +1,14 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Host } from "../host";
+import { useWorkbench } from "../session/store";
 import { Pairing } from "./Pairing";
+
+afterEach(() => {
+  useWorkbench.setState({ hub: null, notice: null });
+});
 
 function host(overrides: Partial<Host> = {}): Host {
   return {
@@ -166,6 +171,31 @@ describe("connecting a machine to a Hub", () => {
     expect(openExternal).not.toHaveBeenCalled();
   });
 
+  /**
+   * The other half of that press. Someone installing on their second computer
+   * already has an account, and the way back to it used to be behind a fold
+   * labelled "连到自己的 Hub" — the wrong sentence entirely for them. Their
+   * remaining option was to start over as a new stranger with a new identity.
+   */
+  it("offers an existing identity beside the one-press path, not underneath it", async () => {
+    const onPair = vi.fn(async () => {});
+    render(
+      <Pairing
+        status={{ state: "unpaired" }}
+        host={host()}
+        defaultHubUrl="https://relay.example.com"
+        onPair={onPair}
+        onTrial={async () => null}
+        onUnpair={async () => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByTestId("pair-hub"));
+    // The same Hub this build knows, so nobody has to know its address to sign
+    // in to it.
+    expect(onPair).toHaveBeenCalledWith("https://relay.example.com");
+  });
+
   /// Folded away, not taken away. Someone running their own Hub is a real user,
   /// and the address box being first is what made connecting look like homework.
   it("keeps the pairing code for a Hub of one's own, one click further in", async () => {
@@ -276,6 +306,107 @@ describe("connecting a machine to a Hub", () => {
       />,
     );
     expect(screen.queryByText(/恢复密钥/)).not.toBeInTheDocument();
+  });
+
+  it("opens a claim link in this app where there is a window for it", async () => {
+    const openWindow = vi.fn();
+    const openExternal = vi.fn();
+    const claim = {
+      claimUrl: "https://hub.example.com/link/abc",
+      expiresAt: "2030-01-01T00:00:00Z",
+    };
+    const paired = {
+      state: "paired",
+      hubUrl: "https://hub.example.com",
+      machineId: "m_1",
+      online: true,
+    } as const;
+
+    const { rerender } = render(
+      <Pairing
+        status={paired}
+        claim={claim}
+        host={host({ openWindow, openExternal })}
+        onPair={async () => {}}
+        onUnpair={async () => {}}
+      />,
+    );
+    await userEvent.click(screen.getByText("在这个应用里打开"));
+    expect(openWindow).toHaveBeenCalledWith(claim.claimUrl);
+
+    // The link's main job is still the other device, so the plain one stays.
+    await userEvent.click(screen.getByText("在浏览器里打开"));
+    expect(openExternal).toHaveBeenCalledWith(claim.claimUrl);
+
+    rerender(
+      <Pairing
+        status={paired}
+        claim={claim}
+        host={host({ kind: "browser" })}
+        onPair={async () => {}}
+        onUnpair={async () => {}}
+      />,
+    );
+    expect(screen.queryByText("在这个应用里打开")).toBeNull();
+  });
+
+  it("opens the account carrying this machine's identity, not as a stranger", async () => {
+    // The whole point of going through a claim link. Opening `/account`
+    // directly would arrive signed out, and anything done there — signing in,
+    // binding — would attach to an identity that owns none of these machines.
+    const openExternal = vi.fn();
+    const claimLink = vi.fn(async () => ({
+      claimUrl: "https://hub.example.com/link/abc",
+      expiresAt: "2030-01-01T00:00:00Z",
+    }));
+    useWorkbench.setState({
+      hub: { state: "paired", hubUrl: "https://hub.example.com", machineId: "m_1", online: true },
+      claimLink,
+    });
+
+    render(
+      <Pairing
+        status={{
+          state: "paired",
+          hubUrl: "https://hub.example.com",
+          machineId: "m_1",
+          online: true,
+        }}
+        host={host({ openExternal })}
+        onPair={async () => {}}
+        onUnpair={async () => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByText("打开我的账户"));
+    await waitFor(() =>
+      expect(openExternal).toHaveBeenCalledWith(
+        "https://hub.example.com/link/abc?next=%2Faccount",
+      ),
+    );
+    // The system browser, not a window of this app: it is somebody's account on
+    // the open web, and the session should stay where they can see it.
+    expect(host().openWindow).toBeUndefined();
+  });
+
+  it("says so rather than opening nothing when there is no Hub", async () => {
+    useWorkbench.setState({ hub: { state: "unpaired" } });
+    render(
+      <Pairing
+        status={{
+          state: "paired",
+          hubUrl: "https://hub.example.com",
+          machineId: "m_1",
+          online: true,
+        }}
+        host={host()}
+        onPair={async () => {}}
+        onUnpair={async () => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByText("打开我的账户"));
+    await waitFor(() => expect(useWorkbench.getState().notice).toMatch(/还没有连到 Hub/));
   });
 
   it("lets the owner disconnect", async () => {

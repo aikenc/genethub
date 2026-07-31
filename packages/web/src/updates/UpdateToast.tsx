@@ -65,7 +65,7 @@ export function UpdateToast({ host }: { host: Host }) {
           <p className="font-medium">新版本 {download.version} 已下载</p>
           <p className="mt-1 text-muted">
             {host.installUpdate
-              ? "安装会关掉 GeneHub，正在跑的会话会被打断。"
+              ? "安装会关掉 GeneHub，正在跑的会话会被打断；装完它自己会重新打开。"
               : "安装包在那台电脑上，去电脑上打开 GeneHub 完成安装。"}
           </p>
           {host.installUpdate ? null : (
@@ -86,8 +86,9 @@ export function UpdateToast({ host }: { host: Host }) {
                   setBusy(true);
                   setProblem(null);
                   try {
-                    // Left on screen rather than dismissed: the OS may still be
-                    // asking the user to confirm, and a box that vanished the
+                    // Left on screen rather than dismissed: on the shell that
+                    // can install, this window is about to close itself anyway,
+                    // and on the one that cannot, a box that vanished the
                     // instant they clicked would leave "did that work?" with
                     // nowhere to look.
                     await host.installUpdate?.(download.path);

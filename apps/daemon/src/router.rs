@@ -486,6 +486,27 @@ pub async fn handle(
             }
         }
 
+        Request::HubMachines => match state.link.get() {
+            Some(link) => match link.machines().await {
+                Ok(machines) => Handled::ok(Reply::HubMachines(machines)),
+                Err(error) => failed(error),
+            },
+            // Still starting up is not "you have no machines", but a switcher
+            // showing an error for the second it takes would be worse than one
+            // that fills in a moment later.
+            None => Handled::ok(Reply::HubMachines(Vec::new())),
+        },
+
+        Request::HubConnect { machine_id } => {
+            let Some(link) = state.link.get() else {
+                return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
+            };
+            match link.connect(&machine_id).await {
+                Ok(ticket) => Handled::ok(Reply::HubTicket(ticket)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::HubUnpair => match state.link.get() {
             Some(link) => match link.unpair().await {
                 Ok(()) => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 
 import type { Host } from "../host";
 
+import { openAccount } from "./account";
 import { Claim } from "./Claim";
 
 /**
@@ -67,7 +68,20 @@ export function Pairing({
             : "已配对，但当前连不上 Hub。本机和局域网仍然可用。"}
         </p>
         {claim ? <Claim claim={claim} host={host} /> : null}
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          {/* The account itself lives on the Hub, and so does its page. This
+              opens it already signed in as this machine's owner. */}
+          <button
+            type="button"
+            className="rounded border border-line px-3 py-1.5 text-xs hover:border-accent"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void openAccount(host).finally(() => setBusy(false));
+            }}
+          >
+            打开我的账户
+          </button>
           {onClaimLink ? (
             <button
               type="button"
@@ -135,21 +149,40 @@ export function Pairing({
       {claim ? <Claim claim={claim} host={host} /> : null}
 
       {automatic ? (
-        <div className="space-y-1">
-          <button
-            type="button"
-            data-testid="connect-hub"
-            className="rounded bg-accent px-4 py-2 text-sm text-white disabled:opacity-40"
-            disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              void onTrial(defaultHubUrl.trim()).finally(() => setBusy(false));
-            }}
-          >
-            {busy ? "连接中…" : "连接"}
-          </button>
+        // Two ways in, side by side. The second one used to be reachable only
+        // by opening a fold labelled "连到自己的 Hub", which is the wrong
+        // sentence for the person it is for: someone who already has an
+        // account and is installing on their second computer. Hidden behind
+        // that wording, their choice was to start over as a new stranger.
+        <div className="space-y-2">
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              data-testid="connect-hub"
+              className="rounded bg-accent px-4 py-2 text-sm text-white disabled:opacity-40"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                void onTrial(defaultHubUrl.trim()).finally(() => setBusy(false));
+              }}
+            >
+              {busy ? "连接中…" : "连接"}
+            </button>
+            <button
+              type="button"
+              data-testid="pair-hub"
+              className="rounded border border-line px-4 py-2 text-sm hover:border-accent disabled:opacity-40"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                void onPair(defaultHubUrl.trim()).finally(() => setBusy(false));
+              }}
+            >
+              用已有身份连接
+            </button>
+          </div>
           <p className="text-xs text-muted">
-            在这个应用里直接完成，不用开浏览器，也不用输配对码。
+            直接连不用注册，在这个应用里就完成了。已经有账号的话走右边那个，这台电脑会记到你名下。
           </p>
         </div>
       ) : null}

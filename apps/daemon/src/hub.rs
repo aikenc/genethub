@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use genehub_proto::{HubMachine, HubTicket};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -48,6 +49,11 @@ struct PollReply {
 struct EnrollReply {
     machine_id: String,
     uplink_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Directory {
+    machines: Vec<HubMachine>,
 }
 
 pub struct Client {
@@ -128,6 +134,60 @@ impl Client {
             ));
         }
         response.json().await.context("reading the link reply")
+    }
+
+    /// Every machine this machine's owner has, as the Hub sees them.
+    ///
+    /// Proved by the same uplink credential as everything else here. That is a
+    /// deliberate reuse rather than a shortcut: it already buys a claim link,
+    /// and a claim link already buys one of the owner's device sessions — so
+    /// nothing here is reachable that was not reachable before, and the client
+    /// asking gets to stay a program with no account credential of its own.
+    pub async fn machines(&self, enrollment: &Enrollment) -> Result<Vec<HubMachine>> {
+        let response = self
+            .http
+            .get(self.url(&format!(
+                "/api/machines/{}/directory",
+                enrollment.daemon_id
+            )))
+            .bearer_auth(&enrollment.secret)
+            .send()
+            .await
+            .context("asking the Hub for the machine list")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "the Hub refused to list machines: {}",
+                response.status()
+            ));
+        }
+        let reply: Directory = response.json().await.context("reading the machine list")?;
+        Ok(reply.machines)
+    }
+
+    /// A one-time address for reaching one of them through the forwarding layer.
+    pub async fn ticket(&self, enrollment: &Enrollment, machine_id: &str) -> Result<HubTicket> {
+        let response = self
+            .http
+            .post(self.url(&format!(
+                "/api/machines/{}/tickets",
+                enrollment.daemon_id
+            )))
+            .bearer_auth(&enrollment.secret)
+            .json(&serde_json::json!({ "machineId": machine_id }))
+            .send()
+            .await
+            .context("asking the Hub for a connection ticket")?;
+        if !response.status().is_success() {
+            // The status is worth carrying: 409 means that machine is offline,
+            // which is a fact about the world rather than a fault, and the only
+            // thing the person on the other end can act on.
+            return Err(match response.status().as_u16() {
+                404 => anyhow!("这台机器不在你的账号下了"),
+                409 => anyhow!("那台机器现在不在线"),
+                other => anyhow!("the Hub refused to issue a ticket: {other}"),
+            });
+        }
+        response.json().await.context("reading the ticket")
     }
 
     /// Step two: wait for the human. Returns the enrollment token.

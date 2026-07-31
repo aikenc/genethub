@@ -32,7 +32,15 @@
   ; menu shows, the Cargo binary name is what the process is called. v0.1.7
   ; shipped a hook that killed the friendly name — a process no machine has — and
   ; the install failed exactly as before.
-  nsExec::Exec 'taskkill /F /T /IM genethub-desktop.exe'
+  ;
+  ; Without `/T`, unlike the two below, and that omission is load-bearing: an
+  ; update started from inside the app runs this installer as a *child* of the
+  ; app, so a tree kill here would kill the installer executing it — an upgrade
+  ; that stops half way with the old version already on its way out. The app
+  ; leaves on its own before it gets this far (`install_update`), and what the
+  ; tree was for is covered by the next two lines: the daemon is named
+  ; explicitly, and its agents go down with it.
+  nsExec::Exec 'taskkill /F /IM genethub-desktop.exe'
   Pop $0
   nsExec::Exec 'taskkill /F /T /IM genet-daemon.exe'
   Pop $0

@@ -1,7 +1,7 @@
 pub mod daemon;
 mod tray;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tauri::{Emitter, Manager, WindowEvent};
@@ -80,11 +80,10 @@ fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
 ///
 /// This is the whole of "立即安装" from the shell's side. The fetching is the
 /// daemon's — it is the half that exists on every platform, and the half a
-/// phone can watch — and the shell's only contribution is that it can ask the
-/// OS to run a file, which a web page cannot.
+/// phone can watch — and the shell's only contribution is that it can start a
+/// process, which a web page cannot.
 ///
-/// Nothing here replaces our own files. That is the installer's job, and only
-/// after the user walks through it (`installer.nsh`).
+/// Nothing here replaces our own files. That is the installer's job.
 ///
 /// The path is checked against the one directory the daemon writes installers
 /// into, because it arrives over a connection this window does not own: a
@@ -92,8 +91,6 @@ fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
 /// is the one message we must never take at face value.
 #[tauri::command]
 fn install_update(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-
     let dir = updates_dir(&app)?;
     let file = std::fs::canonicalize(&path).map_err(|_| format!("找不到安装包 {path}"))?;
     // Canonicalised on both sides, or a path that reaches the same file by a
@@ -108,9 +105,71 @@ fn install_update(app: tauri::AppHandle, path: String) -> Result<(), String> {
     }
 
     tracing_line(&format!("running the installer at {}", file.display()));
-    app.opener()
-        .open_path(file.to_string_lossy().to_string(), None::<&str>)
-        .map_err(|error| error.to_string())
+    run_installer(&app, &file)?;
+    if cfg!(windows) {
+        stand_down(&app);
+    }
+    Ok(())
+}
+
+/// Starts the installer, on Windows with the flags that make it an *upgrade*.
+///
+/// The same three Tauri's own updater passes, and each one is here because of
+/// something the plain double-click does:
+///
+/// - `/UPDATE` — install over the top. Without it the NSIS template finds the
+///   previous version in the registry and offers only 「先卸载再安装」: it runs
+///   the old uninstaller first, turning one operation into two that can fail
+///   apart, on a machine that is then left with neither version. Nothing about
+///   our upgrade needs it — same installer, same directory, and every file it
+///   would remove is one the new version is about to write.
+/// - `/P` — passive. A progress bar and no wizard, because there is nothing
+///   left to ask: the only question was answered by pressing 立即安装.
+/// - `/R` — start the app again afterwards, which the template honours in
+///   passive and silent mode only. `/ARGS` with nothing after it says there are
+///   no arguments to carry over, which is what an app started from a shortcut
+///   has.
+///
+/// Everywhere else the download is a package rather than a program — a `.dmg`
+/// is mounted, a `.deb` goes to whatever installs packages — and both talk to
+/// the user themselves, so the file is simply opened.
+///
+/// `cfg!` rather than `#[cfg(windows)]`, here and below, because CI builds this
+/// crate on Linux only: code behind an attribute nobody compiles is code whose
+/// first compiler is the release that ships it.
+fn run_installer(app: &tauri::AppHandle, file: &Path) -> Result<(), String> {
+    if !cfg!(windows) {
+        use tauri_plugin_opener::OpenerExt;
+        return app
+            .opener()
+            .open_path(file.to_string_lossy().to_string(), None::<&str>)
+            .map_err(|error| error.to_string());
+    }
+
+    std::process::Command::new(file)
+        .args(["/UPDATE", "/P", "/R", "/ARGS"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("安装包没能启动：{error}"))
+}
+
+/// Gets both halves out of the installer's way, and lets it bring us back.
+///
+/// The daemon goes first and goes politely, so an agent mid-turn is asked to
+/// stop rather than cut off by `taskkill`. Then this process ends itself.
+///
+/// Leaving rather than waiting to be killed is the part that matters. The
+/// installer we just started is a *child* of this process, and the hook that
+/// clears the way for an upgrade kills what it finds by image name — asking for
+/// the process tree there would take the installer down with the app, half way
+/// through replacing it. `installer.nsh` no longer asks for the tree, and this
+/// makes the question moot: by the time the hook runs there is nothing of ours
+/// left to find. `/R` brings the new build up once the files are in place.
+fn stand_down(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.daemon.stop();
+    }
+    app.exit(0);
 }
 
 /// The only directory this shell will run an executable out of.

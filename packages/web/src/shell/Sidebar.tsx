@@ -1,10 +1,11 @@
 import type { SessionSummary, WorkspaceInfo } from "@genehub/proto";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { Host } from "../host";
+import type { Endpoint, Host, Target } from "../host";
 import { useWorkbench } from "../session/store";
 import { OpenProject } from "../workspace/OpenProject";
 import type { ExtraTab } from "./tabs";
+import { TargetSwitcher } from "./TargetSwitcher";
 
 /**
  * The left edge of the workbench.
@@ -28,6 +29,8 @@ export function Sidebar({
   open,
   hidden = false,
   extraTabs = [],
+  endpoint = null,
+  onPickTarget,
   onNavigate,
 }: {
   host: Host;
@@ -36,6 +39,9 @@ export function Sidebar({
   /** Someone on a desktop asking for the room back (the 视图 menu). */
   hidden?: boolean;
   extraTabs?: ExtraTab[];
+  /** Which machine everything below is coming from. */
+  endpoint?: Endpoint | null;
+  onPickTarget?(target: Target, endpoint: Endpoint): void;
   onNavigate(): void;
 }) {
   const {
@@ -111,6 +117,14 @@ export function Sidebar({
           // control would otherwise sit under the notch.
           style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}
         >
+          {onPickTarget ? (
+            <TargetSwitcher
+              host={host}
+              current={endpoint}
+              onPick={onPickTarget}
+              onNavigate={onNavigate}
+            />
+          ) : null}
           <button
             type="button"
             className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-accent px-3 text-sm font-medium text-white disabled:opacity-40 md:min-h-0 md:rounded-md md:py-1.5 md:text-xs"

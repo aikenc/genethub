@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ChangesPanel } from "./changes/ChangesPanel";
 import { claimMachine, deviceName } from "./devices/claim";
 import { DevicesPanel } from "./devices/DevicesPanel";
 import { FilesPanel } from "./files/FilesPanel";
 import { detectHost, type Endpoint, type Host } from "./host";
+import type { Target } from "./host";
 import { LogsPanel } from "./logs/LogsPanel";
 import { Client } from "./protocol/client";
 import { SettingsPanel } from "./settings/SettingsPanel";
@@ -69,6 +70,11 @@ export function App({
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">(
     "loading",
   );
+  // Null means "wherever the shell points by default", which on the desktop is
+  // this computer and in a browser is the address it was opened with. It only
+  // becomes an id when someone picks a *remote* machine, because from then on
+  // the shell's default is the wrong answer and has to stop being consulted.
+  const [target, setTarget] = useState<string | null>(null);
   // Decided during the first render, not in an effect. An effect would run
   // after the one below it has already resolved an endpoint, and the page
   // would connect uncredentialed while the pairing was still in flight.
@@ -138,12 +144,26 @@ export function App({
     };
   }, [host, claim]);
 
+  // Read inside the listener below rather than closed over, because
+  // unsubscribing from the shell is not instant — Tauri's `unlisten` arrives a
+  // promise later — and an announcement already in flight would otherwise land
+  // after the user has moved to another machine.
+  const following = useRef(true);
+  following.current = target === null;
+
   useEffect(() => {
     if (claiming !== "idle") return;
-    const look = () => void host.endpoint().then(setEndpoint);
+    // A restarted daemon comes back on a new port, and following that is only
+    // right while we are on the machine it belongs to. Someone working on a
+    // remote machine must not be yanked home because the local daemon bounced.
+    if (target !== null) return;
+    const look = () =>
+      void host.endpoint().then((found) => {
+        if (following.current) setEndpoint(found);
+      });
     look();
     return host.onEndpointChange?.(look);
-  }, [host, claiming]);
+  }, [host, claiming, target]);
 
   useEffect(
     () =>
@@ -188,14 +208,31 @@ export function App({
   useEffect(() => {
     if (claiming !== "idle") return;
     if (endpoint === "loading" || endpoint === null) return;
-    const client = connect(
-      endpoint,
-      async () => (await host.endpoint())?.url ?? endpoint.url,
+    const client = connect(endpoint, async () =>
+      // Asking the target again rather than replaying the address: whoever
+      // supplies a remote machine may be minting a one-time forwarding ticket,
+      // and a client that reuses the first one gives up for good on the first
+      // dropped socket.
+      target !== null && host.openTarget
+        ? (await host.openTarget(target)).url
+        : ((await host.endpoint())?.url ?? endpoint.url),
     );
     client.connect();
     void useWorkbench.getState().attach(client);
     return () => client.close();
-  }, [endpoint, connect, host]);
+  }, [endpoint, connect, host, target]);
+
+  const pickTarget = (picked: Target, next: Endpoint) => {
+    // The local machine goes back to following the shell, which is the only
+    // thing that knows where its daemon moved to.
+    setTarget(picked.kind === "local" ? null : picked.id);
+    // Keeping the object when the address did not move, so that picking the
+    // machine you are already on does not tear the connection down and build
+    // an identical one.
+    setEndpoint((current) =>
+      current !== "loading" && current?.url === next.url ? current : next,
+    );
+  };
 
   if (claiming === "working") return <Splash>正在和这台机器配对…</Splash>;
   if (claiming !== "idle") {
@@ -244,6 +281,8 @@ export function App({
           open={sessionsOpen}
           hidden={sidebarHidden}
           extraTabs={extraTabs}
+          endpoint={endpoint}
+          onPickTarget={pickTarget}
           onNavigate={() => setSessionsOpen(false)}
         />
 

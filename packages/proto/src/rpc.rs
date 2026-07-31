@@ -208,6 +208,21 @@ pub enum Request {
     /// A fresh one-time link into this machine's identity, to open elsewhere.
     #[serde(rename = "hub.claimLink")]
     HubClaimLink,
+    /// Every machine belonging to this machine's owner, as the Hub sees them.
+    ///
+    /// Asked of the daemon rather than of the Hub, because the client is one
+    /// program that talks to one daemon and holds no account credential of its
+    /// own. The daemon already has the strongest proof of ownership there is
+    /// without a browser — its uplink credential — and already may exchange it
+    /// for one of the owner's device sessions (`hub.claimLink`). Reading the
+    /// owner's machine list with it is therefore not a new permission.
+    #[serde(rename = "hub.machines")]
+    HubMachines,
+    /// A one-time address for reaching one of them through the forwarding
+    /// layer. Called again on every reconnect, because a ticket is spent by
+    /// the connection that used it.
+    #[serde(rename = "hub.connect", rename_all = "camelCase")]
+    HubConnect { machine_id: String },
     /// Drops the enrollment and the uplink with it. The machine keeps working
     /// locally; it just stops being reachable from outside.
     #[serde(rename = "hub.unpair")]
@@ -334,6 +349,8 @@ pub enum Reply {
         status: HubStatus,
         claim: HubClaim,
     },
+    HubMachines(Vec<HubMachine>),
+    HubTicket(HubTicket),
     #[serde(rename_all = "camelCase")]
     Devices {
         devices: Vec<DeviceInfo>,
