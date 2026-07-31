@@ -10,6 +10,16 @@
  *
  * `build-stamp.js` writes the value at bundle time.
  */
+
+/**
+ * Substituted by the bundler; nothing declares it at runtime.
+ *
+ * Declared here rather than in `vite-env.d.ts` because this source is compiled
+ * by whoever embeds it, under their tsconfig, which does not see this package's
+ * ambient files. A declaration the consumer cannot find is a build they cannot
+ * make — the cloud console's went down exactly this way.
+ */
+declare const __WORKBENCH_BUILD__: string | undefined;
 export const BUILD: string =
   // A bundler that did not apply the shared `define` leaves the identifier
   // standing rather than a string. Saying so is more use than an empty gap.
