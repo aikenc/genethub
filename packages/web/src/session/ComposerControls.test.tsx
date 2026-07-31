@@ -126,6 +126,28 @@ describe("the agent picker once a conversation has started", () => {
     fireEvent.change(picker, { target: { value: "codex" } });
     expect(onPickAgent).toHaveBeenCalledWith("codex");
   });
+
+  it("shows the same usable default agent that a new draft will send through", () => {
+    const agents: AgentInfo[] = [
+      { ...AGENTS[0]!, catalog: { ...AGENTS[0]!.catalog, models: [] } },
+      { ...AGENTS[1]!, id: "codex", label: "Codex", catalog: { ...AGENTS[0]!.catalog } },
+    ];
+    render(
+      <ComposerControls
+        agents={agents}
+        agentId={null}
+        modelId={null}
+        modeId={null}
+        effortId={null}
+        onPickAgent={vi.fn()}
+        onPickModel={vi.fn()}
+        onPickMode={vi.fn()}
+        onPickEffort={vi.fn()}
+      />,
+    );
+
+    expect((screen.getByLabelText("agent") as HTMLSelectElement).value).toBe("codex");
+  });
 });
 
 /**
