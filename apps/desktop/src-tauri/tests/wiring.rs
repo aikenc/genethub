@@ -295,8 +295,9 @@ fn the_hook_does_not_kill_the_installer_that_is_running_it() {
 
 /// The name the installed executable actually has.
 ///
-/// Not the product name. `productName` is what the Start menu and the installer
-/// title show; the process is named after the Cargo binary unless
+/// Not the product name. `productName` is the install-directory / Start-menu
+/// folder name (path-safe, no spaces); the window title carries the display
+/// brand separately. The process is named after the Cargo binary unless
 /// `mainBinaryName` overrides it. v0.1.7 shipped a hook that killed
 /// `GeneHub.exe`, which exists on no machine, and the upgrade failed with the
 /// same "Error opening file for writing" it was written to prevent — while a
@@ -463,7 +464,27 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
     }
 
     let config = config();
-    assert_eq!(config["productName"], "GeneHub Dev");
+    // productName is the install-directory name (NSIS / deb), not the display
+    // brand — those carry a space on beta/alpha/dev and would break unquoted
+    // shells. It must match DATA_DIR_NAME and never contain whitespace.
+    let data_dir = read(repo().join("apps/desktop/src-tauri/src/channel.rs"))
+        .lines()
+        .find_map(|line| line.strip_prefix("pub const DATA_DIR_NAME: &str = "))
+        .expect("desktop channel has no DATA_DIR_NAME")
+        .trim()
+        .trim_matches(|c| c == '"' || c == ';')
+        .to_string();
+    assert_eq!(config["productName"], data_dir);
+    assert_eq!(config["productName"], "GeneHub-dev");
+    assert!(
+        !config["productName"]
+            .as_str()
+            .expect("productName is a string")
+            .contains(char::is_whitespace),
+        "productName must be path-safe; a space lands the installer under a \
+         directory that breaks unquoted shells"
+    );
+    assert_eq!(config["app"]["windows"][0]["title"], "GeneHub Dev");
     assert_eq!(config["identifier"], "com.genethub.desktop.dev");
     assert_eq!(config["mainBinaryName"], "genethub-desktop-dev");
 

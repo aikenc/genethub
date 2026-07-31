@@ -347,14 +347,20 @@ ENV_WORKSPACE_DIR=${value("env_workspace_dir", channel)}
 # The daemon's override for where the agent binary lives — the journey
 # harness sets this under its stamped name to point at the cargo target dir.
 ENV_AGENT_COMMAND=${value("env_agent_command", channel)}
-# Where a deb puts the app and what it calls the menu entry, both derived by
-# Tauri from productName — quoted because beta carries a space.
-LIB_DIR_NAME="${value("product", channel)}"
-DESKTOP_FILE="${value("product", channel)}.desktop"
+# Where a deb puts the app and what it calls the menu entry. Same string as
+# tauri productName / data_dir_name — never the display product, which carries
+# a space on beta/alpha/dev and would land the installer under a path that
+# breaks unquoted shells.
+LIB_DIR_NAME=${value("data_dir_name", channel)}
+DESKTOP_FILE=${value("data_dir_name", channel)}.desktop
 `;
 
 function stamp(channel) {
   const product = value("product", channel);
+  // Install / Start-menu / deb path. Tauri derives those from productName, so
+  // this must stay free of spaces even though the window title keeps the
+  // friendlier display name in \`product\`.
+  const pathName = value("data_dir_name", channel);
   const identifier = value("identifier", channel);
   const cliBinary = value("cli_binary", channel);
   const agentBinary = value("agent_binary", channel);
@@ -366,13 +372,14 @@ function stamp(channel) {
   writeFileSync(join(repo, "packages/web/src/channel.ts"), tsModule(channel));
   writeFileSync(join(repo, "scripts/channel.env"), shellEnv(channel));
 
-  // The bundle config: what the installer and the Start menu show, the
-  // identifier the data directory and single-instance lock derive from, and
-  // the process name Windows will see. Every substitute keeps the line's
-  // tail — a whole-line replacement eats the trailing comma and the next
-  // Tauri build reports a parse error, not a wrong name.
+  // The bundle config: productName is the install-directory name (and what
+  // the Start menu folder is called); the window title stays the display
+  // product. Identifier and mainBinaryName keep each channel's processes
+  // and locks apart. Every substitute keeps the line's tail — a whole-line
+  // replacement eats the trailing comma and the next Tauri build reports a
+  // parse error, not a wrong name.
   rewriteLines(join(repo, "apps/desktop/src-tauri/tauri.conf.json"), [
-    [/^  "productName": "[^"]*"/, (line) => line.replace(/"productName": "[^"]*"/, `"productName": "${product}"`)],
+    [/^  "productName": "[^"]*"/, (line) => line.replace(/"productName": "[^"]*"/, `"productName": "${pathName}"`)],
     [/^  "identifier": "[^"]*"/, (line) => line.replace(/"identifier": "[^"]*"/, `"identifier": "${identifier}"`)],
     [/^  "mainBinaryName": "[^"]*"/, (line) => line.replace(/"mainBinaryName": "[^"]*"/, `"mainBinaryName": "${desktopBinary}"`)],
     // Indentation-agnostic: the windows block moved a level when the CLI
