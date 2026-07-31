@@ -3,7 +3,8 @@
 #
 # This is the path for a machine with no graphical session: a server, a VM, a
 # box you only ever reach over SSH. It is also the fallback when there is no
-# installer for someone's platform yet.
+# installer for someone's platform yet. The Linux tarball is musl-static, so an
+# older glibc on the box is not a reason for the binary to refuse to start.
 #
 #   curl -fsSL https://raw.githubusercontent.com/aikenc/genethub/main/scripts/install.sh | sh
 #

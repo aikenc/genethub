@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/aikenc/genethub/main/scripts/instal
 genet-daemon   # daemon + 内置 agent，不需要 Node；启动后打印连接地址与 token
 ```
 
-把它打印的地址在浏览器里打开就是完整工作台——和桌面端里的是同一份代码。
+预编译包是 **musl 静态链接**的，不依赖宿主机 glibc 版本。把它打印的地址在浏览器里打开就是完整工作台——和桌面端里的是同一份代码。
 
 **Windows**：从[发布页](https://github.com/aikenc/genethub/releases/latest)下安装包，托盘常驻，
 关掉窗口机器照样可达。

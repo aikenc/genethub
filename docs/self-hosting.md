@@ -17,7 +17,7 @@ curl -fsSL https://genehub.dev/install.sh | sh   # daemon + 内置 agent，不�
 genet-daemon
 ```
 
-脚本会校验 `SHA256SUMS`，对不上就拒绝安装，不会给你留一个半截的二进制。装完的 daemon 和桌面端里那个是同一个，下面的配对步骤完全一样。
+脚本会校验 `SHA256SUMS`，对不上就拒绝安装，不会给你留一个半截的二进制。发布的 Linux 二进制是 musl 静态链接的，不要求宿主机有多新的 glibc。装完的 daemon 和桌面端里那个是同一个，下面的配对步骤完全一样。
 
 ---
 

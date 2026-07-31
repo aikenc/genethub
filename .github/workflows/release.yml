@@ -175,30 +175,45 @@ jobs:
 
   # The pair `scripts/install.sh` downloads, and the whole of what Linux gets in
   # this version. Names here have to match what that script asks for.
+  #
+  # Built for musl and linked statically so a box with an older glibc (CentOS 7,
+  # Ubuntu 20.04, many cloud images) can still run the download. A dynamic build
+  # on ubuntu-22.04 was requiring GLIBC_2.34 and failing on those machines with
+  # a wall of `version 'GLIBC_…' not found` — exactly what `curl | sh` users hit.
   binaries:
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
             asset: genet-linux-x64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install the musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       # As in the installer job: the tag is where the version comes from.
       - run: ./scripts/version.sh --from-tag
-      - run: cargo build --release -p genet-daemon -p genet-agent
+      - run: cargo build --release -p genet-daemon -p genet-agent --target ${{ matrix.target }}
       - name: Pack
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          tar -czf "dist/${{ matrix.asset }}" -C target/release genet-daemon genet-agent
+          tar -czf "dist/${{ matrix.asset }}" \
+            -C "target/${{ matrix.target }}/release" genet-daemon genet-agent
           ls -la dist
       # What the tarball promises: two binaries that start on a machine with no
-      # graphical session and nothing else installed.
+      # graphical session and nothing else installed — including no particular
+      # glibc. `ldd` saying "not a dynamic executable" is the claim; starting is
+      # the proof.
       - name: Check the binaries in the tarball start on their own
         shell: bash
         run: |
@@ -208,6 +223,17 @@ jobs:
           # The unpacked copy, so this is a claim about what is in the tarball
           # rather than about what was left in the build directory.
           ./scripts/version.sh --verify "$root/genet-daemon"
+          # Static-pie prints "statically linked" and exits 0; a fully static
+          # binary may exit 1 with "not a dynamic executable". Either is fine.
+          # What is not fine is a list of .so dependencies on the host glibc.
+          ldd "$root/genet-daemon" >/tmp/ldd.out 2>&1 || true
+          if grep -qiE 'not a dynamic|statically linked' /tmp/ldd.out; then
+            echo "genet-daemon is statically linked"
+          else
+            echo "FAIL: genet-daemon is dynamically linked; old glibc hosts will break:" >&2
+            cat /tmp/ldd.out >&2
+            exit 1
+          fi
           GENEHUB_DATA_DIR="$root/data" GENEHUB_WORKSPACE_DIR="$root/workspace" \
             timeout 30 "$root/genet-daemon" >"$root/out.json" 2>"$root/err.log" || true
           grep -q '"event":"listening"' "$root/out.json" || {
@@ -217,7 +243,7 @@ jobs:
           }
           test -d "$root/workspace" \
             || { echo "FAIL: no folder to work in was created" >&2; exit 1; }
-          echo "the packed daemon starts and prepares a folder to work in"
+          echo "the packed daemon is static, starts, and prepares a folder to work in"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
