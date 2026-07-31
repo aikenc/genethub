@@ -1,5 +1,7 @@
 import type { AgentInfo } from "@genehub/proto";
 
+import { defaultAgent } from "./store";
+
 /**
  * Compact agent / model / mode chips that live *inside* the composer.
  *
@@ -56,7 +58,7 @@ export function ComposerControls({
   // Never display a different agent from the one the session is actually
   // bound to. In particular, an unavailable built-in session used to render
   // the first ready agent (usually Codex) while sends still went to `genet`.
-  const current = selected ?? installed[0];
+  const current = selected ?? defaultAgent(agents) ?? installed[0];
   const agentOptions = [
     ...(selected && selected.probe.state !== "ready"
       ? [{ value: selected.id, label: `${selected.label}（不可用）`, disabled: true }]
