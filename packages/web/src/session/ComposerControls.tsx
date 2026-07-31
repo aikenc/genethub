@@ -52,7 +52,17 @@ export function ComposerControls({
   onPickEffort(id: string): void;
 }) {
   const installed = agents.filter((agent) => agent.probe.state === "ready");
-  const current = installed.find((agent) => agent.id === agentId) ?? installed[0];
+  const selected = agents.find((agent) => agent.id === agentId);
+  // Never display a different agent from the one the session is actually
+  // bound to. In particular, an unavailable built-in session used to render
+  // the first ready agent (usually Codex) while sends still went to `genet`.
+  const current = selected ?? installed[0];
+  const agentOptions = [
+    ...(selected && selected.probe.state !== "ready"
+      ? [{ value: selected.id, label: `${selected.label}（不可用）`, disabled: true }]
+      : []),
+    ...installed.map((agent) => ({ value: agent.id, label: agent.label })),
+  ];
   const model =
     current?.catalog.models.find((candidate) => candidate.id === modelId) ??
     current?.catalog.models.find((candidate) => candidate.id === current?.catalog.defaultModel) ??
@@ -75,7 +85,7 @@ export function ComposerControls({
         value={current?.id ?? ""}
         disabled={disabled || agentLocked}
         title={agentLocked ? "对话已经开始，无法在同一会话里换 agent；新建一个会话即可换" : undefined}
-        options={installed.map((agent) => ({ value: agent.id, label: agent.label }))}
+        options={agentOptions}
         onChange={onPickAgent}
       />
       {current?.capabilities.setModel && current.catalog.models.length > 0 ? (
@@ -148,7 +158,7 @@ function Chip({
    * (e.g. "Default" / "Off") don't say what axis they belong to. */
   label?: string;
   value: string;
-  options: Array<{ value: string; label: string }>;
+  options: Array<{ value: string; label: string; disabled?: boolean }>;
   disabled?: boolean;
   title?: string;
   className?: string;
@@ -174,7 +184,7 @@ function Chip({
         onChange={(event) => onChange(event.target.value)}
       >
         {options.map((option) => (
-          <option key={option.value} value={option.value}>
+          <option key={option.value} value={option.value} disabled={option.disabled}>
             {option.label}
           </option>
         ))}

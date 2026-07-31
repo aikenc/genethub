@@ -67,6 +67,21 @@ export interface Draft {
   effortId: string | null;
 }
 
+/**
+ * The agent a new conversation can actually send a first turn through.
+ *
+ * Prefer our own adapter when it is usable, but do not let a missing or
+ * unconfigured built-in hide a ready external CLI such as Codex. The old
+ * fallback picked the built-in by identity first and only checked readiness
+ * afterwards, so a healthy Codex install could never become the default.
+ */
+export function defaultAgent(agents: AgentInfo[]): AgentInfo | undefined {
+  const usable = agents.filter(
+    (agent) => agent.probe.state === "ready" && agent.catalog.models.length > 0,
+  );
+  return usable.find((agent) => agent.builtin) ?? usable[0];
+}
+
 /** The tab an unstarted conversation lives in. There is only ever one. */
 const DRAFT_TAB = "chat:draft";
 
@@ -794,8 +809,8 @@ async function land(get: () => WorkbenchState): Promise<void> {
     return;
   }
 
-  const agent = state.agents.find((entry) => entry.builtin) ?? state.agents[0];
-  if (!agent || agent.probe.state !== "ready" || agent.catalog.models.length === 0) return;
+  const agent = defaultAgent(state.agents);
+  if (!agent) return;
   // An empty conversation, not a stored one. Landing somewhere used to write a
   // session on every first visit to a project, whether or not anything was ever
   // said in it.
@@ -820,7 +835,7 @@ async function start(
 
   const agentId =
     draft.agentId ??
-    (state.agents.find((entry) => entry.builtin) ?? state.agents[0])?.id ??
+    defaultAgent(state.agents)?.id ??
     null;
   if (!agentId) return null;
 

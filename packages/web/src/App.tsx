@@ -12,7 +12,7 @@ import { SettingsPanel } from "./settings/SettingsPanel";
 import { Composer } from "./session/Composer";
 import { PermissionCard } from "./session/Permission";
 import { TimelineView } from "./session/TimelineView";
-import { useWorkbench } from "./session/store";
+import { defaultAgent, useWorkbench } from "./session/store";
 import { Sidebar } from "./shell/Sidebar";
 import { TabBar } from "./shell/TabBar";
 import type { ExtraTab } from "./shell/tabs";
@@ -506,11 +506,7 @@ function FirstRun({
   } = useWorkbench();
   const workspace =
     workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
-  const builtin = agents.find((agent) => agent.builtin) ?? agents[0];
-  const usable =
-    builtin &&
-    builtin.probe.state === "ready" &&
-    builtin.catalog.models.length > 0;
+  const agent = defaultAgent(agents);
 
   // An empty catalog while the socket is still coming up (or already dead) is
   // not "no project" — saying that sends people hunting for a folder when the
@@ -554,7 +550,7 @@ function FirstRun({
     );
   }
 
-  if (!usable) {
+  if (!agent) {
     return (
       <Splash>
         <p className="text-sm">还差一个模型密钥。</p>
@@ -579,7 +575,7 @@ function FirstRun({
       <button
         type="button"
         className="min-h-11 rounded-xl bg-accent px-4 text-sm text-white md:min-h-0 md:rounded-md md:px-3 md:py-1.5 md:text-xs"
-        onClick={() => builtin && newSession(workspace.id, builtin.id)}
+        onClick={() => newSession(workspace.id, agent.id)}
       >
         新建会话
       </button>

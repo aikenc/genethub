@@ -1,4 +1,4 @@
-import type { SequencedEvent, SessionSummary } from "@genehub/proto";
+import type { AgentInfo, SequencedEvent, SessionSummary } from "@genehub/proto";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import type { Client } from "../protocol/client";
@@ -229,6 +229,47 @@ describe("opening a new conversation", () => {
     expect(calls.filter((type) => type === "session.create")).toHaveLength(1);
     expect(useWorkbench.getState().activeSessionId).toBe("s-new");
     expect(useWorkbench.getState().draft).toBeNull();
+  });
+
+  it("uses ready Codex when the built-in agent is unavailable", async () => {
+    const { client } = creatingClient();
+    const sent: Array<{ type: string; payload?: { agentId?: string } }> = [];
+    const recording = {
+      ...client,
+      call: async (request: { type: string; payload?: { agentId?: string } }) => {
+        sent.push(request);
+        return request.type === "session.create"
+          ? ({ type: "session", data: { ...SESSION, id: "s-new", agentId: "codex" } } as const)
+          : undefined;
+      },
+    } as unknown as Client;
+    const agents = [
+      {
+        id: "genet",
+        builtin: true,
+        probe: { state: "notInstalled" },
+        catalog: { models: [] },
+      },
+      {
+        id: "codex",
+        builtin: false,
+        probe: { state: "ready" },
+        catalog: { models: [{ id: "gpt-5.6-sol" }] },
+      },
+    ] as AgentInfo[];
+    useWorkbench.setState({
+      client: recording,
+      agents,
+      sessions: [],
+      activeWorkspaceId: "w1",
+    });
+    useWorkbench.getState().newSession("w1");
+
+    await useWorkbench.getState().send("hello");
+
+    expect(sent.find((request) => request.type === "session.create")?.payload?.agentId).toBe(
+      "codex",
+    );
   });
 
   it("carries the model chosen in the empty chat into the session it becomes", async () => {
