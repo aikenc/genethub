@@ -143,8 +143,11 @@ impl Journey {
         config.save(&data_dir.join("config.json"))?;
 
         // The daemon finds the agent next to its own binary in production; in a
-        // test it lives in the cargo target directory instead.
-        std::env::set_var("GENET_AGENT_COMMAND", agent_binary()?);
+        // test it lives in the cargo target directory instead. Both the binary
+        // name and the override variable are the stamped ones — a dev tree
+        // builds `genet-agent-dev` and listens for `GENET_AGENT_DEV_COMMAND`.
+        let (env_name, binary) = agent_command_override()?;
+        std::env::set_var(env_name, binary);
 
         let paths = Paths::new(&data_dir);
         let daemon = Daemon::start(paths).await.context("starting the daemon")?;
@@ -320,8 +323,55 @@ impl Journey {
     }
 }
 
+/// The agent override as the daemon expects it: the env variable name and the
+/// binary to point it at. Both names come from `scripts/channel.env` — the
+/// stamp decides what a binary is called, and this harness follows the stamp
+/// rather than pinning a channel's names here.
+fn agent_command_override() -> Result<(String, PathBuf)> {
+    let channel = channel_env()?;
+    let env_name = channel
+        .get("ENV_AGENT_COMMAND")
+        .context("scripts/channel.env has no ENV_AGENT_COMMAND")?
+        .to_string();
+    let binary = agent_binary(
+        channel
+            .get("AGENT_BINARY")
+            .context("scripts/channel.env has no AGENT_BINARY")?,
+    )?;
+    Ok((env_name, binary))
+}
+
+/// `KEY=value` from `scripts/channel.env`, the file the stamper writes for
+/// exactly this kind of consumer.
+fn channel_env() -> Result<std::collections::HashMap<String, String>> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .context("no repository root")?
+        .join("scripts/channel.env");
+    let contents = std::fs::read_to_string(&path)
+        .with_context(|| format!("{} could not be read", path.display()))?;
+    let mut values = std::collections::HashMap::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            values.insert(
+                key.to_string(),
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            );
+        }
+    }
+    Ok(values)
+}
+
 /// Locates the agent binary cargo just built.
-fn agent_binary() -> Result<PathBuf> {
+fn agent_binary(name: &str) -> Result<PathBuf> {
     if let Ok(explicit) = std::env::var("GENET_AGENT_BINARY") {
         return Ok(PathBuf::from(explicit));
     }
@@ -332,11 +382,12 @@ fn agent_binary() -> Result<PathBuf> {
         .parent()
         .and_then(|deps| deps.parent())
         .context("unexpected target layout")?;
-    let candidate = target_dir.join(if cfg!(windows) {
-        "genet-agent.exe"
+    let file_name = if cfg!(windows) {
+        format!("{name}.exe")
     } else {
-        "genet-agent"
-    });
+        name.to_string()
+    };
+    let candidate = target_dir.join(&file_name);
     if !candidate.is_file() {
         // `cargo test` compiles other packages as test harnesses without ever
         // producing their executables, so this is the normal state of a fresh

@@ -56,11 +56,11 @@ pub async fn daemon(args: &[String]) -> i32 {
                 ),
             }
         }
-        "status" => no_extra(rest, || daemon_report()),
-        "endpoint" => no_extra(rest, || endpoint()),
-        "start" => no_extra(rest, || start()),
-        "stop" => no_extra(rest, || stop()),
-        "restart" => no_extra(rest, || restart()),
+        "status" => no_extra(rest, daemon_report),
+        "endpoint" => no_extra(rest, endpoint),
+        "start" => no_extra(rest, start),
+        "stop" => no_extra(rest, stop),
+        "restart" => no_extra(rest, restart),
         _ => crate::usage(),
     }
 }

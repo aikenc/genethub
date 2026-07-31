@@ -6,7 +6,7 @@ license.workspace = true
 description = "GeneHub built-in coding agent, driven over JSONL RPC on stdio"
 
 [[bin]]
-name = "genet-agent"
+name = "genet-agent-dev"
 path = "src/main.rs"
 
 [dependencies]

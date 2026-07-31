@@ -66,6 +66,19 @@ struct Platform {
 /// here ends up as one line under a button: not reaching the release host is
 /// something to say out loud, not something to log and then render "up to date".
 pub async fn check(manifest_url: &str, current: &str) -> UpdateStatus {
+    // A dev build has no manifest to ask: it is not on the update scale at
+    // all, and an empty URL failing to fetch would read as a network problem
+    // rather than as "nothing to compare against".
+    if manifest_url.is_empty() {
+        return UpdateStatus {
+            current: current.to_string(),
+            latest: None,
+            newer: false,
+            url: None,
+            download_url: None,
+            problem: None,
+        };
+    }
     match fetch(manifest_url).await {
         Ok(manifest) => status(current, &manifest),
         Err(error) => UpdateStatus {
@@ -145,7 +158,7 @@ fn platform_key() -> String {
 /// line to ship.
 fn is_newer(current: &str, latest: &str) -> bool {
     // A build the release workflow never stamped calls itself 0.0.0
-    // (`scripts/version.sh`), and it is behind nothing: whoever compiled it has
+    // (`scripts/version.mjs`), and it is behind nothing: whoever compiled it has
     // the source in front of them, and pointing that person at an installer is
     // telling them to replace their own tree with an older one.
     if parts(current).iter().all(|piece| *piece == 0) {

@@ -23,7 +23,7 @@ async fn main() {
     // Answered before anything touches the disk: "which build is this" is a
     // question asked of a machine that is already misbehaving, and the answer
     // should not depend on a data directory being readable. The release
-    // workflow asks it too (`scripts/version.sh --verify`).
+    // workflow asks it too (`scripts/version.mjs --verify`).
     if args
         .iter()
         .any(|argument| argument == "--version" || argument == "-V")

@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "GeneHub",
+  "productName": "GeneHub Dev",
   "version": "0.0.0",
-  "identifier": "com.genethub.desktop",
-  "mainBinaryName": "genethub-desktop",
+  "identifier": "com.genethub.desktop.dev",
+  "mainBinaryName": "genethub-desktop-dev",
   "build": {
     "frontendDist": "../../../packages/web/dist",
     "beforeBuildCommand": "npm --prefix ../../packages/web run build",
@@ -14,7 +14,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "GeneHub",
+        "title": "GeneHub Dev",
         "width": 1100,
         "height": 760,
         "minWidth": 720,

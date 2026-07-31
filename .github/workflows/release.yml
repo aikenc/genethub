@@ -4,17 +4,17 @@ name: Release
 # cross-build a Tauri bundle: the installer embeds the system WebView glue and
 # the packaging tool of the platform it targets.
 #
-# Two channels ship from this one workflow (`docs/dual-channel-release.md` in
+# Three lines ship from this one workflow (`docs/dual-channel-release.md` in
 # genethub-cloud): a plain `v0.22.2` tag builds the official line, a
-# `v0.23.0-beta.4` tag builds the beta line. The tag decides everything — the
-# names the binaries carry, the Hub the build points at, the release it
-# publishes to — because a channel chosen by a dropdown in the Actions tab is
-# a channel somebody picks wrong.
+# `v0.23.0-beta.4` tag the beta line, a `v0.23.0-alpha.4` tag the alpha
+# (intranet) line. The tag decides everything — the names the binaries carry,
+# the Hub the build points at, the release it publishes to — because a channel
+# chosen by a dropdown in the Actions tab is a channel somebody picks wrong.
 on:
   push:
     tags: ["v*"]
   # Also runnable by hand, so a release can be rehearsed without inventing a
-  # tag for it. Nothing is published in that case, and the build is official,
+  # tag for it. Nothing is published in that case, and the build is dev,
   # matching the tree.
   workflow_dispatch:
 
@@ -36,6 +36,9 @@ jobs:
       prerelease: ${{ steps.detect.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - id: detect
         shell: bash
         env:
@@ -43,33 +46,35 @@ jobs:
         run: |
           set -euo pipefail
           # The tag's shape, and only that: `v1.2.3` is official,
-          # `v1.3.0-beta.4` is beta, and anything else is not a release —
-          # refused here rather than published under a guessed channel.
+          # `v1.3.0-beta.4` is beta, `v1.3.0-alpha.4` is alpha, and anything
+          # else is not a release — refused here rather than published under a
+          # guessed channel.
           tag="${GITHUB_REF_NAME:-}"
           if [[ "$tag" == v* ]]; then
             case "$tag" in
-              v[0-9]*.[0-9]*.[0-9]*-beta.[0-9]*) want=beta ;;
-              v[0-9]*.[0-9]*.[0-9]*)             want=official ;;
-              *) echo "::error::'$tag' is neither vX.Y.Z nor vX.Y.Z-beta.N — no such release"; exit 1 ;;
+              v[0-9]*.[0-9]*.[0-9]*-beta.[0-9]*)  want=beta ;;
+              v[0-9]*.[0-9]*.[0-9]*-alpha.[0-9]*) want=alpha ;;
+              v[0-9]*.[0-9]*.[0-9]*)              want=official ;;
+              *) echo "::error::'$tag' is neither vX.Y.Z nor vX.Y.Z-beta.N nor vX.Y.Z-alpha.N — no such release"; exit 1 ;;
             esac
           fi
-          channel="$(./scripts/channel.sh --detect)"
+          channel="$(node scripts/channel.mjs --detect)"
           if [[ "$tag" == v* && "${want:-}" != "$channel" ]]; then
-            echo "::error::tag says ${want:-?} but scripts/channel.sh says $channel — the two rules drifted"
+            echo "::error::tag says ${want:-?} but scripts/channel.mjs says $channel — the two rules drifted"
             exit 1
           fi
 
           # Number discipline the checklist cannot enforce: once a minor has
-          # shipped officially, a beta of that same minor is an update that is
-          # older than what its testers already run. Betas live strictly on
-          # the next minor.
-          if [ "$channel" = beta ] && [[ "$tag" == v* ]]; then
+          # shipped officially, a prerelease of that same minor is an update
+          # that is older than what its testers already run. Prereleases of
+          # either line live strictly on the next minor.
+          if [[ "$channel" == beta || "$channel" == alpha ]] && [[ "$tag" == v* ]]; then
             latest_official="$(gh release view --json tagName -q .tagName || true)"
             if [ -n "$latest_official" ]; then
-              beta_minor="$(sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/' <<<"$tag")"
+              pre_minor="$(sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/' <<<"$tag")"
               official_minor="$(sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/' <<<"$latest_official")"
-              if [ "$beta_minor" -le "$official_minor" ]; then
-                echo "::error::$tag is a beta of minor $beta_minor, but $latest_official already shipped — betas start at 0.$((official_minor + 1)).0-beta.1"
+              if [ "$pre_minor" -le "$official_minor" ]; then
+                echo "::error::$tag is a $channel of minor $pre_minor, but $latest_official already shipped — prereleases start at 0.$((official_minor + 1)).0-$channel.1"
                 exit 1
               fi
             fi
@@ -77,19 +82,40 @@ jobs:
 
           {
             echo "name=$channel"
-            if [ "$channel" = beta ]; then
-              echo "asset_prefix=GeneHub-beta"
-              echo "tarball_prefix=genet-beta"
-              echo "manifest=latest-beta.json"
-              echo "hub_url=${{ vars.GENEHUB_BETA_HUB_URL || 'https://relay-beta.genethub.com' }}"
-              echo "prerelease=true"
-            else
-              echo "asset_prefix=GeneHub"
-              echo "tarball_prefix=genet"
-              echo "manifest=latest.json"
-              echo "hub_url=${{ vars.GENEHUB_HUB_URL || 'https://relay.genethub.com' }}"
-              echo "prerelease=false"
-            fi
+            case "$channel" in
+              beta)
+                echo "asset_prefix=GeneHub-beta"
+                echo "tarball_prefix=genet-beta"
+                echo "manifest=latest-beta.json"
+                echo "hub_url=${{ vars.GENEHUB_BETA_HUB_URL || 'https://relay-beta.genethub.com' }}"
+                echo "prerelease=true"
+                ;;
+              alpha)
+                echo "asset_prefix=GeneHub-alpha"
+                echo "tarball_prefix=genet-alpha"
+                echo "manifest=latest-alpha.json"
+                # Alpha is the intranet line: the default is only a placeholder,
+                # a real deployment sets the variable to its own address.
+                echo "hub_url=${{ vars.GENEHUB_ALPHA_HUB_URL || 'https://relay-alpha.genethub.com' }}"
+                echo "prerelease=true"
+                ;;
+              official)
+                echo "asset_prefix=GeneHub"
+                echo "tarball_prefix=genet"
+                echo "manifest=latest.json"
+                echo "hub_url=${{ vars.GENEHUB_HUB_URL || 'https://relay.genethub.com' }}"
+                echo "prerelease=false"
+                ;;
+              *)
+                # dev: a rehearsal. Nothing is published (the publish job only
+                # runs on a tag), so the names only have to be honest.
+                echo "asset_prefix=GeneHub-dev"
+                echo "tarball_prefix=genet-dev"
+                echo "manifest=latest-dev.json"
+                echo "hub_url="
+                echo "prerelease=true"
+                ;;
+            esac
           } >> "$GITHUB_OUTPUT"
 
   # Windows is the only platform that gets an installer in this version.
@@ -127,12 +153,12 @@ jobs:
       # The version this release ships, taken from the tag and written into the
       # three files that have to carry one, and the channel, written into
       # everything that names a process, a directory or an override. The tree
-      # itself says 0.0.0 and official — no human edits either: `scripts/version.sh`
-      # and `scripts/channel.sh` explain why, and hold the whole rule so that no
-      # workflow has to repeat it.
+      # itself says 0.0.0 and dev — no human edits either: `scripts/version.mjs`
+      # and `scripts/channel.mjs` explain why, and hold the whole rule so that
+      # no workflow has to repeat it.
       - run: |
-          ./scripts/version.sh --from-tag
-          ./scripts/channel.sh --from-tag
+          node scripts/version.mjs --from-tag
+          node scripts/channel.mjs --from-tag
         shell: bash
 
       # Stages the daemon and the built-in agent into the bundle. The checks on
@@ -160,7 +186,7 @@ jobs:
           # The runner's shell already has `-e`, which would end this script at
           # the failing pipeline and skip the reporting below entirely.
           set +e
-          ./apps/desktop/scripts/bundle.sh 2>&1 | tee /tmp/bundle.log
+          node apps/desktop/scripts/bundle.mjs 2>&1 | tee /tmp/bundle.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             grep -iE "^(error|failed|thread .* panicked)|error\[|error:" /tmp/bundle.log \
@@ -176,12 +202,12 @@ jobs:
       # assumed in a comment.
       #
       # The names live in `!define` lines now, because the channel decides them
-      # and the two channels install side by side: a beta installer must stop
-      # beta processes and leave the official line alone, and the defines are
-      # what `scripts/channel.sh` stamps. The stamp is checked both ways —
-      # beta names all carry `-beta`, official names never do — because a
-      # half-stamped tree is exactly how one channel's installer learns to
-      # kill the other's daemon.
+      # and the channels install side by side: a prerelease installer must stop
+      # prerelease processes and leave the official line alone, and the defines
+      # are what `scripts/channel.mjs` stamps. The stamp is checked both ways —
+      # every non-official name carries its channel's suffix, official names
+      # never do — because a half-stamped tree is exactly how one channel's
+      # installer learns to kill another's daemon.
       - name: The installer stops processes that exist, and only this channel's
         shell: bash
         run: |
@@ -195,7 +221,7 @@ jobs:
           grep -q 'taskkill /F /T /PID' apps/desktop/src-tauri/installer.nsh             || { echo "::error::the installer no longer stops the daemon by its lock-file pid"; exit 1; }
           grep -q 'daemon.lock' apps/desktop/src-tauri/installer.nsh             || { echo "::error::the installer does not read the daemon's lock file"; exit 1; }
           ! grep -q 'IM genet' apps/desktop/src-tauri/installer.nsh             || { echo "::error::the installer kills genet by image name — that takes CLI clients down with the daemon"; exit 1; }
-          channel="$(./scripts/channel.sh --show)"
+          channel="$(node scripts/channel.mjs --show)"
           for name in $names; do
             found="$(find apps/desktop/src-tauri/target/release target/release \
               -maxdepth 1 -name "$name" -print -quit 2>/dev/null || true)"
@@ -204,12 +230,16 @@ jobs:
               exit 1
             }
             case "$channel:$name" in
-              beta:*-beta.exe) ;;
-              official:*) [ "${name%-beta.exe}" = "$name" ] || {
-                echo "::error::official build ships a beta process name '$name' — a half-stamped tree"
-                exit 1
-              } ;;
-              *) echo "::error::beta build ships an unmarked process name '$name' — it would fight the official line"
+              beta:*-beta.exe | alpha:*-alpha.exe | dev:*-dev.exe) ;;
+              official:*)
+                case "$name" in
+                  *-beta.exe | *-alpha.exe | *-dev.exe)
+                    echo "::error::official build ships a marked process name '$name' — a half-stamped tree"
+                    exit 1
+                    ;;
+                esac
+                ;;
+              *) echo "::error::$channel build ships an unmarked process name '$name' — it would fight the other lines"
                 exit 1 ;;
             esac
             echo "ok: $name -> $found"
@@ -229,7 +259,7 @@ jobs:
           # And that it is the build this release claims to be. Without this, a
           # job that lost its stamping step would ship a daemon calling itself
           # 0.0.0 — which tells every user they run an unreleased build, silently.
-          ./scripts/version.sh --verify "target/release/$CLI_BINARY$exe" || exit 1
+          node scripts/version.mjs --verify "target/release/$CLI_BINARY$exe" || exit 1
           env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
             "target/release/$CLI_BINARY$exe" daemon run >"$root/out.json" 2>"$root/err.log" &
           pid=$!
@@ -269,11 +299,15 @@ jobs:
           asset="$ASSET_PREFIX-windows-x64-setup.exe"
           cp "$found" "dist/$asset"
           version="${GITHUB_REF_NAME#v}"
-          case "$version" in
-            # Not a tag build: there is no version to put in a name.
-            *[!0-9.]*|"") echo "no version in '$GITHUB_REF_NAME', keeping one name" ;;
-            *) cp "$found" "dist/$ASSET_PREFIX-$version-windows-x64-setup.exe" ;;
-          esac
+          # Official `0.22.2` and prerelease `0.23.0-beta.4` / `0.23.0-alpha.1`
+          # both get a second, versioned name. The old `*[!0-9.]*` guard treated
+          # every `-beta.N` as "not a version" and skipped the copy, so the
+          # site's manifest pointed at a file the release never uploaded.
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z]+\.[0-9]+)?$ ]]; then
+            cp "$found" "dist/$ASSET_PREFIX-$version-windows-x64-setup.exe"
+          else
+            echo "no version in '$GITHUB_REF_NAME', keeping one name"
+          fi
           ls -la dist
 
       - uses: actions/upload-artifact@v4
@@ -310,8 +344,8 @@ jobs:
       # As in the installer job: the tag is where the version and the channel
       # come from.
       - run: |
-          ./scripts/version.sh --from-tag
-          ./scripts/channel.sh --from-tag
+          node scripts/version.mjs --from-tag
+          node scripts/channel.mjs --from-tag
         shell: bash
       - run: cargo build --release -p genet-cli -p genet-agent --target ${{ matrix.target }}
       - name: Pack
@@ -340,7 +374,7 @@ jobs:
           tar -xzf "dist/$TARBALL_PREFIX-linux-x64.tar.gz" -C "$root"
           # The unpacked copy, so this is a claim about what is in the tarball
           # rather than about what was left in the build directory.
-          ./scripts/version.sh --verify "$root/$CLI_BINARY"
+          node scripts/version.mjs --verify "$root/$CLI_BINARY"
           # Static-pie prints "statically linked" and exits 0; a fully static
           # binary may exit 1 with "not a dynamic executable". Either is fine.
           # What is not fine is a list of .so dependencies on the host glibc.
@@ -390,10 +424,10 @@ jobs:
         working-directory: apps/desktop
       # Stamped like the build jobs, so a beta run checks a beta package rather
       # than silently checking an official one.
-      - run: ./scripts/channel.sh --from-tag
+      - run: node scripts/channel.mjs --from-tag
         shell: bash
       - name: Build a package and check what is inside it
-        run: ./apps/desktop/scripts/bundle.sh
+        run: node apps/desktop/scripts/bundle.mjs
         env:
           BUNDLES: deb
 
@@ -411,7 +445,8 @@ jobs:
       # has something to ask that is not the GitHub API: 60 requests an hour is
       # counted per address, and everyone behind one office router shares it.
       #
-      # One manifest per channel — `latest.json` and `latest-beta.json` — and
+      # One manifest per channel — `latest.json`, `latest-beta.json`,
+      # `latest-alpha.json` — and
       # never one measuring the other: the two lines version independently,
       # and a beta that compared itself against the official number would
       # announce a downgrade as an upgrade. `channel` is written into the file
@@ -470,15 +505,16 @@ jobs:
           files: dist/*
           prerelease: ${{ needs.channel.outputs.prerelease }}
           generate_release_notes: true
-      # Beta additionally publishes to a rolling `beta` release. GitHub's
-      # `latest` never names a prerelease, so without this there is no fixed
-      # address a beta daemon or install script can ask for the newest beta —
-      # this is the address `latest-beta.json` and the beta download base
-      # point at, and it is what makes them stay put.
+      # A prerelease additionally publishes to a rolling release named after
+      # its channel. GitHub's `latest` never names a prerelease, so without
+      # this there is no fixed address a beta or alpha daemon or install
+      # script can ask for the newest one — this is the address
+      # `latest-beta.json` / `latest-alpha.json` and the download bases point
+      # at, and it is what makes them stay put.
       - uses: softprops/action-gh-release@v2
         if: needs.channel.outputs.prerelease == 'true'
         with:
-          tag_name: beta
-          name: Beta
+          tag_name: ${{ needs.channel.outputs.name }}
+          name: ${{ needs.channel.outputs.name }}
           prerelease: true
           files: dist/*

@@ -159,21 +159,11 @@ async fn link() -> i32 {
 /// contract contradicting itself.
 fn bare(message: &str) -> &str {
     match message.split_once(": ") {
-        Some((head, rest))
-            if matches!(
-                head,
-                "bad_request"
-                    | "unauthorized"
-                    | "not_found"
-                    | "conflict"
-                    | "unsupported"
-                    | "forbidden"
-                    | "internal"
-                    | "protocol_mismatch"
-            ) =>
-        {
-            rest
-        }
+        Some((
+            "bad_request" | "unauthorized" | "not_found" | "conflict" | "unsupported" | "forbidden"
+            | "internal" | "protocol_mismatch",
+            rest,
+        )) => rest,
         _ => message,
     }
 }
@@ -233,23 +223,31 @@ impl LoginOptions {
             i += 1;
         }
         Ok(Self {
-            hub_url: resolve_hub_url(hub_url),
+            hub_url: resolve_hub_url(hub_url)?,
             name,
             wait,
         })
     }
 }
 
-fn resolve_hub_url(explicit: Option<String>) -> String {
+fn resolve_hub_url(explicit: Option<String>) -> Result<String, String> {
     if let Some(url) = explicit {
-        return url;
+        return Ok(url);
     }
     if let Ok(url) = std::env::var(channel::ENV_HUB_URL) {
         if !url.trim().is_empty() {
-            return url;
+            return Ok(url);
         }
     }
-    channel::DEFAULT_HUB_URL.to_string()
+    // A dev build points nowhere on its own: naming an address beats being
+    // told "relative URL without a base" three steps later.
+    if channel::DEFAULT_HUB_URL.is_empty() {
+        return Err(format!(
+            "this is a dev build with no default Hub — pass the address, or set {}",
+            channel::ENV_HUB_URL
+        ));
+    }
+    Ok(channel::DEFAULT_HUB_URL.to_string())
 }
 
 fn warn_if_cross_channel(hub_url: &str) {

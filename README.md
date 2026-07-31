@@ -38,12 +38,14 @@ macOS 这一版没有发布产物（等签名与公证），从源码构建可�
 ```bash
 cargo build --release -p genet-cli -p genet-agent       # CLI/守护进程（同一二进制）与内置 agent
 cd packages/web && npm install && npm run build        # 工作台
-cd apps/desktop && ./scripts/bundle.sh                 # 桌面安装包
+cd apps/desktop && ./scripts/bundle.mjs                 # 桌面安装包
 ```
 
 自建 relay 见 [self-hosting.md](./docs/self-hosting.md)。发布产物由 `.github/workflows/release.yml` 在打 tag 时构建：每个平台各出一个安装包，另出一份 `genet-<os>-<arch>.tar.gz` 供上面那条命令使用，附 `SHA256SUMS`（`scripts/install.sh` 校验不过就拒绝安装）。
 
-**发一个版本就是打一个 tag**，仓库里没有要跟着改的版本号：`git tag v0.1.18 && git push --tags`。产品版本号只存在于 tag 上，流水线构建前用 `scripts/version.sh` 把它写进 Cargo 和安装包配置，构建完再拿真产物核对一遍（`genet --version` 必须等于 tag）。所以从源码构建出来的那份自称 `0.0.0`，界面上显示"开发版"，也不会被催升级——它确实不是任何一个发布版本。
+**发一个版本就是打一个 tag**，仓库里没有要跟着改的版本号：`git tag v0.1.18 && git push --tags`。产品版本号只存在于 tag 上，流水线构建前用 `scripts/version.mjs` 把它写进 Cargo 和安装包配置，构建完再拿真产物核对一遍（发布产物里 `genet --version` 必须等于 tag）。所以从源码构建出来的那份自称 `0.0.0`（二进制叫 `genet-dev`，树默认走 dev 轨），界面上显示"开发版"，也不会被催升级——它确实不是任何一个发布版本。
+
+发 Beta 就是打一个带 prerelease 后缀的 tag：`git tag v0.4.0-beta.1 && git push origin v0.4.0-beta.1`。流水线按 tag 形态分流——`vX.Y.Z` 发正式线，`vX.Y.Z-beta.N` 发 Beta 线（prerelease，资产名带 `-beta`，默认连 `relay-beta.genethub.com`），两线并装并跑互不干扰（`genethub-cloud/docs/dual-channel-release.md`）。Beta 号段必须大于最新正式版号段：正式已到 `0.3.x` 时，Beta 从 `0.4.0-beta.1` 起。
 
 ## 文档
 

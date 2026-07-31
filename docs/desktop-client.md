@@ -128,7 +128,7 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 | `genet-agent` | 3.9 MB | 同上 |
 | 图标与桌面项 | < 10 KB | |
 
-数字由 `apps/desktop/scripts/bundle.sh` 每次打包时重新量，超预算直接失败。
+数字由 `apps/desktop/scripts/bundle.mjs` 每次打包时重新量，超预算直接失败。
 
 ### 4.1 硬约束：PC 端零 Node 运行时
 

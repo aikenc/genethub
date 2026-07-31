@@ -185,7 +185,7 @@ function Appearance() {
  * What an unstamped build calls itself.
  *
  * The version in the repository is 0.0.0 and the release workflow writes the tag
- * in as it builds (`scripts/version.sh`), so this is the number every build made
+ * in as it builds (`scripts/version.mjs`), so this is the number every build made
  * from source reports — and printing it as "0.0.0" would read as a real release,
  * the very confusion the placeholder exists to avoid.
  */
@@ -194,17 +194,21 @@ const UNRELEASED = "0.0.0";
 // The channel is part of the version's meaning: `0.23.0-beta.4` and `0.23.0`
 // are two lines that never compare against each other, and the prefix is what
 // keeps a screenshot of this page from being read as the other line
-// (`scripts/channel.sh` stamps CHANNEL in, like the version).
+// (`scripts/channel.mjs` stamps CHANNEL in, like the version).
+const PREFIX: Record<string, string> = {
+  official: "正式版 ",
+  beta: "Beta版 ",
+  alpha: "Alpha版 ",
+  dev: "开发版 ",
+};
 const shown = (version: string) =>
-  version === UNRELEASED
-    ? "开发版"
-    : `${CHANNEL === "beta" ? "Beta版 " : "正式版 "}${version}`;
+  version === UNRELEASED ? "开发版" : `${PREFIX[CHANNEL] ?? ""}${version}`;
 
 /**
  * Which build this is, and whether a newer one has been published.
  *
  * Two numbers rather than one because they are two executables. A release stamps
- * one version into both (`scripts/version.sh`), so seeing them disagree means an
+ * one version into both (`scripts/version.mjs`), so seeing them disagree means an
  * upgrade only half landed — a real outcome on Windows, where the daemon holds
  * its own file open while an installer wants to replace it (`installer.nsh`).
  * Printing both is what turns that from a puzzle into a sentence.

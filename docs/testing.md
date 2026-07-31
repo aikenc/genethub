@@ -245,7 +245,7 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 
 | 平台 | 做法 |
 |------|------|
-| Linux | 干净容器里安装分发包，脚本驱动首启与自检（`apps/desktop/scripts/bundle.sh` 里做，构建即校验） |
+| Linux | 干净容器里安装分发包，脚本驱动首启与自检（`apps/desktop/scripts/bundle.mjs` 里做，构建即校验） |
 | 无图形界面的机器 | `scripts/install.sh` 装 daemon + 内置 agent，用例见 §8.1「安装脚本」 |
 | Windows / macOS | 发布流水线（`.github/workflows/release.yml`）在各自的 runner 上构建安装包，并冒烟"daemon 在这个平台起得来、工作目录建出来了"。**装包之后**的首启仍要每次发版手动过一遍主旅程——runner 上没有能点托盘的人 |
 

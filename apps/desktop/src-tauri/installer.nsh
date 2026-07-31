@@ -25,15 +25,15 @@
 ; its own executable open the same way.
 ;
 ; The image names are defines rather than literals because they are the one
-; thing that differs between the official and beta channels, and the two
-; install side by side on one machine: each channel's installer must stop its
-; own processes and leave the other line's alone. `scripts/channel.sh`
-; rewrites these four lines for a beta build; nothing else here changes.
+; thing that differs between the channels, and the lines install side by
+; side on one machine: each channel's installer must stop its own processes
+; and leave the other lines' alone. `scripts/channel.mjs` rewrites these four
+; lines when it stamps a channel; nothing else here changes.
 
-!define GH_DESKTOP_EXE "genethub-desktop.exe"
-!define GH_CLI_EXE "genet.exe"
-!define GH_AGENT_EXE "genet-agent.exe"
-!define GH_DATA_DIR_NAME "GeneHub"
+!define GH_DESKTOP_EXE "genethub-desktop-dev.exe"
+!define GH_CLI_EXE "genet-dev.exe"
+!define GH_AGENT_EXE "genet-agent-dev.exe"
+!define GH_DATA_DIR_NAME "GeneHub-dev"
 
 !macro StopGeneHubProcesses
   DetailPrint "正在停止 GeneHub 后台进程…"

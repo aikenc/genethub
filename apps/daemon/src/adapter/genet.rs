@@ -956,23 +956,23 @@ mod tests {
     /// suite does not run on, so the platform is a parameter.
     #[test]
     fn on_windows_the_agent_is_looked_for_by_its_real_file_name() {
-        assert_eq!(agent_file_name(true), "genet-agent.exe");
-        assert_eq!(agent_file_name(false), "genet-agent");
+        assert_eq!(agent_file_name(true), format!("{}.exe", BINARY));
+        assert_eq!(agent_file_name(false), BINARY);
     }
 
     /// And the name has to be the one the installer actually stages, which lives
-    /// in a shell script this test reads rather than trusts. The script takes
-    /// the names from `scripts/channel.env` — written by `scripts/channel.sh`
+    /// in a script this test reads rather than trusts. The script takes
+    /// the names from `scripts/channel.env` — written by `scripts/channel.mjs`
     /// from the same table as `BINARY` above — so the pin here is that the
     /// staging loop consumes them.
     #[test]
     fn the_installer_stages_the_agent_under_that_same_name() {
         let script = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/scripts/bundle.sh"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/scripts/bundle.mjs"),
         )
         .expect("the bundling script");
         assert!(
-            script.contains(r#"for binary in "$CLI_BINARY" "$AGENT_BINARY""#),
+            script.contains("[CLI_BINARY, AGENT_BINARY]"),
             "the installer no longer stages the agent under its stamped name"
         );
         assert!(
@@ -981,7 +981,7 @@ mod tests {
              reading the channel's names"
         );
         assert!(
-            script.contains(r#"bin/$binary$exe"#),
+            script.contains("binary + exe"),
             "the installer dropped the platform suffix, so the lookup will miss"
         );
     }

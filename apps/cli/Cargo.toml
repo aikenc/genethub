@@ -5,10 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "genet: the GeneHub CLI, and the daemon it controls, in one binary"
 
-# The one binary both channels ship. `scripts/channel.sh` rewrites this name
-# for a beta build (`genet-beta`); the crate name stays put across channels.
+# The one binary every channel ships. `scripts/channel.mjs` rewrites this
+# name when it stamps a channel; the crate name stays put across channels.
 [[bin]]
-name = "genet"
+name = "genet-dev"
 path = "src/main.rs"
 
 [dependencies]

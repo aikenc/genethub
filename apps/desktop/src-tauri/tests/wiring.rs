@@ -145,7 +145,7 @@ fn the_windows_installer_stops_the_daemon_before_replacing_it() {
     // Every executable staged into the bundle is a file the installer will
     // overwrite, so every one of them has to be stopped first. The names come
     // from the defines, not literals: the two channels install side by side,
-    // and scripts/channel.sh rewrites the defines for a beta build.
+    // and scripts/channel.mjs rewrites the defines for a release build.
     //
     // The daemon is the exception, and the exception is the point: it is the
     // same `genet` binary every CLI client runs, so it is stopped by the pid
@@ -328,7 +328,7 @@ fn installer_hook() -> String {
 
 /// The value of a `!define NAME "value"` line in an NSIS script.
 ///
-/// The hook names its processes through defines so `scripts/channel.sh` can
+/// The hook names its processes through defines so `scripts/channel.mjs` can
 /// stamp the beta names in; the tests resolve them rather than pinning the
 /// literal, because the literal is exactly what a channel build changes.
 fn nsis_define(script: &str, name: &str) -> String {
@@ -342,7 +342,7 @@ fn nsis_define(script: &str, name: &str) -> String {
 }
 
 /// The binaries the installer promises are inside it. Named in one place here
-/// and in `scripts/bundle.sh`, which is where they are staged.
+/// and in `apps/desktop/scripts/bundle.mjs`, which is where they are staged.
 #[test]
 fn the_bundle_carries_the_daemon_and_the_agent() {
     let config = config();
@@ -350,7 +350,7 @@ fn the_bundle_carries_the_daemon_and_the_agent() {
         config["bundle"]["resources"]["bin/"],
         serde_json::json!("bin/"),
         "the daemon and agent are staged into src-tauri/bin by \
-         scripts/bundle.sh; without this they are not in the installer"
+         apps/desktop/scripts/bundle.mjs; without this they are not in the installer"
     );
 
     // Windows needs an .ico: Tauri embeds it in the executable and the installer,
@@ -379,7 +379,7 @@ fn the_bundle_carries_the_daemon_and_the_agent() {
 /// a release.
 ///
 /// Three files have to carry a literal — Cargo needs one, the installer needs one
-/// — and all three are written by `scripts/version.sh` from the tag as the release
+/// — and all three are written by `scripts/version.mjs` from the tag as the release
 /// is built. In the tree they stay at 0.0.0, "never released", because the version
 /// a human maintains is the version that goes wrong: these sat at 0.1.0 through
 /// seventeen tagged releases while every installed copy reported 0.1.0 to its own
@@ -390,7 +390,7 @@ fn the_bundle_carries_the_daemon_and_the_agent() {
 #[test]
 fn nothing_in_the_tree_claims_to_be_a_release() {
     const UNRELEASED: &str = "0.0.0";
-    let stamper = repo().join("scripts/version.sh");
+    let stamper = repo().join("scripts/version.mjs");
     let script = std::fs::read_to_string(&stamper).expect("read the stamping script");
 
     let carriers = [
@@ -409,7 +409,7 @@ fn nothing_in_the_tree_claims_to_be_a_release() {
         assert_eq!(
             version, UNRELEASED,
             "{path} says {version}, which is a claim about a release that this \
-             checkout cannot make — the tag is the version (scripts/version.sh)"
+             checkout cannot make — the tag is the version (scripts/version.mjs)"
         );
         assert!(
             script.contains(path),
@@ -419,59 +419,76 @@ fn nothing_in_the_tree_claims_to_be_a_release() {
     }
 }
 
-/// The product's channel works the way its version does: the tree says
-/// `official`, and a beta is the release workflow stamping it in
-/// (`scripts/channel.sh`, modelled on `scripts/version.sh`).
+/// The product's channel works the way its version does: the tree says `dev`,
+/// and a release is the workflow stamping its channel in
+/// (`scripts/channel.mjs`, modelled on `scripts/version.mjs`).
 ///
 /// Checked here for the same reason as the version: a tree accidentally
-/// committed half-stamped for beta is a release that renames itself, kills
-/// the wrong processes and reads the wrong data directory. And the official
-/// column of the table is frozen — those names are what installed copies
-/// already answer to, so renaming one orphans every override a user has set.
+/// committed half-stamped for a release channel is a release that renames
+/// itself, kills the wrong processes and reads the wrong data directory. And
+/// the official column of the table is frozen — those names are what
+/// installed copies already answer to, so renaming one orphans every override
+/// a user has set.
 #[test]
-fn nothing_in_the_tree_claims_to_be_beta() {
-    let stamper = read(repo().join("scripts/channel.sh"));
+fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
+    let stamper = read(repo().join("scripts/channel.mjs"));
 
-    // Every generated module says official, and the stamping script is what
-    // writes each of them — a constants file nothing regenerates is one a
-    // beta build compiles straight past.
+    // Every generated module says dev, and the stamping script is what writes
+    // each of them — a constants file nothing regenerates is one a release
+    // build compiles straight past.
     let modules = [
-        ("apps/daemon/src/channel.rs", "pub const CHANNEL: &str = \"official\";"),
-        ("apps/agent/src/channel.rs", "pub const CHANNEL: &str = \"official\";"),
+        ("apps/daemon/src/channel.rs", "pub const CHANNEL: &str = \"dev\";"),
+        ("apps/agent/src/channel.rs", "pub const CHANNEL: &str = \"dev\";"),
         (
             "apps/desktop/src-tauri/src/channel.rs",
-            "pub const CHANNEL: &str = \"official\";",
+            "pub const CHANNEL: &str = \"dev\";",
         ),
-        ("packages/web/src/channel.ts", "export const CHANNEL: \"official\" | \"beta\" = \"official\";"),
+        (
+            "packages/web/src/channel.ts",
+            "export const CHANNEL: \"dev\" | \"official\" | \"beta\" | \"alpha\" = \"dev\";",
+        ),
     ];
     for (path, marker) in modules {
         let body = read(repo().join(path));
         assert!(
             body.contains(marker),
-            "{path} is not stamped official — the tree ships the official \
-             channel; a beta build stamps it in CI (scripts/channel.sh)"
+            "{path} is not stamped dev — the tree ships the dev channel; \
+             a release build stamps its own channel in CI (scripts/channel.mjs)"
         );
         assert!(
             stamper.contains(path),
             "{path} carries the channel and the stamping script does not write \
-             it, so a beta build would ship it saying whatever it says now"
+             it, so a release build would ship it saying whatever it says now"
         );
     }
 
     let config = config();
-    assert_eq!(config["productName"], "GeneHub");
-    assert_eq!(config["identifier"], "com.genethub.desktop");
-    assert_eq!(config["mainBinaryName"], "genethub-desktop");
+    assert_eq!(config["productName"], "GeneHub Dev");
+    assert_eq!(config["identifier"], "com.genethub.desktop.dev");
+    assert_eq!(config["mainBinaryName"], "genethub-desktop-dev");
 
     let installer = read(repo().join("scripts/install.sh"));
     assert!(
-        installer.contains("# channel: official") && installer.contains("channel=official"),
-        "install.sh is not stamped official"
+        installer.contains("# channel: dev") && installer.contains("channel=dev"),
+        "install.sh is not stamped dev — the tree's installer must refuse to \
+         run rather than quietly install a released line"
     );
 
     // The frozen column. These are the names already installed copies answer
-    // to; the beta column may grow, this one may not move.
-    let script = read(repo().join("scripts/channel.sh"));
+    // to; the other columns may grow, this one may not move.
+    let row = |key: &str| {
+        // Line-anchored, or `hub_url` would match inside `env_hub_url` and the
+        // row would come back as the environment-variable table — a test that
+        // silently reads the wrong row is a test that passes by accident.
+        let start = stamper
+            .find(&format!("\n  {key}: {{"))
+            .unwrap_or_else(|| panic!("scripts/channel.mjs has no {key} row"));
+        let end = stamper[start..]
+            .find('}')
+            .map(|i| start + i)
+            .expect("an unterminated row in the table");
+        &stamper[start..end]
+    };
     for (key, name) in [
         ("env_data_dir", "GENEHUB_DATA_DIR"),
         ("env_workspace_dir", "GENEHUB_WORKSPACE_DIR"),
@@ -487,20 +504,51 @@ fn nothing_in_the_tree_claims_to_be_beta() {
         ("agent_binary", "genet-agent"),
         ("desktop_binary", "genethub-desktop"),
     ] {
-        let line = script
-            .lines()
-            .find_map(|line| line.trim().strip_prefix(&format!("official:{key})")))
-            .unwrap_or_else(|| panic!("scripts/channel.sh has no official:{key} entry"));
         assert!(
-            line.contains(&format!("'%s' {name} ;;")),
-            "the official column of scripts/channel.sh moved: {key} now stamps \
-             {line:?} — {name} is what installed copies already answer to, and \
-             renaming it silently orphans every override a user has set"
+            row(key).contains(&format!("official: \"{name}\"")),
+            "the official column of scripts/channel.mjs moved: {key} no longer \
+             stamps {name:?} — that is what installed copies already answer to, \
+             and renaming it silently orphans every override a user has set"
         );
     }
 
+    // The marked columns keep their marks: a channel whose binaries do not
+    // carry its suffix is one whose installer kills another line's processes.
+    for (key, dev, beta, alpha) in [
+        ("cli_binary", "genet-dev", "genet-beta", "genet-alpha"),
+        ("agent_binary", "genet-agent-dev", "genet-agent-beta", "genet-agent-alpha"),
+        (
+            "desktop_binary",
+            "genethub-desktop-dev",
+            "genethub-desktop-beta",
+            "genethub-desktop-alpha",
+        ),
+    ] {
+        let row = row(key);
+        for (channel, name) in [("dev", dev), ("beta", beta), ("alpha", alpha)] {
+            assert!(
+                row.contains(&format!("{channel}: \"{name}\"")),
+                "the {channel} column of {key} lost its mark ({name})"
+            );
+        }
+    }
+
+    // dev updates from nowhere and points at no Hub: a source build is not on
+    // the release scale, and pretending otherwise is how a dev daemon reads a
+    // release's data or announces a downgrade as an upgrade.
+    assert!(
+        row("manifest_url").contains("dev: \"\""),
+        "the dev column gained an update manifest — a source build must not \
+         measure itself against any release"
+    );
+    assert!(
+        row("hub_url").contains("dev: \"\""),
+        "the dev column gained a default Hub — a source build points nowhere \
+         unless told"
+    );
+
     // And the daemon the shell spawns has to hear the same override name the
-    // daemon listens for, on both channels — a mismatch is the shell and the
+    // daemon listens for, on every channel — a mismatch is the shell and the
     // daemon disagreeing about where the data lives.
     let shell = read(repo().join("apps/desktop/src-tauri/src/daemon.rs"));
     assert!(

@@ -14,7 +14,16 @@ fn daemon_binary() -> Option<PathBuf> {
     // The desktop crate is outside the workspace, so the daemon lands in the
     // workspace's own target directory rather than this crate's.
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let candidate = repo.join("target/debug/genet");
+    // The stamp decides what the binary is called (`genet` in a release,
+    // `genet-dev` in the tree) — read it from the daemon's channel constants
+    // rather than pinning one channel's name here.
+    let channel = std::fs::read_to_string(repo.join("apps/daemon/src/channel.rs")).ok()?;
+    let name = channel
+        .lines()
+        .find_map(|line| line.strip_prefix("pub const CLI_BINARY: &str = "))?
+        .trim()
+        .trim_matches(|c| c == '"' || c == ';');
+    let candidate = repo.join(format!("target/debug/{name}"));
     candidate.exists().then_some(candidate)
 }
 
