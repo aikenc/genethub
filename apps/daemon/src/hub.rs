@@ -146,10 +146,7 @@ impl Client {
     pub async fn machines(&self, enrollment: &Enrollment) -> Result<Vec<HubMachine>> {
         let response = self
             .http
-            .get(self.url(&format!(
-                "/api/machines/{}/directory",
-                enrollment.daemon_id
-            )))
+            .get(self.url(&format!("/api/machines/{}/directory", enrollment.daemon_id)))
             .bearer_auth(&enrollment.secret)
             .send()
             .await
@@ -168,10 +165,7 @@ impl Client {
     pub async fn ticket(&self, enrollment: &Enrollment, machine_id: &str) -> Result<HubTicket> {
         let response = self
             .http
-            .post(self.url(&format!(
-                "/api/machines/{}/tickets",
-                enrollment.daemon_id
-            )))
+            .post(self.url(&format!("/api/machines/{}/tickets", enrollment.daemon_id)))
             .bearer_auth(&enrollment.secret)
             .json(&serde_json::json!({ "machineId": machine_id }))
             .send()

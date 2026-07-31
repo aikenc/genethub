@@ -217,7 +217,10 @@ mod tests {
 
     #[test]
     fn decode_output_keeps_ascii() {
-        assert_eq!(decode_output(b"FINDSTR: Cannot open versionCode"), "FINDSTR: Cannot open versionCode");
+        assert_eq!(
+            decode_output(b"FINDSTR: Cannot open versionCode"),
+            "FINDSTR: Cannot open versionCode"
+        );
     }
 
     #[cfg(windows)]

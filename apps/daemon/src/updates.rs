@@ -89,7 +89,11 @@ async fn fetch(url: &str) -> Result<Manifest> {
         // tell what asked.
         .header(
             reqwest::header::USER_AGENT,
-            format!("{}/{}", crate::channel::DAEMON_BINARY, env!("CARGO_PKG_VERSION")),
+            format!(
+                "{}/{}",
+                crate::channel::DAEMON_BINARY,
+                env!("CARGO_PKG_VERSION")
+            ),
         )
         .send()
         .await
@@ -329,7 +333,11 @@ async fn fetch_installer(state: &Shared, version: &str, url: &str, target: &Path
         .get(url)
         .header(
             reqwest::header::USER_AGENT,
-            format!("{}/{}", crate::channel::DAEMON_BINARY, env!("CARGO_PKG_VERSION")),
+            format!(
+                "{}/{}",
+                crate::channel::DAEMON_BINARY,
+                env!("CARGO_PKG_VERSION")
+            ),
         )
         .send()
         .await

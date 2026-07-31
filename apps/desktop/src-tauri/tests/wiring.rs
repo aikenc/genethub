@@ -407,7 +407,7 @@ fn nothing_in_the_tree_claims_to_be_beta() {
             "apps/desktop/src-tauri/src/channel.rs",
             "pub const CHANNEL: &str = \"official\";",
         ),
-        ("packages/web/src/channel.ts", "export const CHANNEL = \"official\";"),
+        ("packages/web/src/channel.ts", "export const CHANNEL: \"official\" | \"beta\" = \"official\";"),
     ];
     for (path, marker) in modules {
         let body = read(repo().join(path));

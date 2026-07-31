@@ -32,4 +32,7 @@ pub const DEFAULT_MACHINE_NAME: &str = "GeneHub machine";
 /// What the built-in agent calls itself in the picker.
 pub const AGENT_LABEL: &str = "GeneHub Agent";
 /// Where the published builds of this channel announce themselves.
-pub const DEFAULT_MANIFEST_URL: &str = "https://github.com/aikenc/genethub/releases/latest/download/latest.json";
+// Broken across two lines: either channel's URL is longer than rustfmt's
+// line budget, and CI rejects a tree rustfmt would rewrite.
+pub const DEFAULT_MANIFEST_URL: &str =
+    "https://github.com/aikenc/genethub/releases/latest/download/latest.json";
