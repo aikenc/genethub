@@ -1,5 +1,5 @@
 import type { AgentInfo } from "@genehub/proto";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ComposerControls } from "./ComposerControls";
@@ -96,6 +96,35 @@ describe("the agent picker once a conversation has started", () => {
       />,
     );
     expect(screen.getByLabelText("agent")).toBeDisabled();
+  });
+
+  it("does not show Codex while the session is still bound to an unavailable built-in", () => {
+    const onPickAgent = vi.fn();
+    const agents: AgentInfo[] = [
+      { ...AGENTS[0]!, probe: { state: "notInstalled" } },
+      { ...AGENTS[1]!, id: "codex", label: "Codex", catalog: { ...AGENTS[0]!.catalog } },
+    ];
+    render(
+      <ComposerControls
+        agents={agents}
+        agentId="genet"
+        modelId={null}
+        modeId={null}
+        effortId={null}
+        agentLocked={false}
+        onPickAgent={onPickAgent}
+        onPickModel={vi.fn()}
+        onPickMode={vi.fn()}
+        onPickEffort={vi.fn()}
+      />,
+    );
+
+    const picker = screen.getByLabelText("agent") as HTMLSelectElement;
+    expect(picker.value).toBe("genet");
+    expect(picker.selectedOptions[0]?.textContent).toBe("GeneHub Agent（不可用）");
+
+    fireEvent.change(picker, { target: { value: "codex" } });
+    expect(onPickAgent).toHaveBeenCalledWith("codex");
   });
 });
 
