@@ -1,4 +1,5 @@
 pub mod daemon;
+mod channel;
 mod tray;
 
 use std::path::{Path, PathBuf};
@@ -98,7 +99,10 @@ fn install_update(app: tauri::AppHandle, path: String) -> Result<(), String> {
     // while pointing exactly where the check was meant to stop it.
     let dir = std::fs::canonicalize(&dir).map_err(|error| error.to_string())?;
     if file.parent() != Some(dir.as_path()) {
-        return Err("这个安装包不在 GeneHub 的更新目录里，没有运行".into());
+        return Err(format!(
+            "这个安装包不在 {} 的更新目录里，没有运行",
+            channel::PRODUCT
+        ));
     }
     if !file.is_file() {
         return Err(format!("{} 不是一个文件", file.display()));
@@ -179,7 +183,7 @@ fn stand_down(app: &tauri::AppHandle) {
 fn updates_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
-        .map(|dir| dir.join("GeneHub").join("updates"))
+        .map(|dir| dir.join(channel::DATA_DIR_NAME).join("updates"))
         .map_err(|error| error.to_string())
 }
 
@@ -265,7 +269,7 @@ pub fn logs_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> PathBuf {
     use tauri::Manager;
     app.path()
         .app_data_dir()
-        .map(|dir| dir.join("GeneHub").join("logs"))
+        .map(|dir| dir.join(channel::DATA_DIR_NAME).join("logs"))
         .unwrap_or_else(|_| PathBuf::from("logs"))
 }
 
@@ -302,7 +306,7 @@ fn open_window(app: tauri::AppHandle, url: String) -> Result<(), String> {
     }
 
     tauri::WebviewWindowBuilder::new(&app, LOGIN_WINDOW, tauri::WebviewUrl::External(parsed))
-        .title("登录 GeneHub")
+        .title(format!("登录 {}", channel::PRODUCT))
         .inner_size(480.0, 680.0)
         .resizable(true)
         .build()
@@ -379,7 +383,7 @@ pub fn run() {
         }))
         .setup(|app| {
             let handle = app.handle();
-            let data_dir = app.path().app_data_dir()?.join("GeneHub");
+            let data_dir = app.path().app_data_dir()?.join(channel::DATA_DIR_NAME);
             let _ = std::fs::create_dir_all(&data_dir);
             // The same `logs/` the daemon writes into. One place to open, and one
             // place to attach to a report: the shell's account of the startup and
@@ -389,20 +393,20 @@ pub fn run() {
             tracing_line(&format!("数据目录 {}", data_dir.display()));
 
             let name = if cfg!(windows) {
-                "genet-daemon.exe"
+                format!("{}.exe", channel::DAEMON_BINARY)
             } else {
-                "genet-daemon"
+                channel::DAEMON_BINARY.to_string()
             };
             // A missing binary used to end `setup`, which means the app does not
             // open at all — the one failure mode with nowhere to put an
             // explanation. Now it opens and says so: `start` fails naming the
             // path it looked at, which is what someone would need to check.
-            let binary = bundled_binary(handle, name).unwrap_or_else(|| {
+            let binary = bundled_binary(handle, &name).unwrap_or_else(|| {
                 let expected = app
                     .path()
                     .resource_dir()
-                    .map(|dir| dir.join("bin").join(name))
-                    .unwrap_or_else(|_| PathBuf::from(name));
+                    .map(|dir| dir.join("bin").join(&name))
+                    .unwrap_or_else(|_| PathBuf::from(&name));
                 tracing_line(&format!(
                     "找不到内置的 {name}，期望在 {}",
                     expected.display()
@@ -476,7 +480,7 @@ pub fn run() {
             pick_directory
         ])
         .build(tauri::generate_context!())
-        .expect("failed to build GeneHub")
+        .expect("failed to build the app")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 if let Some(state) = app.try_state::<AppState>() {

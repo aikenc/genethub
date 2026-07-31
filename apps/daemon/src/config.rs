@@ -30,16 +30,17 @@ impl Paths {
         }
     }
 
-    /// `$GENEHUB_DATA_DIR`, else the platform data directory.
+    /// The data-dir override named by this channel, else the platform data
+    /// directory.
     ///
     /// The override exists so every test can run against its own directory;
     /// shared state between tests costs far more to debug than it saves.
     pub fn discover() -> Result<Self> {
-        let root = match std::env::var("GENEHUB_DATA_DIR") {
+        let root = match std::env::var(crate::channel::ENV_DATA_DIR) {
             Ok(dir) => PathBuf::from(dir),
             Err(_) => dirs::data_dir()
                 .context("no platform data directory")?
-                .join("GeneHub"),
+                .join(crate::channel::DATA_DIR_NAME),
         };
         Ok(Paths {
             root,
@@ -105,16 +106,17 @@ impl Paths {
     }
 }
 
-/// `$GENEHUB_WORKSPACE_DIR`, else `GeneHub` in the user's home.
+/// The workspace override named by this channel, else a folder in the user's
+/// home named after it.
 ///
 /// It sits in the home directory rather than somewhere hidden because the user
 /// is expected to open it, drop files in it, and point their own editor at it.
 fn default_workspace() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("GENEHUB_WORKSPACE_DIR") {
+    if let Ok(dir) = std::env::var(crate::channel::ENV_WORKSPACE_DIR) {
         return Ok(PathBuf::from(dir));
     }
     let home = dirs::home_dir().context("no home directory")?;
-    Ok(home.join("GeneHub"))
+    Ok(home.join(crate::channel::WORKSPACE_DIR_NAME))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,7 +149,7 @@ impl Default for Config {
             agents: AgentsConfig::default(),
             workspaces: Vec::new(),
             replay_window: 2048,
-            update_manifest_url: crate::updates::DEFAULT_MANIFEST_URL.to_string(),
+            update_manifest_url: crate::channel::DEFAULT_MANIFEST_URL.to_string(),
         }
     }
 }

@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::AppState;
 
-pub const TRAY_ID: &str = "genethub-tray";
+pub const TRAY_ID: &str = crate::channel::TRAY_ID;
 
 /// The status line, kept so it can be rewritten as the daemon comes and goes.
 ///
@@ -48,7 +48,13 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     // In the tray rather than only in the workbench: the times someone wants the
     // logs include the times the window will not show anything useful.
     let logs = MenuItem::with_id(app, "logs", "打开日志目录", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出 GeneHub", true, None::<&str>)?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        format!("退出 {}", crate::channel::PRODUCT),
+        true,
+        None::<&str>,
+    )?;
 
     let menu = Menu::with_items(
         app,
@@ -66,7 +72,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     )?;
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .tooltip("GeneHub")
+        .tooltip(crate::channel::PRODUCT)
         .icon(app.default_window_icon().cloned().expect("bundled icon"))
         .menu(&menu)
         .show_menu_on_left_click(false)

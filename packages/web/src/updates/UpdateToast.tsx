@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { PRODUCT } from "../channel";
 import type { Host } from "../host";
 import { useWorkbench } from "../session/store";
 
@@ -65,8 +66,8 @@ export function UpdateToast({ host }: { host: Host }) {
           <p className="font-medium">新版本 {download.version} 已下载</p>
           <p className="mt-1 text-muted">
             {host.installUpdate
-              ? "安装会关掉 GeneHub，正在跑的会话会被打断；装完它自己会重新打开。"
-              : "安装包在那台电脑上，去电脑上打开 GeneHub 完成安装。"}
+              ? `安装会关掉 ${PRODUCT}，正在跑的会话会被打断；装完它自己会重新打开。`
+              : `安装包在那台电脑上，去电脑上打开 ${PRODUCT} 完成安装。`}
           </p>
           {host.installUpdate ? null : (
             <p className="mt-1 break-all text-faint">{download.path}</p>

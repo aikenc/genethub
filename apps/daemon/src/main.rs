@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("GENEHUB_LOG")
+            tracing_subscriber::EnvFilter::try_from_env(genet_daemon::channel::ENV_LOG)
                 .unwrap_or_else(|_| "info".into()),
         )
         .with_writer(Tee::new(genet_daemon::logs::LogFile::open(

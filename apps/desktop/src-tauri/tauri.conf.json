@@ -3,6 +3,7 @@
   "productName": "GeneHub",
   "version": "0.0.0",
   "identifier": "com.genethub.desktop",
+  "mainBinaryName": "genethub-desktop",
   "build": {
     "frontendDist": "../../../packages/web/dist",
     "beforeBuildCommand": "npm --prefix ../../packages/web run build",

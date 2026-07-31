@@ -431,7 +431,7 @@ async fn discover(program: &Path) -> Option<Hello> {
             "method": "initialize",
             "params": { "clientInfo": {
                 "name": CLIENT_NAME,
-                "title": "GeneHub",
+                "title": crate::channel::PRODUCT,
                 "version": env!("CARGO_PKG_VERSION"),
             } },
         });
@@ -692,7 +692,7 @@ impl CodexSession {
             "initialize",
             json!({ "clientInfo": {
                 "name": CLIENT_NAME,
-                "title": "GeneHub",
+                "title": crate::channel::PRODUCT,
                 "version": env!("CARGO_PKG_VERSION"),
             } }),
         )

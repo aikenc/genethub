@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { PRODUCT } from "../channel";
 import type { Host, WindowControls } from "../host";
 import { useWorkbench } from "../session/store";
 import { THEME_OPTIONS, useTheme } from "../theme/store";
@@ -40,7 +41,7 @@ export function TitleBar({
         data-tauri-drag-region
         className="pointer-events-none px-1.5 text-xs font-medium text-muted"
       >
-        GeneHub
+        {PRODUCT}
       </span>
       <AppMenu host={host} sidebarHidden={sidebarHidden} onToggleSidebar={onToggleSidebar} />
       {/* The rest of the bar is the handle. Without something growing here the

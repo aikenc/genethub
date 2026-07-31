@@ -28,9 +28,9 @@ use crate::state::Shared;
 ///
 /// The open repository's own releases rather than a service: a copy of this
 /// daemon should not have to reach anybody's control plane to learn that a newer
-/// copy of itself exists.
-pub const DEFAULT_MANIFEST_URL: &str =
-    "https://github.com/aikenc/genethub/releases/latest/download/latest.json";
+/// copy of itself exists. Per channel, so a beta never measures itself against
+/// an official release — the address lives with the other channel names.
+pub use crate::channel::DEFAULT_MANIFEST_URL;
 
 /// Long enough for a slow link, short enough that the window says something
 /// while the person who clicked is still looking at it. A timeout rather than a
@@ -89,7 +89,7 @@ async fn fetch(url: &str) -> Result<Manifest> {
         // tell what asked.
         .header(
             reqwest::header::USER_AGENT,
-            format!("genet-daemon/{}", env!("CARGO_PKG_VERSION")),
+            format!("{}/{}", crate::channel::DAEMON_BINARY, env!("CARGO_PKG_VERSION")),
         )
         .send()
         .await
@@ -329,7 +329,7 @@ async fn fetch_installer(state: &Shared, version: &str, url: &str, target: &Path
         .get(url)
         .header(
             reqwest::header::USER_AGENT,
-            format!("genet-daemon/{}", env!("CARGO_PKG_VERSION")),
+            format!("{}/{}", crate::channel::DAEMON_BINARY, env!("CARGO_PKG_VERSION")),
         )
         .send()
         .await

@@ -70,7 +70,7 @@ struct ModelsFile {
 
 /// Where sessions and `models.json` live.
 pub fn data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("GENET_AGENT_HOME") {
+    if let Ok(dir) = std::env::var(crate::channel::ENV_HOME) {
         if !dir.is_empty() {
             return PathBuf::from(dir);
         }
@@ -78,7 +78,7 @@ pub fn data_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
-    Path::new(&home).join(".genet-agent")
+    Path::new(&home).join(crate::channel::HOME_DIR_NAME)
 }
 
 pub fn load_models() -> Vec<ModelConfig> {

@@ -3,17 +3,95 @@ name: Release
 # Installers, on a tag. Built on each platform because there is no honest way to
 # cross-build a Tauri bundle: the installer embeds the system WebView glue and
 # the packaging tool of the platform it targets.
+#
+# Two channels ship from this one workflow (`docs/dual-channel-release.md` in
+# genethub-cloud): a plain `v0.22.2` tag builds the official line, a
+# `v0.23.0-beta.4` tag builds the beta line. The tag decides everything — the
+# names the binaries carry, the Hub the build points at, the release it
+# publishes to — because a channel chosen by a dropdown in the Actions tab is
+# a channel somebody picks wrong.
 on:
   push:
     tags: ["v*"]
-  # Also runnable by hand, so a release can be rehearsed without inventing a tag
-  # for it. Nothing is published in that case.
+  # Also runnable by hand, so a release can be rehearsed without inventing a
+  # tag for it. Nothing is published in that case, and the build is official,
+  # matching the tree.
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # What this run is. Every later job reads the answers from here rather than
+  # re-deriving them, so there is exactly one place where the tag's shape
+  # becomes a channel.
+  channel:
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.detect.outputs.name }}
+      asset_prefix: ${{ steps.detect.outputs.asset_prefix }}
+      tarball_prefix: ${{ steps.detect.outputs.tarball_prefix }}
+      manifest: ${{ steps.detect.outputs.manifest }}
+      hub_url: ${{ steps.detect.outputs.hub_url }}
+      prerelease: ${{ steps.detect.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The tag's shape, and only that: `v1.2.3` is official,
+          # `v1.3.0-beta.4` is beta, and anything else is not a release —
+          # refused here rather than published under a guessed channel.
+          tag="${GITHUB_REF_NAME:-}"
+          if [[ "$tag" == v* ]]; then
+            case "$tag" in
+              v[0-9]*.[0-9]*.[0-9]*-beta.[0-9]*) want=beta ;;
+              v[0-9]*.[0-9]*.[0-9]*)             want=official ;;
+              *) echo "::error::'$tag' is neither vX.Y.Z nor vX.Y.Z-beta.N — no such release"; exit 1 ;;
+            esac
+          fi
+          channel="$(./scripts/channel.sh --detect)"
+          if [[ "$tag" == v* && "${want:-}" != "$channel" ]]; then
+            echo "::error::tag says ${want:-?} but scripts/channel.sh says $channel — the two rules drifted"
+            exit 1
+          fi
+
+          # Number discipline the checklist cannot enforce: once a minor has
+          # shipped officially, a beta of that same minor is an update that is
+          # older than what its testers already run. Betas live strictly on
+          # the next minor.
+          if [ "$channel" = beta ] && [[ "$tag" == v* ]]; then
+            latest_official="$(gh release view --json tagName -q .tagName || true)"
+            if [ -n "$latest_official" ]; then
+              beta_minor="$(sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/' <<<"$tag")"
+              official_minor="$(sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/' <<<"$latest_official")"
+              if [ "$beta_minor" -le "$official_minor" ]; then
+                echo "::error::$tag is a beta of minor $beta_minor, but $latest_official already shipped — betas start at 0.$((official_minor + 1)).0-beta.1"
+                exit 1
+              fi
+            fi
+          fi
+
+          {
+            echo "name=$channel"
+            if [ "$channel" = beta ]; then
+              echo "asset_prefix=GeneHub-beta"
+              echo "tarball_prefix=genet-beta"
+              echo "manifest=latest-beta.json"
+              echo "hub_url=${{ vars.GENEHUB_BETA_HUB_URL || 'https://relay-beta.genethub.com' }}"
+              echo "prerelease=true"
+            else
+              echo "asset_prefix=GeneHub"
+              echo "tarball_prefix=genet"
+              echo "manifest=latest.json"
+              echo "hub_url=${{ vars.GENEHUB_HUB_URL || 'https://relay.genethub.com' }}"
+              echo "prerelease=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
   # Windows is the only platform that gets an installer in this version.
   #
   # Linux gets the pair of binaries below instead: a Linux box is usually reached
@@ -23,6 +101,7 @@ jobs:
   # dependency. macOS waits for signing and notarisation, without which the
   # download is a security warning with an app behind it.
   installers:
+    needs: channel
     strategy:
       fail-fast: false
       matrix:
@@ -30,10 +109,6 @@ jobs:
           - os: windows-2022
             platform: windows
             bundles: nsis
-            # A name without the version in it, so the download link can stay
-            # `releases/latest/download/<name>` forever instead of being
-            # rewritten on every release.
-            asset: GeneHub-windows-x64-setup.exe
             pattern: "*-setup.exe"
     runs-on: ${{ matrix.os }}
     steps:
@@ -50,10 +125,14 @@ jobs:
         working-directory: apps/desktop
 
       # The version this release ships, taken from the tag and written into the
-      # three files that have to carry one. The tree itself says 0.0.0 and no
-      # human ever edits a version — `scripts/version.sh` explains why, and holds
-      # the whole rule so that no workflow has to repeat it.
-      - run: ./scripts/version.sh --from-tag
+      # three files that have to carry one, and the channel, written into
+      # everything that names a process, a directory or an override. The tree
+      # itself says 0.0.0 and official — no human edits either: `scripts/version.sh`
+      # and `scripts/channel.sh` explain why, and hold the whole rule so that no
+      # workflow has to repeat it.
+      - run: |
+          ./scripts/version.sh --from-tag
+          ./scripts/channel.sh --from-tag
         shell: bash
 
       # Stages the daemon and the built-in agent into the bundle. The checks on
@@ -67,14 +146,15 @@ jobs:
         shell: bash
         env:
           BUNDLES: ${{ matrix.bundles }}
-          # The Hub this build suggests. Only published builds get one: a copy
-          # someone compiles from this repository has no business defaulting to
-          # somebody else's service, and the field stays empty there.
+          # The Hub this build suggests, per channel. Only published builds get
+          # one: a copy someone compiles from this repository has no business
+          # defaulting to somebody else's service, and the field stays empty
+          # there.
           #
           # Without it, a first run asks the person to type an address they have
           # no way of knowing, and "先体验" — the one click that is supposed to
           # make a phone able to reach this machine — cannot even be pressed.
-          VITE_GENEHUB_HUB_URL: ${{ vars.GENEHUB_HUB_URL || 'https://relay.genethub.com' }}
+          VITE_GENEHUB_HUB_URL: ${{ needs.channel.outputs.hub_url }}
         run: |
           set -uo pipefail
           # The runner's shell already has `-e`, which would end this script at
@@ -94,13 +174,22 @@ jobs:
       # the name in the Start menu, while the process is `genethub-desktop.exe`.
       # Only the build knows which is which, so it is asked here rather than
       # assumed in a comment.
-      - name: The installer stops processes that exist
+      #
+      # The names live in `!define` lines now, because the channel decides them
+      # and the two channels install side by side: a beta installer must stop
+      # beta processes and leave the official line alone, and the defines are
+      # what `scripts/channel.sh` stamps. The stamp is checked both ways —
+      # beta names all carry `-beta`, official names never do — because a
+      # half-stamped tree is exactly how one channel's installer learns to
+      # kill the other's daemon.
+      - name: The installer stops processes that exist, and only this channel's
         shell: bash
         run: |
           set -euo pipefail
-          names="$(grep -oE '/IM [A-Za-z0-9._-]+\.exe' apps/desktop/src-tauri/installer.nsh \
-            | sed 's|/IM ||' | sort -u)"
+          names="$(grep -oE '^!define GH_[A-Z]+_EXE "[^"]+"' apps/desktop/src-tauri/installer.nsh \
+            | sed 's/.*"\(.*\)"/\1/')"
           test -n "$names" || { echo "::error::the installer hook stops nothing"; exit 1; }
+          channel="$(./scripts/channel.sh --show)"
           for name in $names; do
             found="$(find apps/desktop/src-tauri/target/release target/release \
               -maxdepth 1 -name "$name" -print -quit 2>/dev/null || true)"
@@ -108,6 +197,15 @@ jobs:
               echo "::error::installer.nsh stops '$name', but no executable of that name is built"
               exit 1
             }
+            case "$channel:$name" in
+              beta:*-beta.exe) ;;
+              official:*) [ "${name%-beta.exe}" = "$name" ] || {
+                echo "::error::official build ships a beta process name '$name' — a half-stamped tree"
+                exit 1
+              } ;;
+              *) echo "::error::beta build ships an unmarked process name '$name' — it would fight the official line"
+                exit 1 ;;
+            esac
             echo "ok: $name -> $found"
           done
 
@@ -118,15 +216,16 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          . scripts/channel.env
           root="$(mktemp -d)"
           exe=""
           [ "${{ matrix.platform }}" = "windows" ] && exe=".exe"
           # And that it is the build this release claims to be. Without this, a
           # job that lost its stamping step would ship a daemon calling itself
           # 0.0.0 — which tells every user they run an unreleased build, silently.
-          ./scripts/version.sh --verify "target/release/genet-daemon$exe" || exit 1
-          GENEHUB_DATA_DIR="$root/data" GENEHUB_WORKSPACE_DIR="$root/workspace" \
-            "target/release/genet-daemon$exe" >"$root/out.json" 2>"$root/err.log" &
+          ./scripts/version.sh --verify "target/release/$DAEMON_BINARY$exe" || exit 1
+          env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
+            "target/release/$DAEMON_BINARY$exe" >"$root/out.json" 2>"$root/err.log" &
           pid=$!
           for _ in $(seq 1 30); do
             grep -q '"event":"listening"' "$root/out.json" && break
@@ -145,8 +244,8 @@ jobs:
       # Two names for one file, on purpose:
       #
       # The version-free one is what a link can point at forever
-      # (`releases/latest/download/<name>`), which is what the install script and
-      # the docs use.
+      # (`releases/latest/download/<name>` for official; the rolling `beta`
+      # release for beta), which is what the install script and the docs use.
       #
       # The versioned one is what a person downloads. A browser that has seen
       # `GeneHub-windows-x64-setup.exe` before saves the next one as `(1)`, and
@@ -154,23 +253,26 @@ jobs:
       # version is in which file.
       - name: Name the artifact, twice
         shell: bash
+        env:
+          ASSET_PREFIX: ${{ needs.channel.outputs.asset_prefix }}
         run: |
           set -euo pipefail
           found="$(find apps/desktop/src-tauri/target/release/bundle -name '${{ matrix.pattern }}' -print -quit)"
           test -n "$found" || { echo "no installer matched ${{ matrix.pattern }}" >&2; exit 1; }
           mkdir -p dist
-          cp "$found" "dist/${{ matrix.asset }}"
+          asset="$ASSET_PREFIX-windows-x64-setup.exe"
+          cp "$found" "dist/$asset"
           version="${GITHUB_REF_NAME#v}"
           case "$version" in
             # Not a tag build: there is no version to put in a name.
             *[!0-9.]*|"") echo "no version in '$GITHUB_REF_NAME', keeping one name" ;;
-            *) cp "$found" "dist/$(echo '${{ matrix.asset }}' | sed "s/^GeneHub-/GeneHub-$version-/")" ;;
+            *) cp "$found" "dist/$ASSET_PREFIX-$version-windows-x64-setup.exe" ;;
           esac
           ls -la dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
+          name: windows-setup
           path: dist/*
 
   # The pair `scripts/install.sh` downloads, and the whole of what Linux gets in
@@ -181,13 +283,13 @@ jobs:
   # on ubuntu-22.04 was requiring GLIBC_2.34 and failing on those machines with
   # a wall of `version 'GLIBC_…' not found` — exactly what `curl | sh` users hit.
   binaries:
+    needs: channel
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
-            asset: genet-linux-x64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -199,16 +301,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      # As in the installer job: the tag is where the version comes from.
-      - run: ./scripts/version.sh --from-tag
+      # As in the installer job: the tag is where the version and the channel
+      # come from.
+      - run: |
+          ./scripts/version.sh --from-tag
+          ./scripts/channel.sh --from-tag
+        shell: bash
       - run: cargo build --release -p genet-daemon -p genet-agent --target ${{ matrix.target }}
       - name: Pack
         shell: bash
+        env:
+          TARBALL_PREFIX: ${{ needs.channel.outputs.tarball_prefix }}
         run: |
           set -euo pipefail
+          . scripts/channel.env
           mkdir -p dist
-          tar -czf "dist/${{ matrix.asset }}" \
-            -C "target/${{ matrix.target }}/release" genet-daemon genet-agent
+          tar -czf "dist/$TARBALL_PREFIX-linux-x64.tar.gz" \
+            -C "target/${{ matrix.target }}/release" "$DAEMON_BINARY" "$AGENT_BINARY"
           ls -la dist
       # What the tarball promises: two binaries that start on a machine with no
       # graphical session and nothing else installed — including no particular
@@ -216,26 +325,29 @@ jobs:
       # the proof.
       - name: Check the binaries in the tarball start on their own
         shell: bash
+        env:
+          TARBALL_PREFIX: ${{ needs.channel.outputs.tarball_prefix }}
         run: |
           set -euo pipefail
+          . scripts/channel.env
           root="$(mktemp -d)"
-          tar -xzf "dist/${{ matrix.asset }}" -C "$root"
+          tar -xzf "dist/$TARBALL_PREFIX-linux-x64.tar.gz" -C "$root"
           # The unpacked copy, so this is a claim about what is in the tarball
           # rather than about what was left in the build directory.
-          ./scripts/version.sh --verify "$root/genet-daemon"
+          ./scripts/version.sh --verify "$root/$DAEMON_BINARY"
           # Static-pie prints "statically linked" and exits 0; a fully static
           # binary may exit 1 with "not a dynamic executable". Either is fine.
           # What is not fine is a list of .so dependencies on the host glibc.
-          ldd "$root/genet-daemon" >/tmp/ldd.out 2>&1 || true
+          ldd "$root/$DAEMON_BINARY" >/tmp/ldd.out 2>&1 || true
           if grep -qiE 'not a dynamic|statically linked' /tmp/ldd.out; then
-            echo "genet-daemon is statically linked"
+            echo "$DAEMON_BINARY is statically linked"
           else
-            echo "FAIL: genet-daemon is dynamically linked; old glibc hosts will break:" >&2
+            echo "FAIL: $DAEMON_BINARY is dynamically linked; old glibc hosts will break:" >&2
             cat /tmp/ldd.out >&2
             exit 1
           fi
-          GENEHUB_DATA_DIR="$root/data" GENEHUB_WORKSPACE_DIR="$root/workspace" \
-            timeout 30 "$root/genet-daemon" >"$root/out.json" 2>"$root/err.log" || true
+          env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
+            timeout 30 "$root/$DAEMON_BINARY" >"$root/out.json" 2>"$root/err.log" || true
           grep -q '"event":"listening"' "$root/out.json" || {
             echo "FAIL: the packed daemon did not come up" >&2
             cat "$root/err.log" >&2
@@ -246,14 +358,15 @@ jobs:
           echo "the packed daemon is static, starts, and prepares a folder to work in"
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          name: linux-tarball
+          path: dist/*
 
   # Not published: this is where the claims about what goes *inside* an installer
   # are checked, because `dpkg-deb` is the only tooling that can look. Losing the
   # Linux installer as a product must not lose the only check that the bundle has
   # no Node runtime in it and stays under the size budget.
   bundle-checks:
+    needs: channel
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -269,13 +382,17 @@ jobs:
         working-directory: packages/web
       - run: npm ci
         working-directory: apps/desktop
+      # Stamped like the build jobs, so a beta run checks a beta package rather
+      # than silently checking an official one.
+      - run: ./scripts/channel.sh --from-tag
+        shell: bash
       - name: Build a package and check what is inside it
         run: ./apps/desktop/scripts/bundle.sh
         env:
           BUNDLES: deb
 
   publish:
-    needs: [installers, binaries, bundle-checks]
+    needs: [channel, installers, binaries, bundle-checks]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -288,9 +405,11 @@ jobs:
       # has something to ask that is not the GitHub API: 60 requests an hour is
       # counted per address, and everyone behind one office router shares it.
       #
-      # Named without the version for the same reason as the installer, which is
-      # what makes `releases/latest/download/latest.json` an address that never
-      # moves.
+      # One manifest per channel — `latest.json` and `latest-beta.json` — and
+      # never one measuring the other: the two lines version independently,
+      # and a beta that compared itself against the official number would
+      # announce a downgrade as an upgrade. `channel` is written into the file
+      # so a reader can refuse a manifest that is not its own.
       #
       # Shaped like a Tauri updater manifest although nothing signs anything yet:
       # if the shell ever grows an updater, this file at this URL is what it
@@ -298,6 +417,10 @@ jobs:
       # rather than empty, so an updater would fail closed instead of accepting
       # an unsigned bundle.
       - name: Say what the newest version is, at an address that never moves
+        env:
+          CHANNEL: ${{ needs.channel.outputs.name }}
+          MANIFEST: ${{ needs.channel.outputs.manifest }}
+          ASSET_PREFIX: ${{ needs.channel.outputs.asset_prefix }}
         run: |
           set -euo pipefail
           node -e '
@@ -306,9 +429,10 @@ jobs:
             const version = tag.replace(/^v/, "");
             const release = `https://github.com/${repo}/releases`;
             require("node:fs").writeFileSync(
-              "dist/latest.json",
+              `dist/${process.env.MANIFEST}`,
               JSON.stringify(
                 {
+                  channel: process.env.CHANNEL,
                   version,
                   pub_date: new Date().toISOString(),
                   // Where a person goes. The installer URL is for a machine; a
@@ -316,7 +440,7 @@ jobs:
                   page: `${release}/tag/${tag}`,
                   platforms: {
                     "windows-x86_64": {
-                      url: `${release}/download/${tag}/GeneHub-${version}-windows-x64-setup.exe`,
+                      url: `${release}/download/${tag}/${process.env.ASSET_PREFIX}-${version}-windows-x64-setup.exe`,
                     },
                   },
                 },
@@ -325,14 +449,30 @@ jobs:
               ) + "\n",
             );
           '
-          cat dist/latest.json
+          cat "dist/$MANIFEST"
       # Checksums, because a download that arrives corrupted should be provable
       # rather than argued about.
       - run: |
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+      # The tag's own release: official goes out as a normal release and may be
+      # `latest`; beta is always a prerelease and must never become `latest`,
+      # because `releases/latest` is the official line's fixed address.
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          prerelease: ${{ needs.channel.outputs.prerelease }}
           generate_release_notes: true
+      # Beta additionally publishes to a rolling `beta` release. GitHub's
+      # `latest` never names a prerelease, so without this there is no fixed
+      # address a beta daemon or install script can ask for the newest beta —
+      # this is the address `latest-beta.json` and the beta download base
+      # point at, and it is what makes them stay put.
+      - uses: softprops/action-gh-release@v2
+        if: needs.channel.outputs.prerelease == 'true'
+        with:
+          tag_name: beta
+          name: Beta
+          prerelease: true
+          files: dist/*

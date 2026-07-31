@@ -143,11 +143,14 @@ fn the_windows_installer_stops_the_daemon_before_replacing_it() {
         "the hook runs nowhere before the install"
     );
     // Every executable staged into the bundle is a file the installer will
-    // overwrite, so every one of them has to be stopped first.
-    for binary in ["genet-daemon.exe", "genet-agent.exe"] {
+    // overwrite, so every one of them has to be stopped first. The names come
+    // from the defines, not literals: the two channels install side by side,
+    // and scripts/channel.sh rewrites the defines for a beta build.
+    for define in ["GH_DAEMON_EXE", "GH_AGENT_EXE"] {
+        let exe = nsis_define(&script, define);
         assert!(
-            script.contains(binary),
-            "{binary} ships in the bundle but the installer never stops it"
+            script.contains(&format!("/T /IM ${{{define}}}")),
+            "{define} ({exe}) ships in the bundle but the installer never stops it"
         );
     }
 }
@@ -160,14 +163,22 @@ fn the_windows_installer_stops_the_daemon_before_replacing_it() {
 #[test]
 fn the_installer_stops_the_supervisor_before_the_thing_it_supervises() {
     let script = installer_hook();
-    let exe = format!("/IM {}.exe", installed_exe());
+    // The define has to name the executable the build actually ships: a define
+    // that drifted from mainBinaryName kills a process no machine has, which
+    // is the v0.1.7 bug wearing a new hat.
+    assert_eq!(
+        nsis_define(&script, "GH_DESKTOP_EXE"),
+        format!("{}.exe", installed_exe()),
+        "the installer's name for the app is not the executable the build ships"
+    );
+
     // The kill lines, not any mention of the names: the comment above them
     // explains this in prose and would otherwise decide the ordering.
     let app = script
-        .find(&exe)
+        .find("/IM ${GH_DESKTOP_EXE}")
         .expect("the app itself is never stopped, so it will revive the daemon");
     let daemon = script
-        .find("/IM genet-daemon.exe")
+        .find("/IM ${GH_DAEMON_EXE}")
         .expect("the daemon is never stopped");
     assert!(
         app < daemon,
@@ -221,10 +232,10 @@ fn an_upgrade_installs_over_the_top_instead_of_uninstalling_first() {
 #[test]
 fn the_hook_does_not_kill_the_installer_that_is_running_it() {
     let script = installer_hook();
-    let exe = format!("/IM {}.exe", installed_exe());
+    let exe = "/IM ${GH_DESKTOP_EXE}";
     let line = script
         .lines()
-        .find(|line| line.contains(&exe))
+        .find(|line| line.contains(exe))
         .expect("the app itself is never stopped, so it will revive the daemon");
     assert!(
         !line.contains("/T"),
@@ -234,7 +245,7 @@ fn the_hook_does_not_kill_the_installer_that_is_running_it() {
     // The daemon still goes down with everything it spawned: an agent holds its
     // own executable open exactly the way the daemon does.
     assert!(
-        script.contains("/F /T /IM genet-daemon.exe"),
+        script.contains("/F /T /IM ${GH_DAEMON_EXE}"),
         "the daemon is stopped without its children, so an agent it started \
          will still be holding a file the installer wants to write"
     );
@@ -278,6 +289,21 @@ fn installer_hook() -> String {
         .expect("no installer hooks: an upgrade will fail on a running daemon");
     std::fs::read_to_string(repo().join("apps/desktop/src-tauri").join(hook))
         .expect("the hook file named in the config is missing")
+}
+
+/// The value of a `!define NAME "value"` line in an NSIS script.
+///
+/// The hook names its processes through defines so `scripts/channel.sh` can
+/// stamp the beta names in; the tests resolve them rather than pinning the
+/// literal, because the literal is exactly what a channel build changes.
+fn nsis_define(script: &str, name: &str) -> String {
+    script
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&format!("!define {name} ")))
+        .unwrap_or_else(|| panic!("the hook has no !define {name}"))
+        .trim()
+        .trim_matches('"')
+        .to_string()
 }
 
 /// The binaries the installer promises are inside it. Named in one place here
@@ -356,6 +382,96 @@ fn nothing_in_the_tree_claims_to_be_a_release() {
              so a release would ship whatever is written there"
         );
     }
+}
+
+/// The product's channel works the way its version does: the tree says
+/// `official`, and a beta is the release workflow stamping it in
+/// (`scripts/channel.sh`, modelled on `scripts/version.sh`).
+///
+/// Checked here for the same reason as the version: a tree accidentally
+/// committed half-stamped for beta is a release that renames itself, kills
+/// the wrong processes and reads the wrong data directory. And the official
+/// column of the table is frozen — those names are what installed copies
+/// already answer to, so renaming one orphans every override a user has set.
+#[test]
+fn nothing_in_the_tree_claims_to_be_beta() {
+    let stamper = read(repo().join("scripts/channel.sh"));
+
+    // Every generated module says official, and the stamping script is what
+    // writes each of them — a constants file nothing regenerates is one a
+    // beta build compiles straight past.
+    let modules = [
+        ("apps/daemon/src/channel.rs", "pub const CHANNEL: &str = \"official\";"),
+        ("apps/agent/src/channel.rs", "pub const CHANNEL: &str = \"official\";"),
+        (
+            "apps/desktop/src-tauri/src/channel.rs",
+            "pub const CHANNEL: &str = \"official\";",
+        ),
+        ("packages/web/src/channel.ts", "export const CHANNEL = \"official\";"),
+    ];
+    for (path, marker) in modules {
+        let body = read(repo().join(path));
+        assert!(
+            body.contains(marker),
+            "{path} is not stamped official — the tree ships the official \
+             channel; a beta build stamps it in CI (scripts/channel.sh)"
+        );
+        assert!(
+            stamper.contains(path),
+            "{path} carries the channel and the stamping script does not write \
+             it, so a beta build would ship it saying whatever it says now"
+        );
+    }
+
+    let config = config();
+    assert_eq!(config["productName"], "GeneHub");
+    assert_eq!(config["identifier"], "com.genethub.desktop");
+    assert_eq!(config["mainBinaryName"], "genethub-desktop");
+
+    let installer = read(repo().join("scripts/install.sh"));
+    assert!(
+        installer.contains("# channel: official") && installer.contains("channel=official"),
+        "install.sh is not stamped official"
+    );
+
+    // The frozen column. These are the names already installed copies answer
+    // to; the beta column may grow, this one may not move.
+    let script = read(repo().join("scripts/channel.sh"));
+    for (key, name) in [
+        ("env_data_dir", "GENEHUB_DATA_DIR"),
+        ("env_workspace_dir", "GENEHUB_WORKSPACE_DIR"),
+        ("env_log", "GENEHUB_LOG"),
+        ("env_machine_name", "GENEHUB_MACHINE_NAME"),
+        ("env_agent_command", "GENET_AGENT_COMMAND"),
+        ("env_agent_home", "GENET_AGENT_HOME"),
+        ("env_download_base", "GENEHUB_DOWNLOAD_BASE"),
+        ("env_bin_dir", "GENEHUB_BIN_DIR"),
+        ("identifier", "com.genethub.desktop"),
+        ("daemon_binary", "genet-daemon"),
+        ("agent_binary", "genet-agent"),
+        ("desktop_binary", "genethub-desktop"),
+    ] {
+        let line = script
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&format!("official:{key})")))
+            .unwrap_or_else(|| panic!("scripts/channel.sh has no official:{key} entry"));
+        assert!(
+            line.contains(&format!("'%s' {name} ;;")),
+            "the official column of scripts/channel.sh moved: {key} now stamps \
+             {line:?} — {name} is what installed copies already answer to, and \
+             renaming it silently orphans every override a user has set"
+        );
+    }
+
+    // And the daemon the shell spawns has to hear the same override name the
+    // daemon listens for, on both channels — a mismatch is the shell and the
+    // daemon disagreeing about where the data lives.
+    let shell = read(repo().join("apps/desktop/src-tauri/src/daemon.rs"));
+    assert!(
+        shell.contains("crate::channel::ENV_DATA_DIR"),
+        "the shell names the data-dir override itself again instead of reading \
+         the channel constants"
+    );
 }
 
 fn read(path: PathBuf) -> String {

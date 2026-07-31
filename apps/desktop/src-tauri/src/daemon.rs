@@ -147,7 +147,7 @@ impl Daemon {
     fn spawn(&self) -> Result<Endpoint, String> {
         let mut command = Command::new(&self.binary);
         command
-            .env("GENEHUB_DATA_DIR", &self.data_dir)
+            .env(crate::channel::ENV_DATA_DIR, &self.data_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             // Kept rather than discarded: when a start times out, the reason the

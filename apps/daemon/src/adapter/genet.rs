@@ -26,7 +26,7 @@ use super::{
 };
 use crate::config::ProviderConfig;
 
-const BINARY: &str = "genet-agent";
+const BINARY: &str = crate::channel::AGENT_BINARY;
 
 /// The file name to look for beside the daemon.
 ///
@@ -83,7 +83,7 @@ impl GenetAdapter {
         let sibling = beside
             .map(|dir| dir.join(agent_file_name(cfg!(windows))))
             .filter(|path| path.is_file());
-        let binary = std::env::var("GENET_AGENT_COMMAND")
+        let binary = std::env::var(crate::channel::ENV_AGENT_COMMAND)
             .ok()
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
@@ -100,7 +100,7 @@ impl AgentAdapter for GenetAdapter {
     }
 
     fn label(&self) -> &str {
-        "GeneHub Agent"
+        crate::channel::AGENT_LABEL
     }
 
     fn builtin(&self) -> bool {
@@ -175,7 +175,7 @@ impl AgentAdapter for GenetAdapter {
             .arg("--session")
             .arg(&session_file)
             .current_dir(&config.cwd)
-            .env("GENET_AGENT_HOME", &home)
+            .env(crate::channel::ENV_AGENT_HOME, &home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -297,7 +297,7 @@ impl AgentSession for GenetSession {
             }))
             .await
         {
-            let why = super::stopped("GeneHub Agent", &self.child, &self.said).await;
+            let why = super::stopped(crate::channel::AGENT_LABEL, &self.child, &self.said).await;
             tracing::warn!("{why} (writing the prompt failed: {broken})");
             self.turn.lock().await.id = None;
             anyhow::bail!(why);
@@ -399,7 +399,7 @@ async fn translate_stream(
     // The process died. If a turn was in flight the client is still waiting for
     // it, so fail it explicitly rather than leaving a spinner forever — and say
     // what the process said, which is the part that can be acted on.
-    let why = super::stopped("GeneHub Agent", &child, &said).await;
+    let why = super::stopped(crate::channel::AGENT_LABEL, &child, &said).await;
     tracing::warn!("{why}");
     let mut state = turn.lock().await;
     if let Some(turn_id) = state.id.take() {
@@ -961,7 +961,10 @@ mod tests {
     }
 
     /// And the name has to be the one the installer actually stages, which lives
-    /// in a shell script this test reads rather than trusts.
+    /// in a shell script this test reads rather than trusts. The script takes
+    /// the names from `scripts/channel.env` — written by `scripts/channel.sh`
+    /// from the same table as `BINARY` above — so the pin here is that the
+    /// staging loop consumes them.
     #[test]
     fn the_installer_stages_the_agent_under_that_same_name() {
         let script = std::fs::read_to_string(
@@ -969,8 +972,13 @@ mod tests {
         )
         .expect("the bundling script");
         assert!(
-            script.contains("for binary in genet-daemon genet-agent"),
-            "the installer no longer stages the agent under this name"
+            script.contains(r#"for binary in "$DAEMON_BINARY" "$AGENT_BINARY""#),
+            "the installer no longer stages the agent under its stamped name"
+        );
+        assert!(
+            script.contains("scripts/channel.env"),
+            "the bundling script names the binaries itself again instead of \
+             reading the channel's names"
         );
         assert!(
             script.contains(r#"bin/$binary$exe"#),

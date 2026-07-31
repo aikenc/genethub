@@ -538,8 +538,8 @@ describe("the version section", () => {
 
     render(<SettingsPanel host={desktopish("0.1.17")} />);
 
-    expect(await screen.findByTestId("app-version")).toHaveTextContent("0.1.17");
-    expect(screen.getByTestId("daemon-version")).toHaveTextContent("daemon 0.1.17");
+    expect(await screen.findByTestId("app-version")).toHaveTextContent("正式版 0.1.17");
+    expect(screen.getByTestId("daemon-version")).toHaveTextContent("daemon 正式版 0.1.17");
     // The page is a third artefact, deployed on its own schedule, and the two
     // numbers above say nothing about it. An hour went once on a phone that was
     // three releases behind while the screen said "daemon 0.1.21" and looked
@@ -690,7 +690,7 @@ describe("the version section", () => {
 
     render(<SettingsPanel host={browserHost()} />);
 
-    expect(await screen.findByTestId("daemon-version")).toHaveTextContent("daemon 0.1.17");
+    expect(await screen.findByTestId("daemon-version")).toHaveTextContent("daemon 正式版 0.1.17");
     expect(screen.queryByTestId("app-version")).toBeNull();
   });
 });

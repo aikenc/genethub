@@ -34,14 +34,15 @@ pub fn build(cwd: &Path, skills: &[Skill]) -> String {
     .join("\n");
 
     let mut prompt = format!(
-        "You are an expert coding assistant operating inside GeneHub, a coding agent harness. \
+        "You are an expert coding assistant operating inside {}, a coding agent harness. \
 You help users by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
 {tools_list}
 
 Guidelines:
-{guidelines}"
+{guidelines}",
+        crate::channel::PRODUCT
     );
 
     let context_files = load_context_files(cwd);

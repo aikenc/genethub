@@ -2,6 +2,7 @@ import type { ProviderInfo, UpdateStatus } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
 import { BUILD } from "../build";
+import { CHANNEL } from "../channel";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
 import { useWorkbench } from "../session/store";
@@ -190,8 +191,14 @@ function Appearance() {
  */
 const UNRELEASED = "0.0.0";
 
+// The channel is part of the version's meaning: `0.23.0-beta.4` and `0.23.0`
+// are two lines that never compare against each other, and the prefix is what
+// keeps a screenshot of this page from being read as the other line
+// (`scripts/channel.sh` stamps CHANNEL in, like the version).
 const shown = (version: string) =>
-  version === UNRELEASED ? "开发版" : version;
+  version === UNRELEASED
+    ? "开发版"
+    : `${CHANNEL === "beta" ? "Beta版 " : "正式版 "}${version}`;
 
 /**
  * Which build this is, and whether a newer one has been published.

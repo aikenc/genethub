@@ -378,9 +378,11 @@ async fn finish_without_model(
     // The provider's own words when there are any: "add an API key" is the
     // wrong sentence for someone whose key was just refused.
     let text = crate::config::no_model_reason().unwrap_or_else(|| {
-        "No model is configured. Add an API key in GeneHub settings (or set \
-         ANTHROPIC_API_KEY / OPENAI_API_KEY) and try again."
-            .to_string()
+        format!(
+            "No model is configured. Add an API key in {} settings (or set \
+             ANTHROPIC_API_KEY / OPENAI_API_KEY) and try again.",
+            crate::channel::PRODUCT
+        )
     });
     let text = text.as_str();
     let mut draft = AssistantDraft::new("none", "none", "none");

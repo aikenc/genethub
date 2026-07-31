@@ -14,8 +14,29 @@
 # not always bash.
 set -eu
 
-base="${GENEHUB_DOWNLOAD_BASE:-https://github.com/aikenc/genethub/releases/latest/download}"
-bin_dir="${GENEHUB_BIN_DIR:-$HOME/.local/bin}"
+# channel: official — written by scripts/channel.sh
+# Everything below that names a file, an address or an environment variable
+# derives from that one word, so a beta install can never reach for an
+# official asset — the two channels install side by side on one machine and
+# neither may touch the other's binaries or overrides (`dual-channel-release.md`).
+# It is a plain assignment rather than something the script re-reads from its
+# own file, because the usual way to run this is `curl | sh`, where $0 is not
+# the script at all.
+channel=official
+
+if [ "$channel" = beta ]; then
+  base="${GENEHUB_BETA_DOWNLOAD_BASE:-https://relay-beta.genethub.com/download/beta}"
+  bin_dir="${GENEHUB_BETA_BIN_DIR:-$HOME/.local/bin}"
+  tarball_prefix=genet-beta
+  daemon_binary=genet-daemon-beta
+  agent_binary=genet-agent-beta
+else
+  base="${GENEHUB_DOWNLOAD_BASE:-https://github.com/aikenc/genethub/releases/latest/download}"
+  bin_dir="${GENEHUB_BIN_DIR:-$HOME/.local/bin}"
+  tarball_prefix=genet
+  daemon_binary=genet-daemon
+  agent_binary=genet-agent
+fi
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -40,7 +61,7 @@ if [ "$os" = linux ] && [ "$arch" != x64 ]; then
   die "no Linux $arch build yet. Build from source: https://github.com/aikenc/genethub"
 fi
 
-asset="genet-$os-$arch.tar.gz"
+asset="$tarball_prefix-$os-$arch.tar.gz"
 
 if command -v curl >/dev/null 2>&1; then
   fetch() { curl -fsSL "$1" -o "$2"; }
@@ -79,7 +100,7 @@ got="$(digest "$tmp/$asset")"
 say "==> installing into $bin_dir"
 mkdir -p "$tmp/unpacked" "$bin_dir"
 tar -xzf "$tmp/$asset" -C "$tmp/unpacked"
-for binary in genet-daemon genet-agent; do
+for binary in "$daemon_binary" "$agent_binary"; do
   found="$(find "$tmp/unpacked" -name "$binary" -type f -print | head -n 1)"
   [ -n "$found" ] || die "$binary is missing from $asset"
   # Replaced rather than written in place: overwriting a running binary is what
@@ -91,8 +112,8 @@ done
 
 say ""
 say "Installed:"
-say "  $bin_dir/genet-daemon"
-say "  $bin_dir/genet-agent"
+say "  $bin_dir/$daemon_binary"
+say "  $bin_dir/$agent_binary"
 
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
@@ -105,6 +126,6 @@ esac
 
 say ""
 say "Start it:"
-say "  genet-daemon"
+say "  $daemon_binary"
 say ""
 say "It prints the address and token to connect a workbench to."

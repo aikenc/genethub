@@ -358,7 +358,7 @@ mod tests {
         said.watch("genet-agent", child.stderr.take()).await;
         let child = Mutex::new(Some(child));
 
-        let message = stopped("GeneHub Agent", &child, &said).await;
+        let message = stopped(crate::channel::AGENT_LABEL, &child, &said).await;
         assert!(message.contains("退出码 7"), "{message}");
         assert!(message.contains("日志"), "nowhere to look next: {message}");
     }

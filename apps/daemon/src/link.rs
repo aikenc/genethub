@@ -347,10 +347,10 @@ fn dial(
 
 /// What the owner will see this machine called in their list.
 pub fn default_display_name() -> String {
-    std::env::var("GENEHUB_MACHINE_NAME")
+    std::env::var(crate::channel::ENV_MACHINE_NAME)
         .ok()
         .or_else(hostname)
-        .unwrap_or_else(|| "GeneHub machine".to_string())
+        .unwrap_or_else(|| crate::channel::DEFAULT_MACHINE_NAME.to_string())
 }
 
 fn hostname() -> Option<String> {

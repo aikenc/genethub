@@ -2,9 +2,14 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
+import { PRODUCT } from "./channel";
 import { watchViewport } from "./shell/viewport";
 import "./theme.css";
 import { applyTheme, useTheme, watchSystemTheme } from "./theme/store";
+
+// The tab title is the one place a browser build still names the product;
+// the desktop window takes its title from tauri.conf.json instead.
+document.title = PRODUCT;
 
 const root = document.getElementById("root");
 if (!root) throw new Error("index.html is missing #root");

@@ -49,8 +49,8 @@ pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
         Err(err) => return ToolResult::error(format!("Failed to run command: {err}")),
     };
 
-    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut combined = decode_output(&output.stdout);
+    let stderr = decode_output(&output.stderr);
     if !stderr.is_empty() {
         if !combined.is_empty() && !combined.ends_with('\n') {
             combined.push('\n');
@@ -130,9 +130,167 @@ fn shell_flag() -> &'static str {
     "/C"
 }
 
+/// Decode process output for the model and UI.
+///
+/// Prefer UTF-8 (modern CLIs). On Windows, fall back to the active ANSI code
+/// page (ACP) so `findstr` / `cmd` messages in GBK, Shift_JIS, etc. stay
+/// readable instead of turning into U+FFFD replacement characters.
+fn decode_output(bytes: &[u8]) -> String {
+    #[cfg(windows)]
+    {
+        decode_windows(bytes)
+    }
+    #[cfg(not(windows))]
+    {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+#[cfg(windows)]
+fn decode_windows(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_owned();
+    }
+    decode_acp(bytes).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
+}
+
+#[cfg(windows)]
+fn decode_acp(bytes: &[u8]) -> Option<String> {
+    use std::ptr;
+
+    // CP_ACP: decode with the process ANSI code page (e.g. 936 on zh-CN).
+    const CP_ACP: u32 = 0;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MultiByteToWideChar(
+            code_page: u32,
+            flags: u32,
+            multi_byte_str: *const u8,
+            cb_multi_byte: i32,
+            wide_char_str: *mut u16,
+            cch_wide_char: i32,
+        ) -> i32;
+    }
+
+    let needed = unsafe {
+        MultiByteToWideChar(
+            CP_ACP,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if needed <= 0 {
+        return None;
+    }
+    let mut wide = vec![0u16; needed as usize];
+    let written = unsafe {
+        MultiByteToWideChar(
+            CP_ACP,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            wide.as_mut_ptr(),
+            needed,
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&wide[..written as usize]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_output_keeps_utf8() {
+        assert_eq!(decode_output("hello 无法打开".as_bytes()), "hello 无法打开");
+    }
+
+    #[test]
+    fn decode_output_keeps_ascii() {
+        assert_eq!(decode_output(b"FINDSTR: Cannot open versionCode"), "FINDSTR: Cannot open versionCode");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn decode_output_roundtrips_system_ansi() {
+        let text = "无法打开";
+        let Some(bytes) = encode_acp(text) else {
+            return;
+        };
+        // On UTF-8 system locale (ACP 65001) the bytes are already UTF-8;
+        // the preference path still returns the same string.
+        assert_eq!(decode_output(&bytes), text);
+        if std::str::from_utf8(&bytes).is_err() {
+            // The ACP path is what fixes GBK/Shift_JIS console tools.
+            assert_eq!(decode_acp(&bytes).as_deref(), Some(text));
+        }
+    }
+
+    #[cfg(windows)]
+    fn encode_acp(text: &str) -> Option<Vec<u8>> {
+        use std::ptr;
+
+        const CP_ACP: u32 = 0;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn WideCharToMultiByte(
+                code_page: u32,
+                flags: u32,
+                wide_char_str: *const u16,
+                cch_wide_char: i32,
+                multi_byte_str: *mut u8,
+                cb_multi_byte: i32,
+                default_char: *const u8,
+                used_default_char: *mut i32,
+            ) -> i32;
+        }
+
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let needed = unsafe {
+            WideCharToMultiByte(
+                CP_ACP,
+                0,
+                wide.as_ptr(),
+                wide.len() as i32,
+                ptr::null_mut(),
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+            )
+        };
+        if needed <= 0 {
+            return None;
+        }
+        let mut bytes = vec![0u8; needed as usize];
+        let written = unsafe {
+            WideCharToMultiByte(
+                CP_ACP,
+                0,
+                wide.as_ptr(),
+                wide.len() as i32,
+                bytes.as_mut_ptr(),
+                needed,
+                ptr::null(),
+                ptr::null_mut(),
+            )
+        };
+        if written <= 0 {
+            return None;
+        }
+        bytes.truncate(written as usize);
+        Some(bytes)
+    }
 
     #[tokio::test]
     async fn captures_stdout_without_details_when_short() {

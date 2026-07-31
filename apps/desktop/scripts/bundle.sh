@@ -11,18 +11,35 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 
-echo "==> building the daemon and the built-in agent"
+# What this build calls itself. `scripts/channel.sh` writes channel.env next
+# to itself before a release build (and `official` when nobody stamped), so the
+# packaging here agrees with the names cargo just built. The defaults are for
+# a local build nobody stamped — official, because that is what the tree says.
+CHANNEL=official
+DAEMON_BINARY=genet-daemon
+AGENT_BINARY=genet-agent
+ENV_DATA_DIR=GENEHUB_DATA_DIR
+ENV_WORKSPACE_DIR=GENEHUB_WORKSPACE_DIR
+LIB_DIR_NAME=GeneHub
+DESKTOP_FILE=GeneHub.desktop
+# shellcheck disable=SC1091
+[ -f "$repo/scripts/channel.env" ] && . "$repo/scripts/channel.env"
+
+echo "==> building the daemon and the built-in agent ($CHANNEL)"
 cargo build --release --manifest-path "$repo/Cargo.toml" -p genet-daemon -p genet-agent
 
 echo "==> staging binaries"
-mkdir -p "$here/../src-tauri/bin"
+# Cleaned first: the previous build's staged binaries are still here, and a
+# beta build after an official one would otherwise ship both channels'
+# daemons in one installer. README.md is tracked and stays.
+find "$here/../src-tauri/bin" -mindepth 1 -maxdepth 1 ! -name README.md -delete
 # The shell looks for the platform's own name at runtime (`bundled_binary` in
 # `src-tauri/src/lib.rs`), so the suffix has to survive the copy.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*) exe=".exe" ;;
   *) exe="" ;;
 esac
-for binary in genet-daemon genet-agent; do
+for binary in "$DAEMON_BINARY" "$AGENT_BINARY"; do
   cp "$repo/target/release/$binary$exe" "$here/../src-tauri/bin/$binary$exe"
 done
 
@@ -39,7 +56,13 @@ echo "==> building the installer ($bundles)"
 npm --prefix "$here/.." run build -- --bundles "$bundles"
 
 bundle_dir="$here/../src-tauri/target/release/bundle"
-deb="$(find "$bundle_dir" -name '*.deb' -print -quit 2>/dev/null || true)"
+# Matched by name and newest first, not "any .deb": old packages survive in
+# this directory, and `find -print -quit` happily checks last week's official
+# build while calling it this build — which then fails one rename later with
+# "no such file", because the paths inside belong to the other channel.
+deb="$(ls -t "$bundle_dir/deb/$LIB_DIR_NAME"_*.deb 2>/dev/null | head -n 1 || true)"
+test -n "$deb" || { echo "FAIL: no package named '$LIB_DIR_NAME'_*.deb under $bundle_dir/deb" >&2; exit 1; }
+echo "    checking $deb"
 
 # The two claims the installer has to keep are cheap to check and easy to break
 # by accident, so they are checked here rather than trusted:
@@ -70,13 +93,17 @@ if [[ -n "$deb" ]]; then
   trap 'rm -rf "$staged"' EXIT
   dpkg-deb -x "$deb" "$staged"
   # Redirected to a file rather than piped: the daemon does not exit on its own,
-  # and closing a pipe under it would make this look like a crash.
-  GENEHUB_DATA_DIR="$staged/data" GENEHUB_WORKSPACE_DIR="$staged/workspace" timeout 15 \
-    "$staged/usr/lib/GeneHub/bin/genet-daemon" >"$staged/out.json" 2>/dev/null || true
+  # and closing a pipe under it would make this look like a crash. stderr is
+  # kept too — a daemon that cannot start says why, and "did not come up" with
+  # no reason attached is a debugging session, not a check.
+  env "$ENV_DATA_DIR=$staged/data" "$ENV_WORKSPACE_DIR=$staged/workspace" timeout 15 \
+    "$staged/usr/lib/$LIB_DIR_NAME/bin/$DAEMON_BINARY" >"$staged/out.json" 2>"$staged/err.log" || true
   if grep -q '"event":"listening"' "$staged/out.json"; then
     echo "    the packaged daemon starts and reports a port"
   else
     echo "FAIL: the packaged daemon did not come up" >&2
+    cat "$staged/err.log" >&2
+    ls -la "$staged/usr/lib/$LIB_DIR_NAME/bin/" >&2 || true
     exit 1
   fi
 
@@ -85,7 +112,7 @@ if [[ -n "$deb" ]]; then
     || { echo "FAIL: a new install has no folder to work in" >&2; exit 1; }
   echo "    a new install comes with a folder to work in"
 
-  test -f "$staged/usr/share/applications/GeneHub.desktop" \
+  test -f "$staged/usr/share/applications/$DESKTOP_FILE" \
     || { echo "FAIL: no application entry, so it will not appear in the menu" >&2; exit 1; }
   echo "    the application entry is present"
 fi

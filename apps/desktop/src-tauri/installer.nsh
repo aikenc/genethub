@@ -23,15 +23,25 @@
 ; republishes where it is listening on the next start, and adopts anything it
 ; finds still alive. `/T` takes children with it, since an agent left behind holds
 ; its own executable open the same way.
+;
+; The image names are defines rather than literals because they are the one
+; thing that differs between the official and beta channels, and the two
+; install side by side on one machine: each channel's installer must stop its
+; own processes and leave the other line's alone. `scripts/channel.sh`
+; rewrites these three lines for a beta build; nothing else here changes.
+
+!define GH_DESKTOP_EXE "genethub-desktop.exe"
+!define GH_DAEMON_EXE "genet-daemon.exe"
+!define GH_AGENT_EXE "genet-agent.exe"
 
 !macro StopGeneHubProcesses
   DetailPrint "正在停止 GeneHub 后台进程…"
 
   ; The supervisor first, or it revives what comes next. And it is called
-  ; `genethub-desktop.exe`, not `GeneHub.exe`: the product name is what the Start
-  ; menu shows, the Cargo binary name is what the process is called. v0.1.7
-  ; shipped a hook that killed the friendly name — a process no machine has — and
-  ; the install failed exactly as before.
+  ; after the Cargo binary, not the product name: the product name is what the
+  ; Start menu shows, the Cargo binary name is what the process is called.
+  ; v0.1.7 shipped a hook that killed the friendly name — a process no machine
+  ; has — and the install failed exactly as before.
   ;
   ; Without `/T`, unlike the two below, and that omission is load-bearing: an
   ; update started from inside the app runs this installer as a *child* of the
@@ -40,11 +50,11 @@
   ; leaves on its own before it gets this far (`install_update`), and what the
   ; tree was for is covered by the next two lines: the daemon is named
   ; explicitly, and its agents go down with it.
-  nsExec::Exec 'taskkill /F /IM genethub-desktop.exe'
+  nsExec::Exec 'taskkill /F /IM ${GH_DESKTOP_EXE}'
   Pop $0
-  nsExec::Exec 'taskkill /F /T /IM genet-daemon.exe'
+  nsExec::Exec 'taskkill /F /T /IM ${GH_DAEMON_EXE}'
   Pop $0
-  nsExec::Exec 'taskkill /F /T /IM genet-agent.exe'
+  nsExec::Exec 'taskkill /F /T /IM ${GH_AGENT_EXE}'
   Pop $0
 
   ; Wait for the file to actually be writable — up to about six seconds, which is
@@ -52,9 +62,9 @@
   ; machine reaches the normal error instead of hanging here forever.
   StrCpy $1 0
   genehub_wait:
-    IfFileExists "$INSTDIR\bin\genet-daemon.exe" 0 genehub_ready
+    IfFileExists "$INSTDIR\bin\${GH_DAEMON_EXE}" 0 genehub_ready
     ClearErrors
-    FileOpen $2 "$INSTDIR\bin\genet-daemon.exe" a
+    FileOpen $2 "$INSTDIR\bin\${GH_DAEMON_EXE}" a
     IfErrors genehub_retry
     FileClose $2
     Goto genehub_ready

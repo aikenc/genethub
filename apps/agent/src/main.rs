@@ -4,6 +4,7 @@
 //! There is no interactive interface on purpose.
 
 mod agent;
+mod channel;
 mod cli;
 mod config;
 mod prompt;
