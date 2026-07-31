@@ -676,6 +676,28 @@ describe("the version section", () => {
     expect(screen.queryByText("已经是最新的了。")).toBeNull();
   });
 
+  it("adds the isolated dev branch name to both source-built versions", async () => {
+    vi.stubEnv("VITE_GENEHUB_DEV_NAME", "dev-ui");
+    const stub = stubDaemon({
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    (stub.client as { identity?: unknown }).identity = {
+      machineId: "m_1",
+      fingerprint: "AAAA-BBBB-CCCC-DDDD",
+      daemonVersion: "0.0.0",
+      protocolVersion: 1,
+      transport: "loopback",
+    };
+    install(stub.client);
+
+    render(<SettingsPanel host={desktopish("0.0.0")} />);
+
+    expect(await screen.findByTestId("app-version")).toHaveTextContent("应用 开发版 dev-ui");
+    expect(screen.getByTestId("daemon-version")).toHaveTextContent("daemon 开发版 dev-ui");
+    vi.unstubAllEnvs();
+  });
+
   /**
    * The failure `installer.nsh` was written for, seen from the other end: an
    * installer that could not replace the daemon leaves the two halves on

@@ -7,6 +7,8 @@
 interface ImportMetaEnv {
   /** A Hub to suggest, for a deployment that runs one. */
   readonly VITE_GENEHUB_HUB_URL?: string;
+  /** Identifies one isolated source-tree deployment, for example `dev-ui`. */
+  readonly VITE_GENEHUB_DEV_NAME?: string;
 }
 
 interface ImportMeta {
