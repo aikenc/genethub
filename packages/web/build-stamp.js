@@ -32,7 +32,7 @@ function describe() {
 }
 
 /**
- * `v0.1.21-2-g3f2a1c9 · 2026-07-31 13:40`.
+ * `v0.1.21-2-g3f2a1c9 · 2026-07-31 13:40Z`.
  *
  * Both halves earn their place. The tag says which source, and answers "does
  * this page have the fix". The time says which *deploy*, and answers the
@@ -41,10 +41,14 @@ function describe() {
  *
  * Minutes, not seconds: this is a string people read off a screen and quote
  * back, and the last two digits would never once have mattered.
+ *
+ * The `Z` is not decoration. Build machines are rarely in the reader's
+ * timezone, and an unmarked UTC time eight hours behind the wall clock reads
+ * as a build that has not happened yet — the opposite of what it is for.
  */
 export function buildStamp() {
   const version = describe();
-  const built = new Date().toISOString().slice(0, 16).replace("T", " ");
+  const built = `${new Date().toISOString().slice(0, 16).replace("T", " ")}Z`;
   return version ? `${version} · ${built}` : built;
 }
 
