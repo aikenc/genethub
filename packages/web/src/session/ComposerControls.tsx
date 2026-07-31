@@ -5,6 +5,9 @@ import type { AgentInfo } from "@genehub/proto";
  *
  * The chat surface stays quiet: these are chrome for the next send, not a
  * second toolbar competing with the timeline.
+ *
+ * On a phone the composer collapses these chips so the timeline is not covered
+ * by a permanent toolbar (`Composer` owns when). Desktop always shows them.
  */
 export function ComposerControls({
   agents,
@@ -14,6 +17,7 @@ export function ComposerControls({
   effortId,
   disabled,
   agentLocked,
+  mobileChrome = "full",
   onPickAgent,
   onPickModel,
   onPickMode,
@@ -35,6 +39,13 @@ export function ComposerControls({
    * what it does (`docs/architecture.md` on cross-agent history).
    */
   agentLocked?: boolean;
+  /**
+   * How much chrome a phone should keep while the composer is idle.
+   * - `full`: everything (composer focused, or desktop via `md:`)
+   * - `agent`: only the agent picker — used for a brand-new conversation
+   * - `hidden`: nothing; just the send button remains
+   */
+  mobileChrome?: "full" | "agent" | "hidden";
   onPickAgent(id: string): void;
   onPickModel(id: string): void;
   onPickMode(id: string): void;
@@ -49,9 +60,16 @@ export function ComposerControls({
   // The levels belong to the model, not to the agent: on Claude Code each model
   // names its own, and a model with none should not be offered the control.
   const efforts = model?.efforts ?? [];
+  const hideAllOnMobile = mobileChrome === "hidden";
+  const hideSecondaryOnMobile = mobileChrome !== "full";
 
   return (
-    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+    <div
+      className={`flex min-w-0 flex-1 flex-wrap items-center gap-1 ${
+        hideAllOnMobile ? "max-md:hidden" : ""
+      }`}
+      data-mobile-chrome={mobileChrome}
+    >
       <Chip
         ariaLabel="agent"
         value={current?.id ?? ""}
@@ -63,6 +81,7 @@ export function ComposerControls({
       {current?.capabilities.setModel && current.catalog.models.length > 0 ? (
         <Chip
           ariaLabel="模型"
+          className={hideSecondaryOnMobile ? "max-md:hidden" : undefined}
           value={modelId ?? current.catalog.defaultModel ?? ""}
           disabled={disabled}
           options={current.catalog.models.map((model) => ({
@@ -76,6 +95,7 @@ export function ComposerControls({
       {current?.capabilities.setEffort && efforts.length > 0 ? (
         <Chip
           ariaLabel="思考强度"
+          className={hideSecondaryOnMobile ? "max-md:hidden" : undefined}
           label="思考"
           value={effortId ?? current.catalog.defaultEffort ?? ""}
           disabled={disabled}
@@ -101,6 +121,7 @@ export function ComposerControls({
           // to `efforts`, so this chip no longer means two different things
           // depending on which agent you were talking to.
           ariaLabel="模式"
+          className={hideSecondaryOnMobile ? "max-md:hidden" : undefined}
           label={current.capabilities.permissions ? "权限" : "模式"}
           value={modeId ?? current.catalog.defaultMode ?? ""}
           disabled={disabled}
@@ -119,6 +140,7 @@ function Chip({
   options,
   disabled,
   title,
+  className,
   onChange,
 }: {
   ariaLabel: string;
@@ -129,11 +151,12 @@ function Chip({
   options: Array<{ value: string; label: string }>;
   disabled?: boolean;
   title?: string;
+  className?: string;
   onChange(value: string): void;
 }) {
   return (
     <label
-      className="relative inline-flex max-w-[min(11rem,100%)] items-center gap-1"
+      className={`relative inline-flex max-w-[min(11rem,100%)] items-center gap-1 ${className ?? ""}`}
       title={title}
     >
       <span className="sr-only">{ariaLabel}</span>

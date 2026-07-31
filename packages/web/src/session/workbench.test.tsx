@@ -252,9 +252,34 @@ describe("the controls offered to the user", () => {
     const onInterrupt = vi.fn();
     render(<Composer {...composerProps({ running: true, onInterrupt })} />);
 
+    expect(screen.queryByLabelText("停止")).toBeInTheDocument();
     expect(screen.queryByLabelText("发送")).not.toBeInTheDocument();
     await userEvent.click(screen.getByLabelText("停止"));
     expect(onInterrupt).toHaveBeenCalled();
+  });
+
+  it("on a phone, keeps chips collapsed until the field is focused", async () => {
+    const user = userEvent.setup();
+    render(<Composer {...composerProps({ agentLocked: true })} />);
+
+    const chrome = document.querySelector("[data-mobile-chrome]");
+    expect(chrome).toHaveAttribute("data-mobile-chrome", "hidden");
+
+    await user.click(screen.getByLabelText("任务描述"));
+    expect(chrome).toHaveAttribute("data-mobile-chrome", "full");
+
+    await user.click(document.body);
+    expect(chrome).toHaveAttribute("data-mobile-chrome", "hidden");
+  });
+
+  it("keeps the agent picker visible on a new conversation even while collapsed", () => {
+    render(<Composer {...composerProps({ agentLocked: false })} />);
+
+    expect(document.querySelector("[data-mobile-chrome]")).toHaveAttribute(
+      "data-mobile-chrome",
+      "agent",
+    );
+    expect(screen.getByLabelText("agent")).toBeInTheDocument();
   });
 
   it("asks for approval in the timeline and reports which option was chosen", async () => {

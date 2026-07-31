@@ -11,6 +11,10 @@ import { ComposerControls } from "./ComposerControls";
  * control becomes stop — one affordance, because the user's intent is never
  * ambiguous. Model and mode live here too, as chips under the text.
  *
+ * On a phone those chips cover the timeline if they stay open, so the composer
+ * collapses to the field (plus the agent picker on a brand-new conversation)
+ * until it is focused. Desktop keeps the chips visible.
+ *
  * Typing `/` opens the agent's own command list, when it has one. Running a
  * command needs nothing special — it goes out as ordinary text — so this is only
  * about discovery, which is the whole problem: a Claude Code install has dozens
@@ -61,6 +65,9 @@ export function Composer({
   const [pasteNotice, setPasteNotice] = useState<string | null>(null);
   const [highlighted, setHighlighted] = useState(0);
   const [dismissed, setDismissed] = useState(false);
+  // Phone only: chips stay tucked away until the field (or a chip) is focused.
+  const [expanded, setExpanded] = useState(false);
+  const mobileChrome = expanded ? "full" : agentLocked ? "hidden" : "agent";
 
   // Only while the draft *is* one slash token: a command has to lead the message
   // for the agent to treat it as one, so offering the menu mid-sentence would be
@@ -155,7 +162,17 @@ export function Composer({
           </ul>
         </div>
       ) : null}
-      <div className="pointer-events-auto mx-auto max-w-chat rounded-2xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur">
+      <div
+        className="pointer-events-auto mx-auto max-w-chat rounded-2xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur"
+        onFocus={() => setExpanded(true)}
+        onBlur={(event) => {
+          // Stay open while focus moves between the field and a chip; only
+          // tuck away once focus has left the composer entirely.
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setExpanded(false);
+          }
+        }}
+      >
         {attachments.length > 0 ? (
           <div className="flex flex-wrap gap-2 px-4 pt-3" aria-label="待发送的图片">
             {attachments.map((attachment, index) => (
@@ -178,7 +195,11 @@ export function Composer({
           </div>
         ) : null}
         <textarea
-          className="max-h-40 min-h-[56px] w-full resize-none bg-transparent px-4 pt-3.5 text-base text-fg outline-none placeholder:text-faint md:min-h-[52px] md:pt-3 md:text-sm"
+          // Phone: one line while idle so the chips can tuck away without
+          // leaving a tall empty field. Desktop sizing is unchanged (`md:`).
+          className={`max-h-40 min-h-[56px] w-full resize-none bg-transparent px-4 pt-3.5 text-base text-fg outline-none placeholder:text-faint md:min-h-[52px] md:pt-3 md:text-sm ${
+            expanded ? "" : "max-md:min-h-11 max-md:pt-2.5"
+          }`}
           placeholder="描述任务，或直接说你想改什么"
           aria-label="任务描述"
           value={draft}
@@ -228,7 +249,11 @@ export function Composer({
           }}
         />
         {pasteNotice ? <p className="px-4 pt-1 text-xs text-muted">{pasteNotice}</p> : null}
-        <div className="flex items-center gap-2 px-2 pb-2 pt-0.5 md:pt-0">
+        <div
+          className={`flex items-center gap-2 px-2 pb-2 pt-0.5 md:pt-0 ${
+            mobileChrome === "hidden" ? "max-md:justify-end" : ""
+          }`}
+        >
           <ComposerControls
             agents={agents}
             agentId={agentId}
@@ -237,6 +262,7 @@ export function Composer({
             effortId={effortId ?? null}
             disabled={disabled || running}
             agentLocked={agentLocked}
+            mobileChrome={mobileChrome}
             onPickAgent={onPickAgent}
             onPickModel={onPickModel}
             onPickMode={onPickMode}
