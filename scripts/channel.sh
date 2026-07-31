@@ -123,7 +123,10 @@ rewrite() {
   local file="$1"
   shift
   sed "$@" "$file" >"$file.stamped"
-  mv "$file.stamped" "$file"
+  # cat-over rather than mv: install.sh is executable, and a mv would swap in
+  # the temp file's default permissions and strip the bit on every stamp.
+  cat "$file.stamped" >"$file"
+  rm "$file.stamped"
 }
 
 rust_module() {
