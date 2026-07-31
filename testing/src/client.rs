@@ -90,6 +90,9 @@ impl Client {
                     ServerFrame::Notice { message, .. } => {
                         let _ = notice_tx.send(message);
                     }
+                    // Nothing to assert on here yet, and nothing to lose by
+                    // missing one: it is a state the client can ask for again.
+                    ServerFrame::UpdateDownloadChanged { .. } => {}
                     // Loud on purpose. The real client closes the gap; a test
                     // client that did the same would paper over dropped events
                     // and turn a lost assertion into a mysterious one.

@@ -168,7 +168,7 @@ export function Composer({
           </div>
         ) : null}
         <textarea
-          className="max-h-40 min-h-[52px] w-full resize-none bg-transparent px-4 pt-3 text-sm text-fg outline-none placeholder:text-faint"
+          className="max-h-40 min-h-[52px] w-full resize-none bg-transparent px-4 pt-3 text-base text-fg outline-none placeholder:text-faint md:text-sm"
           placeholder="描述任务，或直接说你想改什么"
           aria-label="任务描述"
           value={draft}
@@ -237,7 +237,7 @@ export function Composer({
               type="button"
               aria-label="停止"
               onClick={onInterrupt}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger md:h-8 md:w-8"
             >
               <span className="h-2.5 w-2.5 rounded-[2px] bg-current" />
             </button>
@@ -247,7 +247,7 @@ export function Composer({
               aria-label="发送"
               onClick={send}
               disabled={disabled || (draft.trim().length === 0 && attachments.length === 0)}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white disabled:opacity-30"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent text-white disabled:opacity-30 md:h-8 md:w-8"
             >
               <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="currentColor" aria-hidden>
                 <path d="M8 3.2 3.6 7.6l1.1 1.1L7.2 6.2V13h1.6V6.2l2.5 2.5 1.1-1.1L8 3.2Z" />

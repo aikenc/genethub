@@ -7,6 +7,12 @@
  *
  * Hierarchy is weight and mute, not size. Surfaces step quietly; the accent is
  * the one green used for "do this", never decoration.
+ *
+ * Two sets, one shape. Every name means the same thing in both — `raised` is
+ * always a step towards the reader, `faint` is always the quietest thing that
+ * is still text — so no component ever has to know which one is in force.
+ * Dark stays on `:root` as the fallback: a page whose script did not run is the
+ * app as it has always looked, not a half-styled white one.
  */
 :root,
 .dark {
@@ -34,10 +40,50 @@
   --ok: 93 186 128;
 }
 
+/*
+ * Light is not the dark set inverted.
+ *
+ * Inverting would put a near-white sidebar next to a white page and lose every
+ * boundary at once, so here elevation reads the other way round: the page is the
+ * lightest thing, and surfaces step *down* in tint as they come towards the
+ * reader. The accent keeps the same green — it is the brand, and a second green
+ * for light mode would be two products.
+ *
+ * The three status colours do change: `--ok` and `--accent-bright` as they are
+ * in dark are pale greens that vanish on white, and they are read as text here,
+ * not just as dots.
+ */
+:root.light,
+.light {
+  color-scheme: light;
+  --bg: 253 253 252;
+  --surface: 247 248 247;
+  --raised: 238 240 239;
+  --sidebar: 244 245 244;
+  --sidebar-hover: 234 236 235;
+  --line: 225 228 226;
+  --line-strong: 205 210 207;
+  --fg: 24 27 26;
+  --muted: 88 95 92;
+  --faint: 132 139 136;
+  --accent: 27 104 66;
+  --accent-bright: 22 88 56;
+  --danger: 178 54 43;
+  --ok: 30 126 79;
+}
+
 html,
 body,
 #root {
   height: 100%;
+  /*
+   * Long shell commands and diffs must never widen the page. A phone that can
+   * be dragged sideways after a tool call is broken, full stop — local panes
+   * that need a horizontal scroll set their own `overflow-x: auto`.
+   */
+  max-width: 100%;
+  overflow-x: hidden;
+  overscroll-behavior-x: none;
 }
 
 body {
@@ -52,6 +98,8 @@ body {
     "Microsoft YaHei",
     sans-serif;
   -webkit-font-smoothing: antialiased;
+  /* Vertical pan only at the page level; nested scrollers opt back in. */
+  touch-action: pan-y;
 }
 
 * {

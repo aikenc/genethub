@@ -76,6 +76,115 @@ fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Runs an installer the daemon already downloaded.
+///
+/// This is the whole of "立即安装" from the shell's side. The fetching is the
+/// daemon's — it is the half that exists on every platform, and the half a
+/// phone can watch — and the shell's only contribution is that it can ask the
+/// OS to run a file, which a web page cannot.
+///
+/// Nothing here replaces our own files. That is the installer's job, and only
+/// after the user walks through it (`installer.nsh`).
+///
+/// The path is checked against the one directory the daemon writes installers
+/// into, because it arrives over a connection this window does not own: a
+/// relayed client is a stranger until proven otherwise, and "run this file"
+/// is the one message we must never take at face value.
+#[tauri::command]
+fn install_update(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let dir = updates_dir(&app)?;
+    let file = std::fs::canonicalize(&path).map_err(|_| format!("找不到安装包 {path}"))?;
+    // Canonicalised on both sides, or a path that reaches the same file by a
+    // different spelling — a symlink, an 8.3 name on Windows — compares unequal
+    // while pointing exactly where the check was meant to stop it.
+    let dir = std::fs::canonicalize(&dir).map_err(|error| error.to_string())?;
+    if file.parent() != Some(dir.as_path()) {
+        return Err("这个安装包不在 GeneHub 的更新目录里，没有运行".into());
+    }
+    if !file.is_file() {
+        return Err(format!("{} 不是一个文件", file.display()));
+    }
+
+    tracing_line(&format!("running the installer at {}", file.display()));
+    app.opener()
+        .open_path(file.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+/// The only directory this shell will run an executable out of.
+///
+/// The same one the daemon writes to (`Paths::updates_dir`), which holds
+/// because the shell is what tells the daemon where its data lives.
+fn updates_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("GeneHub").join("updates"))
+        .map_err(|error| error.to_string())
+}
+
+/// The buttons our own title bar draws.
+///
+/// The window has no decorations of its own (`tauri.conf.json`), because a
+/// native title bar is the one strip of the app that cannot be told what colour
+/// to be: on every Windows machine set to the light system theme it came out
+/// white above a dark workbench, and no amount of styling on our side reached
+/// it. Drawing it ourselves is what makes the shell and its contents one thing
+/// — and the price is that minimise, maximise and close have to be wired by
+/// hand, which is all this trio is.
+#[tauri::command]
+fn window_minimize(window: tauri::Window) -> Result<(), String> {
+    window.minimize().map_err(|error| error.to_string())
+}
+
+/// Returns the state it left the window in, so the button can redraw itself
+/// without a second round trip.
+#[tauri::command]
+fn window_toggle_maximize(window: tauri::Window) -> Result<bool, String> {
+    let maximized = window.is_maximized().map_err(|error| error.to_string())?;
+    if maximized {
+        window.unmaximize()
+    } else {
+        window.maximize()
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(!maximized)
+}
+
+#[tauri::command]
+fn window_is_maximized(window: tauri::Window) -> Result<bool, String> {
+    window.is_maximized().map_err(|error| error.to_string())
+}
+
+/// `close`, deliberately, and not `hide`.
+///
+/// Keeping the daemon alive when the window goes away is decided in one place,
+/// the `CloseRequested` handler, and this goes through it. A button that hid the
+/// window directly would work today and drift the day that decision changes.
+#[tauri::command]
+fn window_close(window: tauri::Window) -> Result<(), String> {
+    window.close().map_err(|error| error.to_string())
+}
+
+/// Keeps the frame the OS paints in step with the palette the page is using.
+///
+/// Only visible for a moment at a time — while a window is being resized, the
+/// compositor fills the not-yet-painted edge with this colour — but a dark strip
+/// chasing the pointer around a light workbench is exactly the kind of seam this
+/// whole change exists to remove.
+#[tauri::command]
+fn set_window_background(window: tauri::Window, dark: bool) -> Result<(), String> {
+    let colour = if dark {
+        tauri::window::Color(24, 27, 26, 255)
+    } else {
+        tauri::window::Color(253, 253, 252, 255)
+    };
+    window
+        .set_background_color(Some(colour))
+        .map_err(|error| error.to_string())
+}
+
 /// Reveals the log directory in the file manager.
 ///
 /// The tray has this too, and for the same reason: when something is wrong the
@@ -295,8 +404,14 @@ pub fn run() {
             daemon_problem,
             restart_daemon,
             open_external,
+            install_update,
             open_window,
             open_logs,
+            window_minimize,
+            window_toggle_maximize,
+            window_is_maximized,
+            window_close,
+            set_window_background,
             app_version,
             notify,
             pick_directory

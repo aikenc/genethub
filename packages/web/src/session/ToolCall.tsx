@@ -20,13 +20,17 @@ export function ToolCallView({
   detail: ToolCallDetail;
 }) {
   return (
-    <div className="rounded-lg border border-line bg-surface" data-testid="tool-call">
-      <header className="flex items-center gap-2 border-b border-line px-3 py-2 text-xs">
+    <div
+      className="min-w-0 max-w-full overflow-hidden rounded-lg border border-line bg-surface"
+      data-testid="tool-call"
+    >
+      <header className="flex min-w-0 items-center gap-2 border-b border-line px-3 py-2 text-xs">
         <StatusDot status={status} />
-        <span className="font-mono text-fg">{name}</span>
-        <span className="text-muted">{summarize(detail)}</span>
+        <span className="shrink-0 font-mono text-fg">{name}</span>
+        {/* Truncate here; the body is where a long command or path is readable. */}
+        <span className="min-w-0 flex-1 truncate text-muted">{summarize(detail)}</span>
       </header>
-      <div className="px-3 py-2 text-[13px]">
+      <div className="min-w-0 px-3 py-2 text-[13px]">
         <Body detail={detail} />
       </div>
     </div>
@@ -70,10 +74,15 @@ function Body({ detail }: { detail: ToolCallDetail }) {
   switch (detail.kind) {
     case "shell":
       return (
-        <Pre>
-          {detail.output || "（暂无输出）"}
-          {detail.exitCode !== null && detail.exitCode !== 0 ? `\n退出码 ${detail.exitCode}` : ""}
-        </Pre>
+        <div className="min-w-0 space-y-2">
+          <Pre>{detail.command}</Pre>
+          <Pre>
+            {detail.output || "（暂无输出）"}
+            {detail.exitCode !== null && detail.exitCode !== 0
+              ? `\n退出码 ${detail.exitCode}`
+              : ""}
+          </Pre>
+        </div>
       );
 
     case "read":
@@ -143,7 +152,7 @@ function Body({ detail }: { detail: ToolCallDetail }) {
 
 function Pre({ children }: { children: React.ReactNode }) {
   return (
-    <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-fg">
+    <pre className="max-h-80 max-w-full overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs text-fg">
       {children}
     </pre>
   );
@@ -152,7 +161,10 @@ function Pre({ children }: { children: React.ReactNode }) {
 /** Line-level colouring. Enough to read a change; not a merge tool. */
 function Diff({ diff }: { diff: string }) {
   return (
-    <pre className="max-h-80 overflow-auto font-mono text-xs" data-testid="diff">
+    <pre
+      className="max-h-80 max-w-full overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs"
+      data-testid="diff"
+    >
       {diff.split("\n").map((line, index) => (
         <div
           key={index}

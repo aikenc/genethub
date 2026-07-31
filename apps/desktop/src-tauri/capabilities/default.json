@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Capabilities the GeneHub main window needs",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-show", "core:window:allow-hide", "core:window:allow-set-focus", "opener:default", "dialog:default", "notification:default"]
+  "permissions": ["core:default", "core:window:allow-show", "core:window:allow-hide", "core:window:allow-set-focus", "core:window:allow-start-dragging", "core:window:allow-toggle-maximize", "opener:default", "dialog:default", "notification:default"]
 }

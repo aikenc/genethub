@@ -132,12 +132,19 @@ function Chip({
   onChange(value: string): void;
 }) {
   return (
-    <label className="relative inline-flex max-w-[11rem] items-center gap-1" title={title}>
+    <label
+      className="relative inline-flex max-w-[min(11rem,100%)] items-center gap-1"
+      title={title}
+    >
       <span className="sr-only">{ariaLabel}</span>
-      {label ? <span className="shrink-0 text-[10px] text-faint">{label}</span> : null}
+      {label ? (
+        <span className="shrink-0 text-xs text-faint md:text-[10px]">{label}</span>
+      ) : null}
       <select
         aria-label={ariaLabel}
-        className="appearance-none truncate rounded-full bg-transparent py-0.5 pl-2 pr-5 text-xs text-muted outline-none hover:bg-raised hover:text-fg disabled:opacity-40"
+        // 16px on phones: iOS zooms the whole page when a focused control is
+        // smaller, and that zoom is what unlocks sideways dragging.
+        className="min-h-10 appearance-none truncate rounded-full bg-transparent py-2 pl-2.5 pr-6 text-base text-muted outline-none hover:bg-raised hover:text-fg disabled:opacity-40 md:min-h-0 md:py-0.5 md:pl-2 md:pr-5 md:text-xs"
         value={value}
         disabled={disabled || options.length === 0}
         onChange={(event) => onChange(event.target.value)}
@@ -148,7 +155,10 @@ function Chip({
           </option>
         ))}
       </select>
-      <span className="pointer-events-none absolute right-1.5 text-[9px] text-faint" aria-hidden>
+      <span
+        className="pointer-events-none absolute right-2 text-xs text-faint md:right-1.5 md:text-[9px]"
+        aria-hidden
+      >
         ▾
       </span>
     </label>

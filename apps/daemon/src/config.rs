@@ -87,6 +87,15 @@ impl Paths {
         self.logs_dir().join("daemon.log")
     }
 
+    /// Where a downloaded installer waits for someone to run it.
+    ///
+    /// Under the same root as everything else, so an uninstall that removes the
+    /// root does not leave a hundred megabytes behind. The desktop shell knows
+    /// this path too — it is the only directory it will open an executable from.
+    pub fn updates_dir(&self) -> PathBuf {
+        self.root.join("updates")
+    }
+
     pub fn ensure(&self) -> Result<()> {
         fs::create_dir_all(&self.root)
             .with_context(|| format!("creating data directory {}", self.root.display()))?;

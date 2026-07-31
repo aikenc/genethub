@@ -367,6 +367,41 @@ pub async fn handle(
             ))
         }
 
+        Request::UpdateDownload => {
+            let url = state.config.read().await.update_manifest_url.clone();
+            if url.trim().is_empty() {
+                return Handled::err(
+                    ErrorCode::Unsupported,
+                    "这台机器关掉了更新检查（config.json 里的 updateManifestUrl 是空的）",
+                );
+            }
+            // Checked again rather than trusting what the client saw. The
+            // address to fetch is the one thing here that must not come from
+            // over the wire: a client that could name it could point this
+            // machine at any file on the internet.
+            let status = crate::updates::check(&url, &state.version).await;
+            let (Some(version), Some(installer)) = (status.latest.clone(), status.download_url)
+            else {
+                return Handled::err(
+                    ErrorCode::Unsupported,
+                    status
+                        .problem
+                        .unwrap_or_else(|| "这个平台没有可下载的安装包".to_string()),
+                );
+            };
+            if !status.newer {
+                return Handled::err(ErrorCode::Unsupported, "已经是最新的了");
+            }
+            match state.updates.start(state, &version, &installer) {
+                Ok(download) => Handled::ok(Reply::UpdateDownload(download)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::UpdateDownloadState => Handled::ok(Reply::UpdateDownload(state.updates.state())),
+
+        Request::UpdateDismiss => Handled::ok(Reply::UpdateDownload(state.updates.dismiss(state))),
+
         Request::SettingsForgetProvider { provider_id } => {
             match state.forget_provider(&provider_id).await {
                 Ok(settings) => Handled::ok(Reply::Settings(settings)),

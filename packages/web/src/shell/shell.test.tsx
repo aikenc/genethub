@@ -1,0 +1,191 @@
+import type { SessionSummary, WorkspaceInfo } from "@genehub/proto";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { Host, WindowControls } from "../host";
+import { useWorkbench } from "../session/store";
+import { useTheme } from "../theme/store";
+import { Sidebar } from "./Sidebar";
+import { TitleBar } from "./TitleBar";
+
+/**
+ * The two pieces of chrome around the workbench.
+ *
+ * Both exist because of the same complaint: the window did not look or read
+ * like one application. The left edge hid every project but one behind a
+ * dropdown, and the strip along the top was drawn by the OS in the OS's own
+ * colours.
+ */
+
+const workspace = (id: string, name: string): WorkspaceInfo => ({
+  id,
+  name,
+  root: `/home/me/${name}`,
+  isGitRepo: true,
+});
+
+const session = (id: string, workspaceId: string, title: string, running = false): SessionSummary => ({
+  id,
+  workspaceId,
+  agentId: "genet",
+  title,
+  createdAtMs: 0,
+  updatedAtMs: 0,
+  archived: false,
+  status: running ? "running" : "idle",
+});
+
+const host = (overrides: Partial<Host> = {}): Host => ({
+  kind: "browser",
+  endpoint: async () => ({ url: "ws://127.0.0.1:1/ws", via: "loopback", label: "本机" }),
+  notify: () => {},
+  openExternal: () => {},
+  ...overrides,
+});
+
+const controls = (): WindowControls => ({
+  minimize: vi.fn(),
+  toggleMaximize: vi.fn(async () => true),
+  isMaximized: vi.fn(async () => false),
+  close: vi.fn(),
+  setBackground: vi.fn(),
+});
+
+beforeEach(() => {
+  localStorage.clear();
+  document.documentElement.className = "dark";
+  useTheme.setState({ preference: "system", resolved: "dark" });
+  useWorkbench.setState({
+    connection: "ready",
+    workspaces: [workspace("w1", "genethub"), workspace("w2", "paseo"), workspace("w3", "demo")],
+    activeWorkspaceId: "w1",
+    sessions: [
+      session("s1", "w1", "修复移动端横向拖动", true),
+      session("s2", "w1", "更新流程"),
+      session("s3", "w2", "relay 重连"),
+    ],
+    activeSessionId: "s1",
+    agents: [],
+    tabs: [],
+    activeTabId: null,
+    selectSession: vi.fn(async () => {}),
+    selectWorkspace: vi.fn(async () => {}),
+  });
+});
+
+function sidebar() {
+  render(<Sidebar host={host()} open onNavigate={() => {}} />);
+  return screen.getByRole("list", { name: "工作区" });
+}
+
+/** The project rows, which are the tree's own children — sessions nest inside. */
+const projectRows = (tree: HTMLElement) => Array.from(tree.children) as HTMLElement[];
+
+describe("the left edge", () => {
+  it("puts each session under the project it belongs to", () => {
+    const projects = projectRows(sidebar());
+
+    expect(within(projects[0]!).getByText("genethub")).toBeInTheDocument();
+    expect(within(projects[0]!).getByText("修复移动端横向拖动")).toBeInTheDocument();
+    // The other project's session is on screen too — which is the point — but
+    // under its own heading, not mixed into this one.
+    expect(within(projects[0]!).queryByText("relay 重连")).not.toBeInTheDocument();
+    expect(within(projects[1]!).getByText("relay 重连")).toBeInTheDocument();
+  });
+
+  it("says so rather than showing an empty gap for a project with nothing in it", () => {
+    const empty = projectRows(sidebar())[2]!;
+
+    expect(within(empty).getByText("demo")).toBeInTheDocument();
+    expect(within(empty).getByText("还没有会话")).toBeInTheDocument();
+  });
+
+  it("counts what is running, and only where something is", () => {
+    const projects = projectRows(sidebar());
+
+    expect(within(projects[0]!).getByText("1")).toBeInTheDocument();
+    expect(within(projects[1]!).queryByText("1")).not.toBeInTheDocument();
+  });
+
+  it("folds a project away and remembers it", async () => {
+    sidebar();
+    await userEvent.click(screen.getByLabelText("折叠 genethub"));
+
+    expect(screen.queryByText("修复移动端横向拖动")).not.toBeInTheDocument();
+    expect(localStorage.getItem("genehub.sidebar.collapsed")).toBe('["w1"]');
+  });
+
+  it("reaches into folded projects when searching, or the search finds nothing", async () => {
+    sidebar();
+    await userEvent.click(screen.getByLabelText("折叠 genethub"));
+    await userEvent.type(screen.getByLabelText("搜索会话"), "更新");
+
+    expect(screen.getByText("更新流程")).toBeInTheDocument();
+    expect(screen.queryByText("relay 重连")).not.toBeInTheDocument();
+  });
+
+  it("still answers the other question: what is running, across every project", async () => {
+    sidebar();
+    await userEvent.click(screen.getByRole("button", { name: "按状态" }));
+
+    expect(screen.getByText("Working")).toBeInTheDocument();
+    // A title on its own does not say where the work is happening, so the
+    // project comes with it once the tree is not there to say.
+    expect(screen.getAllByText("paseo").length).toBeGreaterThan(0);
+  });
+});
+
+describe("the strip along the top", () => {
+  it("is not drawn where the window belongs to a browser", () => {
+    render(<TitleBar host={host()} sidebarHidden={false} onToggleSidebar={() => {}} />);
+
+    expect(screen.queryByRole("menubar")).not.toBeInTheDocument();
+  });
+
+  it("minimises, maximises and closes through the shell", async () => {
+    const window = controls();
+    render(
+      <TitleBar host={host({ window })} sidebarHidden={false} onToggleSidebar={() => {}} />,
+    );
+
+    await userEvent.click(screen.getByLabelText("最小化"));
+    await userEvent.click(screen.getByLabelText("最大化"));
+    await userEvent.click(screen.getByLabelText("关闭"));
+
+    expect(window.minimize).toHaveBeenCalled();
+    expect(window.toggleMaximize).toHaveBeenCalled();
+    // Closing is the shell's decision, not ours: on the desktop it hides the
+    // window and leaves the daemon running, which is what the tray is for.
+    expect(window.close).toHaveBeenCalled();
+  });
+
+  it("switches the palette from the 视图 menu", async () => {
+    render(
+      <TitleBar host={host({ window: controls() })} sidebarHidden={false} onToggleSidebar={() => {}} />,
+    );
+
+    await userEvent.click(screen.getByRole("menuitem", { name: "视图" }));
+    await userEvent.click(screen.getByRole("menuitemradio", { name: "亮色" }));
+
+    expect(document.documentElement.classList.contains("light")).toBe(true);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("offers to give the left column's room back, and says which way round it is", async () => {
+    const onToggleSidebar = vi.fn();
+    const { rerender } = render(
+      <TitleBar host={host({ window: controls() })} sidebarHidden={false} onToggleSidebar={onToggleSidebar} />,
+    );
+
+    await userEvent.click(screen.getByRole("menuitem", { name: "视图" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "隐藏左栏" }));
+    expect(onToggleSidebar).toHaveBeenCalled();
+
+    rerender(
+      <TitleBar host={host({ window: controls() })} sidebarHidden onToggleSidebar={onToggleSidebar} />,
+    );
+    await userEvent.click(screen.getByRole("menuitem", { name: "视图" }));
+    expect(screen.getByRole("menuitem", { name: "显示左栏" })).toBeInTheDocument();
+  });
+});

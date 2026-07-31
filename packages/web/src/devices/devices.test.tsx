@@ -68,6 +68,7 @@ function stubClient() {
     close() {},
     onStateChange: () => () => {},
     onNotice: () => () => {},
+    onUpdateDownload: () => () => {},
     onEvent: () => () => {},
     onPty: () => () => {},
     call: async () => null,

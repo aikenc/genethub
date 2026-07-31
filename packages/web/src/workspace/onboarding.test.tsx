@@ -54,6 +54,7 @@ function stubClient(answers: Partial<Record<Request["type"], (payload: never) =>
     unsubscribe: async () => {},
     onPty: () => () => {},
     onNotice: () => () => {},
+    onUpdateDownload: () => () => {},
     onStateChange: (listener: (state: string) => void) => {
       onState = listener;
       return () => {};

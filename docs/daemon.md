@@ -90,7 +90,7 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 | 文件 | `file.tree` / `read` / `write` / `watch` |
 | Git | `git.status` / `git.diff` / `git.commit` |
 | 终端 | `pty.open` / `write` / `resize` / `close`（输出走推送） |
-| 更新 | `update.check`（有没有更新的版本，见 §7） |
+| 更新 | `update.check` / `update.download` / `update.downloadState` / `update.dismiss`（见 §7） |
 
 **断线重连**：客户端带上最后收到的事件序号，`subscribe` 时 daemon 回补缺口；补不齐（超出保留窗口）就回全量快照并明确告知，不做静默半量。回合进行中掉线也一样：回合不会因为没人看着就停，重连时缺的那段照样补得回来。
 
@@ -214,7 +214,11 @@ daemon 只跟两个外部对象打交道，而且必须当成两件完全不同�
 
 理由与守则见 [architecture.md](./architecture.md) §6 与 [relay.md](./relay.md)。
 
-**第三个对象只在有人点了「检查更新」的那一刻存在。** `update.check` 去取一个固定地址上的 `latest.json`（默认是本仓库 releases 里那个不带版本号的文件名，所以地址不会变），比一比版本号就回来。没有定时器，启动时不查，也不下载任何东西——它的产物只是界面上一句话和一个链接，装不装、什么时候装是用户的事：装的时候 daemon 会被停掉，正在跑的会话跟着断（`installer.nsh`）。
+**第三个对象只在有人点了「检查更新」的那一刻存在。** `update.check` 去取一个固定地址上的 `latest.json`（默认是本仓库 releases 里那个不带版本号的文件名，所以地址不会变），比一比版本号就回来。没有定时器，启动时不查——产物是一句话、发布页地址（`url`）和本平台安装包地址（`downloadUrl`）。
+
+**下载也是 daemon 干的，但仍然只在有人按了之后。** `update.download` 把安装包拉进 `<data>/updates/`，边下边把 `UpdateDownload` 推给每个连着的客户端（`ServerFrame::updateDownload`）。放在 daemon 而不是桌面壳，理由和检查那一半一样：Linux 上根本没有那个壳，而这样一来在手机上按下的下载也能在手机上看着它走完。要下的地址**不从线上来**——请求里没有这个字段，daemon 自己重新查一遍 manifest；一个能指定下载地址的客户端，就是一个能让别人的机器去取互联网上任意文件的客户端。写的时候先写 `.part` 再改名，所以一个下到一半的文件永远不会被当成装得了的安装包；上限一 GiB，免得一份出了岔子的发布把谁的硬盘填满。
+
+**装还是用户点。** 下完之后屏幕右下角出一个小框（`UpdateToast`），「立即安装」由桌面壳执行（`install_update`），而且只肯运行 `<data>/updates/` 里的文件——"去跑这个文件"是唯一一句绝不能照单全收的话。「稍后」只是不再问，文件留着：让人为读了一个提示而重下一百兆是种惩罚。装的时候 daemon 会被停掉，正在跑的会话跟着断（`installer.nsh`），所以什么时候付这个代价是用户的决定。
 
 选文件而不是 GitHub API，是因为 API 按来源地址限 60 次/小时，而一间办公室共用一个出口地址。这个查询要么由人触发，要么不发生，所以它也不需要缓存。
 

@@ -43,7 +43,9 @@ describe("a sub-agent's card", () => {
 
     const steps = screen.getByRole("list", { name: "子 agent 的步骤" });
     expect(within(steps).getAllByTestId("tool-call")).toHaveLength(2);
-    expect(within(steps).getByText("ls /tmp")).toBeInTheDocument();
+    // Twice over: a shell step puts its command in the header as the summary
+    // and again in the body as the thing that was run.
+    expect(within(steps).getAllByText("ls /tmp").length).toBeGreaterThanOrEqual(1);
     // Still working, and visibly so: the point of showing the steps at all.
     expect(within(steps).getByLabelText("running")).toBeInTheDocument();
     // And the instruction it was given stays on the card.

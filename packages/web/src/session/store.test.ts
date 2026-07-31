@@ -89,6 +89,38 @@ describe("a session's title arriving after the first message", () => {
 });
 
 /**
+ * The sidebar shows every project's sessions at once, so the session that was
+ * clicked is no longer guaranteed to be in the project on screen. The file
+ * tree, the terminal and the diff all read `activeWorkspaceId`, and before this
+ * they went on pointing at whichever project the user had navigated away from —
+ * a diff of the wrong repository, presented as if it were this one.
+ */
+describe("opening a session that belongs to another project", () => {
+  it("moves the rest of the workbench to that project too", async () => {
+    const elsewhere: SessionSummary = { ...SESSION, id: "s9", workspaceId: "w2" };
+    const { client } = stubClient();
+    useWorkbench.setState({
+      client,
+      sessions: [SESSION, elsewhere],
+      activeWorkspaceId: "w1",
+    });
+
+    await useWorkbench.getState().selectSession("s9");
+
+    expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
+  });
+
+  it("leaves the project alone for a session it has never heard of", async () => {
+    const { client } = stubClient();
+    useWorkbench.setState({ client, sessions: [SESSION], activeWorkspaceId: "w1" });
+
+    await useWorkbench.getState().selectSession("unknown");
+
+    expect(useWorkbench.getState().activeWorkspaceId).toBe("w1");
+  });
+});
+
+/**
  * The user's report was "对话发送后没反应". The daemon had in fact refused the
  * send and said why; the click handler dropped the rejection on the floor, so
  * the only trace was an unhandled rejection in a console nobody has open.

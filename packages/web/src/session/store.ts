@@ -14,6 +14,7 @@ import type {
   SessionSnapshot,
   SessionSummary,
   Settings,
+  UpdateDownload,
   UpdateStatus,
   WorkspaceInfo,
 } from "@genehub/proto";
@@ -89,6 +90,15 @@ interface WorkbenchState {
   update: UpdateStatus | null;
   /** A check is in flight. Shared, for the same reason `update` is. */
   updating: boolean;
+  /**
+   * How far the machine has got fetching the installer.
+   *
+   * Owned by the machine, not by us: this is the one piece of state here that
+   * keeps moving after the panel that started it is closed, and two windows
+   * watching the same download have to agree. What arrives is either the answer
+   * to `update.downloadState` or a push, and both write the same field.
+   */
+  download: UpdateDownload;
 
   attach(client: Client): Promise<void>;
   openWorkspace(root: string): Promise<void>;
@@ -110,6 +120,13 @@ interface WorkbenchState {
   loadLog(name?: string): Promise<void>;
   /** Asks the machine whether a newer build has been published. */
   checkUpdate(): Promise<void>;
+  /**
+   * Asks the machine to fetch the installer. Returns once it has started, not
+   * once it has finished: what happens after that arrives as pushes.
+   */
+  downloadUpdate(): Promise<void>;
+  /** Stops the prompt asking, without throwing the downloaded file away. */
+  dismissUpdate(): Promise<void>;
   setProvider(input: {
     providerId: string;
     apiKey?: string;
@@ -172,6 +189,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   log: null,
   update: null,
   updating: false,
+  download: { state: "idle" },
 
   async attach(client) {
     set({ client, notice: null });
@@ -183,10 +201,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       if (connection === "closed" && client.failure) set({ notice: client.failure.message });
     });
     client.onNotice((_level, message) => set({ notice: message }));
+    client.onUpdateDownload((download) => set({ download }));
     try {
       await refreshCatalog(client, set);
       if (get().client === client) await land(get);
       await get().refreshHub();
+      // Asked on connect, unlike the update check itself. A download that was
+      // running when the window closed is still running, and the prompt to
+      // install it has to come back with the window rather than wait for
+      // someone to go looking in settings for a file they already have.
+      const download = await client.call({ type: "update.downloadState" });
+      if (download?.type === "updateDownload") set({ download: download.data });
     } catch (error) {
       // A connection can disappear halfway through being asked things: the tab
       // is closing, or the daemon restarted and the shell has already pointed
@@ -207,14 +232,16 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       activeSessionId: null,
       timeline: emptyTimeline(),
     }));
-    await loadSessions(client, reply.data.id, set);
+    await loadSessions(client, set);
     await land(get);
   },
 
   async selectWorkspace(workspaceId) {
-    const client = require_(get().client);
+    // No refetch: the list already holds every workspace's sessions, so
+    // switching projects is a change of which ones are on screen, not a
+    // question for the daemon.
+    require_(get().client);
     set({ activeWorkspaceId: workspaceId, activeSessionId: null, timeline: emptyTimeline() });
-    await loadSessions(client, workspaceId, set);
     await land(get);
   },
 
@@ -254,6 +281,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           ];
       return {
         activeSessionId: sessionId,
+        // The project follows the conversation. Every workspace's sessions are
+        // in the list at once now, so the one just clicked may belong to a
+        // different project than the one on screen — and the file tree, the
+        // terminal and the diff all read `activeWorkspaceId`. Without this they
+        // would go on showing the project the user just navigated away from.
+        activeWorkspaceId: summary?.workspaceId ?? state.activeWorkspaceId,
         timeline: emptyTimeline(),
         tabs,
         activeTabId: tabId,
@@ -480,6 +513,25 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
   },
 
+  async downloadUpdate() {
+    const reply = await asked(set, () =>
+      require_(get().client).call({ type: "update.download" }),
+    );
+    if (reply?.type === "updateDownload") set({ download: reply.data });
+  },
+
+  async dismissUpdate() {
+    // Set here as well as from the reply, so the prompt goes away on the click
+    // rather than after a round trip. The machine's answer overwrites it a
+    // moment later and they agree, except when the download is still running —
+    // and then the machine is right and this was never dismissed.
+    set({ download: { state: "idle" } });
+    const reply = await asked(set, () =>
+      require_(get().client).call({ type: "update.dismiss" }),
+    );
+    if (reply?.type === "updateDownload") set({ download: reply.data });
+  },
+
   async setProvider({ providerId, apiKey, baseUrl, label, dialect, models }) {
     set({ notice: null });
     const reply = await asked(set, () =>
@@ -609,10 +661,16 @@ async function refreshCatalog(client: Client, set: Setter): Promise<void> {
   if (workspaces?.type === "workspaces") {
     set({ workspaces: workspaces.data });
     const first = workspaces.data[0];
-    if (first) {
-      set({ activeWorkspaceId: first.id });
-      await loadSessions(client, first.id, set);
-    }
+    if (!first) return;
+    const sessions = await loadSessions(client, set);
+    // Which project to open on. The newest conversation anywhere, rather than
+    // whichever workspace the daemon listed first: "coming back means
+    // continuing the last thing" is the whole point of landing somewhere, and
+    // the last thing is rarely in the first project alphabetically. Checked
+    // against the list, because a session can outlive the workspace's entry.
+    const last = newest(sessions);
+    const known = workspaces.data.some((entry) => entry.id === last?.workspaceId);
+    set({ activeWorkspaceId: known && last ? last.workspaceId : first.id });
   }
 }
 
@@ -631,13 +689,9 @@ async function land(get: () => WorkbenchState): Promise<void> {
   const workspaceId = state.activeWorkspaceId;
   if (!workspaceId) return;
 
-  const latest = state.sessions
-    .filter((session) => session.workspaceId === workspaceId)
-    .reduce<SessionSummary | null>(
-      (newest, session) =>
-        !newest || session.updatedAtMs > newest.updatedAtMs ? session : newest,
-      null,
-    );
+  const latest = newest(
+    state.sessions.filter((session) => session.workspaceId === workspaceId),
+  );
   if (latest) {
     await get().selectSession(latest.id);
     return;
@@ -648,12 +702,31 @@ async function land(get: () => WorkbenchState): Promise<void> {
   await get().createSession(workspaceId, agent.id);
 }
 
-async function loadSessions(client: Client, workspaceId: string, set: Setter): Promise<void> {
+/**
+ * Every session on the machine, not just the open project's.
+ *
+ * `workspaceId: null` means "all of them" to the daemon
+ * (`SessionManager::list`), and one call is what lets the sidebar draw the
+ * whole tree — which projects exist, and what is going on inside each. Asking
+ * per workspace would mean one round trip per row, and a tree that fills in
+ * raggedly as the answers arrive.
+ */
+async function loadSessions(client: Client, set: Setter): Promise<SessionSummary[]> {
   const reply = await client.call({
     type: "session.list",
-    payload: { workspaceId, includeArchived: false },
+    payload: { workspaceId: null, includeArchived: false },
   });
-  if (reply?.type === "sessions") set({ sessions: reply.data });
+  if (reply?.type !== "sessions") return [];
+  set({ sessions: reply.data });
+  return reply.data;
+}
+
+/** The most recently touched of a set, or null. */
+function newest(sessions: SessionSummary[]): SessionSummary | null {
+  return sessions.reduce<SessionSummary | null>(
+    (best, session) => (!best || session.updatedAtMs > best.updatedAtMs ? session : best),
+    null,
+  );
 }
 
 /**

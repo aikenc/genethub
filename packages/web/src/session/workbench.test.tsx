@@ -86,7 +86,9 @@ describe("what the user sees in a session", () => {
         detail={{ kind: "shell", command: "ls -a", output: "a\nb", exitCode: 0 }}
       />,
     );
-    expect(screen.getByText("ls -a")).toBeInTheDocument();
+    // Header summary and body both carry the command — the body is what wraps
+    // on a phone; the header stays a one-line truncate.
+    expect(screen.getAllByText("ls -a").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByTestId("tool-call")).toHaveTextContent("a b");
   });
 

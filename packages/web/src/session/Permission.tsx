@@ -20,7 +20,7 @@ export function PermissionCard({
     >
       <p className="font-medium">{request.title}</p>
       {request.detail ? (
-        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-xs text-muted">
+        <pre className="mt-1 max-h-40 max-w-full overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs text-muted">
           {request.detail}
         </pre>
       ) : null}

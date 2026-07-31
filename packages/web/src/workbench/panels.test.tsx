@@ -29,6 +29,7 @@ function stubDaemon(answers: Partial<Record<Request["type"], (payload: never) =>
     },
     onPty: () => () => {},
     onNotice: () => () => {},
+    onUpdateDownload: () => () => {},
     onStateChange: () => () => {},
   } as unknown as Client;
   return { client, calls };
@@ -59,6 +60,7 @@ beforeEach(() => {
     log: null,
     update: null,
     updating: false,
+    download: { state: "idle" },
   });
 });
 
@@ -543,9 +545,15 @@ describe("the version section", () => {
     expect(calls.some((call) => call.type === "update.check")).toBe(false);
   });
 
-  it("offers the way to a newer build, and says what installing costs", async () => {
+  /**
+   * The machine downloads, not the shell. What this asserts is the division:
+   * the button asks the daemon, and the address it fetches never travels from
+   * here — a client that could name the file to download could point somebody
+   * else's machine at anything on the internet.
+   */
+  it("has the machine fetch the installer, and says what installing costs", async () => {
     const opened: string[] = [];
-    connected({
+    const { calls } = connected({
       "update.check": () => ({
         type: "update",
         data: {
@@ -553,7 +561,12 @@ describe("the version section", () => {
           latest: "0.1.18",
           newer: true,
           url: "https://example.test/releases/tag/v0.1.18",
+          downloadUrl: "https://example.test/GeneHub-setup.exe",
         },
+      }),
+      "update.download": () => ({
+        type: "updateDownload",
+        data: { state: "fetching", version: "0.1.18", received: 0 },
       }),
     });
 
@@ -562,6 +575,22 @@ describe("the version section", () => {
 
     expect(await screen.findByText(/有新版本 0\.1\.18/)).toBeTruthy();
     expect(screen.getByText(/会被打断/)).toBeTruthy();
+
+    await userEvent.click(screen.getByTestId("download-update"));
+    await waitFor(() =>
+      expect(calls.some((call) => call.type === "update.download")).toBe(true),
+    );
+    expect(calls.find((call) => call.type === "update.download")).toEqual({
+      type: "update.download",
+    });
+    // Nothing was handed to the browser: the file is arriving on the machine.
+    expect(opened).toEqual([]);
+
+    // And the button stops offering a second download of the same thing.
+    await waitFor(() =>
+      expect(screen.getByTestId("download-update")).toHaveTextContent("已在下载"),
+    );
+
     await userEvent.click(screen.getByTestId("open-release"));
     expect(opened).toEqual(["https://example.test/releases/tag/v0.1.18"]);
   });

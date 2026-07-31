@@ -12,7 +12,7 @@ export function TabBar() {
 
   return (
     <div className="flex h-9 shrink-0 items-stretch border-b border-line bg-surface">
-      <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto">
+      <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto touch-pan-x">
         {tabs.map((tab) => {
           const active = tab.id === activeTabId;
           return (

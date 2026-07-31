@@ -153,6 +153,21 @@ pub enum Request {
     /// never on a timer — see `UpdateStatus`.
     #[serde(rename = "update.check")]
     UpdateCheck,
+    /// Fetches the installer for this platform into the machine's own data
+    /// directory. Answers with the state at that moment; the rest arrives as
+    /// `ServerFrame::UpdateDownload` pushes.
+    #[serde(rename = "update.download")]
+    UpdateDownload,
+    /// How far a fetch got, for a client that arrived after it started.
+    #[serde(rename = "update.downloadState")]
+    UpdateDownloadState,
+    /// Forgets a finished or failed fetch, so the prompt stops asking.
+    ///
+    /// The file stays on disk: "稍后" means later, not never, and re-downloading
+    /// a hundred megabytes because someone closed a toast is a punishment for
+    /// reading it.
+    #[serde(rename = "update.dismiss")]
+    UpdateDismiss,
 
     // -- hub ---------------------------------------------------------------
     /// Whether this machine is paired, and how far a pairing in progress got.
@@ -314,6 +329,7 @@ pub enum Reply {
     Settings(Settings),
     Log(LogTail),
     Update(UpdateStatus),
+    UpdateDownload(UpdateDownload),
     Session(SessionSummary),
     Sessions(Vec<SessionSummary>),
     Snapshot(SessionSnapshot),
@@ -399,6 +415,14 @@ pub enum ServerFrame {
     /// Unsolicited notice, e.g. the machine was revoked by the Hub.
     #[serde(rename = "notice", rename_all = "camelCase")]
     Notice { level: NoticeLevel, message: String },
+    /// How far the installer fetch has got.
+    ///
+    /// Pushed to every client rather than answered to the one that asked: a
+    /// download started from the settings page has to keep reporting itself
+    /// after that page is closed, and a second window must not show a stale
+    /// "下载中" forever.
+    #[serde(rename = "updateDownload", rename_all = "camelCase")]
+    UpdateDownloadChanged { download: UpdateDownload },
     /// This connection fell behind and events for a session were dropped.
     ///
     /// Addressed to the client rather than to the person: a hole in a timeline is

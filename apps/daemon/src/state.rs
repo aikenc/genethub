@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use genehub_proto::{ProviderInfo, Settings};
-use tokio::sync::{mpsc, RwLock};
+use genehub_proto::{ProviderInfo, ServerFrame, Settings};
+use tokio::sync::{broadcast, mpsc, RwLock};
 
 use crate::adapter::registry::Registry;
 use crate::adapter::ProviderMap;
@@ -37,6 +37,15 @@ pub struct AppState {
     /// The rendezvous relay this machine waits at, if any. Set alongside the
     /// link and for the same reason.
     pub remote: std::sync::OnceLock<SharedRemote>,
+    /// How far the installer fetch has got, when one was asked for.
+    pub updates: crate::updates::Downloader,
+    /// The channel every connected client is listening on.
+    ///
+    /// The same one terminal output uses, which is why it is set from outside:
+    /// it is created with the listener, after this state exists. Anything the
+    /// machine needs to say to whoever is watching, rather than to whoever
+    /// asked, goes through here.
+    pub fanout: std::sync::OnceLock<broadcast::Sender<ServerFrame>>,
     /// What each provider answered when asked for its models. See `discover`.
     models: RwLock<std::collections::HashMap<String, Discovery>>,
     /// Raised when a local client asks the daemon to stop.
@@ -110,6 +119,7 @@ impl AppState {
         }
 
         let (terminals, pty_rx) = Terminals::new();
+        let updates_dir = paths.updates_dir();
 
         let state = Arc::new(AppState {
             paths,
@@ -124,6 +134,8 @@ impl AppState {
             devices,
             link: std::sync::OnceLock::new(),
             remote: std::sync::OnceLock::new(),
+            updates: crate::updates::Downloader::new(updates_dir),
+            fanout: std::sync::OnceLock::new(),
             models: RwLock::new(std::collections::HashMap::new()),
             shutdown: Arc::new(tokio::sync::Notify::new()),
         });
@@ -344,5 +356,17 @@ impl AppState {
         std::fs::write(&path, serde_json::to_string_pretty(&body)?)?;
         crate::config::restrict_to_owner(&path)?;
         Ok(path)
+    }
+
+    /// Says something to every client that happens to be connected.
+    ///
+    /// Dropped silently when nobody is listening, which is the ordinary case for
+    /// a daemon nobody has open. What this carries is a state the client can ask
+    /// for again (`update.downloadState`), so a missed frame costs a stale
+    /// screen until the next one, never a lost fact.
+    pub fn push(&self, frame: ServerFrame) {
+        if let Some(fanout) = self.fanout.get() {
+            let _ = fanout.send(frame);
+        }
     }
 }

@@ -69,10 +69,16 @@ fn every_command_the_workbench_calls_exists_here() {
         "restart_daemon",
         "notify",
         "open_external",
+        "install_update",
         "open_window",
         "open_logs",
         "pick_directory",
         "app_version",
+        "window_minimize",
+        "window_toggle_maximize",
+        "window_is_maximized",
+        "window_close",
+        "set_window_background",
     ] {
         assert!(
             host.contains(&format!("\"{command}\"")),
@@ -89,6 +95,41 @@ fn every_command_the_workbench_calls_exists_here() {
              so calling it fails at runtime"
         );
     }
+}
+
+/// Turning the decorations off takes away the only way the OS gives anyone to
+/// move, maximise or close the window — so the page has to put all three back,
+/// and the shell has to permit the drag. Any one of the three missing is a
+/// window that cannot be got rid of, which is worse than the white title bar
+/// this arrangement exists to remove.
+#[test]
+fn a_window_with_no_decorations_draws_its_own_title_bar() {
+    let config = config();
+    let window = &config["app"]["windows"][0];
+    assert_eq!(
+        window["decorations"],
+        serde_json::json!(false),
+        "the window uses the system title bar again, which takes its colour \
+         from the OS and not from the workbench — if that is deliberate, \
+         packages/web/src/shell/TitleBar.tsx is now a second one"
+    );
+    assert!(
+        window["backgroundColor"].is_string(),
+        "with no decorations the window's own colour is what shows before the \
+         page paints and along the edge while it is being resized"
+    );
+
+    let bar = read(repo().join("packages/web/src/shell/TitleBar.tsx"));
+    assert!(
+        bar.contains("data-tauri-drag-region"),
+        "nothing in the title bar is draggable, so the window cannot be moved"
+    );
+
+    let capabilities = read(repo().join("apps/desktop/src-tauri/capabilities/default.json"));
+    assert!(
+        capabilities.contains("core:window:allow-start-dragging"),
+        "the drag region is drawn but the shell refuses the drag it asks for"
+    );
 }
 
 /// An upgrade replaces files the running daemon is holding open, and Windows

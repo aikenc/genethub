@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
 import { useWorkbench } from "../session/store";
+import { THEME_OPTIONS, useTheme } from "../theme/store";
 
 /**
  * The providers offered before anything is configured.
@@ -47,6 +48,8 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 overflow-y-auto p-4">
       <Machine identity={client?.identity ?? null} expected={endpoint?.fingerprint} />
+
+      <Appearance />
 
       <section>
         <h2 className="mb-2 text-sm font-medium">模型密钥</h2>
@@ -111,6 +114,54 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
 }
 
 /**
+ * Which palette this client draws itself in.
+ *
+ * Not in `settings.*`, which is the machine's and shared by everything
+ * connected to it: a phone in a dark room and a laptop under an office light
+ * are asking different questions, and one answer for both would be wrong on one
+ * of them. So this is remembered here, per browser (`theme/store.ts`).
+ */
+function Appearance() {
+  const { preference, resolved, setPreference } = useTheme();
+  return (
+    <section>
+      <h2 className="mb-2 text-sm font-medium">外观</h2>
+      <div className="flex flex-col gap-2 rounded bg-surface px-3 py-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex gap-1" role="radiogroup" aria-label="主题">
+            {THEME_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={preference === option.value}
+                data-testid={`theme-${option.value}`}
+                className={`rounded border px-2.5 py-1.5 ${
+                  preference === option.value
+                    ? "border-accent bg-raised text-fg"
+                    : "border-line text-muted hover:border-line-strong hover:text-fg"
+                }`}
+                onClick={() => setPreference(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          {preference === "system" ? (
+            <span className="text-muted">
+              系统现在是{resolved === "dark" ? "暗色" : "亮色"}。
+            </span>
+          ) : null}
+        </div>
+        <p className="text-faint">
+          只对这台设备上的这个客户端生效。同一台机器从手机连过来，那边可以是另一个颜色。
+        </p>
+      </div>
+    </section>
+  );
+}
+
+/**
  * What an unstamped build calls itself.
  *
  * The version in the repository is 0.0.0 and the release workflow writes the tag
@@ -131,9 +182,10 @@ const shown = (version: string) => (version === UNRELEASED ? "开发版" : versi
  * its own file open while an installer wants to replace it (`installer.nsh`).
  * Printing both is what turns that from a puzzle into a sentence.
  *
- * The check is a button and never a timer, and it downloads nothing: it ends in a
- * line of text and a link. Installing stops the daemon and whatever an agent was
- * in the middle of, and when to pay that is the user's call, not ours.
+ * The check is a button and never a timer. When there is something newer, the
+ * machine fetches the installer into its own data folder and says so in the
+ * corner of the screen (`UpdateToast`); installing still stops the daemon and
+ * whatever an agent was mid-turn, and when to pay that is the user's call.
  */
 function Version({ host, daemonVersion }: { host: Host; daemonVersion?: string }) {
   const { update, updating, checkUpdate, client } = useWorkbench();
@@ -173,7 +225,7 @@ function Version({ host, daemonVersion }: { host: Host; daemonVersion?: string }
             两个版本不一致，上次升级大概只装了一半。重新装一遍安装包，或者从托盘退出再打开。
           </p>
         ) : null}
-        <Answer status={update} onOpen={(url) => host.openExternal(url)} />
+        <Answer status={update} host={host} />
       </div>
     </section>
   );
@@ -186,13 +238,11 @@ function Version({ host, daemonVersion }: { host: Host; daemonVersion?: string }
  * nothing looks broken, and a check that reached nothing must never be allowed to
  * read as "you are up to date".
  */
-function Answer({
-  status,
-  onOpen,
-}: {
-  status: UpdateStatus | null;
-  onOpen(url: string): void;
-}) {
+function Answer({ status, host }: { status: UpdateStatus | null; host: Host }) {
+  const { download, downloadUpdate } = useWorkbench();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   if (!status) return null;
   if (status.problem) {
     return (
@@ -213,23 +263,70 @@ function Answer({
   if (!status.newer) {
     return <p className="text-muted">已经是最新的了。</p>;
   }
+
+  const installer = status.downloadUrl;
+  const notes = status.url && status.url !== installer ? status.url : null;
+  // Already fetching, or already fetched. The corner of the screen is saying so
+  // and pressing again would only ask the machine a question it has answered.
+  const started = download.state !== "idle";
+
+  async function fetchIt() {
+    setBusy(true);
+    setError(null);
+    try {
+      await downloadUpdate();
+    } catch (failed) {
+      setError(failed instanceof Error ? failed.message : String(failed));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <p className="flex flex-wrap items-center gap-2">
-      <span>有新版本 {status.latest}。</span>
-      {status.url ? (
-        <button
-          type="button"
-          data-testid="open-release"
-          className="underline decoration-dotted hover:text-accent"
-          onClick={() => onOpen(status.url!)}
-        >
-          打开下载页
-        </button>
+    <div className="flex flex-col gap-1">
+      <p className="flex flex-wrap items-center gap-2">
+        <span>有新版本 {status.latest}。</span>
+        {installer ? (
+          <button
+            type="button"
+            data-testid="download-update"
+            className="underline decoration-dotted hover:text-accent disabled:opacity-40"
+            disabled={busy || started}
+            onClick={() => void fetchIt()}
+          >
+            {started ? "已在下载，见右下角" : busy ? "开始下载…" : "下载"}
+          </button>
+        ) : null}
+        {notes ? (
+          <button
+            type="button"
+            data-testid="open-release"
+            className="underline decoration-dotted hover:text-accent"
+            onClick={() => host.openExternal(notes)}
+          >
+            查看说明
+          </button>
+        ) : !installer && status.url ? (
+          // No installer named for this platform: the page is the only door left.
+          <button
+            type="button"
+            data-testid="open-release"
+            className="underline decoration-dotted hover:text-accent"
+            onClick={() => host.openExternal(status.url!)}
+          >
+            打开下载页
+          </button>
+        ) : null}
+        <span className="text-faint">
+          装的时候这台机器上正在跑的会话会被打断，选个合适的时候。
+        </span>
+      </p>
+      {error ? (
+        <p role="alert" className="text-danger">
+          {error}
+        </p>
       ) : null}
-      <span className="text-faint">
-        装的时候这台机器上正在跑的会话会被打断，选个合适的时候。
-      </span>
-    </p>
+    </div>
   );
 }
 

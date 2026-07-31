@@ -3,9 +3,25 @@ import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
 import "./theme.css";
+import { applyTheme, useTheme, watchSystemTheme } from "./theme/store";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("index.html is missing #root");
+
+/*
+ * Before the first render, not inside a component.
+ *
+ * The stylesheet is render-blocking and this module runs after it and before
+ * React puts anything on screen, so the very first frame already has the right
+ * class on `<html>`. Doing it in an effect instead would paint one frame of the
+ * other palette on every launch.
+ *
+ * An inline script in `index.html` would be a shade earlier still, and is what
+ * most apps do — but the desktop CSP allows scripts from `'self'` only, and
+ * opening it to inline scripts to save part of a frame is a bad trade.
+ */
+applyTheme(useTheme.getState().resolved);
+watchSystemTheme((theme) => useTheme.getState().systemChanged(theme));
 
 createRoot(root).render(
   <StrictMode>

@@ -33,12 +33,43 @@ export interface Notification {
   body?: string;
 }
 
+/**
+ * The parts of a window only its owner can move.
+ *
+ * One object rather than five optional methods, so that "does this shell have a
+ * frame we are responsible for drawing?" is a single question. A browser tab is
+ * not a window anyone here owns, so this is absent there and the workbench
+ * draws no title bar at all.
+ */
+export interface WindowControls {
+  minimize(): void;
+  /** Returns whether the window ended up maximised, so the icon can follow. */
+  toggleMaximize(): Promise<boolean>;
+  isMaximized(): Promise<boolean>;
+  /**
+   * Asks to close. What that means is the shell's business — on the desktop it
+   * is "hide and keep the daemon running", which is the whole point of the tray.
+   */
+  close(): void;
+  /** Keeps the colour the OS paints mid-resize in step with the palette. */
+  setBackground(dark: boolean): void;
+}
+
 export interface Host {
   readonly kind: "browser" | "desktop";
   /** Where to connect on startup, or null when the user has to choose. */
   endpoint(): Promise<Endpoint | null>;
   notify(notification: Notification): void;
   openExternal(url: string): void;
+  /**
+   * Asks the OS to run an installer the machine has already downloaded.
+   *
+   * Desktop only, and no fallback: a browser cannot run a file, and one on a
+   * phone is not even on the machine the file is sitting on. Where this is
+   * missing the prompt says where the installer is instead of offering a button
+   * that could not work.
+   */
+  installUpdate?(path: string): Promise<void>;
   /**
    * Opens a page that is part of getting signed in.
    *
@@ -48,6 +79,11 @@ export interface Host {
    * difference here" and callers fall back to `openExternal`.
    */
   openWindow?(url: string): void;
+  /**
+   * Present only where this app owns the window frame, which is where the
+   * workbench has to draw the title bar itself.
+   */
+  window?: WindowControls;
   /** Present only where a native picker exists. */
   pickDirectory?(): Promise<string | null>;
   /**
@@ -220,8 +256,28 @@ export function desktopHost(): Host {
     openExternal(url) {
       void tauri.core.invoke("open_external", { url });
     },
+    installUpdate(path) {
+      return tauri.core.invoke("install_update", { path });
+    },
     openWindow(url) {
       void tauri.core.invoke("open_window", { url });
+    },
+    window: {
+      minimize() {
+        void tauri.core.invoke("window_minimize");
+      },
+      toggleMaximize() {
+        return tauri.core.invoke<boolean>("window_toggle_maximize");
+      },
+      isMaximized() {
+        return tauri.core.invoke<boolean>("window_is_maximized");
+      },
+      close() {
+        void tauri.core.invoke("window_close");
+      },
+      setBackground(dark) {
+        void tauri.core.invoke("set_window_background", { dark });
+      },
     },
     async pickDirectory() {
       return tauri.core.invoke<string | null>("pick_directory");

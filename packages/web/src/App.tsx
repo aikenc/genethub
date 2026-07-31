@@ -15,7 +15,10 @@ import { useWorkbench } from "./session/store";
 import { Sidebar } from "./shell/Sidebar";
 import { TabBar } from "./shell/TabBar";
 import type { ExtraTab } from "./shell/tabs";
+import { TitleBar } from "./shell/TitleBar";
+import { useTheme } from "./theme/store";
 import { TerminalPanel } from "./terminal/TerminalPanel";
+import { UpdateToast } from "./updates/UpdateToast";
 import { OpenProject } from "./workspace/OpenProject";
 
 /**
@@ -73,7 +76,13 @@ export function App({
     "idle" | "working" | { error: string }
   >(() => (host.pendingPairing?.() ? "working" : "idle"));
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  // Two different questions. `sessionsOpen` is the phone's drawer, which starts
+  // shut because it covers the conversation; `sidebarHidden` is someone on a
+  // desktop asking for the room back, which starts false because the left
+  // column is how the workbench is read.
+  const [sidebarHidden, setSidebarHidden] = useState(false);
   const workbench = useWorkbench();
+  const theme = useTheme((state) => state.resolved);
   const pairing = workbench.hub?.state === "pairing";
   const activeTab = workbench.tabs.find(
     (tab) => tab.id === workbench.activeTabId,
@@ -85,6 +94,13 @@ export function App({
   const currentAgent = workbench.agents.find(
     (agent) => agent.id === session?.agentId,
   );
+
+  // The frame the compositor paints while a window is being resized is the
+  // shell's, not the page's, so it has to be told which palette is in force —
+  // otherwise a dark edge chases the pointer around a light workbench.
+  useEffect(() => {
+    host.window?.setBackground(theme === "dark");
+  }, [host, theme]);
 
   useEffect(() => {
     if (!pairing) return;
@@ -212,174 +228,187 @@ export function App({
   const kind = activeTab?.kind ?? "chat";
 
   return (
-    <div className="flex h-full flex-col bg-bg md:flex-row">
-      <Sidebar
+    <div className="flex h-full max-w-full flex-col overflow-x-hidden bg-bg">
+      <TitleBar
         host={host}
-        open={sessionsOpen}
-        extraTabs={extraTabs}
-        onNavigate={() => setSessionsOpen(false)}
+        sidebarHidden={sidebarHidden}
+        onToggleSidebar={() => setSidebarHidden((hidden) => !hidden)}
       />
 
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="flex items-center gap-2 border-b border-line bg-surface px-2 md:hidden">
-          <button
-            type="button"
-            aria-label="会话列表"
-            className="rounded px-2 py-2 text-xs text-muted"
-            onClick={() => setSessionsOpen((open) => !open)}
-          >
-            ☰
-          </button>
-          <span className="truncate text-xs text-muted">
-            {session?.title ?? "工作台"}
-          </span>
-          <ConnectionBadge state={workbench.connection} endpoint={endpoint} />
-        </div>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
+        <Sidebar
+          host={host}
+          open={sessionsOpen}
+          hidden={sidebarHidden}
+          extraTabs={extraTabs}
+          onNavigate={() => setSessionsOpen(false)}
+        />
 
-        <TabBar />
-
-        {workbench.notice ? (
-          <p
-            role="alert"
-            className="flex shrink-0 items-center gap-2 border-b border-line bg-raised px-3 py-1.5 text-xs text-danger"
-          >
-            <span className="min-w-0 flex-1">{workbench.notice}</span>
-            {/* Every error gets a way to the log. What a failure can say in one
-                line is rarely the whole story, and the rest is already written
-                down — it was just somewhere nobody could reach. */}
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex items-center gap-2 border-b border-line bg-surface px-2 md:hidden">
             <button
               type="button"
-              className="shrink-0 underline decoration-dotted hover:text-fg"
-              onClick={() => workbench.openTab("logs")}
+              aria-label="会话列表"
+              className="rounded px-2 py-2 text-xs text-muted"
+              onClick={() => setSessionsOpen((open) => !open)}
             >
-              查看日志
+              ☰
             </button>
-          </p>
-        ) : null}
+            <span className="truncate text-xs text-muted">
+              {session?.title ?? "工作台"}
+            </span>
+            <ConnectionBadge state={workbench.connection} endpoint={endpoint} />
+          </div>
 
-        <div className="flex min-h-0 flex-1">
-          <section className="relative flex min-w-0 flex-1 flex-col">
-            {showChat ? (
-              workbench.activeSessionId ? (
-                <>
-                  <div className="hidden items-center justify-end border-b border-line px-3 py-1 md:flex">
-                    <ConnectionBadge
-                      state={workbench.connection}
-                      endpoint={endpoint}
-                    />
-                  </div>
-                  <div className="min-h-0 flex-1 overflow-hidden pb-28">
-                    <TimelineView state={workbench.timeline} />
-                  </div>
-                  {workbench.timeline.pendingPermission ? (
-                    <div className="absolute inset-x-0 bottom-28 z-20 px-4">
-                      <div className="mx-auto max-w-chat">
-                        <PermissionCard
-                          request={workbench.timeline.pendingPermission}
-                          onAnswer={(outcome) =>
-                            void workbench.answerPermission(outcome)
-                          }
-                        />
-                      </div>
-                    </div>
-                  ) : null}
-                  <Composer
-                    running={running}
-                    disabled={!workbench.activeSessionId}
-                    agents={workbench.agents}
-                    agentId={session?.agentId ?? null}
-                    modelId={workbench.timeline.modelId}
-                    modeId={workbench.timeline.modeId}
-                    effortId={workbench.timeline.effortId}
-                    agentLocked={workbench.timeline.items.length > 0}
-                    attachmentsSupported={
-                      currentAgent?.capabilities.attachments ?? false
-                    }
-                    commands={currentAgent?.catalog.commands}
-                    onSend={(text, attachments) =>
-                      void workbench.send(text, attachments)
-                    }
-                    onInterrupt={() => void workbench.interrupt()}
-                    onPickAgent={(id) => {
-                      const workspace =
-                        workbench.activeWorkspaceId ??
-                        workbench.workspaces[0]?.id;
-                      if (workspace)
-                        void workbench.createSession(workspace, id);
-                    }}
-                    onPickModel={(id) => void workbench.setModel(id)}
-                    onPickMode={(id) => void workbench.setMode(id)}
-                    onPickEffort={(id) => void workbench.setEffort(id)}
-                  />
-                </>
-              ) : (
-                <FirstRun
-                  host={host}
-                  onOpenSettings={() => workbench.openTab("settings")}
-                />
-              )
-            ) : null}
+          <TabBar />
 
-            {kind === "files" ? (
-              <div className="min-h-0 flex-1">
-                <FilesPanel />
-              </div>
-            ) : null}
-            {kind === "terminal" ? (
-              <div className="min-h-0 flex-1">
-                <TerminalPanel />
-              </div>
-            ) : null}
-            {kind === "settings" ? (
-              <div className="min-h-0 flex-1 overflow-y-auto">
-                <SettingsPanel host={host} endpoint={endpoint} />
-              </div>
-            ) : null}
-            {kind === "logs" ? (
-              <div className="flex min-h-0 flex-1 flex-col">
-                <LogsPanel onOpenDirectory={host.openLogs} />
-              </div>
-            ) : null}
-            {kind === "devices" ? (
-              <div className="min-h-0 flex-1 overflow-y-auto">
-                <DevicesPanel host={host} />
-              </div>
-            ) : null}
-            {extraTabs.map((tab) =>
-              kind === `extra:${tab.id}` ? (
-                <div key={tab.id} className="min-h-0 flex-1 overflow-y-auto">
-                  {tab.render()}
-                </div>
-              ) : null,
-            )}
-          </section>
-
-          {workbench.rightPanel ? (
-            <aside className="hidden w-[22rem] shrink-0 flex-col border-l border-line bg-surface md:flex lg:w-[26rem]">
-              <div className="flex h-9 items-center justify-between border-b border-line px-3">
-                <span className="text-xs text-muted">
-                  {workbench.rightPanel === "changes" ? "Changes" : "Files"}
-                </span>
-                <button
-                  type="button"
-                  aria-label="关闭侧栏"
-                  className="rounded px-1.5 text-faint hover:bg-raised hover:text-fg"
-                  onClick={() => workbench.setRightPanel(null)}
-                >
-                  ×
-                </button>
-              </div>
-              <div className="min-h-0 flex-1">
-                {workbench.rightPanel === "changes" ? (
-                  <ChangesPanel />
-                ) : (
-                  <FilesPanel />
-                )}
-              </div>
-            </aside>
+          {workbench.notice ? (
+            <p
+              role="alert"
+              className="flex shrink-0 items-center gap-2 border-b border-line bg-raised px-3 py-1.5 text-xs text-danger"
+            >
+              <span className="min-w-0 flex-1">{workbench.notice}</span>
+              {/* Every error gets a way to the log. What a failure can say in one
+                  line is rarely the whole story, and the rest is already written
+                  down — it was just somewhere nobody could reach. */}
+              <button
+                type="button"
+                className="shrink-0 underline decoration-dotted hover:text-fg"
+                onClick={() => workbench.openTab("logs")}
+              >
+                查看日志
+              </button>
+            </p>
           ) : null}
-        </div>
-      </main>
+
+          <div className="flex min-h-0 flex-1">
+            <section className="relative flex min-w-0 flex-1 flex-col">
+              {showChat ? (
+                workbench.activeSessionId ? (
+                  <>
+                    <div className="hidden items-center justify-end border-b border-line px-3 py-1 md:flex">
+                      <ConnectionBadge
+                        state={workbench.connection}
+                        endpoint={endpoint}
+                      />
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-hidden pb-28">
+                      <TimelineView state={workbench.timeline} />
+                    </div>
+                    {workbench.timeline.pendingPermission ? (
+                      <div className="absolute inset-x-0 bottom-28 z-20 px-4">
+                        <div className="mx-auto max-w-chat">
+                          <PermissionCard
+                            request={workbench.timeline.pendingPermission}
+                            onAnswer={(outcome) =>
+                              void workbench.answerPermission(outcome)
+                            }
+                          />
+                        </div>
+                      </div>
+                    ) : null}
+                    <Composer
+                      running={running}
+                      disabled={!workbench.activeSessionId}
+                      agents={workbench.agents}
+                      agentId={session?.agentId ?? null}
+                      modelId={workbench.timeline.modelId}
+                      modeId={workbench.timeline.modeId}
+                      effortId={workbench.timeline.effortId}
+                      agentLocked={workbench.timeline.items.length > 0}
+                      attachmentsSupported={
+                        currentAgent?.capabilities.attachments ?? false
+                      }
+                      commands={currentAgent?.catalog.commands}
+                      onSend={(text, attachments) =>
+                        void workbench.send(text, attachments)
+                      }
+                      onInterrupt={() => void workbench.interrupt()}
+                      onPickAgent={(id) => {
+                        const workspace =
+                          workbench.activeWorkspaceId ??
+                          workbench.workspaces[0]?.id;
+                        if (workspace)
+                          void workbench.createSession(workspace, id);
+                      }}
+                      onPickModel={(id) => void workbench.setModel(id)}
+                      onPickMode={(id) => void workbench.setMode(id)}
+                      onPickEffort={(id) => void workbench.setEffort(id)}
+                    />
+                  </>
+                ) : (
+                  <FirstRun
+                    host={host}
+                    onOpenSettings={() => workbench.openTab("settings")}
+                  />
+                )
+              ) : null}
+
+              {kind === "files" ? (
+                <div className="min-h-0 flex-1">
+                  <FilesPanel />
+                </div>
+              ) : null}
+              {kind === "terminal" ? (
+                <div className="min-h-0 flex-1">
+                  <TerminalPanel />
+                </div>
+              ) : null}
+              {kind === "settings" ? (
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  <SettingsPanel host={host} endpoint={endpoint} />
+                </div>
+              ) : null}
+              {kind === "logs" ? (
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <LogsPanel onOpenDirectory={host.openLogs} />
+                </div>
+              ) : null}
+              {kind === "devices" ? (
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  <DevicesPanel host={host} />
+                </div>
+              ) : null}
+              {extraTabs.map((tab) =>
+                kind === `extra:${tab.id}` ? (
+                  <div key={tab.id} className="min-h-0 flex-1 overflow-y-auto">
+                    {tab.render()}
+                  </div>
+                ) : null,
+              )}
+            </section>
+
+            {workbench.rightPanel ? (
+              <aside className="hidden w-[22rem] shrink-0 flex-col border-l border-line bg-surface md:flex lg:w-[26rem]">
+                <div className="flex h-9 items-center justify-between border-b border-line px-3">
+                  <span className="text-xs text-muted">
+                    {workbench.rightPanel === "changes" ? "Changes" : "Files"}
+                  </span>
+                  <button
+                    type="button"
+                    aria-label="关闭侧栏"
+                    className="rounded px-1.5 text-faint hover:bg-raised hover:text-fg"
+                    onClick={() => workbench.setRightPanel(null)}
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1">
+                  {workbench.rightPanel === "changes" ? (
+                    <ChangesPanel />
+                  ) : (
+                    <FilesPanel />
+                  )}
+                </div>
+              </aside>
+            ) : null}
+          </div>
+        </main>
+      </div>
+
+      {/* Outside every tab, because a finished download is not about whichever
+          panel happens to be open. */}
+      <UpdateToast host={host} />
     </div>
   );
 }

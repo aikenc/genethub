@@ -2,7 +2,16 @@
 <html lang="zh-CN" class="dark">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      Inputs and selects are ≥16px so iOS does not zoom the page on focus
+      (that zoom is what then lets the page be dragged sideways).
+    -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!--
+      What the engine paints before our stylesheet arrives. Both names, dark
+      first, because dark is what `:root` falls back to.
+    -->
+    <meta name="color-scheme" content="dark light" />
     <title>GeneHub</title>
   </head>
   <body>

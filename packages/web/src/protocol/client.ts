@@ -5,6 +5,7 @@ import type {
   Request,
   SequencedEvent,
   ServerFrame,
+  UpdateDownload,
 } from "@genehub/proto";
 
 import { proof, randomNonce } from "../devices/proof";
@@ -100,6 +101,9 @@ export class Client {
   private readonly noticeListeners = new Set<
     (level: string, message: string) => void
   >();
+  private readonly downloadListeners = new Set<
+    (download: UpdateDownload) => void
+  >();
   private nextId = 1;
   private attempt = 0;
   private stopped = false;
@@ -129,6 +133,17 @@ export class Client {
   onNotice(listener: (level: string, message: string) => void): () => void {
     this.noticeListeners.add(listener);
     return () => this.noticeListeners.delete(listener);
+  }
+
+  /**
+   * How far the machine has got fetching an installer.
+   *
+   * Pushed rather than polled, and to every client rather than the one that
+   * asked: the download outlives the panel the button was on.
+   */
+  onUpdateDownload(listener: (download: UpdateDownload) => void): () => void {
+    this.downloadListeners.add(listener);
+    return () => this.downloadListeners.delete(listener);
   }
 
   connect(): void {
@@ -366,6 +381,9 @@ export class Client {
       case "notice":
         for (const listener of this.noticeListeners)
           listener(frame.level, frame.message);
+        return;
+      case "updateDownload":
+        for (const listener of this.downloadListeners) listener(frame.download);
         return;
       case "desync":
         // The daemon fell behind and dropped events for this session. Nothing

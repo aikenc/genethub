@@ -46,7 +46,7 @@ export function TimelineView({ state }: { state: TimelineState }) {
   return (
     <div
       ref={scroller}
-      className="mx-auto h-full max-w-chat flex-1 space-y-4 overflow-y-auto px-4 py-6"
+      className="mx-auto h-full min-w-0 max-w-chat flex-1 space-y-4 overflow-x-hidden overflow-y-auto px-4 py-6"
       data-testid="timeline"
       onScroll={(event) => {
         const element = event.currentTarget;

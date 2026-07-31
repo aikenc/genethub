@@ -60,7 +60,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
           },
           pre: ({ children }) => <>{children}</>,
           table: ({ children }) => (
-            <div className="overflow-x-auto">
+            <div className="max-w-full overflow-x-auto touch-pan-x">
               <table className="w-full border-collapse text-xs">{children}</table>
             </div>
           ),
@@ -88,7 +88,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
 function Code({ text, language }: { text: string; language?: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="overflow-hidden rounded-md border border-line bg-raised">
+    <div className="min-w-0 max-w-full overflow-hidden rounded-md border border-line bg-raised">
       <div className="flex items-center justify-between gap-2 border-b border-line px-2 py-1">
         <span className="font-mono text-[11px] text-faint">{language || "code"}</span>
         <button
@@ -103,7 +103,7 @@ function Code({ text, language }: { text: string; language?: string }) {
           {copied ? "已复制" : "复制"}
         </button>
       </div>
-      <pre className="max-h-96 overflow-auto px-2 py-1.5 font-mono text-xs leading-relaxed text-fg">
+      <pre className="max-h-96 max-w-full overflow-x-auto whitespace-pre-wrap break-all px-2 py-1.5 font-mono text-xs leading-relaxed text-fg">
         <code>{text}</code>
       </pre>
     </div>

@@ -36,6 +36,10 @@ impl Daemon {
     pub async fn start(paths: config::Paths) -> Result<Self> {
         let (state, pty_rx) = AppState::build(paths).await?;
         let pty = transport::local::pty_fanout(pty_rx);
+        // The same channel every client already listens on, handed to the state
+        // so anything the machine wants to volunteer — download progress, for
+        // one — reaches them without a second bus to subscribe to.
+        let _ = state.fanout.set(pty.clone());
         let listener = transport::local::serve(state.clone(), pty.clone()).await?;
         state.publish_endpoint(listener.port)?;
 
