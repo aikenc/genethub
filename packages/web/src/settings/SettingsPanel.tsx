@@ -26,7 +26,13 @@ const OFFERED = [
  * A client that is compromised later should not be able to read out a
  * credential it never saw.
  */
-export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpoint | null }) {
+export function SettingsPanel({
+  host,
+  endpoint,
+}: {
+  host: Host;
+  endpoint?: Endpoint | null;
+}) {
   const {
     settings,
     loadSettings,
@@ -48,7 +54,10 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 overflow-y-auto p-4">
-      <Machine identity={client?.identity ?? null} expected={endpoint?.fingerprint} />
+      <Machine
+        identity={client?.identity ?? null}
+        expected={endpoint?.fingerprint}
+      />
 
       <Appearance />
 
@@ -62,8 +71,12 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
             <ProviderRow
               key={provider.id}
               provider={provider}
-              onSave={(input) => setProvider({ providerId: provider.id, ...input })}
-              onForget={provider.custom ? () => forgetProvider(provider.id) : undefined}
+              onSave={(input) =>
+                setProvider({ providerId: provider.id, ...input })
+              }
+              onForget={
+                provider.custom ? () => forgetProvider(provider.id) : undefined
+              }
             />
           ))}
         </div>
@@ -77,9 +90,14 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
         <h2 className="mb-2 text-sm font-medium">Agent</h2>
         <ul className="flex flex-col gap-1 text-sm">
           {agents.map((agent) => (
-            <li key={agent.id} className="flex items-center gap-2 rounded bg-surface px-3 py-2">
+            <li
+              key={agent.id}
+              className="flex items-center gap-2 rounded bg-surface px-3 py-2"
+            >
               <span>{agent.label}</span>
-              {agent.builtin ? <span className="text-xs text-muted">内置</span> : null}
+              {agent.builtin ? (
+                <span className="text-xs text-muted">内置</span>
+              ) : null}
               <span className="ml-auto text-xs text-muted">
                 {agent.probe.state === "ready"
                   ? "可用"
@@ -172,7 +190,8 @@ function Appearance() {
  */
 const UNRELEASED = "0.0.0";
 
-const shown = (version: string) => (version === UNRELEASED ? "开发版" : version);
+const shown = (version: string) =>
+  version === UNRELEASED ? "开发版" : version;
 
 /**
  * Which build this is, and whether a newer one has been published.
@@ -188,7 +207,13 @@ const shown = (version: string) => (version === UNRELEASED ? "开发版" : versi
  * corner of the screen (`UpdateToast`); installing still stops the daemon and
  * whatever an agent was mid-turn, and when to pay that is the user's call.
  */
-function Version({ host, daemonVersion }: { host: Host; daemonVersion?: string }) {
+function Version({
+  host,
+  daemonVersion,
+}: {
+  host: Host;
+  daemonVersion?: string;
+}) {
   const { update, updating, checkUpdate, client } = useWorkbench();
   const [app, setApp] = useState<string | null>(null);
 
@@ -201,16 +226,11 @@ function Version({ host, daemonVersion }: { host: Host; daemonVersion?: string }
       <h2 className="mb-2 text-sm font-medium">版本</h2>
       <div className="flex flex-col gap-2 rounded bg-surface px-3 py-2 text-xs">
         <div className="flex flex-wrap items-center gap-3">
-          {app ? <span data-testid="app-version">应用 {shown(app)}</span> : null}
+          {app ? (
+            <span data-testid="app-version">应用 {shown(app)}</span>
+          ) : null}
           <span className="text-muted" data-testid="daemon-version">
             daemon {daemonVersion ? shown(daemonVersion) : "未连接"}
-          </span>
-          {/* The page is its own artefact, served from wherever it was last
-              deployed to, and it does not update with the daemon. Without this
-              the daemon's number reads as *the* version, and a deployment that
-              was never rebuilt looks like a fixed bug that came back. */}
-          <span className="text-faint" data-testid="page-build">
-            页面 {BUILD}
           </span>
           <button
             type="button"
@@ -225,6 +245,21 @@ function Version({ host, daemonVersion }: { host: Host; daemonVersion?: string }
             {updating ? "检查中…" : "检查更新"}
           </button>
         </div>
+        {/* The page is a third artefact, served from wherever it was last
+            deployed to and updating on nobody's schedule but the deployer's.
+            Without it the daemon's number reads as *the* version, and a
+            deployment that was never rebuilt looks like a fixed bug that came
+            back — an hour went that way once.
+
+            Its own line, and selectable: it is long, it is meant to be quoted
+            into a bug report, and above it sits a button it must never push off
+            the row. */}
+        <code
+          className="select-all break-all font-mono text-faint"
+          data-testid="page-build"
+        >
+          页面 {BUILD}
+        </code>
         {/* Not for a build from source: a developer running a fresh shell against
             an installed daemon is not a broken upgrade, and saying so would be
             crying wolf at the one person who can tell the difference. */}
@@ -264,7 +299,8 @@ function Answer({ status, host }: { status: UpdateStatus | null; host: Host }) {
   if (status.current === UNRELEASED) {
     return (
       <p className="text-muted">
-        这是从源码构建的开发版，不跟发布版本比较。最新发布是 {status.latest ?? "未知"}。
+        这是从源码构建的开发版，不跟发布版本比较。最新发布是{" "}
+        {status.latest ?? "未知"}。
       </p>
     );
   }
@@ -355,7 +391,8 @@ function Machine({
   expected?: string;
 }) {
   if (!identity) return null;
-  const mismatched = expected !== undefined && expected !== identity.fingerprint;
+  const mismatched =
+    expected !== undefined && expected !== identity.fingerprint;
 
   return (
     <section>
@@ -363,7 +400,10 @@ function Machine({
       <div className="flex flex-col gap-1 rounded bg-surface px-3 py-2 text-xs">
         <div className="flex items-center gap-2">
           <span className="text-muted">公钥指纹</span>
-          <code data-testid="fingerprint" className="font-mono text-sm tracking-wider">
+          <code
+            data-testid="fingerprint"
+            className="font-mono text-sm tracking-wider"
+          >
             {identity.fingerprint}
           </code>
         </div>
@@ -395,16 +435,16 @@ function Machine({
  */
 function rows(configured?: ProviderInfo[]): ProviderInfo[] {
   const known = configured ?? [];
-  const missing = OFFERED.filter((offer) => !known.some((entry) => entry.id === offer.id)).map(
-    (offer): ProviderInfo => ({
-      id: offer.id,
-      label: offer.label,
-      hasApiKey: false,
-      dialect: "openai",
-      custom: false,
-      models: [],
-    }),
-  );
+  const missing = OFFERED.filter(
+    (offer) => !known.some((entry) => entry.id === offer.id),
+  ).map((offer): ProviderInfo => ({
+    id: offer.id,
+    label: offer.label,
+    hasApiKey: false,
+    dialect: "openai",
+    custom: false,
+    models: [],
+  }));
   return [...known, ...missing].sort((a, b) => {
     // The ones we ship first, in the order they are offered; then the rest.
     const rank = (entry: ProviderInfo) => {
@@ -462,7 +502,9 @@ function ProviderRow({
           type="button"
           data-testid={`save-${provider.id}`}
           className="rounded bg-accent px-3 py-1 text-xs text-white disabled:opacity-40"
-          disabled={busy || (key.length === 0 && url === (provider.baseUrl ?? ""))}
+          disabled={
+            busy || (key.length === 0 && url === (provider.baseUrl ?? ""))
+          }
           onClick={async () => {
             setBusy(true);
             try {
@@ -512,7 +554,8 @@ function ModelsFound({ provider }: { provider: ProviderInfo }) {
   }
   return (
     <p className="text-xs text-muted">
-      {provider.models.length} 个模型可选：{provider.models.slice(0, 4).join("、")}
+      {provider.models.length} 个模型可选：
+      {provider.models.slice(0, 4).join("、")}
       {provider.models.length > 4 ? " …" : ""}
     </p>
   );
