@@ -52,7 +52,9 @@ function expected() {
 // rewritten instead. A pattern that matches nothing is an error — a quiet
 // no-op is a release that ships 0.0.0.
 function rewriteVersion(path, sectionStart, pattern, version) {
-  const lines = readFileSync(path, "utf8").split("\n");
+  // Split on either newline: a Windows runner checks out with CRLF, and a
+  // `$`-anchored pattern then misses every version line (`"0.0.0"\r`).
+  const lines = readFileSync(path, "utf8").split(/\r?\n/);
   let inside = false;
   let done = false;
   const out = lines.map((line) => {

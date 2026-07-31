@@ -181,7 +181,9 @@ const CHANNEL_TYPE = '"dev" | "official" | "beta" | "alpha"';
 // promise — a replace that silently matches nothing is how a channel ships
 // half-stamped, so every pattern failing to match is an error.
 function rewriteLines(path, replacements) {
-  const lines = readFileSync(path, "utf8").split("\n");
+  // Windows runners check out with CRLF; `$`-anchored patterns miss every
+  // line if the trailing `\r` is left on it.
+  const lines = readFileSync(path, "utf8").split(/\r?\n/);
   const matched = new Set();
   const out = lines.map((line) => {
     for (let i = 0; i < replacements.length; i++) {
@@ -204,7 +206,7 @@ function rewriteLines(path, replacements) {
 // `version`/`name` inside the named section, or a later section's entry
 // would be rewritten instead.
 function rewriteInSection(path, sectionStart, pattern, substitute) {
-  const lines = readFileSync(path, "utf8").split("\n");
+  const lines = readFileSync(path, "utf8").split(/\r?\n/);
   let inside = false;
   let done = false;
   const out = lines.map((line) => {
