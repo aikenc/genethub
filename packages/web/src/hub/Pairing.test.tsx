@@ -139,6 +139,76 @@ describe("connecting a machine to a Hub", () => {
     expect(screen.getByLabelText("Hub 地址")).toHaveValue("https://hub.example.com");
   });
 
+  /**
+   * The whole point of the rework: a build that knows its Hub connects with one
+   * press, inside this window. No address to type, no code to read out, and —
+   * the part that made this feel like someone else's software — no browser
+   * opening on top of the app the user just installed.
+   */
+  it("connects in one press, without a window or a code, where the Hub is known", async () => {
+    const onTrial = vi.fn(async () => null);
+    const openWindow = vi.fn();
+    const openExternal = vi.fn();
+    render(
+      <Pairing
+        status={{ state: "unpaired" }}
+        host={host({ openWindow, openExternal })}
+        defaultHubUrl="https://relay.example.com"
+        onPair={async () => {}}
+        onTrial={onTrial}
+        onUnpair={async () => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByTestId("connect-hub"));
+    expect(onTrial).toHaveBeenCalledWith("https://relay.example.com");
+    expect(openWindow).not.toHaveBeenCalled();
+    expect(openExternal).not.toHaveBeenCalled();
+  });
+
+  /// Folded away, not taken away. Someone running their own Hub is a real user,
+  /// and the address box being first is what made connecting look like homework.
+  it("keeps the pairing code for a Hub of one's own, one click further in", async () => {
+    const onPair = vi.fn(async () => {});
+    render(
+      <Pairing
+        status={{ state: "unpaired" }}
+        host={host()}
+        defaultHubUrl="https://relay.example.com"
+        onPair={onPair}
+        onTrial={async () => null}
+        onUnpair={async () => {}}
+      />,
+    );
+
+    expect(screen.queryByLabelText("Hub 地址")).toBeNull();
+    await userEvent.click(screen.getByTestId("custom-hub"));
+
+    await userEvent.clear(screen.getByLabelText("Hub 地址"));
+    await userEvent.type(screen.getByLabelText("Hub 地址"), "https://hub.mine.test");
+    await userEvent.click(screen.getByText("获取配对码"));
+    expect(onPair).toHaveBeenCalledWith("https://hub.mine.test");
+  });
+
+  /**
+   * A build of this repository alone knows no Hub to suggest. Offering "连接"
+   * there would be a button with nowhere to go, so the address box is the first
+   * thing instead — which is the right first thing for exactly that build.
+   */
+  it("asks for an address when this build knows no Hub", () => {
+    render(
+      <Pairing
+        status={{ state: "unpaired" }}
+        host={host()}
+        onPair={async () => {}}
+        onTrial={async () => null}
+        onUnpair={async () => {}}
+      />,
+    );
+    expect(screen.queryByTestId("connect-hub")).toBeNull();
+    expect(screen.getByLabelText("Hub 地址")).toBeInTheDocument();
+  });
+
   it("offers the no-approval path only where the deployment supports it", async () => {
     const onTrial = vi.fn(async () => null);
     const { rerender } = render(

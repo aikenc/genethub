@@ -6,9 +6,13 @@ import type { Host } from "../host";
 import { Claim } from "./Claim";
 
 /**
- * Approving a pairing means signing in, and where that happens is the shell's
- * call. The desktop app opens a window of its own; being thrown out to the
- * system browser and back is the worst minute of a first install.
+ * Approving a pairing code means signing in, and where that happens is the
+ * shell's call. The desktop app opens a window of its own; being thrown out to
+ * the system browser and back is the worst minute of a first install.
+ *
+ * Only the pairing-code path reaches this. The ordinary one does not open
+ * anything: the Hub enrolls the machine on the spot, which is the whole point
+ * of `hub.trial`.
  */
 function openSignIn(host: Host, url: string): void {
   if (host.openWindow) host.openWindow(url);
@@ -96,7 +100,7 @@ export function Pairing({
   if (status.state === "pairing") {
     return (
       <section className="space-y-3 rounded-lg border border-accent/50 bg-accent/5 p-4 text-center">
-        <p className="text-sm text-muted">打开下面的地址，输入这个配对码：</p>
+        <p className="text-sm text-muted">在浏览器里打开下面的地址，输入这个配对码：</p>
         <p className="font-mono text-3xl tracking-[0.3em]" data-testid="user-code">
           {status.userCode}
         </p>
@@ -112,10 +116,16 @@ export function Pairing({
     );
   }
 
+  // The one-click path exists only where this build knows a Hub to connect to
+  // and the deployment lets a machine enroll without anyone approving it. An
+  // open-source build knows neither, and inventing an address for it would be
+  // a button that fails for everyone who presses it.
+  const automatic = onTrial && defaultHubUrl.trim().length > 0;
+
   return (
     <section className="space-y-3 rounded-lg border border-line bg-surface p-4">
       <p className="text-sm">
-        连接到 Hub 之后，手机和其他电脑上的浏览器就能远程使用这台机器。不连接也不影响本机使用。
+        连接之后，手机和其他电脑上的浏览器就能远程使用这台机器。不连接也不影响本机使用。
       </p>
       {status.state === "failed" ? (
         <p className="text-xs text-danger" role="alert">
@@ -123,40 +133,88 @@ export function Pairing({
         </p>
       ) : null}
       {claim ? <Claim claim={claim} host={host} /> : null}
-      <div className="flex gap-2">
-        <input
-          className="flex-1 rounded border border-line bg-bg px-3 py-1.5 text-sm outline-none focus:border-accent"
-          aria-label="Hub 地址"
-          placeholder="https://hub.example.com"
-          value={hubUrl}
-          onChange={(event) => setHubUrl(event.target.value)}
-        />
-        <button
-          type="button"
-          className="rounded bg-accent px-4 py-1.5 text-sm text-white disabled:opacity-40"
-          disabled={busy || hubUrl.trim().length === 0}
-          onClick={() => {
-            setBusy(true);
-            void onPair(hubUrl.trim()).finally(() => setBusy(false));
-          }}
-        >
-          获取配对码
-        </button>
-      </div>
-      {onTrial ? (
-        <button
-          type="button"
-          className="text-xs text-accent disabled:opacity-40"
-          disabled={busy || hubUrl.trim().length === 0}
-          onClick={() => {
-            setBusy(true);
-            void onTrial(hubUrl.trim()).finally(() => setBusy(false));
-          }}
-        >
-          先体验：不注册，直接连上
-        </button>
+
+      {automatic ? (
+        <div className="space-y-1">
+          <button
+            type="button"
+            data-testid="connect-hub"
+            className="rounded bg-accent px-4 py-2 text-sm text-white disabled:opacity-40"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void onTrial(defaultHubUrl.trim()).finally(() => setBusy(false));
+            }}
+          >
+            {busy ? "连接中…" : "连接"}
+          </button>
+          <p className="text-xs text-muted">
+            在这个应用里直接完成，不用开浏览器，也不用输配对码。
+          </p>
+        </div>
       ) : null}
+
+      <Custom expanded={!automatic}>
+        <div className="flex gap-2">
+          <input
+            className="flex-1 rounded border border-line bg-bg px-3 py-1.5 text-sm outline-none focus:border-accent"
+            aria-label="Hub 地址"
+            placeholder="https://hub.example.com"
+            value={hubUrl}
+            onChange={(event) => setHubUrl(event.target.value)}
+          />
+          <button
+            type="button"
+            className="rounded border border-line px-4 py-1.5 text-sm hover:border-accent disabled:opacity-40"
+            disabled={busy || hubUrl.trim().length === 0}
+            onClick={() => {
+              setBusy(true);
+              void onPair(hubUrl.trim()).finally(() => setBusy(false));
+            }}
+          >
+            获取配对码
+          </button>
+        </div>
+        <p className="text-xs text-muted">
+          连自建的 Hub 用这里。会给一个配对码，需要在浏览器里确认一次。
+        </p>
+        {onTrial ? (
+          <button
+            type="button"
+            className="text-xs text-accent disabled:opacity-40"
+            disabled={busy || hubUrl.trim().length === 0}
+            onClick={() => {
+              setBusy(true);
+              void onTrial(hubUrl.trim()).finally(() => setBusy(false));
+            }}
+          >
+            先体验：不注册，直接连上
+          </button>
+        ) : null}
+      </Custom>
     </section>
+  );
+}
+
+/**
+ * The manual path, folded away where there is a one-click one.
+ *
+ * Folded rather than removed: someone running their own Hub is a real user of
+ * this product, and the address box being the first thing on the page is what
+ * made connecting look like homework for everybody else.
+ */
+function Custom({ expanded, children }: { expanded: boolean; children: React.ReactNode }) {
+  const [open, setOpen] = useState(expanded);
+  if (open) return <div className="space-y-2 border-t border-line pt-3">{children}</div>;
+  return (
+    <button
+      type="button"
+      data-testid="custom-hub"
+      className="text-xs text-muted underline decoration-dotted hover:text-fg"
+      onClick={() => setOpen(true)}
+    >
+      连到自己的 Hub（用配对码）
+    </button>
   );
 }
 
