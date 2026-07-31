@@ -7,9 +7,13 @@
  * this package free of any notion of accounts.
  */
 
+// First, and for its side effects: the palette and the keyboard inset are set
+// up by importing this package, not by the host remembering to ask.
+import "./boot";
+
 export { App } from "./App";
-export { detectHost, browserHost, desktopHost } from "./host";
-export type { Endpoint, Host, Notification } from "./host";
+export { detectHost, browserHost, desktopHost, LOCAL_TARGET } from "./host";
+export type { Endpoint, Host, Notification, Target } from "./host";
 export { Client } from "./protocol/client";
 export { useWorkbench } from "./session/store";
 export type { ExtraTab } from "./shell/tabs";

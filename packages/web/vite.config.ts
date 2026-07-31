@@ -5,6 +5,10 @@ import react from "@vitejs/plugin-react";
 import type { ProxyOptions } from "vite";
 import { defineConfig } from "vitest/config";
 
+// @ts-expect-error -- plain JS, shared with the cloud console's config in
+// another checkout, so it stays outside `src` and outside this tsconfig.
+import { buildDefines } from "./build-stamp.js";
+
 /**
  * Where the page can find a daemon without a second port forward.
  *
@@ -75,6 +79,8 @@ export default defineConfig({
   // Relative so the same build works served from a Hub path, from a Tauri
   // `asset://` URL and from a Capacitor bundle without three configurations.
   base: "./",
+  // So the page can say which build it is; see `build-stamp.js`.
+  define: buildDefines(),
   build: { outDir: "dist", sourcemap: true },
   server: {
     proxy: { ...daemonProxy(), ...relayProxy() },

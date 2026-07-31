@@ -1,6 +1,7 @@
 import type { ProviderInfo, UpdateStatus } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
+import { BUILD } from "../build";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
 import { useWorkbench } from "../session/store";
@@ -203,6 +204,13 @@ function Version({ host, daemonVersion }: { host: Host; daemonVersion?: string }
           {app ? <span data-testid="app-version">应用 {shown(app)}</span> : null}
           <span className="text-muted" data-testid="daemon-version">
             daemon {daemonVersion ? shown(daemonVersion) : "未连接"}
+          </span>
+          {/* The page is its own artefact, served from wherever it was last
+              deployed to, and it does not update with the daemon. Without this
+              the daemon's number reads as *the* version, and a deployment that
+              was never rebuilt looks like a fixed bug that came back. */}
+          <span className="text-faint" data-testid="page-build">
+            页面 {BUILD}
           </span>
           <button
             type="button"
