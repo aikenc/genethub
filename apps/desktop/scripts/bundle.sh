@@ -61,8 +61,13 @@ bundle_dir="$here/../src-tauri/target/release/bundle"
 # build while calling it this build — which then fails one rename later with
 # "no such file", because the paths inside belong to the other channel.
 deb="$(ls -t "$bundle_dir/deb/$LIB_DIR_NAME"_*.deb 2>/dev/null | head -n 1 || true)"
-test -n "$deb" || { echo "FAIL: no package named '$LIB_DIR_NAME'_*.deb under $bundle_dir/deb" >&2; exit 1; }
-echo "    checking $deb"
+# Missing is only a failure when this build was asked for one — the Windows
+# job builds nsis and has no deb to check, by design.
+if [[ "$bundles" == *deb* && -z "$deb" ]]; then
+  echo "FAIL: no package named '$LIB_DIR_NAME'_*.deb under $bundle_dir/deb" >&2
+  exit 1
+fi
+[[ -z "$deb" ]] || echo "    checking $deb"
 
 # The two claims the installer has to keep are cheap to check and easy to break
 # by accident, so they are checked here rather than trusted:
