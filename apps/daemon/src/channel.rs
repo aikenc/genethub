@@ -37,3 +37,6 @@ pub const AGENT_LABEL: &str = "GeneHub Agent";
 // line budget, and CI rejects a tree rustfmt would rewrite.
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/aikenc/genethub/releases/latest/download/latest.json";
+/// Default Hub for `genet hub login` and a standalone first pair.
+pub const DEFAULT_HUB_URL: &str = "https://relay.genethub.com";
+pub const ENV_HUB_URL: &str = "GENEHUB_HUB_URL";

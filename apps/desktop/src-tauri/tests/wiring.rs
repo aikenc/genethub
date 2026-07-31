@@ -481,6 +481,7 @@ fn nothing_in_the_tree_claims_to_be_beta() {
         ("env_agent_home", "GENET_AGENT_HOME"),
         ("env_download_base", "GENEHUB_DOWNLOAD_BASE"),
         ("env_bin_dir", "GENEHUB_BIN_DIR"),
+        ("env_hub_url", "GENEHUB_HUB_URL"),
         ("identifier", "com.genethub.desktop"),
         ("cli_binary", "genet"),
         ("agent_binary", "genet-agent"),

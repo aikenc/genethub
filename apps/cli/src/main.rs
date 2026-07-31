@@ -7,6 +7,8 @@
 //! human words go to stderr (`genethub-cli.md` §3.2).
 
 mod control;
+mod hub;
+mod rpc;
 
 /// Exit codes, frozen for scripts and agents (`genethub-cli.md` §3.2).
 pub const EXIT_OK: i32 = 0;
@@ -32,7 +34,8 @@ async fn main() {
 
     let code = match args.first().map(String::as_str) {
         Some("daemon") => control::daemon(&args[1..]).await,
-        Some("status") => control::status(&args[1..]),
+        Some("status") => control::status(&args[1..]).await,
+        Some("hub") => hub::hub(&args[1..]).await,
         _ => usage(),
     };
     std::process::exit(code);
@@ -48,6 +51,11 @@ pub fn usage() -> i32 {
   genet daemon restart              stop + start
   genet daemon status               whether the daemon is running
   genet daemon endpoint             how to connect: wsUrl, port, token
+  genet hub status                  Hub pairing state
+  genet hub login [--hub <url>] [--name <display>] [--wait]
+                                    enroll with the Hub; print a browser URL
+  genet hub link                    mint a claim link for another device
+  genet hub unpair                  drop Hub enrollment
   genet --version                   print the version"
     );
     fail(

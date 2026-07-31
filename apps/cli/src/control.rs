@@ -56,7 +56,7 @@ pub async fn daemon(args: &[String]) -> i32 {
                 ),
             }
         }
-        "status" => no_extra(rest, || report(false)),
+        "status" => no_extra(rest, || daemon_report()),
         "endpoint" => no_extra(rest, || endpoint()),
         "start" => no_extra(rest, || start()),
         "stop" => no_extra(rest, || stop()),
@@ -65,8 +65,11 @@ pub async fn daemon(args: &[String]) -> i32 {
     }
 }
 
-pub fn status(args: &[String]) -> i32 {
-    no_extra(args, || report(true))
+pub async fn status(args: &[String]) -> i32 {
+    if !args.is_empty() {
+        return crate::usage();
+    }
+    overview().await
 }
 
 fn no_extra(args: &[String], command: impl FnOnce() -> i32) -> i32 {
@@ -123,15 +126,24 @@ fn facts(paths: &Paths) -> serde_json::Value {
     })
 }
 
-/// `genet status` — the daemon facts, plus the hub summary once the hub
-/// commands exist (`null` until then: answering "no idea yet" is honest, and
-/// the field is frozen so scripts can rely on its presence).
-fn report(overview: bool) -> i32 {
+/// `genet daemon status` — process facts only; no WebSocket.
+fn daemon_report() -> i32 {
+    ok(facts(&paths()))
+}
+
+/// `genet status` — daemon facts plus a hub summary when the daemon answers.
+/// Daemon down → `hub: null`, exit 0: looking up status itself succeeded
+/// (`genethub-cli.md` §4.0).
+async fn overview() -> i32 {
     let paths = paths();
     let mut value = facts(&paths);
-    if overview {
-        value["hub"] = serde_json::Value::Null;
-    }
+    value["hub"] = if value["running"].as_bool() == Some(true) {
+        crate::hub::status_value()
+            .await
+            .unwrap_or(serde_json::Value::Null)
+    } else {
+        serde_json::Value::Null
+    };
     ok(value)
 }
 

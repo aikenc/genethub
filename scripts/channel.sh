@@ -107,6 +107,14 @@ value() {
     official:manifest_url)        printf '%s' "https://github.com/aikenc/genethub/releases/latest/download/latest.json" ;;
     beta:manifest_url)            printf '%s' "https://github.com/aikenc/genethub/releases/download/beta/latest-beta.json" ;;
 
+    # Default Hub this channel's CLI/daemon dials (`genethub-cli.md` §4.1).
+    # Not left empty: a headless machine has nowhere else to learn the address.
+    official:hub_url)             printf '%s' "https://relay.genethub.com" ;;
+    beta:hub_url)                 printf '%s' "https://relay-beta.genethub.com" ;;
+
+    official:env_hub_url)         printf '%s' GENEHUB_HUB_URL ;;
+    beta:env_hub_url)             printf '%s' GENEHUB_BETA_HUB_URL ;;
+
     # Where install.sh pulls the Linux tarball from. Beta cannot use
     # `releases/latest/download` (same reason as above), so its default is the
     # beta control plane, which resolves the newest prerelease itself.
@@ -173,6 +181,9 @@ pub const AGENT_LABEL: &str = "$(value agent_label "$channel")";
 // line budget, and CI rejects a tree rustfmt would rewrite.
 pub const DEFAULT_MANIFEST_URL: &str =
     "$(value manifest_url "$channel")";
+/// Default Hub for \`genet hub login\` and a standalone first pair.
+pub const DEFAULT_HUB_URL: &str = "$(value hub_url "$channel")";
+pub const ENV_HUB_URL: &str = "$(value env_hub_url "$channel")";
 EOF
 }
 
