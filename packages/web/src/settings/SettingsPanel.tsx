@@ -201,8 +201,12 @@ const PREFIX: Record<string, string> = {
   alpha: "Alpha版 ",
   dev: "开发版 ",
 };
+const devSuffix = () =>
+  CHANNEL === "dev" && import.meta.env.VITE_GENEHUB_DEV_NAME
+    ? ` ${import.meta.env.VITE_GENEHUB_DEV_NAME}`
+    : "";
 const shown = (version: string) =>
-  version === UNRELEASED ? "开发版" : `${PREFIX[CHANNEL] ?? ""}${version}`;
+  `${version === UNRELEASED ? "开发版" : `${PREFIX[CHANNEL] ?? ""}${version}`}${devSuffix()}`;
 
 /**
  * Which build this is, and whether a newer one has been published.
