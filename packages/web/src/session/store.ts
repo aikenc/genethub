@@ -47,6 +47,29 @@ export interface WorkbenchTab {
 
 export type RightPanel = "changes" | "files" | null;
 
+/**
+ * A conversation that has been opened but not started.
+ *
+ * Nothing exists on the machine while this is all there is: `session.create`
+ * waits for the first message. Pressing "new session" used to write a session
+ * to disk straight away, so every one that was opened and then abandoned —
+ * every mis-tap, every look around — stayed in the list forever as another row
+ * called "新会话", indistinguishable from the rest.
+ *
+ * It carries the choices made before there was anywhere to put them, so picking
+ * a model in an empty chat is not silently dropped.
+ */
+export interface Draft {
+  workspaceId: string;
+  agentId: string | null;
+  modelId: string | null;
+  modeId: string | null;
+  effortId: string | null;
+}
+
+/** The tab an unstarted conversation lives in. There is only ever one. */
+const DRAFT_TAB = "chat:draft";
+
 interface WorkbenchState {
   client: Client | null;
   connection: ConnectionState;
@@ -55,6 +78,8 @@ interface WorkbenchState {
   activeWorkspaceId: string | null;
   sessions: SessionSummary[];
   activeSessionId: string | null;
+  /** Set while an unstarted conversation is on screen. See `Draft`. */
+  draft: Draft | null;
   tabs: WorkbenchTab[];
   activeTabId: string | null;
   rightPanel: RightPanel;
@@ -138,8 +163,18 @@ interface WorkbenchState {
   }): Promise<void>;
   /** Removes a provider the user added. */
   forgetProvider(providerId: string): Promise<void>;
-  createSession(workspaceId: string, agentId: string): Promise<void>;
+  /**
+   * Opens an empty conversation. Writes nothing until the first message.
+   *
+   * Both arguments default to what is already on screen, so the "+" in the
+   * header needs to know nothing about projects or agents.
+   */
+  newSession(workspaceId?: string | null, agentId?: string | null): void;
   selectSession(sessionId: string): Promise<void>;
+  /** Gives a session the name the user typed, on the machine and here. */
+  renameSession(sessionId: string, title: string): Promise<void>;
+  /** Erases a session. There is no undo; the caller does the asking. */
+  deleteSession(sessionId: string): Promise<void>;
   openTab(kind: TabKind, title?: string): void;
   activateTab(tabId: string): void;
   closeTab(tabId: string): void;
@@ -172,6 +207,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   activeWorkspaceId: null,
   sessions: [],
   activeSessionId: null,
+  draft: null,
   tabs: [],
   activeTabId: null,
   rightPanel: null,
@@ -245,16 +281,37 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     await land(get);
   },
 
-  async createSession(workspaceId, agentId) {
-    const reply = await asked(set, () =>
-      require_(get().client).call({
-        type: "session.create",
-        payload: { workspaceId, agentId, modelId: null, modeId: null, title: null },
-      }),
-    );
-    if (reply?.type !== "session") return;
-    set((state) => ({ sessions: [reply.data, ...state.sessions] }));
-    await get().selectSession(reply.data.id);
+  newSession(workspaceId, agentId) {
+    const state = get();
+    const target = workspaceId ?? currentWorkspace(state);
+    if (!target) return;
+    // Nothing is listening to the old conversation's events once it is off
+    // screen, and the daemon should not go on sending them.
+    if (state.activeSessionId) void state.client?.unsubscribe(state.activeSessionId);
+    set({
+      draft: {
+        workspaceId: target,
+        // Whatever is already in front of the user, unless the caller named
+        // one. "New chat" while talking to Claude Code means another one with
+        // Claude Code — being dropped back onto the built-in agent is a
+        // surprise, and one that only shows up at the first reply.
+        agentId:
+          agentId ??
+          state.draft?.agentId ??
+          state.sessions.find((entry) => entry.id === state.activeSessionId)?.agentId ??
+          null,
+        modelId: null,
+        modeId: null,
+        effortId: null,
+      },
+      activeWorkspaceId: target,
+      activeSessionId: null,
+      timeline: emptyTimeline(),
+      tabs: state.tabs.some((tab) => tab.id === DRAFT_TAB)
+        ? state.tabs
+        : [...state.tabs, { id: DRAFT_TAB, kind: "chat" as const, title: "新会话" }],
+      activeTabId: DRAFT_TAB,
+    });
   },
 
   async selectSession(sessionId) {
@@ -265,13 +322,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const summary = get().sessions.find((entry) => entry.id === sessionId);
     const tabId = `chat:${sessionId}`;
     set((state) => {
-      const existing = state.tabs.find((tab) => tab.id === tabId);
+      // The unstarted conversation gives way to a real one, whether because it
+      // just became this session or because the user went elsewhere. Keeping
+      // its tab would leave a second "新会话" strip that opens onto nothing.
+      const kept = state.tabs.filter((tab) => tab.id !== DRAFT_TAB);
+      const existing = kept.find((tab) => tab.id === tabId);
       const tabs = existing
-        ? state.tabs.map((tab) =>
+        ? kept.map((tab) =>
             tab.id === tabId ? { ...tab, title: summary?.title ?? tab.title } : tab,
           )
         : [
-            ...state.tabs,
+            ...kept,
             {
               id: tabId,
               kind: "chat" as const,
@@ -281,6 +342,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           ];
       return {
         activeSessionId: sessionId,
+        draft: null,
         // The project follows the conversation. Every workspace's sessions are
         // in the list at once now, so the one just clicked may belong to a
         // different project than the one on screen — and the file tree, the
@@ -367,11 +429,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async send(text, attachments = []) {
-    const sessionId = get().activeSessionId;
-    if (!sessionId) return;
     // The previous complaint goes away as the next attempt starts, so a stale
     // line does not get read as a description of what just happened.
     set({ notice: null });
+    // This is where a draft becomes a conversation: the machine hears about it
+    // at the first message, not when the button was pressed.
+    const sessionId = await start(get, set);
+    if (!sessionId) return;
     await asked(set, () =>
       require_(get().client).call({
         type: "session.send",
@@ -388,9 +452,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     );
   },
 
+  // Each of these has two homes. With a session, the machine is told now; with
+  // only a draft there is nothing to tell yet, so the choice is held and
+  // applied at `session.create`. Dropping it — which is what happened before —
+  // meant picking a model in a new chat did nothing at all.
   async setModel(modelId) {
     const sessionId = get().activeSessionId;
-    if (!sessionId) return;
+    if (!sessionId) return void onDraft(get, set, { modelId });
     await asked(set, () =>
       require_(get().client).call({ type: "session.setModel", payload: { sessionId, modelId } }),
     );
@@ -398,7 +466,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   async setMode(modeId) {
     const sessionId = get().activeSessionId;
-    if (!sessionId) return;
+    if (!sessionId) return void onDraft(get, set, { modeId });
     await asked(set, () =>
       require_(get().client).call({ type: "session.setMode", payload: { sessionId, modeId } }),
     );
@@ -406,10 +474,39 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   async setEffort(effortId) {
     const sessionId = get().activeSessionId;
-    if (!sessionId) return;
+    if (!sessionId) return void onDraft(get, set, { effortId });
     await asked(set, () =>
       require_(get().client).call({ type: "session.setEffort", payload: { sessionId, effortId } }),
     );
+  },
+
+  async renameSession(sessionId, title) {
+    const wanted = title.trim();
+    if (!wanted) return;
+    const reply = await asked(set, () =>
+      require_(get().client).call({ type: "session.rename", payload: { sessionId, title: wanted } }),
+    );
+    if (reply?.type !== "session") return;
+    // From the reply rather than from what was typed: the daemon trims and
+    // caps, and the sidebar should show the name that was actually stored.
+    applyTitle(sessionId, reply.data.title ?? wanted, set);
+  },
+
+  async deleteSession(sessionId) {
+    await asked(set, () =>
+      require_(get().client).call({ type: "session.delete", payload: { sessionId } }),
+    );
+    const wasOpen = get().activeSessionId === sessionId;
+    const tabId = `chat:${sessionId}`;
+    set((state) => ({
+      sessions: state.sessions.filter((entry) => entry.id !== sessionId),
+      tabs: state.tabs.filter((tab) => tab.id !== tabId),
+      activeTabId: state.activeTabId === tabId ? null : state.activeTabId,
+      ...(wasOpen ? { activeSessionId: null, timeline: emptyTimeline() } : {}),
+    }));
+    // Deleting what you were reading leaves a blank pane otherwise. `land`
+    // picks the next conversation, or opens an empty one.
+    if (wasOpen) await land(get);
   },
 
   /**
@@ -699,7 +796,62 @@ async function land(get: () => WorkbenchState): Promise<void> {
 
   const agent = state.agents.find((entry) => entry.builtin) ?? state.agents[0];
   if (!agent || agent.probe.state !== "ready" || agent.catalog.models.length === 0) return;
-  await get().createSession(workspaceId, agent.id);
+  // An empty conversation, not a stored one. Landing somewhere used to write a
+  // session on every first visit to a project, whether or not anything was ever
+  // said in it.
+  get().newSession(workspaceId, agent.id);
+}
+
+/**
+ * The session to send into, creating it from the draft if there is not one yet.
+ *
+ * Returns null when there is nothing to send into and no way to make one, which
+ * is a caller that should quietly do nothing: `asked` has already said why if a
+ * request was made and refused.
+ */
+async function start(
+  get: () => WorkbenchState,
+  set: Setter,
+): Promise<string | null> {
+  const state = get();
+  if (state.activeSessionId) return state.activeSessionId;
+  const draft = state.draft;
+  if (!draft) return null;
+
+  const agentId =
+    draft.agentId ??
+    (state.agents.find((entry) => entry.builtin) ?? state.agents[0])?.id ??
+    null;
+  if (!agentId) return null;
+
+  const reply = await asked(set, () =>
+    require_(get().client).call({
+      type: "session.create",
+      payload: {
+        workspaceId: draft.workspaceId,
+        agentId,
+        modelId: draft.modelId,
+        modeId: draft.modeId,
+        title: null,
+      },
+    }),
+  );
+  if (reply?.type !== "session") return null;
+
+  set((current) => ({ sessions: [reply.data, ...current.sessions] }));
+  // Clears the draft and turns its tab into this session's.
+  await get().selectSession(reply.data.id);
+  // `session.create` has no field for it, so the one choice that cannot ride
+  // along is made immediately afterwards instead of being lost.
+  if (draft.effortId) await get().setEffort(draft.effortId);
+  return reply.data.id;
+}
+
+/** Records a choice made before there was a session to make it on. */
+function onDraft(get: () => WorkbenchState, set: Setter, change: Partial<Draft>): void {
+  const draft = get().draft;
+  if (!draft) return;
+  set({ draft: { ...draft, ...change } });
 }
 
 /**

@@ -11,20 +11,28 @@ export function TabBar() {
     useTabBar();
 
   return (
-    <div className="flex h-9 shrink-0 items-stretch border-b border-line bg-surface">
-      <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto touch-pan-x">
+    <div
+      // One tab on a phone is not a strip, it is a second title bar under the
+      // first: the header above already says which conversation this is, and
+      // the drawer is how you get to another. It appears once there is a
+      // choice to make.
+      className={`${
+        tabs.length > 1 ? "flex" : "hidden"
+      } h-11 shrink-0 items-stretch border-b border-line bg-surface md:flex md:h-9`}
+    >
+      <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto overscroll-x-contain">
         {tabs.map((tab) => {
           const active = tab.id === activeTabId;
           return (
             <div
               key={tab.id}
-              className={`group flex max-w-[14rem] items-center gap-1 border-r border-line px-3 text-xs ${
+              className={`group flex max-w-[14rem] items-center gap-1 border-r border-line pl-3 pr-1 text-sm md:pr-3 md:text-xs ${
                 active ? "bg-bg text-fg" : "text-muted hover:bg-raised hover:text-fg"
               }`}
             >
               <button
                 type="button"
-                className="min-w-0 flex-1 truncate text-left"
+                className="min-w-0 flex-1 truncate py-2 text-left"
                 onClick={() => activateTab(tab.id)}
               >
                 {tab.title}
@@ -32,10 +40,12 @@ export function TabBar() {
               <button
                 type="button"
                 aria-label={`关闭 ${tab.title}`}
-                className="rounded px-1 text-faint opacity-0 hover:bg-line hover:text-fg group-hover:opacity-100"
+                // Hover is the one thing a phone cannot do, so on touch the
+                // close control is simply there, at a size a thumb can hit.
+                className="flex h-9 w-9 items-center justify-center rounded text-faint hover:bg-line hover:text-fg md:h-auto md:w-auto md:px-1 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
                 onClick={() => closeTab(tab.id)}
               >
-                ×
+                <span aria-hidden>×</span>
               </button>
             </div>
           );
@@ -47,7 +57,10 @@ export function TabBar() {
         ) : null}
       </div>
 
-      <div className="flex shrink-0 items-center gap-1 border-l border-line px-2">
+      {/* Both open a panel that is docked to the right of the chat, and that
+          panel is desktop-only — on a phone these were two buttons that did
+          nothing at all. */}
+      <div className="hidden shrink-0 items-center gap-1 border-l border-line px-2 md:flex">
         <PanelToggle
           label="Changes"
           active={rightPanel === "changes"}

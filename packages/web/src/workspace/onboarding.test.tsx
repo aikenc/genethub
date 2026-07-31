@@ -122,6 +122,7 @@ beforeEach(() => {
     activeWorkspaceId: null,
     sessions: [],
     activeSessionId: null,
+    draft: null,
     tabs: [],
     activeTabId: null,
     rightPanel: null,
@@ -251,6 +252,10 @@ describe("the first run", () => {
    * so by the time the interface loads the only thing between the user and a
    * first message is a session — and there is no decision in it worth asking
    * about.
+   *
+   * Landing there costs nothing on the machine: the conversation is a draft
+   * until it is used. Every first visit to a project used to leave a stored
+   * session behind whether or not anyone ever said anything in it.
    */
   it("goes straight into a conversation once the project and the key are there", async () => {
     const { client, calls } = stubClient({
@@ -265,14 +270,42 @@ describe("the first run", () => {
     });
     await start(client, hostWith());
 
+    expect(await screen.findByPlaceholderText(/描述任务/)).toBeInTheDocument();
+    expect(screen.queryByText(/已就绪/)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(useWorkbench.getState().draft).toMatchObject({
+        workspaceId: "w1",
+        agentId: "genet",
+      }),
+    );
+    expect(calls.some((call) => call.type === "session.create")).toBe(false);
+  });
+
+  it("writes the session once that first message is actually sent", async () => {
+    const { client, calls } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({
+        type: "workspaces",
+        data: [{ id: "w1", name: "GeneHub", root: "/home/me/GeneHub", isGitRepo: false }],
+      }),
+      "session.list": () => ({ type: "sessions", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "session.create": () => ({ type: "session", data: session("s1", 0) }),
+    });
+    await start(client, hostWith());
+
+    await userEvent.type(await screen.findByPlaceholderText(/描述任务/), "在这里改一行{Enter}");
+
     await waitFor(() => {
       expect(calls.find((call) => call.type === "session.create")?.payload).toMatchObject({
         workspaceId: "w1",
         agentId: "genet",
       });
     });
-    expect(await screen.findByPlaceholderText(/描述任务/)).toBeInTheDocument();
-    expect(screen.queryByText(/已就绪/)).not.toBeInTheDocument();
+    expect(calls.find((call) => call.type === "session.send")?.payload).toMatchObject({
+      sessionId: "s1",
+      text: "在这里改一行",
+    });
   });
 
   /**

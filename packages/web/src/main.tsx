@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
+import { watchViewport } from "./shell/viewport";
 import "./theme.css";
 import { applyTheme, useTheme, watchSystemTheme } from "./theme/store";
 
@@ -22,6 +23,9 @@ if (!root) throw new Error("index.html is missing #root");
  */
 applyTheme(useTheme.getState().resolved);
 watchSystemTheme((theme) => useTheme.getState().systemChanged(theme));
+// Belongs to the window, not to any component: the keyboard can arrive while
+// any pane is open, and every one of them is inside the same fixed box.
+watchViewport();
 
 createRoot(root).render(
   <StrictMode>

@@ -91,9 +91,12 @@ export function App({
     (item) => item.id === workbench.activeSessionId,
   );
   const running = workbench.timeline.activeTurn !== null;
-  const currentAgent = workbench.agents.find(
-    (agent) => agent.id === session?.agentId,
-  );
+  // A draft is a conversation with nothing in it yet, so the composer answers to
+  // the choices held on the draft until there is a session to hold them.
+  const draft = workbench.draft;
+  const agentId = session?.agentId ?? draft?.agentId ?? null;
+  const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
+  const composing = Boolean(workbench.activeSessionId || draft);
 
   // The frame the compositor paints while a window is being resized is the
   // shell's, not the page's, so it has to be told which palette is in force —
@@ -245,20 +248,51 @@ export function App({
         />
 
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className="flex items-center gap-2 border-b border-line bg-surface px-2 md:hidden">
+          {/* The phone's only permanent chrome. Three things, each a full
+              44px target: where am I, how do I get to the list, how do I
+              start something new. Everything else — the connection, the
+              project, the panels — reads as noise at this width and lives in
+              the drawer, which is one tap away. */}
+          <header
+            className="flex shrink-0 items-center gap-1 border-b border-line bg-surface px-1 md:hidden"
+            style={{ paddingTop: "env(safe-area-inset-top)" }}
+          >
             <button
               type="button"
               aria-label="会话列表"
-              className="rounded px-2 py-2 text-xs text-muted"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-lg text-muted active:bg-raised"
               onClick={() => setSessionsOpen((open) => !open)}
             >
-              ☰
+              <span aria-hidden>☰</span>
             </button>
-            <span className="truncate text-xs text-muted">
-              {session?.title ?? "工作台"}
+            <span className="min-w-0 flex-1 truncate text-center text-sm font-medium text-fg">
+              {session?.title ?? (draft ? "新会话" : "工作台")}
             </span>
-            <ConnectionBadge state={workbench.connection} endpoint={endpoint} />
-          </div>
+            {/* Only when it is not what it should be. A green tick on every
+                screen is one more thing to read past, and this bar has room
+                for exactly three things — but a phone that has quietly lost
+                the machine must say so, because nothing else here would. */}
+            {workbench.connection === "ready" ? null : (
+              <span
+                role="status"
+                className="shrink-0 text-[11px] text-danger"
+                title={endpoint.label}
+              >
+                {workbench.connection === "closed" ? "已断开" : "连接中"}
+              </span>
+            )}
+            <button
+              type="button"
+              aria-label="新建会话"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-xl text-muted active:bg-raised"
+              onClick={() => {
+                workbench.newSession();
+                setSessionsOpen(false);
+              }}
+            >
+              <span aria-hidden>+</span>
+            </button>
+          </header>
 
           <TabBar />
 
@@ -284,7 +318,7 @@ export function App({
           <div className="flex min-h-0 flex-1">
             <section className="relative flex min-w-0 flex-1 flex-col">
               {showChat ? (
-                workbench.activeSessionId ? (
+                composing ? (
                   <>
                     <div className="hidden items-center justify-end border-b border-line px-3 py-1 md:flex">
                       <ConnectionBadge
@@ -309,12 +343,13 @@ export function App({
                     ) : null}
                     <Composer
                       running={running}
-                      disabled={!workbench.activeSessionId}
                       agents={workbench.agents}
-                      agentId={session?.agentId ?? null}
-                      modelId={workbench.timeline.modelId}
-                      modeId={workbench.timeline.modeId}
-                      effortId={workbench.timeline.effortId}
+                      agentId={agentId}
+                      modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}
+                      modeId={workbench.timeline.modeId ?? draft?.modeId ?? null}
+                      effortId={
+                        workbench.timeline.effortId ?? draft?.effortId ?? null
+                      }
                       agentLocked={workbench.timeline.items.length > 0}
                       attachmentsSupported={
                         currentAgent?.capabilities.attachments ?? false
@@ -324,13 +359,12 @@ export function App({
                         void workbench.send(text, attachments)
                       }
                       onInterrupt={() => void workbench.interrupt()}
-                      onPickAgent={(id) => {
-                        const workspace =
-                          workbench.activeWorkspaceId ??
-                          workbench.workspaces[0]?.id;
-                        if (workspace)
-                          void workbench.createSession(workspace, id);
-                      }}
+                      // Switching agent opens an empty conversation rather than
+                      // handing this one over: no adapter can pick up another's
+                      // history (`ComposerControls` on why the chip locks once
+                      // anything has been said). Nothing is written until that
+                      // conversation is used.
+                      onPickAgent={(id) => workbench.newSession(null, id)}
                       onPickModel={(id) => void workbench.setModel(id)}
                       onPickMode={(id) => void workbench.setMode(id)}
                       onPickEffort={(id) => void workbench.setEffort(id)}
@@ -427,7 +461,7 @@ function FirstRun({
     workspaces,
     activeWorkspaceId,
     agents,
-    createSession,
+    newSession,
     connection,
     client,
   } = useWorkbench();
@@ -505,8 +539,8 @@ function FirstRun({
       <p className="mb-3 text-xs text-muted">开一个会话，直接说你想做什么。</p>
       <button
         type="button"
-        className="rounded-md bg-accent px-3 py-1.5 text-xs text-white"
-        onClick={() => builtin && void createSession(workspace.id, builtin.id)}
+        className="min-h-11 rounded-xl bg-accent px-4 text-sm text-white md:min-h-0 md:rounded-md md:px-3 md:py-1.5 md:text-xs"
+        onClick={() => builtin && newSession(workspace.id, builtin.id)}
       >
         新建会话
       </button>

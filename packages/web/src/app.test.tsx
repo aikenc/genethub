@@ -64,7 +64,9 @@ describe("the app as the browser loads it", () => {
     // Anything at all from the workbench shell proves the tree survived; the
     // failure mode is an empty root, not a wrong pixel.
     expect(await screen.findByRole("status")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "新建会话" })).toBeInTheDocument();
+    // Two of them, and only ever one on screen: the phone's header carries its
+    // own, because the sidebar it would otherwise live in is a drawer.
+    expect(screen.getAllByRole("button", { name: "新建会话" })).not.toHaveLength(0);
     expect(screen.getByRole("button", { name: "Changes" })).toBeInTheDocument();
   });
 

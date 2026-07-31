@@ -153,15 +153,13 @@ function Items({
   const {
     openTab,
     setRightPanel,
-    createSession,
+    newSession,
     openWorkspace,
     activeWorkspaceId,
-    agents,
     checkUpdate,
     claimLink,
   } = useWorkbench();
   const { preference, setPreference } = useTheme();
-  const builtin = agents.find((agent) => agent.builtin) ?? agents[0];
 
   const run = (action: () => void) => () => {
     close();
@@ -172,9 +170,9 @@ function Items({
     return (
       <>
         <Item
-          disabled={!activeWorkspaceId || !builtin}
+          disabled={!activeWorkspaceId}
           onSelect={run(() => {
-            if (activeWorkspaceId && builtin) void createSession(activeWorkspaceId, builtin.id);
+            if (activeWorkspaceId) newSession(activeWorkspaceId, null);
           })}
         >
           新建会话

@@ -82,7 +82,7 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 |----|------|
 | 握手 | `hello`（版本、能力、机器指纹）、`subscribe` / `unsubscribe` |
 | Agent | `agent.list`（含 probe 状态与 catalog）、`agent.refresh` |
-| 会话 | `session.create` / `list` / `get` / `send` / `interrupt` / `close` / `archive` |
+| 会话 | `session.create` / `list` / `get` / `send` / `interrupt` / `close` / `archive` / `rename` / `delete` |
 | 会话配置 | `session.setModel` / `setMode` / `respondPermission` |
 | 设备 | `device.list` / `invite` / `claim` / `revoke` / `remoteAttach` / `remoteDetach` |
 | 控制面 | `hub.status` / `pair` / `trial` / `claimLink` / `unpair`（可选，见 [desktop-client.md](./desktop-client.md) §8） |
@@ -124,6 +124,10 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 流式增量（`ItemDelta`）**不落盘**，只落最终态，否则文件大小会失控。
 
 **标题是可空的。** 新会话没有标题，直到用户说了第一句话（取首行截断）或客户端自己给了一个。daemon 不会填一个「New session」占位——那是一个语言选择，而 daemon 不知道界面是什么语言；界面自己有更合适的词。之前用字符串哨兵判断「要不要自动命名」，副作用是客户端一旦自带标题就再也不会被自动改名，而这件事没人说得清是不是故意的。现在这就是 `Option`，两种情形各自成立。
+
+`session.rename` 把它换成用户自己起的名字。**自动命名只在标题为 `None` 时发生**（`SessionManager::send`），所以改完之后不会被下一条消息盖回去——一个刚起好一秒钟就被改掉的名字，比不能改还糟。改完发一条 `titleChanged`，和 daemon 自己命名时发的是同一条：另一台设备上正开着这个会话的人不必等下一次 `session.list` 才看到。
+
+`session.delete` 是真删：时间线、meta、以及那个会话的 scratch 目录一起没。scratch 里放的是 adapter 存的「CLI 自己那份对话」（`--resume` id、线程文件），留着它等于「删掉的对话在 agent 那边还在」，那不叫删除。没有回收站，也没有撤销——想删掉的对话，通常正是不希望留副本的那种。删一个已经不在的会话不算失败：调用方要的是「它不存在」，而它确实不存在，两个窗口点同一行不该有一个看到报错。
 
 ### 4.2 工作区与默认工作目录
 

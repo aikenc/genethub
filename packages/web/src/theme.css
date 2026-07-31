@@ -72,22 +72,35 @@
   --ok: 30 126 79;
 }
 
-html,
-body,
-#root {
+html {
   height: 100%;
-  /*
-   * Long shell commands and diffs must never widen the page. A phone that can
-   * be dragged sideways after a tool call is broken, full stop — local panes
-   * that need a horizontal scroll set their own `overflow-x: auto`.
-   */
-  max-width: 100%;
-  overflow-x: hidden;
-  overscroll-behavior-x: none;
 }
 
+/*
+ * The page itself does not move. Ever.
+ *
+ * `overflow: hidden` alone was not enough on iOS: when a field takes focus the
+ * engine scrolls the *page* to reveal it, and with the composer pinned to the
+ * bottom that carried the header and the tab strip off the top of the screen,
+ * where they stayed after the keyboard went away. A fixed body has no scroll
+ * position to move to, so the shell stays put and only the panes inside it
+ * scroll — which is the one thing that separates an app from a document.
+ *
+ * `touch-action: manipulation` and not `pan-y`: the latter is consulted on
+ * every ancestor of whatever is touched, so it silently forbade sideways
+ * dragging *inside* the panes that ask for it — a wide table, a long shell
+ * line. `manipulation` leaves panning to whatever can actually pan and drops
+ * only double-tap zoom, which on a phone is nearly always an accident and one
+ * there is no obvious way back from.
+ */
 body {
+  position: fixed;
+  inset: 0;
   margin: 0;
+  overflow: hidden;
+  /* No rubber-band at the edges of a pane, in either direction. */
+  overscroll-behavior: none;
+  touch-action: manipulation;
   background: rgb(var(--bg));
   color: rgb(var(--fg));
   font:
@@ -98,8 +111,38 @@ body {
     "Microsoft YaHei",
     sans-serif;
   -webkit-font-smoothing: antialiased;
-  /* Vertical pan only at the page level; nested scrollers opt back in. */
-  touch-action: pan-y;
+}
+
+#root {
+  height: 100%;
+  /*
+   * Long shell commands and diffs must never widen the shell. A phone that can
+   * be dragged sideways after a tool call is broken, full stop — local panes
+   * that need a horizontal scroll set their own `overflow-x: auto`.
+   */
+  max-width: 100%;
+  overflow: hidden;
+}
+
+/*
+ * iOS zooms the whole page whenever a focused control's text is under 16px,
+ * and nothing brings that zoom back afterwards — the app is left permanently
+ * enlarged and draggable in both directions. It is the single worst thing that
+ * can happen to this layout on a phone, and it takes one component forgetting
+ * one utility class.
+ *
+ * So it is settled here, once, for anything that can take focus. `!important`
+ * because the thing being overridden is a Tailwind size class, and a rule a
+ * component can accidentally out-specify is not a guarantee. Touch pointers
+ * only: a mouse has no such rule and 16px everywhere would coarsen the
+ * desktop's chrome for no reason.
+ */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
 }
 
 * {

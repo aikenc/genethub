@@ -530,6 +530,64 @@ impl SessionManager {
         Ok(meta.summary(status))
     }
 
+    /// Gives a session the name the user typed.
+    ///
+    /// Safe from being undone: `send` only names a session whose title is
+    /// `None`, so a name set here survives every later message. That property is
+    /// the whole feature — a title overwritten a second after typing it would be
+    /// worse than no rename at all.
+    pub async fn rename(&self, session_id: &str, title: &str) -> Result<SessionSummary> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(anyhow!("a session needs a name"));
+        }
+        // Long enough for a sentence, short enough that one session cannot make
+        // the list unreadable for every other one.
+        let title: String = title.chars().take(120).collect();
+
+        let live = self.live(session_id).await?;
+        let summary = {
+            let mut meta = live.meta.lock().await;
+            meta.title = Some(title.clone());
+            meta.updated_at_ms = now_ms();
+            self.store.save_meta(&meta)?;
+            meta.summary(*live.status.lock().await)
+        };
+        // The same push the daemon sends when it names a session itself, so a
+        // phone watching this conversation renames it too instead of keeping
+        // the old name until something else forces a refetch.
+        live.publish(SessionEvent::TitleChanged { title }).await;
+        Ok(summary)
+    }
+
+    /// Erases a session: timeline, metadata and scratch space.
+    ///
+    /// Deleting one that is already gone succeeds. The caller asked for it not
+    /// to exist, and it does not — reporting that as a failure would only make
+    /// two clients deleting the same row look broken.
+    pub async fn delete(&self, session_id: &str) -> Result<()> {
+        let live = self.sessions.write().await.remove(session_id);
+        let workspace_id = match &live {
+            Some(live) => Some(live.meta.lock().await.workspace_id.clone()),
+            None => self
+                .store
+                .list_meta()?
+                .into_iter()
+                .find(|meta| meta.id == session_id)
+                .map(|meta| meta.workspace_id),
+        };
+        // Stopped before the files go. An agent still running would keep
+        // appending to a timeline we just removed, and the session would
+        // reappear a moment after being deleted.
+        if let Some(live) = live {
+            live.shutdown().await;
+        }
+        let Some(workspace_id) = workspace_id else {
+            return Ok(());
+        };
+        self.store.delete(&workspace_id, session_id)
+    }
+
     pub async fn close(&self, session_id: &str) -> Result<()> {
         let live = match self.sessions.write().await.remove(session_id) {
             Some(live) => live,
@@ -897,6 +955,109 @@ mod tests {
             id: id.into(),
             text: text.into(),
         }
+    }
+
+    /// A manager over a throwaway directory. Neither rename nor delete asks the
+    /// registry anything, so an empty one is enough to exercise both.
+    fn manager(root: &std::path::Path) -> SessionManager {
+        SessionManager::new(
+            Store::new(root),
+            Arc::new(Registry::new(&std::collections::BTreeMap::new())),
+            16,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_renamed_session_keeps_the_name_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+
+        let summary = sessions.rename("s1", "  收尾发布  ").await.unwrap();
+
+        assert_eq!(summary.title.as_deref(), Some("收尾发布"));
+        assert_eq!(
+            sessions
+                .store
+                .load_meta("w1", "s1")
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("收尾发布"),
+            "the new name only reached the copy in memory, so it is lost on restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_cannot_be_renamed_to_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+
+        assert!(
+            sessions.rename("s1", "   ").await.is_err(),
+            "a blank name is a row with nothing on it, and no way back to a real one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_renamed_session_is_not_renamed_again_by_its_first_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        sessions.rename("s1", "我起的名字").await.unwrap();
+
+        // The condition `send` uses before naming a session from what was said.
+        let named = sessions
+            .live("s1")
+            .await
+            .unwrap()
+            .meta
+            .lock()
+            .await
+            .title
+            .is_some();
+
+        assert!(
+            named,
+            "the daemon would overwrite the user's title with the first message"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_takes_its_timeline_and_scratch_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        sessions
+            .store
+            .append_items("w1", "s1", &[item("a", "hi")])
+            .unwrap();
+        let scratch = sessions.store.scratch_dir("w1", "s1");
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        sessions.delete("s1").await.unwrap();
+
+        assert!(sessions.store.list_meta().unwrap().is_empty());
+        assert!(sessions.store.load_items("w1", "s1").unwrap().is_empty());
+        assert!(
+            !scratch.exists(),
+            "the agent's own copy of the conversation outlived the delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_twice_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+
+        sessions.delete("s1").await.unwrap();
+
+        assert!(
+            sessions.delete("s1").await.is_ok(),
+            "two windows deleting the same row would show the second one an error"
+        );
     }
 
     #[tokio::test]

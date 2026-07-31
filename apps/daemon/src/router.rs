@@ -258,6 +258,18 @@ pub async fn handle(
             Err(error) => failed(error),
         },
 
+        Request::SessionRename { session_id, title } => {
+            match state.sessions.rename(&session_id, &title).await {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionDelete { session_id } => match state.sessions.delete(&session_id).await {
+            Ok(()) => Handled::ok(Reply::Ack),
+            Err(error) => failed(error),
+        },
+
         Request::SessionSetModel {
             session_id,
             model_id,

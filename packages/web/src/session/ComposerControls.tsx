@@ -142,9 +142,10 @@ function Chip({
       ) : null}
       <select
         aria-label={ariaLabel}
-        // 16px on phones: iOS zooms the whole page when a focused control is
-        // smaller, and that zoom is what unlocks sideways dragging.
-        className="min-h-10 appearance-none truncate rounded-full bg-transparent py-2 pl-2.5 pr-6 text-base text-muted outline-none hover:bg-raised hover:text-fg disabled:opacity-40 md:min-h-0 md:py-0.5 md:pl-2 md:pr-5 md:text-xs"
+        // A real 44px target on a phone, and a bordered pill so it reads as
+        // something to press rather than as a caption. `theme.css` guarantees
+        // the 16px that keeps iOS from zooming the page open on focus.
+        className="min-h-11 appearance-none truncate rounded-full border border-line bg-transparent py-2 pl-3 pr-7 text-base text-muted outline-none hover:bg-raised hover:text-fg disabled:opacity-40 md:min-h-0 md:rounded-full md:border-0 md:py-0.5 md:pl-2 md:pr-5 md:text-xs"
         value={value}
         disabled={disabled || options.length === 0}
         onChange={(event) => onChange(event.target.value)}
@@ -156,7 +157,7 @@ function Chip({
         ))}
       </select>
       <span
-        className="pointer-events-none absolute right-2 text-xs text-faint md:right-1.5 md:text-[9px]"
+        className="pointer-events-none absolute right-2.5 text-xs text-faint md:right-1.5 md:text-[9px]"
         aria-hidden
       >
         ▾

@@ -69,8 +69,12 @@ beforeEach(() => {
     agents: [],
     tabs: [],
     activeTabId: null,
+    draft: null,
     selectSession: vi.fn(async () => {}),
     selectWorkspace: vi.fn(async () => {}),
+    newSession: vi.fn(),
+    renameSession: vi.fn(async () => {}),
+    deleteSession: vi.fn(async () => {}),
   });
 });
 
@@ -133,6 +137,68 @@ describe("the left edge", () => {
     // A title on its own does not say where the work is happening, so the
     // project comes with it once the tree is not there to say.
     expect(screen.getAllByText("paseo").length).toBeGreaterThan(0);
+  });
+
+  it("writes nothing to the machine when a new conversation is opened", async () => {
+    sidebar();
+    await userEvent.click(screen.getByRole("button", { name: "新建会话" }));
+
+    expect(useWorkbench.getState().newSession).toHaveBeenCalledWith("w1", null);
+  });
+});
+
+/**
+ * "会话没有删除和重命名功能".
+ *
+ * Both live on the row itself and both are reachable by touch: a phone cannot
+ * hover, and hiding the only way to get rid of a conversation behind hover is
+ * how this ended up unreachable rather than merely missing.
+ */
+describe("what can be done to one conversation", () => {
+  const openMenu = async (name: string) =>
+    userEvent.click(screen.getByRole("button", { name: `${name} 的更多操作` }));
+
+  it("renames it in place, and sends the new name to the machine", async () => {
+    sidebar();
+    await openMenu("更新流程");
+    await userEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
+
+    const field = screen.getByLabelText("会话名称");
+    await userEvent.clear(field);
+    await userEvent.type(field, "发布收尾{Enter}");
+
+    expect(useWorkbench.getState().renameSession).toHaveBeenCalledWith("s2", "发布收尾");
+  });
+
+  it("leaves the name alone when the edit is abandoned", async () => {
+    sidebar();
+    await openMenu("更新流程");
+    await userEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
+    await userEvent.type(screen.getByLabelText("会话名称"), "改一半{Escape}");
+
+    expect(useWorkbench.getState().renameSession).not.toHaveBeenCalled();
+    expect(screen.getByText("更新流程")).toBeInTheDocument();
+  });
+
+  it("asks once before deleting, because there is no way back", async () => {
+    sidebar();
+    await openMenu("更新流程");
+    await userEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+
+    expect(useWorkbench.getState().deleteSession).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("menuitem", { name: "确认删除" }));
+    expect(useWorkbench.getState().deleteSession).toHaveBeenCalledWith("s2");
+  });
+
+  it("lets the question be dropped", async () => {
+    sidebar();
+    await openMenu("更新流程");
+    await userEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "取消" }));
+
+    expect(useWorkbench.getState().deleteSession).not.toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 });
 

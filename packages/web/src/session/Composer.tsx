@@ -113,7 +113,17 @@ export function Composer({
   };
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-4 pt-8">
+    <div
+      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-8 md:px-4"
+      style={{
+        // Above the on-screen keyboard, and clear of the home indicator when
+        // there is none. The shell is a fixed box that the keyboard covers
+        // rather than shrinks (`shell/viewport.ts`), so without this the field
+        // being typed into would be behind it.
+        paddingBottom:
+          "calc(var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)))",
+      }}
+    >
       {open ? (
         <div className="pointer-events-auto mx-auto mb-2 max-w-chat overflow-hidden rounded-xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur">
           <ul role="listbox" aria-label="命令">
@@ -128,7 +138,7 @@ export function Composer({
                   // menu before the click ever landed.
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => complete(command)}
-                  className={`flex w-full items-baseline gap-2 px-3 py-2 text-left text-xs ${
+                  className={`flex min-h-11 w-full items-baseline gap-2 px-3 py-2.5 text-left text-sm md:min-h-0 md:py-2 md:text-xs ${
                     command === chosen ? "bg-raised" : ""
                   }`}
                 >
@@ -159,7 +169,7 @@ export function Composer({
                   type="button"
                   aria-label={`移除 ${attachment.name}`}
                   onClick={() => setAttachments((current) => current.filter((_, i) => i !== index))}
-                  className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-surface text-xs text-muted shadow group-hover:text-fg"
+                  className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center rounded-full border border-line bg-surface text-sm text-muted shadow group-hover:text-fg md:-right-1.5 md:-top-1.5 md:h-5 md:w-5 md:text-xs"
                 >
                   ×
                 </button>
@@ -168,7 +178,7 @@ export function Composer({
           </div>
         ) : null}
         <textarea
-          className="max-h-40 min-h-[52px] w-full resize-none bg-transparent px-4 pt-3 text-base text-fg outline-none placeholder:text-faint md:text-sm"
+          className="max-h-40 min-h-[56px] w-full resize-none bg-transparent px-4 pt-3.5 text-base text-fg outline-none placeholder:text-faint md:min-h-[52px] md:pt-3 md:text-sm"
           placeholder="描述任务，或直接说你想改什么"
           aria-label="任务描述"
           value={draft}
@@ -218,7 +228,7 @@ export function Composer({
           }}
         />
         {pasteNotice ? <p className="px-4 pt-1 text-xs text-muted">{pasteNotice}</p> : null}
-        <div className="flex items-center gap-2 px-2 pb-2">
+        <div className="flex items-center gap-2 px-2 pb-2 pt-0.5 md:pt-0">
           <ComposerControls
             agents={agents}
             agentId={agentId}
@@ -237,9 +247,9 @@ export function Composer({
               type="button"
               aria-label="停止"
               onClick={onInterrupt}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger md:h-8 md:w-8"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger md:h-8 md:w-8"
             >
-              <span className="h-2.5 w-2.5 rounded-[2px] bg-current" />
+              <span className="h-3 w-3 rounded-[2px] bg-current md:h-2.5 md:w-2.5" />
             </button>
           ) : (
             <button
@@ -247,9 +257,14 @@ export function Composer({
               aria-label="发送"
               onClick={send}
               disabled={disabled || (draft.trim().length === 0 && attachments.length === 0)}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent text-white disabled:opacity-30 md:h-8 md:w-8"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-accent text-white disabled:opacity-30 md:h-8 md:w-8"
             >
-              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="currentColor" aria-hidden>
+              <svg
+                viewBox="0 0 16 16"
+                className="h-4 w-4 md:h-3.5 md:w-3.5"
+                fill="currentColor"
+                aria-hidden
+              >
                 <path d="M8 3.2 3.6 7.6l1.1 1.1L7.2 6.2V13h1.6V6.2l2.5 2.5 1.1-1.1L8 3.2Z" />
               </svg>
             </button>

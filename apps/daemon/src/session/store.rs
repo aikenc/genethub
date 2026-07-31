@@ -182,9 +182,19 @@ impl Store {
         Ok(out)
     }
 
+    /// Removes every trace of a session from disk.
+    ///
+    /// The scratch directory goes with the rest. It is where adapters keep a
+    /// CLI's own idea of the conversation — a `--resume` id, a thread file —
+    /// and leaving it behind would mean a deleted conversation still exists
+    /// inside the agent, which is not what anyone means by "delete".
+    ///
+    /// Missing files are not an error: this is also the cleanup path for a
+    /// session that never got as far as being written.
     pub fn delete(&self, workspace_id: &str, session_id: &str) -> Result<()> {
         let _ = fs::remove_file(self.timeline_path(workspace_id, session_id));
         let _ = fs::remove_file(self.meta_path(workspace_id, session_id));
+        let _ = fs::remove_dir_all(self.scratch_dir(workspace_id, session_id));
         Ok(())
     }
 

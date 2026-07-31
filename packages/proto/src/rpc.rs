@@ -84,6 +84,22 @@ pub enum Request {
     SessionClose { session_id: String },
     #[serde(rename = "session.archive", rename_all = "camelCase")]
     SessionArchive { session_id: String, archived: bool },
+    /// Renames a session, replacing whatever the daemon named it.
+    ///
+    /// Separate from archiving because the two answer different questions. A
+    /// title the user typed also stops the daemon renaming it later from the
+    /// first message: being overwritten a second after typing it is the one
+    /// outcome that would make this feature untrustworthy.
+    #[serde(rename = "session.rename", rename_all = "camelCase")]
+    SessionRename { session_id: String, title: String },
+    /// Erases a session: its timeline, its metadata and its scratch space.
+    ///
+    /// Not `archive`, which only hides. There is no undo and no bin — a
+    /// conversation people want gone is usually one with something in it they
+    /// would rather not keep, and a "deleted" that quietly keeps the file is a
+    /// lie about that.
+    #[serde(rename = "session.delete", rename_all = "camelCase")]
+    SessionDelete { session_id: String },
     #[serde(rename = "session.setModel", rename_all = "camelCase")]
     SessionSetModel {
         session_id: String,

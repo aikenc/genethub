@@ -3,10 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <!--
-      Inputs and selects are ≥16px so iOS does not zoom the page on focus
-      (that zoom is what then lets the page be dragged sideways).
+      `interactive-widget=resizes-content` asks the engine to shrink the layout
+      viewport when the on-screen keyboard appears, instead of leaving it the
+      same size and sliding the page up behind the keyboard. Honoured by
+      Chrome; Safari ignores it, which is what `shell/viewport.ts` is for.
+
+      No `user-scalable=no`: Safari has ignored it since iOS 10, and pinching
+      to read something is nobody's mistake. The zoom this app had to stop is
+      the *automatic* one, and that is settled in `theme.css` by never giving a
+      focusable control text under 16px.
     -->
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <!--
       What the engine paints before our stylesheet arrives. Both names, dark
       first, because dark is what `:root` falls back to.
