@@ -145,6 +145,52 @@ body {
   }
 }
 
+/*
+ * Phone typography and controls need to survive a thumb, motion and Chinese
+ * glyphs with more visual detail than Latin chrome. Desktop intentionally keeps
+ * the compact workbench density; below the tablet breakpoint, body copy starts
+ * at 16px, supporting copy never drops below 14px, and every standalone native
+ * control gets the 44px hit area recommended for touch interfaces.
+ *
+ * This belongs in the shared theme rather than in individual screens: the Hub
+ * welcome page, workbench, settings and self-hosted build must not disagree on
+ * what "mobile" means. Inline links remain inline, so paragraphs do not acquire
+ * artificial 44px gaps; their surrounding line-height supplies separation.
+ */
+@media (max-width: 767px) {
+  body {
+    font-size: 16px;
+    line-height: 1.625;
+  }
+
+  .text-xs {
+    font-size: 14px;
+    line-height: 1.5rem;
+  }
+
+  .text-sm {
+    font-size: 16px;
+    line-height: 1.625rem;
+  }
+
+  button,
+  input:not([type="checkbox"]):not([type="radio"]),
+  select {
+    min-height: 44px;
+  }
+
+  button {
+    min-width: 44px;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    width: 22px;
+    height: 22px;
+    flex: 0 0 auto;
+  }
+}
+
 * {
   scrollbar-width: thin;
   scrollbar-color: rgb(var(--faint)) transparent;
