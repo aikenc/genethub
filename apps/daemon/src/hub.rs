@@ -332,4 +332,13 @@ mod tests {
         assert_eq!(base64url(b"abc"), "YWJj");
         assert!(!base64url(&[0xfb, 0xff]).contains('+'));
     }
+
+    #[test]
+    fn hub_api_urls_keep_the_deployment_subpath() {
+        let client = Client::new("http://myteam.devcloud.woa.com/dev-0/");
+        assert_eq!(
+            client.url("/api/device-authorizations"),
+            "http://myteam.devcloud.woa.com/dev-0/api/device-authorizations"
+        );
+    }
 }
