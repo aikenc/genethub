@@ -86,4 +86,33 @@ describe("the contract as the relay speaks it", () => {
     remote.deliverRevocation({ machineId: "m_9", reason: "revoked by the owner" });
     assert.deepEqual(seenRevocations, ["m_9"]);
   });
+
+  it("fires onReconnect every time the revocation stream is re-established", async () => {
+    // A stream that ends at once, so the watcher loops: each pass is one
+    // (re)connect and must be one resync signal — that signal is what brings
+    // presence back after the control plane restarts and boots every machine
+    // to offline.
+    const authority = new RemoteAuthority("http://control.test", "tok", async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close();
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+
+    let resyncs = 0;
+    const stop = authority.watchRevocations({
+      retryMs: 5,
+      onReconnect: () => {
+        resyncs += 1;
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stop();
+    assert.ok(resyncs >= 2, `expected a resync per (re)connect, saw ${resyncs}`);
+  });
 });

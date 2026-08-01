@@ -60,8 +60,13 @@ export class RemoteAuthority implements ChannelAuthority {
    * The relay dials the control plane rather than the other way round, so a
    * relay behind NAT works the same as one in a datacentre — which is what
    * makes "run your own" a real option rather than a paragraph in a README.
+   *
+   * `onReconnect` fires each time the stream (re-)establishes, first connect
+   * included: that is the one moment the relay knows the control plane is
+   * (back) up, and therefore the moment to re-sync anything presence-like
+   * that was reported only on change.
    */
-  watchRevocations(options: { retryMs?: number } = {}): () => void {
+  watchRevocations(options: { retryMs?: number; onReconnect?: () => void } = {}): () => void {
     const retryMs = options.retryMs ?? 3000;
     let stopped = false;
     let controller: AbortController | null = null;
@@ -70,7 +75,7 @@ export class RemoteAuthority implements ChannelAuthority {
       while (!stopped) {
         controller = new AbortController();
         try {
-          await this.streamRevocations(controller.signal);
+          await this.streamRevocations(controller.signal, options.onReconnect);
         } catch (error) {
           if (!stopped) {
             log.warn("forward: the revocation stream dropped", { error: String(error) });
@@ -88,7 +93,10 @@ export class RemoteAuthority implements ChannelAuthority {
     };
   }
 
-  private async streamRevocations(signal: AbortSignal): Promise<void> {
+  private async streamRevocations(
+    signal: AbortSignal,
+    onReconnect?: () => void,
+  ): Promise<void> {
     const response = await this.fetchImpl(new URL(REVOCATIONS, this.origin), {
       headers: {
         accept: "text/event-stream",
@@ -99,6 +107,7 @@ export class RemoteAuthority implements ChannelAuthority {
     if (!response.ok || !response.body) {
       throw new Error(`revocation stream refused with ${response.status}`);
     }
+    onReconnect?.();
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();

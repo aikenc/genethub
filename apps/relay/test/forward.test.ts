@@ -181,6 +181,30 @@ describe("forwarding between a machine and a browser", () => {
     assert.deepEqual(relay.authority.presence.at(-1), { machineId, state: "offline" });
   });
 
+  it("re-reports every machine it holds when the control plane comes back", async () => {
+    // The control plane boots every machine to offline, and presence is
+    // otherwise only reported on change — without this a restart of it
+    // strands live machines as "offline" until each reconnects on its own.
+    const first = await bringOnline();
+    const second = await bringOnline();
+    const already = relay.authority.presence.length;
+
+    relay.relay.forwarder.resyncPresence();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const fresh = relay.authority.presence.slice(already);
+    const reported = fresh.map((entry) => entry.machineId);
+    assert.ok(reported.includes(first.machineId), `${first.machineId} was not re-reported`);
+    assert.ok(reported.includes(second.machineId), `${second.machineId} was not re-reported`);
+    assert.ok(
+      fresh.every((entry) => entry.state === "online"),
+      "a resync must not take anything offline: it cannot see other relays' machines",
+    );
+
+    first.uplink.close();
+    second.uplink.close();
+  });
+
   it("says how many machines and channels it holds, and nothing about them", async () => {
     const health = await relay.json<{ status: string; forward: Record<string, number> }>(
       "/api/health",

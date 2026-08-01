@@ -83,6 +83,23 @@ export class Forwarder {
     return this.machines.has(machineId);
   }
 
+  /**
+   * Re-reports every machine currently held.
+   *
+   * Presence is otherwise reported only on change, and the control plane
+   * marks every machine offline as it boots — so a control plane restart
+   * strands live machines as "offline" until each one happens to reconnect
+   * on its own. This is called each time the revocation stream
+   * re-establishes, the relay's own signal that the control plane is (back)
+   * up. Additive on purpose: another relay's machines are not ours to
+   * describe.
+   */
+  resyncPresence(): void {
+    for (const machineId of this.machines.keys()) {
+      void this.authority.reportPresence(machineId, "online");
+    }
+  }
+
   /** For the split-readiness smoke test and for metrics. */
   stats(): { machines: number; channels: number } {
     let channels = 0;

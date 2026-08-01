@@ -52,9 +52,14 @@ export async function startRelay(
   const app = new Hono();
   const forwarder = new Forwarder(authority);
   // A revocation the relay never hears about is a machine that stays reachable
-  // after its owner cut it off, so the subscription is not optional.
+  // after its owner cut it off, so the subscription is not optional. Its
+  // reconnect is also the resync signal: the control plane boots every machine
+  // to offline, and without the re-report a restart of it leaves live machines
+  // looking gone.
   const stopWatching =
-    authority instanceof RemoteAuthority ? authority.watchRevocations() : () => {};
+    authority instanceof RemoteAuthority
+      ? authority.watchRevocations({ onReconnect: () => forwarder.resyncPresence() })
+      : () => {};
 
   app.get("/api/health", (c) => c.json({ status: "ok", forward: forwarder.stats() }));
 
