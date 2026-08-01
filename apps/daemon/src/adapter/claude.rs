@@ -1757,7 +1757,14 @@ fn detail_from_tool(name: &str, input: &Value, result: Option<&str>) -> ToolCall
     };
     match name {
         "Bash" => ToolCallDetail::Shell {
-            command: str_field("command"),
+            // The CLI's own one-liner for the command, when it wrote one —
+            // the daemon's overview filter keeps only this field, so the
+            // human sentence survives where the command itself would be cut
+            // mid-flag.
+            command: match str_field("description") {
+                description if !description.is_empty() => description,
+                _ => str_field("command"),
+            },
             output: result.unwrap_or_default().to_string(),
             exit_code: None,
         },
@@ -2143,6 +2150,33 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// The CLI writes a one-line description of what a command is for; that
+    /// sentence is the overview the daemon keeps, so it is what the card
+    /// carries — not the command, which a 24-character cut would leave
+    /// mid-flag.
+    #[test]
+    fn a_bash_call_prefers_the_clis_own_one_liner() {
+        let detail = detail_from_tool(
+            "Bash",
+            &json!({
+                "command": "cargo test --workspace --all-features -- --nocapture",
+                "description": "Run the full test suite",
+            }),
+            None,
+        );
+        let ToolCallDetail::Shell { command, .. } = detail else {
+            panic!("expected a shell call");
+        };
+        assert_eq!(command, "Run the full test suite");
+
+        // No description written: the command itself is the one-liner.
+        let detail = detail_from_tool("Bash", &json!({ "command": "ls" }), None);
+        let ToolCallDetail::Shell { command, .. } = detail else {
+            panic!("expected a shell call");
+        };
+        assert_eq!(command, "ls");
     }
 
     /// A sub-agent card that says which agent and what it was asked to do, rather

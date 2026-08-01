@@ -569,7 +569,9 @@ async fn an_unknown_tool_still_renders_instead_of_disappearing() {
     mock_only!(journey);
 
     // A tool the built-in agent does not implement: it will report an error,
-    // but the call must still reach the timeline with its data intact.
+    // but the call must still reach the timeline. What it does not keep is the
+    // raw frame — the access layer sheds everything but the card itself
+    // (`session::overview`).
     journey
         .mock()
         .reply(Turn::tool("teleport", json!({ "destination": "mars" })))
@@ -588,7 +590,10 @@ async fn an_unknown_tool_still_renders_instead_of_disappearing() {
     assert_eq!(*name, "teleport");
     match detail {
         ToolCallDetail::Unknown { raw } => {
-            assert_eq!(raw["arguments"]["destination"], "mars");
+            assert!(
+                raw.is_null(),
+                "the fallback card keeps the name and status, not the payload: {raw}"
+            );
         }
         other => panic!("expected the fallback renderer, got {other:?}"),
     }
@@ -1178,8 +1183,12 @@ async fn a_terminal_opens_echoes_resizes_and_closes() {
     journey.finish().await;
 }
 
+/// Two hundred thousand lines of output is the extreme of an ordinary shape:
+/// what the client needs is the command and that it ran, and the access layer
+/// sheds the rest (`session::overview`) rather than streaming it to every
+/// connected screen.
 #[tokio::test]
-async fn large_tool_output_is_truncated_and_marked() {
+async fn a_commands_output_stays_behind_the_access_layer() {
     let journey = Journey::start().await.expect("journey starts");
     mock_only!(journey);
 
@@ -1202,11 +1211,13 @@ async fn large_tool_output_is_truncated_and_marked() {
         .find(|(name, _)| *name == "bash")
         .expect("the command ran");
     match detail {
-        ToolCallDetail::Shell { output, .. } => {
-            assert!(!output.is_empty());
+        ToolCallDetail::Shell {
+            command, output, ..
+        } => {
+            assert_eq!(command, "seq 1 200000");
             assert!(
-                output.len() < 1_000_000,
-                "unbounded output would swamp the client: {} bytes",
+                output.is_empty(),
+                "the output is the detail the access layer filters: {} bytes",
                 output.len()
             );
         }

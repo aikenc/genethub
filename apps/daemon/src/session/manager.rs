@@ -16,6 +16,7 @@ use genehub_proto::{
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 
+use super::overview;
 use super::store::{now_ms, title_from, SessionMeta, Store};
 use crate::adapter::registry::Registry;
 use crate::adapter::{AgentSession, PromptInput, ProviderMap, SessionConfig};
@@ -744,12 +745,24 @@ async fn deny_when_no_one_can_answer(live: Arc<Live>, request_id: String, grace:
 }
 
 /// Folds adapter events into session state, then republishes them.
+///
+/// Everything passes through `overview` first: the daemon's answer to "what
+/// is the agent doing" is one sentence per tool call or thinking block, not
+/// the payload that sentence summarizes. Shedding it here — the one place
+/// every agent's events converge — lightens the wire, the replay buffer, the
+/// snapshot and the on-disk log in a single move.
 async fn pump_events(
     live: Arc<Live>,
     mut receiver: broadcast::Receiver<SessionEvent>,
     store: Store,
     replay_window: usize,
 ) {
+    // Thinking streams one delta per token, and the only part anyone reads is
+    // the first sentence. The raw text is held here so the overview can be
+    // recomputed as the block grows, and republished only when that overview
+    // actually changes — which a 24-character prefix does a handful of times
+    // per block, not once per token. Item id → (raw text, overview last sent).
+    let mut thinking: HashMap<String, (String, String)> = HashMap::new();
     loop {
         let event = match receiver.recv().await {
             Ok(event) => event,
@@ -757,6 +770,51 @@ async fn pump_events(
             Err(broadcast::error::RecvError::Lagged(missed)) => {
                 tracing::warn!("dropped {missed} agent events: the pump fell behind");
                 continue;
+            }
+        };
+
+        let event = match event {
+            SessionEvent::ItemDelta {
+                turn_id,
+                item_id,
+                delta: ItemDelta::Text { delta },
+            } if thinking.contains_key(&item_id) => {
+                let (raw, published) = thinking
+                    .get_mut(&item_id)
+                    .expect("checked against the same map");
+                raw.push_str(&delta);
+                let sentence = overview::shorten(raw, overview::OVERVIEW_CHARS);
+                if sentence == *published {
+                    // The first sentence is already on screen; the rest of the
+                    // block is the detail being filtered.
+                    continue;
+                }
+                *published = sentence.clone();
+                SessionEvent::Item {
+                    turn_id,
+                    item: TimelineItem::Reasoning {
+                        id: item_id,
+                        text: sentence,
+                    },
+                }
+            }
+            event => {
+                if let SessionEvent::Item {
+                    item: TimelineItem::Reasoning { id, text },
+                    ..
+                } = &event
+                {
+                    // An Item frame carries the block's text so far, whole —
+                    // it replaces rather than extends what deltas built up.
+                    thinking.insert(
+                        id.clone(),
+                        (
+                            text.clone(),
+                            overview::shorten(text, overview::OVERVIEW_CHARS),
+                        ),
+                    );
+                }
+                overview::condense_event(&event)
             }
         };
 
@@ -781,6 +839,7 @@ async fn pump_events(
         live.trim_replay(replay_window).await;
 
         if settle {
+            thinking.clear();
             flush_turn(&live, &store).await;
         }
     }
@@ -1429,5 +1488,184 @@ mod tests {
             SessionEvent::TurnCompleted { usage, .. } => assert_eq!(usage.input_tokens, 10),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// Runs the pump against a scripted agent and collects everything the
+    /// clients would see until the turn ends, plus what landed on disk.
+    async fn pumped(
+        script: Vec<SessionEvent>,
+    ) -> (
+        Vec<SessionEvent>,
+        Vec<TimelineItem>,
+        tokio::task::JoinHandle<()>,
+        broadcast::Sender<SessionEvent>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let live = Arc::new(Live::new(meta()));
+        let (agent_events, _) = broadcast::channel(64);
+        let mut seen = live.events.subscribe();
+        let pump = tokio::spawn(pump_events(
+            live.clone(),
+            agent_events.subscribe(),
+            store.clone(),
+            64,
+        ));
+        for event in script {
+            agent_events.send(event).expect("the pump is listening");
+        }
+        let mut wire = Vec::new();
+        loop {
+            let event = seen.recv().await.expect("the pump is running").event;
+            let ended = matches!(event, SessionEvent::TurnCompleted { .. });
+            wire.push(event);
+            if ended {
+                break;
+            }
+        }
+        // The flush rides on the settle event, which was just observed — but
+        // only observed on its way out, so give the pump its turn.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let on_disk = store.load_items("w1", "s1").unwrap();
+        (wire, on_disk, pump, agent_events)
+    }
+
+    /// A thinking block streams one delta per token; what reaches the wire is
+    /// its first sentence, republished only while that sentence is still
+    /// growing. Forty tokens must not be forty messages.
+    #[tokio::test]
+    async fn thinking_reaches_the_wire_as_one_sentence_not_one_message_per_token() {
+        let mut script = vec![
+            SessionEvent::TurnStarted {
+                turn_id: "t".into(),
+            },
+            SessionEvent::Item {
+                turn_id: "t".into(),
+                item: TimelineItem::Reasoning {
+                    id: "r".into(),
+                    text: String::new(),
+                },
+            },
+        ];
+        for _ in 0..40 {
+            script.push(SessionEvent::ItemDelta {
+                turn_id: "t".into(),
+                item_id: "r".into(),
+                delta: ItemDelta::Text {
+                    delta: "abc ".into(),
+                },
+            });
+        }
+        script.push(SessionEvent::TurnCompleted {
+            turn_id: "t".into(),
+            usage: Usage::default(),
+        });
+
+        let (wire, on_disk, pump, agent_events) = pumped(script).await;
+        drop(agent_events);
+        pump.await.unwrap();
+
+        let reasoning_updates = wire
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    SessionEvent::Item {
+                        item: TimelineItem::Reasoning { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(
+            reasoning_updates <= 8,
+            "forty tokens became {reasoning_updates} messages"
+        );
+        assert!(
+            !wire.iter().any(|event| matches!(
+                event,
+                SessionEvent::ItemDelta { item_id, .. } if item_id == "r"
+            )),
+            "a thinking delta leaked onto the wire"
+        );
+        for event in &wire {
+            if let SessionEvent::Item {
+                item: TimelineItem::Reasoning { text, .. },
+                ..
+            } = event
+            {
+                assert!(
+                    text.chars().count() <= 25,
+                    "more than the overview reached the wire: {text:?}"
+                );
+            }
+        }
+        let persisted = on_disk
+            .iter()
+            .find(|item| item.id() == "r")
+            .expect("the thinking block is in the log");
+        match persisted {
+            TimelineItem::Reasoning { text, .. } => {
+                assert!(text.ends_with('…'), "the log holds detail: {text:?}");
+                assert_eq!(text.chars().count(), 25);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// A shell command's output is the heaviest ordinary payload there is.
+    /// The card keeps the command and the exit code; the wall of text goes no
+    /// further than the agent.
+    #[tokio::test]
+    async fn a_tool_calls_payload_stays_behind_the_access_layer() {
+        let output = "a line of build output\n".repeat(500);
+        let (wire, on_disk, pump, agent_events) = pumped(vec![
+            SessionEvent::TurnStarted {
+                turn_id: "t".into(),
+            },
+            SessionEvent::Item {
+                turn_id: "t".into(),
+                item: TimelineItem::ToolCall {
+                    id: "c".into(),
+                    name: "Shell".into(),
+                    status: ToolStatus::Ok,
+                    detail: ToolCallDetail::Shell {
+                        command: "cargo build --workspace".into(),
+                        output,
+                        exit_code: Some(0),
+                    },
+                },
+            },
+            SessionEvent::TurnCompleted {
+                turn_id: "t".into(),
+                usage: Usage::default(),
+            },
+        ])
+        .await;
+        drop(agent_events);
+        pump.await.unwrap();
+
+        for event in &wire {
+            if let SessionEvent::Item {
+                item: TimelineItem::ToolCall { detail, .. },
+                ..
+            } = event
+            {
+                match detail {
+                    ToolCallDetail::Shell {
+                        command,
+                        output,
+                        exit_code,
+                    } => {
+                        assert_eq!(command, "cargo build --workspace");
+                        assert!(output.is_empty(), "the output reached the wire");
+                        assert_eq!(*exit_code, Some(0));
+                    }
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        }
+        let size = serde_json::to_string(&on_disk).unwrap().len();
+        assert!(size < 400, "the log kept the payload ({size} bytes)");
     }
 }
