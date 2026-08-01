@@ -1349,8 +1349,8 @@ mod tests {
         assert!(matches!(detail, ToolCallDetail::Unknown { .. }));
     }
 
-    #[tokio::test]
-    async fn permission_requests_carry_their_options_and_reply_id() {
+    #[test]
+    fn permission_requests_carry_their_options_and_reply_id() {
         let (tx, mut rx) = broadcast::channel(8);
         let pending: PendingPermissionsMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
         translate_permission(
@@ -1364,8 +1364,7 @@ mod tests {
             }),
             &tx,
             &pending,
-        )
-        .await;
+        );
         match &drain(&mut rx)[0] {
             SessionEvent::PermissionRequested { request } => {
                 assert_eq!(request.id, "42", "the id is what we answer on");
