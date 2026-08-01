@@ -210,6 +210,10 @@ mod tests {
             daemon_url("https://relay.example.com/").unwrap(),
             "wss://relay.example.com/forward/daemon"
         );
+        assert_eq!(
+            daemon_url("http://myteam.devcloud.woa.com/dev-0").unwrap(),
+            "ws://myteam.devcloud.woa.com/dev-0/forward/daemon"
+        );
     }
 
     #[test]
