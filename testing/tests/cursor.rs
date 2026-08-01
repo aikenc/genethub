@@ -13,7 +13,7 @@
 //! for is the binary that starts, the ACP handshake we open is one the real
 //! CLI answers, and a turn comes back through the normalized timeline.
 
-use genehub_testing::{assert_normalized_reply, binary_on_path, real_only, EventsExt, Journey};
+use genehub_testing::{assert_normalized_reply, binary_on_path, real_only, Journey};
 
 macro_rules! needs_cursor_agent {
     ($journey:expr) => {
