@@ -37,6 +37,15 @@ export interface ClientOptions {
   socketFactory?: (url: string) => WebSocketLike;
   /** Delay before each reconnection attempt. Also injected in tests. */
   backoffMs?: (attempt: number) => number;
+  /**
+   * How long a socket may stay in CONNECTING before it is replaced.
+   *
+   * Some WebKit releases can strand a WebSocket without firing either
+   * `error` or `close`. Without a deadline that leaves the whole workbench on
+   * “connecting” forever, and a one-use relay ticket is never exchanged for a
+   * fresh one.
+   */
+  connectTimeoutMs?: number;
   now?: () => number;
 }
 
@@ -107,6 +116,7 @@ export class Client {
   private nextId = 1;
   private attempt = 0;
   private stopped = false;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private queue: string[] = [];
   private state: ConnectionState = "connecting";
   /** Why the connection gave up, when it did so for a reason worth showing. */
@@ -171,18 +181,28 @@ export class Client {
       ((at: string) => new WebSocket(at) as WebSocketLike);
     const socket = factory(url);
     this.socket = socket;
+    this.clearConnectTimer();
+    this.connectTimer = setTimeout(
+      () => this.abandon(socket),
+      this.options.connectTimeoutMs ?? 5_000,
+    );
 
     socket.onopen = () => {
+      if (this.socket !== socket || this.stopped) return;
+      this.clearConnectTimer();
       this.attempt = 0;
       void this.handshake();
     };
-    socket.onmessage = (event) => this.receive(String(event.data));
-    socket.onclose = () => this.dropped();
+    socket.onmessage = (event) => {
+      if (this.socket === socket) this.receive(String(event.data));
+    };
+    socket.onclose = () => this.dropped(socket);
     socket.onerror = () => socket.close();
   }
 
   close(): void {
     this.stopped = true;
+    this.clearConnectTimer();
     this.setState("closed");
     this.socket?.close();
     this.socket = null;
@@ -394,8 +414,26 @@ export class Client {
     }
   }
 
-  private dropped(): void {
-    if (this.stopped) return;
+  /**
+   * Gives up a socket WebKit left suspended in CONNECTING.
+   *
+   * Its handlers are detached first because `close()` may synchronously fire
+   * `onclose` in a test double and asynchronously in a browser. Either way one
+   * failed dial must schedule exactly one retry.
+   */
+  private abandon(socket: WebSocketLike): void {
+    if (this.stopped || this.socket !== socket) return;
+    socket.onopen = null;
+    socket.onclose = null;
+    socket.onerror = null;
+    socket.onmessage = null;
+    socket.close();
+    this.dropped(socket);
+  }
+
+  private dropped(socket?: WebSocketLike): void {
+    if (this.stopped || (socket && this.socket !== socket)) return;
+    this.clearConnectTimer();
     this.setState("reconnecting");
     this.socket = null;
 
@@ -404,6 +442,12 @@ export class Client {
       ((attempt) => Math.min(1000 * 2 ** attempt, 15_000));
     const delay = backoff(this.attempt++);
     setTimeout(() => this.connect(), delay);
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer === null) return;
+    clearTimeout(this.connectTimer);
+    this.connectTimer = null;
   }
 
   private setState(state: ConnectionState): void {

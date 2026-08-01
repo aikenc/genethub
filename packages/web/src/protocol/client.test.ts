@@ -326,6 +326,41 @@ describe("the daemon connection", () => {
     client.close();
   });
 
+  it("replaces a socket that stays silent in CONNECTING", async () => {
+    // Safari 26 can strand a WebSocket before the HTTP upgrade reaches the
+    // server: no open, error, or close event. Waiting for an event in that
+    // state means waiting forever, and the relay ticket is never redeemed.
+    vi.useFakeTimers();
+    try {
+      const queue = socketQueue();
+      let minted = 1;
+      const client = new Client({
+        url: "ws://test/?ticket=1",
+        redial: () => Promise.resolve(`ws://test/?ticket=${++minted}`),
+        socketFactory: queue.factory,
+        connectTimeoutMs: 5_000,
+        backoffMs: () => 0,
+      });
+
+      client.connect();
+      expect(queue.urls).toEqual(["ws://test/?ticket=1"]);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.runOnlyPendingTimersAsync();
+      await Promise.resolve();
+
+      expect(queue.sockets[0]?.closed).toBe(true);
+      expect(queue.urls).toEqual([
+        "ws://test/?ticket=1",
+        "ws://test/?ticket=2",
+      ]);
+      expect(client.connectionState).toBe("reconnecting");
+      client.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps retrying when it cannot even find out where to dial", async () => {
     // The thing that mints the address can be the thing that is down. Treating
     // that as fatal would turn a control-plane blip into a session the user has
