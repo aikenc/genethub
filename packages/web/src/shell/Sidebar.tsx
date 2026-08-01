@@ -216,7 +216,7 @@ export function Sidebar({
         </div>
 
         <div
-          className="flex items-center gap-1 border-t border-line px-2 py-2"
+          className="hidden items-center gap-1 border-t border-line px-2 py-2 md:flex"
           style={{ paddingBottom: "max(0.5rem, env(safe-area-inset-bottom))" }}
         >
           <StatusDot connection={connection} />

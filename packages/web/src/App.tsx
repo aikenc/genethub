@@ -14,6 +14,7 @@ import { PermissionCard } from "./session/Permission";
 import { TimelineView } from "./session/TimelineView";
 import { defaultAgent, useWorkbench } from "./session/store";
 import { Sidebar } from "./shell/Sidebar";
+import { MobileToolsDrawer } from "./shell/MobileToolsDrawer";
 import { TabBar } from "./shell/TabBar";
 import type { ExtraTab } from "./shell/tabs";
 import { TitleBar } from "./shell/TitleBar";
@@ -44,6 +45,7 @@ export function App({
   extraTabs = [],
   claim = claimMachine,
   welcome,
+  mobileTools,
 }: {
   host?: Host;
   /**
@@ -66,6 +68,8 @@ export function App({
    * copy honestly can say: someone has to pair a machine first.
    */
   welcome?: () => React.ReactNode;
+  /** Product-specific actions shown with the workbench tools on phones. */
+  mobileTools?: React.ReactNode;
 }) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">(
     "loading",
@@ -82,6 +86,7 @@ export function App({
     "idle" | "working" | { error: string }
   >(() => (host.pendingPairing?.() ? "working" : "idle"));
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   // Two different questions. `sessionsOpen` is the phone's drawer, which starts
   // shut because it covers the conversation; `sidebarHidden` is someone on a
   // desktop asking for the room back, which starts false because the left
@@ -286,6 +291,14 @@ export function App({
           onNavigate={() => setSessionsOpen(false)}
         />
 
+        <MobileToolsDrawer
+          open={toolsOpen}
+          extraTabs={extraTabs}
+          onNavigate={() => setToolsOpen(false)}
+        >
+          {mobileTools}
+        </MobileToolsDrawer>
+
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/* The phone's only permanent chrome. Three things, each a full
               44px target: where am I, how do I get to the list, how do I
@@ -322,14 +335,14 @@ export function App({
             )}
             <button
               type="button"
-              aria-label="新建会话"
+              aria-label="工作区工具"
               className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-xl text-muted active:bg-raised"
               onClick={() => {
-                workbench.newSession();
                 setSessionsOpen(false);
+                setToolsOpen((open) => !open);
               }}
             >
-              <span aria-hidden>+</span>
+              <span aria-hidden>•••</span>
             </button>
           </header>
 

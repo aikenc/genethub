@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -59,7 +59,7 @@ afterEach(() => {
 
 describe("the app as the browser loads it", () => {
   it("renders, instead of looping until React gives up", async () => {
-    render(<App />);
+    render(<App mobileTools={<button type="button">反馈问题</button>} />);
 
     // Anything at all from the workbench shell proves the tree survived; the
     // failure mode is an empty root, not a wrong pixel.
@@ -68,6 +68,11 @@ describe("the app as the browser loads it", () => {
     // own, because the sidebar it would otherwise live in is a drawer.
     expect(screen.getAllByRole("button", { name: "新建会话" })).not.toHaveLength(0);
     expect(screen.getByRole("button", { name: "Changes" })).toBeInTheDocument();
+
+    screen.getByRole("button", { name: "工作区工具" }).click();
+    const tools = screen.getByRole("complementary", { name: "工作区工具" });
+    expect(within(tools).getByRole("button", { name: "文件" })).toBeInTheDocument();
+    expect(within(tools).getByRole("button", { name: "反馈问题" })).toBeInTheDocument();
   });
 
   it("hands the empty case to whoever embedded it, when they have something to offer", async () => {
