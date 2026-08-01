@@ -335,10 +335,10 @@ mod tests {
 
     #[test]
     fn hub_api_urls_keep_the_deployment_subpath() {
-        let client = Client::new("http://myteam.devcloud.woa.com/dev-0/");
+        let client = Client::new("http://myteam.devcloud.woa.com/relay-dev-0/");
         assert_eq!(
             client.url("/api/device-authorizations"),
-            "http://myteam.devcloud.woa.com/dev-0/api/device-authorizations"
+            "http://myteam.devcloud.woa.com/relay-dev-0/api/device-authorizations"
         );
     }
 }

@@ -211,8 +211,8 @@ mod tests {
             "wss://relay.example.com/forward/daemon"
         );
         assert_eq!(
-            daemon_url("http://myteam.devcloud.woa.com/dev-0").unwrap(),
-            "ws://myteam.devcloud.woa.com/dev-0/forward/daemon"
+            daemon_url("http://myteam.devcloud.woa.com/relay-dev-0").unwrap(),
+            "ws://myteam.devcloud.woa.com/relay-dev-0/forward/daemon"
         );
     }
 
