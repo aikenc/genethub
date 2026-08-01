@@ -37,6 +37,16 @@ impl Registry {
             // nobody could guess at — this entry used to report "not
             // installed" to anyone who had `codex` but not the bridge.
             Arc::new(CodexAdapter::default()),
+            // Cursor, spoken as ACP (`cursor-agent acp`): the protocol its CLI
+            // publishes for exactly this kind of embedding. Unlike Claude and
+            // Codex there is no documented native protocol worth the tracking
+            // cost, and ACP already gives us permission prompts and image
+            // attachments — see `docs/third-party-agents.md` §5.
+            Arc::new(AcpAdapter::new(
+                "cursor",
+                "Cursor",
+                vec!["cursor-agent".into(), "acp".into()],
+            )),
             // A generic ACP entry so any other ACP-speaking CLI on PATH works
             // with no configuration at all.
             Arc::new(AcpAdapter::new(
@@ -160,6 +170,28 @@ mod tests {
         assert!(codex.capabilities().set_mode);
         assert!(codex.capabilities().resume);
         assert!(codex.capabilities().attachments);
+    }
+
+    /// Cursor ships in the default set too (`docs/desktop-client.md` promises
+    /// the picker detects a locally installed Cursor CLI), spoken as ACP rather
+    /// than through a hand-written config entry.
+    #[tokio::test]
+    async fn cursor_is_registered_out_of_the_box() {
+        let registry = Registry::new(&BTreeMap::new());
+        let cursor = registry.get("cursor").expect("cursor is registered");
+        assert!(!cursor.builtin());
+        assert_eq!(cursor.label(), "Cursor");
+        // What ACP buys without a native adapter: permission prompts, mode
+        // switching and pasted images all come through the one protocol.
+        assert!(cursor.capabilities().permissions);
+        assert!(cursor.capabilities().set_mode);
+        assert!(cursor.capabilities().attachments);
+        // Probing is honest either way: ready when `cursor-agent` is on PATH,
+        // not installed when it is not — never an error the picker chokes on.
+        assert!(matches!(
+            cursor.probe().await,
+            ProbeState::Ready | ProbeState::NotInstalled
+        ));
     }
 
     #[tokio::test]

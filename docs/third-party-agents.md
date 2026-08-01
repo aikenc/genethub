@@ -25,6 +25,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | `opencode` | 本地 HTTP + SSE | 探测 `opencode` 二进制；模型/密钥全在它自己的 `opencode.json` |
 | `claude` | 子进程 + 原生 `stream-json` stdio | 探测 `claude` 二进制本身（`@anthropic-ai/claude-code`），daemon 直接说它的原生协议，见 §3 |
 | `codex` | 子进程 + 原生 `app-server` JSON-RPC | 探测 `codex` 二进制本身，daemon 直接说它的 `app-server` 协议，见 §4 |
+| `cursor` | 子进程 + ACP over stdio | 探测 `cursor-agent` 二进制本身，说它自己发布的 ACP（`cursor-agent acp`），见 §5 |
 | `acp` | 子进程 + ACP over stdio | 兜底条目，探测一个叫 `acp-agent` 的二进制；真正常用的是下面的自定义声明 |
 
 `claude` 在代码里是 `adapter::claude::ClaudeAdapter`——直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。换原生协议不是图省事，是为了拿回 ACP 不暴露给客户端的能力：**逐个工具调用的权限控制**。`claude --permission-mode manual --permission-prompt-tool stdio` 会把每一次工具调用都变成一个 `control_request`/`control_response` 往返，和 daemon 自己的 `PermissionRequested`/`respondPermission` 正好对上；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `apps/daemon/src/adapter/claude.rs` 顶部的模块文档。
@@ -126,7 +127,20 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 
 ---
 
-## 5. 接入任何其他 ACP agent
+## 5. Cursor：走它自己发布的 ACP
+
+`cursor` 在代码里是 `adapter::acp::AcpAdapter` 的一个默认条目——拉起 `cursor-agent acp`，说 [ACP](https://agentclientprotocol.com/)，这个 CLI 自己发布的嵌入协议。没有像 Claude 和 Codex 那样写原生适配器，因为 Cursor 没有一份公开的、值得跟进维护的原生协议，而 ACP 已经把我们需要的暴露出来了：权限请求（`session/request_permission`）、模式切换和图片附件都在协议里。
+
+```bash
+curl https://cursor.com/install -fsS | bash
+cursor-agent login
+```
+
+登录态和模型选择都是这个 CLI 自己的事（§1）：它没有一个可以把模型后端指走的配置项，所以 mock 模式下没有它的专项测试——`testing/tests/cursor.rs` 只在真实模式、且机器上装着登录过的 `cursor-agent` 时跑，其余情况跳过并打印原因，与 Codex 的处境相同（§4）。
+
+---
+
+## 6. 接入任何其他 ACP agent
 
 不止 Claude 和 Codex，任何说 [ACP](https://agentclientprotocol.com/) 的 CLI 都能不改代码接进来，写一段配置声明即可（`docs/architecture.md` §3）：
 
@@ -138,7 +152,7 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 
 ---
 
-## 8. 第三方 CLI 起不来的时候
+## 7. 第三方 CLI 起不来的时候
 
 外部 CLI 退出的原因只有它自己知道，而它说这句话的地方是 stderr。以前那些行走 `tracing::debug!`（默认级别 `info`，即被丢弃），用户看到的是一句「Claude Code stopped unexpectedly.」——凭据没配、CLI 版本不认识我们传的参数、Windows 上的 shim 找不到 node，三种情况长得一模一样，而且没有一种能据此往下走。
 
@@ -154,7 +168,7 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 
 ---
 
-## 9. 别人的 CLI 不是一个稳定的接口
+## 8. 别人的 CLI 不是一个稳定的接口
 
 同一个版本号下的 Claude Code 有两套权限模式的名字:一套认 `manual`、拒绝 `default`,另一套认 `default`、拒绝 `manual`。写死任何一个,都等于对一半的安装说「启动失败」——这件事真的发生了:
 
