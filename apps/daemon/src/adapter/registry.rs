@@ -184,6 +184,7 @@ mod tests {
         // What ACP buys without a native adapter: permission prompts, mode
         // switching and pasted images all come through the one protocol.
         assert!(cursor.capabilities().permissions);
+        assert!(cursor.capabilities().set_model);
         assert!(cursor.capabilities().set_mode);
         assert!(cursor.capabilities().attachments);
         // Probing is honest either way: ready when `cursor-agent` is on PATH,
