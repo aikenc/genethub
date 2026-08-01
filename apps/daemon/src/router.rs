@@ -602,6 +602,13 @@ pub async fn handle(
             }
         }
 
+        Request::WorkspaceRename { workspace_id, name } => {
+            match state.workspaces.rename(&workspace_id, &name).await {
+                Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
+                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+            }
+        }
+
         Request::FileTree {
             workspace_id,
             path,

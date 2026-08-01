@@ -1,5 +1,5 @@
 import type { SessionSummary, WorkspaceInfo } from "@genehub/proto";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { Endpoint, Host, Target } from "../host";
 import { useWorkbench } from "../session/store";
@@ -51,6 +51,7 @@ export function Sidebar({
     workspaces,
     activeWorkspaceId,
     selectWorkspace,
+    renameWorkspace,
     newSession,
     renameSession,
     deleteSession,
@@ -191,6 +192,7 @@ export function Sidebar({
                 void selectWorkspace(id);
                 onNavigate();
               }}
+              onRenameWorkspace={(id, name) => void renameWorkspace(id, name)}
               onPickSession={go}
               {...actions}
             />
@@ -287,6 +289,7 @@ function Projects({
   activeWorkspaceId,
   onToggle,
   onPickWorkspace,
+  onRenameWorkspace,
   ...actions
 }: {
   workspaces: WorkspaceInfo[];
@@ -296,6 +299,7 @@ function Projects({
   activeWorkspaceId: string | null;
   onToggle(workspaceId: string): void;
   onPickWorkspace(workspaceId: string): void;
+  onRenameWorkspace(workspaceId: string, name: string): void;
 } & RowActions) {
   return (
     <ul aria-label="工作区">
@@ -303,41 +307,20 @@ function Projects({
         const mine = sessions.filter((session) => session.workspaceId === workspace.id);
         const running = mine.filter((session) => session.status === "running").length;
         const shut = collapsed.includes(workspace.id);
+        const rename = (name: string) => {
+          if (name !== workspace.name) onRenameWorkspace(workspace.id, name);
+        };
         return (
-          <li key={workspace.id} className="mb-1">
-            <div
-              className={`flex w-full items-center gap-1 rounded-md pr-1 text-sm md:text-xs ${
-                workspace.id === activeWorkspaceId ? "text-fg" : "text-muted"
-              }`}
-            >
-              <button
-                type="button"
-                aria-label={shut ? `展开 ${workspace.name}` : `折叠 ${workspace.name}`}
-                aria-expanded={!shut}
-                className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-auto md:w-auto md:px-1 md:py-1"
-                onClick={() => onToggle(workspace.id)}
-              >
-                <span aria-hidden>{shut ? "▸" : "▾"}</span>
-              </button>
-              <button
-                type="button"
-                className="min-w-0 flex-1 truncate py-2 text-left font-medium hover:text-fg md:py-1"
-                title={workspace.root}
-                onClick={() => onPickWorkspace(workspace.id)}
-              >
-                {workspace.name}
-              </button>
-              {/* A count only where there is something to count: a "0" next to
-                  every idle project is noise on the one screen that has to be
-                  scannable. */}
-              {running > 0 ? (
-                <span className="flex shrink-0 items-center gap-1 text-[10px] text-ok">
-                  <span className="h-1.5 w-1.5 rounded-full bg-ok" aria-hidden />
-                  {running}
-                </span>
-              ) : null}
-            </div>
-
+          <WorkspaceRow
+            key={workspace.id}
+            workspace={workspace}
+            running={running}
+            shut={shut}
+            active={workspace.id === activeWorkspaceId}
+            onToggle={() => onToggle(workspace.id)}
+            onPick={() => onPickWorkspace(workspace.id)}
+            onRename={rename}
+          >
             {shut ? null : mine.length > 0 ? (
               <ul className="ml-3 border-l border-line pl-1">
                 {mine.map((session) => (
@@ -352,10 +335,84 @@ function Projects({
             ) : (
               <p className="ml-4 py-1 pl-2 text-[11px] text-faint">还没有会话</p>
             )}
-          </li>
+          </WorkspaceRow>
         );
       })}
     </ul>
+  );
+}
+
+function WorkspaceRow({
+  workspace,
+  running,
+  shut,
+  active,
+  onToggle,
+  onPick,
+  onRename,
+  children,
+}: {
+  workspace: WorkspaceInfo;
+  running: number;
+  shut: boolean;
+  active: boolean;
+  onToggle(): void;
+  onPick(): void;
+  onRename(name: string): void;
+  children: ReactNode;
+}) {
+  const [editing, setEditing] = useState(false);
+  return (
+    <li className="group mb-1">
+      {editing ? (
+        <Rename
+          initial={workspace.name}
+          label="工作区名称"
+          onCommit={(name) => {
+            setEditing(false);
+            onRename(name);
+          }}
+          onCancel={() => setEditing(false)}
+        />
+      ) : (
+        <div
+          className={`flex w-full items-center gap-1 rounded-md pr-1 text-sm md:text-xs ${active ? "text-fg" : "text-muted"}`}
+        >
+          <button
+            type="button"
+            aria-label={shut ? `展开 ${workspace.name}` : `折叠 ${workspace.name}`}
+            aria-expanded={!shut}
+            className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-auto md:w-auto md:px-1 md:py-1"
+            onClick={onToggle}
+          >
+            <span aria-hidden>{shut ? "▸" : "▾"}</span>
+          </button>
+          <button
+            type="button"
+            className="min-w-0 flex-1 truncate py-2 text-left font-medium hover:text-fg md:py-1"
+            title={workspace.root}
+            onClick={onPick}
+          >
+            {workspace.name}
+          </button>
+          {running > 0 ? (
+            <span className="flex shrink-0 items-center gap-1 text-[10px] text-ok">
+              <span className="h-1.5 w-1.5 rounded-full bg-ok" aria-hidden />
+              {running}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            aria-label={`重命名工作区 ${workspace.name}`}
+            className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-7 md:w-6 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
+            onClick={() => setEditing(true)}
+          >
+            <span aria-hidden>✎</span>
+          </button>
+        </div>
+      )}
+      {children}
+    </li>
   );
 }
 
@@ -573,10 +630,12 @@ function Menu({
 /** The row itself becomes the field, so the name is edited where it is read. */
 function Rename({
   initial,
+  label = "会话名称",
   onCommit,
   onCancel,
 }: {
   initial: string;
+  label?: string;
   onCommit(title: string): void;
   onCancel(): void;
 }) {
@@ -598,7 +657,7 @@ function Rename({
   return (
     <input
       ref={field}
-      aria-label="会话名称"
+      aria-label={label}
       className="min-h-11 w-full rounded-lg border border-accent bg-surface px-2 text-base text-fg outline-none md:min-h-0 md:rounded-md md:py-1.5 md:text-xs"
       value={value}
       onChange={(event) => setValue(event.target.value)}

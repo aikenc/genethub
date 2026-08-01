@@ -115,6 +115,32 @@ impl Workspaces {
 
         Ok(describe(&entry))
     }
+
+    /// Changes only the label shown to the user; the directory itself stays put.
+    pub async fn rename(&self, id: &str, name: &str) -> Result<WorkspaceInfo> {
+        let name: String = name.trim().chars().take(80).collect();
+        if name.is_empty() {
+            return Err(anyhow!("workspace name cannot be empty"));
+        }
+
+        let mut entries = self.entries.write().await;
+        let entry = entries
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+        entry.name = name;
+        let updated = entry.clone();
+
+        let mut config = self.config.write().await;
+        let saved = config
+            .workspaces
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| anyhow!("workspace {id} is missing from config"))?;
+        saved.name = updated.name.clone();
+        config.save(&self.config_path)?;
+
+        Ok(describe(&updated))
+    }
 }
 
 fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
@@ -217,5 +243,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let spaces = workspaces(dir.path()).await;
         assert!(spaces.get("nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_workspace_name_is_trimmed_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let config = Arc::new(RwLock::new(Config::default()));
+        let spaces = Workspaces::new(config.clone(), dir.path().join("config.json"));
+        let opened = spaces.open(&project, None).await.unwrap();
+
+        let renamed = spaces.rename(&opened.id, "  我的项目  ").await.unwrap();
+
+        assert_eq!(renamed.name, "我的项目");
+        assert_eq!(spaces.list().await[0].name, "我的项目");
+        assert_eq!(config.read().await.workspaces[0].name, "我的项目");
+        let saved = Config::load(&dir.path().join("config.json")).unwrap();
+        assert_eq!(saved.workspaces[0].name, "我的项目");
+    }
+
+    #[tokio::test]
+    async fn a_workspace_cannot_be_renamed_to_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let opened = spaces.open(dir.path(), None).await.unwrap();
+
+        assert!(spaces.rename(&opened.id, "   ").await.is_err());
+        assert_eq!(spaces.list().await[0].name, opened.name);
     }
 }

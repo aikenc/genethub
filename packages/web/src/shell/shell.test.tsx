@@ -74,6 +74,7 @@ beforeEach(() => {
     selectWorkspace: vi.fn(async () => {}),
     newSession: vi.fn(),
     renameSession: vi.fn(async () => {}),
+    renameWorkspace: vi.fn(async () => {}),
     deleteSession: vi.fn(async () => {}),
   });
 });
@@ -118,6 +119,16 @@ describe("the left edge", () => {
 
     expect(screen.queryByText("修复移动端横向拖动")).not.toBeInTheDocument();
     expect(localStorage.getItem("genehub.sidebar.collapsed")).toBe('["w1"]');
+  });
+
+  it("renames a workspace in place", async () => {
+    sidebar();
+    await userEvent.click(screen.getByRole("button", { name: "重命名工作区 genethub" }));
+    const field = screen.getByLabelText("工作区名称");
+    await userEvent.clear(field);
+    await userEvent.type(field, "核心项目{Enter}");
+
+    expect(useWorkbench.getState().renameWorkspace).toHaveBeenCalledWith("w1", "核心项目");
   });
 
   it("reaches into folded projects when searching, or the search finds nothing", async () => {
