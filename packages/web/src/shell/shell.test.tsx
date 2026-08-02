@@ -123,12 +123,31 @@ describe("the left edge", () => {
 
   it("renames a workspace in place", async () => {
     sidebar();
-    await userEvent.click(screen.getByRole("button", { name: "重命名工作区 genethub" }));
+    await userEvent.click(screen.getByRole("button", { name: "genethub 的目录操作" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
     const field = screen.getByLabelText("工作区名称");
     await userEvent.clear(field);
     await userEvent.type(field, "核心项目{Enter}");
 
     expect(useWorkbench.getState().renameWorkspace).toHaveBeenCalledWith("w1", "核心项目");
+  });
+
+  it("shows a workspace's name, full path and owning device", async () => {
+    render(
+      <Sidebar
+        host={host()}
+        endpoint={{ url: "ws://127.0.0.1/ws", via: "loopback", label: "开发工作站" }}
+        open
+        onNavigate={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "genethub 的目录操作" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "详情" }));
+
+    const details = screen.getByText("目录详情").parentElement?.parentElement;
+    expect(details).toHaveTextContent("名称genethub");
+    expect(details).toHaveTextContent("完整路径/home/me/genethub");
+    expect(details).toHaveTextContent("所属设备开发工作站");
   });
 
   it("reaches into folded projects when searching, or the search finds nothing", async () => {

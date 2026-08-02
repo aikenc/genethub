@@ -187,6 +187,7 @@ export function Sidebar({
               collapsed={needle ? [] : collapsed}
               activeSessionId={activeSessionId}
               activeWorkspaceId={workspace?.id ?? null}
+              deviceName={endpoint?.label ?? "当前设备"}
               onToggle={toggle}
               onPickWorkspace={(id) => {
                 void selectWorkspace(id);
@@ -287,6 +288,7 @@ function Projects({
   collapsed,
   activeSessionId,
   activeWorkspaceId,
+  deviceName,
   onToggle,
   onPickWorkspace,
   onRenameWorkspace,
@@ -297,6 +299,7 @@ function Projects({
   collapsed: string[];
   activeSessionId: string | null;
   activeWorkspaceId: string | null;
+  deviceName: string;
   onToggle(workspaceId: string): void;
   onPickWorkspace(workspaceId: string): void;
   onRenameWorkspace(workspaceId: string, name: string): void;
@@ -317,6 +320,7 @@ function Projects({
             running={running}
             shut={shut}
             active={workspace.id === activeWorkspaceId}
+            deviceName={deviceName}
             onToggle={() => onToggle(workspace.id)}
             onPick={() => onPickWorkspace(workspace.id)}
             onRename={rename}
@@ -347,6 +351,7 @@ function WorkspaceRow({
   running,
   shut,
   active,
+  deviceName,
   onToggle,
   onPick,
   onRename,
@@ -356,14 +361,17 @@ function WorkspaceRow({
   running: number;
   shut: boolean;
   active: boolean;
+  deviceName: string;
   onToggle(): void;
   onPick(): void;
   onRename(name: string): void;
   children: ReactNode;
 }) {
   const [editing, setEditing] = useState(false);
+  const [menu, setMenu] = useState(false);
+  const [details, setDetails] = useState(false);
   return (
-    <li className="group mb-1">
+    <li className="group relative mb-1">
       {editing ? (
         <Rename
           initial={workspace.name}
@@ -403,16 +411,81 @@ function WorkspaceRow({
           ) : null}
           <button
             type="button"
-            aria-label={`重命名工作区 ${workspace.name}`}
+            aria-label={`${workspace.name} 的目录操作`}
+            aria-expanded={menu}
             className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-7 md:w-6 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
-            onClick={() => setEditing(true)}
+            onClick={() => setMenu((open) => !open)}
           >
-            <span aria-hidden>✎</span>
+            <span aria-hidden>⋯</span>
           </button>
         </div>
       )}
+      {menu ? (
+        <>
+          <button
+            type="button"
+            aria-label="收起目录操作"
+            className="fixed inset-0 z-40 cursor-default"
+            onClick={() => setMenu(false)}
+          />
+          <div
+            role="menu"
+            className="absolute right-1 top-9 z-50 min-w-28 overflow-hidden rounded-lg border border-line-strong bg-surface py-1 shadow-[0_8px_30px_rgb(0_0_0_/0.35)]"
+          >
+            <button
+              type="button"
+              role="menuitem"
+              className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+              onClick={() => {
+                setMenu(false);
+                setDetails(true);
+              }}
+            >
+              详情
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+              onClick={() => {
+                setMenu(false);
+                setEditing(true);
+              }}
+            >
+              重命名
+            </button>
+          </div>
+        </>
+      ) : null}
+      {details ? (
+        <div className="mx-1 mb-2 rounded-lg border border-line bg-surface p-3 text-xs">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="font-medium text-fg">目录详情</span>
+            <button
+              type="button"
+              aria-label="关闭目录详情"
+              className="rounded px-2 py-1 text-faint hover:bg-raised hover:text-fg"
+              onClick={() => setDetails(false)}
+            >
+              ×
+            </button>
+          </div>
+          <Detail label="名称" value={workspace.name} />
+          <Detail label="完整路径" value={workspace.root} />
+          <Detail label="所属设备" value={deviceName} />
+        </div>
+      ) : null}
       {children}
     </li>
+  );
+}
+
+function Detail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[4rem_minmax(0,1fr)] gap-2 py-1">
+      <span className="text-faint">{label}</span>
+      <span className="break-all text-fg">{value}</span>
+    </div>
   );
 }
 
