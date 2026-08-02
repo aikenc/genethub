@@ -80,7 +80,7 @@ impl Terminals {
             }),
         );
 
-        let outbound = self.outbound.clone();
+        let output = self.outbound.clone();
         let reader_id = id.clone();
         // Blocking reads on a dedicated thread: the pty reader has no async
         // form, and parking it on the runtime would stall other tasks.
@@ -91,7 +91,7 @@ impl Terminals {
                     Ok(0) | Err(_) => break,
                     Ok(count) => {
                         let data = String::from_utf8_lossy(&buffer[..count]).to_string();
-                        if outbound
+                        if output
                             .send(PtyMessage::Output {
                                 pty_id: reader_id.clone(),
                                 data,
@@ -103,9 +103,19 @@ impl Terminals {
                     }
                 }
             }
+        });
+
+        let closed = self.outbound.clone();
+        let child_id = id.clone();
+        // A shell can exit while this process still owns the PTY master. On
+        // some platforms that means the reader does not observe EOF until the
+        // master is dropped, so waiting for EOF before waiting for the child
+        // deadlocks the close notification. The process handle is the source
+        // of truth for exit and gets its own blocking waiter.
+        std::thread::spawn(move || {
             let exit_code = child.wait().ok().map(|status| status.exit_code() as i32);
-            let _ = outbound.send(PtyMessage::Closed {
-                pty_id: reader_id,
+            let _ = closed.send(PtyMessage::Closed {
+                pty_id: child_id,
                 exit_code,
             });
         });
@@ -187,13 +197,40 @@ mod tests {
         seen
     }
 
+    /// Waits until the shell has printed its startup prompt and gone idle.
+    ///
+    /// Interactive startup files can query the terminal and consume input sent
+    /// before the prompt exists. A real person cannot press Enter before the
+    /// terminal is visible; tests must honor that same boundary.
+    async fn wait_until_ready(inbound: &mut mpsc::UnboundedReceiver<PtyMessage>) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut output = String::new();
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), inbound.recv()).await {
+                Ok(Some(PtyMessage::Output { data, .. })) => {
+                    output.push_str(&data);
+                    if ["# ", "$ ", "> ", "% "]
+                        .iter()
+                        .any(|prompt| output.ends_with(prompt))
+                    {
+                        return;
+                    }
+                }
+                Ok(Some(PtyMessage::Closed { .. })) | Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        panic!("the shell never printed its startup prompt; output: {output:?}");
+    }
+
     #[tokio::test]
     async fn a_terminal_echoes_what_it_is_given() {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, mut inbound) = Terminals::new();
         let id = terminals.open(dir.path(), 80, 24).await.unwrap();
 
-        terminals.write(&id, "echo genehub-marker\n").await.unwrap();
+        wait_until_ready(&mut inbound).await;
+        terminals.write(&id, "echo genehub-marker\r").await.unwrap();
         let output = collect_output(&mut inbound, "genehub-marker").await;
         assert!(output.contains("genehub-marker"), "got: {output:?}");
 
@@ -205,19 +242,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, mut inbound) = Terminals::new();
         let id = terminals.open(dir.path(), 80, 24).await.unwrap();
-        terminals.write(&id, "exit\n").await.unwrap();
+        wait_until_ready(&mut inbound).await;
+        // xterm sends carriage return for Enter. A bare line feed is output
+        // translation on a terminal, not the key that submits the command.
+        terminals.write(&id, "exit\r").await.unwrap();
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let mut closed = false;
+        let mut output = String::new();
         while tokio::time::Instant::now() < deadline && !closed {
-            if let Ok(Some(PtyMessage::Closed { pty_id, .. })) =
-                tokio::time::timeout(Duration::from_millis(500), inbound.recv()).await
-            {
-                assert_eq!(pty_id, id);
-                closed = true;
+            match tokio::time::timeout(Duration::from_millis(500), inbound.recv()).await {
+                Ok(Some(PtyMessage::Closed { pty_id, .. })) => {
+                    assert_eq!(pty_id, id);
+                    closed = true;
+                }
+                Ok(Some(PtyMessage::Output { data, .. })) => output.push_str(&data),
+                Ok(None) | Err(_) => {}
             }
         }
-        assert!(closed, "the shell exiting must be reported");
+        assert!(
+            closed,
+            "the shell exiting must be reported; output: {output:?}"
+        );
 
         terminals.close(&id).await.unwrap();
         assert!(terminals.write(&id, "x").await.is_err());
