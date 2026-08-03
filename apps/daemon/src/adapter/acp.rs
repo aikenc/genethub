@@ -1375,7 +1375,11 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(
-            pending.lock().unwrap().get("42").map(|options| options.len()),
+            pending
+                .lock()
+                .unwrap()
+                .get("42")
+                .map(|options| options.len()),
             Some(2)
         );
     }
