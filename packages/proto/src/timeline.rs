@@ -17,6 +17,15 @@ use ts_rs::TS;
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum ToolCallDetail {
+    /// The only tool shape retained by the session boundary. Adapters may
+    /// produce richer variants below, but memory, disk and clients receive
+    /// three human-scannable strings of at most 24 Unicode characters each.
+    #[serde(rename_all = "camelCase")]
+    Overview {
+        overview: String,
+        input: String,
+        output: String,
+    },
     #[serde(rename_all = "camelCase")]
     Shell {
         command: String,

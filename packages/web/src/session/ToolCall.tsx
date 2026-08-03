@@ -19,9 +19,10 @@ export function ToolCallView({
   status: ToolStatus;
   detail: ToolCallDetail;
 }) {
-  // Plans are decisions the user must read. Ordinary successful tools stay out
-  // of the way until asked for; failures open themselves when they settle.
-  const [open, setOpen] = useState(detail.kind === "plan" || status === "error");
+  // Ordinary successful tools stay out of the way until asked for; failures
+  // open themselves when they settle. New sessions only carry bounded
+  // overviews; old detailed shapes remain renderable during migration.
+  const [open, setOpen] = useState(status === "error");
   useEffect(() => {
     if (status === "error") setOpen(true);
   }, [status]);
@@ -68,6 +69,8 @@ function StatusDot({ status }: { status: ToolStatus }) {
 
 function summarize(detail: ToolCallDetail): string {
   switch (detail.kind) {
+    case "overview":
+      return detail.overview;
     case "shell":
       return detail.command;
     case "read":
@@ -89,6 +92,13 @@ function summarize(detail: ToolCallDetail): string {
 
 function Body({ detail }: { detail: ToolCallDetail }) {
   switch (detail.kind) {
+    case "overview":
+      return (
+        <div className="min-w-0 space-y-1">
+          {detail.input ? <p className="break-all text-muted">输入：{detail.input}</p> : null}
+          {detail.output ? <p className="break-all text-muted">输出：{detail.output}</p> : null}
+        </div>
+      );
     case "shell":
       return (
         <div className="min-w-0 space-y-2">

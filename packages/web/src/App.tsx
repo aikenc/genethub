@@ -107,7 +107,8 @@ export function App({
   // adapter is still working, the snapshot says `running` even though there is
   // no turn id to restore. Using the transient id here used to turn Stop back
   // into Send and made an in-flight turn look lost.
-  const running = workbench.timeline.status === "running";
+  const running =
+    workbench.timeline.status === "running" || workbench.timeline.status === "waiting";
   // A draft is a conversation with nothing in it yet, so the composer answers to
   // the choices held on the draft until there is a session to hold them.
   const draft = workbench.draft;

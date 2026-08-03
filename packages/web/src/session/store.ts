@@ -141,6 +141,8 @@ interface WorkbenchState {
   download: UpdateDownload;
 
   attach(client: Client): Promise<void>;
+  /** Refreshes daemon-owned session status for the sidebar. */
+  refreshSessions(): Promise<void>;
   openWorkspace(root: string): Promise<void>;
   selectWorkspace(workspaceId: string): Promise<void>;
   /** Changes a workspace's display name without moving its directory. */
@@ -275,6 +277,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
   },
 
+  async refreshSessions() {
+    const client = get().client;
+    if (!client) return;
+    await loadSessions(client, set).catch(unattended(client, get, set));
+  },
+
   async openWorkspace(root) {
     const client = require_(get().client);
     const reply = await client.call({ type: "workspace.open", payload: { root } });
@@ -389,10 +397,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
     const { snapshot, replayed } = await client.subscribe(sessionId, {
       onEvent: (event) => {
-        if (get().activeSessionId !== sessionId) return;
         if (event.event.type === "titleChanged") {
           applyTitle(sessionId, event.event.title, set);
         }
+        applySessionStatus(sessionId, event.event, set);
+        if (get().activeSessionId !== sessionId) return;
         set((state) => ({ timeline: applySequenced(state.timeline, event) }));
       },
       onResync: (resnapshot, events, reset) => {
@@ -402,6 +411,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           : get().timeline;
         for (const event of events) {
           if (event.event.type === "titleChanged") applyTitle(sessionId, event.event.title, set);
+          applySessionStatus(sessionId, event.event, set);
         }
         set({ timeline: events.reduce(applySequenced, base) });
       },
@@ -931,6 +941,32 @@ function applyTitle(sessionId: string, title: string, set: Setter): void {
     ),
     tabs: state.tabs.map((tab) =>
       tab.sessionId === sessionId ? { ...tab, title } : tab,
+    ),
+  }));
+}
+
+/** Mirrors live daemon status into the session list without waiting for a poll. */
+function applySessionStatus(
+  sessionId: string,
+  event: import("@genehub/proto").SessionEvent,
+  set: Setter,
+): void {
+  const status =
+    event.type === "turnStarted" || event.type === "permissionResolved"
+      ? "running"
+      : event.type === "permissionRequested"
+        ? "waiting"
+        : event.type === "turnFailed"
+          ? "failed"
+          : event.type === "turnCompleted" || event.type === "turnCanceled"
+            ? "idle"
+            : event.type === "sessionStatusChanged"
+              ? event.status
+              : null;
+  if (!status) return;
+  set((state) => ({
+    sessions: state.sessions.map((session) =>
+      session.id === sessionId ? { ...session, status } : session,
     ),
   }));
 }

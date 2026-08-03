@@ -93,6 +93,20 @@ describe("what the user sees in a session", () => {
     expect(screen.getByTestId("tool-call")).toHaveTextContent("a b");
   });
 
+  it("renders the daemon's bounded overview, input and output", async () => {
+    render(
+      <ToolCallView
+        name="bash"
+        status="ok"
+        detail={{ kind: "overview", overview: "检查构建", input: "npm test", output: "全部通过" }}
+      />,
+    );
+    expect(screen.getByText("检查构建")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "展开详情" }));
+    expect(screen.getByText("输入：npm test")).toBeInTheDocument();
+    expect(screen.getByText("输出：全部通过")).toBeInTheDocument();
+  });
+
   it("colours an edit when its compact card is expanded", async () => {
     render(
       <ToolCallView

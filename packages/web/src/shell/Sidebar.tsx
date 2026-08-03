@@ -57,18 +57,67 @@ export function Sidebar({
     deleteSession,
     openTab,
     connection,
+    refreshSessions,
   } = useWorkbench();
 
   const [grouping, setGrouping] = useState<Grouping>(() => recall(GROUPING_KEY, "project"));
   const [collapsed, setCollapsed] = useState<string[]>(() => recall(COLLAPSED_KEY, []));
   const [query, setQuery] = useState("");
+  const [readAt, setReadAt] = useState<Record<string, number>>(() => recall(READ_KEY, {}));
+  const readStateInitialized = useRef(recall(READ_INITIALIZED_KEY, false));
+
+  // Session execution continues after navigation, so the sidebar refreshes its
+  // daemon-owned status independently of whichever conversation is open.
+  useEffect(() => {
+    if (connection !== "ready") return;
+    const timer = setInterval(() => void refreshSessions(), 2_000);
+    return () => clearInterval(timer);
+  }, [connection, refreshSessions]);
+
+  // Existing conversations start as read when this feature first appears;
+  // afterwards updatedAtMs is the durable unread boundary. The active
+  // conversation is always read through its latest persisted update.
+  useEffect(() => {
+    if (sessions.length === 0) return;
+    setReadAt((current) => {
+      const next = { ...current };
+      let changed = false;
+      if (!readStateInitialized.current) {
+        for (const session of sessions) next[session.id] = session.updatedAtMs;
+        readStateInitialized.current = true;
+        changed = true;
+        remember(READ_INITIALIZED_KEY, true);
+      }
+      const active = sessions.find((session) => session.id === activeSessionId);
+      if (active && (next[active.id] ?? 0) < active.updatedAtMs) {
+        next[active.id] = active.updatedAtMs;
+        changed = true;
+      }
+      if (!changed) return current;
+      remember(READ_KEY, next);
+      return next;
+    });
+  }, [sessions, activeSessionId]);
 
   const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
 
   const needle = query.trim().toLowerCase();
+  const listed = useMemo<ListedSession[]>(
+    () =>
+      sessions.map((session) => ({
+        ...session,
+        unread:
+          !["running", "waiting", "failed"].includes(session.status) &&
+          (readAt[session.id] ?? 0) < session.updatedAtMs,
+      })),
+    [sessions, readAt],
+  );
   const matching = useMemo(
-    () => (needle ? sessions.filter((session) => title(session).toLowerCase().includes(needle)) : sessions),
-    [sessions, needle],
+    () =>
+      needle
+        ? listed.filter((session) => title(session).toLowerCase().includes(needle))
+        : listed,
+    [listed, needle],
   );
 
   const go = (sessionId: string) => {
@@ -281,6 +330,8 @@ interface RowActions {
   onDelete(sessionId: string): void;
 }
 
+type ListedSession = SessionSummary & { unread: boolean };
+
 /** Every project, with its conversations under it. */
 function Projects({
   workspaces,
@@ -295,7 +346,7 @@ function Projects({
   ...actions
 }: {
   workspaces: WorkspaceInfo[];
-  sessions: SessionSummary[];
+  sessions: ListedSession[];
   collapsed: string[];
   activeSessionId: string | null;
   activeWorkspaceId: string | null;
@@ -308,7 +359,9 @@ function Projects({
     <ul aria-label="工作区">
       {workspaces.map((workspace) => {
         const mine = sessions.filter((session) => session.workspaceId === workspace.id);
-        const running = mine.filter((session) => session.status === "running").length;
+        const running = mine.filter((session) =>
+          ["running", "waiting"].includes(session.status),
+        ).length;
         const shut = collapsed.includes(workspace.id);
         const rename = (name: string) => {
           if (name !== workspace.name) onRenameWorkspace(workspace.id, name);
@@ -501,21 +554,34 @@ function Statuses({
   activeSessionId,
   ...actions
 }: {
-  sessions: SessionSummary[];
+  sessions: ListedSession[];
   workspaces: WorkspaceInfo[];
   activeSessionId: string | null;
 } & RowActions) {
-  const working = sessions.filter((session) => session.status === "running");
-  const idle = sessions.filter((session) => session.status !== "running");
-  const named = (session: SessionSummary) =>
+  const named = (session: ListedSession) =>
     workspaces.find((entry) => entry.id === session.workspaceId)?.name;
+
+  const groups = [
+    { label: "运行异常", rows: sessions.filter((session) => session.status === "failed") },
+    { label: "等待交互", rows: sessions.filter((session) => session.status === "waiting") },
+    { label: "运行中", rows: sessions.filter((session) => session.status === "running") },
+    {
+      label: "已完成未阅读",
+      rows: sessions.filter(
+        (session) => !["failed", "waiting", "running"].includes(session.status) && session.unread,
+      ),
+    },
+    {
+      label: "已完成已阅读",
+      rows: sessions.filter(
+        (session) => !["failed", "waiting", "running"].includes(session.status) && !session.unread,
+      ),
+    },
+  ];
 
   return (
     <>
-      {[
-        { label: "Working", rows: working },
-        { label: working.length > 0 ? "Ready" : "Sessions", rows: idle },
-      ].map(({ label, rows }) =>
+      {groups.map(({ label, rows }) =>
         rows.length === 0 ? null : (
           <div key={label} className="mb-3">
             <div className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-faint">
@@ -547,7 +613,7 @@ function SessionRow({
   onRename,
   onDelete,
 }: {
-  session: SessionSummary;
+  session: ListedSession;
   active: boolean;
   project?: string;
 } & RowActions) {
@@ -578,12 +644,7 @@ function SessionRow({
         }`}
         onClick={() => onPickSession(session.id)}
       >
-        <span
-          className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-            session.status === "running" ? "bg-ok" : "bg-faint"
-          }`}
-          aria-hidden
-        />
+        <SessionStateIcon session={session} />
         <span className="min-w-0 flex-1 truncate">{title(session)}</span>
         {project ? <span className="shrink-0 text-[10px] text-faint">{project}</span> : null}
       </button>
@@ -760,6 +821,29 @@ function StatusDot({ connection }: { connection: string }) {
   );
 }
 
+function SessionStateIcon({ session }: { session: ListedSession }) {
+  const state =
+    session.status === "failed"
+      ? { icon: "⚠", label: "运行异常", tone: "text-danger" }
+      : session.status === "waiting"
+        ? { icon: "✋", label: "等待交互", tone: "text-accent" }
+        : session.status === "running"
+          ? { icon: "↻", label: "运行中", tone: "text-ok animate-pulse" }
+          : session.unread
+            ? { icon: "●", label: "已完成未阅读", tone: "text-accent" }
+            : { icon: "✓", label: "已完成已阅读", tone: "text-faint" };
+  return (
+    <span
+      className={`w-4 shrink-0 text-center text-[11px] leading-none ${state.tone}`}
+      role="img"
+      aria-label={state.label}
+      title={state.label}
+    >
+      {state.icon}
+    </span>
+  );
+}
+
 /** The daemon names a session from its first message; until then this stands in. */
 const title = (session: SessionSummary) => session.title || "新会话";
 
@@ -767,6 +851,8 @@ type Grouping = "project" | "status";
 
 const GROUPING_KEY = "genehub.sidebar.grouping";
 const COLLAPSED_KEY = "genehub.sidebar.collapsed";
+const READ_KEY = "genehub.sidebar.read-at";
+const READ_INITIALIZED_KEY = "genehub.sidebar.read-at.initialized";
 
 /*
  * Which projects are folded shut, and which of the two lists is showing.

@@ -165,6 +165,8 @@ pub enum SessionEvent {
 pub enum SessionStatus {
     Idle,
     Running,
+    /// The turn is still live but cannot continue until a person responds.
+    Waiting,
     /// History is viewable but the underlying agent cannot resume it.
     ReadOnly,
     Failed,

@@ -105,7 +105,14 @@ impl SessionManager {
             .into_iter()
             .find(|meta| meta.id == session_id)
             .ok_or_else(|| anyhow!("no such session: {session_id}"))?;
-        let items = self.store.load_items(&meta.workspace_id, &meta.id)?;
+        // Old session logs may predate the overview-only boundary. Never let
+        // their historical tool payloads or reasoning leak back to a client.
+        let loaded = self.store.load_items(&meta.workspace_id, &meta.id)?;
+        let items: Vec<TimelineItem> = loaded.iter().map(overview::condense_item).collect();
+        if items != loaded {
+            self.store
+                .replace_items(&meta.workspace_id, &meta.id, &items)?;
+        }
         let live = Arc::new(Live::new(meta));
         *live.items.lock().await = items;
         self.sessions
@@ -217,7 +224,7 @@ impl SessionManager {
         let live = self.live(session_id).await?;
         {
             let mut status = live.status.lock().await;
-            if *status == SessionStatus::Running {
+            if matches!(*status, SessionStatus::Running | SessionStatus::Waiting) {
                 return Err(anyhow!("a turn is already running in this session"));
             }
             // Claimed before the handover, not after it: a second send arriving
@@ -757,14 +764,12 @@ async fn pump_events(
     store: Store,
     replay_window: usize,
 ) {
-    // Thinking streams one delta per token, and the only part anyone reads is
-    // the first sentence. The raw text is held here so the overview can be
-    // recomputed as the block grows, and republished only when that overview
-    // actually changes — which a 24-character prefix does a handful of times
-    // per block, not once per token. Item id → (raw text, overview last sent).
-    let mut thinking: HashMap<String, (String, String)> = HashMap::new();
+    // Thinking streams one delta per token. Keep only the overview already
+    // shown; even this transient pump state must never accumulate the raw
+    // reasoning block. Item id → overview last sent (at most 24 characters).
+    let mut thinking: HashMap<String, String> = HashMap::new();
     loop {
-        let mut event = match receiver.recv().await {
+        let event = match receiver.recv().await {
             Ok(event) => event,
             Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(missed)) => {
@@ -773,22 +778,21 @@ async fn pump_events(
             }
         };
 
-        // Bound provider payloads first. The overview below sheds ordinary tool
-        // details even further, while intentionally preserving plans; those
-        // still need a hard ceiling before reaching memory, disk or clients.
-        super::compact::event(&mut event);
-
         let event = match event {
             SessionEvent::ItemDelta {
                 turn_id,
                 item_id,
                 delta: ItemDelta::Text { delta },
             } if thinking.contains_key(&item_id) => {
-                let (raw, published) = thinking
+                let published = thinking
                     .get_mut(&item_id)
                     .expect("checked against the same map");
-                raw.push_str(&delta);
-                let sentence = overview::shorten(raw, overview::OVERVIEW_CHARS);
+                if published.ends_with('…') || published.chars().count() >= overview::OVERVIEW_CHARS
+                {
+                    continue;
+                }
+                let sentence =
+                    overview::shorten(&format!("{published}{delta}"), overview::OVERVIEW_CHARS);
                 if sentence == *published {
                     // The first sentence is already on screen; the rest of the
                     // block is the detail being filtered.
@@ -811,13 +815,11 @@ async fn pump_events(
                 {
                     // An Item frame carries the block's text so far, whole —
                     // it replaces rather than extends what deltas built up.
-                    thinking.insert(
-                        id.clone(),
-                        (
-                            text.clone(),
-                            overview::shorten(text, overview::OVERVIEW_CHARS),
-                        ),
-                    );
+                    let sentence = overview::shorten(text, overview::OVERVIEW_CHARS);
+                    thinking.insert(id.clone(), sentence.clone());
+                    if sentence.is_empty() {
+                        continue;
+                    }
                 }
                 overview::condense_event(&event)
             }
@@ -890,12 +892,17 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
         }
         SessionEvent::PermissionRequested { request } => {
             live.pending_permissions.lock().await.push(request.clone());
+            *live.status.lock().await = SessionStatus::Waiting;
         }
         SessionEvent::PermissionResolved { request_id, .. } => {
             live.pending_permissions
                 .lock()
                 .await
                 .retain(|request| &request.id != request_id);
+            let mut status = live.status.lock().await;
+            if *status == SessionStatus::Waiting {
+                *status = SessionStatus::Running;
+            }
         }
         SessionEvent::TurnStarted { .. } => {
             *live.status.lock().await = SessionStatus::Running;
@@ -917,8 +924,9 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
                 error.message
             );
             drop(meta);
-            // Failed, not closed: the user can send again.
-            *live.status.lock().await = SessionStatus::Idle;
+            // Failed, not closed: the user can send again, but the sidebar must
+            // keep the abnormal completion visible until that next attempt.
+            *live.status.lock().await = SessionStatus::Failed;
         }
         SessionEvent::ModelChanged { model_id } => {
             let mut meta = live.meta.lock().await;
@@ -1264,6 +1272,7 @@ mod tests {
         )
         .await;
         assert_eq!(live.snapshot().await.unwrap().pending_permissions.len(), 1);
+        assert_eq!(*live.status.lock().await, SessionStatus::Waiting);
 
         apply(
             &live,
@@ -1279,6 +1288,7 @@ mod tests {
             .unwrap()
             .pending_permissions
             .is_empty());
+        assert_eq!(*live.status.lock().await, SessionStatus::Running);
     }
 
     /// Stands in for an agent that has asked for approval and is waiting. It only
@@ -1411,7 +1421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_turn_leaves_the_session_usable() {
+    async fn a_failed_turn_stays_visible_as_failed_but_remains_retryable() {
         let live = Arc::new(Live::new(meta()));
         apply(
             &live,
@@ -1424,7 +1434,7 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(*live.status.lock().await, SessionStatus::Idle);
+        assert_eq!(*live.status.lock().await, SessionStatus::Failed);
     }
 
     #[tokio::test]
@@ -1600,7 +1610,7 @@ mod tests {
             } = event
             {
                 assert!(
-                    text.chars().count() <= 25,
+                    text.chars().count() <= overview::OVERVIEW_CHARS,
                     "more than the overview reached the wire: {text:?}"
                 );
             }
@@ -1611,15 +1621,14 @@ mod tests {
             .expect("the thinking block is in the log");
         match persisted {
             TimelineItem::Reasoning { text, .. } => {
-                assert!(text.ends_with('…'), "the log holds detail: {text:?}");
-                assert_eq!(text.chars().count(), 25);
+                assert_eq!(text.chars().count(), overview::OVERVIEW_CHARS);
             }
             other => panic!("unexpected {other:?}"),
         }
     }
 
     /// A shell command's output is the heaviest ordinary payload there is.
-    /// The card keeps the command and the exit code; the wall of text goes no
+    /// The card keeps only three short strings; the wall of text goes no
     /// further than the agent.
     #[tokio::test]
     async fn a_tool_calls_payload_stays_behind_the_access_layer() {
@@ -1657,14 +1666,17 @@ mod tests {
             } = event
             {
                 match detail {
-                    ToolCallDetail::Shell {
-                        command,
+                    ToolCallDetail::Overview {
+                        overview,
+                        input,
                         output,
-                        exit_code,
                     } => {
-                        assert_eq!(command, "cargo build --workspace");
-                        assert!(output.is_empty(), "the output reached the wire");
-                        assert_eq!(*exit_code, Some(0));
+                        assert_eq!(overview, "cargo build --workspace");
+                        assert_eq!(input, "cargo build --workspace");
+                        assert_eq!(output, "a line of build output");
+                        for field in [overview, input, output] {
+                            assert!(field.chars().count() <= overview::OVERVIEW_CHARS);
+                        }
                     }
                     other => panic!("unexpected {other:?}"),
                 }

@@ -89,17 +89,17 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
       return { ...state, activeTurn: null, status: "idle", usage: event.usage };
 
     case "turnFailed":
-      return { ...state, activeTurn: null, status: "idle", lastError: event.error };
+      return { ...state, activeTurn: null, status: "failed", lastError: event.error };
 
     case "turnCanceled":
       return { ...state, activeTurn: null, status: "idle" };
 
     case "permissionRequested":
-      return { ...state, pendingPermission: event.request };
+      return { ...state, status: "waiting", pendingPermission: event.request };
 
     case "permissionResolved":
       return state.pendingPermission?.id === event.requestId
-        ? { ...state, pendingPermission: null }
+        ? { ...state, status: "running", pendingPermission: null }
         : state;
 
     case "modelChanged":

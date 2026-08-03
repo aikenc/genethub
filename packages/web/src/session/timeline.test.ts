@@ -130,7 +130,7 @@ describe("the session timeline", () => {
 
     expect(state.lastError?.code).toBe("missingCredentials");
     expect(state.activeTurn).toBeNull();
-    expect(state.status).toBe("idle");
+    expect(state.status).toBe("failed");
   });
 
   it("shows an approval request and takes it down once it is answered", () => {

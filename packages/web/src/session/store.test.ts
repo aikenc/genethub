@@ -93,6 +93,49 @@ describe("a session's title arriving after the first message", () => {
   });
 });
 
+describe("live session status in the sidebar", () => {
+  it("tracks running, waiting, failed and completed events immediately", async () => {
+    const { client, fire } = stubClient();
+    useWorkbench.setState({ client });
+    await useWorkbench.getState().selectSession("s1");
+
+    fire({ seq: 1, sessionId: "s1", event: { type: "turnStarted", turnId: "t1" } });
+    expect(useWorkbench.getState().sessions[0]?.status).toBe("running");
+
+    fire({
+      seq: 2,
+      sessionId: "s1",
+      event: {
+        type: "permissionRequested",
+        request: { id: "p1", title: "允许？", options: [] },
+      },
+    });
+    expect(useWorkbench.getState().sessions[0]?.status).toBe("waiting");
+
+    fire({
+      seq: 3,
+      sessionId: "s1",
+      event: {
+        type: "turnFailed",
+        turnId: "t1",
+        error: { code: "upstream", message: "boom" },
+      },
+    });
+    expect(useWorkbench.getState().sessions[0]?.status).toBe("failed");
+
+    fire({
+      seq: 4,
+      sessionId: "s1",
+      event: {
+        type: "turnCompleted",
+        turnId: "t1",
+        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+    });
+    expect(useWorkbench.getState().sessions[0]?.status).toBe("idle");
+  });
+});
+
 /**
  * The sidebar shows every project's sessions at once, so the session that was
  * clicked is no longer guaranteed to be in the project on screen. The file

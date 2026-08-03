@@ -1,4 +1,3 @@
-mod compact;
 pub mod manager;
 pub mod overview;
 pub mod store;

@@ -163,10 +163,31 @@ describe("the left edge", () => {
     sidebar();
     await userEvent.click(screen.getByRole("button", { name: "按状态" }));
 
-    expect(screen.getByText("Working")).toBeInTheDocument();
+    expect(screen.getByText("运行中")).toBeInTheDocument();
     // A title on its own does not say where the work is happening, so the
     // project comes with it once the tree is not there to say.
     expect(screen.getAllByText("paseo").length).toBeGreaterThan(0);
+  });
+
+  it("shows five named session states instead of ambiguous coloured dots", () => {
+    localStorage.setItem("genehub.sidebar.read-at.initialized", "true");
+    localStorage.setItem("genehub.sidebar.read-at", JSON.stringify({ read: 20, unread: 5 }));
+    useWorkbench.setState({
+      activeSessionId: null,
+      sessions: [
+        { ...session("unread", "w1", "未读"), updatedAtMs: 10 },
+        { ...session("read", "w1", "已读"), updatedAtMs: 10 },
+        { ...session("running", "w1", "执行"), status: "running" },
+        { ...session("waiting", "w1", "审批"), status: "waiting" },
+        { ...session("failed", "w1", "故障"), status: "failed" },
+      ],
+    });
+
+    sidebar();
+
+    for (const label of ["已完成未阅读", "已完成已阅读", "运行中", "等待交互", "运行异常"]) {
+      expect(screen.getByRole("img", { name: label })).toBeInTheDocument();
+    }
   });
 
   it("writes nothing to the machine when a new conversation is opened", async () => {

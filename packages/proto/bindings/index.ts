@@ -421,7 +421,7 @@ export type SessionSnapshot = { summary: SessionSummary, items: Array<TimelineIt
  */
 seq: number, pendingPermissions: Array<PermissionRequest>, };
 
-export type SessionStatus = "idle" | "running" | "readOnly" | "failed" | "closed";
+export type SessionStatus = "idle" | "running" | "waiting" | "readOnly" | "failed" | "closed";
 
 export type SessionSummary = { id: string, workspaceId: string, agentId: string, 
 /**
@@ -459,7 +459,7 @@ export type TodoStatus = "pending" | "inProgress" | "completed" | "cancelled";
  * lives inside each adapter on purpose: a single global table would become a
  * coupling point between every adapter we ever add.
  */
-export type ToolCallDetail = { "kind": "shell", command: string, output: string, exitCode?: number, } | { "kind": "read", path: string, content: string, truncated: boolean, } | { "kind": "edit", path: string, diff: string, } | { "kind": "write", path: string, content: string, } | { "kind": "search", query: string, matches: Array<SearchMatch>, } | { "kind": "fetch", url: string, summary: string, } | { "kind": "plan", markdown: string, } | { "kind": "subAgent", agent: string, prompt: string, items: Array<TimelineItem>, } | { "kind": "unknown", raw: JsonValue, };
+export type ToolCallDetail = { "kind": "overview", overview: string, input: string, output: string, } | { "kind": "shell", command: string, output: string, exitCode?: number, } | { "kind": "read", path: string, content: string, truncated: boolean, } | { "kind": "edit", path: string, diff: string, } | { "kind": "write", path: string, content: string, } | { "kind": "search", query: string, matches: Array<SearchMatch>, } | { "kind": "fetch", url: string, summary: string, } | { "kind": "plan", markdown: string, } | { "kind": "subAgent", agent: string, prompt: string, items: Array<TimelineItem>, } | { "kind": "unknown", raw: JsonValue, };
 
 export type ToolStatus = "pending" | "running" | "ok" | "error" | "canceled";
 
