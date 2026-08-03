@@ -234,6 +234,7 @@ impl AgentAdapter for CodexAdapter {
             permissions: true,
             // `thread/resume` with the id we stored from `thread/start`.
             resume: true,
+            fork: true,
             // Pasted screenshots are written under the session scratch dir and
             // sent as `localImage` paths — that is the only shape this CLI takes.
             attachments: true,
@@ -796,6 +797,7 @@ impl AgentSession for CodexSession {
         }
         let _ = self.events.send(SessionEvent::TurnStarted {
             turn_id: turn_id.clone(),
+            started_at_ms: 0,
         });
 
         let mode = mode_named(self.mode.lock().await.as_str());
@@ -884,6 +886,34 @@ impl AgentSession for CodexSession {
         }
         *self.mode.lock().await = mode_id.to_string();
         Ok(())
+    }
+
+    async fn fork(&self, checkpoint: &str) -> Result<PersistHandle> {
+        let thread_id = self
+            .thread
+            .lock()
+            .expect("the thread id is never poisoned")
+            .clone()
+            .ok_or_else(|| anyhow!("the Codex thread was never started"))?;
+        let forked = self
+            .call(
+                "thread/fork",
+                json!({
+                    "threadId": thread_id,
+                    "lastTurnId": checkpoint,
+                    "ephemeral": false,
+                }),
+            )
+            .await?;
+        let thread_id = forked
+            .get("thread")
+            .and_then(|thread| thread.get("id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("thread/fork did not return a thread id"))?;
+        Ok(PersistHandle {
+            agent_id: "codex".into(),
+            value: json!({ "threadId": thread_id }),
+        })
     }
 
     async fn set_effort(&self, effort_id: &str) -> Result<()> {
@@ -1445,6 +1475,7 @@ fn finish(state: &mut TurnState, params: &Value, events: &broadcast::Sender<Sess
         SessionEvent::TurnCompleted {
             turn_id,
             usage: state.usage.clone(),
+            fork_checkpoint: state.codex_turn.clone(),
         }
     };
 
@@ -2010,6 +2041,7 @@ mod tests {
     fn token_counts_ride_along_with_the_completed_turn() {
         let (events, mut seen) = broadcast::channel(8);
         let mut state = state();
+        state.codex_turn = Some("turn-7".into());
         state.usage = usage_in(&json!({ "tokenUsage": { "last": {
             "inputTokens": 120,
             "cachedInputTokens": 40,
@@ -2024,10 +2056,15 @@ mod tests {
         );
 
         match seen.try_recv().expect("an end") {
-            SessionEvent::TurnCompleted { usage, .. } => {
+            SessionEvent::TurnCompleted {
+                usage,
+                fork_checkpoint,
+                ..
+            } => {
                 assert_eq!(usage.input_tokens, 120);
                 assert_eq!(usage.cache_read_tokens, 40);
                 assert_eq!(usage.output_tokens, 7);
+                assert_eq!(fork_checkpoint.as_deref(), Some("turn-7"));
             }
             other => panic!("unexpected {other:?}"),
         }

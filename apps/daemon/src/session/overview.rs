@@ -17,13 +17,17 @@
 //! Where an agent's protocol carries a ready-made overview, the adapter has
 //! already put it in the identifying field this filter reads (Codex's
 //! reasoning summary is the reasoning text; Claude's Bash `description` is
-//! the shell command's one-liner). Every tool becomes `Overview`, with its
-//! overview, input and output independently capped at [`OVERVIEW_CHARS`].
+//! explicit overview prose). Every tool becomes `Overview`: its final header
+//! is at most [`SUMMARY_CHARS`], input is one [`TOOL_LINE_CHARS`]-character
+//! line, and output keeps only its bounded first two and last two lines.
 
-use genehub_proto::{ItemDelta, SessionEvent, TimelineItem, ToolCallDetail};
+use genehub_proto::{ItemDelta, SessionEvent, TimelineItem, ToolCallDetail, ToolKind};
 
-/// The hard limit for every retained tool/reasoning string.
-pub const OVERVIEW_CHARS: usize = 24;
+/// Agent prose stays short; the final header may use the remaining room for input.
+pub const OVERVIEW_CHARS: usize = 48;
+pub const SUMMARY_CHARS: usize = 64;
+pub const TOOL_LINE_CHARS: usize = 64;
+pub const REASONING_CHARS: usize = 24;
 
 /// One line, at most `max` characters, with an ellipsis where text was cut.
 ///
@@ -47,6 +51,63 @@ pub fn shorten(text: &str, max: usize) -> String {
     let mut taken: String = line.chars().take(max - 1).collect();
     taken.push('…');
     taken
+}
+
+fn one_line(text: &str, max: usize) -> String {
+    clip(&text.split_whitespace().collect::<Vec<_>>().join(" "), max)
+}
+
+fn clip(text: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut taken: String = text.chars().take(max - 1).collect();
+    taken.push('…');
+    taken
+}
+
+/// The first two and last two physical lines, with every retained line bounded.
+fn output_excerpt(text: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    let bounded = |line: &&str| clip(line.trim_end_matches('\r'), TOOL_LINE_CHARS);
+    if lines.len() <= 4 {
+        return lines.iter().map(bounded).collect::<Vec<_>>().join("\n");
+    }
+    let mut kept = lines[..2].iter().map(bounded).collect::<Vec<_>>();
+    kept.push(format!("… 已省略 {} 行 …", lines.len() - 4));
+    kept.extend(lines[lines.len() - 2..].iter().map(bounded));
+    kept.join("\n")
+}
+
+fn header(provided: &str, input: &str, output: &str, fallback: &str) -> String {
+    let input = one_line(input, TOOL_LINE_CHARS);
+    let provided = one_line(provided, OVERVIEW_CHARS);
+    if provided.is_empty() {
+        let direct = first_nonempty(&[&input, output, fallback])
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        return clip(&direct, SUMMARY_CHARS);
+    }
+    if input.is_empty() || input == provided {
+        return provided;
+    }
+    let separator = " · ";
+    let remaining =
+        SUMMARY_CHARS.saturating_sub(provided.chars().count() + separator.chars().count());
+    if remaining == 0 {
+        return provided;
+    }
+    format!("{provided}{separator}{}", clip(&input, remaining))
 }
 
 /// The overview of an event, when the event carries detail worth shedding.
@@ -81,7 +142,7 @@ pub fn condense_item(item: &TimelineItem) -> TimelineItem {
     match item {
         TimelineItem::Reasoning { id, text } => TimelineItem::Reasoning {
             id: id.clone(),
-            text: shorten(text, OVERVIEW_CHARS),
+            text: shorten(text, REASONING_CHARS),
         },
         TimelineItem::ToolCall {
             id,
@@ -98,24 +159,51 @@ pub fn condense_item(item: &TimelineItem) -> TimelineItem {
     }
 }
 
-/// Converts every adapter-specific tool shape into the only shape sessions
-/// retain. No field in the returned value can exceed 24 Unicode characters.
+/// Converts every adapter-specific tool shape into the only shape sessions retain.
 fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> ToolCallDetail {
-    let (provided, input, output) = match detail {
+    let (kind, provided, input, output) = match detail {
         ToolCallDetail::Overview {
+            tool_kind,
             overview,
             input,
             output,
-        } => (overview.clone(), input.clone(), output.clone()),
+        } => (
+            if *tool_kind == ToolKind::Other {
+                kind_from_name(fallback_name.unwrap_or_default())
+            } else {
+                *tool_kind
+            },
+            if overview.trim() == input.trim() {
+                String::new()
+            } else {
+                overview.clone()
+            },
+            input.clone(),
+            output.clone(),
+        ),
         ToolCallDetail::Shell {
             command, output, ..
-        } => (command.clone(), command.clone(), output.clone()),
-        ToolCallDetail::Read { path, content, .. } => (path.clone(), path.clone(), content.clone()),
-        ToolCallDetail::Write { path, content } => (path.clone(), path.clone(), content.clone()),
-        ToolCallDetail::Edit { path, diff } => (path.clone(), path.clone(), diff.clone()),
+        } => (
+            ToolKind::Shell,
+            String::new(),
+            command.clone(),
+            output.clone(),
+        ),
+        ToolCallDetail::Read { path, content, .. } => {
+            (ToolKind::Read, String::new(), path.clone(), content.clone())
+        }
+        ToolCallDetail::Write { path, content } => (
+            ToolKind::Write,
+            String::new(),
+            path.clone(),
+            content.clone(),
+        ),
+        ToolCallDetail::Edit { path, diff } => {
+            (ToolKind::Edit, String::new(), path.clone(), diff.clone())
+        }
         ToolCallDetail::Search { query, matches } => {
             let output = matches
-                .first()
+                .iter()
                 .map(|found| {
                     let line = found
                         .line
@@ -123,27 +211,26 @@ fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> Tool
                         .unwrap_or_default();
                     format!("{}{line} {}", found.path, found.preview)
                 })
-                .unwrap_or_default();
-            (query.clone(), query.clone(), output)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (ToolKind::Search, String::new(), query.clone(), output)
         }
-        ToolCallDetail::Fetch { url, summary } => (url.clone(), url.clone(), summary.clone()),
-        ToolCallDetail::Plan { markdown } => (markdown.clone(), markdown.clone(), String::new()),
+        ToolCallDetail::Fetch { url, summary } => {
+            (ToolKind::Fetch, String::new(), url.clone(), summary.clone())
+        }
+        ToolCallDetail::Plan { markdown } => (
+            ToolKind::Plan,
+            String::new(),
+            markdown.clone(),
+            String::new(),
+        ),
         ToolCallDetail::SubAgent {
             agent,
             prompt,
             items,
         } => {
-            let output = items
-                .iter()
-                .rev()
-                .find_map(item_overview)
-                .unwrap_or_default();
-            let provided = if agent.trim().is_empty() {
-                prompt
-            } else {
-                agent
-            };
-            (provided.clone(), prompt.clone(), output)
+            let output = items.iter().find_map(item_overview).unwrap_or_default();
+            (ToolKind::SubAgent, agent.clone(), prompt.clone(), output)
         }
         ToolCallDetail::Unknown { raw } => {
             let input = raw_field(raw, &["input", "arguments"]);
@@ -151,18 +238,37 @@ fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> Tool
             let provided = raw_field(raw, &["overview", "summary", "description", "title"]);
             let encoded = serde_json::to_string(raw).unwrap_or_default();
             (
-                first_nonempty(&[&provided, &input, &output, &encoded]).to_string(),
+                kind_from_name(fallback_name.unwrap_or_default()),
+                provided,
                 first_nonempty(&[&input, &encoded]).to_string(),
                 output,
             )
         }
     };
     let fallback = fallback_name.unwrap_or_default();
-    let overview = first_nonempty(&[&provided, &input, &output, fallback]);
     ToolCallDetail::Overview {
-        overview: shorten(overview, OVERVIEW_CHARS),
-        input: shorten(&input, OVERVIEW_CHARS),
-        output: shorten(&output, OVERVIEW_CHARS),
+        tool_kind: kind,
+        overview: header(&provided, &input, &output, fallback),
+        input: one_line(&input, TOOL_LINE_CHARS),
+        output: output_excerpt(&output),
+    }
+}
+
+fn kind_from_name(name: &str) -> ToolKind {
+    let name = name.to_ascii_lowercase();
+    if name.starts_with("mcp__") || name.contains("mcp") {
+        return ToolKind::Mcp;
+    }
+    match name.as_str() {
+        "bash" | "shell" | "execute" | "commandexecution" | "exec" => ToolKind::Shell,
+        "read" | "read_file" | "readfile" => ToolKind::Read,
+        "write" | "write_file" | "create_file" => ToolKind::Write,
+        "edit" | "patch" | "apply_patch" | "filechange" => ToolKind::Edit,
+        "grep" | "glob" | "find" | "ls" | "list" | "search" => ToolKind::Search,
+        "fetch" | "webfetch" | "websearch" | "web_search" | "open_url" => ToolKind::Fetch,
+        "plan" | "todowrite" | "todoread" => ToolKind::Plan,
+        "task" | "subagent" | "collabagenttoolcall" => ToolKind::SubAgent,
+        _ => ToolKind::Other,
     }
 }
 
@@ -197,6 +303,7 @@ fn item_overview(item: &TimelineItem) -> Option<String> {
         TimelineItem::Todo { items, .. } => items.first().map(|item| item.text.clone()),
         TimelineItem::Compaction { reason, .. } => Some(reason.clone()),
         TimelineItem::Error { message, .. } => Some(message.clone()),
+        TimelineItem::TurnSummary { .. } => None,
     }
 }
 
@@ -211,13 +318,14 @@ mod tests {
                 overview,
                 input,
                 output,
+                ..
             } => (overview, input, output),
             other => panic!("unexpected {other:?}"),
         }
     }
 
     #[test]
-    fn an_overview_is_one_line_of_at_most_24_characters() {
+    fn reasoning_is_one_line_of_at_most_24_characters() {
         assert_eq!(shorten("short", 24), "short");
         assert_eq!(shorten("\n\n  first line\nsecond", 24), "first line");
         assert_eq!(
@@ -242,14 +350,14 @@ mod tests {
         match condense_item(&item) {
             TimelineItem::Reasoning { text, .. } => {
                 assert_eq!(text, "Let me think about this…");
-                assert!(text.chars().count() <= OVERVIEW_CHARS);
+                assert!(text.chars().count() <= REASONING_CHARS);
             }
             other => panic!("unexpected {other:?}"),
         }
     }
 
     #[test]
-    fn a_shell_call_keeps_only_three_24_character_strings() {
+    fn a_shell_call_keeps_one_input_line_and_four_output_lines() {
         let item = TimelineItem::ToolCall {
             id: "c".into(),
             name: "Shell".into(),
@@ -266,13 +374,18 @@ mod tests {
                     overview,
                     input,
                     output,
+                    tool_kind,
                 } = detail
                 else {
                     panic!("unexpected detail")
                 };
                 assert_eq!(overview, "ls");
                 assert_eq!(input, "ls");
-                assert!(output.chars().count() <= OVERVIEW_CHARS);
+                assert_eq!(tool_kind, ToolKind::Shell);
+                assert_eq!(output.lines().count(), 5);
+                assert!(output
+                    .lines()
+                    .all(|line| line.chars().count() <= TOOL_LINE_CHARS));
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -296,9 +409,11 @@ mod tests {
             },
         ] {
             let (overview, input, output) = overview(detail);
-            for field in [overview, input, output] {
-                assert!(field.chars().count() <= OVERVIEW_CHARS, "{field:?}");
-            }
+            assert!(overview.chars().count() <= SUMMARY_CHARS, "{overview:?}");
+            assert!(input.chars().count() <= TOOL_LINE_CHARS, "{input:?}");
+            assert!(output
+                .lines()
+                .all(|line| line.chars().count() <= TOOL_LINE_CHARS));
         }
     }
 
@@ -308,8 +423,8 @@ mod tests {
             markdown: "## 步骤\n\na plan someone must read before approving".repeat(10),
         };
         let (overview, input, output) = overview(detail);
-        assert!(overview.chars().count() <= OVERVIEW_CHARS);
-        assert!(input.chars().count() <= OVERVIEW_CHARS);
+        assert!(overview.chars().count() <= SUMMARY_CHARS);
+        assert!(input.chars().count() <= TOOL_LINE_CHARS);
         assert!(output.is_empty());
     }
 
@@ -324,9 +439,27 @@ mod tests {
         };
         let (overview, input, output) = overview(detail);
         assert!(overview.starts_with("agent supplied overview"));
-        assert_eq!(overview.chars().count(), OVERVIEW_CHARS);
+        assert!(overview.chars().count() <= SUMMARY_CHARS);
+        assert!(overview.ends_with("input value"));
         assert_eq!(input, "input value");
         assert_eq!(output, "output value");
+    }
+
+    #[test]
+    fn an_explicit_overview_uses_48_characters_then_fills_the_64_character_header() {
+        let provided = "概".repeat(60);
+        let input = "入".repeat(60);
+        let title = header(&provided, &input, "", "fallback");
+        assert_eq!(title.chars().count(), SUMMARY_CHARS);
+        assert!(title.starts_with(&format!("{}… · ", "概".repeat(OVERVIEW_CHARS - 1))));
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn missing_overview_uses_the_input_directly() {
+        let title = header("", &"入".repeat(80), "", "fallback");
+        assert_eq!(title.chars().count(), SUMMARY_CHARS);
+        assert!(!title.contains(" · "));
     }
 
     #[test]
@@ -342,7 +475,7 @@ mod tests {
         assert_eq!(
             overview(detail),
             (
-                "Explore".into(),
+                "Explore · find the thing".into(),
                 "find the thing".into(),
                 "nested work".into()
             )
@@ -372,10 +505,12 @@ mod tests {
                     overview,
                     input,
                     output,
+                    tool_kind,
                 } => {
                     assert_eq!(overview, "make");
                     assert_eq!(input, "make");
-                    assert_eq!(output, "a wall of compiler outp…");
+                    assert_eq!(output, "a wall of compiler output");
+                    assert_eq!(tool_kind, ToolKind::Shell);
                 }
                 other => panic!("unexpected {other:?}"),
             },

@@ -21,6 +21,37 @@ pub struct Usage {
     pub cost_usd: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum TurnOutcome {
+    Completed,
+    Failed,
+    Canceled,
+}
+
+/// Metrics retained with the turn rather than only with the latest event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct TurnStats {
+    pub turn_id: String,
+    pub outcome: TurnOutcome,
+    #[ts(type = "number")]
+    pub started_at_ms: i64,
+    #[ts(type = "number")]
+    pub finished_at_ms: i64,
+    #[ts(type = "number")]
+    pub duration_ms: u64,
+    pub usage: Usage,
+    #[ts(type = "number")]
+    pub tool_calls: u64,
+    /// Opaque Agent checkpoint used only when that Agent supports true forks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fork_checkpoint: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -119,7 +150,14 @@ pub enum TurnErrorCode {
 #[ts(export, export_to = "index.ts")]
 pub enum SessionEvent {
     #[serde(rename_all = "camelCase")]
-    TurnStarted { turn_id: String },
+    TurnStarted {
+        turn_id: String,
+        /// Zero is accepted from adapters; the session boundary replaces it
+        /// with its own wall clock before the event reaches a client.
+        #[serde(default)]
+        #[ts(type = "number")]
+        started_at_ms: i64,
+    },
     #[serde(rename_all = "camelCase")]
     Item { turn_id: String, item: TimelineItem },
     #[serde(rename_all = "camelCase")]
@@ -129,7 +167,13 @@ pub enum SessionEvent {
         delta: ItemDelta,
     },
     #[serde(rename_all = "camelCase")]
-    TurnCompleted { turn_id: String, usage: Usage },
+    TurnCompleted {
+        turn_id: String,
+        usage: Usage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        fork_checkpoint: Option<String>,
+    },
     #[serde(rename_all = "camelCase")]
     TurnFailed { turn_id: String, error: TurnError },
     #[serde(rename_all = "camelCase")]

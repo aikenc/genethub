@@ -100,6 +100,13 @@ pub trait AgentSession: Send + Sync {
     async fn set_model(&self, model_id: &str) -> Result<()>;
     async fn set_mode(&self, mode_id: &str) -> Result<()>;
 
+    /// Creates a genuinely independent Agent context through a completed turn.
+    /// The checkpoint is opaque to the session kernel and came from this same
+    /// adapter when that turn completed.
+    async fn fork(&self, _checkpoint: &str) -> Result<PersistHandle> {
+        Err(anyhow::anyhow!("this agent does not support forking"))
+    }
+
     /// How hard to think. Refused by default: an agent with no such dial should
     /// say so rather than accept the call and ignore it, which would leave a
     /// control on screen that quietly does nothing.

@@ -99,7 +99,11 @@ describe("live session status in the sidebar", () => {
     useWorkbench.setState({ client });
     await useWorkbench.getState().selectSession("s1");
 
-    fire({ seq: 1, sessionId: "s1", event: { type: "turnStarted", turnId: "t1" } });
+    fire({
+      seq: 1,
+      sessionId: "s1",
+      event: { type: "turnStarted", turnId: "t1", startedAtMs: 1 },
+    });
     expect(useWorkbench.getState().sessions[0]?.status).toBe("running");
 
     fire({
@@ -207,6 +211,45 @@ describe("opening a session that belongs to another project", () => {
     expect(useWorkbench.getState().timeline.items).toEqual([
       { type: "assistantMessage", id: "a-s2", text: "second" },
     ]);
+  });
+});
+
+describe("forking a completed turn", () => {
+  it("asks for the exact turn and opens the independent session returned by the daemon", async () => {
+    const forked: SessionSummary = {
+      ...SESSION,
+      id: "s-fork",
+      title: "Fix the redirect · 分支",
+      updatedAtMs: 10,
+    };
+    const calls: unknown[] = [];
+    const client = {
+      call: async (request: unknown) => {
+        calls.push(request);
+        return { type: "session", data: forked };
+      },
+      subscribe: async (sessionId: string) => ({
+        snapshot: {
+          seq: 0,
+          items: [],
+          pendingPermissions: [],
+          summary: sessionId === forked.id ? forked : SESSION,
+        },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({ client, activeSessionId: SESSION.id });
+
+    await useWorkbench.getState().forkSession("turn-7");
+
+    expect(calls).toContainEqual({
+      type: "session.fork",
+      payload: { sessionId: SESSION.id, turnId: "turn-7" },
+    });
+    expect(useWorkbench.getState().sessions[0]).toEqual(forked);
+    expect(useWorkbench.getState().activeSessionId).toBe(forked.id);
   });
 });
 

@@ -593,10 +593,13 @@ async fn an_unknown_tool_still_renders_instead_of_disappearing() {
             overview,
             input,
             output,
+            ..
         } => {
-            assert!(overview.chars().count() <= 24);
-            assert!(input.chars().count() <= 24);
-            assert!(output.chars().count() <= 24);
+            assert!(overview.chars().count() <= 64);
+            assert!(input.lines().count() <= 1);
+            assert!(input.chars().count() <= 64);
+            assert!(output.lines().count() <= 5);
+            assert!(output.lines().all(|line| line.chars().count() <= 64));
         }
         other => panic!("expected the bounded fallback renderer, got {other:?}"),
     }
@@ -1218,10 +1221,12 @@ async fn a_commands_output_stays_behind_the_access_layer() {
             overview,
             input,
             output,
+            ..
         } => {
             assert_eq!(overview, "seq 1 200000");
             assert_eq!(input, "seq 1 200000");
-            assert!(output.chars().count() <= 24);
+            assert!(output.lines().count() <= 5);
+            assert!(output.lines().all(|line| line.chars().count() <= 64));
         }
         other => panic!("unexpected {other:?}"),
     }

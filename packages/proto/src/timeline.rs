@@ -8,6 +8,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
+use crate::event::TurnStats;
+
+/// A stable semantic category shared by every Agent adapter.
+///
+/// Tool names are Agent-specific (`Bash`, `commandExecution`, `execute`), while
+/// the activity icon should mean the same thing everywhere.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum ToolKind {
+    Shell,
+    Read,
+    Write,
+    Edit,
+    Search,
+    Fetch,
+    Plan,
+    SubAgent,
+    Mcp,
+    #[default]
+    Other,
+}
+
 /// Which renderer the frontend should reach for.
 ///
 /// Adapters map their agent's tool names onto these variants. The mapping table
@@ -19,9 +42,11 @@ use ts_rs::TS;
 pub enum ToolCallDetail {
     /// The only tool shape retained by the session boundary. Adapters may
     /// produce richer variants below, but memory, disk and clients receive
-    /// three human-scannable strings of at most 24 Unicode characters each.
+    /// a compact header, one input line, and a four-line output excerpt.
     #[serde(rename_all = "camelCase")]
     Overview {
+        #[serde(default)]
+        tool_kind: ToolKind,
         overview: String,
         input: String,
         output: String,
@@ -149,6 +174,9 @@ pub enum TimelineItem {
     Compaction { id: String, reason: String },
     #[serde(rename_all = "camelCase")]
     Error { id: String, message: String },
+    /// The durable footer for one completed, failed or canceled turn.
+    #[serde(rename_all = "camelCase")]
+    TurnSummary { id: String, stats: TurnStats },
 }
 
 impl TimelineItem {
@@ -160,7 +188,8 @@ impl TimelineItem {
             | TimelineItem::ToolCall { id, .. }
             | TimelineItem::Todo { id, .. }
             | TimelineItem::Compaction { id, .. }
-            | TimelineItem::Error { id, .. } => id,
+            | TimelineItem::Error { id, .. }
+            | TimelineItem::TurnSummary { id, .. } => id,
         }
     }
 

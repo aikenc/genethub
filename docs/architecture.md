@@ -125,10 +125,11 @@ enum TimelineItem {
     Todo { items },
     Compaction { reason },
     Error { message },
+    TurnSummary { stats },           // 时间、耗时、token、工具数与可选 fork checkpoint
 }
 
 enum ToolCallDetail {                // 决定前端用哪个渲染器
-    Overview { overview, input, output }, // session 边界后唯一保留的形状
+    Overview { tool_kind, overview, input, output }, // session 边界后唯一保留的形状
     Shell { command, output, exit_code },
     Read  { path, content, truncated },
     Edit  { path, diff },
@@ -147,8 +148,12 @@ enum ToolCallDetail {                // 决定前端用哪个渲染器
 2. **工具名归一化在 adapter 内做**，各家自己维护映射表。不要做一张全局大表，那会变成所有 adapter 的耦合点。
 3. **增量与全量都要有**。`ItemDelta` 给流式打字机效果，`Item` 给最终态；断线重连只回放 `Item`。
 4. **session 只保留 overview**。adapter 可以在边界内产出详细形状，但进入 session 内存、磁盘和客户端
-   前一律变成 `Overview`；优先使用 Agent 给出的 overview，否则取输入开头。`overview`、`input`、
-   `output` 各自最多 24 个 Unicode 字符，思考过程同样最多 24 字符，没有 Plan 或 Unknown 例外。
+   前一律变成 `Overview`。有 Agent overview 时先截到 48 字符，再追加 input 补足为最多 64 字符；没有时
+   直接拿 input 作最多 64 字符的标题。input 被压成一行、最多 64 字符；output 只留前两行和后两行，
+   每行最多 64 字符。思考过程仍最多 24 字符，没有 Plan 或 Unknown 例外。`tool_kind` 是跨 Agent 的
+   语义类别，只用来选择稳定的活动图标，不依赖各平台不同的工具名。
+5. **turn 结束时形成持久统计**。`TurnSummary` 保存完成时间、耗时、四类 token、工具调用数和结果；
+   Agent 若提供原生 checkpoint 才附带它并开放真实 fork，绝不拿已经裁剪的时间线伪造可继续的分支。
 
 ---
 

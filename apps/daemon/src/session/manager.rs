@@ -3,7 +3,7 @@
 //! Everything here is agent-agnostic. The manager holds a `dyn AgentSession`
 //! and never learns which adapter produced it.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -13,6 +13,7 @@ use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     Attachment, Catalog, ItemDelta, PermissionOutcome, PermissionRequest, SequencedEvent,
     SessionEvent, SessionSnapshot, SessionStatus, SessionSummary, TimelineItem, ToolStatus,
+    TurnOutcome, TurnStats, Usage,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 
@@ -90,6 +91,91 @@ impl SessionManager {
             .write()
             .await
             .insert(meta.id.clone(), Arc::new(Live::new(meta)));
+        Ok(summary)
+    }
+
+    pub async fn fork(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        providers: &ProviderMap,
+    ) -> Result<SessionSummary> {
+        let source = self.live(session_id).await?;
+        if matches!(
+            *source.status.lock().await,
+            SessionStatus::Running | SessionStatus::Waiting
+        ) {
+            anyhow::bail!("wait for the current turn to finish before forking");
+        }
+        let source_meta = source.meta.lock().await.clone();
+        let adapter = self.registry.require(&source_meta.agent_id)?;
+        if !adapter.capabilities().fork {
+            anyhow::bail!(
+                "the {} agent does not support forking",
+                source_meta.agent_id
+            );
+        }
+
+        let (items, checkpoint) = {
+            let items = source.items.lock().await;
+            let at = items
+                .iter()
+                .position(|item| {
+                    matches!(
+                        item,
+                        TimelineItem::TurnSummary { stats, .. } if stats.turn_id == turn_id
+                    )
+                })
+                .ok_or_else(|| anyhow!("no completed turn called {turn_id}"))?;
+            let checkpoint = match &items[at] {
+                TimelineItem::TurnSummary { stats, .. } => stats
+                    .fork_checkpoint
+                    .clone()
+                    .ok_or_else(|| anyhow!("that turn has no Agent fork checkpoint"))?,
+                _ => unreachable!("the index was selected by the same variant"),
+            };
+            (items[..=at].to_vec(), checkpoint)
+        };
+
+        self.ensure_started(&source, providers).await?;
+        let persist = source
+            .agent
+            .lock()
+            .await
+            .as_ref()
+            .ok_or_else(|| anyhow!("the source session has no running agent"))?
+            .fork(&checkpoint)
+            .await?;
+
+        let now = now_ms();
+        let title = source_meta
+            .title
+            .as_deref()
+            .and_then(|title| title_from(&format!("{title} · 分支")));
+        let meta = SessionMeta {
+            id: format!("s_{}", uuid::Uuid::new_v4().simple()),
+            workspace_id: source_meta.workspace_id,
+            agent_id: source_meta.agent_id,
+            title,
+            cwd: source_meta.cwd,
+            model_id: source_meta.model_id,
+            mode_id: source_meta.mode_id,
+            effort_id: source_meta.effort_id,
+            created_at_ms: now,
+            updated_at_ms: now,
+            archived: false,
+            persist: Some(persist),
+        };
+        self.store.save_meta(&meta)?;
+        self.store
+            .append_items(&meta.workspace_id, &meta.id, &items)?;
+        let summary = meta.summary(SessionStatus::Idle);
+        let forked = Arc::new(Live::new(meta));
+        *forked.items.lock().await = items;
+        self.sessions
+            .write()
+            .await
+            .insert(summary.id.clone(), forked);
         Ok(summary)
     }
 
@@ -768,8 +854,9 @@ async fn pump_events(
     // shown; even this transient pump state must never accumulate the raw
     // reasoning block. Item id → overview last sent (at most 24 characters).
     let mut thinking: HashMap<String, String> = HashMap::new();
+    let mut turns: HashMap<String, (i64, HashSet<String>)> = HashMap::new();
     loop {
-        let event = match receiver.recv().await {
+        let mut event = match receiver.recv().await {
             Ok(event) => event,
             Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(missed)) => {
@@ -777,6 +864,23 @@ async fn pump_events(
                 continue;
             }
         };
+
+        if let SessionEvent::TurnStarted {
+            turn_id,
+            started_at_ms,
+        } = &mut event
+        {
+            if *started_at_ms <= 0 {
+                *started_at_ms = now_ms();
+            }
+            turns.insert(turn_id.clone(), (*started_at_ms, HashSet::new()));
+        }
+        if let SessionEvent::Item { turn_id, item } = &event {
+            let entry = turns
+                .entry(turn_id.clone())
+                .or_insert_with(|| (now_ms(), HashSet::new()));
+            collect_tool_ids(item, &mut entry.1);
+        }
 
         let event = match event {
             SessionEvent::ItemDelta {
@@ -787,12 +891,13 @@ async fn pump_events(
                 let published = thinking
                     .get_mut(&item_id)
                     .expect("checked against the same map");
-                if published.ends_with('…') || published.chars().count() >= overview::OVERVIEW_CHARS
+                if published.ends_with('…')
+                    || published.chars().count() >= overview::REASONING_CHARS
                 {
                     continue;
                 }
                 let sentence =
-                    overview::shorten(&format!("{published}{delta}"), overview::OVERVIEW_CHARS);
+                    overview::shorten(&format!("{published}{delta}"), overview::REASONING_CHARS);
                 if sentence == *published {
                     // The first sentence is already on screen; the rest of the
                     // block is the detail being filtered.
@@ -815,7 +920,7 @@ async fn pump_events(
                 {
                     // An Item frame carries the block's text so far, whole —
                     // it replaces rather than extends what deltas built up.
-                    let sentence = overview::shorten(text, overview::OVERVIEW_CHARS);
+                    let sentence = overview::shorten(text, overview::REASONING_CHARS);
                     thinking.insert(id.clone(), sentence.clone());
                     if sentence.is_empty() {
                         continue;
@@ -824,6 +929,20 @@ async fn pump_events(
                 overview::condense_event(&event)
             }
         };
+
+        let summary = turn_summary(&event, &mut turns);
+        if let Some(stats) = summary {
+            let summary_event = SessionEvent::Item {
+                turn_id: stats.turn_id.clone(),
+                item: TimelineItem::TurnSummary {
+                    id: format!("turn-summary-{}", stats.turn_id),
+                    stats,
+                },
+            };
+            apply(&live, &summary_event).await;
+            live.publish(summary_event).await;
+            live.trim_replay(replay_window).await;
+        }
 
         apply(&live, &event).await;
 
@@ -850,6 +969,57 @@ async fn pump_events(
             flush_turn(&live, &store).await;
         }
     }
+}
+
+fn collect_tool_ids(item: &TimelineItem, ids: &mut HashSet<String>) {
+    let TimelineItem::ToolCall { id, detail, .. } = item else {
+        return;
+    };
+    ids.insert(id.clone());
+    if let genehub_proto::ToolCallDetail::SubAgent { items, .. } = detail {
+        for item in items {
+            collect_tool_ids(item, ids);
+        }
+    }
+}
+
+fn turn_summary(
+    event: &SessionEvent,
+    turns: &mut HashMap<String, (i64, HashSet<String>)>,
+) -> Option<TurnStats> {
+    let (turn_id, outcome, usage, fork_checkpoint) = match event {
+        SessionEvent::TurnCompleted {
+            turn_id,
+            usage,
+            fork_checkpoint,
+        } => (
+            turn_id,
+            TurnOutcome::Completed,
+            usage.clone(),
+            fork_checkpoint.clone(),
+        ),
+        SessionEvent::TurnFailed { turn_id, .. } => {
+            (turn_id, TurnOutcome::Failed, Usage::default(), None)
+        }
+        SessionEvent::TurnCanceled { turn_id } => {
+            (turn_id, TurnOutcome::Canceled, Usage::default(), None)
+        }
+        _ => return None,
+    };
+    let finished_at_ms = now_ms();
+    let (started_at_ms, tools) = turns
+        .remove(turn_id)
+        .unwrap_or_else(|| (finished_at_ms, HashSet::new()));
+    Some(TurnStats {
+        turn_id: turn_id.clone(),
+        outcome,
+        started_at_ms,
+        finished_at_ms,
+        duration_ms: finished_at_ms.saturating_sub(started_at_ms) as u64,
+        usage,
+        tool_calls: tools.len() as u64,
+        fork_checkpoint,
+    })
 }
 
 /// Applies an event to the in-memory timeline.
@@ -1248,6 +1418,7 @@ mod tests {
             let event = live
                 .publish(SessionEvent::TurnStarted {
                     turn_id: "t".into(),
+                    started_at_ms: 1,
                 })
                 .await;
             assert_eq!(event.seq, index);
@@ -1472,6 +1643,7 @@ mod tests {
         for _ in 0..10 {
             live.publish(SessionEvent::TurnStarted {
                 turn_id: "t".into(),
+                started_at_ms: 1,
             })
             .await;
             live.trim_replay(4).await;
@@ -1497,6 +1669,7 @@ mod tests {
                     input_tokens: 10,
                     ..Usage::default()
                 },
+                fork_checkpoint: None,
             })
             .await;
         match event.event {
@@ -1553,6 +1726,7 @@ mod tests {
         let mut script = vec![
             SessionEvent::TurnStarted {
                 turn_id: "t".into(),
+                started_at_ms: 1,
             },
             SessionEvent::Item {
                 turn_id: "t".into(),
@@ -1574,6 +1748,7 @@ mod tests {
         script.push(SessionEvent::TurnCompleted {
             turn_id: "t".into(),
             usage: Usage::default(),
+            fork_checkpoint: None,
         });
 
         let (wire, on_disk, pump, agent_events) = pumped(script).await;
@@ -1610,7 +1785,7 @@ mod tests {
             } = event
             {
                 assert!(
-                    text.chars().count() <= overview::OVERVIEW_CHARS,
+                    text.chars().count() <= overview::REASONING_CHARS,
                     "more than the overview reached the wire: {text:?}"
                 );
             }
@@ -1621,7 +1796,7 @@ mod tests {
             .expect("the thinking block is in the log");
         match persisted {
             TimelineItem::Reasoning { text, .. } => {
-                assert_eq!(text.chars().count(), overview::OVERVIEW_CHARS);
+                assert_eq!(text.chars().count(), overview::REASONING_CHARS);
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -1636,6 +1811,7 @@ mod tests {
         let (wire, on_disk, pump, agent_events) = pumped(vec![
             SessionEvent::TurnStarted {
                 turn_id: "t".into(),
+                started_at_ms: 1,
             },
             SessionEvent::Item {
                 turn_id: "t".into(),
@@ -1652,7 +1828,13 @@ mod tests {
             },
             SessionEvent::TurnCompleted {
                 turn_id: "t".into(),
-                usage: Usage::default(),
+                usage: Usage {
+                    input_tokens: 120,
+                    output_tokens: 34,
+                    cache_read_tokens: 80,
+                    ..Usage::default()
+                },
+                fork_checkpoint: Some("agent-turn-7".into()),
             },
         ])
         .await;
@@ -1670,19 +1852,36 @@ mod tests {
                         overview,
                         input,
                         output,
+                        ..
                     } => {
                         assert_eq!(overview, "cargo build --workspace");
                         assert_eq!(input, "cargo build --workspace");
-                        assert_eq!(output, "a line of build output");
-                        for field in [overview, input, output] {
-                            assert!(field.chars().count() <= overview::OVERVIEW_CHARS);
-                        }
+                        assert_eq!(output.lines().count(), 5);
+                        assert_eq!(output.lines().next(), Some("a line of build output"));
+                        assert_eq!(output.lines().last(), Some("a line of build output"));
+                        assert!(overview.chars().count() <= overview::SUMMARY_CHARS);
+                        assert!(input.chars().count() <= overview::TOOL_LINE_CHARS);
+                        assert!(output
+                            .lines()
+                            .all(|line| line.chars().count() <= overview::TOOL_LINE_CHARS));
                     }
                     other => panic!("unexpected {other:?}"),
                 }
             }
         }
+        let stats = on_disk
+            .iter()
+            .find_map(|item| match item {
+                TimelineItem::TurnSummary { stats, .. } => Some(stats),
+                _ => None,
+            })
+            .expect("the completed turn keeps its statistics");
+        assert_eq!(stats.usage.input_tokens, 120);
+        assert_eq!(stats.usage.output_tokens, 34);
+        assert_eq!(stats.usage.cache_read_tokens, 80);
+        assert_eq!(stats.tool_calls, 1);
+        assert_eq!(stats.fork_checkpoint.as_deref(), Some("agent-turn-7"));
         let size = serde_json::to_string(&on_disk).unwrap().len();
-        assert!(size < 400, "the log kept the payload ({size} bytes)");
+        assert!(size < 1_000, "the log kept the payload ({size} bytes)");
     }
 }

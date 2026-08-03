@@ -71,6 +71,7 @@ mod tests {
         events.push(SessionEvent::TurnCompleted {
             turn_id: "t1".into(),
             usage: Usage::default(),
+            fork_checkpoint: None,
         });
         events
     }

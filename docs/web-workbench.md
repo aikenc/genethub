@@ -28,7 +28,8 @@
 |------|------|
 | 流式对话 | 增量打字机效果、markdown 渲染（GFM：列表/表格/删除线）、代码块带语言标签和复制按钮 |
 | 推理块 | `Reasoning` 折叠展示，默认收起；daemon 只下发 Agent overview 或前 24 个 Unicode 字符 |
-| 工具调用渲染 | session 只下发 `overview / input / output`，三者各自最多 24 个 Unicode 字符；列表默认显示 overview，展开也只有受限的输入与输出，不提供原始 payload |
+| 工具调用渲染 | session 只下发语义类型与裁剪后的 `overview / input / output`：标题最多 64 字符，input 一行最多 64，output 只留前二后二行且每行最多 64；列表用 Emoji 区分命令、读写、搜索、网络、计划、子 Agent、MCP 等类型，失败只加 `!`，展开只显示并可复制输出，不提供原始 payload |
+| Turn 页脚 | 重点显示 GitHub 风格相对完成时间、耗时和输出 token；点击 token 才展开 cached input / input / output / tools，另提供复制回答和能力感知的真实 Fork |
 | Diff 视图 | `edit` 的行级 diff 着色，支持展开全文 |
 | 输入区 | 多行输入、发送/停止、图片与文件附件、排队消息 |
 | 思考强度 | 独立于「模式」的一条轴：档位由当前模型自己报（Claude Code 每个模型报自己的 `low…max`），模型没有档位就不出现这个控件；不知道当前在哪一档时显示「默认」而不是假装是最低档 |
@@ -251,12 +252,12 @@ MVP 内部也要有先后，按这个顺序交付，每一步都能演示：
 | 实时语音对话、TTS、听写 | 长尾 |
 | 定时任务 | M3+ |
 | 内嵌浏览器标签页与浏览器自动化 | M4+ |
-| 会话 fork / rewind / 分支树 | M3 |
+| rewind / 完整分支树可视化 | M3；当前只在 Agent 提供原生 checkpoint 时支持从已完成 turn Fork |
 | 子 agent 轨道与独立视图 | 随 agent 能力再定 |
 | PR 面板与多 forge 适配 | M3 |
 | 从外部 agent 导入历史会话 | M3 |
 | 分屏（split pane） | M2，MVP 只做标签页 |
-| 工具调用的 overview 折叠模式 | 只做详细模式 |
+| 工具原始 payload / 详细输入视图 | 只保留可扫描的 overview 与受限输出 |
 | 快捷键自定义、工作区数字快捷键与 pin | 长尾 |
 | 用量统计页 | M4 随观测一起 |
 | 多语言（先中文 + 英文） | 长尾 |

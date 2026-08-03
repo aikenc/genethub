@@ -24,6 +24,10 @@ pub struct Capabilities {
     /// The agent can rehydrate a past session itself. When false the daemon
     /// falls back to read-only replay from its own log.
     pub resume: bool,
+    /// The Agent can create a genuinely independent context through a
+    /// completed turn. False means the UI keeps the action visible but honest.
+    #[serde(default)]
+    pub fork: bool,
     pub attachments: bool,
 }
 

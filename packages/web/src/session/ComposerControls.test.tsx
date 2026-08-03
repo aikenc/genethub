@@ -18,6 +18,7 @@ const AGENTS: AgentInfo[] = [
       setEffort: true,
       permissions: false,
       resume: true,
+      fork: false,
       attachments: false,
     },
     catalog: {
@@ -43,6 +44,7 @@ const AGENTS: AgentInfo[] = [
       setEffort: false,
       permissions: true,
       resume: true,
+      fork: false,
       attachments: false,
     },
     catalog: {

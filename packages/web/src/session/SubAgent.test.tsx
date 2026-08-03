@@ -1,5 +1,5 @@
-import type { TimelineItem, ToolCallDetail } from "@genehub/proto";
-import { render, screen, within } from "@testing-library/react";
+import type { ToolCallDetail } from "@genehub/proto";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -11,55 +11,33 @@ import { ToolCallView } from "./ToolCall";
  * stalled one — and its steps, if they showed at all, showed as the main agent's.
  */
 describe("a sub-agent's card", () => {
-  const detail = (items: TimelineItem[]): ToolCallDetail => ({
-    kind: "subAgent",
-    agent: "Explore",
-    prompt: "Find hello.txt",
-    items,
+  const detail = (output: string): ToolCallDetail => ({
+    kind: "overview",
+    toolKind: "subAgent",
+    overview: "Explore · Find hello.txt",
+    input: "Find hello.txt",
+    output,
   });
 
-  it("shows what it has done so far, as its own work", async () => {
+  it("shows only the bounded output excerpt", async () => {
     render(
       <ToolCallView
         name="Agent"
         status="running"
-        detail={detail([
-          {
-            type: "toolCall",
-            id: "1-1",
-            name: "Bash",
-            status: "ok",
-            detail: { kind: "shell", command: "ls /tmp", output: "hello.txt", exitCode: 0 },
-          },
-          {
-            type: "toolCall",
-            id: "1-2",
-            name: "Read",
-            status: "running",
-            detail: { kind: "read", path: "/tmp/hello.txt", content: "", truncated: false },
-          },
-        ])}
+        detail={detail("Found /tmp/hello.txt")}
       />,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "展开详情" }));
-    const steps = screen.getByRole("list", { name: "子 agent 的步骤" });
-    expect(within(steps).getAllByTestId("tool-call")).toHaveLength(2);
-    // Twice over: a shell step puts its command in the header as the summary
-    // and again in the body as the thing that was run.
-    expect(within(steps).getAllByText("ls /tmp").length).toBeGreaterThanOrEqual(1);
-    // Still working, and visibly so: the point of showing the steps at all.
-    expect(within(steps).getByLabelText("running")).toBeInTheDocument();
-    // And the instruction it was given stays on the card.
-    expect(screen.getByText("Find hello.txt")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "子 Agent" })).toHaveTextContent("🤖");
+    await userEvent.click(screen.getByRole("button", { name: "查看输出" }));
+    expect(screen.getByText("Found /tmp/hello.txt")).toBeInTheDocument();
+    expect(screen.queryByText("Find hello.txt", { selector: "pre" })).not.toBeInTheDocument();
   });
 
-  it("is just the prompt before it has done anything", async () => {
-    render(<ToolCallView name="Agent" status="running" detail={detail([])} />);
+  it("says when there is no output yet", async () => {
+    render(<ToolCallView name="Agent" status="running" detail={detail("")} />);
 
-    await userEvent.click(screen.getByRole("button", { name: "展开详情" }));
-    expect(screen.getByText("Find hello.txt")).toBeInTheDocument();
-    // No empty container pretending there is a list of steps.
-    expect(screen.queryByRole("list", { name: "子 agent 的步骤" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "查看输出" }));
+    expect(screen.getByText("暂无输出")).toBeInTheDocument();
   });
 });

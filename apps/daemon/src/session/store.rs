@@ -363,6 +363,7 @@ mod tests {
             name: "bash".into(),
             status: ToolStatus::Ok,
             detail: genehub_proto::ToolCallDetail::Overview {
+                tool_kind: genehub_proto::ToolKind::Shell,
                 overview: "cat secrets".into(),
                 input: "cat secrets".into(),
                 output: "old detailed output".into(),

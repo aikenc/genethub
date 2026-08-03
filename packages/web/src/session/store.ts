@@ -199,6 +199,8 @@ interface WorkbenchState {
   closeTab(tabId: string): void;
   setRightPanel(panel: RightPanel): void;
   send(text: string, attachments?: Attachment[]): Promise<void>;
+  /** Creates an independent Agent context through one completed turn. */
+  forkSession(turnId: string): Promise<void>;
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
   setMode(modeId: string): Promise<void>;
@@ -488,6 +490,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         payload: { sessionId, text, attachments },
       }),
     );
+  },
+
+  async forkSession(turnId) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "session.fork",
+        payload: { sessionId, turnId },
+      }),
+    );
+    if (reply?.type !== "session") return;
+    set((state) => ({ sessions: [reply.data, ...state.sessions] }));
+    await get().selectSession(reply.data.id);
   },
 
   async interrupt() {
