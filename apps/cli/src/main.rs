@@ -9,6 +9,7 @@
 mod control;
 mod hub;
 mod rpc;
+mod update;
 
 /// Exit codes, frozen for scripts and agents (`genethub-cli.md` §3.2).
 pub const EXIT_OK: i32 = 0;
@@ -36,6 +37,7 @@ async fn main() {
         Some("daemon") => control::daemon(&args[1..]).await,
         Some("status") => control::status(&args[1..]).await,
         Some("hub") => hub::hub(&args[1..]).await,
+        Some("update") => update::update(&args[1..]),
         _ => usage(),
     };
     std::process::exit(code);
@@ -45,6 +47,7 @@ pub fn usage() -> i32 {
     eprintln!(
         "usage:
   genet status                      overview: channel, version, daemon, hub
+  genet update                      install the latest Linux build and restart daemon
   genet daemon run                  run the daemon in the foreground (systemd)
   genet daemon start                start the daemon in the background
   genet daemon stop                 stop the daemon (by lock-file pid)

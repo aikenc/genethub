@@ -63,6 +63,40 @@ fn installing_puts_both_binaries_where_the_path_can_find_them() {
 }
 
 #[test]
+fn cli_update_restarts_the_daemon_with_the_new_binary() {
+    if skip() {
+        return;
+    }
+    let release = fake_release();
+    let home = TempDir::new().expect("temp home");
+    let bin = home.path().join("bin");
+    let calls = home.path().join("calls");
+
+    let output = Command::new("sh")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh"))
+        .env(
+            "GENEHUB_DEV_DOWNLOAD_BASE",
+            format!("file://{}", release.path().display()),
+        )
+        .env("GENEHUB_DEV_BIN_DIR", &bin)
+        .env("GENEHUB_RESTART_DAEMON", "1")
+        .env("GENEHUB_TEST_CALLS", &calls)
+        .output()
+        .expect("run update installer");
+
+    assert!(
+        output.status.success(),
+        "update failed: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(calls).expect("new CLI recorded its call"),
+        "daemon restart\n",
+        "the installer did not restart through the newly installed CLI"
+    );
+}
+
+#[test]
 fn a_download_that_does_not_match_its_checksum_is_not_installed() {
     if skip() {
         return;
@@ -154,7 +188,12 @@ fn fake_release() -> TempDir {
     // does not care about.
     for binary in ["genet-dev", "genet-agent-dev"] {
         let path = staged.join(binary);
-        fs::write(&path, "#!/bin/sh\necho ok\n").expect("write a stand-in");
+        let body = if binary == "genet-dev" {
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${GENEHUB_TEST_CALLS:-/dev/null}\"\necho ok\n"
+        } else {
+            "#!/bin/sh\necho ok\n"
+        };
+        fs::write(&path, body).expect("write a stand-in");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 

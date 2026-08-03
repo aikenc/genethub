@@ -141,6 +141,17 @@ say "Installed:"
 say "  $bin_dir/$cli_binary"
 say "  $bin_dir/$agent_binary"
 
+# `genet update` sets this after launching the copy of this script embedded in
+# its own binary. Run the command from the install destination: the updater
+# process is still the old executable, while this path now names the new one.
+# Restart also starts a daemon that was not running, so a successful CLI update
+# always leaves the machine reachable again.
+if [ "${GENEHUB_RESTART_DAEMON:-}" = 1 ]; then
+  say ""
+  say "==> restarting daemon with the new binary"
+  "$bin_dir/$cli_binary" daemon restart
+fi
+
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
   *)
