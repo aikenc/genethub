@@ -268,6 +268,8 @@ pub enum Request {
     WorkspaceOpen { root: String },
     #[serde(rename = "workspace.create", rename_all = "camelCase")]
     WorkspaceCreate { root: String, name: String },
+    #[serde(rename = "workspace.rename", rename_all = "camelCase")]
+    WorkspaceRename { workspace_id: String, name: String },
 
     // -- files -------------------------------------------------------------
     #[serde(rename = "file.tree", rename_all = "camelCase")]

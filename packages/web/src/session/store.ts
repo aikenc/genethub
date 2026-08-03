@@ -143,6 +143,8 @@ interface WorkbenchState {
   attach(client: Client): Promise<void>;
   openWorkspace(root: string): Promise<void>;
   selectWorkspace(workspaceId: string): Promise<void>;
+  /** Changes a workspace's display name without moving its directory. */
+  renameWorkspace(workspaceId: string, name: string): Promise<void>;
   loadTree(path?: string): Promise<void>;
   openFile(path: string): Promise<void>;
   saveFile(content: string): Promise<void>;
@@ -294,6 +296,21 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     require_(get().client);
     set({ activeWorkspaceId: workspaceId, activeSessionId: null, timeline: emptyTimeline() });
     await land(get);
+  },
+
+  async renameWorkspace(workspaceId, name) {
+    const wanted = name.trim();
+    if (!wanted) return;
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "workspace.rename",
+        payload: { workspaceId, name: wanted },
+      }),
+    );
+    if (reply?.type !== "workspace") return;
+    set((state) => ({
+      workspaces: upsertBy(state.workspaces, reply.data, (workspace) => workspace.id),
+    }));
   },
 
   newSession(workspaceId, agentId) {

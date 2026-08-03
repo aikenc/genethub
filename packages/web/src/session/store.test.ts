@@ -389,3 +389,20 @@ describe("renaming and deleting a conversation", () => {
     expect(useWorkbench.getState().activeSessionId).toBeNull();
   });
 });
+
+describe("renaming a workspace", () => {
+  it("uses the name returned by the machine", async () => {
+    const workspace = { id: "w1", name: "project", root: "/tmp/project", isGitRepo: false };
+    const client = {
+      call: async (request: { type: string }) =>
+        request.type === "workspace.rename"
+          ? { type: "workspace", data: { ...workspace, name: "核心项目" } }
+          : undefined,
+    } as unknown as Client;
+    useWorkbench.setState({ client, workspaces: [workspace] });
+
+    await useWorkbench.getState().renameWorkspace("w1", "  核心项目  ");
+
+    expect(useWorkbench.getState().workspaces[0]?.name).toBe("核心项目");
+  });
+});
