@@ -16,7 +16,7 @@ const bubble = (id: string, text: string): TimelineItem => ({
 describe("the session timeline", () => {
   it("streams a reply into one bubble rather than one per token", () => {
     const state = run([
-      { type: "turnStarted", turnId: "t1" },
+      { type: "turnStarted", turnId: "t1", startedAtMs: 1 },
       { type: "item", turnId: "t1", item: bubble("a1", "") },
       { type: "itemDelta", turnId: "t1", itemId: "a1", delta: { kind: "text", delta: "he" } },
       { type: "itemDelta", turnId: "t1", itemId: "a1", delta: { kind: "text", delta: "llo" } },
@@ -112,9 +112,9 @@ describe("the session timeline", () => {
 
   it("clears the previous failure when a new turn starts", () => {
     const state = run([
-      { type: "turnStarted", turnId: "t1" },
+      { type: "turnStarted", turnId: "t1", startedAtMs: 1 },
       { type: "turnFailed", turnId: "t1", error: { code: "upstream", message: "boom" } },
-      { type: "turnStarted", turnId: "t2" },
+      { type: "turnStarted", turnId: "t2", startedAtMs: 2 },
     ]);
 
     expect(state.lastError).toBeNull();
@@ -124,13 +124,13 @@ describe("the session timeline", () => {
 
   it("leaves a failure visible until something replaces it", () => {
     const state = run([
-      { type: "turnStarted", turnId: "t1" },
+      { type: "turnStarted", turnId: "t1", startedAtMs: 1 },
       { type: "turnFailed", turnId: "t1", error: { code: "missingCredentials", message: "no key" } },
     ]);
 
     expect(state.lastError?.code).toBe("missingCredentials");
     expect(state.activeTurn).toBeNull();
-    expect(state.status).toBe("idle");
+    expect(state.status).toBe("failed");
   });
 
   it("shows an approval request and takes it down once it is answered", () => {
@@ -196,6 +196,10 @@ describe("the session timeline", () => {
     } as unknown as SessionSnapshot);
 
     expect(state.pendingPermission?.id).toBe("p1");
+    // A snapshot cannot recover the transient turn id, but it does recover the
+    // durable fact the composer needs in order to keep showing Stop.
+    expect(state.activeTurn).toBeNull();
+    expect(state.status).toBe("running");
     expect(state.seq).toBe(42);
   });
 

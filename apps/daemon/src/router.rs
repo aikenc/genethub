@@ -238,6 +238,17 @@ pub async fn handle(
             }
         }
 
+        Request::SessionFork {
+            session_id,
+            turn_id,
+        } => {
+            let providers = state.providers().await;
+            match state.sessions.fork(&session_id, &turn_id, &providers).await {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::SessionInterrupt { session_id } => {
             match state.sessions.interrupt(&session_id).await {
                 Ok(()) => Handled::ok(Reply::Ack),

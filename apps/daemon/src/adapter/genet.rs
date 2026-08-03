@@ -122,6 +122,7 @@ impl AgentAdapter for GenetAdapter {
             // approval controls for it.
             permissions: false,
             resume: true,
+            fork: false,
             attachments: false,
         }
     }
@@ -440,6 +441,7 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
     match kind {
         "agent_start" => emit(SessionEvent::TurnStarted {
             turn_id: turn_id.clone(),
+            started_at_ms: 0,
         }),
 
         "text_start" => {
@@ -627,7 +629,11 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
             } else if canceled {
                 emit(SessionEvent::TurnCanceled { turn_id });
             } else {
-                emit(SessionEvent::TurnCompleted { turn_id, usage });
+                emit(SessionEvent::TurnCompleted {
+                    turn_id,
+                    usage,
+                    fork_checkpoint: None,
+                });
             }
         }
 

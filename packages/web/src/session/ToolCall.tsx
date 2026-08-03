@@ -1,15 +1,6 @@
-import type { ToolCallDetail, ToolStatus } from "@genehub/proto";
+import type { ToolCallDetail, ToolKind, ToolStatus } from "@genehub/proto";
+import { useEffect, useState } from "react";
 
-import { Markdown } from "./Markdown";
-import { useState } from "react";
-
-/**
- * Tool calls get a renderer per shape, and `unknown` gets a readable fallback.
- *
- * The fallback is not a nicety. A new agent will call tools we have never heard
- * of, and showing raw JSON is the difference between "that agent looks broken"
- * and "that tool has no custom view yet" (`architecture.md` §4).
- */
 export function ToolCallView({
   name,
   status,
@@ -19,38 +10,73 @@ export function ToolCallView({
   status: ToolStatus;
   detail: ToolCallDetail;
 }) {
+  const [open, setOpen] = useState(status === "error");
+  const [copied, setCopied] = useState(false);
+  // The daemon is authoritative, but keep the same bound when this newer web
+  // app reconnects to an older daemon or renders a legacy in-memory fixture.
+  const output = boundedOutput(toolOutput(detail));
+  const summary = oneLine(summarize(detail), 64);
+
+  useEffect(() => {
+    if (status === "error") setOpen(true);
+  }, [status]);
+
   return (
     <div
-      className="min-w-0 max-w-full overflow-hidden rounded-lg border border-line bg-surface"
+      className={`min-w-0 max-w-full overflow-hidden rounded-lg border bg-surface ${
+        status === "error" ? "border-danger/50" : "border-line"
+      }`}
       data-testid="tool-call"
     >
-      <header className="flex min-w-0 items-center gap-2 border-b border-line px-3 py-2 text-xs">
-        <StatusDot status={status} />
+      <header className="flex min-w-0 items-center gap-2 px-3 py-2 text-xs">
+        <span className="shrink-0 text-base" role="img" aria-label={kindLabel(toolKind(detail))}>
+          {kindEmoji(toolKind(detail))}
+        </span>
         <span className="shrink-0 font-mono text-fg">{name}</span>
-        {/* Truncate here; the body is where a long command or path is readable. */}
-        <span className="min-w-0 flex-1 truncate text-muted">{summarize(detail)}</span>
+        <span className="min-w-0 flex-1 truncate text-muted">{summary}</span>
+        {status === "error" ? (
+          <strong className="shrink-0 text-sm text-danger" aria-label="失败" title="失败">
+            !
+          </strong>
+        ) : null}
+        <button
+          type="button"
+          className="shrink-0 text-accent"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? "收起输出" : "查看输出"}
+        </button>
       </header>
-      <div className="min-w-0 px-3 py-2 text-[13px]">
-        <Body detail={detail} />
-      </div>
+      {open ? (
+        <div className="min-w-0 border-t border-line px-3 py-2 text-[13px]">
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-xs text-muted">输出</span>
+            <button
+              type="button"
+              className="text-xs text-accent"
+              onClick={() => {
+                if (!navigator.clipboard) return;
+                void navigator.clipboard.writeText(output).then(() => {
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1200);
+                });
+              }}
+            >
+              {copied ? "已复制" : "复制输出"}
+            </button>
+          </div>
+          <Pre>{output || "暂无输出"}</Pre>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function StatusDot({ status }: { status: ToolStatus }) {
-  const colour =
-    status === "ok"
-      ? "bg-ok"
-      : status === "error"
-        ? "bg-danger"
-        : status === "running"
-          ? "bg-accent animate-pulse"
-          : "bg-muted";
-  return <i className={`h-2 w-2 shrink-0 rounded-full ${colour}`} aria-label={status} role="img" />;
-}
-
 function summarize(detail: ToolCallDetail): string {
   switch (detail.kind) {
+    case "overview":
+      return detail.overview;
     case "shell":
       return detail.command;
     case "read":
@@ -70,84 +96,93 @@ function summarize(detail: ToolCallDetail): string {
   }
 }
 
-function Body({ detail }: { detail: ToolCallDetail }) {
+function toolOutput(detail: ToolCallDetail): string {
   switch (detail.kind) {
+    case "overview":
     case "shell":
-      return (
-        <div className="min-w-0 space-y-2">
-          <Pre>{detail.command}</Pre>
-          <Pre>
-            {detail.output || "（暂无输出）"}
-            {detail.exitCode !== null && detail.exitCode !== 0
-              ? `\n退出码 ${detail.exitCode}`
-              : ""}
-          </Pre>
-        </div>
-      );
-
+      return detail.output;
     case "read":
-      return (
-        <Pre>
-          {detail.content}
-          {detail.truncated ? "\n…（已截断）" : ""}
-        </Pre>
-      );
-
+      return detail.content;
     case "write":
-      return <Pre>{detail.content}</Pre>;
-
+      return detail.content;
     case "edit":
-      return <Diff diff={detail.diff} />;
-
+      return detail.diff;
     case "search":
-      return detail.matches.length === 0 ? (
-        <p className="text-muted">没有匹配</p>
-      ) : (
-        <ul className="space-y-0.5 font-mono text-xs">
-          {detail.matches.slice(0, 50).map((match, index) => (
-            <li key={`${match.path}:${match.line ?? index}`} className="truncate">
-              <span className="text-accent">{match.path}</span>
-              {match.line !== null && match.line !== undefined ? `:${match.line}` : ""}
-              {match.preview ? <span className="text-muted"> {match.preview}</span> : null}
-            </li>
-          ))}
-        </ul>
-      );
-
+      return detail.matches
+        .map((match) => `${match.path}${match.line == null ? "" : `:${match.line}`} ${match.preview}`)
+        .join("\n");
     case "fetch":
-      return <Pre>{detail.summary}</Pre>;
-
+      return detail.summary;
     case "plan":
-      // A plan is written as markdown, and it is the one tool output someone is
-      // meant to read end to end before answering a permission request about it.
-      return <Markdown text={detail.markdown} />;
-
+      return detail.markdown;
     case "subAgent":
-      return (
-        <div className="space-y-2">
-          <p className="text-muted">{detail.prompt}</p>
-          {detail.items.length > 0 ? (
-            // Indented, because whose work this is matters: these ran inside the
-            // sub-agent, and reading them as the main agent's own steps is exactly
-            // the confusion the nesting exists to remove.
-            <ul className="space-y-2 border-l border-line pl-3" aria-label="子 agent 的步骤">
-              {detail.items.map((item) => (
-                <li key={item.id}>
-                  {item.type === "toolCall" ? (
-                    <ToolCallView name={item.name} status={item.status} detail={item.detail} />
-                  ) : item.type === "assistantMessage" || item.type === "reasoning" ? (
-                    <p className="text-xs text-muted">{item.text}</p>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-      );
-
+      return detail.items
+        .map((item) =>
+          item.type === "assistantMessage" || item.type === "reasoning" ? item.text : "",
+        )
+        .filter(Boolean)
+        .join("\n");
     case "unknown":
-      return <Unknown raw={detail.raw} />;
+      return JSON.stringify(detail.raw, null, 2);
   }
+}
+
+function toolKind(detail: ToolCallDetail): ToolKind {
+  if (detail.kind === "overview") return detail.toolKind ?? "other";
+  if (detail.kind === "subAgent") return "subAgent";
+  if (detail.kind === "unknown") return "other";
+  return detail.kind;
+}
+
+const EMOJI: Record<ToolKind, string> = {
+  shell: "🖥️",
+  read: "📖",
+  write: "📝",
+  edit: "✏️",
+  search: "🔍",
+  fetch: "🌐",
+  plan: "📋",
+  subAgent: "🤖",
+  mcp: "🔌",
+  other: "🔧",
+};
+
+const LABEL: Record<ToolKind, string> = {
+  shell: "执行命令",
+  read: "读取文件",
+  write: "写入文件",
+  edit: "编辑文件",
+  search: "搜索",
+  fetch: "访问网络",
+  plan: "计划",
+  subAgent: "子 Agent",
+  mcp: "外部工具",
+  other: "工具",
+};
+
+const kindEmoji = (kind: ToolKind) => EMOJI[kind];
+const kindLabel = (kind: ToolKind) => LABEL[kind];
+
+function clip(text: string, max: number): string {
+  const characters = [...text];
+  return characters.length <= max ? text : `${characters.slice(0, max - 1).join("")}…`;
+}
+
+function oneLine(text: string, max: number): string {
+  return clip(text.trim().split(/\s+/u).filter(Boolean).join(" "), max);
+}
+
+function boundedOutput(text: string): string {
+  const lines = text.replace(/\r\n/gu, "\n").split("\n");
+  while (lines[0]?.trim() === "") lines.shift();
+  while (lines.at(-1)?.trim() === "") lines.pop();
+  const bounded = (line: string) => clip(line, 64);
+  if (lines.length <= 4) return lines.map(bounded).join("\n");
+  return [
+    ...lines.slice(0, 2).map(bounded),
+    `… 已省略 ${lines.length - 4} 行 …`,
+    ...lines.slice(-2).map(bounded),
+  ].join("\n");
 }
 
 function Pre({ children }: { children: React.ReactNode }) {
@@ -155,48 +190,5 @@ function Pre({ children }: { children: React.ReactNode }) {
     <pre className="max-h-80 max-w-full overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs text-fg">
       {children}
     </pre>
-  );
-}
-
-/** Line-level colouring. Enough to read a change; not a merge tool. */
-function Diff({ diff }: { diff: string }) {
-  return (
-    <pre
-      className="max-h-80 max-w-full overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs"
-      data-testid="diff"
-    >
-      {diff.split("\n").map((line, index) => (
-        <div
-          key={index}
-          className={
-            line.startsWith("+")
-              ? "bg-ok/10 text-ok"
-              : line.startsWith("-")
-                ? "bg-danger/10 text-danger"
-                : line.startsWith("@@")
-                  ? "text-muted"
-                  : ""
-          }
-        >
-          {line || " "}
-        </div>
-      ))}
-    </pre>
-  );
-}
-
-function Unknown({ raw }: { raw: unknown }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div>
-      <button
-        type="button"
-        className="text-xs text-accent"
-        onClick={() => setOpen((value) => !value)}
-      >
-        {open ? "收起原始数据" : "展开原始数据"}
-      </button>
-      {open ? <Pre>{JSON.stringify(raw, null, 2)}</Pre> : null}
-    </div>
   );
 }

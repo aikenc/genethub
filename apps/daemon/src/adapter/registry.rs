@@ -170,6 +170,7 @@ mod tests {
         assert!(codex.capabilities().set_mode);
         assert!(codex.capabilities().resume);
         assert!(codex.capabilities().attachments);
+        assert!(codex.capabilities().fork);
     }
 
     /// Cursor ships in the default set too (`docs/desktop-client.md` promises

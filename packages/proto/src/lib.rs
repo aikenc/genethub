@@ -67,6 +67,7 @@ mod tests {
             json!({"id": "4", "type": "git.commit", "payload": {"workspaceId": "w", "message": "m"}}),
             json!({"id": "5", "type": "pty.resize", "payload": {"ptyId": "p", "cols": 80, "rows": 24}}),
             json!({"id": "6", "type": "workspace.rename", "payload": {"workspaceId": "w", "name": "demo"}}),
+            json!({"id": "7", "type": "session.fork", "payload": {"sessionId": "s", "turnId": "t"}}),
         ];
         for case in cases {
             let raw = case.to_string();

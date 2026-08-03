@@ -141,6 +141,8 @@ interface WorkbenchState {
   download: UpdateDownload;
 
   attach(client: Client): Promise<void>;
+  /** Refreshes daemon-owned session status for the sidebar. */
+  refreshSessions(): Promise<void>;
   openWorkspace(root: string): Promise<void>;
   selectWorkspace(workspaceId: string): Promise<void>;
   /** Changes a workspace's display name without moving its directory. */
@@ -197,6 +199,8 @@ interface WorkbenchState {
   closeTab(tabId: string): void;
   setRightPanel(panel: RightPanel): void;
   send(text: string, attachments?: Attachment[]): Promise<void>;
+  /** Creates an independent Agent context through one completed turn. */
+  forkSession(turnId: string): Promise<void>;
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
   setMode(modeId: string): Promise<void>;
@@ -273,6 +277,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       if (get().client !== client) return;
       set({ notice: error instanceof Error ? error.message : String(error) });
     }
+  },
+
+  async refreshSessions() {
+    const client = get().client;
+    if (!client) return;
+    await loadSessions(client, set).catch(unattended(client, get, set));
   },
 
   async openWorkspace(root) {
@@ -389,10 +399,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
     const { snapshot, replayed } = await client.subscribe(sessionId, {
       onEvent: (event) => {
-        if (get().activeSessionId !== sessionId) return;
         if (event.event.type === "titleChanged") {
           applyTitle(sessionId, event.event.title, set);
         }
+        applySessionStatus(sessionId, event.event, set);
+        if (get().activeSessionId !== sessionId) return;
         set((state) => ({ timeline: applySequenced(state.timeline, event) }));
       },
       onResync: (resnapshot, events, reset) => {
@@ -402,12 +413,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           : get().timeline;
         for (const event of events) {
           if (event.event.type === "titleChanged") applyTitle(sessionId, event.event.title, set);
+          applySessionStatus(sessionId, event.event, set);
         }
         set({ timeline: events.reduce(applySequenced, base) });
       },
     });
 
     const base = fromSnapshot(snapshot as SessionSnapshot);
+    // A slower subscription must not repaint whichever session the user opened
+    // next. This is easy to hit when switching pages over a relay: both replies
+    // are valid, but only the currently selected session owns the timeline.
+    if (get().activeSessionId !== sessionId) return;
     set({ timeline: replayed.reduce(applySequenced, base) });
   },
 
@@ -474,6 +490,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         payload: { sessionId, text, attachments },
       }),
     );
+  },
+
+  async forkSession(turnId) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "session.fork",
+        payload: { sessionId, turnId },
+      }),
+    );
+    if (reply?.type !== "session") return;
+    set((state) => ({ sessions: [reply.data, ...state.sessions] }));
+    await get().selectSession(reply.data.id);
   },
 
   async interrupt() {
@@ -927,6 +957,32 @@ function applyTitle(sessionId: string, title: string, set: Setter): void {
     ),
     tabs: state.tabs.map((tab) =>
       tab.sessionId === sessionId ? { ...tab, title } : tab,
+    ),
+  }));
+}
+
+/** Mirrors live daemon status into the session list without waiting for a poll. */
+function applySessionStatus(
+  sessionId: string,
+  event: import("@genehub/proto").SessionEvent,
+  set: Setter,
+): void {
+  const status =
+    event.type === "turnStarted" || event.type === "permissionResolved"
+      ? "running"
+      : event.type === "permissionRequested"
+        ? "waiting"
+        : event.type === "turnFailed"
+          ? "failed"
+          : event.type === "turnCompleted" || event.type === "turnCanceled"
+            ? "idle"
+            : event.type === "sessionStatusChanged"
+              ? event.status
+              : null;
+  if (!status) return;
+  set((state) => ({
+    sessions: state.sessions.map((session) =>
+      session.id === sessionId ? { ...session, status } : session,
     ),
   }));
 }

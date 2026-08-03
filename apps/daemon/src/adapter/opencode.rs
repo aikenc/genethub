@@ -50,6 +50,7 @@ impl AgentAdapter for OpenCodeAdapter {
             set_mode: false,
             permissions: false,
             resume: true,
+            fork: false,
             attachments: true,
         }
     }
@@ -200,6 +201,7 @@ impl AgentSession for OpenCodeSession {
         }
         let _ = self.events.send(SessionEvent::TurnStarted {
             turn_id: turn_id.clone(),
+            started_at_ms: 0,
         });
 
         let mut body = json!({ "parts": message_parts(&input) });
@@ -234,6 +236,7 @@ impl AgentSession for OpenCodeSession {
                     SessionEvent::TurnCompleted {
                         turn_id: completed,
                         usage: usage_from_info(settled.get("info").unwrap_or(&Value::Null)),
+                        fork_checkpoint: None,
                     }
                 }
                 Ok(response) => {

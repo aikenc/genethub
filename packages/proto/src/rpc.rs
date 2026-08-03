@@ -78,6 +78,8 @@ pub enum Request {
         #[serde(default)]
         attachments: Vec<Attachment>,
     },
+    #[serde(rename = "session.fork", rename_all = "camelCase")]
+    SessionFork { session_id: String, turn_id: String },
     #[serde(rename = "session.interrupt", rename_all = "camelCase")]
     SessionInterrupt { session_id: String },
     #[serde(rename = "session.close", rename_all = "camelCase")]

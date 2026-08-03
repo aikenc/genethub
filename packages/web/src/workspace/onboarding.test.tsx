@@ -75,6 +75,7 @@ const READY_AGENT: AgentInfo = {
     setEffort: false,
     permissions: true,
     resume: true,
+    fork: false,
     attachments: false,
   },
   catalog: {

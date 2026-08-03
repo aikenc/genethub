@@ -14,6 +14,7 @@ export interface TimelineState {
   status: SessionStatus;
   /** The turn currently in flight, if any. */
   activeTurn: string | null;
+  activeTurnStartedAtMs?: number | null;
   pendingPermission: PermissionRequest | null;
   lastError: TurnError | null;
   usage: Usage | null;
@@ -28,6 +29,7 @@ export function emptyTimeline(): TimelineState {
     items: [],
     status: "idle",
     activeTurn: null,
+    activeTurnStartedAtMs: null,
     pendingPermission: null,
     lastError: null,
     usage: null,
@@ -77,7 +79,13 @@ export function fromSnapshot(snapshot: SessionSnapshot): TimelineState {
 export function apply(state: TimelineState, event: SessionEvent): TimelineState {
   switch (event.type) {
     case "turnStarted":
-      return { ...state, activeTurn: event.turnId, status: "running", lastError: null };
+      return {
+        ...state,
+        activeTurn: event.turnId,
+        activeTurnStartedAtMs: event.startedAtMs || Date.now(),
+        status: "running",
+        lastError: null,
+      };
 
     case "item":
       return { ...state, items: upsert(state.items, event.item) };
@@ -86,20 +94,32 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
       return { ...state, items: applyDelta(state.items, event) };
 
     case "turnCompleted":
-      return { ...state, activeTurn: null, status: "idle", usage: event.usage };
+      return {
+        ...state,
+        activeTurn: null,
+        activeTurnStartedAtMs: null,
+        status: "idle",
+        usage: event.usage,
+      };
 
     case "turnFailed":
-      return { ...state, activeTurn: null, status: "idle", lastError: event.error };
+      return {
+        ...state,
+        activeTurn: null,
+        activeTurnStartedAtMs: null,
+        status: "failed",
+        lastError: event.error,
+      };
 
     case "turnCanceled":
-      return { ...state, activeTurn: null, status: "idle" };
+      return { ...state, activeTurn: null, activeTurnStartedAtMs: null, status: "idle" };
 
     case "permissionRequested":
-      return { ...state, pendingPermission: event.request };
+      return { ...state, status: "waiting", pendingPermission: event.request };
 
     case "permissionResolved":
       return state.pendingPermission?.id === event.requestId
-        ? { ...state, pendingPermission: null }
+        ? { ...state, status: "running", pendingPermission: null }
         : state;
 
     case "modelChanged":

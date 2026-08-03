@@ -72,7 +72,7 @@ use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, CommandInfo, ItemDelta, ModeInfo, ModelInfo, PermissionOption,
     PermissionOptionKind, PermissionOutcome, PermissionRequest, ProbeState, SessionEvent,
-    TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    TimelineItem, ToolCallDetail, ToolKind, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -477,6 +477,7 @@ impl AgentAdapter for ClaudeAdapter {
             permissions: true,
             // `--resume <session-id>` is real; we just need the id back.
             resume: true,
+            fork: false,
             attachments: true,
         }
     }
@@ -904,6 +905,7 @@ impl AgentSession for ClaudeSession {
         }
         let _ = self.events.send(SessionEvent::TurnStarted {
             turn_id: turn_id.clone(),
+            started_at_ms: 0,
         });
 
         // A CLI that already exited leaves a closed pipe, and the write fails with
@@ -1607,6 +1609,7 @@ fn translate_result(
                     .unwrap_or(0),
                 cost_usd: frame.get("total_cost_usd").and_then(Value::as_f64),
             },
+            fork_checkpoint: None,
         });
         return;
     }
@@ -1756,17 +1759,12 @@ fn detail_from_tool(name: &str, input: &Value, result: Option<&str>) -> ToolCall
             .to_string()
     };
     match name {
-        "Bash" => ToolCallDetail::Shell {
-            // The CLI's own one-liner for the command, when it wrote one —
-            // the daemon's overview filter keeps only this field, so the
-            // human sentence survives where the command itself would be cut
-            // mid-flag.
-            command: match str_field("description") {
-                description if !description.is_empty() => description,
-                _ => str_field("command"),
-            },
+        "Bash" => ToolCallDetail::Overview {
+            tool_kind: ToolKind::Shell,
+            // Claude supplies a real human overview separately from the input.
+            overview: str_field("description"),
+            input: str_field("command"),
             output: result.unwrap_or_default().to_string(),
-            exit_code: None,
         },
         "Read" => ToolCallDetail::Read {
             path: str_field("file_path"),
@@ -2086,13 +2084,17 @@ mod tests {
                 name,
                 status,
                 detail:
-                    ToolCallDetail::Shell {
-                        command, output, ..
+                    ToolCallDetail::Overview {
+                        tool_kind,
+                        input,
+                        output,
+                        ..
                     },
                 ..
             }] => {
                 assert_eq!(name, "Bash");
-                assert_eq!(command, "ls /tmp");
+                assert_eq!(*tool_kind, ToolKind::Shell);
+                assert_eq!(input, "ls /tmp");
                 // Settled, not still running: the result reached the right card.
                 assert_eq!(*status, ToolStatus::Ok);
                 assert_eq!(output, "hello.txt");
@@ -2153,9 +2155,8 @@ mod tests {
     }
 
     /// The CLI writes a one-line description of what a command is for; that
-    /// sentence is the overview the daemon keeps, so it is what the card
-    /// carries — not the command, which a 24-character cut would leave
-    /// mid-flag.
+    /// sentence is the explicit overview, while the command remains available
+    /// as the input that the access boundary appends to the card header.
     #[test]
     fn a_bash_call_prefers_the_clis_own_one_liner() {
         let detail = detail_from_tool(
@@ -2166,17 +2167,33 @@ mod tests {
             }),
             None,
         );
-        let ToolCallDetail::Shell { command, .. } = detail else {
-            panic!("expected a shell call");
+        let ToolCallDetail::Overview {
+            tool_kind,
+            overview,
+            input,
+            ..
+        } = detail
+        else {
+            panic!("expected a bounded shell call");
         };
-        assert_eq!(command, "Run the full test suite");
+        assert_eq!(tool_kind, ToolKind::Shell);
+        assert_eq!(overview, "Run the full test suite");
+        assert_eq!(
+            input,
+            "cargo test --workspace --all-features -- --nocapture"
+        );
 
-        // No description written: the command itself is the one-liner.
+        // No description written: the access boundary will use the input as
+        // the complete header rather than inventing an overview.
         let detail = detail_from_tool("Bash", &json!({ "command": "ls" }), None);
-        let ToolCallDetail::Shell { command, .. } = detail else {
-            panic!("expected a shell call");
+        let ToolCallDetail::Overview {
+            overview, input, ..
+        } = detail
+        else {
+            panic!("expected a bounded shell call");
         };
-        assert_eq!(command, "ls");
+        assert!(overview.is_empty());
+        assert_eq!(input, "ls");
     }
 
     /// A sub-agent card that says which agent and what it was asked to do, rather
@@ -2628,10 +2645,11 @@ mod tests {
                 assert_eq!(*status, ToolStatus::Ok);
                 assert_eq!(
                     detail,
-                    &ToolCallDetail::Shell {
-                        command: "ls".into(),
+                    &ToolCallDetail::Overview {
+                        tool_kind: ToolKind::Shell,
+                        overview: String::new(),
+                        input: "ls".into(),
                         output: "a.txt".into(),
-                        exit_code: None,
                     }
                 );
             }

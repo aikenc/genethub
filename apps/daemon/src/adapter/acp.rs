@@ -107,6 +107,7 @@ impl AgentAdapter for AcpAdapter {
             set_mode: true,
             permissions: true,
             resume: false,
+            fork: false,
             attachments: true,
         }
     }
@@ -335,6 +336,7 @@ impl AgentSession for AcpSession {
         }
         let _ = self.events.send(SessionEvent::TurnStarted {
             turn_id: turn_id.clone(),
+            started_at_ms: 0,
         });
 
         let events = self.events.clone();
@@ -384,6 +386,7 @@ impl AgentSession for AcpSession {
                     _ => SessionEvent::TurnCompleted {
                         turn_id: completed_turn,
                         usage: Usage::default(),
+                        fork_checkpoint: None,
                     },
                 },
                 Ok(Err(message)) => SessionEvent::TurnFailed {

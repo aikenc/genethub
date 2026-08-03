@@ -123,6 +123,31 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically replaces a timeline during a privacy/shape migration.
+    ///
+    /// Ordinary writes stay append-only. This path exists so an old detailed
+    /// tool payload cannot remain on disk after the overview-only boundary has
+    /// learned how to read it.
+    pub fn replace_items(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        items: &[TimelineItem],
+    ) -> Result<()> {
+        let dir = self.dir(workspace_id);
+        fs::create_dir_all(&dir)?;
+        let path = self.timeline_path(workspace_id, session_id);
+        let tmp = path.with_extension("jsonl.tmp");
+        let mut file = File::create(&tmp)?;
+        for item in items {
+            writeln!(file, "{}", serde_json::to_string(item)?)?;
+        }
+        file.flush()?;
+        file.sync_all()?;
+        fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
     /// Reads the timeline back, skipping lines we cannot parse.
     ///
     /// A single bad line — a half-written record from a power cut, or a record
@@ -316,6 +341,41 @@ mod tests {
         let loaded = store.load_items("w1", "s1").unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].id(), "one");
+    }
+
+    #[test]
+    fn replacing_a_legacy_timeline_removes_its_old_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let legacy = TimelineItem::ToolCall {
+            id: "tool".into(),
+            name: "bash".into(),
+            status: ToolStatus::Ok,
+            detail: genehub_proto::ToolCallDetail::Shell {
+                command: "cat secrets".into(),
+                output: "old detailed output".into(),
+                exit_code: Some(0),
+            },
+        };
+        store.append_items("w1", "s1", &[legacy]).unwrap();
+        let overview = TimelineItem::ToolCall {
+            id: "tool".into(),
+            name: "bash".into(),
+            status: ToolStatus::Ok,
+            detail: genehub_proto::ToolCallDetail::Overview {
+                tool_kind: genehub_proto::ToolKind::Shell,
+                overview: "cat secrets".into(),
+                input: "cat secrets".into(),
+                output: "old detailed output".into(),
+            },
+        };
+        store
+            .replace_items("w1", "s1", std::slice::from_ref(&overview))
+            .unwrap();
+
+        assert_eq!(store.load_items("w1", "s1").unwrap(), vec![overview]);
+        let raw = fs::read_to_string(dir.path().join("w1/s1.jsonl")).unwrap();
+        assert!(!raw.contains("kind\":\"shell"));
     }
 
     /// A truncated tail is the normal outcome of a power cut on an append-only

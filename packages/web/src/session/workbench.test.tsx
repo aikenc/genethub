@@ -24,6 +24,7 @@ const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
     setEffort: false,
     permissions: false,
     resume: true,
+    fork: false,
     attachments: false,
   },
   catalog: {
@@ -78,7 +79,7 @@ describe("what the user sees in a session", () => {
     expect(screen.getByText("先看看目录结构")).toBeInTheDocument();
   });
 
-  it("renders a shell call as its command and output", () => {
+  it("keeps a successful shell call compact until its details are requested", async () => {
     render(
       <ToolCallView
         name="bash"
@@ -86,13 +87,58 @@ describe("what the user sees in a session", () => {
         detail={{ kind: "shell", command: "ls -a", output: "a\nb", exitCode: 0 }}
       />,
     );
-    // Header summary and body both carry the command — the body is what wraps
-    // on a phone; the header stays a one-line truncate.
-    expect(screen.getAllByText("ls -a").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("ls -a")).toBeInTheDocument();
+    expect(screen.getByTestId("tool-call")).not.toHaveTextContent("a b");
+
+    expect(screen.getByRole("img", { name: "执行命令" })).toHaveTextContent("🖥️");
+    await userEvent.click(screen.getByRole("button", { name: "查看输出" }));
     expect(screen.getByTestId("tool-call")).toHaveTextContent("a b");
   });
 
-  it("colours an edit so the change is readable at a glance", () => {
+  it("renders the bounded overview but expands only the output", async () => {
+    render(
+      <ToolCallView
+        name="bash"
+        status="ok"
+        detail={{
+          kind: "overview",
+          toolKind: "shell",
+          overview: "检查构建",
+          input: "npm test",
+          output: "全部通过",
+        }}
+      />,
+    );
+    expect(screen.getByText("检查构建")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "查看输出" }));
+    expect(screen.queryByText("npm test")).not.toBeInTheDocument();
+    expect(screen.getByText("全部通过")).toBeInTheDocument();
+  });
+
+  it("keeps legacy output to the first two and last two 64-character lines", async () => {
+    render(
+      <ToolCallView
+        name="legacy"
+        status="ok"
+        detail={{
+          kind: "overview",
+          toolKind: "other",
+          overview: "旧机器输出",
+          input: "ignored",
+          output: [`${"a".repeat(80)}`, "second", "middle", "fourth", "last"].join("\n"),
+        }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "查看输出" }));
+    const output = screen.getByText(/已省略 1 行/).textContent ?? "";
+    expect(output.split("\n")).toHaveLength(5);
+    expect(output.split("\n")[0]).toHaveLength(64);
+    expect(output).not.toContain("middle");
+    expect(output).toContain("fourth\nlast");
+  });
+
+  it("shows an edit with its own emoji and expands its output", async () => {
     render(
       <ToolCallView
         name="edit"
@@ -100,9 +146,10 @@ describe("what the user sees in a session", () => {
         detail={{ kind: "edit", path: "src/main.rs", diff: "@@ -1 +1 @@\n-old\n+new" }}
       />,
     );
-    const diff = screen.getByTestId("diff");
-    expect(diff).toHaveTextContent("-old");
-    expect(diff).toHaveTextContent("+new");
+    expect(screen.getByRole("img", { name: "编辑文件" })).toHaveTextContent("✏️");
+    await userEvent.click(screen.getByRole("button", { name: "查看输出" }));
+    expect(screen.getByTestId("tool-call")).toHaveTextContent("-old");
+    expect(screen.getByTestId("tool-call")).toHaveTextContent("+new");
   });
 
   it("shows a tool it has never heard of instead of dropping it", async () => {
@@ -115,8 +162,8 @@ describe("what the user sees in a session", () => {
     );
 
     expect(screen.getByText("teleport")).toBeInTheDocument();
-    await userEvent.click(screen.getByText("展开原始数据"));
-    expect(screen.getByTestId("tool-call")).toHaveTextContent("mars");
+    expect(screen.getByLabelText("失败")).toHaveTextContent("!");
+    expect(screen.getByTestId("tool-call")).toHaveTextContent("已省略");
   });
 
   it("says a turn failed, in the words the daemon used", () => {
@@ -305,7 +352,7 @@ describe("the controls offered to the user", () => {
 });
 
 describe("a whole turn as the timeline sees it", () => {
-  it("goes from prompt to tool call to answer without losing anything", () => {
+  it("keeps its compact metrics and reveals token details on demand", async () => {
     const call: TimelineItem = {
       type: "toolCall",
       id: "c1",
@@ -321,7 +368,7 @@ describe("a whole turn as the timeline sees it", () => {
         turnId: "t1",
         item: { type: "userMessage" as const, id: "u1", text: "写个文件", attachments: [] },
       },
-      { type: "turnStarted" as const, turnId: "t1" },
+      { type: "turnStarted" as const, turnId: "t1", startedAtMs: 1 },
       { type: "item" as const, turnId: "t1", item: call },
       {
         type: "itemDelta" as const,
@@ -333,6 +380,30 @@ describe("a whole turn as the timeline sees it", () => {
         type: "item" as const,
         turnId: "t1",
         item: { type: "assistantMessage" as const, id: "a1", text: "写好了。" },
+      },
+      {
+        type: "item" as const,
+        turnId: "t1",
+        item: {
+          type: "turnSummary" as const,
+          id: "summary-t1",
+          stats: {
+            turnId: "t1",
+            outcome: "completed" as const,
+            startedAtMs: Date.now() - 125_000,
+            finishedAtMs: Date.now() - 120_000,
+            durationMs: 5_000,
+            usage: {
+              inputTokens: 10,
+              outputTokens: 5,
+              cacheReadTokens: 3,
+              cacheWriteTokens: 0,
+              costUsd: undefined,
+            },
+            toolCalls: 1,
+            forkCheckpoint: undefined,
+          },
+        },
       },
       {
         type: "turnCompleted" as const,
@@ -353,6 +424,14 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.getByText("写个文件")).toBeInTheDocument();
     expect(screen.getByTestId("tool-call")).toHaveTextContent("hello.txt");
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("写好了。");
+    expect(screen.getByTestId("turn-footer")).toHaveTextContent("2 分钟前");
+    expect(screen.getByTestId("turn-footer")).toHaveTextContent("耗时 5s");
+    expect(screen.queryByText("Cached 3")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /5 输出 tokens/ }));
+    expect(screen.getByText("Cached 3")).toBeInTheDocument();
+    expect(screen.getByText("Input 10")).toBeInTheDocument();
+    expect(screen.getByText("Tools 1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled();
     expect(state.status).toBe("idle");
   });
 });

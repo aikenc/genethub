@@ -70,8 +70,8 @@ async fn the_main_journey_runs_a_task_end_to_end_on_the_built_in_agent() {
     assert!(
         tools
             .iter()
-            .any(|(_, detail)| matches!(detail, ToolCallDetail::Write { path, .. } if path.contains("result.txt"))),
-        "the write is rendered as a write, not as Unknown: {tools:?}"
+            .any(|(_, detail)| matches!(detail, ToolCallDetail::Overview { overview, .. } if overview.contains("result.txt"))),
+        "the write keeps a useful bounded overview: {tools:?}"
     );
     assert!(
         !events.assistant_text().trim().is_empty(),
@@ -589,13 +589,19 @@ async fn an_unknown_tool_still_renders_instead_of_disappearing() {
         .expect("the unrecognised call is not dropped");
     assert_eq!(*name, "teleport");
     match detail {
-        ToolCallDetail::Unknown { raw } => {
-            assert!(
-                raw.is_null(),
-                "the fallback card keeps the name and status, not the payload: {raw}"
-            );
+        ToolCallDetail::Overview {
+            overview,
+            input,
+            output,
+            ..
+        } => {
+            assert!(overview.chars().count() <= 64);
+            assert!(input.lines().count() <= 1);
+            assert!(input.chars().count() <= 64);
+            assert!(output.lines().count() <= 5);
+            assert!(output.lines().all(|line| line.chars().count() <= 64));
         }
-        other => panic!("expected the fallback renderer, got {other:?}"),
+        other => panic!("expected the bounded fallback renderer, got {other:?}"),
     }
 
     journey.finish().await;
@@ -1211,15 +1217,16 @@ async fn a_commands_output_stays_behind_the_access_layer() {
         .find(|(name, _)| *name == "bash")
         .expect("the command ran");
     match detail {
-        ToolCallDetail::Shell {
-            command, output, ..
+        ToolCallDetail::Overview {
+            overview,
+            input,
+            output,
+            ..
         } => {
-            assert_eq!(command, "seq 1 200000");
-            assert!(
-                output.is_empty(),
-                "the output is the detail the access layer filters: {} bytes",
-                output.len()
-            );
+            assert_eq!(overview, "seq 1 200000");
+            assert_eq!(input, "seq 1 200000");
+            assert!(output.lines().count() <= 5);
+            assert!(output.lines().all(|line| line.chars().count() <= 64));
         }
         other => panic!("unexpected {other:?}"),
     }

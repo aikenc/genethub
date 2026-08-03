@@ -1,4 +1,4 @@
-import type { TimelineItem } from "@genehub/proto";
+import type { TimelineItem, TurnStats } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 
 import { Markdown } from "./Markdown";
@@ -36,6 +36,14 @@ export function TimelineView({ state }: { state: TimelineState }) {
   const bottom = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
+  const forkSession = useWorkbench((workbench) => workbench.forkSession);
+  const activeSessionId = useWorkbench((workbench) => workbench.activeSessionId);
+  const canFork = useWorkbench((workbench) => {
+    const session = workbench.sessions.find((entry) => entry.id === activeSessionId);
+    const agent = workbench.agents.find((entry) => entry.id === session?.agentId);
+    return agent?.capabilities.fork ?? false;
+  });
+  const turns = turnBlocks(state.items);
 
   // Stay at the bottom while new content arrives, unless the user scrolled up
   // to read something — then leave them where they are.
@@ -54,8 +62,27 @@ export function TimelineView({ state }: { state: TimelineState }) {
         setPinned(distance < 40);
       }}
     >
-      {state.items.map((item) => (
-        <Item key={item.id} item={item} />
+      {turns.map((turn, index) => (
+        <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
+          {turn.items.map((item) => (
+            <Item key={item.id} item={item} />
+          ))}
+          {turn.stats ? (
+            <TurnFooter
+              stats={turn.stats}
+              text={assistantText(turn.items)}
+              canFork={canFork && Boolean(turn.stats.forkCheckpoint)}
+              onFork={() => void forkSession(turn.stats!.turnId)}
+            />
+          ) : index === turns.length - 1 && state.activeTurn ? (
+            <TurnFooter
+              liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
+              liveTools={countTools(turn.items)}
+              text={assistantText(turn.items)}
+              canFork={false}
+            />
+          ) : null}
+        </section>
       ))}
 
       {state.lastError ? (
@@ -139,7 +166,167 @@ function Item({ item }: { item: TimelineItem }) {
           <LogLink />
         </div>
       );
+
+    case "turnSummary":
+      return null;
   }
+}
+
+interface TurnBlock {
+  items: TimelineItem[];
+  stats: TurnStats | null;
+}
+
+function turnBlocks(items: TimelineItem[]): TurnBlock[] {
+  const turns: TurnBlock[] = [];
+  let current: TimelineItem[] = [];
+  for (const item of items) {
+    if (item.type === "userMessage" && current.some((entry) => entry.type === "userMessage")) {
+      turns.push({ items: current, stats: null });
+      current = [];
+    }
+    if (item.type === "turnSummary") {
+      turns.push({ items: current, stats: item.stats });
+      current = [];
+    } else {
+      current.push(item);
+    }
+  }
+  if (current.length > 0 || turns.length === 0) turns.push({ items: current, stats: null });
+  return turns;
+}
+
+function assistantText(items: TimelineItem[]): string {
+  return items
+    .filter((item): item is Extract<TimelineItem, { type: "assistantMessage" }> =>
+      item.type === "assistantMessage",
+    )
+    .map((item) => item.text)
+    .join("\n\n");
+}
+
+function countTools(items: TimelineItem[]): number {
+  const count = (item: TimelineItem): number => {
+    if (item.type !== "toolCall") return 0;
+    if (item.detail.kind !== "subAgent") return 1;
+    return 1 + item.detail.items.reduce((total, child) => total + count(child), 0);
+  };
+  return items.reduce((total, item) => total + count(item), 0);
+}
+
+function TurnFooter({
+  stats,
+  liveStartedAtMs,
+  liveTools = 0,
+  text,
+  canFork,
+  onFork,
+}: {
+  stats?: TurnStats;
+  liveStartedAtMs?: number;
+  liveTools?: number;
+  text: string;
+  canFork: boolean;
+  onFork?: () => void;
+}) {
+  const live = !stats;
+  const [now, setNow] = useState(Date.now());
+  const [details, setDetails] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), live ? 1_000 : 60_000);
+    return () => window.clearInterval(timer);
+  }, [live]);
+
+  const duration = stats?.durationMs ?? Math.max(0, now - (liveStartedAtMs ?? now));
+  const usage = stats?.usage;
+  const tools = stats?.toolCalls ?? liveTools;
+  const forkTitle = canFork
+    ? "从这个 turn 创建独立分支"
+    : live
+      ? "turn 完成后才能 Fork"
+      : "当前 Agent 不支持从这个 turn Fork";
+
+  return (
+    <footer className="ml-auto max-w-full text-xs text-muted" data-testid="turn-footer">
+      <div className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
+        <span>{stats ? relativeTime(stats.finishedAtMs, now) : "进行中"}</span>
+        <span aria-hidden="true">·</span>
+        <span>耗时 {formatDuration(duration)}</span>
+        <span aria-hidden="true">·</span>
+        <button
+          type="button"
+          className="text-accent"
+          aria-expanded={details}
+          onClick={() => setDetails((value) => !value)}
+        >
+          {usage ? `${formatTokens(usage.outputTokens)} 输出 tokens` : "— 输出 tokens"}
+          {details ? " ▴" : " ▾"}
+        </button>
+        <button
+          type="button"
+          className="text-accent disabled:cursor-not-allowed disabled:text-faint"
+          disabled={!canFork}
+          title={forkTitle}
+          onClick={onFork}
+        >
+          Fork
+        </button>
+        <button
+          type="button"
+          className="text-accent disabled:text-faint"
+          disabled={!text}
+          onClick={() => {
+            if (!text || !navigator.clipboard) return;
+            void navigator.clipboard.writeText(text).then(() => {
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1200);
+            });
+          }}
+        >
+          {copied ? "已复制" : "复制"}
+        </button>
+      </div>
+      {details ? (
+        <div className="mt-1 flex flex-wrap justify-end gap-x-3 rounded-md bg-raised px-2 py-1">
+          <span>Cached {usage ? formatTokens(usage.cacheReadTokens) : "—"}</span>
+          <span>Input {usage ? formatTokens(usage.inputTokens) : "—"}</span>
+          <span>Output {usage ? formatTokens(usage.outputTokens) : "—"}</span>
+          <span>Tools {tools}</span>
+        </div>
+      ) : null}
+    </footer>
+  );
+}
+
+function relativeTime(timestamp: number, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - timestamp) / 1_000));
+  if (seconds < 60) return "刚刚";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} 天前`;
+  return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" }).format(timestamp);
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+}
+
+function formatTokens(value: number): string {
+  if (value < 1_000) return String(value);
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(1)}m`;
 }
 
 /** Collapsed by default: it is context, not the answer. */
