@@ -23,7 +23,10 @@ export default {
         mono: ["ui-monospace", "SFMono-Regular", "Menlo", "Consolas", "monospace"],
       },
       maxWidth: {
-        chat: "48rem",
+        // Wide enough to use a desktop workbench without turning long tool
+        // output and the composer into a narrow column. On smaller screens the
+        // parent width still wins, so the same token remains fluid there.
+        chat: "64rem",
       },
     },
   },
