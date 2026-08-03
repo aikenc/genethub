@@ -123,6 +123,48 @@ describe("opening a session that belongs to another project", () => {
 
     expect(useWorkbench.getState().activeWorkspaceId).toBe("w1");
   });
+
+  it("does not let a late subscription overwrite the session opened next", async () => {
+    const second: SessionSummary = { ...SESSION, id: "s2" };
+    let releaseFirst!: (value: {
+      snapshot: unknown;
+      replayed: SequencedEvent[];
+      reset: boolean;
+    }) => void;
+    const first = new Promise<{
+      snapshot: unknown;
+      replayed: SequencedEvent[];
+      reset: boolean;
+    }>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const snapshot = (summary: SessionSummary, text: string) => ({
+      snapshot: {
+        seq: 0,
+        items: [{ type: "assistantMessage", id: `a-${summary.id}`, text }],
+        pendingPermissions: [],
+        summary,
+      },
+      replayed: [],
+      reset: true,
+    });
+    const client = {
+      subscribe: async (sessionId: string) =>
+        sessionId === "s1" ? first : snapshot(second, "second"),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({ client, sessions: [SESSION, second] });
+
+    const openingFirst = useWorkbench.getState().selectSession("s1");
+    await useWorkbench.getState().selectSession("s2");
+    releaseFirst(snapshot(SESSION, "first"));
+    await openingFirst;
+
+    expect(useWorkbench.getState().activeSessionId).toBe("s2");
+    expect(useWorkbench.getState().timeline.items).toEqual([
+      { type: "assistantMessage", id: "a-s2", text: "second" },
+    ]);
+  });
 });
 
 /**

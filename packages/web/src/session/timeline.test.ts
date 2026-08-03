@@ -196,6 +196,10 @@ describe("the session timeline", () => {
     } as unknown as SessionSnapshot);
 
     expect(state.pendingPermission?.id).toBe("p1");
+    // A snapshot cannot recover the transient turn id, but it does recover the
+    // durable fact the composer needs in order to keep showing Stop.
+    expect(state.activeTurn).toBeNull();
+    expect(state.status).toBe("running");
     expect(state.seq).toBe(42);
   });
 

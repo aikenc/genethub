@@ -408,6 +408,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     });
 
     const base = fromSnapshot(snapshot as SessionSnapshot);
+    // A slower subscription must not repaint whichever session the user opened
+    // next. This is easy to hit when switching pages over a relay: both replies
+    // are valid, but only the currently selected session owns the timeline.
+    if (get().activeSessionId !== sessionId) return;
     set({ timeline: replayed.reduce(applySequenced, base) });
   },
 
