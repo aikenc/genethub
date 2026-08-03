@@ -13,6 +13,8 @@
 export const WIRE_VERSION = 1;
 
 export const AUTHORIZE_DAEMON = "/internal/authorize-daemon";
+/** Look up a client ticket without spending it (`ChannelAuthority.inspectClient`). */
+export const INSPECT_CLIENT = "/internal/inspect-client";
 export const AUTHORIZE_CLIENT = "/internal/authorize-client";
 export const PRESENCE = "/internal/presence";
 export const REVOCATIONS = "/internal/revocations";
@@ -28,11 +30,12 @@ export interface AuthorizeDaemonResponse {
   daemonId: string;
 }
 
-/** `POST /internal/authorize-client` */
+/** `POST /internal/inspect-client` and `POST /internal/authorize-client` */
 export interface AuthorizeClientRequest {
   ticket: string;
 }
 
+/** 200 with a body, or 204 for "no". Same shape for inspect and authorize. */
 export interface AuthorizeClientResponse {
   machineId: string;
   clientId: string;

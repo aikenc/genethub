@@ -167,6 +167,22 @@ const TABLE = {
     alpha: "https://relay-alpha.genethub.com/download/alpha",
   },
   tarball_prefix: { dev: "genet-dev", official: "genet", beta: "genet-beta", alpha: "genet-alpha" },
+
+  // What the WebView is allowed to dial. Loopback is always there (the local
+  // daemon). Released channels also need https/wss: the workbench reaches a
+  // remote machine by opening `wss://…/forward/client?ticket=…` itself — if
+  // CSP lists only loopback, hub.connect succeeds, the ticket is never
+  // redeemed, and the UI sits on 「已断开」while burning tickets in a loop.
+  // Wide `https: wss:` (not a pinned host) so a user who pairs with their own
+  // Hub is not locked to the default name. Dev stays loopback-only: it has no
+  // default Hub and is not a shipping build.
+  connect_src: {
+    dev: "'self' ws://127.0.0.1:* http://127.0.0.1:* ipc: http://ipc.localhost",
+    official:
+      "'self' ws://127.0.0.1:* http://127.0.0.1:* https: wss: ipc: http://ipc.localhost",
+    beta: "'self' ws://127.0.0.1:* http://127.0.0.1:* https: wss: ipc: http://ipc.localhost",
+    alpha: "'self' ws://127.0.0.1:* http://127.0.0.1:* https: wss: ipc: http://ipc.localhost",
+  },
 };
 
 const value = (key, channel) => {
@@ -380,6 +396,8 @@ function stamp(channel) {
   // and locks apart. Every substitute keeps the line's tail — a whole-line
   // replacement eats the trailing comma and the next Tauri build reports a
   // parse error, not a wrong name.
+  const csp =
+    `default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ${value("connect_src", channel)}`;
   rewriteLines(join(repo, "apps/desktop/src-tauri/tauri.conf.json"), [
     [/^  "productName": "[^"]*"/, (line) => line.replace(/"productName": "[^"]*"/, `"productName": "${pathName}"`)],
     [/^  "identifier": "[^"]*"/, (line) => line.replace(/"identifier": "[^"]*"/, `"identifier": "${identifier}"`)],
@@ -387,6 +405,9 @@ function stamp(channel) {
     // Indentation-agnostic: the windows block moved a level when the CLI
     // merge restructured it, and a fixed-indent pattern misses silently.
     [/^(\s*)"title": "[^"]*"/, (line) => line.replace(/"title": "[^"]*"/, `"title": "${product}"`)],
+    // Whole-line replace: the CSP string itself contains quotes, so a
+    // field-only substitute would leave a broken JSON value behind.
+    [/^\s*"csp": "/, `      "csp": "${csp}"`],
   ]);
 
   // The binaries' own names. Crate (package) names stay put — source packages
@@ -419,6 +440,7 @@ function stamp(channel) {
   const conf = readFileSync(join(repo, "apps/desktop/src-tauri/tauri.conf.json"), "utf8");
   console.log(conf.match(/"productName".*$/m)[0].trim());
   console.log(conf.match(/"identifier".*$/m)[0].trim());
+  console.log(conf.match(/"csp".*$/m)[0].trim());
   console.log(readFileSync(join(repo, "scripts/install.sh"), "utf8").match(/^# channel:.*$/m)[0]);
 }
 

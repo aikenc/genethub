@@ -38,6 +38,11 @@ export class FakeAuthority implements ChannelAuthority {
     return this.daemonTickets.get(ticket) ?? null;
   }
 
+  async inspectClient(ticket: string): Promise<ClientGrant | null> {
+    this.calls.push("inspectClient");
+    return this.clientTickets.get(ticket) ?? null;
+  }
+
   async authorizeClient(ticket: string): Promise<ClientGrant | null> {
     this.calls.push("authorizeClient");
     const grant = this.clientTickets.get(ticket);

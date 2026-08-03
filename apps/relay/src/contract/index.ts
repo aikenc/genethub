@@ -44,7 +44,16 @@ export interface ChannelAuthority {
   /** Machine registering its outbound connection. Null means "not allowed". */
   authorizeDaemon(ticket: string): Promise<DaemonGrant | null>;
 
-  /** Device asking to attach to a machine. Null means "not allowed". */
+  /**
+   * Look up a client ticket without spending it.
+   *
+   * The forwarder asks this first so it can refuse an offline machine with
+   * 409 *before* burning a one-shot ticket. Spending happens in
+   * `authorizeClient`, only once the uplink is known to be there.
+   */
+  inspectClient(ticket: string): Promise<ClientGrant | null>;
+
+  /** Device asking to attach to a machine. Null means "not allowed". Spends the ticket. */
   authorizeClient(ticket: string): Promise<ClientGrant | null>;
 
   /** Tells the control plane whether a machine currently has an uplink. */

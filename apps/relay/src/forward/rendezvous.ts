@@ -30,6 +30,13 @@ export class RendezvousAuthority implements ChannelAuthority {
     return { machineId: id, daemonId: id };
   }
 
+  async inspectClient(ticket: string): Promise<ClientGrant | null> {
+    if (!ticket) return null;
+    // Peek only: a stable placeholder clientId so the forwarder can check the
+    // uplink map without inventing a fresh id it will throw away.
+    return { machineId: ticket, clientId: "inspect" };
+  }
+
   async authorizeClient(ticket: string): Promise<ClientGrant | null> {
     if (!ticket) return null;
     // A client that names a slot nobody holds is turned away by the forwarder

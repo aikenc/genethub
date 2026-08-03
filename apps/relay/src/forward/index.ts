@@ -211,16 +211,28 @@ export class Forwarder {
     const ticket = bearer(request);
     if (!ticket) return reject(socket, 401, "Unauthorized");
 
+    // Inspect first, spend second. Authorizing (which burns a one-shot ticket)
+    // before checking the uplink map turned every brief offline blip into a
+    // spent ticket and a 409 — the desktop then mints another, and the Hub
+    // fills with unredeemable rows while the user stares at 「已断开」.
+    const peek = await this.authority.inspectClient(ticket).catch((error: unknown) => {
+      log.warn("forward: the control plane could not be reached", { error: String(error) });
+      return null;
+    });
+    if (!peek) return reject(socket, 403, "Forbidden");
+
+    const machine = this.machines.get(peek.machineId);
+    if (!machine) return reject(socket, 409, "Machine Offline");
+    if (machine.clients.size >= config.limits.maxClientsPerMachine) {
+      return reject(socket, 429, "Too Many Connections");
+    }
+
     const grant = await this.authority.authorizeClient(ticket).catch((error: unknown) => {
       log.warn("forward: the control plane could not be reached", { error: String(error) });
       return null;
     });
-    if (!grant) return reject(socket, 403, "Forbidden");
-
-    const machine = this.machines.get(grant.machineId);
-    if (!machine) return reject(socket, 409, "Machine Offline");
-    if (machine.clients.size >= config.limits.maxClientsPerMachine) {
-      return reject(socket, 429, "Too Many Connections");
+    if (!grant || grant.machineId !== machine.machineId) {
+      return reject(socket, 403, "Forbidden");
     }
 
     this.clients.handleUpgrade(request, socket, head, (ws) => {

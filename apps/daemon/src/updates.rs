@@ -9,8 +9,10 @@
 //!
 //! It lives in the daemon rather than in the desktop shell for two reasons: the
 //! shell exists on Windows only, and Linux reaches the same workbench in a
-//! browser; and this way the outbound call needs no exception in the shell's CSP,
-//! which lists loopback and nothing else.
+//! browser; and this way the outbound call needs no exception beyond what a
+//! released shell already opens for Hub WSS (`scripts/channel.mjs` stamps
+//! `https: wss:` into the shipping CSP — the tree's loopback-only CSP is the
+//! dev column).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

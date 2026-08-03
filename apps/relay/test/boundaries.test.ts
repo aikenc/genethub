@@ -69,7 +69,7 @@ describe("what the relay is allowed to know", () => {
     );
     assert.deepEqual(
       calls.map(([, name]) => name),
-      ["authorizeDaemon", "authorizeClient", "reportPresence"],
+      ["authorizeDaemon", "inspectClient", "authorizeClient", "reportPresence"],
       "a new contract method needs a deliberate decision, not a silent one",
     );
 

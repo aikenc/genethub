@@ -231,11 +231,20 @@ describe("the machines the account knows about", () => {
     const queue = socketQueue();
     const opening = desktopHost(queue.factory).openTarget!("mch_far");
 
-    await answer(queue, 0, "hub.connect", {
+    // One short-lived connection carries both asks (ticket + label). A second
+    // socket used to be a second handshake that could fail the whole switch.
+    await vi.waitFor(() => expect(queue.sockets.length).toBe(1));
+    const socket = queue.sockets[0]!;
+    socket.open();
+    await vi.waitFor(() => socket.lastOf("hello"));
+    socket.acceptHandshake();
+    await vi.waitFor(() => socket.lastOf("hub.connect"));
+    socket.reply(socket.lastOf("hub.connect").id, {
       type: "hubTicket",
       data: { url: REMOTE, expiresAt: "2099-01-01T00:00:00Z", fingerprint: "EF-GH" },
     });
-    await answer(queue, 1, "hub.machines", {
+    await vi.waitFor(() => socket.lastOf("hub.machines"));
+    socket.reply(socket.lastOf("hub.machines").id, {
       type: "hubMachines",
       data: [{ id: "mch_far", name: "公司台式机", online: true, fingerprint: "EF-GH" }],
     });

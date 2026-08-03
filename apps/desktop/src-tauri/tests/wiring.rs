@@ -568,6 +568,37 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
          unless told"
     );
 
+    // Remote workbench dials the Hub's WSS itself. A released package whose
+    // CSP lists only loopback signs tickets that can never be redeemed — the
+    // WebView blocks the upgrade before the relay sees it. Dev stays
+    // loopback-only; every shipping column must open https/wss.
+    let connect_src = row("connect_src");
+    assert!(
+        connect_src.contains("dev: \"'self' ws://127.0.0.1:*"),
+        "the dev column of connect_src must stay loopback-only"
+    );
+    for channel in ["official", "beta", "alpha"] {
+        assert!(
+            connect_src.contains(&format!("{channel}:"))
+                && connect_src.contains("https: wss:"),
+            "the {channel} column of connect_src must allow https/wss — \
+             without them the desktop cannot open a remote workbench"
+        );
+    }
+    let csp = config["app"]["security"]["csp"]
+        .as_str()
+        .expect("tauri.conf.json has no CSP");
+    assert!(
+        csp.contains("ws://127.0.0.1:*") && !csp.contains("https: wss:"),
+        "the tree's CSP must be the dev (loopback-only) column — a release \
+         stamps https/wss in via scripts/channel.mjs"
+    );
+    assert!(
+        stamper.contains("\"csp\":"),
+        "scripts/channel.mjs no longer stamps the CSP line, so a release \
+         would ship a WebView that cannot reach the Hub"
+    );
+
     // And the daemon the shell spawns has to hear the same override name the
     // daemon listens for, on every channel — a mismatch is the shell and the
     // daemon disagreeing about where the data lives.

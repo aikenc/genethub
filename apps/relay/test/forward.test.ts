@@ -115,11 +115,14 @@ describe("forwarding between a machine and a browser", () => {
     uplink.close();
   });
 
-  it("refuses a client whose machine has no uplink", async () => {
+  it("refuses a client whose machine has no uplink without spending the ticket", async () => {
     const ticket = "client-for-an-absent-machine";
     relay.authority.grantClient(ticket, { machineId: "m_absent", clientId: "dev_1" });
     const result = await connect(`${relay.wsOrigin}${CLIENT_PATH}?ticket=${ticket}`);
     assert.ok("error" in result && result.error.includes("409"), `got ${JSON.stringify(result)}`);
+    // The ticket must still be there — burning it on a 409 is what made a
+    // brief offline blip look like a permanent「已断开」on the desktop.
+    assert.ok(relay.authority.clientTickets.has(ticket), "offline refusal spent the ticket");
   });
 
   it("drops every attached client when the machine goes away", async () => {

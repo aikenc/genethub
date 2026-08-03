@@ -8,6 +8,7 @@ import type {
 import {
   AUTHORIZE_CLIENT,
   AUTHORIZE_DAEMON,
+  INSPECT_CLIENT,
   PRESENCE,
   REVOCATIONS,
   type AuthorizeClientResponse,
@@ -35,6 +36,10 @@ export class RemoteAuthority implements ChannelAuthority {
 
   async authorizeDaemon(ticket: string): Promise<DaemonGrant | null> {
     return this.post<AuthorizeDaemonResponse>(AUTHORIZE_DAEMON, { ticket });
+  }
+
+  async inspectClient(ticket: string): Promise<ClientGrant | null> {
+    return this.post<AuthorizeClientResponse>(INSPECT_CLIENT, { ticket });
   }
 
   async authorizeClient(ticket: string): Promise<ClientGrant | null> {

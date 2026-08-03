@@ -368,19 +368,27 @@ export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Hos
       // moment a client that asked the far end would have nobody to ask.
       const here = await local();
       if (!here) throw new Error("这台电脑上的后台进程没有在运行，没法替你去连别的机器。");
-      const ticket = await onDaemon(
+      // One short-lived connection for both asks: a separate hub.machines dial
+      // used to open a second handshake just to read a label, and would fail
+      // the whole switch if the daemon hiccupped between the two.
+      const switched = await onDaemon(
         here.url,
-        (client) => client.call({ type: "hub.connect", payload: { machineId: id } }),
+        async (client) => {
+          const ticket = await client.call({ type: "hub.connect", payload: { machineId: id } });
+          if (ticket?.type !== "hubTicket") return null;
+          const machines = await client.call({ type: "hub.machines" }).catch(() => null);
+          const account = machines?.type === "hubMachines" ? machines.data : [];
+          return {
+            url: ticket.data.url,
+            via: "relay" as const,
+            label: account.find((entry) => entry.id === id)?.name ?? "远程机器",
+            fingerprint: ticket.data.fingerprint,
+          };
+        },
         socketFactory,
       );
-      if (ticket?.type !== "hubTicket") throw new Error("这台机器不在你的账号下。");
-      const account = await hubMachines(here.url, socketFactory).catch(() => []);
-      return {
-        url: ticket.data.url,
-        via: "relay",
-        label: account.find((entry) => entry.id === id)?.name ?? "远程机器",
-        fingerprint: ticket.data.fingerprint,
-      };
+      if (!switched) throw new Error("这台机器不在你的账号下。");
+      return switched;
     },
     notify(notification) {
       void tauri.core.invoke("notify", { ...notification });
@@ -475,19 +483,33 @@ async function onDaemon<T>(
   socketFactory?: (url: string) => WebSocketLike,
 ): Promise<T> {
   const client = new Client({ url, clientName: "genehub-app", ...(socketFactory ? { socketFactory } : {}) });
-  const gaveUp = new Promise<never>((_, reject) => {
-    // Waiting out a blip forever is right for the workbench and wrong here:
-    // this is one question asked while somebody holds a menu open. The first
-    // failed dial is the answer.
-    const stop = client.onStateChange((state) => {
-      if (state !== "reconnecting") return;
+  // Wait until ready (or give up) rather than failing on the first
+  // `reconnecting` flicker: a daemon that is mid-restart would otherwise make
+  // every machine switch and every Hub directory read look permanently dead.
+  const ready = new Promise<void>((resolve, reject) => {
+    let stop = () => {};
+    const timer = setTimeout(() => {
       stop();
       reject(new Error("这台电脑上的后台进程没有回应。"));
+    }, 3_000);
+    stop = client.onStateChange((state) => {
+      if (state === "ready") {
+        clearTimeout(timer);
+        stop();
+        resolve();
+        return;
+      }
+      if (state === "closed") {
+        clearTimeout(timer);
+        stop();
+        reject(new Error("这台电脑上的后台进程没有在运行。"));
+      }
     });
   });
   client.connect();
   try {
-    return await Promise.race([exchange(client), gaveUp]);
+    await ready;
+    return await exchange(client);
   } finally {
     client.close();
   }
