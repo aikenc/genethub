@@ -28,7 +28,7 @@
 |------|------|
 | 流式对话 | 增量打字机效果、markdown 渲染（GFM：列表/表格/删除线）、代码块带语言标签和复制按钮 |
 | 推理块 | `Reasoning` 折叠展示，默认收起 |
-| 工具调用渲染 | 按 `ToolCallDetail` 分派渲染器：**shell / read / edit / write / search / fetch / plan / subAgent** 专用 + `unknown` 兜底；`plan` 按 markdown 渲染（计划是要读完再批准的东西） |
+| 工具调用渲染 | 按 `ToolCallDetail` 分派渲染器：**shell / read / edit / write / search / fetch / plan / subAgent** 专用 + `unknown` 兜底；普通调用默认只显示单行摘要、按需展开，错误自动展开，`plan` 默认展开并按 markdown 渲染（计划是要读完再批准的东西） |
 | Diff 视图 | `edit` 的行级 diff 着色，支持展开全文 |
 | 输入区 | 多行输入、发送/停止、图片与文件附件、排队消息 |
 | 思考强度 | 独立于「模式」的一条轴：档位由当前模型自己报（Claude Code 每个模型报自己的 `low…max`），模型没有档位就不出现这个控件；不知道当前在哪一档时显示「默认」而不是假装是最低档 |

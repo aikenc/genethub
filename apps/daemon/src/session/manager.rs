@@ -764,7 +764,7 @@ async fn pump_events(
     // per block, not once per token. Item id → (raw text, overview last sent).
     let mut thinking: HashMap<String, (String, String)> = HashMap::new();
     loop {
-        let event = match receiver.recv().await {
+        let mut event = match receiver.recv().await {
             Ok(event) => event,
             Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(missed)) => {
@@ -772,6 +772,11 @@ async fn pump_events(
                 continue;
             }
         };
+
+        // Bound provider payloads first. The overview below sheds ordinary tool
+        // details even further, while intentionally preserving plans; those
+        // still need a hard ceiling before reaching memory, disk or clients.
+        super::compact::event(&mut event);
 
         let event = match event {
             SessionEvent::ItemDelta {

@@ -1,7 +1,7 @@
 import type { ToolCallDetail, ToolStatus } from "@genehub/proto";
 
 import { Markdown } from "./Markdown";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /**
  * Tool calls get a renderer per shape, and `unknown` gets a readable fallback.
@@ -19,6 +19,13 @@ export function ToolCallView({
   status: ToolStatus;
   detail: ToolCallDetail;
 }) {
+  // Plans are decisions the user must read. Ordinary successful tools stay out
+  // of the way until asked for; failures open themselves when they settle.
+  const [open, setOpen] = useState(detail.kind === "plan" || status === "error");
+  useEffect(() => {
+    if (status === "error") setOpen(true);
+  }, [status]);
+
   return (
     <div
       className="min-w-0 max-w-full overflow-hidden rounded-lg border border-line bg-surface"
@@ -29,10 +36,20 @@ export function ToolCallView({
         <span className="shrink-0 font-mono text-fg">{name}</span>
         {/* Truncate here; the body is where a long command or path is readable. */}
         <span className="min-w-0 flex-1 truncate text-muted">{summarize(detail)}</span>
+        <button
+          type="button"
+          className="shrink-0 text-accent"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? "收起详情" : "展开详情"}
+        </button>
       </header>
-      <div className="min-w-0 px-3 py-2 text-[13px]">
-        <Body detail={detail} />
-      </div>
+      {open ? (
+        <div className="min-w-0 px-3 py-2 text-[13px]">
+          <Body detail={detail} />
+        </div>
+      ) : null}
     </div>
   );
 }

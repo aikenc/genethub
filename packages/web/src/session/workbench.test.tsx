@@ -78,7 +78,7 @@ describe("what the user sees in a session", () => {
     expect(screen.getByText("先看看目录结构")).toBeInTheDocument();
   });
 
-  it("renders a shell call as its command and output", () => {
+  it("keeps a successful shell call compact until its details are requested", async () => {
     render(
       <ToolCallView
         name="bash"
@@ -86,13 +86,14 @@ describe("what the user sees in a session", () => {
         detail={{ kind: "shell", command: "ls -a", output: "a\nb", exitCode: 0 }}
       />,
     );
-    // Header summary and body both carry the command — the body is what wraps
-    // on a phone; the header stays a one-line truncate.
-    expect(screen.getAllByText("ls -a").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("ls -a")).toBeInTheDocument();
+    expect(screen.getByTestId("tool-call")).not.toHaveTextContent("a b");
+
+    await userEvent.click(screen.getByRole("button", { name: "展开详情" }));
     expect(screen.getByTestId("tool-call")).toHaveTextContent("a b");
   });
 
-  it("colours an edit so the change is readable at a glance", () => {
+  it("colours an edit when its compact card is expanded", async () => {
     render(
       <ToolCallView
         name="edit"
@@ -100,6 +101,7 @@ describe("what the user sees in a session", () => {
         detail={{ kind: "edit", path: "src/main.rs", diff: "@@ -1 +1 @@\n-old\n+new" }}
       />,
     );
+    await userEvent.click(screen.getByRole("button", { name: "展开详情" }));
     const diff = screen.getByTestId("diff");
     expect(diff).toHaveTextContent("-old");
     expect(diff).toHaveTextContent("+new");
