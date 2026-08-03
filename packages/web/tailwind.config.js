@@ -23,10 +23,9 @@ export default {
         mono: ["ui-monospace", "SFMono-Regular", "Menlo", "Consolas", "monospace"],
       },
       maxWidth: {
-        // Wide enough to use a desktop workbench without turning long tool
-        // output and the composer into a narrow column. On smaller screens the
-        // parent width still wins, so the same token remains fluid there.
-        chat: "64rem",
+        // Conversation chrome follows the whole available centre column. The
+        // shared page padding, not another reading-width cap, provides air.
+        chat: "none",
       },
     },
   },

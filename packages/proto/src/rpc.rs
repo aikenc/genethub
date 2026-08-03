@@ -272,6 +272,12 @@ pub enum Request {
     WorkspaceCreate { root: String, name: String },
     #[serde(rename = "workspace.rename", rename_all = "camelCase")]
     WorkspaceRename { workspace_id: String, name: String },
+    /// Lists folders on the daemon's machine before a workspace exists.
+    #[serde(rename = "directory.list", rename_all = "camelCase")]
+    DirectoryList {
+        #[serde(default)]
+        path: Option<String>,
+    },
 
     // -- files -------------------------------------------------------------
     #[serde(rename = "file.tree", rename_all = "camelCase")]
@@ -372,6 +378,7 @@ pub enum Reply {
     Snapshot(SessionSnapshot),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),
+    Directory(DirectoryListing),
     FileTree(FileNode),
     FileContent(FileContent),
     GitStatus(GitStatus),
@@ -389,6 +396,23 @@ pub enum Reply {
     },
     /// Nothing to return, but the call succeeded.
     Ack,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct DirectoryListing {
+    pub path: String,
+    pub parent: Option<String>,
+    pub directories: Vec<DirectoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
