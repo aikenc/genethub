@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { PRODUCT } from "../channel";
-import type { Host, WindowControls } from "../host";
+import type { Endpoint, Host, WindowControls } from "../host";
 import { useWorkbench } from "../session/store";
 import { THEME_OPTIONS, useTheme } from "../theme/store";
 
@@ -20,10 +20,12 @@ import { THEME_OPTIONS, useTheme } from "../theme/store";
  */
 export function TitleBar({
   host,
+  endpoint,
   sidebarHidden,
   onToggleSidebar,
 }: {
   host: Host;
+  endpoint: Endpoint;
   sidebarHidden: boolean;
   onToggleSidebar(): void;
 }) {
@@ -43,7 +45,12 @@ export function TitleBar({
       >
         {PRODUCT}
       </span>
-      <AppMenu host={host} sidebarHidden={sidebarHidden} onToggleSidebar={onToggleSidebar} />
+      <AppMenu
+        host={host}
+        endpoint={endpoint}
+        sidebarHidden={sidebarHidden}
+        onToggleSidebar={onToggleSidebar}
+      />
       {/* The rest of the bar is the handle. Without something growing here the
           window can only be dragged by the few pixels between the buttons. */}
       <div data-tauri-drag-region className="h-full min-w-0 flex-1" />
@@ -64,10 +71,12 @@ type MenuName = (typeof MENUS)[number];
  */
 function AppMenu({
   host,
+  endpoint,
   sidebarHidden,
   onToggleSidebar,
 }: {
   host: Host;
+  endpoint: Endpoint;
   sidebarHidden: boolean;
   onToggleSidebar(): void;
 }) {
@@ -114,6 +123,7 @@ function AppMenu({
               <Items
                 name={name}
                 host={host}
+                endpoint={endpoint}
                 sidebarHidden={sidebarHidden}
                 onToggleSidebar={onToggleSidebar}
                 close={() => setOpen(null)}
@@ -141,12 +151,14 @@ function Dropdown({ name, children }: { name: string; children: React.ReactNode 
 function Items({
   name,
   host,
+  endpoint,
   sidebarHidden,
   onToggleSidebar,
   close,
 }: {
   name: MenuName;
   host: Host;
+  endpoint: Endpoint;
   sidebarHidden: boolean;
   onToggleSidebar(): void;
   close(): void;
@@ -182,8 +194,9 @@ function Items({
           // Only where a folder can be browsed. In a browser the daemon is on
           // another machine and there is nothing here to pick from, so that
           // path is typed into the sidebar instead of guessed at from a menu.
-          disabled={!host.pickDirectory}
+          disabled={endpoint.via !== "loopback" || !host.pickDirectory}
           onSelect={run(() => {
+            if (endpoint.via !== "loopback") return;
             void host.pickDirectory?.().then((picked) => {
               if (picked) void openWorkspace(picked);
             });

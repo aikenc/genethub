@@ -264,7 +264,9 @@ export function Sidebar({
         </div>
 
         <div className="border-t border-line px-3 py-2">
-          <OpenProject host={host} compact onOpened={onNavigate} />
+          {endpoint ? (
+            <OpenProject host={host} endpoint={endpoint} compact onOpened={onNavigate} />
+          ) : null}
         </div>
 
         <div

@@ -283,6 +283,7 @@ export function App({
     <div className="flex h-full max-w-full flex-col overflow-x-hidden bg-bg">
       <TitleBar
         host={host}
+        endpoint={endpoint}
         sidebarHidden={sidebarHidden}
         onToggleSidebar={() => setSidebarHidden((hidden) => !hidden)}
       />
@@ -432,6 +433,7 @@ export function App({
                 ) : (
                   <FirstRun
                     host={host}
+                    endpoint={endpoint}
                     onOpenSettings={() => workbench.openTab("settings")}
                   />
                 )
@@ -511,9 +513,11 @@ export function App({
  */
 function FirstRun({
   host,
+  endpoint,
   onOpenSettings,
 }: {
   host: Host;
+  endpoint: Endpoint;
   onOpenSettings(): void;
 }) {
   const {
@@ -565,7 +569,7 @@ function FirstRun({
         <p className="mb-3 text-xs text-muted">
           agent 只能在你打开的目录里读写，这一步同时决定了它的活动范围。
         </p>
-        <OpenProject host={host} />
+        <OpenProject host={host} endpoint={endpoint} />
       </Splash>
     );
   }

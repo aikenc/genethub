@@ -172,6 +172,27 @@ describe("the first run", () => {
     expect(pickDirectory).toHaveBeenCalled();
   });
 
+  it("does not browse this device when the desktop shell is connected to a remote machine", async () => {
+    const { client } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({ type: "workspaces", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    const pickDirectory = vi.fn(async () => "/local/path");
+    await start(
+      client,
+      hostWith({
+        kind: "desktop",
+        endpoint: async () => ({ url: "wss://relay.test", via: "relay", label: "工作电脑" }),
+        pickDirectory,
+      }),
+    );
+
+    expect(await screen.findAllByText("工作电脑上的文件夹")).not.toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "打开项目文件夹…" })).not.toBeInTheDocument();
+    expect(pickDirectory).not.toHaveBeenCalled();
+  });
+
   /**
    * A browser is talking to a daemon on another machine, where there is nothing
    * local to browse — so it asks for a path instead of offering a picker.
