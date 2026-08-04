@@ -117,4 +117,18 @@ describe("the slash command menu", () => {
     await userEvent.type(input, "/");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
+
+  it("does not reopen a bare-slash menu behind runtime settings", async () => {
+    const { input } = composer();
+    await userEvent.type(input, "/");
+    expect(screen.getByRole("listbox", { name: "命令" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /Agent：claude/ }));
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "关闭运行设置" }));
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+
+    await userEvent.click(input);
+    expect(screen.getByRole("listbox", { name: "命令" })).toBeInTheDocument();
+  });
 });

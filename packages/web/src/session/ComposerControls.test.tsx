@@ -45,8 +45,8 @@ const AGENTS: AgentInfo[] = [
     probe: { state: "ready" },
     capabilities: {
       interrupt: true,
-      setModel: false,
-      setEffort: false,
+      setModel: true,
+      setEffort: true,
       setMode: true,
       permissions: true,
       resume: true,
@@ -103,7 +103,8 @@ describe("the compact runtime summary", () => {
       }),
     ).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("DeepSeek…")).toBeInTheDocument();
-    expect(screen.getByText("中")).toBeInTheDocument();
+    expect(screen.getByText("🤔")).toHaveAttribute("aria-hidden");
+    expect(screen.queryByText("中")).not.toBeInTheDocument();
   });
 
   it("uses the scoped friendly name for a known Codex model", () => {
@@ -188,6 +189,19 @@ describe("the rich runtime settings panel", () => {
     expect(onPickAgent).toHaveBeenCalledWith("codex");
   });
 
+  it("keeps a removed custom Agent as an unavailable tombstone", async () => {
+    controls({ agents: [AGENTS[0]!], agentId: "acp:retired" });
+    const { dialog } = await openSettings(
+      /Agent：acp:retired（不可用：已从当前 Agent 配置中移除）/,
+    );
+    expect(
+      within(dialog).getByRole("radio", {
+        name: "acp:retired 不可用：已从当前 Agent 配置中移除",
+      }),
+    ).toBeChecked();
+    expect(within(dialog).getByRole("radio", { name: "GeneHub Agent" })).toBeEnabled();
+  });
+
   it("selects model ids and effort ids without changing their wire values", async () => {
     const second = {
       id: "provider/a-very-long-model-id",
@@ -218,6 +232,99 @@ describe("the rich runtime settings panel", () => {
     expect(within(dialog).getByText("Run without asking")).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole("radio", { name: /Bypass/ }));
     expect(onPickMode).toHaveBeenCalledWith("bypassPermissions");
+  });
+
+  it("calls Cursor's agent/plan/ask axis a mode instead of a permission policy", async () => {
+    const cursor: AgentInfo = {
+      ...AGENTS[1]!,
+      id: "cursor",
+      label: "Cursor",
+      capabilities: {
+        ...AGENTS[1]!.capabilities,
+        setEffort: false,
+      },
+      catalog: {
+        ...AGENTS[1]!.catalog,
+        modes: [
+          { id: "agent", label: "Agent", description: "Work autonomously" },
+          { id: "plan", label: "Plan", description: "Plan before editing" },
+        ],
+        defaultMode: "agent",
+      },
+    };
+    controls({ agents: [cursor], agentId: "cursor" });
+    expect(screen.getByRole("button", { name: /模式：Agent/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /权限：Agent/ })).not.toBeInTheDocument();
+    const { dialog } = await openSettings(/Agent：Cursor/);
+    expect(within(dialog).getByText("模式")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("⚙️")).toHaveLength(2);
+  });
+
+  it("shows all six registry Agents, including unavailable choices", async () => {
+    const variants: AgentInfo[] = [
+      AGENTS[0]!,
+      { ...AGENTS[0]!, id: "opencode", label: "OpenCode", probe: { state: "notInstalled" } },
+      AGENTS[1]!,
+      { ...AGENTS[1]!, id: "codex", label: "Codex" },
+      { ...AGENTS[1]!, id: "cursor", label: "Cursor" },
+      { ...AGENTS[1]!, id: "acp", label: "ACP agent", probe: { state: "notInstalled" } },
+    ];
+    controls({ agents: variants });
+    const { dialog } = await openSettings();
+    const radios = within(dialog).getAllByRole("radio", { name: /GeneHub|OpenCode|Claude|Codex|Cursor|ACP/ });
+    expect(radios.map((radio) => radio.getAttribute("value"))).toEqual([
+      "genet",
+      "opencode",
+      "claude",
+      "codex",
+      "cursor",
+      "acp",
+    ]);
+    expect(within(dialog).getByRole("radio", { name: "OpenCode 未安装" })).toBeDisabled();
+    expect(within(dialog).getByRole("radio", { name: "ACP agent 未安装" })).toBeDisabled();
+  });
+
+  it("explains an empty ready catalog instead of looking unfinished", async () => {
+    const cursor: AgentInfo = {
+      ...AGENTS[1]!,
+      id: "cursor",
+      label: "Cursor",
+      catalog: {
+        models: [],
+        modes: [],
+        commands: [],
+        defaultModel: undefined,
+        defaultMode: undefined,
+        defaultEffort: undefined,
+      },
+    };
+    controls({ agents: [cursor], agentId: "cursor" });
+    expect(screen.getByText("Cursor")).toBeInTheDocument();
+    const { dialog } = await openSettings(/Agent：Cursor/);
+    expect(within(dialog).getByText(/将使用 Agent 自身默认配置/)).toBeInTheDocument();
+  });
+
+  it("marks Genet as needing model setup when its required catalog is empty", async () => {
+    const genet: AgentInfo = {
+      ...AGENTS[0]!,
+      catalog: {
+        models: [],
+        modes: [],
+        commands: [],
+        defaultModel: undefined,
+        defaultMode: undefined,
+        defaultEffort: "medium",
+      },
+    };
+    controls({ agents: [genet] });
+    const { dialog } = await openSettings(/Agent：GeneHub Agent（待配置：请先配置模型服务）/);
+    expect(
+      within(dialog).getByRole("radio", {
+        name: "GeneHub Agent 待配置：请先配置模型服务",
+      }),
+    ).toBeDisabled();
+    expect(within(dialog).getByText(/当前没有可用模型/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/自身默认配置/)).not.toBeInTheDocument();
   });
 
   it("shows a vanished model as unavailable instead of replacing it with the default", async () => {

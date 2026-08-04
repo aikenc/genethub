@@ -5,8 +5,10 @@ import { createPortal } from "react-dom";
 
 import { AgentMark } from "../presentation/AgentMark";
 import {
+  canStartAgent,
   resolveAgentAvailability,
   resolveAgentPresentation,
+  resolveAgentProfile,
   resolveEffortBadge,
   resolveModeBadge,
   resolveModelPresentation,
@@ -61,12 +63,22 @@ export function RuntimeSettingsPanel({
 
   if (typeof document === "undefined") return null;
   const current = selection.current;
-  const agentOptions = [
-    ...(current ? [current] : []),
-    ...selection.installed.filter((agent) => agent.id !== current?.id),
-  ];
-  const models = current ? withMissing(current.catalog.models, selection.model, selection.modelAvailable) : [];
-  const modes = current ? withMissing(current.catalog.modes, selection.mode, selection.modeAvailable) : [];
+  const agentOptions = selection.agents;
+  const models = current
+    ? withMissing(current.catalog.models, selection.model, selection.modelAvailable)
+    : [];
+  const modes = current
+    ? withMissing(current.catalog.modes, selection.mode, selection.modeAvailable)
+    : [];
+  const currentProfile = current ? resolveAgentProfile(current.id) : null;
+  const permissionAxis = Boolean(
+    current?.capabilities.permissions && currentProfile?.modeKind === "permission",
+  );
+  const hasRuntimeChoices = Boolean(
+    (current?.capabilities.setModel && models.length > 0) ||
+      (current?.capabilities.setEffort && (selection.model?.efforts.length ?? 0) > 0) ||
+      (current?.capabilities.setMode && modes.length > 0),
+  );
   const settingsDisabled = Boolean(disabled);
 
   return createPortal(
@@ -117,34 +129,83 @@ export function RuntimeSettingsPanel({
               {agentOptions.map((agent) => {
                 const presentation = resolveAgentPresentation(agent);
                 const availability = resolveAgentAvailability(agent);
+                const profile = resolveAgentProfile(agent.id);
+                const axes = [
+                  agent.capabilities.setModel ? "模型" : null,
+                  agent.capabilities.setEffort ? "思考" : null,
+                  agent.capabilities.setMode
+                    ? agent.capabilities.permissions && profile.modeKind === "permission"
+                      ? "权限"
+                      : "模式"
+                    : null,
+                  agent.capabilities.attachments ? "附件" : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ");
                 return (
                   <label
                     key={agent.id}
-                    className="flex min-h-14 cursor-pointer items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
+                    className="flex min-h-16 cursor-pointer items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
                   >
                     <input
                       type="radio"
                       name="runtime-agent"
                       value={agent.id}
+                      aria-label={`${presentation.label}${availability ? ` ${availability.fullLabel}` : ""}`}
                       checked={agent.id === current?.id}
-                      disabled={agent.probe.state !== "ready"}
+                      disabled={!canStartAgent(agent)}
                       onChange={() => onPickAgent(agent.id)}
                       className="sr-only"
                     />
-                    <AgentMark agent={agent} className="h-6 w-6" />
+                    {presentation.kind === "text" ? null : (
+                      <AgentMark
+                        agent={agent}
+                        className="h-6 w-6"
+                        fallbackToText={false}
+                      />
+                    )}
                     <span className="min-w-0 flex-1">
-                      {presentation.kind === "text" ? null : (
-                        <span className="block truncate text-fg">{agent.label}</span>
-                      )}
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="min-w-0 flex-1 truncate text-fg">{presentation.label}</span>
+                        <span
+                          className={`shrink-0 text-[10px] ${availability ? "text-danger" : "text-faint"}`}
+                        >
+                          {availability?.shortLabel ?? "已就绪"}
+                        </span>
+                      </span>
                       {availability ? (
-                        <span className="block text-xs text-danger">{availability.fullLabel}</span>
+                        availability.fullLabel === availability.shortLabel ? null : (
+                          <span
+                            className="block truncate text-[10px] text-danger"
+                            title={availability.fullLabel}
+                          >
+                            {availability.fullLabel}
+                          </span>
+                        )
                       ) : null}
+                      <span className="block truncate text-[10px] text-faint">
+                        {axes || "基础对话"}
+                      </span>
                     </span>
                   </label>
                 );
               })}
             </div>
           </fieldset>
+
+          {current?.probe.state === "ready" && !hasRuntimeChoices ? (
+            <div className="rounded-xl border border-line bg-raised/40 px-3 py-2 text-xs text-muted">
+              <span className="font-medium text-fg">
+                {resolveAgentPresentation(current).label}
+              </span>
+              <span>
+                {" "}
+                {currentProfile?.startWithoutModelCatalog
+                  ? "已接入；当前没有返回可切换的模型、思考强度或模式，将使用 Agent 自身默认配置。"
+                  : "已接入，但当前没有可用模型；请先在设置中配置模型服务。"}
+              </span>
+            </div>
+          ) : null}
 
           {current?.capabilities.setModel && models.length > 0 ? (
             <fieldset disabled={settingsDisabled}>
@@ -197,13 +258,13 @@ export function RuntimeSettingsPanel({
           {current?.capabilities.setMode && modes.length > 0 ? (
             <fieldset disabled={settingsDisabled}>
               <legend className="text-xs font-medium uppercase tracking-wide text-faint">
-                {current.capabilities.permissions ? "权限" : "模式"}
+                {permissionAxis ? "权限" : "模式"}
               </legend>
               <div className="mt-2 space-y-2">
                 {modes.map((mode) => {
                   const badge = resolveModeBadge({
                     agentId: current.id,
-                    permissions: current.capabilities.permissions,
+                    permissions: permissionAxis,
                     modeId: mode.id,
                     modeLabel: mode.label,
                   });

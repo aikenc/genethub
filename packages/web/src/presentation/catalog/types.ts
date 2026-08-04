@@ -3,6 +3,10 @@ export interface AgentVisualRule {
   label: string;
   assetId?: string;
   glyph?: string;
+  /** Whether a mode picker changes access policy or the Agent's workflow. */
+  modeKind?: "permission" | "workflow" | "unknown";
+  /** Some CLIs own their model choice and deliberately expose no pre-session catalog. */
+  startWithoutModelCatalog?: boolean;
 }
 
 export interface AgentAssetVariants {

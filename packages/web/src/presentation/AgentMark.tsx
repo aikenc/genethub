@@ -6,9 +6,16 @@ import { resolveAgentPresentation } from "./catalog/resolve";
 export function AgentMark({
   agent,
   className = "h-5 w-5",
+  textClassName = "max-w-24 text-xs",
+  glyphClassName = "text-lg",
+  fallbackToText = true,
 }: {
   agent: Pick<AgentInfo, "id" | "label">;
   className?: string;
+  textClassName?: string;
+  glyphClassName?: string;
+  /** A surrounding card may already render the name beside the mark. */
+  fallbackToText?: boolean;
 }) {
   const presentation = resolveAgentPresentation(agent);
   const [failed, setFailed] = useState(false);
@@ -17,16 +24,17 @@ export function AgentMark({
 
   useEffect(() => setFailed(false), [signature]);
 
-  if (presentation.kind === "text" || failed) {
+  if (presentation.kind === "text" || (failed && fallbackToText)) {
     return (
-      <span className="max-w-24 truncate text-xs font-medium text-fg" title={presentation.label}>
+      <span className={`${textClassName} truncate font-medium text-fg`} title={presentation.label}>
         {presentation.label}
       </span>
     );
   }
+  if (failed) return null;
   if (presentation.kind === "glyph") {
     return (
-      <span className="text-lg leading-none text-fg" aria-hidden>
+      <span className={`${glyphClassName} leading-none text-fg`} aria-hidden>
         {presentation.glyph}
       </span>
     );

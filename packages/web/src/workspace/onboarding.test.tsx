@@ -278,6 +278,36 @@ describe("the first run", () => {
     expect(await screen.findByLabelText("DeepSeek API Key")).toBeInTheDocument();
   });
 
+  it("does not misdiagnose an empty OpenCode catalog as a missing GeneHub key", async () => {
+    const opencode: AgentInfo = {
+      ...UNCONFIGURED_AGENT,
+      id: "opencode",
+      label: "OpenCode",
+      builtin: false,
+      capabilities: {
+        ...UNCONFIGURED_AGENT.capabilities,
+        setEffort: false,
+        setMode: false,
+        permissions: false,
+        attachments: true,
+      },
+    };
+    const { client } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [opencode] }),
+      "workspace.list": () => ({
+        type: "workspaces",
+        data: [{ id: "w1", name: "app", root: "/home/me/app", isGitRepo: true }],
+      }),
+      "session.list": () => ({ type: "sessions", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    await start(client, hostWith());
+
+    expect(await screen.findByPlaceholderText(/描述任务/)).toBeInTheDocument();
+    expect(screen.queryByText("还差一个模型密钥。")).not.toBeInTheDocument();
+    expect(useWorkbench.getState().draft?.agentId).toBe("opencode");
+  });
+
   /**
    * The daemon gives a machine that has never been used a folder to work in,
    * so by the time the interface loads the only thing between the user and a

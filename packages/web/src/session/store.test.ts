@@ -2,7 +2,7 @@ import type { AgentInfo, SequencedEvent, SessionSummary } from "@genehub/proto";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import type { Client } from "../protocol/client";
-import { useWorkbench } from "./store";
+import { defaultAgent, useWorkbench } from "./store";
 
 /**
  * The daemon pushes `titleChanged` once, the moment a session picks up a
@@ -398,6 +398,52 @@ describe("opening a new conversation", () => {
     expect(sent.find((request) => request.type === "session.create")?.payload?.agentId).toBe(
       "codex",
     );
+  });
+
+  it("lets an external Agent use its own default even when discovery returned no models", () => {
+    const external = {
+      id: "opencode",
+      label: "OpenCode",
+      builtin: false,
+      probe: { state: "ready" },
+      capabilities: {
+        interrupt: true,
+        setModel: true,
+        setEffort: false,
+        setMode: false,
+        permissions: false,
+        resume: true,
+        fork: false,
+        attachments: true,
+      },
+      catalog: {
+        models: [],
+        modes: [],
+        commands: [],
+        defaultModel: undefined,
+        defaultMode: undefined,
+        defaultEffort: undefined,
+      },
+    } as AgentInfo;
+    expect(defaultAgent([external])?.id).toBe("opencode");
+
+    const catalogued = {
+      ...external,
+      id: "codex",
+      label: "Codex",
+      catalog: {
+        ...external.catalog,
+        models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", reasoning: true, efforts: [] }],
+      },
+    } as AgentInfo;
+    expect(defaultAgent([external, catalogued])?.id).toBe("codex");
+
+    const unconfiguredGenet = {
+      ...external,
+      id: "genet",
+      builtin: true,
+    } as AgentInfo;
+    expect(defaultAgent([unconfiguredGenet])).toBeUndefined();
   });
 
   it("carries the model chosen in the empty chat into the session it becomes", async () => {

@@ -5,6 +5,7 @@ import agentConfig from "./agents.json";
 import modelConfig from "./model-aliases.json";
 import {
   resolveAgentPresentation,
+  resolveAgentProfile,
   resolveEffortBadge,
   resolveModeBadge,
   resolveModelPresentation,
@@ -13,13 +14,20 @@ import {
 import badgeConfig from "./runtime-badges.json";
 
 describe("Agent presentation catalog", () => {
-  it("matches exact built-in and configured ACP ids", () => {
-    expect(resolveAgentPresentation({ id: "cursor", label: "Cursor" }).kind).toBe("icon");
+  it("covers every built-in registry Agent with an icon, glyph, or name", () => {
+    expect(resolveAgentPresentation({ id: "genet", label: "GeneHub Agent" }).kind).toBe("icon");
+    expect(resolveAgentPresentation({ id: "opencode", label: "OpenCode" }).kind).toBe("icon");
     expect(resolveAgentPresentation({ id: "acp:goose", label: "goose" }).kind).toBe("icon");
     expect(resolveAgentPresentation({ id: "claude", label: "Claude Code" })).toMatchObject({
       kind: "glyph",
       glyph: "✱",
     });
+    expect(resolveAgentPresentation({ id: "codex", label: "Codex" })).toEqual({
+      kind: "text",
+      label: "Codex",
+    });
+    expect(resolveAgentPresentation({ id: "cursor", label: "Cursor" }).kind).toBe("icon");
+    expect(resolveAgentPresentation({ id: "acp", label: "ACP agent" }).kind).toBe("icon");
     expect(
       resolveAgentPresentation({ id: "acp:github-copilot", label: "GitHub Copilot" }),
     ).toEqual({ kind: "text", label: "GitHub Copilot" });
@@ -29,6 +37,10 @@ describe("Agent presentation catalog", () => {
     expect(resolveAgentPresentation({ id: "acp:private", label: "My Codex wrapper" })).toEqual({
       kind: "text",
       label: "My Codex wrapper",
+    });
+    expect(resolveAgentPresentation({ id: "acp:private", label: "" })).toEqual({
+      kind: "text",
+      label: "acp:private",
     });
   });
 });
@@ -55,6 +67,8 @@ describe("presentation catalog integrity", () => {
     for (const rule of agentConfig.agents) {
       expect(rule.ids.every(Boolean)).toBe(true);
       expect(rule.label.trim()).not.toBe("");
+      expect(["permission", "workflow", "unknown"]).toContain(rule.modeKind);
+      expect(typeof rule.startWithoutModelCatalog).toBe("boolean");
       if ("assetId" in rule && rule.assetId) expect(agentAssets).toHaveProperty(rule.assetId);
     }
     for (const rule of modelConfig.exact) {
@@ -95,6 +109,18 @@ describe("model display names", () => {
     ).toBe("long-mod…");
   });
 
+  it("applies the same eight-grapheme fallback to every dynamic Agent catalog", () => {
+    for (const agentId of ["genet", "opencode", "claude", "codex", "cursor", "acp"]) {
+      expect(
+        resolveModelPresentation({
+          agentId,
+          modelId: "provider/runtime-model-123",
+          modelLabel: "Runtime Model 123",
+        }).shortLabel,
+      ).toBe("Runtime …");
+    }
+  });
+
   it("does not split a joined emoji grapheme", () => {
     expect(truncateGraphemes("👨‍👩‍👧‍👦abcdefghi", 8)).toBe("👨‍👩‍👧‍👦abcdefg…");
   });
@@ -102,7 +128,17 @@ describe("model display names", () => {
 
 describe("runtime emoji badges", () => {
   it("does not invent a thinking level when the Agent supplied no default", () => {
-    expect(resolveEffortBadge(null)).toEqual({ emoji: "🧠", shortLabel: "默认", fullLabel: "默认" });
+    expect(resolveEffortBadge(null)).toEqual({ emoji: "🤔", shortLabel: "默认", fullLabel: "默认" });
+  });
+
+  it("separates a permission policy from an ACP workflow selector", () => {
+    expect(resolveAgentProfile("codex").modeKind).toBe("permission");
+    expect(resolveAgentProfile("claude").modeKind).toBe("permission");
+    expect(resolveAgentProfile("cursor").modeKind).toBe("workflow");
+    expect(resolveAgentProfile("acp:private")).toEqual({
+      modeKind: "unknown",
+      startWithoutModelCatalog: true,
+    });
   });
 
   it("only shows the unlock emoji for known unrestricted modes", () => {

@@ -6,8 +6,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import { useWorkbench } from "./store";
 import {
-  COMPOSER_TEXTAREA_MAX_HEIGHT,
-  COMPOSER_TEXTAREA_MIN_HEIGHT,
+  COMPOSER_TEXTAREA_COLLAPSED_HEIGHT,
+  COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT,
+  COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT,
+  COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT,
+  COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT,
   Composer,
   resizeComposerTextarea,
 } from "./Composer";
@@ -228,7 +231,7 @@ describe("the controls offered to the user", () => {
     expect(within(dialog).queryByText("模式")).not.toBeInTheDocument();
   });
 
-  it("leaves an agent that is not installed out of the picker entirely", async () => {
+  it("keeps every Agent visible and labels one that is not installed", async () => {
     render(
       <ComposerControls
         agents={[agent(), agent({ id: "opencode", label: "OpenCode", probe: { state: "notInstalled" } })]}
@@ -246,7 +249,8 @@ describe("the controls offered to the user", () => {
     await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
     const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
     expect(within(dialog).getByRole("radio", { name: "GeneHub Agent" })).toBeInTheDocument();
-    expect(within(dialog).queryByRole("radio", { name: "OpenCode" })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("radio", { name: "OpenCode 未安装" })).toBeDisabled();
+    expect(within(dialog).getByText("未安装")).toBeInTheDocument();
   });
 
   it("sends on enter and keeps shift+enter for a new line", async () => {
@@ -268,17 +272,24 @@ describe("the controls offered to the user", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
-  it("grows the textarea from two to four lines and then scrolls internally", () => {
+  it("uses one idle line, three-to-five phone lines, and four-to-seven desktop lines", () => {
     const box = document.createElement("textarea");
     Object.defineProperty(box, "scrollHeight", { configurable: true, value: 40 });
-    expect(resizeComposerTextarea(box)).toBe(COMPOSER_TEXTAREA_MIN_HEIGHT);
+    expect(resizeComposerTextarea(box, false, false)).toBe(COMPOSER_TEXTAREA_COLLAPSED_HEIGHT);
     expect(box.style.overflowY).toBe("hidden");
 
-    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 96 });
-    expect(resizeComposerTextarea(box)).toBe(96);
+    expect(resizeComposerTextarea(box, true, false)).toBe(COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT);
+    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 104 });
+    expect(resizeComposerTextarea(box, true, false)).toBe(104);
 
     Object.defineProperty(box, "scrollHeight", { configurable: true, value: 180 });
-    expect(resizeComposerTextarea(box)).toBe(COMPOSER_TEXTAREA_MAX_HEIGHT);
+    expect(resizeComposerTextarea(box, true, false)).toBe(COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT);
+    expect(box.style.overflowY).toBe("auto");
+
+    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 40 });
+    expect(resizeComposerTextarea(box, true, true)).toBe(COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT);
+    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 220 });
+    expect(resizeComposerTextarea(box, true, true)).toBe(COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT);
     expect(box.style.overflowY).toBe("auto");
   });
 
@@ -316,7 +327,9 @@ describe("the controls offered to the user", () => {
     const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
     const file = new File(["fake-bytes"], "picked.png", { type: "image/png" });
 
-    expect(screen.getByRole("button", { name: "添加文件" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "添加文件（当前仅支持图片）" }),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /添加图片/ })).not.toBeInTheDocument();
     await userEvent.upload(input, file);
     await waitFor(() => expect(screen.getByAltText("picked.png")).toBeInTheDocument());
@@ -348,15 +361,36 @@ describe("the controls offered to the user", () => {
     expect(onInterrupt).toHaveBeenCalled();
   });
 
-  it("keeps a two-line input and the same compact footer when it is focused", async () => {
+  it("expands from one idle line when focused and collapses again on blur", async () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
 
     const box = screen.getByLabelText("任务描述");
     const summary = screen.getByRole("button", { name: /Agent：GeneHub Agent/ });
-    expect(box).toHaveAttribute("rows", "2");
+    const card = box.closest("[data-composer-state]");
+    expect(box).toHaveAttribute("rows", "1");
+    expect(box).toHaveAttribute("data-expanded", "false");
+    expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_COLLAPSED_HEIGHT}px` });
+    expect(card).toHaveAttribute("data-composer-state", "idle");
+    expect(summary).toHaveClass(
+      "h-3",
+      "text-[9px]",
+      "!min-h-0",
+      "!min-w-0",
+      "after:-inset-y-1.5",
+    );
+    expect(screen.getByRole("button", { name: /添加文件/ })).toHaveClass("h-10", "w-10");
+    expect(screen.getByRole("button", { name: "发送" })).toHaveClass("h-10", "w-10");
     await userEvent.click(box);
+    expect(box).toHaveAttribute("data-expanded", "true");
+    expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT}px` });
+    expect(card).toHaveAttribute("data-composer-state", "active");
+    expect(summary).toHaveClass("h-5", "text-[11px]");
     expect(summary).toHaveAttribute("aria-expanded", "false");
     expect(document.querySelectorAll('select')).toHaveLength(0);
+
+    fireEvent.blur(box);
+    expect(box).toHaveAttribute("data-expanded", "false");
+    expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_COLLAPSED_HEIGHT}px` });
   });
 
   it("keeps the rich settings viewable when Agent switching is locked", async () => {

@@ -177,10 +177,20 @@ cursor-agent login
 不止 Claude 和 Codex，任何说 [ACP](https://agentclientprotocol.com/) 的 CLI 都能不改代码接进来，写一段配置声明即可（`docs/architecture.md` §3）：
 
 ```jsonc
-{ "agents": { "goose": { "extends": "acp", "command": ["goose", "acp"] } } }
+{
+  "agents": {
+    "custom": {
+      "goose": {
+        "extends": "acp",
+        "command": ["goose", "acp"],
+        "label": "goose"
+      }
+    }
+  }
+}
 ```
 
-`extends` 目前只认 `"acp"`；`command` 是完整的可执行文件 + 参数列表。凭证同样是那个 CLI 自己的事——不在这份配置里出现，也不会出现。
+自定义 Agent 放在 `agents.custom` 下；它的 key 会形成运行时 ID `acp:<key>`。`extends` 目前只认 `"acp"`；`command` 是完整的可执行文件 + 参数列表。凭证同样是那个 CLI 自己的事——不在这份配置里出现，也不会出现。
 
 ---
 

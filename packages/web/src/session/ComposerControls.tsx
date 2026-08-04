@@ -1,9 +1,11 @@
 import type { AgentInfo, ModeInfo, ModelInfo } from "@genehub/proto";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useId, useRef, useState } from "react";
 
 import { AgentMark } from "../presentation/AgentMark";
 import {
   resolveAgentAvailability,
+  resolveAgentPresentation,
+  resolveAgentProfile,
   resolveEffortBadge,
   resolveModeBadge,
   resolveModelPresentation,
@@ -13,7 +15,7 @@ import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 
 export interface RuntimeSelection {
   current: AgentInfo | undefined;
-  installed: AgentInfo[];
+  agents: AgentInfo[];
   model: ModelInfo | undefined;
   modelAvailable: boolean;
   mode: ModeInfo | undefined;
@@ -40,9 +42,10 @@ export function resolveRuntimeSelection({
   modeId: string | null;
   effortId: string | null;
 }): RuntimeSelection {
-  const installed = agents.filter((agent) => agent.probe.state === "ready");
+  const ready = agents.filter((agent) => agent.probe.state === "ready");
   const selected = agents.find((agent) => agent.id === agentId);
-  const current = selected ?? defaultAgent(agents) ?? installed[0];
+  const removed = agentId && !selected ? removedAgent(agentId) : undefined;
+  const current = selected ?? removed ?? defaultAgent(agents) ?? ready[0];
   const catalogModel = current?.catalog.models.find((candidate) => candidate.id === modelId);
   const fallbackModel =
     current?.catalog.models.find((candidate) => candidate.id === current.catalog.defaultModel) ??
@@ -61,12 +64,42 @@ export function resolveRuntimeSelection({
 
   return {
     current,
-    installed,
+    agents: removed ? [removed, ...agents] : agents,
     model,
     modelAvailable: Boolean(catalogModel ?? (!modelId && fallbackModel)),
     mode: catalogMode ?? missingMode ?? fallbackMode,
     modeAvailable: Boolean(catalogMode ?? (!modeId && fallbackMode)),
     effortId: effortId ?? current?.catalog.defaultEffort ?? null,
+  };
+}
+
+/** Keep a historical/custom Agent honest after it has been removed from the
+ * daemon configuration. Falling through to the default used to relabel old
+ * sessions as Codex or Genet. */
+function removedAgent(id: string): AgentInfo {
+  return {
+    id,
+    label: id,
+    builtin: false,
+    probe: { state: "unavailable", reason: "已从当前 Agent 配置中移除" },
+    capabilities: {
+      interrupt: false,
+      setModel: false,
+      setEffort: false,
+      setMode: false,
+      permissions: false,
+      resume: false,
+      fork: false,
+      attachments: false,
+    },
+    catalog: {
+      models: [],
+      modes: [],
+      commands: [],
+      defaultModel: undefined,
+      defaultMode: undefined,
+      defaultEffort: undefined,
+    },
   };
 }
 
@@ -81,6 +114,7 @@ export function ComposerControls({
   modelId,
   modeId,
   effortId,
+  compact = false,
   disabled,
   agentLocked,
   onOpenChange,
@@ -94,6 +128,8 @@ export function ComposerControls({
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  /** Idle composer treatment: one very small metadata strip under the input. */
+  compact?: boolean;
   disabled?: boolean;
   agentLocked?: boolean;
   onOpenChange?(open: boolean): void;
@@ -103,8 +139,19 @@ export function ComposerControls({
   onPickEffort(id: string): void;
 }) {
   const [open, setOpen] = useState(false);
+  const generatedId = useId();
+  const panelId = `runtime-settings-${generatedId}`;
   const trigger = useRef<HTMLButtonElement>(null);
   const selection = resolveRuntimeSelection({ agents, agentId, modelId, modeId, effortId });
+  const agentPresentation = selection.current
+    ? resolveAgentPresentation(selection.current)
+    : null;
+  const agentProfile = selection.current
+    ? resolveAgentProfile(selection.current.id)
+    : null;
+  const permissionAxis = Boolean(
+    selection.current?.capabilities.permissions && agentProfile?.modeKind === "permission",
+  );
   const model = selection.model
     ? resolveModelPresentation({
         agentId: selection.current?.id ?? null,
@@ -122,19 +169,19 @@ export function ComposerControls({
   const mode = selection.current?.capabilities.setMode && selection.mode
     ? resolveModeBadge({
         agentId: selection.current.id,
-        permissions: selection.current.capabilities.permissions,
+        permissions: permissionAxis,
         modeId: selection.mode?.id,
         modeLabel: selection.mode?.label,
       })
     : null;
   const summary = [
     selection.current
-      ? `Agent：${selection.current.label}${agentAvailability ? `（${agentAvailability.fullLabel}）` : ""}`
+      ? `Agent：${agentPresentation?.label ?? selection.current.id}${agentAvailability ? `（${agentAvailability.fullLabel}）` : ""}`
       : "Agent：未选择",
     model ? `模型：${model.fullLabel}` : null,
     effort ? `思考强度：${effort.fullLabel}` : null,
     mode
-      ? `${selection.current?.capabilities.permissions ? "权限" : "模式"}：${mode.fullLabel}`
+      ? `${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}`
       : null,
   ]
     .filter(Boolean)
@@ -153,50 +200,63 @@ export function ComposerControls({
         aria-label={summary}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-controls="runtime-settings"
+        aria-controls={panelId}
         onClick={() => setPanelOpen(true)}
-        className="flex min-h-11 min-w-0 flex-1 items-center gap-2 overflow-hidden rounded-xl px-2 text-left text-muted hover:bg-raised hover:text-fg md:min-h-8"
+        className={`flex !min-h-0 !min-w-0 flex-1 items-center overflow-hidden text-left text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${
+          compact
+            ? "relative h-3 min-h-0 gap-1 rounded px-1 text-[9px] leading-none after:absolute after:-inset-y-1.5 after:inset-x-0 after:content-['']"
+            : "h-5 min-h-0 gap-1.5 rounded-md px-1.5 text-[11px] leading-none"
+        }`}
       >
-        {selection.current ? <AgentMark agent={selection.current} /> : null}
+        {selection.current ? (
+          <AgentMark
+            agent={selection.current}
+            className={compact ? "h-3 w-3" : "h-4 w-4"}
+            textClassName={compact ? "max-w-16 text-[9px]" : "max-w-24 text-[11px]"}
+            glyphClassName={compact ? "text-xs" : "text-sm"}
+          />
+        ) : null}
         {agentAvailability ? (
           <span
-            className="shrink-0 whitespace-nowrap text-xs text-danger"
+            className="shrink-0 whitespace-nowrap text-danger"
             title={agentAvailability.fullLabel}
           >
             {agentAvailability.shortLabel}
           </span>
         ) : null}
         {model ? (
-          <span className="min-w-0 truncate text-xs text-muted" title={model.fullLabel}>
+          <span className="min-w-0 truncate text-muted" title={model.fullLabel}>
             {model.shortLabel}
+          </span>
+        ) : selection.current && agentPresentation && agentPresentation.kind !== "text" ? (
+          <span className="min-w-0 truncate text-muted" title={agentPresentation.label}>
+            {agentPresentation.label}
           </span>
         ) : null}
         {effort ? (
           <span
-            className="shrink-0 whitespace-nowrap text-xs text-muted"
+            className="shrink-0 whitespace-nowrap text-muted"
             title={`思考强度：${effort.fullLabel}`}
           >
             <span aria-hidden>{effort.emoji}</span>
-            <span>{effort.shortLabel}</span>
           </span>
         ) : null}
         {mode ? (
           <span
-            className="shrink-0 whitespace-nowrap text-xs text-muted"
-            title={`${selection.current?.capabilities.permissions ? "权限" : "模式"}：${mode.fullLabel}`}
+            className="shrink-0 whitespace-nowrap text-muted"
+            title={`${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}`}
           >
             <span aria-hidden>{mode.emoji}</span>
-            <span className="max-[360px]:sr-only">{mode.shortLabel}</span>
           </span>
         ) : null}
-        <span className="ml-auto shrink-0 text-[10px] text-faint" aria-hidden>
+        <span className="ml-auto shrink-0 text-[8px] text-faint" aria-hidden>
           ▾
         </span>
       </button>
 
       {open ? (
         <RuntimeSettingsPanel
-          id="runtime-settings"
+          id={panelId}
           selection={selection}
           disabled={disabled}
           agentLocked={agentLocked}

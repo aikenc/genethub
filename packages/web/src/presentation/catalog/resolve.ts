@@ -18,9 +18,11 @@ export type AgentPresentation =
   | { kind: "text"; label: string };
 
 export interface AgentAvailability {
-  shortLabel: "未安装" | "不可用";
+  shortLabel: "未安装" | "不可用" | "待配置";
   fullLabel: string;
 }
+
+export type AgentModeKind = "permission" | "workflow" | "unknown";
 
 const agentRules = agentConfig.agents as AgentVisualRule[];
 const modelRules = modelConfig.exact as ModelAliasRule[];
@@ -37,10 +39,31 @@ export function resolveAgentPresentation(
   return { kind: "text", label };
 }
 
+/** Runtime behavior that cannot be inferred safely from the generic capability
+ * flags. ACP's `permissions` flag says it can ask permission; it does not make
+ * Cursor's `agent / plan / ask` workflow selector a permission policy. */
+export function resolveAgentProfile(agentId: string): {
+  modeKind: AgentModeKind;
+  startWithoutModelCatalog: boolean;
+} {
+  const rule = agentRules.find((candidate) => candidate.ids.includes(agentId));
+  return {
+    modeKind: rule?.modeKind ?? "unknown",
+    // Every configured ACP Agent owns its runtime defaults even when discovery
+    // returned no catalog. Unknown non-ACP Agents remain conservative.
+    startWithoutModelCatalog:
+      rule?.startWithoutModelCatalog ?? agentId.startsWith("acp:"),
+  };
+}
+
 export function resolveAgentAvailability(
-  agent: Pick<AgentInfo, "probe">,
+  agent: Pick<AgentInfo, "id" | "probe" | "catalog">,
 ): AgentAvailability | null {
-  if (agent.probe.state === "ready") return null;
+  if (agent.probe.state === "ready") {
+    return canStartAgent(agent)
+      ? null
+      : { shortLabel: "待配置", fullLabel: "待配置：请先配置模型服务" };
+  }
   if (agent.probe.state === "notInstalled") {
     return { shortLabel: "未安装", fullLabel: "未安装" };
   }
@@ -49,6 +72,17 @@ export function resolveAgentAvailability(
     shortLabel: "不可用",
     fullLabel: reason ? `不可用：${reason}` : "不可用",
   };
+}
+
+/** A ready probe means the executable exists. Starting a turn additionally
+ * needs either a concrete catalog or an Agent whose own runtime owns defaults. */
+export function canStartAgent(
+  agent: Pick<AgentInfo, "id" | "probe" | "catalog">,
+): boolean {
+  return (
+    agent.probe.state === "ready" &&
+    (agent.catalog.models.length > 0 || resolveAgentProfile(agent.id).startWithoutModelCatalog)
+  );
 }
 
 function isAssetId(value: string): value is AgentAssetId {
@@ -107,7 +141,7 @@ export function resolveEffortBadge(effortId?: string | null): RuntimeBadge {
   >;
   const known = efforts[id];
   return {
-    emoji: "🧠",
+    emoji: "🤔",
     shortLabel: known?.shortLabel ?? truncateGraphemes(id, 2, ""),
     fullLabel: known?.fullLabel ?? id,
   };

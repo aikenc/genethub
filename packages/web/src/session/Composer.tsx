@@ -1,6 +1,6 @@
 import type { AgentInfo, Attachment, CommandInfo } from "@genehub/proto";
 import { Paperclip } from "lucide-react";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { attachmentPreviewUrl, AttachmentTooLarge, fileToAttachment, imageFilesFromClipboard } from "./attachments";
 import { ComposerControls } from "./ComposerControls";
@@ -69,6 +69,8 @@ export function Composer({
   const [highlighted, setHighlighted] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const commandMenuId = `composer-commands-${useId()}`;
   const textarea = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   const card = useRef<HTMLDivElement>(null);
@@ -90,7 +92,8 @@ export function Composer({
       })
       .slice(0, 8);
   }, [commands, typing, dismissed]);
-  const open = matches.length > 0 && !settingsOpen;
+  const active = focused || settingsOpen;
+  const open = focused && matches.length > 0 && !settingsOpen;
   const chosen = matches[Math.min(highlighted, matches.length - 1)];
 
   const complete = (command: CommandInfo) => {
@@ -124,8 +127,8 @@ export function Composer({
   };
 
   useLayoutEffect(() => {
-    if (textarea.current) resizeComposerTextarea(textarea.current);
-  }, [draft]);
+    if (textarea.current) resizeComposerTextarea(textarea.current, active);
+  }, [active, draft]);
 
   useLayoutEffect(() => {
     const element = card.current;
@@ -140,11 +143,11 @@ export function Composer({
 
   useLayoutEffect(() => {
     const update = () => {
-      if (textarea.current) resizeComposerTextarea(textarea.current);
+      if (textarea.current) resizeComposerTextarea(textarea.current, active);
     };
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
-  }, []);
+  }, [active]);
 
   return (
     <div
@@ -160,10 +163,11 @@ export function Composer({
     >
       {open ? (
         <div className="pointer-events-auto mx-auto mb-2 max-w-chat overflow-hidden rounded-xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur">
-          <ul role="listbox" aria-label="命令">
+          <ul id={commandMenuId} role="listbox" aria-label="命令">
             {matches.map((command, index) => (
               <li key={command.name}>
                 <button
+                  id={`${commandMenuId}-${index}`}
                   type="button"
                   role="option"
                   aria-selected={command === chosen}
@@ -191,7 +195,10 @@ export function Composer({
       ) : null}
       <div
         ref={card}
-        className="pointer-events-auto mx-auto max-w-chat rounded-2xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur"
+        data-composer-state={active ? "active" : "idle"}
+        className={`pointer-events-auto mx-auto max-w-chat rounded-2xl border bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur transition-colors ${
+          focused ? "border-accent/60" : "border-line-strong"
+        }`}
       >
         {attachments.length > 0 ? (
           <div
@@ -217,151 +224,196 @@ export function Composer({
             ))}
           </div>
         ) : null}
-        <textarea
-          ref={textarea}
-          className="h-[72px] min-h-[72px] max-h-[120px] w-full resize-none overflow-y-hidden bg-transparent px-4 py-3 text-base leading-6 text-fg outline-none placeholder:text-faint md:text-sm"
-          placeholder="描述任务，或直接说你想改什么"
-          aria-label="任务描述"
-          value={draft}
-          disabled={disabled}
-          rows={2}
-          onChange={(event) => {
-            setDraft(event.target.value);
-            setHighlighted(0);
-            setDismissed(false);
-          }}
-          onPaste={(event) => {
-            const files = imageFilesFromClipboard(event.clipboardData);
-            if (files.length === 0) return;
-            // Pasting an image alongside plain text is possible in principle,
-            // but the composer is a single textarea: no cursor position to
-            // insert a thumbnail at. Only the image is kept, same as most
-            // chat apps' composers when a screenshot lands in an empty draft.
-            event.preventDefault();
-            void addFiles(files);
-          }}
-          onKeyDown={(event) => {
-            if (open) {
-              // While the menu is up it owns these keys. Enter in particular:
-              // sending `/co` because the menu was showing `/code-review` would
-              // be the one outcome nobody wanted.
-              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                event.preventDefault();
-                const step = event.key === "ArrowDown" ? 1 : matches.length - 1;
-                setHighlighted((current) => (current + step) % matches.length);
-                return;
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-x-1 px-1.5 py-0.5">
+          <div className="min-w-0">
+            <textarea
+              ref={textarea}
+              data-expanded={active}
+              className={`block w-full resize-none overflow-y-hidden bg-transparent px-3 text-base leading-6 text-fg outline-none placeholder:text-faint md:text-sm ${
+                active ? "py-1" : "py-0.5"
+              }`}
+              placeholder="描述任务…"
+              aria-label="任务描述"
+              aria-autocomplete="list"
+              aria-expanded={open}
+              aria-controls={open ? commandMenuId : undefined}
+              aria-activedescendant={
+                open ? `${commandMenuId}-${Math.min(highlighted, matches.length - 1)}` : undefined
               }
-              if ((event.key === "Enter" || event.key === "Tab") && chosen) {
+              value={draft}
+              disabled={disabled}
+              rows={1}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                setHighlighted(0);
+                setDismissed(false);
+              }}
+              onPaste={(event) => {
+                const files = imageFilesFromClipboard(event.clipboardData);
+                if (files.length === 0) return;
+                // Pasting an image alongside plain text is possible in principle,
+                // but the composer is a single textarea: no cursor position to
+                // insert a thumbnail at. Only the image is kept, same as most
+                // chat apps' composers when a screenshot lands in an empty draft.
                 event.preventDefault();
-                complete(chosen);
-                return;
+                void addFiles(files);
+              }}
+              onKeyDown={(event) => {
+                if (open) {
+                  // While the menu is up it owns these keys. Enter in particular:
+                  // sending `/co` because the menu was showing `/code-review` would
+                  // be the one outcome nobody wanted.
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault();
+                    const step = event.key === "ArrowDown" ? 1 : matches.length - 1;
+                    setHighlighted((current) => (current + step) % matches.length);
+                    return;
+                  }
+                  if ((event.key === "Enter" || event.key === "Tab") && chosen) {
+                    event.preventDefault();
+                    complete(chosen);
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setDismissed(true);
+                    return;
+                  }
+                }
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  send();
+                }
+              }}
+            />
+            {pasteNotice ? (
+              <p className="px-3 py-1 text-xs text-muted" role="alert">
+                {pasteNotice}
+              </p>
+            ) : null}
+            <div className="flex min-w-0">
+              <ComposerControls
+                agents={agents}
+                agentId={agentId}
+                modelId={modelId}
+                modeId={modeId}
+                effortId={effortId ?? null}
+                compact={!active}
+                disabled={disabled || running}
+                agentLocked={agentLocked}
+                onOpenChange={setSettingsOpen}
+                onPickAgent={onPickAgent}
+                onPickModel={onPickModel}
+                onPickMode={onPickMode}
+                onPickEffort={onPickEffort ?? (() => {})}
+              />
+            </div>
+          </div>
+          <div className="flex flex-nowrap items-center gap-1">
+            <input
+              ref={picker}
+              type="file"
+              accept="image/*"
+              multiple
+              tabIndex={-1}
+              className="hidden"
+              onChange={(event) => {
+                const files = Array.from(event.currentTarget.files ?? []);
+                event.currentTarget.value = "";
+                if (files.length > 0) void addFiles(files);
+              }}
+            />
+            <button
+              type="button"
+              aria-label={
+                attachmentsSupported
+                  ? "添加文件（当前仅支持图片）"
+                  : "添加文件（当前 Agent 不支持附件）"
               }
-              if (event.key === "Escape") {
-                event.preventDefault();
+              title={attachmentsSupported ? "添加文件（当前仅支持图片）" : "当前 Agent 不支持附件"}
+              disabled={disabled || running || !attachmentsSupported}
+              onClick={() => {
                 setDismissed(true);
-                return;
-              }
-            }
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              send();
-            }
-          }}
-        />
-        {pasteNotice ? (
-          <p className="px-4 pt-1 text-xs text-muted" role="alert">
-            {pasteNotice}
-          </p>
-        ) : null}
-        <div className="flex flex-nowrap items-center gap-1 px-2 pb-2 pt-0.5">
-          <ComposerControls
-            agents={agents}
-            agentId={agentId}
-            modelId={modelId}
-            modeId={modeId}
-            effortId={effortId ?? null}
-            disabled={disabled || running}
-            agentLocked={agentLocked}
-            onOpenChange={setSettingsOpen}
-            onPickAgent={onPickAgent}
-            onPickModel={onPickModel}
-            onPickMode={onPickMode}
-            onPickEffort={onPickEffort ?? (() => {})}
-          />
-          <input
-            ref={picker}
-            type="file"
-            accept="image/*"
-            multiple
-            tabIndex={-1}
-            className="hidden"
-            onChange={(event) => {
-              const files = Array.from(event.currentTarget.files ?? []);
-              event.currentTarget.value = "";
-              if (files.length > 0) void addFiles(files);
-            }}
-          />
-          <button
-            type="button"
-            aria-label={
-              attachmentsSupported ? "添加文件" : "添加文件（当前 Agent 不支持附件）"
-            }
-            title={attachmentsSupported ? "添加文件（当前支持图片）" : "当前 Agent 不支持附件"}
-            disabled={disabled || running || !attachmentsSupported}
-            onClick={() => {
-              setDismissed(true);
-              picker.current?.click();
-            }}
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg disabled:opacity-30 md:h-8 md:w-8"
-          >
-            <Paperclip className="h-4 w-4" aria-hidden />
-          </button>
-          {running ? (
-            <button
-              type="button"
-              aria-label="停止"
-              onClick={onInterrupt}
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger md:h-8 md:w-8"
+                picker.current?.click();
+              }}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg disabled:opacity-30"
             >
-              <span className="h-3 w-3 rounded-[2px] bg-current md:h-2.5 md:w-2.5" />
+              <Paperclip className="h-4 w-4" aria-hidden />
             </button>
-          ) : (
-            <button
-              type="button"
-              aria-label="发送"
-              onClick={send}
-              disabled={disabled || (draft.trim().length === 0 && attachments.length === 0)}
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-accent text-white disabled:opacity-30 md:h-8 md:w-8"
-            >
-              <svg
-                viewBox="0 0 16 16"
-                className="h-4 w-4 md:h-3.5 md:w-3.5"
-                fill="currentColor"
-                aria-hidden
+            {running ? (
+              <button
+                type="button"
+                aria-label="停止"
+                onClick={onInterrupt}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger"
               >
-                <path d="M8 3.2 3.6 7.6l1.1 1.1L7.2 6.2V13h1.6V6.2l2.5 2.5 1.1-1.1L8 3.2Z" />
-              </svg>
-            </button>
-          )}
+                <span className="h-3 w-3 rounded-[2px] bg-current" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                aria-label="发送"
+                onClick={send}
+                disabled={disabled || (draft.trim().length === 0 && attachments.length === 0)}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent text-white disabled:opacity-30"
+              >
+                <svg
+                  viewBox="0 0 16 16"
+                  className="h-4 w-4"
+                  fill="currentColor"
+                  aria-hidden
+                >
+                  <path d="M8 3.2 3.6 7.6l1.1 1.1L7.2 6.2V13h1.6V6.2l2.5 2.5 1.1-1.1L8 3.2Z" />
+                </svg>
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-export const COMPOSER_TEXTAREA_MIN_HEIGHT = 72;
-export const COMPOSER_TEXTAREA_MAX_HEIGHT = 120;
+export const COMPOSER_TEXTAREA_COLLAPSED_HEIGHT = 28;
+export const COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT = 80;
+export const COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT = 128;
+export const COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT = 104;
+export const COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT = 176;
+export const COMPOSER_DESKTOP_BREAKPOINT = 768;
 
-/** Fit two to four 24px lines plus vertical padding. Kept as a small exported
- * function so the clamp can be tested without asking jsdom to perform layout. */
-export function resizeComposerTextarea(element: HTMLTextAreaElement): number {
+/** Idle is exactly one 24px line. Focus expands to three-to-five lines on a
+ * phone and four-to-seven on a wider screen, then scrolls internally. */
+export function resizeComposerTextarea(
+  element: HTMLTextAreaElement,
+  active: boolean,
+  desktop = isDesktopComposerViewport(),
+): number {
+  if (!active) {
+    element.style.height = `${COMPOSER_TEXTAREA_COLLAPSED_HEIGHT}px`;
+    element.style.overflowY = "hidden";
+    return COMPOSER_TEXTAREA_COLLAPSED_HEIGHT;
+  }
+
+  const minHeight = desktop
+    ? COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT
+    : COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT;
+  const maxHeight = desktop
+    ? COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT
+    : COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT;
   element.style.height = "auto";
-  const contentHeight = element.scrollHeight || COMPOSER_TEXTAREA_MIN_HEIGHT;
-  const height = Math.min(
-    COMPOSER_TEXTAREA_MAX_HEIGHT,
-    Math.max(COMPOSER_TEXTAREA_MIN_HEIGHT, contentHeight),
-  );
+  const contentHeight = element.scrollHeight || minHeight;
+  const height = Math.min(maxHeight, Math.max(minHeight, contentHeight));
   element.style.height = `${height}px`;
-  element.style.overflowY = contentHeight > COMPOSER_TEXTAREA_MAX_HEIGHT ? "auto" : "hidden";
+  element.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
   return height;
+}
+
+function isDesktopComposerViewport(): boolean {
+  if (typeof window === "undefined") return true;
+  if (typeof window.matchMedia === "function") {
+    return window.matchMedia(`(min-width: ${COMPOSER_DESKTOP_BREAKPOINT}px)`).matches;
+  }
+  return window.innerWidth >= COMPOSER_DESKTOP_BREAKPOINT;
 }
