@@ -908,9 +908,8 @@ async fn read_loop(
             continue;
         }
         let mut state = turn.lock().await;
-        match method {
-            "session/update" => translate_update(&params, &mut state, &events),
-            _ => {}
+        if method == "session/update" {
+            translate_update(&params, &mut state, &events);
         }
     }
 }
