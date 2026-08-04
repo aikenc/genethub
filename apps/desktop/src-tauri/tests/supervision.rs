@@ -166,7 +166,7 @@ fn a_second_start_returns_the_running_daemon_instead_of_spawning_another() {
 }
 
 #[test]
-fn stopping_leaves_nothing_behind_that_would_block_the_next_start() {
+fn stopping_releases_the_kernel_lock_and_allows_the_next_start() {
     with_daemon!(binary);
     let dir = tempfile::tempdir().unwrap();
     let daemon = Daemon::new(binary.clone(), dir.path().to_path_buf());
@@ -174,17 +174,24 @@ fn stopping_leaves_nothing_behind_that_would_block_the_next_start() {
     let first = daemon.start().expect("first start");
     daemon.stop();
 
-    // Those files are removed by the daemon on its way out, so their absence is
+    // The endpoint is removed by the daemon on its way out, so its absence is
     // proof it was asked to stop and did, rather than being killed mid-session
     // with agents still running.
     assert!(
         !dir.path().join("endpoint.json").exists(),
         "a killed daemon would have left this behind"
     );
-    assert!(!dir.path().join("daemon.lock").exists());
+    // The lock pathname deliberately keeps one stable inode for the lifetime
+    // of the data directory. Removing it after unlock would let racing starts
+    // lock different inodes and both become the daemon.
+    assert!(
+        dir.path().join("daemon.lock").is_file(),
+        "the stable lock inode must survive shutdown"
+    );
 
     // The daemon refuses to start twice on one data directory, so a restart
-    // succeeding is proof the lock and the endpoint file were cleaned up.
+    // succeeding is proof the kernel lock was released even though its stable
+    // pathname remains.
     let restarted = Daemon::new(binary, dir.path().to_path_buf());
     let second = restarted.start().expect("a restart should not be blocked");
     assert_ne!(second.port, 0);
