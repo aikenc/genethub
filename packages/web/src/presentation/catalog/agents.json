@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "ids": ["genet"],
+      "label": "GeneHub Agent",
+      "assetId": "genet",
+      "modeKind": "unknown",
+      "startWithoutModelCatalog": false
+    },
+    {
+      "ids": ["opencode", "acp:opencode"],
+      "label": "OpenCode",
+      "assetId": "opencode",
+      "modeKind": "unknown",
+      "startWithoutModelCatalog": true
+    },
+    {
+      "ids": ["claude", "acp:claude", "acp:claude-code"],
+      "label": "Claude Code",
+      "glyph": "✱",
+      "modeKind": "permission",
+      "startWithoutModelCatalog": true
+    },
+    {
+      "ids": ["codex", "acp:codex", "acp:codex-acp"],
+      "label": "Codex",
+      "modeKind": "permission",
+      "startWithoutModelCatalog": true
+    },
+    {
+      "ids": ["cursor", "acp:cursor", "acp:cursor-agent"],
+      "label": "Cursor",
+      "assetId": "cursor",
+      "modeKind": "workflow",
+      "startWithoutModelCatalog": true
+    },
+    {
+      "ids": ["acp"],
+      "label": "ACP",
+      "assetId": "acp",
+      "modeKind": "unknown",
+      "startWithoutModelCatalog": true
+    },
+    {
+      "ids": ["acp:goose", "goose"],
+      "label": "goose",
+      "assetId": "goose",
+      "modeKind": "unknown",
+      "startWithoutModelCatalog": true
+    },
+    {
+      "ids": ["acp:github-copilot-cli", "acp:github-copilot", "acp:copilot", "github-copilot-cli"],
+      "label": "GitHub Copilot",
+      "modeKind": "unknown",
+      "startWithoutModelCatalog": true
+    },
+    {
+      "ids": ["acp:gemini", "acp:gemini-cli", "gemini"],
+      "label": "Gemini",
+      "modeKind": "unknown",
+      "startWithoutModelCatalog": true
+    }
+  ]
+}

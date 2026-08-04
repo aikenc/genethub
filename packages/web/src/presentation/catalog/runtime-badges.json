@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "efforts": {
+    "default": { "shortLabel": "默认", "fullLabel": "默认" },
+    "off": { "shortLabel": "关", "fullLabel": "关闭" },
+    "minimal": { "shortLabel": "微", "fullLabel": "极低" },
+    "low": { "shortLabel": "低", "fullLabel": "低" },
+    "medium": { "shortLabel": "中", "fullLabel": "中" },
+    "high": { "shortLabel": "高", "fullLabel": "高" },
+    "xhigh": { "shortLabel": "极", "fullLabel": "极高" },
+    "max": { "shortLabel": "满", "fullLabel": "最大" },
+    "ultra": { "shortLabel": "超", "fullLabel": "超高" }
+  },
+  "permissions": [
+    {
+      "agentIds": ["codex"],
+      "ids": ["read-only"],
+      "emoji": "🔒",
+      "shortLabel": "只读",
+      "fullLabel": "只读",
+      "risk": "restricted"
+    },
+    {
+      "agentIds": ["claude"],
+      "ids": ["plan"],
+      "emoji": "📝",
+      "shortLabel": "规划",
+      "fullLabel": "规划模式",
+      "risk": "restricted"
+    },
+    {
+      "agentIds": ["claude"],
+      "ids": ["default", "manual"],
+      "emoji": "🛡️",
+      "shortLabel": "确认",
+      "fullLabel": "执行前确认",
+      "risk": "prompted"
+    },
+    {
+      "agentIds": ["codex"],
+      "ids": ["auto"],
+      "emoji": "✍️",
+      "shortLabel": "编辑",
+      "fullLabel": "允许编辑",
+      "risk": "write"
+    },
+    {
+      "agentIds": ["claude"],
+      "ids": ["acceptEdits"],
+      "emoji": "✍️",
+      "shortLabel": "编辑",
+      "fullLabel": "允许编辑",
+      "risk": "write"
+    },
+    {
+      "agentIds": ["codex"],
+      "ids": ["full-access"],
+      "emoji": "🔓",
+      "shortLabel": "完全",
+      "fullLabel": "完全访问",
+      "risk": "unrestricted"
+    },
+    {
+      "agentIds": ["claude"],
+      "ids": ["bypassPermissions"],
+      "emoji": "🔓",
+      "shortLabel": "完全",
+      "fullLabel": "完全访问",
+      "risk": "unrestricted"
+    }
+  ]
+}

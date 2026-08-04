@@ -3,7 +3,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Host, WindowControls } from "../host";
+import type { Endpoint, Host, WindowControls } from "../host";
 import { useWorkbench } from "../session/store";
 import { useTheme } from "../theme/store";
 import { Sidebar } from "./Sidebar";
@@ -43,6 +43,12 @@ const host = (overrides: Partial<Host> = {}): Host => ({
   openExternal: () => {},
   ...overrides,
 });
+
+const localEndpoint: Endpoint = {
+  url: "ws://127.0.0.1:1/ws",
+  via: "loopback",
+  label: "本机",
+};
 
 const controls = (): WindowControls => ({
   minimize: vi.fn(),
@@ -255,7 +261,14 @@ describe("what can be done to one conversation", () => {
 
 describe("the strip along the top", () => {
   it("is not drawn where the window belongs to a browser", () => {
-    render(<TitleBar host={host()} sidebarHidden={false} onToggleSidebar={() => {}} />);
+    render(
+      <TitleBar
+        host={host()}
+        endpoint={localEndpoint}
+        sidebarHidden={false}
+        onToggleSidebar={() => {}}
+      />,
+    );
 
     expect(screen.queryByRole("menubar")).not.toBeInTheDocument();
   });
@@ -263,7 +276,12 @@ describe("the strip along the top", () => {
   it("minimises, maximises and closes through the shell", async () => {
     const window = controls();
     render(
-      <TitleBar host={host({ window })} sidebarHidden={false} onToggleSidebar={() => {}} />,
+      <TitleBar
+        host={host({ window })}
+        endpoint={localEndpoint}
+        sidebarHidden={false}
+        onToggleSidebar={() => {}}
+      />,
     );
 
     await userEvent.click(screen.getByLabelText("最小化"));
@@ -279,7 +297,12 @@ describe("the strip along the top", () => {
 
   it("switches the palette from the 视图 menu", async () => {
     render(
-      <TitleBar host={host({ window: controls() })} sidebarHidden={false} onToggleSidebar={() => {}} />,
+      <TitleBar
+        host={host({ window: controls() })}
+        endpoint={localEndpoint}
+        sidebarHidden={false}
+        onToggleSidebar={() => {}}
+      />,
     );
 
     await userEvent.click(screen.getByRole("menuitem", { name: "视图" }));
@@ -289,10 +312,31 @@ describe("the strip along the top", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
+  it("does not offer the local folder picker while connected to a remote machine", async () => {
+    const pickDirectory = vi.fn(async () => "/local/path");
+    render(
+      <TitleBar
+        host={host({ window: controls(), pickDirectory })}
+        endpoint={{ url: "wss://relay.test", via: "relay", label: "工作电脑" }}
+        sidebarHidden={false}
+        onToggleSidebar={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("menuitem", { name: "文件" }));
+    expect(screen.getByRole("menuitem", { name: "打开项目…" })).toBeDisabled();
+    expect(pickDirectory).not.toHaveBeenCalled();
+  });
+
   it("offers to give the left column's room back, and says which way round it is", async () => {
     const onToggleSidebar = vi.fn();
     const { rerender } = render(
-      <TitleBar host={host({ window: controls() })} sidebarHidden={false} onToggleSidebar={onToggleSidebar} />,
+      <TitleBar
+        host={host({ window: controls() })}
+        endpoint={localEndpoint}
+        sidebarHidden={false}
+        onToggleSidebar={onToggleSidebar}
+      />,
     );
 
     await userEvent.click(screen.getByRole("menuitem", { name: "视图" }));
@@ -300,7 +344,12 @@ describe("the strip along the top", () => {
     expect(onToggleSidebar).toHaveBeenCalled();
 
     rerender(
-      <TitleBar host={host({ window: controls() })} sidebarHidden onToggleSidebar={onToggleSidebar} />,
+      <TitleBar
+        host={host({ window: controls() })}
+        endpoint={localEndpoint}
+        sidebarHidden
+        onToggleSidebar={onToggleSidebar}
+      />,
     );
     await userEvent.click(screen.getByRole("menuitem", { name: "视图" }));
     expect(screen.getByRole("menuitem", { name: "显示左栏" })).toBeInTheDocument();

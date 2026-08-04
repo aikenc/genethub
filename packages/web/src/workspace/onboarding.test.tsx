@@ -172,11 +172,32 @@ describe("the first run", () => {
     expect(pickDirectory).toHaveBeenCalled();
   });
 
+  it("does not browse this device when the desktop shell is connected to a remote machine", async () => {
+    const { client } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({ type: "workspaces", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    const pickDirectory = vi.fn(async () => "/local/path");
+    await start(
+      client,
+      hostWith({
+        kind: "desktop",
+        endpoint: async () => ({ url: "wss://relay.test", via: "relay", label: "工作电脑" }),
+        pickDirectory,
+      }),
+    );
+
+    expect(await screen.findAllByRole("button", { name: "选择项目文件夹…" })).not.toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "打开项目文件夹…" })).not.toBeInTheDocument();
+    expect(pickDirectory).not.toHaveBeenCalled();
+  });
+
   /**
-   * A browser is talking to a daemon on another machine, where there is nothing
-   * local to browse — so it asks for a path instead of offering a picker.
+   * The paths belong to the remote machine, so its daemon supplies the folders
+   * instead of asking the person to remember and type one.
    */
-  it("takes a typed path when the shell has no folder picker", async () => {
+  it("browses and selects a folder on a remote machine", async () => {
     const { client, calls } = stubClient({
       "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
       "workspace.list": () => ({ type: "workspaces", data: [] }),
@@ -186,12 +207,18 @@ describe("the first run", () => {
         data: { id: "w1", name: "app", root: "/srv/app", isGitRepo: false },
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
+      "directory.list": (payload: { path: string | null }) => ({
+        type: "directory",
+        data: payload.path
+          ? { path: "/srv/app", parent: "/srv", directories: [] }
+          : { path: "/srv", parent: "/", directories: [{ name: "app", path: "/srv/app" }] },
+      }),
     });
     await start(client, hostWith());
 
-    const field = await screen.findAllByLabelText("项目路径");
-    await userEvent.type(field[0]!, "/srv/app");
-    await userEvent.click(screen.getAllByRole("button", { name: "打开" })[0]!);
+    await userEvent.click((await screen.findAllByRole("button", { name: "选择项目文件夹…" }))[0]!);
+    await userEvent.click(await screen.findByRole("button", { name: /app/ }));
+    await userEvent.click(screen.getByRole("button", { name: "选择当前文件夹" }));
 
     await waitFor(() => {
       expect(calls.find((call) => call.type === "workspace.open")?.payload).toEqual({
@@ -211,14 +238,17 @@ describe("the first run", () => {
       request,
     ) => {
       if (request.type === "workspace.open") throw new Error("no such directory: /nope");
+      if (request.type === "directory.list") {
+        return { type: "directory", data: { path: "/nope", parent: "/", directories: [] } };
+      }
       if (request.type === "agent.list") return { type: "agents", data: [READY_AGENT] };
       if (request.type === "workspace.list") return { type: "workspaces", data: [] };
       return { type: "hubStatus", data: { state: "unpaired" } };
     };
     await start(client, hostWith());
 
-    await userEvent.type((await screen.findAllByLabelText("项目路径"))[0]!, "/nope");
-    await userEvent.click(screen.getAllByRole("button", { name: "打开" })[0]!);
+    await userEvent.click((await screen.findAllByRole("button", { name: "选择项目文件夹…" }))[0]!);
+    await userEvent.click(await screen.findByRole("button", { name: "选择当前文件夹" }));
 
     expect(await screen.findByText(/no such directory/)).toBeInTheDocument();
   });
@@ -246,6 +276,36 @@ describe("the first run", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "去填密钥" }));
     expect(await screen.findByLabelText("DeepSeek API Key")).toBeInTheDocument();
+  });
+
+  it("does not misdiagnose an empty OpenCode catalog as a missing GeneHub key", async () => {
+    const opencode: AgentInfo = {
+      ...UNCONFIGURED_AGENT,
+      id: "opencode",
+      label: "OpenCode",
+      builtin: false,
+      capabilities: {
+        ...UNCONFIGURED_AGENT.capabilities,
+        setEffort: false,
+        setMode: false,
+        permissions: false,
+        attachments: true,
+      },
+    };
+    const { client } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [opencode] }),
+      "workspace.list": () => ({
+        type: "workspaces",
+        data: [{ id: "w1", name: "app", root: "/home/me/app", isGitRepo: true }],
+      }),
+      "session.list": () => ({ type: "sessions", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    await start(client, hostWith());
+
+    expect(await screen.findByPlaceholderText(/描述任务/)).toBeInTheDocument();
+    expect(screen.queryByText("还差一个模型密钥。")).not.toBeInTheDocument();
+    expect(useWorkbench.getState().draft?.agentId).toBe("opencode");
   });
 
   /**

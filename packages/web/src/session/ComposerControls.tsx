@@ -1,15 +1,112 @@
-import type { AgentInfo } from "@genehub/proto";
+import type { AgentInfo, ModeInfo, ModelInfo } from "@genehub/proto";
+import { useCallback, useId, useRef, useState } from "react";
 
+import { AgentMark } from "../presentation/AgentMark";
+import {
+  resolveAgentAvailability,
+  resolveAgentPresentation,
+  resolveAgentProfile,
+  resolveEffortBadge,
+  resolveModeBadge,
+  resolveModelPresentation,
+} from "../presentation/catalog/resolve";
 import { defaultAgent } from "./store";
+import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 
-/**
- * Compact agent / model / mode chips that live *inside* the composer.
+export interface RuntimeSelection {
+  current: AgentInfo | undefined;
+  agents: AgentInfo[];
+  model: ModelInfo | undefined;
+  modelAvailable: boolean;
+  mode: ModeInfo | undefined;
+  modeAvailable: boolean;
+  effortId: string | null;
+}
+
+/** Resolve exactly what the footer and the settings panel describe.
  *
- * The chat surface stays quiet: these are chrome for the next send, not a
- * second toolbar competing with the timeline.
+ * A historical model or mode can disappear from a dynamic catalog. Keep its
+ * real id visible instead of silently presenting the new default as if the
+ * session had switched itself.
+ */
+export function resolveRuntimeSelection({
+  agents,
+  agentId,
+  modelId,
+  modeId,
+  effortId,
+}: {
+  agents: AgentInfo[];
+  agentId: string | null;
+  modelId: string | null;
+  modeId: string | null;
+  effortId: string | null;
+}): RuntimeSelection {
+  const ready = agents.filter((agent) => agent.probe.state === "ready");
+  const selected = agents.find((agent) => agent.id === agentId);
+  const removed = agentId && !selected ? removedAgent(agentId) : undefined;
+  const current = selected ?? removed ?? defaultAgent(agents) ?? ready[0];
+  const catalogModel = current?.catalog.models.find((candidate) => candidate.id === modelId);
+  const fallbackModel =
+    current?.catalog.models.find((candidate) => candidate.id === current.catalog.defaultModel) ??
+    current?.catalog.models[0];
+  const missingModel =
+    modelId && !catalogModel
+      ? { id: modelId, label: modelId, contextWindow: undefined, reasoning: false, efforts: [] }
+      : undefined;
+  const model = catalogModel ?? missingModel ?? fallbackModel;
+  const catalogMode = current?.catalog.modes.find((candidate) => candidate.id === modeId);
+  const fallbackMode =
+    current?.catalog.modes.find((candidate) => candidate.id === current.catalog.defaultMode) ??
+    current?.catalog.modes[0];
+  const missingMode =
+    modeId && !catalogMode ? { id: modeId, label: modeId, description: undefined } : undefined;
+
+  return {
+    current,
+    agents: removed ? [removed, ...agents] : agents,
+    model,
+    modelAvailable: Boolean(catalogModel ?? (!modelId && fallbackModel)),
+    mode: catalogMode ?? missingMode ?? fallbackMode,
+    modeAvailable: Boolean(catalogMode ?? (!modeId && fallbackMode)),
+    effortId: effortId ?? current?.catalog.defaultEffort ?? null,
+  };
+}
+
+/** Keep a historical/custom Agent honest after it has been removed from the
+ * daemon configuration. Falling through to the default used to relabel old
+ * sessions as Codex or Genet. */
+function removedAgent(id: string): AgentInfo {
+  return {
+    id,
+    label: id,
+    builtin: false,
+    probe: { state: "unavailable", reason: "已从当前 Agent 配置中移除" },
+    capabilities: {
+      interrupt: false,
+      setModel: false,
+      setEffort: false,
+      setMode: false,
+      permissions: false,
+      resume: false,
+      fork: false,
+      attachments: false,
+    },
+    catalog: {
+      models: [],
+      modes: [],
+      commands: [],
+      defaultModel: undefined,
+      defaultMode: undefined,
+      defaultEffort: undefined,
+    },
+  };
+}
+
+/** One quiet, non-wrapping summary in the composer footer.
  *
- * On a phone the composer collapses these chips so the timeline is not covered
- * by a permanent toolbar (`Composer` owns when). Desktop always shows them.
+ * The full catalog remains available in `RuntimeSettingsPanel`; focusing the
+ * textarea no longer unfolds four native selects into the conversation.
  */
 export function ComposerControls({
   agents,
@@ -17,9 +114,10 @@ export function ComposerControls({
   modelId,
   modeId,
   effortId,
+  compact = false,
   disabled,
   agentLocked,
-  mobileChrome = "full",
+  onOpenChange,
   onPickAgent,
   onPickModel,
   onPickMode,
@@ -30,173 +128,153 @@ export function ComposerControls({
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  /** Idle composer treatment: one very small metadata strip under the input. */
+  compact?: boolean;
   disabled?: boolean;
-  /**
-   * True once the session has said anything. Picking a different agent here
-   * does not hand the conversation over to it — each adapter keeps its own,
-   * incompatible idea of "session" (a CLI's own `--resume` id, its own HTTP
-   * session, a scratch file), so today it silently opens a *second*, empty
-   * session instead. That surprise is worse than not offering the switch, so
-   * once there is something to lose, the picker locks instead of lying about
-   * what it does (`docs/architecture.md` on cross-agent history).
-   */
   agentLocked?: boolean;
-  /**
-   * How much chrome a phone should keep while the composer is idle.
-   * - `full`: everything (composer focused, or desktop via `md:`)
-   * - `agent`: only the agent picker — used for a brand-new conversation
-   * - `hidden`: nothing; just the send button remains
-   */
-  mobileChrome?: "full" | "agent" | "hidden";
+  onOpenChange?(open: boolean): void;
   onPickAgent(id: string): void;
   onPickModel(id: string): void;
   onPickMode(id: string): void;
   onPickEffort(id: string): void;
 }) {
-  const installed = agents.filter((agent) => agent.probe.state === "ready");
-  const selected = agents.find((agent) => agent.id === agentId);
-  // Never display a different agent from the one the session is actually
-  // bound to. In particular, an unavailable built-in session used to render
-  // the first ready agent (usually Codex) while sends still went to `genet`.
-  const current = selected ?? defaultAgent(agents) ?? installed[0];
-  const agentOptions = [
-    ...(selected && selected.probe.state !== "ready"
-      ? [{ value: selected.id, label: `${selected.label}（不可用）`, disabled: true }]
-      : []),
-    ...installed.map((agent) => ({ value: agent.id, label: agent.label })),
-  ];
-  const model =
-    current?.catalog.models.find((candidate) => candidate.id === modelId) ??
-    current?.catalog.models.find((candidate) => candidate.id === current?.catalog.defaultModel) ??
-    current?.catalog.models[0];
-  // The levels belong to the model, not to the agent: on Claude Code each model
-  // names its own, and a model with none should not be offered the control.
-  const efforts = model?.efforts ?? [];
-  const hideAllOnMobile = mobileChrome === "hidden";
-  const hideSecondaryOnMobile = mobileChrome !== "full";
-
-  return (
-    <div
-      className={`flex min-w-0 flex-1 flex-wrap items-center gap-1 ${
-        hideAllOnMobile ? "max-md:hidden" : ""
-      }`}
-      data-mobile-chrome={mobileChrome}
-    >
-      <Chip
-        ariaLabel="agent"
-        value={current?.id ?? ""}
-        disabled={disabled || agentLocked}
-        title={agentLocked ? "对话已经开始，无法在同一会话里换 agent；新建一个会话即可换" : undefined}
-        options={agentOptions}
-        onChange={onPickAgent}
-      />
-      {current?.capabilities.setModel && current.catalog.models.length > 0 ? (
-        <Chip
-          ariaLabel="模型"
-          className={hideSecondaryOnMobile ? "max-md:hidden" : undefined}
-          value={modelId ?? current.catalog.defaultModel ?? ""}
-          disabled={disabled}
-          options={current.catalog.models.map((model) => ({
-            value: model.id,
-            label: model.label,
-          }))
-          }
-          onChange={onPickModel}
-        />
-      ) : null}
-      {current?.capabilities.setEffort && efforts.length > 0 ? (
-        <Chip
-          ariaLabel="思考强度"
-          className={hideSecondaryOnMobile ? "max-md:hidden" : undefined}
-          label="思考"
-          value={effortId ?? current.catalog.defaultEffort ?? ""}
-          disabled={disabled}
-          options={[
-            // Only when nothing is chosen and the agent did not say what its own
-            // default is: showing the weakest level as if it were in force would
-            // be a wrong answer rather than an unknown one (Claude Code does not
-            // report which level it is on).
-            ...(effortId ?? current.catalog.defaultEffort
-              ? []
-              : [{ value: "", label: "默认" }]),
-            ...efforts.map((effort) => ({ value: effort, label: effort })),
-          ]}
-          onChange={(value) => {
-            // The placeholder is not a level anyone can be switched to.
-            if (value) onPickEffort(value);
-          }}
-        />
-      ) : null}
-      {current?.capabilities.setMode && current.catalog.modes.length > 0 ? (
-        <Chip
-          // Modes are now only ever tool-approval policy: the thinking axis moved
-          // to `efforts`, so this chip no longer means two different things
-          // depending on which agent you were talking to.
-          ariaLabel="模式"
-          className={hideSecondaryOnMobile ? "max-md:hidden" : undefined}
-          label={current.capabilities.permissions ? "权限" : "模式"}
-          value={modeId ?? current.catalog.defaultMode ?? ""}
-          disabled={disabled}
-          options={current.catalog.modes.map((mode) => ({ value: mode.id, label: mode.label }))}
-          onChange={onPickMode}
-        />
-      ) : null}
-    </div>
+  const [open, setOpen] = useState(false);
+  const generatedId = useId();
+  const panelId = `runtime-settings-${generatedId}`;
+  const trigger = useRef<HTMLButtonElement>(null);
+  const selection = resolveRuntimeSelection({ agents, agentId, modelId, modeId, effortId });
+  const agentPresentation = selection.current
+    ? resolveAgentPresentation(selection.current)
+    : null;
+  const agentProfile = selection.current
+    ? resolveAgentProfile(selection.current.id)
+    : null;
+  const permissionAxis = Boolean(
+    selection.current?.capabilities.permissions && agentProfile?.modeKind === "permission",
   );
-}
+  const model = selection.model
+    ? resolveModelPresentation({
+        agentId: selection.current?.id ?? null,
+        modelId: selection.model.id,
+        modelLabel: selection.model.label,
+      })
+    : null;
+  const agentAvailability = selection.current
+    ? resolveAgentAvailability(selection.current)
+    : null;
+  const effort =
+    selection.current?.capabilities.setEffort && (selection.model?.efforts.length ?? 0) > 0
+    ? resolveEffortBadge(selection.effortId)
+    : null;
+  const mode = selection.current?.capabilities.setMode && selection.mode
+    ? resolveModeBadge({
+        agentId: selection.current.id,
+        permissions: permissionAxis,
+        modeId: selection.mode?.id,
+        modeLabel: selection.mode?.label,
+      })
+    : null;
+  const summary = [
+    selection.current
+      ? `Agent：${agentPresentation?.label ?? selection.current.id}${agentAvailability ? `（${agentAvailability.fullLabel}）` : ""}`
+      : "Agent：未选择",
+    model ? `模型：${model.fullLabel}` : null,
+    effort ? `思考强度：${effort.fullLabel}` : null,
+    mode
+      ? `${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join("；");
+  const setPanelOpen = useCallback((next: boolean) => {
+    setOpen(next);
+    onOpenChange?.(next);
+  }, [onOpenChange]);
+  const closePanel = useCallback(() => setPanelOpen(false), [setPanelOpen]);
 
-function Chip({
-  ariaLabel,
-  label,
-  value,
-  options,
-  disabled,
-  title,
-  className,
-  onChange,
-}: {
-  ariaLabel: string;
-  /** A short visible caption before the value, for chips whose options alone
-   * (e.g. "Default" / "Off") don't say what axis they belong to. */
-  label?: string;
-  value: string;
-  options: Array<{ value: string; label: string; disabled?: boolean }>;
-  disabled?: boolean;
-  title?: string;
-  className?: string;
-  onChange(value: string): void;
-}) {
   return (
-    <label
-      className={`relative inline-flex max-w-[min(11rem,100%)] items-center gap-1 ${className ?? ""}`}
-      title={title}
-    >
-      <span className="sr-only">{ariaLabel}</span>
-      {label ? (
-        <span className="shrink-0 text-xs text-faint md:text-[10px]">{label}</span>
+    <>
+      <button
+        ref={trigger}
+        type="button"
+        aria-label={summary}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => setPanelOpen(true)}
+        className={`flex !min-h-0 !min-w-0 flex-1 items-center text-left text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 ${
+          compact
+            ? "relative h-[18px] min-h-0 rounded px-1 text-[14px] leading-[18px] after:absolute after:-inset-y-1.5 after:inset-x-0 after:content-[''] md:h-3 md:text-[11px] md:leading-3"
+            : "h-9 min-h-0 rounded-md px-1.5 text-[14px] leading-9 md:h-6 md:text-[12px] md:leading-6"
+        }`}
+      >
+        <span
+          className={`flex min-w-0 flex-1 items-center overflow-hidden opacity-75 ${
+            compact ? "gap-1.5 md:gap-1" : "gap-2 md:gap-1.5"
+          }`}
+        >
+          {selection.current ? (
+            <AgentMark
+              agent={selection.current}
+              className={compact ? "h-4 w-4 md:h-3 md:w-3" : "h-5 w-5 md:h-4 md:w-4"}
+              textClassName={compact ? "max-w-16 text-[14px] md:text-[11px]" : "max-w-24 text-[14px] md:text-[12px]"}
+              glyphClassName={compact ? "text-[14px] md:text-[11px]" : "text-[18px] md:text-[14px]"}
+            />
+          ) : null}
+          {agentAvailability ? (
+            <span
+              className="shrink-0 whitespace-nowrap text-danger"
+              title={agentAvailability.fullLabel}
+            >
+              {agentAvailability.shortLabel}
+            </span>
+          ) : null}
+          {model ? (
+            <span className="min-w-0 truncate text-muted" title={model.fullLabel}>
+              {model.shortLabel}
+            </span>
+          ) : selection.current && agentPresentation && agentPresentation.kind !== "text" ? (
+            <span className="min-w-0 truncate text-muted" title={agentPresentation.label}>
+              {agentPresentation.label}
+            </span>
+          ) : null}
+          {effort ? (
+            <span
+              className="shrink-0 whitespace-nowrap text-muted"
+              title={`思考强度：${effort.fullLabel}`}
+            >
+              <span aria-hidden>{effort.emoji}{effort.shortLabel}</span>
+            </span>
+          ) : null}
+          {mode ? (
+            <span
+              className="shrink-0 whitespace-nowrap text-muted"
+              title={`${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}`}
+            >
+              <span aria-hidden>{mode.emoji}</span>
+            </span>
+          ) : null}
+          <span className="ml-auto shrink-0 text-[12px] text-faint md:text-[8px]" aria-hidden>
+            ▾
+          </span>
+        </span>
+      </button>
+
+      {open ? (
+        <RuntimeSettingsPanel
+          id={panelId}
+          selection={selection}
+          disabled={disabled}
+          agentLocked={agentLocked}
+          returnFocusRef={trigger}
+          onClose={closePanel}
+          onPickAgent={onPickAgent}
+          onPickModel={onPickModel}
+          onPickMode={onPickMode}
+          onPickEffort={onPickEffort}
+        />
       ) : null}
-      <select
-        aria-label={ariaLabel}
-        // A real 44px target on a phone, and a bordered pill so it reads as
-        // something to press rather than as a caption. `theme.css` guarantees
-        // the 16px that keeps iOS from zooming the page open on focus.
-        className="min-h-11 appearance-none truncate rounded-full border border-line bg-transparent py-2 pl-3 pr-7 text-base text-muted outline-none hover:bg-raised hover:text-fg disabled:opacity-40 md:min-h-0 md:rounded-full md:border-0 md:py-0.5 md:pl-2 md:pr-5 md:text-xs"
-        value={value}
-        disabled={disabled || options.length === 0}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        {options.map((option) => (
-          <option key={option.value} value={option.value} disabled={option.disabled}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-      <span
-        className="pointer-events-none absolute right-2.5 text-xs text-faint md:right-1.5 md:text-[9px]"
-        aria-hidden
-      >
-        ▾
-      </span>
-    </label>
+    </>
   );
 }

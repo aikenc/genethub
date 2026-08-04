@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use genehub_proto::WorkspaceInfo;
+use genehub_proto::{DirectoryEntry, DirectoryListing, WorkspaceInfo};
 use tokio::sync::RwLock;
 
 use crate::config::{Config, WorkspaceEntry};
@@ -14,6 +14,40 @@ pub struct Workspaces {
     entries: RwLock<HashMap<String, WorkspaceEntry>>,
     config_path: PathBuf,
     config: Arc<RwLock<Config>>,
+}
+
+pub fn list_directory(requested: Option<&Path>) -> Result<DirectoryListing> {
+    let path = requested
+        .map(Path::to_path_buf)
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| anyhow!("no home directory"))?
+        .canonicalize()
+        .context("no such directory")?;
+    if !path.is_dir() {
+        return Err(anyhow!("{} is not a directory", path.display()));
+    }
+
+    let mut directories = std::fs::read_dir(&path)
+        .with_context(|| format!("could not read {}", path.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .filter(|kind| kind.is_dir())
+                .map(|_| DirectoryEntry {
+                    name: entry.file_name().to_string_lossy().to_string(),
+                    path: entry.path().display().to_string(),
+                })
+        })
+        .collect::<Vec<_>>();
+    directories.sort_by_key(|entry| entry.name.to_lowercase());
+
+    Ok(DirectoryListing {
+        path: path.display().to_string(),
+        parent: path.parent().map(|parent| parent.display().to_string()),
+        directories,
+    })
 }
 
 impl Workspaces {
@@ -192,6 +226,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("no such directory"));
+    }
+
+    #[test]
+    fn directory_picker_lists_only_folders_and_can_move_up() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("project")).unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not a folder").unwrap();
+
+        let listing = list_directory(Some(dir.path())).unwrap();
+        assert_eq!(listing.directories.len(), 1);
+        assert_eq!(listing.directories[0].name, "project");
+        assert_eq!(
+            listing.parent.as_deref(),
+            dir.path()
+                .parent()
+                .map(|path| path.to_string_lossy())
+                .as_deref()
+        );
     }
 
     #[tokio::test]

@@ -23,7 +23,9 @@ export default {
         mono: ["ui-monospace", "SFMono-Regular", "Menlo", "Consolas", "monospace"],
       },
       maxWidth: {
-        chat: "48rem",
+        // Conversation chrome follows the whole available centre column. The
+        // shared page padding, not another reading-width cap, provides air.
+        chat: "none",
       },
     },
   },

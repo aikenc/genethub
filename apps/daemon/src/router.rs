@@ -623,6 +623,13 @@ pub async fn handle(
             }
         }
 
+        Request::DirectoryList { path } => {
+            match crate::workspace::list_directory(path.as_deref().map(Path::new)) {
+                Ok(listing) => Handled::ok(Reply::Directory(listing)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::FileTree {
             workspace_id,
             path,

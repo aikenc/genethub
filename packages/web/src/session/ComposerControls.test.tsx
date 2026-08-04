@@ -1,8 +1,9 @@
 import type { AgentInfo } from "@genehub/proto";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { ComposerControls } from "./ComposerControls";
+import { ComposerControls, resolveRuntimeSelection } from "./ComposerControls";
 
 const AGENTS: AgentInfo[] = [
   {
@@ -13,9 +14,8 @@ const AGENTS: AgentInfo[] = [
     capabilities: {
       interrupt: true,
       setModel: true,
-      // Thinking, which for our own agent is the only such dial it has.
-      setMode: false,
       setEffort: true,
+      setMode: false,
       permissions: false,
       resume: true,
       fork: false,
@@ -23,13 +23,19 @@ const AGENTS: AgentInfo[] = [
     },
     catalog: {
       models: [
-        { id: "deepseek/v4", label: "DeepSeek V4", reasoning: true, efforts: ["low", "high"] },
+        {
+          id: "deepseek/v4-long-name",
+          label: "DeepSeek V4 Long",
+          contextWindow: 128_000,
+          reasoning: true,
+          efforts: ["low", "medium", "high"],
+        },
       ],
       modes: [],
       commands: [],
-      defaultModel: "deepseek/v4",
+      defaultModel: "deepseek/v4-long-name",
       defaultMode: undefined,
-      defaultEffort: "low",
+      defaultEffort: "medium",
     },
   },
   {
@@ -39,199 +45,336 @@ const AGENTS: AgentInfo[] = [
     probe: { state: "ready" },
     capabilities: {
       interrupt: true,
-      setModel: false,
+      setModel: true,
+      setEffort: true,
       setMode: true,
-      setEffort: false,
       permissions: true,
       resume: true,
       fork: false,
-      attachments: false,
+      attachments: true,
     },
     catalog: {
       models: [],
-      modes: [{ id: "default", label: "Default", description: undefined }],
+      modes: [
+        { id: "default", label: "Default", description: "Ask before tools run" },
+        { id: "bypassPermissions", label: "Bypass", description: "Run without asking" },
+      ],
       commands: [],
       defaultModel: undefined,
       defaultMode: "default",
+      defaultEffort: undefined,
     },
   },
 ];
 
-/**
- * Switching agents mid-conversation does not hand the conversation over —
- * each CLI keeps its own incompatible session state — it silently opens a
- * second, empty session instead. Once a conversation exists, the picker
- * locks rather than doing that surprise.
- */
-describe("the agent picker once a conversation has started", () => {
-  it("is enabled with nothing said yet", () => {
-    render(
-      <ComposerControls
-        agents={AGENTS}
-        agentId="genet"
-        modelId={null}
-        modeId={null}
+function controls(overrides: Partial<Parameters<typeof ComposerControls>[0]> = {}) {
+  const callbacks = {
+    onPickAgent: vi.fn(),
+    onPickModel: vi.fn(),
+    onPickMode: vi.fn(),
+    onPickEffort: vi.fn(),
+  };
+  render(
+    <ComposerControls
+      agents={AGENTS}
+      agentId="genet"
+      modelId={null}
+      modeId={null}
       effortId={null}
-        agentLocked={false}
-        onPickAgent={vi.fn()}
-        onPickModel={vi.fn()}
-        onPickMode={vi.fn()}
-        onPickEffort={() => {}}
-      />,
-    );
-    expect(screen.getByLabelText("agent")).toBeEnabled();
+      {...callbacks}
+      {...overrides}
+    />,
+  );
+  return callbacks;
+}
+
+async function openSettings(name: RegExp = /Agent：/) {
+  const trigger = screen.getByRole("button", { name });
+  await userEvent.click(trigger);
+  return { trigger, dialog: screen.getByRole("dialog", { name: "Agent 与运行设置" }) };
+}
+
+describe("the compact runtime summary", () => {
+  it("keeps full accessible values while shortening the visible model", () => {
+    controls();
+    expect(
+      screen.getByRole("button", {
+        name: "Agent：GeneHub Agent；模型：DeepSeek V4 Long；思考强度：中",
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("DeepSeek…")).toBeInTheDocument();
+    expect(screen.getByText("🤔中")).toHaveAttribute("aria-hidden");
   });
 
-  it("locks once the session has history", () => {
-    render(
-      <ComposerControls
-        agents={AGENTS}
-        agentId="genet"
-        modelId={null}
-        modeId={null}
-      effortId={null}
-        agentLocked={true}
-        onPickAgent={vi.fn()}
-        onPickModel={vi.fn()}
-        onPickMode={vi.fn()}
-        onPickEffort={() => {}}
-      />,
-    );
-    expect(screen.getByLabelText("agent")).toBeDisabled();
+  it.each([
+    ["low", "低"],
+    ["medium", "中"],
+    ["high", "高"],
+  ])("shows the %s thinking level beside its emoji", (effortId, label) => {
+    controls({ effortId });
+    expect(screen.getByText(`🤔${label}`)).toHaveAttribute("aria-hidden");
+    expect(
+      screen.getByRole("button", { name: new RegExp(`思考强度：${label}`) }),
+    ).toBeInTheDocument();
   });
 
-  it("does not show Codex while the session is still bound to an unavailable built-in", () => {
-    const onPickAgent = vi.fn();
-    const agents: AgentInfo[] = [
-      { ...AGENTS[0]!, probe: { state: "notInstalled" } },
-      { ...AGENTS[1]!, id: "codex", label: "Codex", catalog: { ...AGENTS[0]!.catalog } },
-    ];
-    render(
-      <ComposerControls
-        agents={agents}
-        agentId="genet"
-        modelId={null}
-        modeId={null}
-        effortId={null}
-        agentLocked={false}
-        onPickAgent={onPickAgent}
-        onPickModel={vi.fn()}
-        onPickMode={vi.fn()}
-        onPickEffort={vi.fn()}
-      />,
-    );
-
-    const picker = screen.getByLabelText("agent") as HTMLSelectElement;
-    expect(picker.value).toBe("genet");
-    expect(picker.selectedOptions[0]?.textContent).toBe("GeneHub Agent（不可用）");
-
-    fireEvent.change(picker, { target: { value: "codex" } });
-    expect(onPickAgent).toHaveBeenCalledWith("codex");
+  it.each([
+    [true, "text-[14px]", "md:text-[11px]"],
+    [false, "text-[18px]", "md:text-[14px]"],
+  ])("keeps a responsive Agent glyph inside the compact=%s runtime row", (compact, phoneSize, desktopSize) => {
+    controls({ agentId: "claude", compact });
+    expect(screen.getByText("✱")).toHaveClass(phoneSize, desktopSize, "leading-none");
   });
 
-  it("shows the same usable default agent that a new draft will send through", () => {
-    const agents: AgentInfo[] = [
-      { ...AGENTS[0]!, catalog: { ...AGENTS[0]!.catalog, models: [] } },
-      { ...AGENTS[1]!, id: "codex", label: "Codex", catalog: { ...AGENTS[0]!.catalog } },
-    ];
-    render(
-      <ComposerControls
-        agents={agents}
-        agentId={null}
-        modelId={null}
-        modeId={null}
-        effortId={null}
-        onPickAgent={vi.fn()}
-        onPickModel={vi.fn()}
-        onPickMode={vi.fn()}
-        onPickEffort={vi.fn()}
-      />,
-    );
+  it("uses the scoped friendly name for a known Codex model", () => {
+    const codex: AgentInfo = {
+      ...AGENTS[0]!,
+      id: "codex",
+      label: "Codex",
+      builtin: false,
+      catalog: {
+        ...AGENTS[0]!.catalog,
+        models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", reasoning: true, efforts: ["low"] }],
+        defaultModel: "gpt-5.6-sol",
+        defaultEffort: "low",
+      },
+    };
+    controls({ agents: [codex], agentId: "codex" });
+    expect(screen.getByText("5.6 Sol")).toBeInTheDocument();
+  });
 
-    expect((screen.getByLabelText("agent") as HTMLSelectElement).value).toBe("codex");
+  it("does not advertise effort or mode axes when their catalogs are empty", () => {
+    const emptyAxes: AgentInfo = {
+      ...AGENTS[0]!,
+      capabilities: { ...AGENTS[0]!.capabilities, setMode: true },
+      catalog: {
+        ...AGENTS[0]!.catalog,
+        models: [{ ...AGENTS[0]!.catalog.models[0]!, efforts: [] }],
+        modes: [],
+        defaultEffort: undefined,
+      },
+    };
+    controls({ agents: [emptyAxes] });
+    const summary = screen.getByRole("button", { name: /Agent：GeneHub Agent/ });
+    expect(summary).not.toHaveAccessibleName(/思考强度|权限|模式/);
   });
 });
 
-/**
- * Thinking used to ride on the `mode` axis for our own agent while claude used
- * that same axis for tool-approval policy — one chip that meant two unrelated
- * things depending on who you were talking to, and the only way to tell was a
- * capability flag. Thinking now has its own axis, so each chip means one thing.
- */
-describe("the thinking and permission chips", () => {
-  const controls = (agentId: string) =>
-    render(
-      <ComposerControls
-        agents={AGENTS}
-        agentId={agentId}
-        modelId={null}
-        modeId={null}
-        effortId={null}
-        onPickAgent={vi.fn()}
-        onPickModel={vi.fn()}
-        onPickMode={vi.fn()}
-        onPickEffort={vi.fn()}
-      />,
-    );
+describe("the rich runtime settings panel", () => {
+  it("opens as a dialog and restores focus when closed", async () => {
+    controls();
+    const { trigger, dialog } = await openSettings();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(within(dialog).getByText("128K 上下文")).toBeInTheDocument();
 
-  it("offers thinking from the levels the model named", () => {
-    controls("genet");
-
-    const thinking = screen.getByLabelText("思考强度");
-    expect([...thinking.querySelectorAll("option")].map((option) => option.value)).toEqual([
-      "low",
-      "high",
-    ]);
-    // No permission chip: our own agent has no approval flow to have a policy about.
-    expect(screen.queryByLabelText("模式")).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "关闭运行设置" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
   });
 
-  it("offers permissions where they exist, and no thinking where the model has none", () => {
-    controls("claude");
-
-    expect(screen.getByText("权限")).toBeInTheDocument();
-    // This fixture's claude lists no levels, so the control that would pretend to
-    // set one is absent rather than empty.
-    expect(screen.queryByLabelText("思考强度")).not.toBeInTheDocument();
+  it("gives visually hidden radio controls a visible keyboard focus ring", async () => {
+    controls();
+    const { dialog } = await openSettings();
+    const agent = within(dialog).getByRole("radio", { name: "GeneHub Agent" });
+    const effort = within(dialog).getByRole("radio", { name: /高/ });
+    await waitFor(() => expect(agent).toHaveFocus());
+    expect(agent.closest("label")).toHaveClass("has-[:focus-visible]:outline-2");
+    expect(effort.closest("label")).toHaveClass("has-[:focus-visible]:outline-2");
   });
 
-  it("says '默认' rather than naming a level nobody chose", () => {
-    // Claude Code never reports which level it is on. Showing the weakest one as
-    // if it were in force would be a wrong answer dressed as a known one.
-    const agents = AGENTS.map((agent) =>
-      agent.id === "claude"
-        ? {
-            ...agent,
-            capabilities: { ...agent.capabilities, setEffort: true },
-            catalog: {
-              ...agent.catalog,
-              models: [{ id: "default", label: "Default", reasoning: true, efforts: ["low", "max"] }],
-              defaultModel: "default",
-              defaultEffort: undefined,
-            },
-          }
-        : agent,
-    );
-    render(
-      <ComposerControls
-        agents={agents}
-        agentId="claude"
-        modelId={null}
-        modeId={null}
-        effortId={null}
-        onPickAgent={vi.fn()}
-        onPickModel={vi.fn()}
-        onPickMode={vi.fn()}
-        onPickEffort={vi.fn()}
-      />,
-    );
+  it("locks only the Agent choice once a conversation has history", async () => {
+    controls({ agentLocked: true });
+    const { dialog } = await openSettings();
+    expect(within(dialog).getByText(/当前会话已有内容/)).toBeInTheDocument();
+    expect(within(dialog).getByRole("radio", { name: "GeneHub Agent" })).toBeDisabled();
+    expect(within(dialog).getByRole("radio", { name: /高/ })).toBeEnabled();
+  });
 
-    const thinking = screen.getByLabelText("思考强度");
-    expect([...thinking.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
-      "默认",
-      "low",
-      "max",
+  it("keeps an unavailable bound Agent visible without pretending it is Codex", async () => {
+    const unavailable = {
+      ...AGENTS[0]!,
+      probe: { state: "unavailable", reason: "请先登录" } as const,
+    };
+    const codex = { ...AGENTS[1]!, id: "codex", label: "Codex" };
+    const onPickAgent = vi.fn();
+    controls({ agents: [unavailable, codex], onPickAgent });
+    const { dialog } = await openSettings(/Agent：GeneHub Agent（不可用：请先登录）/);
+
+    expect(
+      within(dialog).getByRole("radio", { name: "GeneHub Agent 不可用：请先登录" }),
+    ).toBeChecked();
+    expect(within(dialog).getByText("不可用：请先登录")).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("radio", { name: "Codex" }));
+    expect(onPickAgent).toHaveBeenCalledWith("codex");
+  });
+
+  it("keeps a removed custom Agent as an unavailable tombstone", async () => {
+    controls({ agents: [AGENTS[0]!], agentId: "acp:retired" });
+    const { dialog } = await openSettings(
+      /Agent：acp:retired（不可用：已从当前 Agent 配置中移除）/,
+    );
+    expect(
+      within(dialog).getByRole("radio", {
+        name: "acp:retired 不可用：已从当前 Agent 配置中移除",
+      }),
+    ).toBeChecked();
+    expect(within(dialog).getByRole("radio", { name: "GeneHub Agent" })).toBeEnabled();
+  });
+
+  it("selects model ids and effort ids without changing their wire values", async () => {
+    const second = {
+      id: "provider/a-very-long-model-id",
+      label: "A very long model label",
+      reasoning: true,
+      efforts: ["low", "high"],
+    };
+    const agents = [
+      {
+        ...AGENTS[0]!,
+        catalog: { ...AGENTS[0]!.catalog, models: [...AGENTS[0]!.catalog.models, second] },
+      },
+    ];
+    const callbacks = controls({ agents });
+    const { dialog } = await openSettings();
+
+    await userEvent.click(within(dialog).getByRole("radio", { name: /A very long model label/ }));
+    expect(callbacks.onPickModel).toHaveBeenCalledWith("provider/a-very-long-model-id");
+    await userEvent.click(within(dialog).getByRole("radio", { name: /高/ }));
+    expect(callbacks.onPickEffort).toHaveBeenCalledWith("high");
+  });
+
+  it("keeps permission descriptions and maps unrestricted access to an unlock badge", async () => {
+    const onPickMode = vi.fn();
+    controls({ agentId: "claude", onPickMode });
+    expect(screen.getByRole("button", { name: /权限：执行前确认/ })).toBeInTheDocument();
+    const { dialog } = await openSettings(/Agent：Claude Code/);
+    expect(within(dialog).getByText("Run without asking")).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("radio", { name: /Bypass/ }));
+    expect(onPickMode).toHaveBeenCalledWith("bypassPermissions");
+  });
+
+  it("calls Cursor's agent/plan/ask axis a mode instead of a permission policy", async () => {
+    const cursor: AgentInfo = {
+      ...AGENTS[1]!,
+      id: "cursor",
+      label: "Cursor",
+      capabilities: {
+        ...AGENTS[1]!.capabilities,
+        setEffort: false,
+      },
+      catalog: {
+        ...AGENTS[1]!.catalog,
+        modes: [
+          { id: "agent", label: "Agent", description: "Work autonomously" },
+          { id: "plan", label: "Plan", description: "Plan before editing" },
+        ],
+        defaultMode: "agent",
+      },
+    };
+    controls({ agents: [cursor], agentId: "cursor" });
+    expect(screen.getByRole("button", { name: /模式：Agent/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /权限：Agent/ })).not.toBeInTheDocument();
+    const { dialog } = await openSettings(/Agent：Cursor/);
+    expect(within(dialog).getByText("模式")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("⚙️")).toHaveLength(2);
+  });
+
+  it("shows all six registry Agents, including unavailable choices", async () => {
+    const variants: AgentInfo[] = [
+      AGENTS[0]!,
+      { ...AGENTS[0]!, id: "opencode", label: "OpenCode", probe: { state: "notInstalled" } },
+      AGENTS[1]!,
+      { ...AGENTS[1]!, id: "codex", label: "Codex" },
+      { ...AGENTS[1]!, id: "cursor", label: "Cursor" },
+      { ...AGENTS[1]!, id: "acp", label: "ACP agent", probe: { state: "notInstalled" } },
+    ];
+    controls({ agents: variants });
+    const { dialog } = await openSettings();
+    const radios = within(dialog).getAllByRole("radio", { name: /GeneHub|OpenCode|Claude|Codex|Cursor|ACP/ });
+    expect(radios.map((radio) => radio.getAttribute("value"))).toEqual([
+      "genet",
+      "opencode",
+      "claude",
+      "codex",
+      "cursor",
+      "acp",
     ]);
-    expect((thinking as HTMLSelectElement).value).toBe("");
+    expect(within(dialog).getByRole("radio", { name: "OpenCode 未安装" })).toBeDisabled();
+    expect(within(dialog).getByRole("radio", { name: "ACP agent 未安装" })).toBeDisabled();
+  });
+
+  it("explains an empty ready catalog instead of looking unfinished", async () => {
+    const cursor: AgentInfo = {
+      ...AGENTS[1]!,
+      id: "cursor",
+      label: "Cursor",
+      catalog: {
+        models: [],
+        modes: [],
+        commands: [],
+        defaultModel: undefined,
+        defaultMode: undefined,
+        defaultEffort: undefined,
+      },
+    };
+    controls({ agents: [cursor], agentId: "cursor" });
+    expect(screen.getByText("Cursor")).toBeInTheDocument();
+    const { dialog } = await openSettings(/Agent：Cursor/);
+    expect(within(dialog).getByText(/将使用 Agent 自身默认配置/)).toBeInTheDocument();
+  });
+
+  it("marks Genet as needing model setup when its required catalog is empty", async () => {
+    const genet: AgentInfo = {
+      ...AGENTS[0]!,
+      catalog: {
+        models: [],
+        modes: [],
+        commands: [],
+        defaultModel: undefined,
+        defaultMode: undefined,
+        defaultEffort: "medium",
+      },
+    };
+    controls({ agents: [genet] });
+    const { dialog } = await openSettings(/Agent：GeneHub Agent（待配置：请先配置模型服务）/);
+    expect(
+      within(dialog).getByRole("radio", {
+        name: "GeneHub Agent 待配置：请先配置模型服务",
+      }),
+    ).toBeDisabled();
+    expect(within(dialog).getByText(/当前没有可用模型/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/自身默认配置/)).not.toBeInTheDocument();
+  });
+
+  it("shows a vanished model as unavailable instead of replacing it with the default", async () => {
+    controls({ modelId: "provider/removed-model" });
+    expect(screen.getByRole("button", { name: /模型：provider\/removed-model/ })).toBeInTheDocument();
+    const { dialog } = await openSettings();
+    const stale = within(dialog).getByRole("radio", { name: /provider\/removed-model/ });
+    expect(stale).toBeChecked();
+    expect(stale).toBeDisabled();
+    expect(within(dialog).getByText("当前目录已不再提供")).toBeInTheDocument();
+  });
+
+  it("closes on Escape", async () => {
+    controls();
+    await openSettings();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+});
+
+describe("runtime selection", () => {
+  it("uses the same ready default Agent as a new draft", () => {
+    const unavailable = { ...AGENTS[0]!, probe: { state: "notInstalled" } as const };
+    expect(
+      resolveRuntimeSelection({
+        agents: [unavailable, AGENTS[1]!],
+        agentId: null,
+        modelId: null,
+        modeId: null,
+        effortId: null,
+      }).current?.id,
+    ).toBe("claude");
   });
 });

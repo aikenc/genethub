@@ -1,5 +1,6 @@
 import type { AgentInfo, Attachment, CommandInfo } from "@genehub/proto";
-import { useMemo, useState } from "react";
+import { Paperclip } from "lucide-react";
+import { useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { attachmentPreviewUrl, AttachmentTooLarge, fileToAttachment, imageFilesFromClipboard } from "./attachments";
 import { ComposerControls } from "./ComposerControls";
@@ -9,11 +10,8 @@ import { ComposerControls } from "./ComposerControls";
  *
  * Enter sends, shift+enter breaks the line. While a turn is running the send
  * control becomes stop — one affordance, because the user's intent is never
- * ambiguous. Model and mode live here too, as chips under the text.
- *
- * On a phone those chips cover the timeline if they stay open, so the composer
- * collapses to the field (plus the agent picker on a brand-new conversation)
- * until it is focused. Desktop keeps the chips visible.
+ * ambiguous. Agent and runtime settings live in one quiet footer summary; its
+ * responsive detail panel keeps the richer catalog out of the conversation.
  *
  * Typing `/` opens the agent's own command list, when it has one. Running a
  * command needs nothing special — it goes out as ordinary text — so this is only
@@ -37,6 +35,7 @@ export function Composer({
   onPickModel,
   onPickMode,
   onPickEffort,
+  onHeightChange,
 }: {
   running: boolean;
   disabled?: boolean;
@@ -59,15 +58,22 @@ export function Composer({
   onPickModel(id: string): void;
   onPickMode(id: string): void;
   onPickEffort?(id: string): void;
+  /** The card grows with text and attachments while floating over the
+   * timeline. Its owner uses this to keep the last message and permission
+   * prompt above the real card instead of a guessed fixed offset. */
+  onHeightChange?(height: number): void;
 }) {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [pasteNotice, setPasteNotice] = useState<string | null>(null);
   const [highlighted, setHighlighted] = useState(0);
   const [dismissed, setDismissed] = useState(false);
-  // Phone only: chips stay tucked away until the field (or a chip) is focused.
-  const [expanded, setExpanded] = useState(false);
-  const mobileChrome = expanded ? "full" : agentLocked ? "hidden" : "agent";
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const commandMenuId = `composer-commands-${useId()}`;
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const picker = useRef<HTMLInputElement>(null);
+  const card = useRef<HTMLDivElement>(null);
 
   // Only while the draft *is* one slash token: a command has to lead the message
   // for the agent to treat it as one, so offering the menu mid-sentence would be
@@ -86,7 +92,8 @@ export function Composer({
       })
       .slice(0, 8);
   }, [commands, typing, dismissed]);
-  const open = matches.length > 0;
+  const active = focused || settingsOpen;
+  const open = focused && matches.length > 0 && !settingsOpen;
   const chosen = matches[Math.min(highlighted, matches.length - 1)];
 
   const complete = (command: CommandInfo) => {
@@ -105,9 +112,9 @@ export function Composer({
     onSend(text, attachments);
   };
 
-  const addPastedImages = async (files: File[]) => {
+  const addFiles = async (files: File[]) => {
     if (!attachmentsSupported) {
-      setPasteNotice("当前 agent 还不支持贴图");
+      setPasteNotice("当前 Agent 还不支持附件");
       return;
     }
     try {
@@ -115,9 +122,32 @@ export function Composer({
       setAttachments((current) => [...current, ...added]);
       setPasteNotice(null);
     } catch (error) {
-      setPasteNotice(error instanceof AttachmentTooLarge ? error.message : "读取图片失败");
+      setPasteNotice(error instanceof AttachmentTooLarge ? error.message : "读取文件失败");
     }
   };
+
+  useLayoutEffect(() => {
+    if (textarea.current) resizeComposerTextarea(textarea.current, active);
+  }, [active, draft]);
+
+  useLayoutEffect(() => {
+    const element = card.current;
+    if (!element || !onHeightChange) return;
+    const update = () => onHeightChange(Math.ceil(element.getBoundingClientRect().height));
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [onHeightChange]);
+
+  useLayoutEffect(() => {
+    const update = () => {
+      if (textarea.current) resizeComposerTextarea(textarea.current, active);
+    };
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [active]);
 
   return (
     <div
@@ -133,10 +163,11 @@ export function Composer({
     >
       {open ? (
         <div className="pointer-events-auto mx-auto mb-2 max-w-chat overflow-hidden rounded-xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur">
-          <ul role="listbox" aria-label="命令">
+          <ul id={commandMenuId} role="listbox" aria-label="命令">
             {matches.map((command, index) => (
               <li key={command.name}>
                 <button
+                  id={`${commandMenuId}-${index}`}
                   type="button"
                   role="option"
                   aria-selected={command === chosen}
@@ -163,18 +194,17 @@ export function Composer({
         </div>
       ) : null}
       <div
-        className="pointer-events-auto mx-auto max-w-chat rounded-2xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur"
-        onFocus={() => setExpanded(true)}
-        onBlur={(event) => {
-          // Stay open while focus moves between the field and a chip; only
-          // tuck away once focus has left the composer entirely.
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-            setExpanded(false);
-          }
-        }}
+        ref={card}
+        data-composer-state={active ? "active" : "idle"}
+        className={`pointer-events-auto mx-auto max-w-chat rounded-2xl border bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur transition-colors ${
+          focused ? "border-muted/50" : "border-line-strong"
+        }`}
       >
         {attachments.length > 0 ? (
-          <div className="flex flex-wrap gap-2 px-4 pt-3" aria-label="待发送的图片">
+          <div
+            className="flex flex-nowrap gap-2 overflow-x-auto px-4 pt-3"
+            aria-label="待发送的文件"
+          >
             {attachments.map((attachment, index) => (
               <div key={index} className="group relative h-14 w-14 shrink-0">
                 <img
@@ -194,109 +224,236 @@ export function Composer({
             ))}
           </div>
         ) : null}
-        <textarea
-          // Phone: one line while idle so the chips can tuck away without
-          // leaving a tall empty field. Desktop sizing is unchanged (`md:`).
-          className={`max-h-40 min-h-[56px] w-full resize-none bg-transparent px-4 pt-3.5 text-base text-fg outline-none placeholder:text-faint md:min-h-[52px] md:pt-3 md:text-sm ${
-            expanded ? "" : "max-md:min-h-11 max-md:pt-2.5"
-          }`}
-          placeholder="描述任务，或直接说你想改什么"
-          aria-label="任务描述"
-          value={draft}
-          disabled={disabled}
-          rows={2}
-          onChange={(event) => {
-            setDraft(event.target.value);
-            setHighlighted(0);
-            setDismissed(false);
-          }}
-          onPaste={(event) => {
-            const files = imageFilesFromClipboard(event.clipboardData);
-            if (files.length === 0) return;
-            // Pasting an image alongside plain text is possible in principle,
-            // but the composer is a single textarea: no cursor position to
-            // insert a thumbnail at. Only the image is kept, same as most
-            // chat apps' composers when a screenshot lands in an empty draft.
-            event.preventDefault();
-            void addPastedImages(files);
-          }}
-          onKeyDown={(event) => {
-            if (open) {
-              // While the menu is up it owns these keys. Enter in particular:
-              // sending `/co` because the menu was showing `/code-review` would
-              // be the one outcome nobody wanted.
-              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                event.preventDefault();
-                const step = event.key === "ArrowDown" ? 1 : matches.length - 1;
-                setHighlighted((current) => (current + step) % matches.length);
-                return;
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-x-1 px-1.5 py-1 md:py-0.5">
+          <div
+            data-composer-slot="input"
+            className={`min-w-0 ${
+              active
+                ? "col-span-2 col-start-1 row-start-1"
+                : "col-start-1 row-start-1"
+            }`}
+          >
+            <textarea
+              ref={textarea}
+              data-expanded={active}
+              className={`block w-full resize-none overflow-y-hidden bg-transparent px-3 text-base leading-9 text-fg outline-none placeholder:text-faint focus-visible:outline-transparent md:text-sm md:leading-6 ${
+                active ? "py-1.5 md:py-1" : "py-[3px] md:py-0.5"
+              }`}
+              placeholder="描述任务…"
+              aria-label="任务描述"
+              aria-autocomplete="list"
+              aria-expanded={open}
+              aria-controls={open ? commandMenuId : undefined}
+              aria-activedescendant={
+                open ? `${commandMenuId}-${Math.min(highlighted, matches.length - 1)}` : undefined
               }
-              if ((event.key === "Enter" || event.key === "Tab") && chosen) {
+              value={draft}
+              disabled={disabled}
+              rows={1}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                setHighlighted(0);
+                setDismissed(false);
+              }}
+              onPaste={(event) => {
+                const files = imageFilesFromClipboard(event.clipboardData);
+                if (files.length === 0) return;
+                // Pasting an image alongside plain text is possible in principle,
+                // but the composer is a single textarea: no cursor position to
+                // insert a thumbnail at. Only the image is kept, same as most
+                // chat apps' composers when a screenshot lands in an empty draft.
                 event.preventDefault();
-                complete(chosen);
-                return;
-              }
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setDismissed(true);
-                return;
-              }
-            }
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              send();
-            }
-          }}
-        />
-        {pasteNotice ? <p className="px-4 pt-1 text-xs text-muted">{pasteNotice}</p> : null}
-        <div
-          className={`flex items-center gap-2 px-2 pb-2 pt-0.5 md:pt-0 ${
-            mobileChrome === "hidden" ? "max-md:justify-end" : ""
-          }`}
-        >
-          <ComposerControls
-            agents={agents}
-            agentId={agentId}
-            modelId={modelId}
-            modeId={modeId}
-            effortId={effortId ?? null}
-            disabled={disabled || running}
-            agentLocked={agentLocked}
-            mobileChrome={mobileChrome}
-            onPickAgent={onPickAgent}
-            onPickModel={onPickModel}
-            onPickMode={onPickMode}
-            onPickEffort={onPickEffort ?? (() => {})}
-          />
-          {running ? (
-            <button
-              type="button"
-              aria-label="停止"
-              onClick={onInterrupt}
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger md:h-8 md:w-8"
-            >
-              <span className="h-3 w-3 rounded-[2px] bg-current md:h-2.5 md:w-2.5" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              aria-label="发送"
-              onClick={send}
-              disabled={disabled || (draft.trim().length === 0 && attachments.length === 0)}
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-accent text-white disabled:opacity-30 md:h-8 md:w-8"
-            >
-              <svg
-                viewBox="0 0 16 16"
-                className="h-4 w-4 md:h-3.5 md:w-3.5"
-                fill="currentColor"
-                aria-hidden
+                void addFiles(files);
+              }}
+              onKeyDown={(event) => {
+                if (open) {
+                  // While the menu is up it owns these keys. Enter in particular:
+                  // sending `/co` because the menu was showing `/code-review` would
+                  // be the one outcome nobody wanted.
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault();
+                    const step = event.key === "ArrowDown" ? 1 : matches.length - 1;
+                    setHighlighted((current) => (current + step) % matches.length);
+                    return;
+                  }
+                  if ((event.key === "Enter" || event.key === "Tab") && chosen) {
+                    event.preventDefault();
+                    complete(chosen);
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setDismissed(true);
+                    return;
+                  }
+                }
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  send();
+                }
+              }}
+            />
+            {pasteNotice ? (
+              <p
+                data-composer-slot="notice"
+                className="px-3 py-1 text-xs text-muted"
+                role="alert"
               >
-                <path d="M8 3.2 3.6 7.6l1.1 1.1L7.2 6.2V13h1.6V6.2l2.5 2.5 1.1-1.1L8 3.2Z" />
-              </svg>
+                {pasteNotice}
+              </p>
+            ) : null}
+          </div>
+          <div
+            data-composer-slot="runtime"
+            data-row-units={active ? "1" : "0.5"}
+            className={`col-start-1 row-start-2 flex min-w-0 items-center ${
+              active ? "h-9 md:h-6" : "h-[18px] md:h-3"
+            }`}
+          >
+            <ComposerControls
+              agents={agents}
+              agentId={agentId}
+              modelId={modelId}
+              modeId={modeId}
+              effortId={effortId ?? null}
+              compact={!active}
+              disabled={disabled || running}
+              agentLocked={agentLocked}
+              onOpenChange={setSettingsOpen}
+              onPickAgent={onPickAgent}
+              onPickModel={onPickModel}
+              onPickMode={onPickMode}
+              onPickEffort={onPickEffort ?? (() => {})}
+            />
+          </div>
+          <div
+            data-composer-slot="actions"
+            data-row-units={active ? "1" : "1.25"}
+            className={`col-start-2 flex flex-nowrap items-center gap-1 self-center ${
+              active ? "row-start-2 h-9 md:h-6" : "row-span-2 row-start-1 h-[45px] md:h-8"
+            }`}
+          >
+            <input
+              ref={picker}
+              type="file"
+              accept="image/*"
+              multiple
+              tabIndex={-1}
+              className="hidden"
+              onChange={(event) => {
+                const files = Array.from(event.currentTarget.files ?? []);
+                event.currentTarget.value = "";
+                if (files.length > 0) void addFiles(files);
+              }}
+            />
+            <button
+              type="button"
+              aria-label={
+                attachmentsSupported
+                  ? "添加文件（当前仅支持图片）"
+                  : "添加文件（当前 Agent 不支持附件）"
+              }
+              title={attachmentsSupported ? "添加文件（当前仅支持图片）" : "当前 Agent 不支持附件"}
+              disabled={disabled || running || !attachmentsSupported}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                setDismissed(true);
+                picker.current?.click();
+              }}
+              className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 ${
+                active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
+              }`}
+            >
+              <Paperclip className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
             </button>
-          )}
+            {running ? (
+              <button
+                type="button"
+                aria-label="停止"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={onInterrupt}
+                className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 ${
+                  active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
+                }`}
+              >
+                <span className="h-[18px] w-[18px] rounded-[3px] bg-current md:h-3 md:w-3 md:rounded-[2px]" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                aria-label="发送"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  send();
+                  textarea.current?.blur();
+                }}
+                disabled={disabled || (draft.trim().length === 0 && attachments.length === 0)}
+                className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 ${
+                  active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
+                }`}
+              >
+                <svg
+                  viewBox="0 0 16 16"
+                  className="h-6 w-6 md:h-4 md:w-4"
+                  fill="currentColor"
+                  aria-hidden
+                >
+                  <path d="M8 3.2 3.6 7.6l1.1 1.1L7.2 6.2V13h1.6V6.2l2.5 2.5 1.1-1.1L8 3.2Z" />
+                </svg>
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
   );
+}
+
+export const COMPOSER_TEXTAREA_COLLAPSED_HEIGHT = 28;
+export const COMPOSER_TEXTAREA_PHONE_COLLAPSED_HEIGHT = 42;
+export const COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT = 120;
+export const COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT = 192;
+export const COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT = 104;
+export const COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT = 176;
+export const COMPOSER_DESKTOP_BREAKPOINT = 768;
+
+/** Idle is one line: 36px on a phone and 24px on a wider screen. Focus expands
+ * to roughly three-to-five phone lines or four-to-seven desktop lines, then
+ * scrolls internally. */
+export function resizeComposerTextarea(
+  element: HTMLTextAreaElement,
+  active: boolean,
+  desktop = isDesktopComposerViewport(),
+): number {
+  if (!active) {
+    const height = desktop
+      ? COMPOSER_TEXTAREA_COLLAPSED_HEIGHT
+      : COMPOSER_TEXTAREA_PHONE_COLLAPSED_HEIGHT;
+    element.style.height = `${height}px`;
+    element.style.overflowY = "hidden";
+    return height;
+  }
+
+  const minHeight = desktop
+    ? COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT
+    : COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT;
+  const maxHeight = desktop
+    ? COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT
+    : COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT;
+  element.style.height = "auto";
+  const contentHeight = element.scrollHeight || minHeight;
+  const height = Math.min(maxHeight, Math.max(minHeight, contentHeight));
+  element.style.height = `${height}px`;
+  element.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
+  return height;
+}
+
+function isDesktopComposerViewport(): boolean {
+  if (typeof window === "undefined") return true;
+  if (typeof window.matchMedia === "function") {
+    return window.matchMedia(`(min-width: ${COMPOSER_DESKTOP_BREAKPOINT}px)`).matches;
+  }
+  return window.innerWidth >= COMPOSER_DESKTOP_BREAKPOINT;
 }

@@ -22,6 +22,7 @@ import { create } from "zustand";
 
 import type { Host } from "../host";
 import type { Client, ConnectionState } from "../protocol/client";
+import { canStartAgent } from "../presentation/catalog/resolve";
 import { applySequenced, emptyTimeline, fromSnapshot, type TimelineState } from "./timeline";
 
 /**
@@ -71,16 +72,22 @@ export interface Draft {
 /**
  * The agent a new conversation can actually send a first turn through.
  *
- * Prefer our own adapter when it is usable, but do not let a missing or
- * unconfigured built-in hide a ready external CLI such as Codex. The old
- * fallback picked the built-in by identity first and only checked readiness
- * afterwards, so a healthy Codex install could never become the default.
+ * Prefer our own adapter when it is usable, but do not require every external
+ * CLI to publish a model catalog before its first session. OpenCode and ACP
+ * Agents may intentionally use their own default and discover choices only
+ * after startup; Genet still needs a provider-backed catalog. A ready Agent
+ * with a concrete catalog remains the least surprising default when both kinds
+ * are installed, while the catalog-less Agent stays selectable and usable.
  */
 export function defaultAgent(agents: AgentInfo[]): AgentInfo | undefined {
-  const usable = agents.filter(
-    (agent) => agent.probe.state === "ready" && agent.catalog.models.length > 0,
+  const usable = agents.filter(canStartAgent);
+  const catalogued = usable.filter((agent) => agent.catalog.models.length > 0);
+  return (
+    catalogued.find((agent) => agent.builtin) ??
+    catalogued[0] ??
+    usable.find((agent) => agent.builtin) ??
+    usable[0]
   );
-  return usable.find((agent) => agent.builtin) ?? usable[0];
 }
 
 /** The tab an unstarted conversation lives in. There is only ever one. */
