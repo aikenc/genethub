@@ -7,6 +7,9 @@ import {
   type FabricRandomFill,
   FabricReset,
   newFabricStreamId,
+  FABRIC_INITIAL_STREAM_CREDIT,
+  FABRIC_MAX_OPERATION_METADATA_BYTES,
+  FABRIC_MAX_STREAM_CREDIT,
   FABRIC_ZERO_STREAM_ID,
 } from "./frame";
 
@@ -35,6 +38,8 @@ export interface FabricSocketCloseEvent {
 export interface FabricSocketLike {
   binaryType: string;
   readonly readyState: number;
+  /** Bytes the browser has accepted but not yet written to the network. */
+  readonly bufferedAmount: number;
   send(data: Uint8Array): void;
   close(code?: number, reason?: string): void;
   onopen: ((event: unknown) => void) | null;
@@ -43,17 +48,52 @@ export interface FabricSocketLike {
   onmessage: ((event: { data: unknown }) => void) | null;
 }
 
+export interface FabricReconnectTimer {
+  set(callback: () => void, delayMs: number): unknown;
+  clear(handle: unknown): void;
+}
+
+export interface FabricReconnectOptions {
+  /** Delay before the first recovery dial. Later delays double. */
+  initialDelayMs?: number;
+  /** Upper bound for the exponential delay. */
+  maxDelayMs?: number;
+  /** Symmetric random spread around each delay, from 0 through 1. */
+  jitterRatio?: number;
+  /** Injectable entropy for deterministic tests. Must return a value in [0, 1]. */
+  random?: () => number;
+  /** Injectable timer pair. Production callers should use the default. */
+  timer?: FabricReconnectTimer;
+}
+
 export interface FabricEndpointOptions {
   /** The first short-lived endpoint URL. It is attempted at most once. */
   url: string;
   /** Supplies a fresh endpoint URL after any previous dial was attempted. */
   redial?: () => Promise<string>;
+  /**
+   * Safe physical-connection recovery. Enabled by default when redial exists;
+   * false keeps reconnect fully manual. Operations are never replayed.
+   */
+  reconnect?: FabricReconnectOptions | false;
   socketFactory?: (url: string) => FabricSocketLike;
   /** Deterministic id source for tests. Production callers should omit it. */
   streamId?: () => string;
   randomFill?: FabricRandomFill;
   connectTimeoutMs?: number;
   maxFrameBytes?: number;
+  /** Bounds streams retained for one physical connection. */
+  maxActiveStreams?: number;
+  /** Bounds replay tombstones retained for one physical connection. */
+  maxRememberedStreamIds?: number;
+  /** Bounds frames waiting behind asynchronous Blob decoding. */
+  maxQueuedInboundFrames?: number;
+  /** Bounds bytes waiting behind asynchronous Blob decoding. */
+  maxQueuedInboundBytes?: number;
+  /** Bounds browser WebSocket buffering when a Relay stops reading. */
+  maxBufferedBytes?: number;
+  /** Bytes this endpoint is prepared to buffer independently for each stream. */
+  initialStreamCredit?: number;
   onError?: (error: unknown) => void;
 }
 
@@ -89,11 +129,20 @@ export class FabricStateError extends Error {
 }
 
 type IncomingHandler = (stream: FabricStream, opaqueHello: Uint8Array) => void | Promise<void>;
-type DataHandler = (payload: Uint8Array) => void;
+type DataHandler = (payload: Uint8Array) => unknown;
 type FinishHandler = () => void;
 
 const EMPTY = new Uint8Array();
 const DEFAULT_MAX_FRAME_BYTES = 4 * 1024 * 1024;
+const DEFAULT_MAX_ACTIVE_STREAMS = 256;
+const DEFAULT_MAX_REMEMBERED_STREAM_IDS = 4096;
+const DEFAULT_MAX_QUEUED_INBOUND_FRAMES = 64;
+const DEFAULT_MAX_QUEUED_INBOUND_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+const MAX_REMEMBERED_LOCAL_IDS = 4096;
+const DEFAULT_RECONNECT_INITIAL_MS = 250;
+const DEFAULT_RECONNECT_MAX_MS = 10_000;
+const DEFAULT_RECONNECT_JITTER = 0.2;
 const SOCKET_OPEN = 1;
 
 function deferred<T>(): {
@@ -123,6 +172,11 @@ export class FabricStream {
   private remoteSequence = 0n;
   private localFin = false;
   private remoteFin = false;
+  private outboundCredit = 0n;
+  private outboundWindow = 0n;
+  private inboundCredit: bigint;
+  private readonly inboundWindow: bigint;
+  private inboundTail: Promise<void> = Promise.resolve();
   private acceptedSettled = false;
   private completed = false;
   private readonly acceptance = deferred<Uint8Array>();
@@ -138,8 +192,14 @@ export class FabricStream {
     readonly id: string,
     readonly direction: FabricStreamDirection,
     readonly connectionEpoch: symbol,
+    inboundWindow: bigint,
+    initialOutboundCredit = 0n,
   ) {
     this.phase_ = direction === "outgoing" ? "opening" : "incoming";
+    this.inboundWindow = inboundWindow;
+    this.inboundCredit = inboundWindow;
+    this.outboundCredit = initialOutboundCredit;
+    this.outboundWindow = initialOutboundCredit;
     // A caller is free to observe only `done`. Marking the internal promise as
     // handled prevents a reset-before-accept from becoming a global unhandled
     // rejection; awaiting `accepted` still receives the same rejection.
@@ -148,6 +208,11 @@ export class FabricStream {
 
   get phase(): FabricStreamPhase {
     return this.phase_;
+  }
+
+  /** Bytes that may be sent immediately without exceeding peer credit. */
+  get availableSendCredit(): bigint {
+    return this.outboundCredit;
   }
 
   /** Accepts an INCOMING stream. Outgoing streams are accepted by their peer. */
@@ -181,8 +246,12 @@ export class FabricStream {
   }
 
   /** @internal */
-  activate(payload: Uint8Array): void {
+  activate(payload: Uint8Array, outboundCredit?: bigint): void {
     if (this.phase_ !== "opening" && this.phase_ !== "incoming") return;
+    if (outboundCredit !== undefined) {
+      this.outboundCredit = outboundCredit;
+      this.outboundWindow = outboundCredit;
+    }
     this.phase_ = "active";
     if (!this.acceptedSettled) {
       this.acceptedSettled = true;
@@ -197,22 +266,52 @@ export class FabricStream {
   }
 
   /** @internal */
+  takeOutboundCredit(byteLength: number): boolean {
+    const cost = BigInt(byteLength);
+    if (cost <= 0n || cost > this.outboundCredit) return false;
+    this.outboundCredit -= cost;
+    return true;
+  }
+
+  /** @internal */
+  addOutboundCredit(credit: bigint): boolean {
+    if (credit <= 0n || this.outboundCredit + credit > this.outboundWindow) {
+      return false;
+    }
+    this.outboundCredit += credit;
+    return true;
+  }
+
+  /** @internal */
   receiveData(sequence: bigint, payload: Uint8Array): boolean {
+    const cost = BigInt(payload.byteLength);
     if (
       (this.phase_ !== "active" && this.phase_ !== "halfClosedLocal") ||
       this.remoteFin ||
-      sequence !== this.remoteSequence + 1n
+      sequence !== this.remoteSequence + 1n ||
+      cost <= 0n ||
+      cost > this.inboundCredit
     ) {
       return false;
     }
     this.remoteSequence = sequence;
-    for (const handler of this.dataHandlers) {
-      try {
-        handler(payload.slice());
-      } catch (error) {
-        this.endpoint.reportListenerError(error);
-      }
-    }
+    this.inboundCredit -= cost;
+    const handlers = [...this.dataHandlers];
+    const delivered = this.inboundTail.then(async () => {
+      if (this.completed) return;
+      for (const handler of handlers) await handler(payload.slice());
+      if (!this.completed) this.endpoint.returnCredit(this, cost);
+    });
+    this.inboundTail = delivered.catch((error: unknown) => {
+      this.endpoint.failConsumer(this, error);
+    });
+    return true;
+  }
+
+  /** @internal */
+  restoreInboundCredit(credit: bigint): boolean {
+    if (credit <= 0n || this.inboundCredit + credit > this.inboundWindow) return false;
+    this.inboundCredit += credit;
     return true;
   }
 
@@ -292,8 +391,8 @@ export class FabricStream {
 /**
  * A single physical `/fabric/v2` endpoint WebSocket with many operation flows.
  *
- * Reconnect is explicit. Every attempted endpoint credential is considered
- * spent, all streams fail when that socket goes away, and no OPEN or DATA is
+ * A transient transport loss can recover the physical socket with a fresh
+ * one-shot admission. Every old stream still fails, and no OPEN or DATA is
  * replayed onto the next connection. This is essential for commands whose
  * execution outcome is unknown after a disconnect.
  */
@@ -303,16 +402,34 @@ export class FabricEndpoint {
   private streams = new Map<string, FabricStream>();
   private usedInEpoch = new Set<string>();
   private readonly allocatedIds = new Set<string>();
+  private readonly allocatedIdOrder: string[] = [];
   private readonly stateHandlers = new Set<(state: FabricConnectionState) => void>();
   private incomingHandler: IncomingHandler | null = null;
   private state_: FabricConnectionState = "idle";
   private connecting: Promise<void> | null = null;
+  private recovery: Promise<void> | null = null;
+  private recoveryDelay: {
+    token: symbol;
+    handle: unknown;
+    resolve(elapsed: boolean): void;
+  } | null = null;
+  private terminalError: FabricConnectionError | null = null;
   private dialAttempted = false;
   private stopped = false;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
-  private inbound: { epoch: symbol; tail: Promise<void> } | null = null;
+  private inbound: {
+    epoch: symbol;
+    tail: Promise<void>;
+    queuedFrames: number;
+    queuedBytes: number;
+  } | null = null;
+  private readonly initialCredit: bigint;
 
-  constructor(private readonly options: FabricEndpointOptions) {}
+  constructor(private readonly options: FabricEndpointOptions) {
+    this.validateReconnectOptions();
+    this.validateResourceOptions();
+    this.initialCredit = this.validateInitialCredit();
+  }
 
   get connectionState(): FabricConnectionState {
     return this.state_;
@@ -338,14 +455,16 @@ export class FabricEndpoint {
     };
   }
 
-  /** Opens the first socket, or explicitly reconnects with a freshly minted URL. */
+  /** Opens the first socket, or joins the one coalesced recovery attempt. */
   connect(): Promise<void> {
     if (this.stopped) {
       return Promise.reject(
         new FabricStateError("this Fabric endpoint was closed permanently"),
       );
     }
+    if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.state_ === "open") return Promise.resolve();
+    if (this.recovery) return this.recovery;
     if (this.connecting) return this.connecting;
 
     const attempt = this.dial();
@@ -356,24 +475,36 @@ export class FabricEndpoint {
     // `finally` would create a second rejected promise nobody owns when a dial
     // fails. Two explicit branches clean up without manufacturing an
     // unhandled rejection beside the one returned to the caller.
-    void attempt.then(clear, clear);
+    void attempt.then(clear, (cause: unknown) => {
+      clear();
+      this.ensureRecovery(cause);
+    });
     return attempt;
   }
 
   /** Starts an operation without opening another physical WebSocket. */
   open(routeTicket: string, opaqueHello: Uint8Array = EMPTY): FabricStream {
     this.requireOpen();
+    if (this.streams.size >= this.maxActiveStreams()) {
+      throw new FabricStateError("too many Fabric streams are active on this endpoint");
+    }
     // Validate a one-shot ticket before reserving an id. A typo should not burn
     // either resource locally.
     const payload = encodeFabricOpenPayload(routeTicket, opaqueHello);
     const streamId = this.allocateStreamId();
-    const stream = new FabricStream(this, streamId, "outgoing", this.epoch!);
+    const stream = new FabricStream(
+      this,
+      streamId,
+      "outgoing",
+      this.epoch!,
+      this.initialCredit,
+    );
     this.streams.set(streamId, stream);
     try {
       this.sendFrame({
         kind: FabricKind.Open,
         streamId,
-        value: 0n,
+        value: this.initialCredit,
         payload,
       });
     } catch (error) {
@@ -388,6 +519,7 @@ export class FabricEndpoint {
   close(): void {
     if (this.stopped) return;
     this.stopped = true;
+    this.cancelRecoveryDelay();
     const socket = this.socket;
     const epoch = this.epoch;
     const error = new FabricConnectionError(
@@ -406,10 +538,13 @@ export class FabricEndpoint {
     if (stream.direction !== "incoming" || stream.phase !== "incoming") {
       throw new FabricStateError("only a pending INCOMING stream can be accepted");
     }
+    if (opaqueReply.byteLength > FABRIC_MAX_OPERATION_METADATA_BYTES) {
+      throw new FabricStateError("Fabric operation metadata is too large");
+    }
     this.sendFrame({
       kind: FabricKind.Accept,
       streamId: stream.id,
-      value: 0n,
+      value: this.initialCredit,
       payload: opaqueReply,
     });
     stream.activate(opaqueReply);
@@ -420,6 +555,11 @@ export class FabricEndpoint {
     this.requireCurrent(stream);
     if (!stream.canSend()) {
       throw new FabricStateError(`cannot send DATA while stream is ${stream.phase}`);
+    }
+    if (!stream.takeOutboundCredit(payload.byteLength)) {
+      throw new FabricStateError(
+        "cannot send empty DATA or DATA beyond this stream's available credit",
+      );
     }
     this.sendFrame({
       kind: FabricKind.Data,
@@ -462,7 +602,34 @@ export class FabricEndpoint {
 
   /** @internal */
   reportListenerError(error: unknown): void {
-    this.options.onError?.(error);
+    try {
+      this.options.onError?.(error);
+    } catch {
+      // Observability callbacks are outside the transport state machine. A
+      // broken reporter must never strand a stream or disable reconnect.
+    }
+  }
+
+  /** @internal */
+  returnCredit(stream: FabricStream, credit: bigint): void {
+    if (this.streams.get(stream.id) !== stream || stream.isCompleted()) return;
+    if (!stream.restoreInboundCredit(credit)) {
+      this.failProtocol(stream);
+      return;
+    }
+    this.sendFrame({
+      kind: FabricKind.WindowUpdate,
+      streamId: stream.id,
+      value: credit,
+      payload: EMPTY,
+    });
+  }
+
+  /** @internal */
+  failConsumer(stream: FabricStream, error: unknown): void {
+    this.reportListenerError(error);
+    if (this.streams.get(stream.id) !== stream || stream.isCompleted()) return;
+    this.reset(stream, BigInt(FabricReset.TooSlow));
   }
 
   private async dial(): Promise<void> {
@@ -504,7 +671,12 @@ export class FabricEndpoint {
     this.epoch = epoch;
     this.streams = new Map();
     this.usedInEpoch = new Set();
-    this.inbound = { epoch, tail: Promise.resolve() };
+    this.inbound = {
+      epoch,
+      tail: Promise.resolve(),
+      queuedFrames: 0,
+      queuedBytes: 0,
+    };
     socket.binaryType = "arraybuffer";
 
     return new Promise<void>((resolve, reject) => {
@@ -525,7 +697,7 @@ export class FabricEndpoint {
           "connect timeout",
         );
         rejectOnce(error);
-        this.drop(epoch, error);
+        this.disconnect(epoch, error);
         socket.close(4008, "connect timeout");
       }, this.options.connectTimeoutMs ?? 5_000);
 
@@ -544,7 +716,7 @@ export class FabricEndpoint {
           event.code,
           event.reason,
         );
-        this.drop(epoch, error);
+        this.disconnect(epoch, error);
         if (!opened) rejectOnce(error);
       };
       socket.onerror = (cause) => {
@@ -556,7 +728,7 @@ export class FabricEndpoint {
           { cause },
         );
         if (!opened) rejectOnce(error);
-        this.drop(epoch, error);
+        this.disconnect(epoch, error);
         socket.close();
       };
     });
@@ -565,15 +737,32 @@ export class FabricEndpoint {
   private enqueueMessage(socket: FabricSocketLike, epoch: symbol, data: unknown): void {
     const queue = this.inbound;
     if (!queue || queue.epoch !== epoch) return;
+    const byteLength = messageByteLength(data);
+    if (byteLength === null) {
+      this.protocolClose(socket, epoch, 1003, "Fabric message is not binary");
+      return;
+    }
+    const maxFrameBytes = this.options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
+    if (byteLength > maxFrameBytes) {
+      this.protocolClose(socket, epoch, 1009, "Fabric frame is too large");
+      return;
+    }
+    if (
+      queue.queuedFrames >=
+        (this.options.maxQueuedInboundFrames ?? DEFAULT_MAX_QUEUED_INBOUND_FRAMES) ||
+      queue.queuedBytes + byteLength >
+        (this.options.maxQueuedInboundBytes ?? DEFAULT_MAX_QUEUED_INBOUND_BYTES)
+    ) {
+      this.protocolClose(socket, epoch, 1013, "Fabric inbound queue is full");
+      return;
+    }
+    queue.queuedFrames += 1;
+    queue.queuedBytes += byteLength;
     queue.tail = queue.tail
       .then(async () => {
         if (!this.isCurrent(socket, epoch)) return;
         const bytes = await messageBytes(data);
         if (!this.isCurrent(socket, epoch)) return;
-        if (bytes.byteLength > (this.options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES)) {
-          this.protocolClose(socket, epoch, 1009, "Fabric frame is too large");
-          return;
-        }
         const frame = decodeFabricFrame(bytes);
         if (!frame) {
           this.protocolClose(socket, epoch, 1002, "malformed Fabric frame");
@@ -584,6 +773,10 @@ export class FabricEndpoint {
       .catch((cause: unknown) => {
         if (!this.isCurrent(socket, epoch)) return;
         this.protocolClose(socket, epoch, 1003, "Fabric message is not binary", cause);
+      })
+      .finally(() => {
+        queue.queuedFrames = Math.max(0, queue.queuedFrames - 1);
+        queue.queuedBytes = Math.max(0, queue.queuedBytes - byteLength);
       });
   }
 
@@ -608,6 +801,10 @@ export class FabricEndpoint {
         this.receiveReset(frame);
         return;
       case FabricKind.Ping:
+        if (frame.payload.byteLength !== 0) {
+          this.closeCurrentProtocol("Fabric PING payload must be empty");
+          return;
+        }
         this.sendFrame({
           kind: FabricKind.Pong,
           streamId: FABRIC_ZERO_STREAM_ID,
@@ -616,6 +813,9 @@ export class FabricEndpoint {
         });
         return;
       case FabricKind.Pong:
+        if (frame.payload.byteLength !== 0) {
+          this.closeCurrentProtocol("Fabric PONG payload must be empty");
+        }
         return;
       case FabricKind.Open:
         // Route tickets go endpoint -> Relay. Receiving one would blur the
@@ -626,7 +826,11 @@ export class FabricEndpoint {
   }
 
   private receiveIncoming(frame: FabricFrame): void {
-    if (frame.value !== 0n) {
+    if (
+      frame.value <= 0n ||
+      frame.value > BigInt(FABRIC_MAX_STREAM_CREDIT) ||
+      frame.payload.byteLength > FABRIC_MAX_OPERATION_METADATA_BYTES
+    ) {
       this.sendUnknownReset(frame.streamId, FabricReset.ProtocolViolation);
       return;
     }
@@ -639,9 +843,25 @@ export class FabricEndpoint {
       this.sendUnknownReset(frame.streamId, FabricReset.DuplicateStream);
       return;
     }
+    if (!this.rememberStreamId(frame.streamId)) return;
+    if (this.streams.size >= this.maxActiveStreams()) {
+      this.sendFrame({
+        kind: FabricKind.Reset,
+        streamId: frame.streamId,
+        value: BigInt(FabricReset.TooSlow),
+        payload: EMPTY,
+      });
+      return;
+    }
 
-    this.usedInEpoch.add(frame.streamId);
-    const stream = new FabricStream(this, frame.streamId, "incoming", this.epoch!);
+    const stream = new FabricStream(
+      this,
+      frame.streamId,
+      "incoming",
+      this.epoch!,
+      this.initialCredit,
+      frame.value,
+    );
     this.streams.set(frame.streamId, stream);
     const handler = this.incomingHandler;
     if (!handler) {
@@ -655,7 +875,7 @@ export class FabricEndpoint {
       .then(() => handler(stream, frame.payload.slice()))
       .catch((error: unknown) => {
         this.reportListenerError(error);
-        if (this.streams.get(stream.id) === stream && stream.phase === "incoming") {
+        if (this.streams.get(stream.id) === stream && !stream.isCompleted()) {
           this.reset(stream, BigInt(FabricReset.RouteDenied));
         }
       });
@@ -667,12 +887,14 @@ export class FabricEndpoint {
     if (
       stream.direction !== "outgoing" ||
       stream.phase !== "opening" ||
-      frame.value !== 0n
+      frame.value <= 0n ||
+      frame.value > BigInt(FABRIC_MAX_STREAM_CREDIT) ||
+      frame.payload.byteLength > FABRIC_MAX_OPERATION_METADATA_BYTES
     ) {
       this.failProtocol(stream);
       return;
     }
-    stream.activate(frame.payload);
+    stream.activate(frame.payload, frame.value);
   }
 
   private receiveData(frame: FabricFrame): void {
@@ -689,12 +911,12 @@ export class FabricEndpoint {
         stream.phase !== "halfClosedLocal" &&
         stream.phase !== "halfClosedRemote") ||
       frame.value === 0n ||
-      frame.payload.byteLength !== 0
+      frame.payload.byteLength !== 0 ||
+      !stream.addOutboundCredit(frame.value)
     ) {
       this.failProtocol(stream);
+      return;
     }
-    // Credit accounting belongs in the later bounded scheduling layer. A valid
-    // update is accepted but cannot silently enable unbounded buffering here.
   }
 
   private receiveFin(frame: FabricFrame): void {
@@ -712,7 +934,7 @@ export class FabricEndpoint {
     // RESET is terminal and deliberately unanswered, otherwise two endpoints
     // can bounce UnknownStream at each other forever after a race.
     if (!stream) {
-      this.usedInEpoch.add(frame.streamId);
+      this.rememberStreamId(frame.streamId);
       return;
     }
     if (frame.value === 0n || frame.payload.byteLength !== 0) {
@@ -742,7 +964,7 @@ export class FabricEndpoint {
     // Any operation id observed on this connection is tombstoned, including a
     // malformed or out-of-order first frame. It can never later be redefined
     // as a different INCOMING operation on the same socket.
-    this.usedInEpoch.add(streamId);
+    if (!this.rememberStreamId(streamId)) return;
     this.sendFrame({
       kind: FabricKind.Reset,
       streamId,
@@ -761,12 +983,18 @@ export class FabricEndpoint {
       if (!/^[0-9a-f]{32}$/.test(streamId) || streamId === FABRIC_ZERO_STREAM_ID) {
         throw new FabricStateError("the Fabric stream id source returned an invalid id");
       }
-      // Never reuse an id produced by this endpoint object, even after a
-      // reconnect. Epoch isolation already makes reuse routable; refusing it
-      // also makes stale-frame tests and operation logs unambiguous.
+      // Retain a bounded recent-id fence across reconnects. Epoch isolation is
+      // the security boundary; 128-bit random ids make a collision after this
+      // bounded history is evicted negligible in production.
       if (this.allocatedIds.has(streamId) || this.usedInEpoch.has(streamId)) continue;
       this.allocatedIds.add(streamId);
-      this.usedInEpoch.add(streamId);
+      this.allocatedIdOrder.push(streamId);
+      if (this.allocatedIdOrder.length > MAX_REMEMBERED_LOCAL_IDS) {
+        this.allocatedIds.delete(this.allocatedIdOrder.shift()!);
+      }
+      if (!this.rememberStreamId(streamId)) {
+        throw new FabricStateError("too many Fabric stream ids were used on this connection");
+      }
       return streamId;
     }
     throw new FabricStateError("the Fabric stream id source repeatedly returned used ids");
@@ -778,11 +1006,22 @@ export class FabricEndpoint {
       throw new FabricStateError("Fabric endpoint is not open");
     }
     try {
-      socket.send(encodeFabricFrame(frame));
+      const wire = encodeFabricFrame(frame);
+      const maxFrameBytes = this.options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
+      if (wire.byteLength > maxFrameBytes) {
+        throw new FabricStateError("Fabric frame is too large");
+      }
+      if (
+        socket.bufferedAmount + wire.byteLength >
+        (this.options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES)
+      ) {
+        throw new FabricStateError("Fabric WebSocket peer is too slow");
+      }
+      socket.send(wire);
     } catch (cause) {
       const epoch = this.epoch;
       const error = this.connectionError(cause);
-      if (epoch) this.drop(epoch, error);
+      if (epoch) this.disconnect(epoch, error);
       socket.close();
       throw error;
     }
@@ -809,8 +1048,18 @@ export class FabricEndpoint {
     if (this.streams.get(stream.id) === stream) this.streams.delete(stream.id);
   }
 
-  private drop(epoch: symbol, error: FabricConnectionError): void {
-    if (this.epoch !== epoch) return;
+  private rememberStreamId(streamId: string): boolean {
+    if (this.usedInEpoch.has(streamId)) return true;
+    if (this.usedInEpoch.size >= this.maxRememberedStreamIds()) {
+      this.closeCurrentProtocol("Fabric stream id budget was exhausted");
+      return false;
+    }
+    this.usedInEpoch.add(streamId);
+    return true;
+  }
+
+  private drop(epoch: symbol, error: FabricConnectionError): boolean {
+    if (this.epoch !== epoch) return false;
     this.clearConnectTimer();
     this.socket = null;
     this.epoch = null;
@@ -819,6 +1068,22 @@ export class FabricEndpoint {
     this.streams.clear();
     for (const stream of streams) stream.failConnection(error);
     this.setState("closed");
+    return true;
+  }
+
+  private disconnect(epoch: symbol, error: FabricConnectionError): boolean {
+    if (this.epoch !== epoch) return false;
+    if (error.expired || error.revoked) {
+      // These are authority decisions, not transport failures. This endpoint
+      // identity must stay dead even if a caller invokes connect again.
+      this.terminalError = error;
+      this.cancelRecoveryDelay();
+    } else {
+      // Install the recovery promise before publishing `closed`, so a state
+      // listener calling connect cannot bypass the backoff with a second dial.
+      this.ensureRecovery(error);
+    }
+    return this.drop(epoch, error);
   }
 
   private protocolClose(
@@ -829,7 +1094,7 @@ export class FabricEndpoint {
     cause?: unknown,
   ): void {
     const error = new FabricConnectionError(reason, code, reason, { cause });
-    this.drop(epoch, error);
+    this.disconnect(epoch, error);
     socket.close(code, reason);
   }
 
@@ -846,6 +1111,204 @@ export class FabricEndpoint {
   private clearConnectTimer(): void {
     if (this.connectTimer) clearTimeout(this.connectTimer);
     this.connectTimer = null;
+  }
+
+  private ensureRecovery(cause: unknown): void {
+    if (
+      this.stopped ||
+      this.terminalError ||
+      this.recovery ||
+      !this.options.redial ||
+      this.options.reconnect === false ||
+      !this.isTransient(cause)
+    ) {
+      return;
+    }
+
+    const recovery = this.recover();
+    this.recovery = recovery;
+    const clear = () => {
+      if (this.recovery === recovery) this.recovery = null;
+    };
+    // Recovery is intentionally background-capable. Attach a rejection
+    // handler even when no caller joins it, while returning the original
+    // promise from connect() so an interested caller still sees the failure.
+    void recovery.then(clear, (error: unknown) => {
+      clear();
+      if (!this.stopped && error !== this.terminalError) {
+        this.reportRecoveryError(error);
+      }
+    });
+  }
+
+  private async recover(): Promise<void> {
+    let attempt = 0;
+    while (true) {
+      if (this.stopped) {
+        throw new FabricStateError("this Fabric endpoint was closed permanently");
+      }
+      if (this.terminalError) throw this.terminalError;
+
+      const elapsed = await this.waitForRecoveryDelay(this.recoveryDelayMs(attempt));
+      if (!elapsed || this.stopped) {
+        throw new FabricStateError("this Fabric endpoint was closed permanently");
+      }
+      if (this.terminalError) throw this.terminalError;
+
+      try {
+        await this.dial();
+        return;
+      } catch (cause) {
+        if (this.stopped) {
+          throw new FabricStateError("this Fabric endpoint was closed permanently");
+        }
+        if (this.terminalError) throw this.terminalError;
+        if (!this.isTransient(cause)) throw cause;
+        this.reportRecoveryError(cause);
+        attempt += 1;
+      }
+    }
+  }
+
+  private recoveryDelayMs(attempt: number): number {
+    const options = this.options.reconnect || {};
+    const initial = options.initialDelayMs ?? DEFAULT_RECONNECT_INITIAL_MS;
+    const maximum = options.maxDelayMs ?? DEFAULT_RECONNECT_MAX_MS;
+    const jitter = options.jitterRatio ?? DEFAULT_RECONNECT_JITTER;
+    const raw = Math.min(maximum, initial * 2 ** Math.min(attempt, 30));
+    const sampled = (options.random ?? Math.random)();
+    const random = Number.isFinite(sampled) ? Math.min(1, Math.max(0, sampled)) : 0.5;
+    return Math.max(0, Math.round(raw * (1 + (random * 2 - 1) * jitter)));
+  }
+
+  private waitForRecoveryDelay(delayMs: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const token = Symbol("fabric-recovery-delay");
+      const callback = () => this.finishRecoveryDelay(token, true);
+      const timer = this.reconnectOptions().timer;
+      this.recoveryDelay = { token, handle: null, resolve };
+      try {
+        const handle = timer ? timer.set(callback, delayMs) : setTimeout(callback, delayMs);
+        // A test timer is allowed to fire synchronously. In that case the
+        // callback already cleared this token and there is no handle to retain.
+        if (this.recoveryDelay?.token === token) this.recoveryDelay.handle = handle;
+      } catch (error) {
+        if (this.recoveryDelay?.token === token) this.recoveryDelay = null;
+        throw error;
+      }
+    });
+  }
+
+  private finishRecoveryDelay(token: symbol, elapsed: boolean): void {
+    const pending = this.recoveryDelay;
+    if (!pending || pending.token !== token) return;
+    this.recoveryDelay = null;
+    pending.resolve(elapsed);
+  }
+
+  private cancelRecoveryDelay(): void {
+    const pending = this.recoveryDelay;
+    if (!pending) return;
+    this.recoveryDelay = null;
+    const timer = this.reconnectOptions().timer;
+    if (timer) timer.clear(pending.handle);
+    else clearTimeout(pending.handle as ReturnType<typeof setTimeout>);
+    pending.resolve(false);
+  }
+
+  private reconnectOptions(): FabricReconnectOptions {
+    return typeof this.options.reconnect === "object" ? this.options.reconnect : {};
+  }
+
+  private validateReconnectOptions(): void {
+    if (typeof this.options.reconnect !== "object") return;
+    const { initialDelayMs, maxDelayMs, jitterRatio } = this.options.reconnect;
+    if (initialDelayMs !== undefined && (!Number.isFinite(initialDelayMs) || initialDelayMs < 0)) {
+      throw new FabricStateError("Fabric reconnect initial delay must be non-negative");
+    }
+    if (maxDelayMs !== undefined && (!Number.isFinite(maxDelayMs) || maxDelayMs < 0)) {
+      throw new FabricStateError("Fabric reconnect maximum delay must be non-negative");
+    }
+    if (
+      initialDelayMs !== undefined &&
+      maxDelayMs !== undefined &&
+      maxDelayMs < initialDelayMs
+    ) {
+      throw new FabricStateError("Fabric reconnect maximum delay must not be below its initial delay");
+    }
+    if (
+      jitterRatio !== undefined &&
+      (!Number.isFinite(jitterRatio) || jitterRatio < 0 || jitterRatio > 1)
+    ) {
+      throw new FabricStateError("Fabric reconnect jitter ratio must be between zero and one");
+    }
+  }
+
+  private validateResourceOptions(): void {
+    const integers: Array<[string, number | undefined]> = [
+      ["maxFrameBytes", this.options.maxFrameBytes],
+      ["maxActiveStreams", this.options.maxActiveStreams],
+      ["maxRememberedStreamIds", this.options.maxRememberedStreamIds],
+      ["maxQueuedInboundFrames", this.options.maxQueuedInboundFrames],
+      ["maxQueuedInboundBytes", this.options.maxQueuedInboundBytes],
+      ["maxBufferedBytes", this.options.maxBufferedBytes],
+    ];
+    for (const [name, value] of integers) {
+      if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+        throw new FabricStateError(`Fabric ${name} must be a positive safe integer`);
+      }
+    }
+    if (this.maxRememberedStreamIds() < this.maxActiveStreams()) {
+      throw new FabricStateError(
+        "Fabric maxRememberedStreamIds must not be below maxActiveStreams",
+      );
+    }
+  }
+
+  private maxActiveStreams(): number {
+    return this.options.maxActiveStreams ?? DEFAULT_MAX_ACTIVE_STREAMS;
+  }
+
+  private maxRememberedStreamIds(): number {
+    return this.options.maxRememberedStreamIds ?? DEFAULT_MAX_REMEMBERED_STREAM_IDS;
+  }
+
+  private validateInitialCredit(): bigint {
+    const credit = this.options.initialStreamCredit ?? FABRIC_INITIAL_STREAM_CREDIT;
+    if (
+      !Number.isSafeInteger(credit) ||
+      credit <= 0 ||
+      credit > FABRIC_MAX_STREAM_CREDIT
+    ) {
+      throw new FabricStateError(
+        `Fabric initial stream credit must be an integer from 1 through ${FABRIC_MAX_STREAM_CREDIT}`,
+      );
+    }
+    return BigInt(credit);
+  }
+
+  private isTransient(cause: unknown): boolean {
+    if (cause instanceof FabricConnectionError) {
+      return (
+        cause.code === null ||
+        cause.code === 1001 ||
+        cause.code === 1006 ||
+        cause.code === 1011 ||
+        cause.code === 1012 ||
+        cause.code === 1013
+      );
+    }
+    // Browser fetch reports transport failures as TypeError. Structured Hub
+    // authorization errors are ordinary Error subclasses and stop recovery.
+    return cause instanceof TypeError;
+  }
+
+  private reportRecoveryError(error: unknown): void {
+    try {
+      this.reportListenerError(error);
+    } catch {
+      // Observability callbacks cannot be allowed to disable connectivity.
+    }
   }
 
   private setState(state: FabricConnectionState): void {
@@ -881,6 +1344,13 @@ async function messageBytes(data: unknown): Promise<Uint8Array> {
     return new Uint8Array(await data.arrayBuffer());
   }
   throw new TypeError("Fabric WebSocket messages must be binary");
+}
+
+function messageByteLength(data: unknown): number | null {
+  if (data instanceof ArrayBuffer) return data.byteLength;
+  if (ArrayBuffer.isView(data)) return data.byteLength;
+  if (typeof Blob !== "undefined" && data instanceof Blob) return data.size;
+  return null;
 }
 
 function closeMessage(code: number, reason: string): string {

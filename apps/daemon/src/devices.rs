@@ -16,10 +16,12 @@ use std::sync::Mutex;
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
-use genehub_proto::{DeviceAuth, DeviceCredential, DeviceInfo, DeviceInvite};
+use genehub_proto::{DeviceAuth, DeviceCredential, DeviceInfo, DeviceInvite, InviteAuth};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
+
+use crate::channel_auth::{self, SessionKey};
 
 /// How long an invite is worth anything. Short because it is the one moment
 /// this machine will talk to a stranger.
@@ -28,6 +30,9 @@ const INVITE_LIFETIME_MINUTES: i64 = 15;
 /// How many recently used nonces to remember. Generous next to the handful of
 /// connections a machine actually gets, and bounded so it cannot grow forever.
 const NONCE_MEMORY: usize = 1024;
+const MAX_INVITES: usize = 32;
+const MAX_DEVICES: usize = 128;
+const MAX_DEVICE_NAME_CHARS: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,7 +50,8 @@ struct Device {
 /// Invites are not persisted. An invite means "right now I am waiting for a new
 /// device"; surviving a restart would turn it into a standing offer.
 struct Invite {
-    code: String,
+    id: String,
+    secret: String,
     expires_at: DateTime<Utc>,
 }
 
@@ -78,7 +84,10 @@ impl Devices {
             .ok()
             .and_then(|raw| serde_json::from_str::<Persisted>(&raw).ok())
             .map(|file| file.devices)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .take(MAX_DEVICES)
+            .collect();
         let (revoked, _) = broadcast::channel(16);
         Devices {
             path,
@@ -115,13 +124,19 @@ impl Devices {
     /// which is the only part of the system that knows whether this machine is
     /// currently reachable from outside.
     pub fn invite(&self) -> DeviceInvite {
-        let code = random_token();
+        let id = format!("inv_{}", uuid::Uuid::new_v4().simple());
+        let secret = random_token();
+        let code = format!("{id}.{secret}");
         let expires_at = Utc::now() + Duration::minutes(INVITE_LIFETIME_MINUTES);
         let mut state = self.state.lock().unwrap();
         let now = Utc::now();
         state.invites.retain(|invite| invite.expires_at > now);
+        if state.invites.len() >= MAX_INVITES {
+            state.invites.remove(0);
+        }
         state.invites.push(Invite {
-            code: code.clone(),
+            id,
+            secret,
             expires_at,
         });
         DeviceInvite {
@@ -144,34 +159,121 @@ impl Devices {
         nonce: &str,
         presented: &str,
     ) -> Result<(DeviceCredential, String)> {
+        let device_name = validate_device_name(device_name)?;
         let mut state = self.state.lock().unwrap();
-        self.remember_nonce(&mut state, nonce)?;
+        validate_nonce(nonce)?;
 
         let now = Utc::now();
         state.invites.retain(|invite| invite.expires_at > now);
+        let Some((invite_id, invite_secret)) = code.split_once('.') else {
+            return Err(anyhow!("this pairing link is no longer valid"));
+        };
         let position = state
             .invites
             .iter()
             .position(|invite| {
-                constant_time_eq(&invite.code, code)
-                    && constant_time_eq(&proof("client", nonce, &invite.code), presented)
+                constant_time_eq(&invite.id, invite_id)
+                    && constant_time_eq(&invite.secret, invite_secret)
+                    && constant_time_eq(&proof("client", nonce, code), presented)
             })
             .ok_or_else(|| anyhow!("this pairing link is no longer valid"))?;
+        if state.devices.len() >= MAX_DEVICES {
+            return Err(anyhow!(
+                "this machine has reached its authorized-device limit"
+            ));
+        }
+        self.remember_nonce(&mut state, nonce)?;
         let invite = state.invites.remove(position);
+        let invite_code = format!("{}.{}", invite.id, invite.secret);
 
         let device = Device {
             id: format!("d_{}", random_token()),
-            name: device_name.trim().to_string(),
+            name: device_name,
             secret: random_token(),
             paired_at: now,
             last_seen_at: None,
         };
         let credential = DeviceCredential {
             device_id: device.id.clone(),
+            machine_id: String::new(),
             secret: device.secret.clone(),
             machine_name: String::new(),
             fingerprint: String::new(),
-            proof: proof("server", nonce, &invite.code),
+            proof: proof("server", nonce, &invite_code),
+        };
+        let id = device.id.clone();
+        state.devices.push(device);
+        self.persist(&state)?;
+        Ok((credential, id))
+    }
+
+    /// Authenticates a pairing-link PSK without consuming it. Consumption is
+    /// the later encrypted claim, so a Relay cannot steal the invite merely by
+    /// replaying or racing the public Hello.
+    pub fn authenticate_invite(
+        &self,
+        auth: &InviteAuth,
+        server_nonce: &str,
+    ) -> Result<(String, String, SessionKey)> {
+        validate_nonce(&auth.nonce)?;
+        let mut state = self.state.lock().unwrap();
+        let now = Utc::now();
+        state.invites.retain(|invite| invite.expires_at > now);
+        let invite = state
+            .invites
+            .iter()
+            .find(|invite| invite.id == auth.invite_id)
+            .ok_or_else(|| anyhow!("this pairing link is no longer valid"))?;
+        let secret = invite.secret.clone();
+        let context = format!("invite:{}", auth.invite_id);
+        channel_auth::verify_proof(
+            &channel_auth::client_proof(&secret, &context, &auth.nonce),
+            &auth.proof,
+        )?;
+        self.remember_nonce(&mut state, &auth.nonce)?;
+        Ok((
+            auth.invite_id.clone(),
+            channel_auth::server_proof(&secret, &context, &auth.nonce, server_nonce),
+            channel_auth::derive_key(&secret, &context, &auth.nonce, server_nonce),
+        ))
+    }
+
+    /// Atomically consumes a previously authenticated invite on the encrypted
+    /// bootstrap channel and creates the real long-lived device credential.
+    pub fn claim_authenticated(
+        &self,
+        invite_id: &str,
+        device_name: &str,
+    ) -> Result<(DeviceCredential, String)> {
+        let device_name = validate_device_name(device_name)?;
+        let mut state = self.state.lock().unwrap();
+        let now = Utc::now();
+        state.invites.retain(|invite| invite.expires_at > now);
+        let position = state
+            .invites
+            .iter()
+            .position(|invite| invite.id == invite_id)
+            .ok_or_else(|| anyhow!("this pairing link is no longer valid"))?;
+        if state.devices.len() >= MAX_DEVICES {
+            return Err(anyhow!(
+                "this machine has reached its authorized-device limit"
+            ));
+        }
+        state.invites.remove(position);
+        let device = Device {
+            id: format!("d_{}", random_token()),
+            name: device_name,
+            secret: random_token(),
+            paired_at: now,
+            last_seen_at: None,
+        };
+        let credential = DeviceCredential {
+            device_id: device.id.clone(),
+            machine_id: String::new(),
+            secret: device.secret.clone(),
+            machine_name: String::new(),
+            fingerprint: String::new(),
+            proof: String::new(),
         };
         let id = device.id.clone();
         state.devices.push(device);
@@ -182,20 +284,57 @@ impl Devices {
     /// Checks a device in and returns this machine's half of the proof.
     pub fn authenticate(&self, auth: &DeviceAuth) -> Result<String> {
         let mut state = self.state.lock().unwrap();
-        self.remember_nonce(&mut state, &auth.nonce)?;
-
-        let device = state
+        validate_nonce(&auth.nonce)?;
+        let position = state
             .devices
-            .iter_mut()
-            .find(|device| device.id == auth.device_id)
+            .iter()
+            .position(|device| device.id == auth.device_id)
             .ok_or_else(|| anyhow!("this device is not authorized on this machine"))?;
-        if !constant_time_eq(&proof("client", &auth.nonce, &device.secret), &auth.proof) {
+        let secret = state.devices[position].secret.clone();
+        if !constant_time_eq(&proof("client", &auth.nonce, &secret), &auth.proof) {
             return Err(anyhow!("this device is not authorized on this machine"));
         }
+        self.remember_nonce(&mut state, &auth.nonce)?;
+        let device = &mut state.devices[position];
         device.last_seen_at = Some(Utc::now());
-        let answer = proof("server", &auth.nonce, &device.secret);
+        let answer = proof("server", &auth.nonce, &secret);
         self.persist(&state)?;
         Ok(answer)
+    }
+
+    /// Authenticates a device and derives a connection-specific key.
+    ///
+    /// Unlike the legacy mutual proof, both fresh nonces and the device id are
+    /// bound into the transcript. A relay that records one whole connection
+    /// therefore cannot replay its signed requests after reconnect or on a
+    /// different device channel.
+    pub fn authenticate_session(
+        &self,
+        auth: &DeviceAuth,
+        server_nonce: &str,
+    ) -> Result<(String, String, SessionKey)> {
+        let mut state = self.state.lock().unwrap();
+        validate_nonce(&auth.nonce)?;
+        let position = state
+            .devices
+            .iter()
+            .position(|device| device.id == auth.device_id)
+            .ok_or_else(|| anyhow!("this device is not authorized on this machine"))?;
+        let device_id = state.devices[position].id.clone();
+        let secret = state.devices[position].secret.clone();
+        let context = channel_auth::device_context(&device_id);
+        channel_auth::verify_proof(
+            &channel_auth::client_proof(&secret, &context, &auth.nonce),
+            &auth.proof,
+        )?;
+        self.remember_nonce(&mut state, &auth.nonce)?;
+        let answer = channel_auth::server_proof(&secret, &context, &auth.nonce, server_nonce);
+        let key = channel_auth::derive_key(&secret, &context, &auth.nonce, server_nonce);
+        let device = &mut state.devices[position];
+        device.last_seen_at = Some(Utc::now());
+        let id = device.id.clone();
+        self.persist(&state)?;
+        Ok((id, answer, key))
     }
 
     /// Forgets a device and tells any live connection of its to go away.
@@ -232,9 +371,6 @@ impl Devices {
     /// Without this, a proof observed once could be replayed forever, and the
     /// whole point of not sending the secret would be lost.
     fn remember_nonce(&self, state: &mut State, nonce: &str) -> Result<()> {
-        if nonce.len() < 16 {
-            return Err(anyhow!("the challenge is too short to be random"));
-        }
         if state.seen_nonces.iter().any(|seen| seen == nonce) {
             return Err(anyhow!("this challenge has already been used"));
         }
@@ -252,12 +388,46 @@ impl Devices {
         let body = serde_json::to_string_pretty(&Persisted {
             devices: state.devices.clone(),
         })?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, body)?;
-        std::fs::rename(&tmp, &self.path)?;
-        crate::config::restrict_to_owner(&self.path)?;
-        Ok(())
+        crate::config::save_private(&self.path, body.as_bytes())
     }
+}
+
+fn validate_device_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > MAX_DEVICE_NAME_CHARS {
+        return Err(anyhow!(
+            "the device name must contain 1 through {MAX_DEVICE_NAME_CHARS} characters"
+        ));
+    }
+    if name.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    }) {
+        return Err(anyhow!(
+            "the device name cannot contain control or bidirectional-formatting characters"
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn validate_nonce(nonce: &str) -> Result<()> {
+    if nonce.len() != 32
+        || !nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(anyhow!(
+            "the challenge must be exactly 16 random bytes in lowercase hexadecimal"
+        ));
+    }
+    Ok(())
 }
 
 /// One half of the mutual proof.
@@ -305,10 +475,14 @@ mod tests {
         (devices, dir)
     }
 
+    fn nonce() -> String {
+        uuid::Uuid::new_v4().simple().to_string()
+    }
+
     /// The happy path, and the shape every other test leans on.
     fn claim(devices: &Devices, name: &str) -> (String, String) {
         let invite = devices.invite();
-        let nonce = random_token();
+        let nonce = nonce();
         let (credential, _) = devices
             .claim(
                 &invite.code,
@@ -326,7 +500,7 @@ mod tests {
         let (devices, _dir) = devices();
         let (device_id, secret) = claim(&devices, "phone");
 
-        let nonce = random_token();
+        let nonce = nonce();
         let answer = devices
             .authenticate(&DeviceAuth {
                 device_id,
@@ -338,11 +512,48 @@ mod tests {
     }
 
     #[test]
+    fn invalid_device_names_do_not_consume_the_invite_or_touch_disk() {
+        let (devices, dir) = devices();
+        let invite = devices.invite();
+        let challenge = nonce();
+        let invalid = format!("phone\u{202e}{}", "x".repeat(80));
+        let error = devices
+            .claim(
+                &invite.code,
+                &invalid,
+                &challenge,
+                &proof("client", &challenge, &invite.code),
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("device name"));
+        assert!(!dir.path().join("devices.json").exists());
+
+        let retry = nonce();
+        assert!(devices
+            .claim(
+                &invite.code,
+                "手机浏览器",
+                &retry,
+                &proof("client", &retry, &invite.code),
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn invite_and_device_collections_have_hard_limits() {
+        let (devices, _dir) = devices();
+        for _ in 0..MAX_INVITES + 5 {
+            devices.invite();
+        }
+        assert_eq!(devices.state.lock().unwrap().invites.len(), MAX_INVITES);
+    }
+
+    #[test]
     fn an_invite_works_exactly_once() {
         let (devices, _dir) = devices();
         let invite = devices.invite();
 
-        let first = random_token();
+        let first = nonce();
         devices
             .claim(
                 &invite.code,
@@ -352,7 +563,7 @@ mod tests {
             )
             .expect("the first use is the one that counts");
 
-        let second = random_token();
+        let second = nonce();
         let error = devices
             .claim(
                 &invite.code,
@@ -370,7 +581,7 @@ mod tests {
     fn claiming_without_the_proof_is_refused() {
         let (devices, _dir) = devices();
         let invite = devices.invite();
-        let nonce = random_token();
+        let nonce = nonce();
         assert!(devices
             .claim(&invite.code, "phone", &nonce, "not-the-proof")
             .is_err());
@@ -381,7 +592,7 @@ mod tests {
         let (devices, _dir) = devices();
         let (device_id, _) = claim(&devices, "phone");
 
-        let nonce = random_token();
+        let nonce = nonce();
         assert!(devices
             .authenticate(&DeviceAuth {
                 device_id,
@@ -394,7 +605,7 @@ mod tests {
     #[test]
     fn an_unknown_device_is_refused() {
         let (devices, _dir) = devices();
-        let nonce = random_token();
+        let nonce = nonce();
         assert!(devices
             .authenticate(&DeviceAuth {
                 device_id: "d_nobody".into(),
@@ -411,7 +622,7 @@ mod tests {
         let (devices, _dir) = devices();
         let (device_id, secret) = claim(&devices, "phone");
 
-        let nonce = random_token();
+        let nonce = nonce();
         let auth = DeviceAuth {
             device_id,
             nonce: nonce.clone(),
@@ -431,7 +642,7 @@ mod tests {
         assert_eq!(revocations.try_recv().unwrap(), device_id);
         assert!(devices.list().is_empty());
 
-        let nonce = random_token();
+        let nonce = nonce();
         assert!(devices
             .authenticate(&DeviceAuth {
                 device_id,
@@ -458,7 +669,7 @@ mod tests {
 
         let devices = Devices::load(&path);
         assert_eq!(devices.list().len(), 1);
-        let nonce = random_token();
+        let nonce = nonce();
         assert!(devices
             .authenticate(&DeviceAuth {
                 device_id,
@@ -478,7 +689,7 @@ mod tests {
                 entry.expires_at = Utc::now() - Duration::minutes(1);
             }
         }
-        let nonce = random_token();
+        let nonce = nonce();
         assert!(devices
             .claim(
                 &invite.code,

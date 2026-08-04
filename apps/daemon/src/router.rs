@@ -1,7 +1,7 @@
 //! Request dispatch: one `Request` in, one `Reply` or `ProtocolError` out.
 //!
-//! Kept free of transport concerns so the same routing serves loopback, LAN
-//! and forwarded connections without duplication.
+//! Kept free of transport concerns so the same routing serves loopback and
+//! forwarded connections without duplication. Legacy LAN is rejected at bind.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 
 use crate::state::Shared;
 use crate::transport::uplink::Admission;
-use crate::{files, git};
+use crate::{channel_auth, files, git};
 
 /// What a handled request may ask the connection to do beyond replying.
 pub enum SideEffect {
@@ -33,6 +33,10 @@ pub struct Handled {
     /// Set when this request authenticated the connection as a known device,
     /// so the connection can be dropped if that device is later revoked.
     pub device: Option<String>,
+    /// Established by a successful mutually authenticated Hello. Session owns
+    /// the key and refuses every subsequent unsigned frame.
+    pub authentication: Option<channel_auth::SessionKey>,
+    pub bootstrap_invite: Option<String>,
 }
 
 impl Handled {
@@ -41,6 +45,8 @@ impl Handled {
             reply: Ok(reply),
             effect: SideEffect::None,
             device: None,
+            authentication: None,
+            bootstrap_invite: None,
         }
     }
 
@@ -52,6 +58,8 @@ impl Handled {
             }),
             effect: SideEffect::None,
             device: None,
+            authentication: None,
+            bootstrap_invite: None,
         }
     }
 }
@@ -78,19 +86,23 @@ fn failed(error: anyhow::Error) -> Handled {
         reply: Err(ProtocolError { code, message }),
         effect: SideEffect::None,
         device: None,
+        authentication: None,
+        bootstrap_invite: None,
     }
 }
 
 pub async fn handle(
     state: &Shared,
     transport: TransportKind,
-    admission: Admission,
+    admission: &Admission,
     request: Request,
 ) -> Handled {
     match request {
         Request::Hello {
             protocol_version,
             device,
+            channel,
+            invite,
             ..
         } => {
             if protocol_version != PROTOCOL_VERSION {
@@ -104,40 +116,136 @@ pub async fn handle(
                 );
             }
 
-            // The credential is checked even when admission does not require
-            // one: a client that offered it wants the machine's half of the
-            // proof back, and that is the only thing telling it that it
-            // reached the real machine rather than something in its slot.
-            let authenticated = match &device {
-                Some(auth) => match state.devices.authenticate(auth) {
-                    Ok(proof) => Some((auth.device_id.clone(), proof)),
+            if [device.is_some(), channel.is_some(), invite.is_some()]
+                .into_iter()
+                .filter(|present| *present)
+                .count()
+                > 1
+            {
+                return Handled::err(
+                    ErrorCode::Unauthorized,
+                    "choose exactly one channel credential",
+                );
+            }
+
+            let server_nonce = crate::devices::random_token();
+            let authenticated = match (&device, &channel, &invite, admission) {
+                (
+                    Some(auth),
+                    None,
+                    None,
+                    Admission::DeviceRequired | Admission::Vouched | Admission::Loopback { .. },
+                ) => match state.devices.authenticate_session(auth, &server_nonce) {
+                    Ok((id, proof, key)) => Some((Some(id), proof, key, None)),
                     Err(error) => {
                         return Handled::err(ErrorCode::Unauthorized, format!("{error:#}"))
                     }
                 },
-                None => None,
+                (
+                    None,
+                    Some(auth),
+                    None,
+                    Admission::Hosted {
+                        capability_id,
+                        secret,
+                        ..
+                    },
+                ) if auth.capability_id == *capability_id => {
+                    let context = channel_auth::hosted_context(capability_id);
+                    if let Err(error) = channel_auth::verify_proof(
+                        &channel_auth::client_proof(secret, &context, &auth.nonce),
+                        &auth.proof,
+                    ) {
+                        return Handled::err(ErrorCode::Unauthorized, format!("{error:#}"));
+                    }
+                    Some((
+                        None,
+                        channel_auth::server_proof(secret, &context, &auth.nonce, &server_nonce),
+                        channel_auth::derive_key(secret, &context, &auth.nonce, &server_nonce),
+                        None,
+                    ))
+                }
+                (None, None, Some(auth), Admission::DeviceRequired) => {
+                    match state.devices.authenticate_invite(auth, &server_nonce) {
+                        Ok((invite_id, proof, key)) => Some((None, proof, key, Some(invite_id))),
+                        Err(error) => {
+                            return Handled::err(ErrorCode::Unauthorized, format!("{error:#}"))
+                        }
+                    }
+                }
+                // Only the loopback token may vouch without an end-to-end
+                // message key. Legacy LAN and all forwarded channels fail closed.
+                (None, None, None, Admission::Loopback { .. })
+                    if transport == TransportKind::Loopback =>
+                {
+                    None
+                }
+                _ => {
+                    return Handled::err(
+                        ErrorCode::Unauthorized,
+                        "this connection requires end-to-end channel authentication",
+                    )
+                }
             };
-            if admission == Admission::DeviceRequired && authenticated.is_none() {
-                return Handled::err(
-                    ErrorCode::Unauthorized,
-                    "this machine only accepts devices it has paired with",
-                );
-            }
 
+            let private_identity = authenticated.is_some();
             Handled {
                 reply: Ok(Reply::Hello(HelloResult {
-                    daemon_version: state.version.clone(),
+                    daemon_version: if private_identity {
+                        String::new()
+                    } else {
+                        state.version.clone()
+                    },
                     protocol_version: PROTOCOL_VERSION,
-                    machine_id: state.machine.machine_id.clone(),
-                    fingerprint: state.machine.fingerprint(),
+                    machine_id: if private_identity {
+                        String::new()
+                    } else {
+                        state.machine.machine_id.clone()
+                    },
+                    fingerprint: if private_identity {
+                        String::new()
+                    } else {
+                        state.machine.fingerprint()
+                    },
                     transport,
-                    machine_name: crate::link::default_display_name(),
-                    proof: authenticated.as_ref().map(|(_, proof)| proof.clone()),
+                    machine_name: if private_identity {
+                        String::new()
+                    } else {
+                        crate::link::default_display_name()
+                    },
+                    proof: authenticated
+                        .as_ref()
+                        .map(|(_, proof, _, _)| proof.clone())
+                        .or_else(|| match admission {
+                            Admission::Loopback { server_proof } => Some(server_proof.clone()),
+                            _ => None,
+                        }),
+                    server_nonce: authenticated.as_ref().map(|_| server_nonce),
                 })),
                 effect: SideEffect::None,
-                device: authenticated.map(|(id, _)| id),
+                device: authenticated.as_ref().and_then(|(id, _, _, _)| id.clone()),
+                bootstrap_invite: authenticated
+                    .as_ref()
+                    .and_then(|(_, _, _, invite)| invite.clone()),
+                authentication: authenticated.map(|(_, _, key, _)| key),
             }
         }
+
+        Request::Authenticated { .. } => Handled::err(
+            ErrorCode::Unauthorized,
+            "authenticated envelopes are verified by the connection layer",
+        ),
+
+        Request::ConnectionIdentity => Handled::ok(Reply::Hello(HelloResult {
+            daemon_version: state.version.clone(),
+            protocol_version: PROTOCOL_VERSION,
+            machine_id: state.machine.machine_id.clone(),
+            fingerprint: state.machine.fingerprint(),
+            transport,
+            machine_name: crate::link::default_display_name(),
+            proof: None,
+            server_nonce: None,
+        })),
 
         Request::Subscribe {
             session_id,
@@ -154,6 +262,8 @@ pub async fn handle(
                     receiver,
                 },
                 device: None,
+                authentication: None,
+                bootstrap_invite: None,
             },
             Err(error) => failed(error),
         },
@@ -162,6 +272,8 @@ pub async fn handle(
             reply: Ok(Reply::Ack),
             effect: SideEffect::Unsubscribe { session_id },
             device: None,
+            authentication: None,
+            bootstrap_invite: None,
         },
 
         Request::AgentList => {
@@ -378,51 +490,9 @@ pub async fn handle(
             }
         }
 
-        Request::UpdateCheck => {
-            let url = state.config.read().await.update_manifest_url.clone();
-            if url.trim().is_empty() {
-                // Refused rather than answered with "up to date": this machine
-                // was told not to look, and the two are not the same sentence.
-                return Handled::err(
-                    ErrorCode::Unsupported,
-                    "这台机器关掉了更新检查（config.json 里的 updateManifestUrl 是空的）",
-                );
-            }
-            Handled::ok(Reply::Update(
-                crate::updates::check(&url, &state.version).await,
-            ))
-        }
+        Request::UpdateCheck => automatic_update_refusal(),
 
-        Request::UpdateDownload => {
-            let url = state.config.read().await.update_manifest_url.clone();
-            if url.trim().is_empty() {
-                return Handled::err(
-                    ErrorCode::Unsupported,
-                    "这台机器关掉了更新检查（config.json 里的 updateManifestUrl 是空的）",
-                );
-            }
-            // Checked again rather than trusting what the client saw. The
-            // address to fetch is the one thing here that must not come from
-            // over the wire: a client that could name it could point this
-            // machine at any file on the internet.
-            let status = crate::updates::check(&url, &state.version).await;
-            let (Some(version), Some(installer)) = (status.latest.clone(), status.download_url)
-            else {
-                return Handled::err(
-                    ErrorCode::Unsupported,
-                    status
-                        .problem
-                        .unwrap_or_else(|| "这个平台没有可下载的安装包".to_string()),
-                );
-            };
-            if !status.newer {
-                return Handled::err(ErrorCode::Unsupported, "已经是最新的了");
-            }
-            match state.updates.start(state, &version, &installer) {
-                Ok(download) => Handled::ok(Reply::UpdateDownload(download)),
-                Err(error) => failed(error),
-            }
-        }
+        Request::UpdateDownload => automatic_update_refusal(),
 
         Request::UpdateDownloadState => Handled::ok(Reply::UpdateDownload(state.updates.state())),
 
@@ -548,6 +618,7 @@ pub async fn handle(
         } => match state.devices.claim(&code, &device_name, &nonce, &proof) {
             Ok((mut credential, _)) => {
                 credential.machine_name = crate::link::default_display_name();
+                credential.machine_id = state.machine.machine_id.clone();
                 credential.fingerprint = state.machine.fingerprint();
                 Handled::ok(Reply::Claimed(credential))
             }
@@ -677,7 +748,11 @@ pub async fn handle(
                 Ok(target) => target,
                 Err(error) => return failed(error),
             };
-            match files::write(&target, &content) {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match files::write(&workspace.root, &target, &content) {
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
@@ -758,6 +833,16 @@ pub async fn handle(
     }
 }
 
+/// Integrity metadata delivered beside a binary is not an authenticity root.
+/// Until releases have an independently pinned signing key, no protocol caller
+/// may make this machine fetch or execute an update.
+fn automatic_update_refusal() -> Handled {
+    Handled::err(
+        ErrorCode::Unsupported,
+        "自动更新尚未启用：请从官方发布页手动下载，并核对 SHA256SUMS",
+    )
+}
+
 async fn remote_status(state: &Shared) -> genehub_proto::RemoteAccess {
     match state.remote.get() {
         Some(remote) => remote.status().await,
@@ -814,6 +899,8 @@ mod tests {
             client_name: "web".into(),
             protocol_version: 1,
             device: None,
+            channel: None,
+            invite: None,
         }));
         // The device doing this has no credential yet, which is the whole point
         // of the exchange — requiring one first would make pairing impossible.
@@ -845,6 +932,19 @@ mod tests {
         match handled.reply {
             Err(error) => assert_eq!(error.code, ErrorCode::NotFound),
             Ok(_) => panic!("expected an error"),
+        }
+    }
+
+    #[test]
+    fn unsigned_update_entry_points_fail_closed() {
+        let handled = automatic_update_refusal();
+        match handled.reply {
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::Unsupported);
+                assert!(error.message.contains("手动下载"));
+                assert!(error.message.contains("SHA256SUMS"));
+            }
+            Ok(_) => panic!("an unsigned updater entry point was enabled"),
         }
     }
 }

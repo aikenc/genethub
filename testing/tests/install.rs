@@ -1,9 +1,10 @@
-//! `scripts/install.sh`, run for real.
+//! `scripts/install.sh`, run end to end.
 //!
 //! This is the only way onto a machine with no graphical session, and it is a
 //! shell script — the kind of thing that breaks silently and is discovered by a
-//! stranger. So it is run against a real release layout on disk: real `curl`,
-//! real `tar`, real `sha256sum`, real target directory.
+//! stranger. It is run against a real release layout on disk with real `tar`,
+//! `sha256sum` and target directory. A curl shim records and enforces the
+//! transport flags without weakening production code to permit `file://`.
 //!
 //! The two properties worth pinning are the ones whose failure is expensive:
 //! the binaries land runnable, and a download that does not match its checksum
@@ -63,7 +64,7 @@ fn installing_puts_both_binaries_where_the_path_can_find_them() {
 }
 
 #[test]
-fn cli_update_restarts_the_daemon_with_the_new_binary() {
+fn an_explicit_install_can_restart_the_daemon_with_the_new_binary() {
     if skip() {
         return;
     }
@@ -72,17 +73,7 @@ fn cli_update_restarts_the_daemon_with_the_new_binary() {
     let bin = home.path().join("bin");
     let calls = home.path().join("calls");
 
-    let output = Command::new("sh")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh"))
-        .env(
-            "GENEHUB_DEV_DOWNLOAD_BASE",
-            format!("file://{}", release.path().display()),
-        )
-        .env("GENEHUB_DEV_BIN_DIR", &bin)
-        .env("GENEHUB_RESTART_DAEMON", "1")
-        .env("GENEHUB_TEST_CALLS", &calls)
-        .output()
-        .expect("run update installer");
+    let output = install_with_restart(release.path(), &bin, &calls);
 
     assert!(
         output.status.success(),
@@ -94,6 +85,45 @@ fn cli_update_restarts_the_daemon_with_the_new_binary() {
         "daemon restart\n",
         "the installer did not restart through the newly installed CLI"
     );
+}
+
+#[test]
+fn unsafe_download_bases_are_refused_before_fetching() {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh");
+    for base in [
+        "http://downloads.example.invalid",
+        "file:///tmp/release",
+        "https://user:secret@downloads.example.invalid",
+        "https://downloads.example.invalid/release?channel=dev",
+        "https://downloads.example.invalid/release#asset",
+    ] {
+        let output = Command::new("sh")
+            .arg(&script)
+            .env("GENEHUB_DEV_DOWNLOAD_BASE", base)
+            .output()
+            .expect("run install.sh");
+        assert!(
+            !output.status.success(),
+            "unsafe download base was accepted: {base}"
+        );
+        let problem = stderr(&output);
+        assert!(
+            problem.contains("download base"),
+            "unsafe base {base} had an unhelpful refusal: {problem}"
+        );
+    }
+}
+
+#[test]
+fn every_fetch_is_pinned_to_https_including_redirects() {
+    let script =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh"))
+            .expect("read install.sh");
+    assert!(script.contains("--proto '=https'"));
+    assert!(script.contains("--proto-redir '=https'"));
+    assert!(script.contains("--max-redirs 5"));
+    assert!(script.contains("--globoff"));
+    assert!(script.contains("wget --https-only --max-redirect=5"));
 }
 
 #[test]
@@ -235,19 +265,71 @@ fn asset_name() -> String {
 }
 
 fn install(release: &Path, bin: &Path) -> Output {
+    run_install(release, bin, None)
+}
+
+fn install_with_restart(release: &Path, bin: &Path, calls: &Path) -> Output {
+    run_install(release, bin, Some(calls))
+}
+
+fn run_install(release: &Path, bin: &Path, calls: Option<&Path>) -> Output {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh");
-    Command::new("sh")
+    let tools = TempDir::new().expect("temp tools");
+    let curl = tools.path().join("curl");
+    fs::write(
+        &curl,
+        r#"#!/bin/sh
+set -eu
+proto=
+proto_redir=
+max_redirs=
+output=
+url=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --proto) proto="$2"; shift 2 ;;
+    --proto-redir) proto_redir="$2"; shift 2 ;;
+    --max-redirs) max_redirs="$2"; shift 2 ;;
+    -o) output="$2"; shift 2 ;;
+    --globoff|-fsSL) shift ;;
+    -*) echo "unexpected curl option: $1" >&2; exit 91 ;;
+    *) url="$1"; shift ;;
+  esac
+done
+[ "$proto" = "=https" ] || { echo "curl protocol was not pinned" >&2; exit 92; }
+[ "$proto_redir" = "=https" ] || { echo "curl redirect protocol was not pinned" >&2; exit 93; }
+[ "$max_redirs" = 5 ] || { echo "curl redirects were not bounded" >&2; exit 94; }
+case "$url" in
+  https://downloads.example.invalid/*) ;;
+  *) echo "unexpected URL: $url" >&2; exit 95 ;;
+esac
+cp "$GENEHUB_TEST_RELEASE/${url##*/}" "$output"
+"#,
+    )
+    .expect("write curl shim");
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).expect("chmod curl shim");
+
+    let path = format!(
+        "{}:{}",
+        tools.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut command = Command::new("sh");
+    command
         .arg(script)
-        // `file://` rather than a server: the transport is curl's business, and
-        // what this test is about is which URL is asked for and what is done
-        // with the answer.
+        .env("PATH", path)
+        .env("GENEHUB_TEST_RELEASE", release)
         .env(
             "GENEHUB_DEV_DOWNLOAD_BASE",
-            format!("file://{}", release.display()),
+            "https://downloads.example.invalid",
         )
-        .env("GENEHUB_DEV_BIN_DIR", bin)
-        .output()
-        .expect("run install.sh")
+        .env("GENEHUB_DEV_BIN_DIR", bin);
+    if let Some(calls) = calls {
+        command
+            .env("GENEHUB_RESTART_DAEMON", "1")
+            .env("GENEHUB_TEST_CALLS", calls);
+    }
+    command.output().expect("run install.sh")
 }
 
 fn stderr(output: &Output) -> String {

@@ -21,8 +21,12 @@ license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
 anyhow = "1"
+aes-gcm = "0.10"
+base64 = "0.22"
+hmac = "0.12"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 futures-util = "0.3"
+fs2 = "0.4"
 globset = "0.4"
 ignore = "0.4"
 regex = "1"

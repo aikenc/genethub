@@ -6,7 +6,7 @@
 //! the CLI's dispatcher to call.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Seek, Write};
 
 use anyhow::{Context, Result};
 
@@ -36,16 +36,7 @@ pub async fn run() -> Result<()> {
     let daemon = Daemon::start(paths).await?;
     // Printed on stdout so the desktop shell can read the endpoint without
     // racing the file write.
-    println!(
-        "{}",
-        serde_json::json!({
-            "event": "listening",
-            "port": daemon.port,
-            "token": daemon.token(),
-            "machineId": daemon.state.machine.machine_id,
-            "fingerprint": daemon.state.machine.fingerprint(),
-        })
-    );
+    println!("{}", listening_payload(&daemon));
     let _ = std::io::stdout().flush();
     tracing::info!("listening on 127.0.0.1:{}", daemon.port);
 
@@ -57,6 +48,26 @@ pub async fn run() -> Result<()> {
     tracing::info!("shutting down");
     daemon.shutdown().await;
     Ok(())
+}
+
+fn listening_payload(daemon: &Daemon) -> serde_json::Value {
+    let admission = daemon.websocket_admission();
+    serde_json::json!({
+        "event": "listening",
+        "port": daemon.port,
+        "url": admission.url,
+        "serverProof": admission.server_proof,
+        "admission": {
+            "challenge": admission.challenge,
+            "pid": admission.pid,
+            "machineId": admission.machine_id,
+            "fingerprint": admission.fingerprint,
+            "expiresAt": admission.expires_at,
+        },
+        "pid": std::process::id(),
+        "machineId": daemon.state.machine.machine_id,
+        "fingerprint": daemon.state.machine.fingerprint(),
+    })
 }
 
 /// Writes to the log file, and to stderr when someone is watching it.
@@ -132,27 +143,108 @@ async fn wait_for_signal() {
 /// Two daemons on one data directory would fight over session files and both
 /// publish an endpoint, leaving clients connecting to whichever won the race.
 struct SingleInstance {
-    path: std::path::PathBuf,
+    file: Option<std::fs::File>,
 }
 
 impl SingleInstance {
     fn acquire(paths: &Paths) -> Result<Self> {
         let path = paths.lock_file();
-        if let Some(pid) = crate::lifecycle::lock_pid(paths) {
-            if crate::lifecycle::pid_alive(pid) {
-                anyhow::bail!("another daemon is already running (pid {pid}); stop it first");
-            }
-            // A stale lock from a crash should not block startup forever.
-            tracing::warn!("clearing a stale lock from pid {pid}");
+        let mut options = fs::OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-        fs::write(&path, std::process::id().to_string())
-            .with_context(|| format!("writing {}", path.display()))?;
-        Ok(SingleInstance { path })
+        let mut file = options
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        crate::config::restrict_to_owner(&path)?;
+        if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
+            let owner = crate::lifecycle::lock_pid(paths)
+                .map(|pid| format!(" (pid {pid})"))
+                .unwrap_or_default();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                anyhow::bail!("another daemon is already running{owner}; stop it first");
+            }
+            return Err(error).with_context(|| format!("locking {}", path.display()));
+        }
+        // File contents are for human/CLI diagnostics only. The kernel-held
+        // lock is the authority: it is released on crash and cannot suffer pid
+        // reuse or the check-then-write race of the former pid probe.
+        file.set_len(0)?;
+        file.rewind()?;
+        write!(file, "{}", std::process::id())?;
+        file.sync_all()?;
+        Ok(SingleInstance { file: Some(file) })
     }
 }
 
 impl Drop for SingleInstance {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if let Some(file) = self.file.take() {
+            let _ = fs2::FileExt::unlock(&file);
+            drop(file);
+        }
+        // Keep the inode permanently. Unlinking after unlock lets another
+        // process lock the old inode while a third creates and locks a new file
+        // at the same path, producing two live daemons.
+    }
+}
+
+#[cfg(test)]
+mod instance_tests {
+    use super::*;
+
+    #[test]
+    fn the_kernel_lock_blocks_a_racing_second_daemon_but_not_a_stale_live_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        paths.ensure().unwrap();
+
+        let first = SingleInstance::acquire(&paths).unwrap();
+        assert!(SingleInstance::acquire(&paths).is_err());
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(paths.lock_file()).unwrap().ino()
+        };
+        drop(first);
+        assert!(paths.lock_file().exists());
+
+        // A crash can leave text behind, and that pid may now name an entirely
+        // different live process. With the kernel lock released, it must not
+        // block recovery or authorize killing that process.
+        std::fs::write(paths.lock_file(), std::process::id().to_string()).unwrap();
+        let recovered = SingleInstance::acquire(&paths).unwrap();
+        assert!(SingleInstance::acquire(&paths).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(std::fs::metadata(paths.lock_file()).unwrap().ino(), inode);
+        }
+        drop(recovered);
+    }
+
+    #[tokio::test]
+    async fn the_listening_line_never_publishes_the_reusable_local_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(Paths::new(dir.path())).await.unwrap();
+        let secret = daemon.state.token.clone();
+        let payload = listening_payload(&daemon);
+        let text = payload.to_string();
+
+        assert_eq!(payload["event"], "listening");
+        assert!(payload["url"].as_str().unwrap().contains("proof="));
+        assert!(!payload["url"]
+            .as_str()
+            .unwrap()
+            .contains(payload["serverProof"].as_str().unwrap()));
+        assert_eq!(payload["admission"]["machineId"], payload["machineId"]);
+        assert!(payload.get("token").is_none());
+        assert!(!text.contains(&secret));
+        assert!(!text.contains("token="));
+
+        daemon.shutdown().await;
     }
 }

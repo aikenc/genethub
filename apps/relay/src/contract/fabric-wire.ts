@@ -11,6 +11,7 @@ export const FABRIC_PATH = "/fabric/v2";
 
 export const FABRIC_AUTHORIZE_ENDPOINT = "/internal/fabric/v2/authorize-endpoint";
 export const FABRIC_AUTHORIZE_ROUTE = "/internal/fabric/v2/authorize-route";
+/** `204` when this generation was applied; `409` when Control fenced it. */
 export const FABRIC_PRESENCE = "/internal/fabric/v2/presence";
 export const FABRIC_REVOCATIONS = "/internal/fabric/v2/revocations";
 
@@ -24,6 +25,8 @@ export interface FabricAuthorizeEndpointResponse {
   expiresAt: string | null;
   /** Cloud-issued fencing value for every presence report from this socket. */
   connectionGeneration: number;
+  /** Cloud presence lease; every Relay uses the same authoritative duration. */
+  presenceLeaseSeconds: number;
 }
 
 export interface FabricAuthorizeRouteRequest {
@@ -51,3 +54,7 @@ export interface FabricRevocationEvent {
 export interface FabricRevocationSync {
   revocations: FabricRevocationEvent[];
 }
+
+/** Initial catch-up page and its explicit readiness fence. */
+export type FabricRevocationSyncPage = FabricRevocationSync;
+export type FabricRevocationSyncComplete = Record<string, never>;

@@ -1,6 +1,7 @@
 //! Configuration and the on-disk layout.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -98,10 +99,44 @@ impl Paths {
     }
 
     pub fn ensure(&self) -> Result<()> {
-        fs::create_dir_all(&self.root)
+        ensure_real_directory(&self.root)
             .with_context(|| format!("creating data directory {}", self.root.display()))?;
-        fs::create_dir_all(self.sessions_dir())?;
-        fs::create_dir_all(self.logs_dir())?;
+        // Tighten the parent before creating sensitive children. On a custom
+        // data path with a permissive inherited ACL, the opposite order leaves
+        // a first-start window in which another local account can traverse the
+        // newly created directories.
+        restrict_dir_to_owner(&self.root)?;
+        ensure_real_directory(&self.sessions_dir())?;
+        restrict_dir_to_owner(&self.sessions_dir())?;
+        ensure_real_directory(&self.logs_dir())?;
+        restrict_dir_to_owner(&self.logs_dir())?;
+        restrict_existing_sensitive_tree(&self.sessions_dir())?;
+        restrict_existing_sensitive_tree(&self.logs_dir())?;
+        // Protect existing sensitive children too. Tightening a Windows parent
+        // DACL does not retroactively rewrite ACLs inherited in older releases.
+        for path in [
+            self.config_file(),
+            self.state_file(),
+            self.lock_file(),
+            self.endpoint_file(),
+            self.devices_file(),
+            self.log_file(),
+        ] {
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) => {
+                    reject_link_or_reparse(&path, &metadata)?;
+                    if !metadata.is_file() {
+                        anyhow::bail!("sensitive path is not a file: {}", path.display());
+                    }
+                    restrict_to_owner(&path)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("inspecting sensitive file {}", path.display()))
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -233,16 +268,8 @@ impl Config {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let body = serde_json::to_string_pretty(self)?;
-        // Write-then-rename so a crash mid-write cannot leave a truncated
-        // config that would make the daemon unstartable.
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, body)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        save_private(path, body.as_bytes())
     }
 
     /// Makes the catalogue generation durable before it is ever uploaded.
@@ -320,7 +347,9 @@ pub struct Enrollment {
     #[serde(default)]
     pub fabric_url: Option<String>,
     pub daemon_id: String,
-    /// Presented on the uplink. Only its hash ever left this machine.
+    /// Presented only to the Hub HTTPS boundary to mint short-lived uplink
+    /// admissions. Only its hash is persisted by the Hub, and the reusable
+    /// value must never be sent to a Relay.
     pub secret: String,
     /// Last workspace catalogue generation durably acknowledged by this Hub.
     ///
@@ -330,13 +359,6 @@ pub struct Enrollment {
     /// old process could overwrite a newer registry snapshot.
     #[serde(default)]
     pub workspace_catalog_generation: Option<String>,
-}
-
-impl Enrollment {
-    /// What goes in the uplink's `Authorization` header.
-    pub fn ticket(&self) -> String {
-        format!("{}.{}", self.daemon_id, self.secret)
-    }
 }
 
 impl MachineState {
@@ -362,14 +384,7 @@ impl MachineState {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        restrict_to_owner(&tmp)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        save_private(path, serde_json::to_string_pretty(self)?.as_bytes())
     }
 
     /// Short, readable form of the machine identity for out-of-band comparison
@@ -383,6 +398,175 @@ impl MachineState {
             .collect::<Vec<_>>()
             .join("-")
     }
+}
+
+/** Writes secrets without a world-readable creation window and survives crashes. */
+pub(crate) fn save_private(path: &Path, body: &[u8]) -> Result<()> {
+    #[cfg(test)]
+    if take_injected_save_failure(path) {
+        anyhow::bail!("injected private-save failure for {}", path.display());
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    ensure_real_directory(parent)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("private");
+    let tmp = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let mut cleanup = PrivateTemp::new(tmp.clone());
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    restrict_to_owner(&tmp)?;
+    file.write_all(body)?;
+    file.sync_all()?;
+    drop(file);
+    replace_private(&tmp, path)?;
+    cleanup.disarm();
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspecting published private file {}", path.display()))?;
+    reject_link_or_reparse(path, &metadata)?;
+    if !metadata.is_file() {
+        anyhow::bail!("published private path is not a file: {}", path.display());
+    }
+    // Do not rely on rename ACL preservation; a failed protection step fails
+    // the save closed even when the destination existed before this write.
+    restrict_to_owner(path)?;
+    // Persist the rename where the platform supports syncing directories.
+    if let Ok(directory) = fs::File::open(parent) {
+        let _ = directory.sync_all();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+static PRIVATE_SAVE_FAILURES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn fail_next_private_save(path: &Path) {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    PRIVATE_SAVE_FAILURES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf());
+}
+
+#[cfg(test)]
+fn take_injected_save_failure(path: &Path) -> bool {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    PRIVATE_SAVE_FAILURES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .remove(path)
+}
+
+struct PrivateTemp(Option<PathBuf>);
+
+impl PrivateTemp {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for PrivateTemp {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn ensure_real_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            reject_link_or_reparse(path, &metadata)?;
+            if !metadata.is_dir() {
+                anyhow::bail!("expected a directory at {}", path.display());
+            }
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspecting directory {}", path.display()))
+        }
+    }
+    fs::create_dir_all(path)?;
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspecting created directory {}", path.display()))?;
+    reject_link_or_reparse(path, &metadata)?;
+    if !metadata.is_dir() {
+        anyhow::bail!("expected a directory at {}", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn reject_link_or_reparse(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "refusing symbolic link in sensitive data: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn reject_link_or_reparse(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        anyhow::bail!(
+            "refusing reparse point in sensitive data: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn reject_link_or_reparse(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "refusing symbolic link in sensitive data: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn replace_private(source: &Path, destination: &Path) -> Result<()> {
+    fs::rename(source, destination)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn replace_private(source: &Path, destination: &Path) -> Result<()> {
+    windows_acl::replace_file(source, destination)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn replace_private(_source: &Path, _destination: &Path) -> Result<()> {
+    anyhow::bail!("atomic private-file replacement is unsupported on this platform")
 }
 
 /// A small non-cryptographic digest used only for display fingerprints.
@@ -409,10 +593,346 @@ pub fn restrict_to_owner(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub fn restrict_to_owner(_path: &Path) -> Result<()> {
-    // Windows inherits the user profile ACL, which already excludes other users.
+#[cfg(windows)]
+pub fn restrict_to_owner(path: &Path) -> Result<()> {
+    windows_acl::restrict_to_current_user(path, false)
+}
+
+#[cfg(unix)]
+fn restrict_dir_to_owner(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn restrict_dir_to_owner(path: &Path) -> Result<()> {
+    windows_acl::restrict_to_current_user(path, true)
+}
+
+#[cfg(windows)]
+fn restrict_existing_sensitive_tree(root: &Path) -> Result<()> {
+    const MAX_MIGRATION_ENTRIES: usize = 100_000;
+    let mut pending = vec![root.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("reading sensitive directory {}", directory.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("reading an entry under {}", directory.display()))?;
+            visited = visited
+                .checked_add(1)
+                .context("sensitive ACL migration entry count overflowed")?;
+            if visited > MAX_MIGRATION_ENTRIES {
+                anyhow::bail!(
+                    "refusing to migrate more than {MAX_MIGRATION_ENTRIES} sensitive files"
+                );
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("inspecting sensitive path {}", path.display()))?;
+            reject_link_or_reparse(&path, &metadata)?;
+            if metadata.is_dir() {
+                restrict_dir_to_owner(&path)?;
+                pending.push(path);
+            } else if metadata.is_file() {
+                restrict_to_owner(&path)?;
+            } else {
+                anyhow::bail!("unsupported sensitive data entry: {}", path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn restrict_existing_sensitive_tree(_root: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn restrict_to_owner(_path: &Path) -> Result<()> {
+    anyhow::bail!("owner-only file permissions are unsupported on this platform")
+}
+
+#[cfg(not(any(unix, windows)))]
+fn restrict_dir_to_owner(_path: &Path) -> Result<()> {
+    anyhow::bail!("owner-only directory permissions are unsupported on this platform")
+}
+
+#[cfg(windows)]
+mod windows_acl {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use std::ptr::{null, null_mut};
+
+    use anyhow::{bail, Context, Result};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE,
+    };
+    use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        AddAccessAllowedAceEx, GetLengthSid, GetTokenInformation, InitializeAcl, TokenUser,
+        ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
+        OBJECT_INHERIT_ACE, PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    struct Token(HANDLE);
+
+    impl Drop for Token {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    fn last_error(operation: &str) -> anyhow::Error {
+        anyhow::Error::new(std::io::Error::last_os_error()).context(operation.to_owned())
+    }
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    pub(super) fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+        let source_wide = wide(source);
+        let destination_wide = wide(destination);
+        let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
+        if unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), flags) } == 0 {
+            return Err(last_error("atomically replacing a private file")).with_context(|| {
+                format!(
+                    "publishing {} as {}",
+                    source.display(),
+                    destination.display()
+                )
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn restrict_to_current_user(path: &Path, directory: bool) -> Result<()> {
+        let wide_path = wide(path);
+
+        unsafe {
+            let mut raw_token: HANDLE = null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token) == 0 {
+                return Err(last_error("opening the current process token"))
+                    .with_context(|| format!("protecting {}", path.display()));
+            }
+            let token = Token(raw_token);
+
+            let mut token_bytes = 0;
+            let first = GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut token_bytes);
+            if first != 0 || token_bytes == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                return Err(last_error("sizing the current user token"))
+                    .with_context(|| format!("protecting {}", path.display()));
+            }
+
+            // usize storage gives TOKEN_USER and SID their required alignment.
+            let word = size_of::<usize>();
+            let mut token_storage = vec![0usize; (token_bytes as usize).div_ceil(word)];
+            if GetTokenInformation(
+                token.0,
+                TokenUser,
+                token_storage.as_mut_ptr().cast::<c_void>(),
+                token_bytes,
+                &mut token_bytes,
+            ) == 0
+            {
+                return Err(last_error("reading the current user token"))
+                    .with_context(|| format!("protecting {}", path.display()));
+            }
+            let user = &*token_storage.as_ptr().cast::<TOKEN_USER>();
+            let sid = user.User.Sid;
+            let sid_bytes = GetLengthSid(sid);
+            if sid_bytes == 0 {
+                return Err(last_error("reading the current user SID"))
+                    .with_context(|| format!("protecting {}", path.display()));
+            }
+
+            let acl_bytes = size_of::<ACL>() + size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>()
+                + sid_bytes as usize;
+            let mut acl_storage = vec![0usize; acl_bytes.div_ceil(word)];
+            let acl = acl_storage.as_mut_ptr().cast::<ACL>();
+            if InitializeAcl(acl, acl_bytes as u32, ACL_REVISION) == 0 {
+                return Err(last_error("initializing an owner-only DACL"))
+                    .with_context(|| format!("protecting {}", path.display()));
+            }
+            let inheritance = if directory {
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+            } else {
+                0
+            };
+            if AddAccessAllowedAceEx(acl, ACL_REVISION, inheritance, FILE_ALL_ACCESS, sid) == 0 {
+                return Err(last_error("adding the owner DACL entry"))
+                    .with_context(|| format!("protecting {}", path.display()));
+            }
+
+            let status = SetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                acl,
+                null(),
+            );
+            if status != ERROR_SUCCESS {
+                bail!(
+                    "protecting {} with an owner-only DACL failed: {}",
+                    path.display(),
+                    std::io::Error::from_raw_os_error(status as i32)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn verify_owner_only(path: &Path, directory: bool) -> Result<()> {
+        use windows_sys::Win32::Security::{
+            EqualSid, GetAce, GetFileSecurityW, GetSecurityDescriptorControl,
+            GetSecurityDescriptorDacl, SE_DACL_PROTECTED,
+        };
+
+        let wide_path = wide(path);
+
+        unsafe {
+            let mut raw_token: HANDLE = null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token) == 0 {
+                return Err(last_error("opening the current process token"));
+            }
+            let token = Token(raw_token);
+            let mut token_bytes = 0;
+            let _ = GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut token_bytes);
+            if token_bytes == 0 {
+                return Err(last_error("sizing the current user token"));
+            }
+            let word = size_of::<usize>();
+            let mut token_storage = vec![0usize; (token_bytes as usize).div_ceil(word)];
+            if GetTokenInformation(
+                token.0,
+                TokenUser,
+                token_storage.as_mut_ptr().cast::<c_void>(),
+                token_bytes,
+                &mut token_bytes,
+            ) == 0
+            {
+                return Err(last_error("reading the current user token"));
+            }
+            let user_sid = (*token_storage.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+
+            let mut descriptor_bytes = 0;
+            let _ = GetFileSecurityW(
+                wide_path.as_ptr(),
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                0,
+                &mut descriptor_bytes,
+            );
+            if descriptor_bytes == 0 {
+                return Err(last_error("sizing the file security descriptor"));
+            }
+            let mut descriptor_storage = vec![0usize; (descriptor_bytes as usize).div_ceil(word)];
+            let descriptor = descriptor_storage.as_mut_ptr().cast::<c_void>();
+            if GetFileSecurityW(
+                wide_path.as_ptr(),
+                DACL_SECURITY_INFORMATION,
+                descriptor,
+                descriptor_bytes,
+                &mut descriptor_bytes,
+            ) == 0
+            {
+                return Err(last_error("reading the file security descriptor"));
+            }
+
+            let mut control = 0;
+            let mut revision = 0;
+            if GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) == 0 {
+                return Err(last_error("reading security descriptor control flags"));
+            }
+            if control & SE_DACL_PROTECTED == 0 {
+                bail!("{} DACL still inherits access entries", path.display());
+            }
+
+            let mut present = 0;
+            let mut defaulted = 0;
+            let mut acl: *mut ACL = null_mut();
+            if GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) == 0 {
+                return Err(last_error("reading the protected DACL"));
+            }
+            if present == 0 || acl.is_null() || (*acl).AceCount != 1 {
+                bail!(
+                    "{} must have exactly one explicit access entry",
+                    path.display()
+                );
+            }
+
+            let mut raw_ace: *mut c_void = null_mut();
+            if GetAce(acl, 0, &mut raw_ace) == 0 {
+                return Err(last_error("reading the owner DACL entry"));
+            }
+            let ace = &*raw_ace.cast::<ACCESS_ALLOWED_ACE>();
+            const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+            if ace.Header.AceType != ACCESS_ALLOWED_ACE_TYPE || ace.Mask != FILE_ALL_ACCESS {
+                bail!("{} has a non-owner or partial access entry", path.display());
+            }
+            let expected_flags = if directory {
+                (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8
+            } else {
+                0
+            };
+            if ace.Header.AceFlags != expected_flags {
+                bail!("{} has unexpected DACL inheritance flags", path.display());
+            }
+            let ace_sid = (&ace.SidStart as *const u32).cast_mut().cast::<c_void>();
+            if EqualSid(ace_sid, user_sid) == 0 {
+                bail!(
+                    "{} grants access to a principal other than its owner",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn make_unprotected_for_test(path: &Path) -> Result<()> {
+        use windows_sys::Win32::Security::UNPROTECTED_DACL_SECURITY_INFORMATION;
+
+        let wide_path = wide(path);
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                null(),
+                null(),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            bail!(
+                "making {} deliberately permissive for a test failed: {}",
+                path.display(),
+                std::io::Error::from_raw_os_error(status as i32)
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -447,6 +967,132 @@ mod tests {
         assert_eq!(loaded.port, 1234);
         assert_eq!(loaded.workspaces.len(), 1);
         assert_eq!(loaded.workspaces[0].name, "demo");
+    }
+
+    #[test]
+    fn private_save_atomically_replaces_the_same_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        save_private(&path, br#"{"version":1}"#).unwrap();
+        save_private(&path, br#"{"version":2}"#).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), br#"{"version":2}"#);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planted_sensitive_symlinks_never_touch_their_external_targets() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let outer = tempfile::tempdir().unwrap();
+        let victim_dir = outer.path().join("victim-dir");
+        fs::create_dir(&victim_dir).unwrap();
+        fs::set_permissions(&victim_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let linked_root = outer.path().join("linked-data");
+        symlink(&victim_dir, &linked_root).unwrap();
+        assert!(Paths::new(&linked_root).ensure().is_err());
+        assert_eq!(
+            victim_dir.metadata().unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+
+        let root_with_linked_sessions = outer.path().join("data-with-linked-sessions");
+        fs::create_dir(&root_with_linked_sessions).unwrap();
+        symlink(&victim_dir, root_with_linked_sessions.join("sessions")).unwrap();
+        assert!(Paths::new(&root_with_linked_sessions).ensure().is_err());
+        assert_eq!(
+            victim_dir.metadata().unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+
+        let root = outer.path().join("real-data");
+        fs::create_dir(&root).unwrap();
+        let victim_file = outer.path().join("victim.json");
+        fs::write(&victim_file, b"outside secret").unwrap();
+        fs::set_permissions(&victim_file, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&victim_file, root.join("config.json")).unwrap();
+        assert!(Paths::new(&root).ensure().is_err());
+        assert_eq!(fs::read(&victim_file).unwrap(), b"outside secret");
+        assert_eq!(
+            victim_file.metadata().unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        let path = outer.path().join("published.json");
+        let stale_fixed_temp = path.with_extension("json.tmp");
+        symlink(&victim_file, &stale_fixed_temp).unwrap();
+        save_private(&path, b"new private data").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new private data");
+        assert_eq!(fs::read(&victim_file).unwrap(), b"outside secret");
+        assert_eq!(
+            victim_file.metadata().unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_secrets_are_saved_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = Config::default();
+        config.agents.providers.insert(
+            "private".into(),
+            ProviderConfig {
+                api_key: Some("secret".into()),
+                ..Default::default()
+            },
+        );
+        config.save(&path).unwrap();
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_data_root_and_secret_files_have_protected_owner_only_dacls() {
+        let parent = tempfile::tempdir().unwrap();
+        let paths = Paths::new(parent.path().join("data"));
+        let nested = paths.sessions_dir().join("workspace");
+        let old_session = nested.join("old.jsonl");
+        let old_log = paths.logs_dir().join("old.log");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(paths.logs_dir()).unwrap();
+        fs::write(&old_session, b"legacy session").unwrap();
+        fs::write(&old_log, b"legacy log").unwrap();
+        windows_acl::make_unprotected_for_test(&nested).unwrap();
+        windows_acl::make_unprotected_for_test(&old_session).unwrap();
+        windows_acl::make_unprotected_for_test(&old_log).unwrap();
+        paths.ensure().unwrap();
+        windows_acl::verify_owner_only(&paths.root, true).unwrap();
+        windows_acl::verify_owner_only(&paths.sessions_dir(), true).unwrap();
+        windows_acl::verify_owner_only(&paths.logs_dir(), true).unwrap();
+        windows_acl::verify_owner_only(&nested, true).unwrap();
+        windows_acl::verify_owner_only(&old_session, false).unwrap();
+        windows_acl::verify_owner_only(&old_log, false).unwrap();
+
+        let mut config = Config::default();
+        config.agents.providers.insert(
+            "private".into(),
+            ProviderConfig {
+                api_key: Some("secret".into()),
+                ..Default::default()
+            },
+        );
+        config.save(&paths.config_file()).unwrap();
+        config.port = 4242;
+        config.save(&paths.config_file()).unwrap();
+        assert_eq!(Config::load(&paths.config_file()).unwrap().port, 4242);
+        windows_acl::verify_owner_only(&paths.config_file(), false).unwrap();
     }
 
     #[test]
@@ -507,6 +1153,25 @@ mod tests {
     #[test]
     fn a_test_gets_an_empty_machine_unless_it_asks_otherwise() {
         assert!(Paths::new("/tmp/whatever").default_workspace.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_data_and_sensitive_subdirectories_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("daemon-data");
+        // Simulate an older build (or permissive umask) which left the data
+        // directory traversable by other local accounts.
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let paths = Paths::new(&root);
+        paths.ensure().unwrap();
+
+        for path in [&root, &paths.sessions_dir(), &paths.logs_dir()] {
+            assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o700);
+        }
     }
 
     #[test]

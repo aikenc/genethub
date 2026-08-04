@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, Mutex};
 use crate::config::{Enrollment, Paths};
 use crate::hub;
 use crate::state::AppState;
-use crate::transport::uplink::{Admission, Uplink};
+use crate::transport::uplink::Uplink;
 
 enum Stage {
     Unpaired,
@@ -490,14 +490,47 @@ fn dial(
     pty: &broadcast::Sender<ServerFrame>,
     enrollment: &Enrollment,
 ) -> Uplink {
-    Uplink::start(
+    let client = Arc::new(hub::Client::new(&enrollment.hub_url));
+    let enrollment_for_admission = Arc::new(enrollment.clone());
+    let channel_client = client.clone();
+    let enrollment_for_channel = enrollment_for_admission.clone();
+    let lease_client = channel_client.clone();
+    let enrollment_for_lease = enrollment_for_channel.clone();
+    Uplink::start_refreshing_hosted(
         state.clone(),
         pty.clone(),
         enrollment.uplink_url.clone(),
-        enrollment.ticket(),
-        // The Hub only opens a channel for a client it already authorized, so
-        // this path does not ask for a device credential on top.
-        Admission::Vouched,
+        move || {
+            let client = client.clone();
+            let enrollment = enrollment_for_admission.clone();
+            async move {
+                Ok(client
+                    .uplink_admission(&enrollment)
+                    .await?
+                    .map(|admission| admission.ticket))
+            }
+        },
+        move |capability| {
+            let client = channel_client.clone();
+            let enrollment = enrollment_for_channel.clone();
+            async move {
+                Ok(client
+                    .channel_admission(&enrollment, &capability)
+                    .await?
+                    .map(
+                        |admission| crate::transport::uplink::HostedChannelAdmission {
+                            secret: admission.secret,
+                            lease_id: admission.lease_id,
+                            expires_at: admission.expires_at,
+                        },
+                    ))
+            }
+        },
+        move |lease_id| {
+            let client = lease_client.clone();
+            let enrollment = enrollment_for_lease.clone();
+            async move { client.renew_channel_lease(&enrollment, &lease_id).await }
+        },
     )
 }
 
@@ -631,11 +664,7 @@ mod tests {
         let mut acknowledged_generation = Some("wcg_previous".to_string());
         let mut published = None;
 
-        // MachineState::save writes this temporary sibling before renaming it.
-        // A directory at that exact path reliably simulates a failed durable
-        // write even when the tests run as root.
-        let save_blocker = state_path.with_extension("json.tmp");
-        std::fs::create_dir(&save_blocker).unwrap();
+        crate::config::fail_next_private_save(&state_path);
         sync_catalog_version(
             &client,
             &weak_state,
@@ -666,7 +695,6 @@ mod tests {
         // Hub has already advanced to the incoming generation, just like the
         // real idempotent endpoint, and accepts this replay instead of wedging
         // the daemon behind a permanent generation-conflict response.
-        std::fs::remove_dir(&save_blocker).unwrap();
         sync_catalog_version(
             &client,
             &weak_state,
@@ -730,7 +758,7 @@ mod tests {
         // `Link` has no daemon behind it. That is the property worth pinning:
         // the way back in must survive a failed enrollment, or someone ends up
         // with an identity they cannot reach and a machine that is not in it.
-        assert_eq!(trial.claim_url, "http://hub.test/link/abc");
+        assert_eq!(trial.claim_url, format!("{hub}/link/abc"));
         assert_eq!(trial.recovery_key.as_deref(), Some("rk-1"));
 
         // And nobody is left staring at a code to type: a trial was approved by
@@ -756,23 +784,23 @@ mod tests {
     /// Hand-rolled rather than mocked: what is being checked is that the daemon
     /// reads a real HTTP reply the way the control plane writes one.
     async fn fake_hub() -> String {
-        serve(|path| match path {
-            "/api/device-authorizations" => Some(
-                r#"{"deviceCode":"dc","userCode":"AAAA-BBBB","verificationUri":"http://hub.test/activate","verificationUriComplete":"http://hub.test/activate?code=AAAA-BBBB","expiresAt":"2030-01-01T00:00:00Z","interval":5}"#,
-            ),
-            "/api/trial" => Some(
-                r#"{"claimUrl":"http://hub.test/link/abc","recoveryKey":"rk-1","expiresAt":"2030-01-01T00:00:00Z"}"#,
-            ),
+        serve(|path, origin| match path {
+            "/api/device-authorizations" => Some(format!(
+                r#"{{"deviceCode":"dc","userCode":"AAAA-BBBB","verificationUri":"{origin}/activate","verificationUriComplete":"{origin}/activate?code=AAAA-BBBB","expiresAt":"2030-01-01T00:00:00Z","interval":5}}"#,
+            )),
+            "/api/trial" => Some(format!(
+                r#"{{"claimUrl":"{origin}/link/abc","recoveryKey":"rk-1","expiresAt":"2030-01-01T00:00:00Z"}}"#,
+            )),
             _ => None,
         })
         .await
     }
 
     async fn fake_hub_refusing_trials() -> String {
-        serve(|path| match path {
-            "/api/device-authorizations" => Some(
-                r#"{"deviceCode":"dc","userCode":"AAAA-BBBB","verificationUri":"http://hub.test/activate","verificationUriComplete":"http://hub.test/activate?code=AAAA-BBBB","expiresAt":"2030-01-01T00:00:00Z","interval":5}"#,
-            ),
+        serve(|path, origin| match path {
+            "/api/device-authorizations" => Some(format!(
+                r#"{{"deviceCode":"dc","userCode":"AAAA-BBBB","verificationUri":"{origin}/activate","verificationUriComplete":"{origin}/activate?code=AAAA-BBBB","expiresAt":"2030-01-01T00:00:00Z","interval":5}}"#,
+            )),
             _ => None,
         })
         .await
@@ -852,11 +880,12 @@ mod tests {
         (origin, requests_rx)
     }
 
-    async fn serve(answer: fn(&str) -> Option<&'static str>) -> String {
+    async fn serve(answer: fn(&str, &str) -> Option<String>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
+        let served_origin = origin.clone();
         tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
@@ -870,7 +899,7 @@ mod tests {
                     .nth(1)
                     .unwrap_or_default()
                     .to_string();
-                let response = match answer(&path) {
+                let response = match answer(&path, &served_origin) {
                     Some(body) => format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                         body.len()

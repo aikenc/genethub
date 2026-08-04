@@ -7,6 +7,7 @@ import {
   encodeFabricFrame,
   encodeFabricOpenPayload,
   FABRIC_HEADER_BYTES,
+  MAX_OPERATION_METADATA_BYTES,
   FABRIC_VERSION,
   FabricKind,
   ZERO_STREAM_ID,
@@ -110,5 +111,28 @@ describe("Fabric v2 framing", () => {
     const oversizedLength = Buffer.alloc(2);
     oversizedLength.writeUInt16BE(4097, 0);
     assert.equal(decodeFabricOpenPayload(oversizedLength), null);
+  });
+
+  it("bounds opaque OPEN metadata independently from DATA frames", () => {
+    const boundary = encodeFabricOpenPayload(
+      "ticket",
+      Buffer.alloc(MAX_OPERATION_METADATA_BYTES),
+    );
+    assert.equal(
+      decodeFabricOpenPayload(boundary)?.opaqueHello.length,
+      MAX_OPERATION_METADATA_BYTES,
+    );
+    assert.throws(
+      () =>
+        encodeFabricOpenPayload(
+          "ticket",
+          Buffer.alloc(MAX_OPERATION_METADATA_BYTES + 1),
+        ),
+      /operation metadata/,
+    );
+    assert.equal(
+      decodeFabricOpenPayload(Buffer.concat([boundary, Buffer.from([1])])),
+      null,
+    );
   });
 });

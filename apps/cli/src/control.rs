@@ -28,12 +28,29 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 struct Endpoint {
     port: u16,
     token: String,
+    machine_id: String,
+    fingerprint: String,
     pid: u32,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Health {
+    pid: u32,
+    machine_id: String,
+    fingerprint: String,
+    proof: String,
+}
+
 impl Endpoint {
-    fn websocket_url(&self) -> String {
-        format!("ws://127.0.0.1:{}/ws?token={}", self.port, self.token)
+    fn websocket_admission(&self) -> genet_daemon::transport::local::LocalWebSocketAdmission {
+        genet_daemon::transport::local::websocket_admission(
+            self.port,
+            &self.token,
+            self.pid,
+            &self.machine_id,
+            &self.fingerprint,
+        )
     }
 }
 
@@ -108,11 +125,12 @@ fn live_pid(paths: &Paths) -> Option<u32> {
 fn facts(paths: &Paths) -> serde_json::Value {
     let pid = live_pid(paths);
     let endpoint = read_endpoint(paths);
+    let instance_locked = lifecycle::instance_locked(paths).unwrap_or(false);
     // Both halves, the way the shell adopts: a live pid with a dead listener
     // is no use to anyone, and a fresh endpoint with a dead pid is a leftover.
     let running = match (pid, &endpoint) {
-        (Some(lock), Some(endpoint)) => lock == endpoint.pid && health(endpoint.port),
-        (Some(_), None) => true, // up but not listening yet, or endpoint unreadable
+        (Some(lock), Some(endpoint)) => instance_locked && lock == endpoint.pid && health(endpoint),
+        (Some(_), None) => instance_locked, // up but not listening yet
         _ => false,
     };
     serde_json::json!({
@@ -148,18 +166,30 @@ async fn overview() -> i32 {
 }
 
 /// `genet daemon endpoint` — how to connect, for a browser, an SSH tunnel or
-/// another agent. The token is part of the answer on purpose: this file is
-/// already restricted to the machine's owner, and the shell reads the same
-/// facts today (`genethub-cli.md` §4.0).
+/// another agent. The reusable token stays in the owner-only file; the answer
+/// contains a short-lived, single-use admission URL.
 fn endpoint() -> i32 {
     let paths = paths();
     let mut value = facts(&paths);
-    if let Some(endpoint) = read_endpoint(&paths) {
-        value["token"] = serde_json::json!(endpoint.token);
-        value["wsUrl"] = serde_json::json!(endpoint.websocket_url());
+    if value["running"].as_bool() == Some(true) {
+        let Some(endpoint) = read_endpoint(&paths) else {
+            value["wsUrl"] = serde_json::Value::Null;
+            return ok(value);
+        };
+        let admission = endpoint.websocket_admission();
+        value["wsUrl"] = serde_json::json!(admission.url);
+        value["serverProof"] = serde_json::json!(admission.server_proof);
+        value["admission"] = serde_json::json!({
+            "challenge": admission.challenge,
+            "pid": admission.pid,
+            "machineId": admission.machine_id,
+            "fingerprint": admission.fingerprint,
+            "expiresAt": admission.expires_at,
+        });
     } else {
-        value["token"] = serde_json::Value::Null;
         value["wsUrl"] = serde_json::Value::Null;
+        value["serverProof"] = serde_json::Value::Null;
+        value["admission"] = serde_json::Value::Null;
     }
     ok(value)
 }
@@ -176,7 +206,7 @@ fn start() -> i32 {
         );
     }
 
-    if live_pid(&paths).is_some() {
+    if lifecycle::instance_locked(&paths).unwrap_or(false) {
         let mut value = facts(&paths);
         value["started"] = serde_json::json!(false);
         value["alreadyRunning"] = serde_json::json!(true);
@@ -229,7 +259,7 @@ fn start() -> i32 {
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
         if let Some(endpoint) = read_endpoint(&paths) {
-            if lifecycle::pid_alive(endpoint.pid) && health(endpoint.port) {
+            if lifecycle::pid_alive(endpoint.pid) && health(&endpoint) {
                 let mut value = facts(&paths);
                 value["started"] = serde_json::json!(true);
                 value["alreadyRunning"] = serde_json::json!(false);
@@ -257,10 +287,17 @@ fn start() -> i32 {
 fn start_log(paths: &Paths) -> std::io::Result<(std::fs::File, std::fs::File)> {
     let dir = paths.logs_dir();
     std::fs::create_dir_all(&dir)?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("cli-start.log"))?;
+    let path = dir.join("cli-start.log");
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&path)?;
+    genet_daemon::config::restrict_to_owner(&path)
+        .map_err(|error| std::io::Error::other(format!("restricting startup log: {error:#}")))?;
     Ok((file.try_clone()?, file))
 }
 
@@ -271,62 +308,84 @@ fn start_log(paths: &Paths) -> std::io::Result<(std::fs::File, std::fs::File)> {
 /// (`{"stopped": false, "running": false}`), not an error.
 fn stop() -> i32 {
     let paths = paths();
-    let Some(pid) = live_pid(&paths) else {
+    if !lifecycle::instance_locked(&paths).unwrap_or(false) {
         return ok(serde_json::json!({"stopped": false, "running": false}));
-    };
-
-    lifecycle::terminate(pid);
-    if wait_gone(pid, STOP_TIMEOUT) {
-        return ok(serde_json::json!({"stopped": true, "running": false, "forced": false}));
     }
-
-    // It did not go quietly. Sessions get their graceful window first because
-    // an agent mid-turn deserves the chance to end; past that, a stop that
-    // does not stop is worse than a hard one.
-    lifecycle::force_kill(pid);
-    if wait_gone(pid, Duration::from_secs(3)) {
-        return ok(serde_json::json!({"stopped": true, "running": false, "forced": true}));
+    match stop_verified(&paths) {
+        Ok(forced) => ok(serde_json::json!({
+            "stopped": true,
+            "running": false,
+            "forced": forced,
+        })),
+        Err(error) => fail("internal", &error, EXIT_FAILED),
     }
-    fail(
-        "internal",
-        &format!("the daemon (pid {pid}) would not stop"),
-        EXIT_FAILED,
-    )
 }
 
 fn restart() -> i32 {
     let paths = paths();
-    if let Some(pid) = live_pid(&paths) {
-        lifecycle::terminate(pid);
-        if !wait_gone(pid, STOP_TIMEOUT) {
-            lifecycle::force_kill(pid);
-            if !wait_gone(pid, Duration::from_secs(3)) {
-                fail(
-                    "internal",
-                    &format!("the daemon (pid {pid}) would not stop"),
-                    EXIT_FAILED,
-                );
-            }
+    if lifecycle::instance_locked(&paths).unwrap_or(false) {
+        if let Err(error) = stop_verified(&paths) {
+            fail("internal", &error, EXIT_FAILED);
         }
     }
     start()
 }
 
-fn wait_gone(pid: u32, within: Duration) -> bool {
+/// Stops only the daemon which proves it owns the private endpoint bearer.
+///
+/// A pid from a stale lock can have been reused. Never signal it merely because
+/// some unrelated listener now answers 200 on the stale port.
+fn stop_verified(paths: &Paths) -> Result<bool, String> {
+    let lock = live_pid(paths).ok_or_else(|| "the daemon is no longer running".to_string())?;
+    let endpoint = read_endpoint(paths).ok_or_else(|| {
+        "refusing to stop an unverified pid: endpoint.json is missing or unreadable".to_string()
+    })?;
+    if endpoint.pid != lock || !health(&endpoint) {
+        return Err(format!(
+            "refusing to stop pid {lock}: its private endpoint identity could not be verified"
+        ));
+    }
+
+    ask_to_stop(&endpoint);
+    if wait_unhealthy(&endpoint, STOP_TIMEOUT) {
+        return Ok(false);
+    }
+
+    // Re-prove the identity immediately before every signal. Once the daemon's
+    // listener is gone we deliberately stop touching the pid: it may already
+    // have exited and been reused by an unrelated process.
+    if !health(&endpoint) {
+        return Ok(false);
+    }
+    lifecycle::terminate(endpoint.pid);
+    if wait_unhealthy(&endpoint, Duration::from_secs(3)) {
+        return Ok(false);
+    }
+    if !health(&endpoint) {
+        return Ok(false);
+    }
+    lifecycle::force_kill(endpoint.pid);
+    if wait_unhealthy(&endpoint, Duration::from_secs(3)) {
+        return Ok(true);
+    }
+    Err(format!("the daemon (pid {}) would not stop", endpoint.pid))
+}
+
+fn wait_unhealthy(endpoint: &Endpoint, within: Duration) -> bool {
     let deadline = Instant::now() + within;
     while Instant::now() < deadline {
-        if !lifecycle::pid_alive(pid) {
+        if !health(endpoint) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    !lifecycle::pid_alive(pid)
+    !health(endpoint)
 }
 
-/// Whether something is answering `/health` on this port — the same cheap
-/// probe the shell adopts daemons with.
-fn health(port: u16) -> bool {
-    let Ok(address) = format!("127.0.0.1:{port}").parse() else {
+/// Whether the exact daemon described by endpoint.json owns this listener.
+fn health(endpoint: &Endpoint) -> bool {
+    let challenge = health_challenge();
+    let Ok(address) = format!("127.0.0.1:{}", endpoint.port).parse() else {
         return false;
     };
     let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
@@ -334,15 +393,181 @@ fn health(port: u16) -> bool {
     };
     let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
     let _ = stream.set_read_timeout(Some(Duration::from_millis(1000)));
-    if stream
-        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
+    let request = format!(
+        "GET /health?challenge={challenge} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
     let mut answer = Vec::new();
     if stream.read_to_end(&mut answer).is_err() && answer.is_empty() {
         return false;
     }
-    answer.starts_with(b"HTTP/1.1 200")
+    let Some(body) = http_ok_body(&answer) else {
+        return false;
+    };
+    let Ok(found) = serde_json::from_slice::<Health>(body) else {
+        return false;
+    };
+    let expected = genet_daemon::transport::local::health_proof(
+        &endpoint.token,
+        &challenge,
+        endpoint.pid,
+        &endpoint.machine_id,
+        &endpoint.fingerprint,
+    );
+    found.pid == endpoint.pid
+        && found.machine_id == endpoint.machine_id
+        && found.fingerprint == endpoint.fingerprint
+        && genet_daemon::transport::auth::token_matches(&expected, &found.proof)
+}
+
+fn health_challenge() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "{:x}-{:x}-{:x}",
+        std::process::id(),
+        nanos,
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn http_ok_body(answer: &[u8]) -> Option<&[u8]> {
+    if !answer.starts_with(b"HTTP/1.1 200") {
+        return None;
+    }
+    answer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|at| &answer[at + 4..])
+}
+
+fn ask_to_stop(endpoint: &Endpoint) {
+    let challenge = health_challenge();
+    let expires_at = unix_seconds().saturating_add(15);
+    let proof = genet_daemon::transport::local::shutdown_proof(
+        &endpoint.token,
+        &challenge,
+        endpoint.pid,
+        &endpoint.machine_id,
+        &endpoint.fingerprint,
+        expires_at,
+    );
+    let request = format!(
+        "POST /shutdown?challenge={challenge}&pid={}&expiresAt={expires_at}&proof={proof} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        endpoint.pid,
+    );
+    let Ok(address) = format!("127.0.0.1:{}", endpoint.port).parse() else {
+        return;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.write_all(request.as_bytes());
+    let mut answer = Vec::new();
+    let _ = stream.read_to_end(&mut answer);
+}
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unrelated_health_listener() -> (u16, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = socket.read(&mut request);
+            let body = r#"{"pid":1,"machineId":"wrong","fingerprint":"wrong","proof":"wrong"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).unwrap();
+        });
+        (port, task)
+    }
+
+    #[test]
+    fn stop_refuses_a_live_but_reused_pid_behind_an_unrelated_200_listener() {
+        let (port, server) = unrelated_health_listener();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        std::fs::write(paths.lock_file(), std::process::id().to_string()).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(paths.lock_file())
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&lock).unwrap();
+        std::fs::write(
+            paths.endpoint_file(),
+            serde_json::json!({
+                "port": port,
+                "token": "private-token",
+                "machineId": "expected-machine",
+                "fingerprint": "expected-fingerprint",
+                "pid": std::process::id(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error = stop_verified(&paths).unwrap_err();
+        assert!(error.contains("refusing to stop"));
+        server.join().unwrap();
+        // Reaching this line proves the stale pid (the test runner itself) was
+        // never signalled merely because something answered 200.
+        assert!(lifecycle::pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn shutdown_sends_only_a_one_use_action_proof_never_the_endpoint_bearer() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let count = socket.read(&mut request).unwrap();
+            seen.send(String::from_utf8_lossy(&request[..count]).to_string())
+                .unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 8\r\nConnection: close\r\n\r\nstopping",
+                )
+                .unwrap();
+        });
+        let endpoint = Endpoint {
+            port,
+            token: "never-send-this-bearer".into(),
+            machine_id: "machine".into(),
+            fingerprint: "fingerprint".into(),
+            pid: std::process::id(),
+        };
+
+        ask_to_stop(&endpoint);
+        let request = received.recv().unwrap();
+        assert!(request.starts_with("POST /shutdown?challenge="));
+        assert!(request.contains("&expiresAt="));
+        assert!(request.contains("&proof="));
+        assert!(!request.contains(&endpoint.token));
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+        server.join().unwrap();
+    }
 }

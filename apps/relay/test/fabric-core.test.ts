@@ -18,10 +18,14 @@ import {
   encodeFabricOpenPayload,
   FabricKind,
   type FabricFrame,
+  FABRIC_INITIAL_STREAM_CREDIT,
+  FABRIC_MAX_STREAM_CREDIT,
   FabricReset,
+  MAX_OPERATION_METADATA_BYTES,
 } from "../src/forward/fabric-frame.js";
 
 const NEVER = "2099-01-01T00:00:00.000Z";
+const CREDIT = BigInt(FABRIC_INITIAL_STREAM_CREDIT);
 
 function id(value: number): string {
   return value.toString(16).padStart(32, "0");
@@ -51,6 +55,7 @@ class TestConnection implements FabricEndpointConnection {
       revocationHandle: `revoke:${handle}`,
       expiresAt: options.expiresAt ?? null,
       connectionGeneration: options.connectionGeneration ?? 1,
+      presenceLeaseSeconds: 90,
       connectionEpoch: options.epoch ?? `epoch:${handle}`,
     });
   }
@@ -111,11 +116,16 @@ function frame(
   return { kind, streamId, value, payload };
 }
 
-function open(streamId: string, ticket: string, hello = ticket): FabricFrame {
+function open(
+  streamId: string,
+  ticket: string,
+  hello = ticket,
+  credit = CREDIT,
+): FabricFrame {
   return frame(
     FabricKind.Open,
     streamId,
-    0n,
+    credit,
     encodeFabricOpenPayload(ticket, Buffer.from(hello)),
   );
 }
@@ -135,13 +145,14 @@ async function establish(
   ticket: string,
   routeHandle = `route:${ticket}`,
   expiresAt = NEVER,
+  credit = CREDIT,
 ): Promise<string> {
   authority.grant(ticket, target.context.endpointHandle, routeHandle, expiresAt);
-  await core.handle(source, open(sourceStreamId, ticket, `hello:${ticket}`));
+  await core.handle(source, open(sourceStreamId, ticket, `hello:${ticket}`, credit));
   const incoming = last(target);
   assert.equal(incoming.kind, FabricKind.Incoming);
   assert.deepEqual(incoming.payload, Buffer.from(`hello:${ticket}`));
-  await core.handle(target, frame(FabricKind.Accept, incoming.streamId, 0n, Buffer.from("accepted")));
+  await core.handle(target, frame(FabricKind.Accept, incoming.streamId, credit, Buffer.from("accepted")));
   const accepted = last(source);
   assert.equal(accepted.kind, FabricKind.Accept);
   assert.equal(accepted.streamId, sourceStreamId);
@@ -149,6 +160,21 @@ async function establish(
 }
 
 describe("Fabric endpoint-neutral routing", () => {
+  it("prunes idle endpoint tombstones during sweep and clears them on unregister", () => {
+    let now = 1_000;
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority, { now: () => now });
+    const endpoint = new TestConnection("endpoint:tombstones");
+    core.register(endpoint);
+    endpoint.tombstones.set(id(1), 999);
+    endpoint.tombstones.set(id(2), 2_000);
+
+    core.sweepExpired();
+    assert.deepEqual([...endpoint.tombstones.keys()], [id(2)]);
+    now = 3_000;
+    core.unregister(endpoint);
+    assert.equal(endpoint.tombstones.size, 0);
+  });
   it("lets one endpoint use one connection for two concurrent targets", async () => {
     const authority = new TestAuthority();
     const generated = [id(101), id(102)];
@@ -388,19 +414,204 @@ describe("Fabric endpoint-neutral routing", () => {
       "2030-01-01T00:00:10.000Z",
     );
     now = Date.parse("2030-01-01T00:00:11.000Z");
-    core.sweepExpired();
+    await core.handle(source, frame(FabricKind.Data, id(10), 1n, Buffer.from("late")));
     assert.equal(last(source).value, BigInt(FabricReset.Expired));
     assert.equal(last(target).value, BigInt(FabricReset.Expired));
     assert.equal(core.stats().streams, 0);
 
     now = Date.parse("2030-01-01T00:00:21.000Z");
-    core.sweepExpired();
+    await core.handle(source, frame(FabricKind.Ping, id(0), 1n));
     assert.deepEqual(source.closeCodes, [4408]);
     assert.equal(core.current(source.context.endpointHandle), null);
   });
 });
 
 describe("Fabric protocol violations stay scoped", () => {
+  it("enforces each leg's credit without stalling or closing a healthy binding", async () => {
+    const authority = new TestAuthority();
+    const generated = [id(901), id(902)];
+    const core = new FabricCore(authority, { streamId: () => generated.shift()! });
+    const source = new TestConnection("endpoint:source");
+    const target = new TestConnection("endpoint:target");
+    core.register(source);
+    core.register(target);
+
+    const floodedPeer = await establish(
+      core,
+      authority,
+      source,
+      target,
+      id(21),
+      "flooded",
+      "route:flooded",
+      NEVER,
+      4n,
+    );
+    const healthyPeer = await establish(
+      core,
+      authority,
+      source,
+      target,
+      id(22),
+      "healthy",
+      "route:healthy",
+      NEVER,
+      4n,
+    );
+
+    await core.handle(source, frame(FabricKind.Data, id(21), 1n, Buffer.from("flood")));
+    assert.equal(source.closeCodes.length, 0);
+    assert.equal(target.closed, false);
+    assert.equal(core.stats().streams, 1);
+    assert.deepEqual(last(source), frame(
+      FabricKind.Reset,
+      id(21),
+      BigInt(FabricReset.ProtocolViolation),
+    ));
+
+    await core.handle(source, frame(FabricKind.Data, id(22), 1n, Buffer.from("full")));
+    assert.deepEqual(last(target), frame(FabricKind.Data, healthyPeer, 1n, Buffer.from("full")));
+    await core.handle(target, frame(FabricKind.WindowUpdate, healthyPeer, 4n));
+    assert.deepEqual(last(source), frame(FabricKind.WindowUpdate, id(22), 4n));
+    await core.handle(source, frame(FabricKind.Data, id(22), 2n, Buffer.from("x")));
+    assert.deepEqual(last(target), frame(FabricKind.Data, healthyPeer, 2n, Buffer.from("x")));
+
+    // The peer now has only three bytes available. Granting two would overflow
+    // its negotiated window, so only this binding is reset.
+    await core.handle(target, frame(FabricKind.WindowUpdate, healthyPeer, 2n));
+    assert.equal(core.stats().streams, 0);
+    assert.equal(source.closed, false);
+    assert.equal(target.closed, false);
+    assert.equal(last(source).value, BigInt(FabricReset.ProtocolViolation));
+    assert.equal(last(target).value, BigInt(FabricReset.ProtocolViolation));
+    assert.notEqual(floodedPeer, healthyPeer);
+  });
+
+  it("rejects zero or excessive negotiated windows without closing endpoints", async () => {
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority, { streamId: () => id(903) });
+    const source = new TestConnection("endpoint:source");
+    const target = new TestConnection("endpoint:target");
+    core.register(source);
+    core.register(target);
+
+    await core.handle(source, open(id(23), "zero", "hello", 0n));
+    await core.handle(
+      source,
+      open(
+        id(24),
+        "overflow",
+        "hello",
+        BigInt(FABRIC_MAX_STREAM_CREDIT) + 1n,
+      ),
+    );
+    assert.equal(authority.calls.length, 0);
+    assert.deepEqual(
+      source.sent.map(({ streamId, value }) => ({ streamId, value })),
+      [
+        { streamId: id(23), value: BigInt(FabricReset.MalformedOpen) },
+        { streamId: id(24), value: BigInt(FabricReset.MalformedOpen) },
+      ],
+    );
+    assert.equal(source.closed, false);
+    assert.equal(target.closed, false);
+  });
+
+  it("rejects oversized ACCEPT metadata at stream scope", async () => {
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority, { streamId: () => id(906) });
+    const source = new TestConnection("endpoint:source");
+    const target = new TestConnection("endpoint:target");
+    core.register(source);
+    core.register(target);
+    authority.grant("large-accept", target.context.endpointHandle);
+
+    await core.handle(source, open(id(27), "large-accept"));
+    const incoming = last(target);
+    await core.handle(
+      target,
+      frame(
+        FabricKind.Accept,
+        incoming.streamId,
+        CREDIT,
+        Buffer.alloc(MAX_OPERATION_METADATA_BYTES + 1),
+      ),
+    );
+
+    assert.equal(core.stats().streams, 0);
+    assert.equal(source.closed, false);
+    assert.equal(target.closed, false);
+    assert.equal(last(source).value, BigInt(FabricReset.ProtocolViolation));
+    assert.equal(last(target).value, BigInt(FabricReset.ProtocolViolation));
+  });
+
+  it("rejects malformed RESET frames without forwarding attacker-controlled fields", async () => {
+    const authority = new TestAuthority();
+    const generated = [id(904), id(905)];
+    const core = new FabricCore(authority, { streamId: () => generated.shift()! });
+    const source = new TestConnection("endpoint:source");
+    const target = new TestConnection("endpoint:target");
+    core.register(source);
+    core.register(target);
+
+    const firstPeer = await establish(core, authority, source, target, id(25), "zero-reset");
+    await core.handle(source, frame(FabricKind.Reset, id(25), 0n));
+    assert.deepEqual(
+      last(source),
+      frame(FabricKind.Reset, id(25), BigInt(FabricReset.ProtocolViolation)),
+    );
+    assert.deepEqual(
+      last(target),
+      frame(FabricKind.Reset, firstPeer, BigInt(FabricReset.ProtocolViolation)),
+    );
+
+    const secondPeer = await establish(
+      core,
+      authority,
+      source,
+      target,
+      id(26),
+      "payload-reset",
+    );
+    await core.handle(
+      source,
+      frame(FabricKind.Reset, id(26), 1n, Buffer.from("must-not-cross")),
+    );
+    assert.deepEqual(
+      last(source),
+      frame(FabricKind.Reset, id(26), BigInt(FabricReset.ProtocolViolation)),
+    );
+    assert.deepEqual(
+      last(target),
+      frame(FabricKind.Reset, secondPeer, BigInt(FabricReset.ProtocolViolation)),
+    );
+    assert.equal(core.stats().streams, 0);
+  });
+
+  it("does not let control frames bypass DATA payload limits", async () => {
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority, { maxStrikes: 3 });
+    const source = new TestConnection("endpoint:source");
+    core.register(source);
+
+    await core.handle(
+      source,
+      frame(FabricKind.Ping, id(0), 1n, Buffer.from("control payload")),
+    );
+    assert.equal(source.strikes, 1);
+    assert.equal(source.sent.length, 0);
+
+    await core.handle(source, frame(FabricKind.Ping, id(0), 2n));
+    assert.deepEqual(last(source), frame(FabricKind.Pong, id(0), 2n));
+
+    await core.handle(
+      source,
+      frame(FabricKind.Pong, id(0), 2n, Buffer.from("control payload")),
+    );
+    assert.equal(source.strikes, 2);
+    assert.equal(source.closed, false);
+  });
+
   it("does not turn a duplicate local OPEN into a second binding", async () => {
     const authority = new TestAuthority();
     let release: (grant: FabricRouteGrant | null) => void = () => {
@@ -464,6 +675,107 @@ describe("Fabric protocol violations stay scoped", () => {
     assert.equal(core.stats().streams, 0);
   });
 
+  it("does not resurrect an OPEN cancelled by RESET or an early DATA frame", async () => {
+    const authority = new TestAuthority();
+    const releases: Array<(grant: FabricRouteGrant | null) => void> = [];
+    authority.authorizeRoute = async (sourceEndpointHandle, routeTicket) => {
+      authority.calls.push({ sourceEndpointHandle, routeTicket });
+      return new Promise<FabricRouteGrant | null>((resolve) => releases.push(resolve));
+    };
+    const core = new FabricCore(authority, { streamId: () => id(950) });
+    const source = new TestConnection("endpoint:source");
+    const target = new TestConnection("endpoint:target");
+    core.register(source);
+    core.register(target);
+
+    const resetOpening = core.handle(source, open(id(13), "reset-race"));
+    await core.handle(source, frame(FabricKind.Reset, id(13), 1n));
+    const dataOpening = core.handle(source, open(id(14), "data-race"));
+    await core.handle(source, frame(FabricKind.Data, id(14), 1n, Buffer.from("too early")));
+
+    releases[0]!({
+      targetEndpointHandle: target.context.endpointHandle,
+      routeHandle: "route:reset-race",
+      expiresAt: NEVER,
+    });
+    releases[1]!({
+      targetEndpointHandle: target.context.endpointHandle,
+      routeHandle: "route:data-race",
+      expiresAt: NEVER,
+    });
+    await Promise.all([resetOpening, dataOpening]);
+
+    assert.equal(target.sent.length, 0);
+    assert.equal(core.stats().streams, 0);
+    assert.equal(core.stats().pendingOpens, 0);
+    assert.equal(last(source).value, BigInt(FabricReset.ProtocolViolation));
+  });
+
+  it("bounds pending route authorization per endpoint and globally", async () => {
+    const authority = new TestAuthority();
+    const releases: Array<(grant: FabricRouteGrant | null) => void> = [];
+    authority.authorizeRoute = async (sourceEndpointHandle, routeTicket) => {
+      authority.calls.push({ sourceEndpointHandle, routeTicket });
+      return new Promise<FabricRouteGrant | null>((resolve) => releases.push(resolve));
+    };
+    const core = new FabricCore(authority, {
+      maxPendingPerEndpoint: 2,
+      maxPendingGlobal: 2,
+    });
+    const source = new TestConnection("endpoint:source");
+    core.register(source);
+
+    const first = core.handle(source, open(id(15), "one"));
+    const second = core.handle(source, open(id(16), "two"));
+    await core.handle(source, open(id(17), "over-limit"));
+    assert.equal(authority.calls.length, 2);
+    assert.equal(core.stats().pendingOpens, 2);
+    assert.equal(last(source).value, BigInt(FabricReset.TooSlow));
+
+    releases[0]!(null);
+    releases[1]!(null);
+    await Promise.all([first, second]);
+    assert.equal(core.stats().pendingOpens, 0);
+  });
+
+  it("reports transient route-authority failure as retryable and stream-local", async () => {
+    const authority = new TestAuthority();
+    authority.authorizeRoute = async () => {
+      throw new Error("Control temporarily unavailable");
+    };
+    const core = new FabricCore(authority);
+    const source = new TestConnection("endpoint:source");
+    core.register(source);
+
+    await core.handle(source, open(id(18), "temporary"));
+    assert.equal(last(source).kind, FabricKind.Reset);
+    assert.equal(last(source).value, BigInt(FabricReset.TooSlow));
+    assert.equal(source.closed, false);
+    assert.equal(core.stats().pendingOpens, 0);
+  });
+
+  it("rejects an oversized OPEN hello before starting route authorization", async () => {
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority);
+    const source = new TestConnection("endpoint:source");
+    core.register(source);
+
+    const ticket = Buffer.from("ticket");
+    const payload = Buffer.alloc(
+      2 + ticket.length + MAX_OPERATION_METADATA_BYTES + 1,
+    );
+    payload.writeUInt16BE(ticket.length, 0);
+    ticket.copy(payload, 2);
+    await core.handle(source, frame(FabricKind.Open, id(18), CREDIT, payload));
+
+    assert.equal(authority.calls.length, 0);
+    assert.equal(core.stats().pendingOpens, 0);
+    assert.deepEqual(
+      last(source),
+      frame(FabricKind.Reset, id(18), BigInt(FabricReset.MalformedOpen)),
+    );
+  });
+
   it("does not admit an endpoint after its revocation arrived first", () => {
     const authority = new TestAuthority();
     const core = new FabricCore(authority);
@@ -476,5 +788,39 @@ describe("Fabric protocol violations stay scoped", () => {
     assert.deepEqual(late.closeCodes, [4403]);
     assert.equal(core.current(late.context.endpointHandle), null);
     assert.deepEqual(core.stats(), { endpoints: 0, streams: 0, pendingOpens: 0 });
+  });
+
+  it("fails delayed grants closed after revocation churn evicts an exact fence", async () => {
+    const authority = new TestAuthority();
+    let release!: (grant: FabricRouteGrant | null) => void;
+    authority.authorizeRoute = async () =>
+      new Promise<FabricRouteGrant | null>((resolve) => {
+        release = resolve;
+      });
+    const core = new FabricCore(authority, { maxRevocationTombstones: 1 });
+    const source = new TestConnection("endpoint:source");
+    const target = new TestConnection("endpoint:target");
+    core.register(source);
+    core.register(target);
+
+    const opening = core.handle(source, open(id(90), "delayed"));
+    await Promise.resolve();
+    core.revoke({ target: "route", handle: "route:churn-one" });
+    core.revoke({ target: "route", handle: "route:churn-two" });
+    release({
+      targetEndpointHandle: target.context.endpointHandle,
+      routeHandle: "route:delayed",
+      expiresAt: NEVER,
+    });
+    await opening;
+
+    assert.equal(last(source).value, BigInt(FabricReset.Revoked));
+    assert.equal(target.sent.length, 0, "a delayed grant crossed the revocation floor");
+
+    const staleCheckpoint = 0;
+    const late = new TestConnection("endpoint:late");
+    core.register(late, staleCheckpoint);
+    assert.equal(late.closed, true);
+    assert.deepEqual(late.closeCodes, [4403]);
   });
 });

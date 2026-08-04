@@ -60,13 +60,13 @@ pub fn usage() -> i32 {
   genet session list [--workspace <id>]
                                     list local daemon sessions
   genet session get <id>            get one session snapshot
-  genet update                      install the latest Linux build and restart daemon
+  genet update                      unsupported until releases are independently signed
   genet daemon run                  run the daemon in the foreground (systemd)
   genet daemon start                start the daemon in the background
   genet daemon stop                 stop the daemon (by lock-file pid)
   genet daemon restart              stop + start
   genet daemon status               whether the daemon is running
-  genet daemon endpoint             how to connect: wsUrl, port, token
+  genet daemon endpoint             one-use local wsUrl and process facts
   genet hub status                  Hub pairing state
   genet hub login [--hub <url>] [--name <display>] [--wait]
                                     enroll with the Hub; print a browser URL

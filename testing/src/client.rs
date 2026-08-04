@@ -7,7 +7,11 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use futures_util::{SinkExt, StreamExt};
-use genehub_proto::{Reply, Request, SequencedEvent, ServerFrame, SessionEvent, PROTOCOL_VERSION};
+use genehub_proto::{
+    DeviceAuth, InviteAuth, Reply, Request, SequencedEvent, ServerFrame, SessionEvent,
+    PROTOCOL_VERSION,
+};
+use genet_daemon::channel_auth::{self, Direction, SessionKey};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::tungstenite::Message;
@@ -20,9 +24,18 @@ pub const WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Reply, String>>>>>;
 
+struct Authentication {
+    key: SessionKey,
+    outbound_sequence: u64,
+    inbound_sequence: u64,
+}
+
+type SharedAuthentication = Arc<Mutex<Option<Authentication>>>;
+
 pub struct Client {
     outbound: mpsc::UnboundedSender<Message>,
     pending: Pending,
+    authentication: SharedAuthentication,
     next_id: AtomicU64,
     pub events: Mutex<mpsc::UnboundedReceiver<SequencedEvent>>,
     pub pty: Mutex<mpsc::UnboundedReceiver<(String, String)>>,
@@ -46,19 +59,76 @@ impl Client {
         });
 
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let authentication: SharedAuthentication = Arc::new(Mutex::new(None));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (pty_tx, pty_rx) = mpsc::unbounded_channel();
         let (notice_tx, notice_rx) = mpsc::unbounded_channel();
 
         let reader_pending = pending.clone();
+        let reader_authentication = authentication.clone();
         let reader = tokio::spawn(async move {
-            while let Some(Ok(message)) = stream.next().await {
-                let Message::Text(text) = message else {
-                    continue;
+            while let Some(received) = stream.next().await {
+                let message = match received {
+                    Ok(message) => message,
+                    Err(error) => {
+                        eprintln!("test client: WebSocket read failed: {error}");
+                        break;
+                    }
+                };
+                let text = match message {
+                    Message::Text(text) => text,
+                    Message::Close(frame) => {
+                        eprintln!("test client: WebSocket closed: {frame:?}");
+                        break;
+                    }
+                    _ => continue,
                 };
                 let Ok(frame) = serde_json::from_str::<ServerFrame>(&text) else {
                     eprintln!("test client: undecodable frame: {text}");
                     continue;
+                };
+                let frame = match frame {
+                    ServerFrame::Authenticated {
+                        sequence,
+                        body,
+                        mac,
+                    } => {
+                        let mut authentication = reader_authentication.lock().await;
+                        let Some(authentication) = authentication.as_mut() else {
+                            eprintln!("test client: authenticated frame before a keyed Hello");
+                            break;
+                        };
+                        let Some(expected) = authentication.inbound_sequence.checked_add(1) else {
+                            break;
+                        };
+                        if sequence != expected {
+                            eprintln!(
+                                "test client: server sequence {sequence}, expected {expected}"
+                            );
+                            break;
+                        }
+                        let Ok(plaintext) = channel_auth::open_frame(
+                            &authentication.key,
+                            Direction::DaemonToClient,
+                            sequence,
+                            &body,
+                            &mac,
+                        ) else {
+                            eprintln!("test client: server frame authentication failed");
+                            break;
+                        };
+                        let Ok(inner) = serde_json::from_str::<ServerFrame>(&plaintext) else {
+                            eprintln!("test client: decrypted server frame is not protocol JSON");
+                            break;
+                        };
+                        if matches!(inner, ServerFrame::Authenticated { .. }) {
+                            eprintln!("test client: nested authenticated server frame");
+                            break;
+                        }
+                        authentication.inbound_sequence = sequence;
+                        inner
+                    }
+                    plain => plain,
                 };
                 match frame {
                     ServerFrame::Result {
@@ -99,6 +169,10 @@ impl Client {
                     ServerFrame::Desync { session_id, missed } => {
                         panic!("the daemon dropped {missed} events for {session_id}");
                     }
+                    // Handled and decrypted above. A second envelope is never
+                    // accepted because nesting could make sequence ownership
+                    // ambiguous and is not part of protocol v2.
+                    ServerFrame::Authenticated { .. } => unreachable!(),
                 }
             }
 
@@ -113,6 +187,7 @@ impl Client {
         Ok(Client {
             outbound,
             pending,
+            authentication,
             next_id: AtomicU64::new(1),
             events: Mutex::new(events_rx),
             pty: Mutex::new(pty_rx),
@@ -124,15 +199,46 @@ impl Client {
 
     pub async fn call(&self, request: Request) -> Result<Reply> {
         let id = format!("c{}", self.next_id.fetch_add(1, Ordering::SeqCst));
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id.clone(), tx);
-
+        let is_hello = matches!(request, Request::Hello { .. });
         let mut envelope = serde_json::to_value(&request)?;
         envelope
             .as_object_mut()
             .ok_or_else(|| anyhow!("a request must encode as an object"))?
             .insert("id".into(), json!(id));
-        self.outbound.send(Message::Text(envelope.to_string()))?;
+        let mut wire = envelope.to_string();
+        if !is_hello {
+            let mut authentication = self.authentication.lock().await;
+            if let Some(authentication) = authentication.as_mut() {
+                let sequence = authentication
+                    .outbound_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("test client request sequence exhausted"))?;
+                let (body, mac) = channel_auth::seal_frame(
+                    &authentication.key,
+                    Direction::ClientToDaemon,
+                    sequence,
+                    &wire,
+                )?;
+                let mut outer = serde_json::to_value(Request::Authenticated {
+                    sequence,
+                    body,
+                    mac,
+                })?;
+                outer
+                    .as_object_mut()
+                    .ok_or_else(|| anyhow!("an authenticated request must encode as an object"))?
+                    .insert("id".into(), json!(id));
+                wire = outer.to_string();
+                authentication.outbound_sequence = sequence;
+            }
+        }
+
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id.clone(), tx);
+        if self.outbound.send(Message::Text(wire)).is_err() {
+            self.pending.lock().await.remove(&id);
+            bail!("the connection closed before sending");
+        }
 
         match tokio::time::timeout(WAIT_TIMEOUT, rx).await {
             Ok(Ok(Ok(reply))) => Ok(reply),
@@ -155,6 +261,8 @@ impl Client {
             client_name: name.to_string(),
             protocol_version: PROTOCOL_VERSION,
             device: None,
+            channel: None,
+            invite: None,
         })
         .await
     }
@@ -166,21 +274,79 @@ impl Client {
         device_id: &str,
         secret: &str,
     ) -> Result<Reply> {
-        let nonce = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
-        self.call(Request::Hello {
-            client_name: name.to_string(),
-            protocol_version: PROTOCOL_VERSION,
-            device: Some(genehub_proto::DeviceAuth {
-                device_id: device_id.to_string(),
-                proof: genet_daemon::devices::proof("client", &nonce, secret),
-                nonce,
-            }),
-        })
-        .await
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let context = channel_auth::device_context(device_id);
+        let reply = self
+            .call(Request::Hello {
+                client_name: name.to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                device: Some(DeviceAuth {
+                    device_id: device_id.to_string(),
+                    proof: channel_auth::client_proof(secret, &context, &nonce),
+                    nonce: nonce.clone(),
+                }),
+                channel: None,
+                invite: None,
+            })
+            .await?;
+        self.install_authentication(secret, &context, &nonce, &reply)
+            .await?;
+        Ok(reply)
+    }
+
+    /// Authenticates a first-device bootstrap channel before sending the claim.
+    pub async fn hello_with_invite(&self, name: &str, code: &str) -> Result<Reply> {
+        let (invite_id, secret) = code
+            .split_once('.')
+            .ok_or_else(|| anyhow!("an invite must contain its id and secret"))?;
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let context = format!("invite:{invite_id}");
+        let reply = self
+            .call(Request::Hello {
+                client_name: name.to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                device: None,
+                channel: None,
+                invite: Some(InviteAuth {
+                    invite_id: invite_id.to_string(),
+                    nonce: nonce.clone(),
+                    proof: channel_auth::client_proof(secret, &context, &nonce),
+                }),
+            })
+            .await?;
+        self.install_authentication(secret, &context, &nonce, &reply)
+            .await?;
+        Ok(reply)
+    }
+
+    async fn install_authentication(
+        &self,
+        secret: &str,
+        context: &str,
+        client_nonce: &str,
+        reply: &Reply,
+    ) -> Result<()> {
+        let Reply::Hello(hello) = reply else {
+            bail!("authenticated Hello returned {reply:?}");
+        };
+        let server_nonce = hello
+            .server_nonce
+            .as_deref()
+            .ok_or_else(|| anyhow!("authenticated Hello omitted the server nonce"))?;
+        let proof = hello
+            .proof
+            .as_deref()
+            .ok_or_else(|| anyhow!("authenticated Hello omitted the server proof"))?;
+        channel_auth::verify_proof(
+            &channel_auth::server_proof(secret, context, client_nonce, server_nonce),
+            proof,
+        )?;
+        *self.authentication.lock().await = Some(Authentication {
+            key: channel_auth::derive_key(secret, context, client_nonce, server_nonce),
+            outbound_sequence: 0,
+            inbound_sequence: 0,
+        });
+        Ok(())
     }
 
     /// Sends a raw frame, for cases that need to be malformed on purpose.

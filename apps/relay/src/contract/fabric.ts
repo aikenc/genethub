@@ -9,6 +9,8 @@ export interface FabricEndpointGrant {
   expiresAt: string | null;
   /** Authority-issued monotonic fence for this physical connection. */
   connectionGeneration: number;
+  /** Authority's presence lease; Relay refreshes and fail-closes against it. */
+  presenceLeaseSeconds: number;
 }
 
 export interface FabricRouteGrant {

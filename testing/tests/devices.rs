@@ -86,20 +86,27 @@ fn nonce() -> String {
 
 /// Redeems an invite the way the web client does, mutual proof included.
 async fn claim(client: &Client, code: &str, name: &str) -> Result<DeviceCredential> {
+    client.hello_with_invite(name, code).await?;
+    let invite_id = code
+        .split_once('.')
+        .expect("an invite contains its id and secret")
+        .0;
     let nonce = nonce();
     let reply = client
         .call(Request::DeviceClaim {
-            code: code.to_string(),
+            // The bootstrap Hello already proved the secret. The encrypted
+            // claim names only the invite id, so the reusable code is not
+            // copied into a second application frame.
+            code: invite_id.to_string(),
             device_name: name.to_string(),
             nonce: nonce.clone(),
             proof: genet_daemon::devices::proof("client", &nonce, code),
         })
         .await?;
     let credential = expect_reply!(reply, Reply::Claimed);
-    assert_eq!(
-        credential.proof,
-        genet_daemon::devices::proof("server", &nonce, code),
-        "the machine has to prove it knows the invite too"
+    assert!(
+        credential.proof.is_empty(),
+        "mutual proof belongs to the authenticated Hello, not the claim reply"
     );
     Ok(credential)
 }
@@ -178,15 +185,11 @@ async fn an_invite_is_good_for_exactly_one_device() {
     first.close().await;
 
     let second = reachable.dial().await.expect("reaching the machine");
-    let nonce = nonce();
     let refused = second
-        .expect_error(Request::DeviceClaim {
-            code: code.clone(),
-            device_name: "第二台".into(),
-            nonce: nonce.clone(),
-            proof: genet_daemon::devices::proof("client", &nonce, &code),
-        })
-        .await;
+        .hello_with_invite("第二台", &code)
+        .await
+        .expect_err("a spent invite completed its encrypted Hello")
+        .to_string();
     assert!(
         refused.contains("Unauthorized") || refused.contains("closed"),
         "a spent invite was accepted again: {refused}"
@@ -206,7 +209,8 @@ async fn a_stolen_proof_cannot_be_replayed() {
     phone.close().await;
 
     let reused = nonce();
-    let proof = genet_daemon::devices::proof("client", &reused, &credential.secret);
+    let context = genet_daemon::channel_auth::device_context(&credential.device_id);
+    let proof = genet_daemon::channel_auth::client_proof(&credential.secret, &context, &reused);
     let honest = reachable.dial().await.expect("reaching the machine");
     honest
         .call(Request::Hello {
@@ -217,6 +221,8 @@ async fn a_stolen_proof_cannot_be_replayed() {
                 nonce: reused.clone(),
                 proof: proof.clone(),
             }),
+            channel: None,
+            invite: None,
         })
         .await
         .expect("the first use of a nonce is fine");
@@ -233,6 +239,8 @@ async fn a_stolen_proof_cannot_be_replayed() {
                 nonce: reused.clone(),
                 proof,
             }),
+            channel: None,
+            invite: None,
         })
         .await;
     assert!(
@@ -285,8 +293,14 @@ async fn revoking_a_device_drops_the_connection_it_is_using() {
             device: Some(genehub_proto::DeviceAuth {
                 device_id: credential.device_id.clone(),
                 nonce: fresh.clone(),
-                proof: genet_daemon::devices::proof("client", &fresh, &credential.secret),
+                proof: genet_daemon::channel_auth::client_proof(
+                    &credential.secret,
+                    &genet_daemon::channel_auth::device_context(&credential.device_id),
+                    &fresh,
+                ),
             }),
+            channel: None,
+            invite: None,
         })
         .await;
     assert!(

@@ -70,8 +70,15 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
             </th>
           ),
           td: ({ children }) => <td className="border border-line px-2 py-1">{children}</td>,
-          img: ({ src, alt }) => (
-            <img src={src} alt={alt} className="max-h-80 rounded-md border border-line" />
+          // Never fetch an image merely because a model wrote Markdown for it.
+          // Repository text can steer a model into emitting a tracking URL or
+          // a request to a loopback/private service. Hosted CSP blocks most of
+          // those requests, but the static self-hosted workbench must be safe
+          // without depending on deployment headers too.
+          img: ({ alt }) => (
+            <span className="rounded border border-line px-1.5 py-0.5 text-xs text-faint">
+              图片已阻止{alt ? `：${alt}` : ""}
+            </span>
           ),
         }}
       >

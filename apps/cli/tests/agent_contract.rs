@@ -21,12 +21,42 @@ fn an_unknown_command_uses_the_same_agent_error_envelope() {
 }
 
 #[test]
+fn unsigned_self_update_is_explicitly_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let sentinel = dir.path().join("must-not-run");
+    let output = genet()
+        .arg("update")
+        .env("GENEHUB_TEST_CALLS", &sentinel)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    assert!(
+        !sentinel.exists(),
+        "the disabled updater executed a child process"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "unsupported");
+    assert_eq!(value["error"]["retryable"], false);
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("SHA256SUMS"));
+}
+
+#[test]
 fn a_failed_dial_never_prints_the_local_daemon_bearer() {
     let dir = tempfile::tempdir().unwrap();
     let sentinel = "full-local-daemon-secret-must-not-leak";
     std::fs::write(
         dir.path().join("endpoint.json"),
-        serde_json::json!({"port": 1, "token": sentinel}).to_string(),
+        serde_json::json!({
+            "port": 1,
+            "token": sentinel,
+            "machineId": "machine-test",
+            "fingerprint": "fingerprint-test",
+            "pid": std::process::id(),
+        })
+        .to_string(),
     )
     .unwrap();
 
@@ -77,7 +107,14 @@ async fn hello_version_rejection_is_typed_and_not_marked_retryable() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("endpoint.json"),
-        serde_json::json!({"port": port, "token": "test-token"}).to_string(),
+        serde_json::json!({
+            "port": port,
+            "token": "test-token",
+            "machineId": "machine-test",
+            "fingerprint": "fingerprint-test",
+            "pid": std::process::id(),
+        })
+        .to_string(),
     )
     .unwrap();
     let root = dir.path().to_path_buf();

@@ -1,7 +1,8 @@
 //! The client protocol envelope: requests in, results and pushes out.
 //!
 //! One shape serves all three transports in `daemon.md` §3.1. Only
-//! authentication differs between loopback, LAN and forwarded connections.
+//! authentication differs between loopback and forwarded connections. The LAN
+//! wire enum remains only for compatibility; privileged LAN transport is disabled.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,7 +14,10 @@ use crate::timeline::Attachment;
 
 /// Bumped when a change would break an older client. Clients that see a version
 /// they do not know must refuse to connect rather than guess.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
+/// Keeps an AES-GCM ciphertext plus base64url and JSON envelope below the
+/// four-megabyte WebSocket wire ceiling used by daemon and Relay.
+pub const MAX_AUTHENTICATED_PLAINTEXT_BYTES: usize = 2_900_000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
@@ -29,6 +33,28 @@ pub enum Request {
         /// itself, and a relay vouches for nobody.
         #[serde(default)]
         device: Option<DeviceAuth>,
+        /// Present for a Hub-issued channel. The opaque capability names the
+        /// one-use secret the target daemon obtained directly from Control;
+        /// Relay sees the name but never the secret or either proof.
+        #[serde(default)]
+        channel: Option<ChannelAuth>,
+        /// Temporary proof for encrypted first-device bootstrap.
+        #[serde(default)]
+        invite: Option<InviteAuth>,
+    },
+    /// Returns machine metadata only after the channel key is active, so a
+    /// forwarding service cannot read a user's alias or fingerprint.
+    #[serde(rename = "connection.identity")]
+    ConnectionIdentity,
+    /// Authenticated envelope used after Hello on every non-loopback channel.
+    /// `body` is base64url AES-256-GCM ciphertext. Its plaintext is the exact
+    /// JSON request; the independent HMAC covers this ciphertext and context.
+    #[serde(rename = "authenticated", rename_all = "camelCase")]
+    Authenticated {
+        #[ts(type = "number")]
+        sequence: u64,
+        body: String,
+        mac: String,
     },
     /// Subscribe to a session's events. `sinceSeq` asks for a replay of
     /// everything after that sequence number.
@@ -445,6 +471,15 @@ pub struct ProtocolError {
 #[serde(tag = "type", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum ServerFrame {
+    /// Authenticated and encrypted envelope used after Hello. Sequence numbers
+    /// share one strictly increasing stream for every result, event and PTY.
+    #[serde(rename = "authenticated", rename_all = "camelCase")]
+    Authenticated {
+        #[ts(type = "number")]
+        sequence: u64,
+        body: String,
+        mac: String,
+    },
     /// Answer to a request, correlated by the request's `id`.
     #[serde(rename = "result", rename_all = "camelCase")]
     Result {

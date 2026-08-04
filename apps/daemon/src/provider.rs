@@ -20,6 +20,7 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use futures_util::StreamExt;
 
 use crate::config::ProviderConfig;
 
@@ -29,6 +30,7 @@ use crate::config::ProviderConfig;
 /// that cannot answer in this long leaves its models missing and says why,
 /// which beats a picker that will not open.
 const LIST_TIMEOUT: Duration = Duration::from_secs(4);
+const MAX_MODEL_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 /// The providers we ship an address for.
 ///
@@ -117,6 +119,55 @@ pub fn resolve(id: &str, config: &ProviderConfig) -> Resolved {
     }
 }
 
+/// A provider credential may cross the network only under TLS, except for an
+/// exact IP loopback endpoint used by local model servers and tests.
+pub fn validate_credential_url(value: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(value).context("读取模型接口地址")?;
+    if !credential_url_allowed(&parsed) {
+        return Err(anyhow!(
+            "带 API Key 的模型接口必须使用 https；明文 http 只允许 127.0.0.1 或 [::1]，且地址不能包含凭证、query 或 fragment"
+        ));
+    }
+    Ok(())
+}
+
+fn credential_url_allowed(parsed: &reqwest::Url) -> bool {
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return false;
+    }
+    let loopback = parsed
+        .host_str()
+        .and_then(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|address| address.is_loopback());
+    parsed.scheme() == "https" || (parsed.scheme() == "http" && loopback)
+}
+
+fn credential_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let same_origin = attempt.previous().first().is_some_and(|original| {
+            credential_origin(original) == credential_origin(attempt.url())
+        });
+        if attempt.previous().len() >= 5 || !credential_url_allowed(attempt.url()) || !same_origin {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+fn credential_origin(url: &reqwest::Url) -> (&str, Option<&str>, Option<u16>) {
+    (url.scheme(), url.host_str(), url.port_or_known_default())
+}
+
 /// The providers a fresh install offers to fill in, in the order shown.
 pub fn known() -> Vec<(&'static str, &'static str)> {
     KNOWN.iter().map(|(id, label, ..)| (*id, *label)).collect()
@@ -137,9 +188,13 @@ pub async fn list_models(id: &str, config: &ProviderConfig) -> Result<Vec<String
         .clone()
         .filter(|key| !key.is_empty())
         .ok_or_else(|| anyhow!("{id} 还没有 API Key"))?;
+    validate_credential_url(&base)?;
     let base = base.trim_end_matches('/');
 
-    let client = reqwest::Client::builder().timeout(LIST_TIMEOUT).build()?;
+    let client = reqwest::Client::builder()
+        .timeout(LIST_TIMEOUT)
+        .redirect(credential_redirect_policy())
+        .build()?;
     let request = match resolved.dialect {
         Dialect::OpenAi => client.get(format!("{base}/models")).bearer_auth(key),
         // Anthropic puts the version in a header and the key in its own, and
@@ -155,7 +210,22 @@ pub async fn list_models(id: &str, config: &ProviderConfig) -> Result<Vec<String
         .await
         .with_context(|| format!("问 {id} 要模型列表"))?;
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_MODEL_RESPONSE_BYTES as u64)
+    {
+        return Err(anyhow!("{id} 的模型列表超过大小限制"));
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("读取 {id} 的模型列表"))?;
+        if body.len().saturating_add(chunk.len()) > MAX_MODEL_RESPONSE_BYTES {
+            return Err(anyhow!("{id} 的模型列表超过大小限制"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8_lossy(&body);
     if !status.is_success() {
         // The provider's own words, trimmed. A key that was rejected is the
         // common case here and only the provider can say why.
@@ -240,6 +310,35 @@ pub fn reasons(id: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn provider_keys_require_tls_except_on_exact_ip_loopback() {
+        for allowed in [
+            "https://api.example.com/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://127.42.0.9:8080/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            validate_credential_url(allowed).unwrap();
+        }
+        for refused in [
+            "http://api.example.com/v1",
+            "http://10.0.0.2:8080/v1",
+            "http://172.16.0.2:8080/v1",
+            "http://192.168.1.20:8080/v1",
+            "http://localhost:8080/v1",
+            "http://loopback.attacker.test:8080/v1",
+            "ftp://api.example.com/v1",
+            "https://user:password@api.example.com/v1",
+            "https://api.example.com/v1?key=secret",
+            "https://api.example.com/v1#credential",
+        ] {
+            assert!(
+                validate_credential_url(refused).is_err(),
+                "{refused} was accepted"
+            );
+        }
+    }
+
     fn key_only() -> ProviderConfig {
         ProviderConfig {
             api_key: Some("sk-test".into()),
@@ -307,6 +406,36 @@ mod tests {
             format!("{error:#}").contains("接口地址"),
             "unhelpful: {error:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_credentials_are_not_followed_to_an_insecure_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let count = socket.read(&mut request).await.unwrap();
+            assert!(String::from_utf8_lossy(&request[..count])
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk-test"));
+            socket
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://192.0.2.1/models\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let config = ProviderConfig {
+            api_key: Some("sk-test".into()),
+            base_url: Some(format!("http://{address}")),
+            ..Default::default()
+        };
+
+        let error = list_models("redirect-test", &config).await.unwrap_err();
+        assert!(format!("{error:#}").contains("302"));
     }
 
     #[test]

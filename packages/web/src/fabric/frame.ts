@@ -11,6 +11,12 @@ export const FABRIC_STREAM_ID_BYTES = 16;
 export const FABRIC_HEADER_BYTES = 1 + 1 + 2 + FABRIC_STREAM_ID_BYTES + 8;
 export const FABRIC_ZERO_STREAM_ID = "0".repeat(FABRIC_STREAM_ID_BYTES * 2);
 export const FABRIC_MAX_ROUTE_TICKET_BYTES = 4096;
+/** OPEN metadata retained during route admission has its own memory bound. */
+export const FABRIC_MAX_OPERATION_METADATA_BYTES = 16 * 1024;
+/** Default receive window advertised independently by each stream endpoint. */
+export const FABRIC_INITIAL_STREAM_CREDIT = 256 * 1024;
+/** Hard protocol cap for an advertised per-stream receive window. */
+export const FABRIC_MAX_STREAM_CREDIT = 4 * 1024 * 1024;
 
 export const FabricKind = {
   Open: 1,
@@ -166,6 +172,11 @@ export function encodeFabricOpenPayload(
       `Fabric route ticket must be 1..${FABRIC_MAX_ROUTE_TICKET_BYTES} bytes`,
     );
   }
+  if (opaqueHello.byteLength > FABRIC_MAX_OPERATION_METADATA_BYTES) {
+    throw new Error(
+      `Fabric operation metadata must be at most ${FABRIC_MAX_OPERATION_METADATA_BYTES} bytes`,
+    );
+  }
   const out = new Uint8Array(2 + ticket.byteLength + opaqueHello.byteLength);
   new DataView(out.buffer).setUint16(0, ticket.byteLength, false);
   out.set(ticket, 2);
@@ -183,7 +194,8 @@ export function decodeFabricOpenPayload(payload: Uint8Array): FabricOpenPayload 
   if (
     ticketLength === 0 ||
     ticketLength > FABRIC_MAX_ROUTE_TICKET_BYTES ||
-    2 + ticketLength > payload.byteLength
+    2 + ticketLength > payload.byteLength ||
+    payload.byteLength - 2 - ticketLength > FABRIC_MAX_OPERATION_METADATA_BYTES
   ) {
     return null;
   }

@@ -1,7 +1,7 @@
 import type { Reply, Request } from "@genehub/proto";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import type { Host } from "../host";
 import type { Client } from "../protocol/client";
@@ -69,8 +69,9 @@ describe("the box in the corner after a download", () => {
     expect(screen.getByTestId("update-toast")).not.toHaveTextContent("%");
   });
 
-  it("guides the finished download into the installer", async () => {
+  it("never executes a legacy downloaded file and points to the fixed official page", async () => {
     const installed: string[] = [];
+    const opened: string[] = [];
     useWorkbench.setState({
       download: {
         state: "ready",
@@ -81,6 +82,7 @@ describe("the box in the corner after a download", () => {
     render(
       <UpdateToast
         host={host({
+          openExternal: (url) => opened.push(url),
           installUpdate: async (path) => {
             installed.push(path);
           },
@@ -88,15 +90,13 @@ describe("the box in the corner after a download", () => {
       />,
     );
 
-    expect(screen.getByTestId("update-toast")).toHaveTextContent("新版本 0.1.18 已下载");
-    // The cost is on the box, not buried in settings: this is the click that
-    // stops the daemon and whatever an agent was mid-turn.
-    expect(screen.getByTestId("update-toast")).toHaveTextContent("会被打断");
+    expect(screen.getByTestId("update-toast")).toHaveTextContent("自动安装已禁用");
+    expect(screen.getByTestId("update-toast")).toHaveTextContent("SHA256SUMS");
+    expect(screen.queryByTestId("install-update")).toBeNull();
+    expect(installed).toEqual([]);
 
-    await userEvent.click(screen.getByTestId("install-update"));
-    expect(installed).toEqual([
-      "C:\\Users\\me\\AppData\\Roaming\\GeneHub\\updates\\GeneHub-setup.exe",
-    ]);
+    await userEvent.click(screen.getByTestId("manual-update-link"));
+    expect(opened).toEqual(["https://github.com/aikenc/genethub/releases"]);
   });
 
   /**
@@ -105,34 +105,14 @@ describe("the box in the corner after a download", () => {
    * the sentence saying where the installer went.
    */
   it("offers no install button where the shell cannot run one", () => {
+    const remoteInstaller = "C:\\Users\\dev\\Downloads\\GeneHub-Setup.exe";
     useWorkbench.setState({
-      download: { state: "ready", version: "0.1.18", path: "/data/updates/GeneHub.AppImage" },
+      download: { state: "ready", version: "0.1.18", path: remoteInstaller },
     });
     render(<UpdateToast host={host({ kind: "browser" })} />);
 
     expect(screen.queryByTestId("install-update")).toBeNull();
-    expect(screen.getByTestId("update-toast")).toHaveTextContent("/data/updates/GeneHub.AppImage");
-  });
-
-  it("says why the install did not start rather than closing on the failure", async () => {
-    useWorkbench.setState({
-      download: { state: "ready", version: "0.1.18", path: "/data/updates/setup.exe" },
-    });
-    render(
-      <UpdateToast
-        host={host({
-          installUpdate: async () => {
-            throw new Error("这个安装包不在 GeneHub 的更新目录里，没有运行");
-          },
-        })}
-      />,
-    );
-
-    await userEvent.click(screen.getByTestId("install-update"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("不在 GeneHub 的更新目录里");
-    // Still there, because the person now has something to read and a second
-    // chance to press.
-    expect(screen.getByTestId("install-update")).toBeInTheDocument();
+    expect(screen.getByTestId("update-toast")).toHaveTextContent(remoteInstaller);
   });
 
   /// "稍后" means later. Throwing the file away would make the next press pay
@@ -144,7 +124,7 @@ describe("the box in the corner after a download", () => {
     useWorkbench.setState({
       download: { state: "ready", version: "0.1.18", path: "/data/updates/setup.exe" },
     });
-    render(<UpdateToast host={host({ installUpdate: vi.fn() })} />);
+    render(<UpdateToast host={host()} />);
 
     await userEvent.click(screen.getByTestId("dismiss-update"));
 
@@ -152,13 +132,8 @@ describe("the box in the corner after a download", () => {
     expect(calls).toEqual([{ type: "update.dismiss" }]);
   });
 
-  it("lets a failed download be tried again from where it is reported", async () => {
-    const calls = daemon({
-      "update.download": () => ({
-        type: "updateDownload",
-        data: { state: "fetching", version: "0.1.18", received: 0 },
-      }),
-    });
+  it("does not retry an obsolete automatic download path", () => {
+    const calls = daemon({});
     useWorkbench.setState({
       download: { state: "failed", version: "0.1.18", message: "下载失败：服务器返回 503" },
     });
@@ -167,10 +142,7 @@ describe("the box in the corner after a download", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("下载 0.1.18 失败");
     expect(screen.getByTestId("update-toast")).toHaveTextContent("503");
 
-    await userEvent.click(screen.getByTestId("retry-update"));
-    expect(calls).toEqual([{ type: "update.download" }]);
-    await waitFor(() =>
-      expect(screen.getByTestId("update-toast")).toHaveTextContent("正在下载 0.1.18"),
-    );
+    expect(screen.queryByTestId("retry-update")).toBeNull();
+    expect(calls).toEqual([]);
   });
 });

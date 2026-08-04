@@ -11,10 +11,9 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
 ```
      浏览器 / 桌面 / 手机  ← 同一份工作台前端
               │
-              │  统一会话协议（本仓 packages/proto 定义），三条路同一套消息：
-              │   ① 127.0.0.1     桌面/手机壳内直连，最常见
-              │   ② 局域网直连     同一个 Wi-Fi
-              │   ③ 经 relay 转发  人在外面时
+              │  统一会话协议（本仓 packages/proto 定义），连接与机器解耦：
+              │   ① 同机 127.0.0.1  桌面壳连本机 daemon
+              │   ② 跨设备统一 relay（包括同一 Wi-Fi）
               ▼
         ┌──────────┐         出站 WS        ┌───────────┐
         │  daemon  │ ─────────────────────► │   relay   │
@@ -189,7 +188,7 @@ enum ToolCallDetail {                // 决定前端用哪个渲染器
 
 ### 6.2 relay 为什么不做鉴权
 
-**准入是 daemon 的事**：只有你的机器知道它授权过哪些设备，也只有它能让撤销立刻生效。relay 不参与这个判断，所以它可以由任何人部署（[self-hosting.md](./self-hosting.md)），坏的 relay 能做的最坏的事是不转发。
+**最终通道认证在 daemon 完成**：relay 不持有通道密钥，也不解释业务请求。自建配对由 daemon 本地设备表决定；托管形态还由 Control 核验账号、机器、来源会话与短期租约，daemon 再用从 Control 兑换的通道 secret 完成双向证明。坏的 Relay 单独只能观察元数据、延迟、丢弃或重放密文；重放会被严格序号拒绝。
 
 两种部署形态因此只差一步：
 
@@ -227,15 +226,15 @@ interface ChannelAuthority {
 
 ### 6.5 加密的现状，说实话
 
-**当前实现：** 三条通道都是传输层加密——本机走 loopback，局域网与转发走 TLS。relay 拿到的是 TLS 解密后的应用层字节，它在代码上不解析、不落库，但**技术上具备读取能力**。
+**当前实现：** 转发通道先做 v2 双向 HMAC 证明，再以独立方向密钥、严格序号、AES-256-GCM 与独立 HMAC 封装所有业务帧。Relay 能看到 IP、连接时序、长度、channel id 和初始证明材料，但拿不到 secret，不能读取或伪造业务内容。首次配对的设备名与新凭证也在证明完成后加密传输。
 
-**这不等于端到端加密。** 真正的 E2EE 要求 daemon 与客户端基于对方公钥直接握手，relay 只见密文——它在路线图上（[roadmap.md](./roadmap.md)），尚未实现。
+**这仍不等于“整个平台零知识”。** 托管 Control 生成 channel secret，分别返回给浏览器并供 daemon 兑换，因此平台运营方技术上知道该会话密钥；托管前端也处在浏览器凭证的信任路径里。当前协议还是对称 PSK，没有公钥握手与前向保密。若要让 Control/前端也无法读取或主动仿冒，仍需路线图 M4 的独立公钥握手、可验证客户端与密钥轮换。
 
-在它落地之前，文档与产品文案里都不要出现"平台无法看到你的内容"。可以说的是：relay 不解析、不存储，代码开源且可自建。差别很大，写清楚比含糊过去更值钱。
+所以可以说“Relay 单独不具备业务内容密钥、数据面不解析也不落库”，不能扩大成“Hub/平台技术上无法查看或控制”。
 
-### 6.6 常见路径根本不走 relay
+### 6.6 只有同机 loopback 绕过 relay
 
-桌面壳内的 WebView 直连 `127.0.0.1`，同局域网可直连内网地址。只有"人在外面用手机连家里电脑"才经过 relay，所以这条链路的容量压力比直觉小得多。客户端按 ①→②→③ 顺序尝试，对用户不可见。
+桌面壳内的 WebView 可以直连同一台机器的 `127.0.0.1`。任何跨设备连接——即使两台设备在同一 Wi-Fi——也统一经过 relay；当前没有 WebRTC、P2P、内网地址探测或 direct fallback。客户端只选择工作空间/能力，不选择物理机器连接。
 
 ---
 
@@ -243,9 +242,9 @@ interface ChannelAuthority {
 
 | 宿主 | 怎么来的 | 连哪里 |
 |------|---------|--------|
-| 浏览器 | 直接访问 | 局域网地址或 relay 票据 |
+| 浏览器 | 直接访问 | relay 票据 |
 | 桌面（Tauri） | 系统 WebView 加载同一份产物 | 本机 daemon |
-| 手机（Tauri Mobile） | 同上 | relay，或同 Wi-Fi 直连 |
+| 手机（Tauri Mobile） | 同上 | relay |
 | 自建部署 | 静态文件 | 同浏览器 |
 
 宿主差异收敛在 `packages/web/src/host/` 一个模块里，业务组件不允许出现 `if (isTauri)`。范围与移动端约束见 [web-workbench.md](./web-workbench.md)。
@@ -260,7 +259,7 @@ interface ChannelAuthority {
 apps/daemon      ← Rust：会话内核 + adapter 层 + 本地 WS + 出站长连接
 apps/agent       ← Rust：内置 Genet Agent（众多 adapter 中的一个后端）
 apps/relay       ← Node：转发层。无数据库、无业务、可自建
-apps/desktop     ← Tauri 2 壳；桌面与移动端共用
+apps/desktop     ← 仅 Windows/macOS 的 Tauri 2 壳；复用 Web 工作台
 packages/web     ← 工作台前端（四个宿主同一份产物）
 packages/proto   ← 会话协议的唯一定义处，生成 TS 类型与 Rust 结构
 testing/         ← 跨部件旅程测试（daemon + agent + mock 模型）

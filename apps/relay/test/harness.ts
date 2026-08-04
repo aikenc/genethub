@@ -27,39 +27,173 @@ import { startRelay, type Relay } from "../src/main.js";
 export class FakeAuthority implements ChannelAuthority {
   readonly daemonTickets = new Map<string, DaemonGrant>();
   readonly clientTickets = new Map<string, ClientGrant>();
-  readonly presence: Array<{ machineId: string; state: PresenceState }> = [];
+  readonly presence: Array<{
+    machineId: string;
+    connectionGeneration: number;
+    state: PresenceState;
+  }> = [];
   readonly calls: string[] = [];
   private revoke: ((revocation: Revocation) => void) | null = null;
+  private readonly clientAuthorizationGates = new Map<
+    string,
+    { started: () => void; released: Promise<void> }
+  >();
+  private readonly daemonAuthorizationGates = new Map<
+    string,
+    { started: () => void; released: Promise<void> }
+  >();
+  private presenceGate: { started: () => void; released: Promise<void> } | null = null;
+  private failDaemon = false;
+  private failClientInspect = false;
+  private failClientAuthorize = false;
+  private failPresence = false;
+  private nextDaemonGeneration = 1;
 
-  grantDaemon(ticket: string, grant: DaemonGrant): void {
-    this.daemonTickets.set(ticket, grant);
+  failNextDaemonAuthorization(): void {
+    this.failDaemon = true;
+  }
+
+  failNextClientInspection(): void {
+    this.failClientInspect = true;
+  }
+
+  failNextClientAuthorization(): void {
+    this.failClientAuthorize = true;
+  }
+
+  failNextPresenceReport(): void {
+    this.failPresence = true;
+  }
+
+  holdNextPresenceReport(): { started: Promise<void>; release(): void } {
+    let markStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.presenceGate = { started: markStarted, released };
+    return { started, release };
+  }
+
+  /** Delays one daemon grant so a machine revocation can race its response. */
+  holdDaemonAuthorization(ticket: string): { started: Promise<void>; release(): void } {
+    let markStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.daemonAuthorizationGates.set(ticket, { started: markStarted, released });
+    return { started, release };
+  }
+
+  /** Delays one redeemed client grant so a revocation can race its response. */
+  holdClientAuthorization(ticket: string): { started: Promise<void>; release(): void } {
+    let markStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.clientAuthorizationGates.set(ticket, { started: markStarted, released });
+    return { started, release };
+  }
+
+  grantDaemon(
+    ticket: string,
+    grant: Omit<DaemonGrant, "connectionGeneration" | "presenceLeaseSeconds"> & {
+      connectionGeneration?: number;
+      presenceLeaseSeconds?: number;
+    },
+  ): void {
+    this.daemonTickets.set(ticket, {
+      ...grant,
+      connectionGeneration:
+        grant.connectionGeneration ?? this.nextDaemonGeneration++,
+      presenceLeaseSeconds: grant.presenceLeaseSeconds ?? 90,
+    });
   }
 
   /** Single use, mirroring the real ticket: redeeming removes it. */
-  grantClient(ticket: string, grant: ClientGrant): void {
-    this.clientTickets.set(ticket, grant);
+  grantClient(
+    ticket: string,
+    grant: ClientGrant | { machineId: string; clientId: string },
+  ): void {
+    this.clientTickets.set(ticket, {
+      ...grant,
+      channelCapability:
+        "channelCapability" in grant
+          ? grant.channelCapability
+          : `cap_${grant.clientId}`,
+    });
   }
 
   async authorizeDaemon(ticket: string): Promise<DaemonGrant | null> {
     this.calls.push("authorizeDaemon");
-    return this.daemonTickets.get(ticket) ?? null;
+    if (this.failDaemon) {
+      this.failDaemon = false;
+      throw new Error("temporary daemon authority failure");
+    }
+    const grant = this.daemonTickets.get(ticket) ?? null;
+    const gate = this.daemonAuthorizationGates.get(ticket);
+    if (gate) {
+      gate.started();
+      await gate.released;
+      this.daemonAuthorizationGates.delete(ticket);
+    }
+    return grant;
   }
 
   async inspectClient(ticket: string): Promise<ClientGrant | null> {
     this.calls.push("inspectClient");
+    if (this.failClientInspect) {
+      this.failClientInspect = false;
+      throw new Error("temporary client inspection failure");
+    }
     return this.clientTickets.get(ticket) ?? null;
   }
 
   async authorizeClient(ticket: string): Promise<ClientGrant | null> {
     this.calls.push("authorizeClient");
+    if (this.failClientAuthorize) {
+      this.failClientAuthorize = false;
+      throw new Error("temporary client authorization failure");
+    }
     const grant = this.clientTickets.get(ticket);
     if (grant) this.clientTickets.delete(ticket);
+    const gate = this.clientAuthorizationGates.get(ticket);
+    if (gate) {
+      gate.started();
+      await gate.released;
+      this.clientAuthorizationGates.delete(ticket);
+    }
     return grant ?? null;
   }
 
-  async reportPresence(machineId: string, state: PresenceState): Promise<void> {
+  async reportPresence(
+    machineId: string,
+    connectionGeneration: number,
+    state: PresenceState,
+  ): Promise<void> {
     this.calls.push("reportPresence");
-    this.presence.push({ machineId, state });
+    const gate = this.presenceGate;
+    if (gate) {
+      this.presenceGate = null;
+      gate.started();
+      await gate.released;
+    }
+    if (this.failPresence) {
+      this.failPresence = false;
+      throw new Error("temporary presence failure");
+    }
+    this.presence.push({ machineId, connectionGeneration, state });
   }
 
   onRevoked(handler: (revocation: Revocation) => void): void {
@@ -68,7 +202,12 @@ export class FakeAuthority implements ChannelAuthority {
 
   /** Stands in for the control plane pushing a revocation. */
   revokeMachine(machineId: string, reason = "revoked by the owner"): void {
-    this.revoke?.({ machineId, reason });
+    this.revoke?.({ target: "machine", machineId, reason });
+  }
+
+  /** Stands in for one signed-in session losing every live channel it opened. */
+  revokeClient(clientId: string, reason = "session revoked by the owner"): void {
+    this.revoke?.({ target: "client", clientId, reason });
   }
 }
 
@@ -112,6 +251,7 @@ export class FakeFabricAuthority implements FabricAuthority {
       revocationHandle?: string;
       expiresAt?: string | null;
       connectionGeneration?: number;
+      presenceLeaseSeconds?: number;
     } = {},
   ): void {
     this.endpointTickets.set(credential, {
@@ -119,6 +259,7 @@ export class FakeFabricAuthority implements FabricAuthority {
       revocationHandle: options.revocationHandle ?? `revoke:${endpointHandle}`,
       expiresAt: options.expiresAt ?? null,
       connectionGeneration: options.connectionGeneration ?? 1,
+      presenceLeaseSeconds: options.presenceLeaseSeconds ?? 90,
     });
   }
 

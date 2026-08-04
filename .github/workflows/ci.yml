@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   # A lock file records where each tarball came from. Written on a machine with a
   # company mirror in its npm config, it records that mirror — and then every
@@ -13,7 +16,9 @@ jobs:
   lockfiles:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Every dependency must come from somewhere the world can reach
         run: |
           set -euo pipefail
@@ -25,6 +30,20 @@ jobs:
             exit 1
           fi
           echo "all resolved URLs point at the public registry"
+
+      - name: Every third-party action must be pinned to a commit
+        run: |
+          set -euo pipefail
+          bad="$(grep -rhoE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+[^[:space:]#]+' \
+            --include='*.yml' --include='*.yaml' .github/workflows \
+            | sed -E 's/.*uses:[[:space:]]+//' \
+            | grep -Ev '^(\./|[^@]+@[0-9a-f]{40})$' || true)"
+          if [ -n "$bad" ]; then
+            echo "these actions are not pinned to a full commit SHA:" >&2
+            echo "$bad" >&2
+            exit 1
+          fi
+          echo "all third-party actions are pinned to full commit SHAs"
 
       # Two modules whose paths differ only in casing are one module on Windows
       # and on a stock macOS disk. An import then resolves to whichever of them
@@ -47,12 +66,14 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       # The adapter journeys (docs/testing.md §8.1's "专项测试") drive real
@@ -61,11 +82,14 @@ jobs:
       # JOURNEY_LLM=real. `claude` itself, not `claude-agent-acp`: the
       # daemon speaks its native stream-json protocol directly
       # (apps/daemon/src/adapter/claude.rs).
-      - run: |
-          npm install --prefix "$HOME/.opencode" opencode-ai
-          echo "$HOME/.opencode/node_modules/.bin" >> "$GITHUB_PATH"
-          npm install --prefix "$HOME/.acp-agents" @anthropic-ai/claude-code @agentclientprotocol/codex-acp
-          echo "$HOME/.acp-agents/node_modules/.bin" >> "$GITHUB_PATH"
+      # These are test fixtures, not product dependencies. Keep them in their
+      # own lockfile so `npm ci` verifies exact tarball integrity without
+      # coupling Rust CI to one of the shipped JavaScript packages. Codex uses
+      # its native CLI now, so the retired codex-acp bridge is not installed.
+      - name: Install locked third-party agent CLIs
+        run: |
+          npm ci --prefix .github/agent-clis
+          echo "$GITHUB_WORKSPACE/.github/agent-clis/node_modules/.bin" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The journeys start real daemon and agent processes, and `cargo test` does
@@ -110,8 +134,10 @@ jobs:
       run:
         working-directory: apps/relay
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - run: npm ci
@@ -122,16 +148,22 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
+    env:
+      GENET_E2E_REQUIRED: "1"
+      GENET_E2E_DAEMON: ${{ github.workspace }}/target/debug/genet-dev
+      GENET_E2E_AGENT: ${{ github.workspace }}/target/debug/genet-agent-dev
     defaults:
       run:
         working-directory: packages/web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # The end-to-end case drives a real daemon and a real agent. Without the
       # binaries it skips itself, which would quietly drop the only test that
       # covers the wire between the two languages.
@@ -144,21 +176,44 @@ jobs:
         working-directory: apps/relay
       - run: npm ci
       - run: npm run typecheck
+      - name: Refuse to skip mandatory real-process journeys
+        run: |
+          test -x "$GENET_E2E_DAEMON"
+          test -x "$GENET_E2E_AGENT"
+          test -f "$GITHUB_WORKSPACE/apps/relay/dist/main.js"
       - run: npm test
       - run: npm run build
 
   desktop:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # Tauri needs the system WebView headers even to typecheck the shell.
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-      # The supervision tests drive the real daemon binary; without it they skip
-      # themselves, which would leave the one thing the shell does untested.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo build -p genet-cli
-      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-      - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+      # Daemon persistence is shared by the CLI and desktop shell. In
+      # particular, the owner-only Windows DACL assertions must execute on a
+      # real Windows filesystem; a Linux cross-check can only compile them.
+      - run: cargo test -p genet-daemon --lib
+      - name: Refuse to skip real daemon supervision
+        shell: bash
+        run: |
+          binary=target/debug/genet-dev
+          if [ "$RUNNER_OS" = Windows ]; then binary="${binary}.exe"; fi
+          test -x "$binary"
+      - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check
+      # The installer integrity gate is pure Rust but lives in the Tauri crate;
+      # compile and execute it on the two desktop platforms we actually ship or
+      # support, rather than treating a Linux WebView build as a proxy.
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --test wiring
+      # All lifecycle cases run on both platforms. Only the test which kills a
+      # listener behind the supervisor's back is Unix-specific.
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --test supervision
+      - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --test wiring --test supervision -- -D warnings

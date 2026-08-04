@@ -7,9 +7,16 @@ import type { WebSocketLike } from "../protocol/client";
 import { useWorkbench } from "../session/store";
 import { claimMachine } from "./claim";
 import { forgetMachine, listMachines, pairingLink, readPairingLink } from "./machines";
-import { proof } from "./proof";
+import {
+  channelServerProof,
+  deriveChannelSessionKey,
+  openChannelFrame,
+  sealChannelFrame,
+} from "./proof";
 
-const CODE = "invite-code-1";
+const INVITE_ID = `inv_${"1".repeat(32)}`;
+const INVITE_SECRET = "2".repeat(64);
+const CODE = `${INVITE_ID}.${INVITE_SECRET}`;
 const ENDPOINT = "wss://relay.example.com/forward/client?rendezvous=abc";
 
 /**
@@ -19,6 +26,10 @@ const ENDPOINT = "wss://relay.example.com/forward/client?rendezvous=abc";
  */
 function machineSocket({ knowsCode = true }: { knowsCode?: boolean } = {}) {
   return (_url: string) => {
+    const context = `invite:${INVITE_ID}`;
+    const secret = knowsCode ? INVITE_SECRET : "3".repeat(64);
+    const serverNonce = "server-nonce";
+    let key: Awaited<ReturnType<typeof deriveChannelSessionKey>> | null = null;
     const socket = {
       onopen: null as (() => void) | null,
       onclose: null as (() => void) | null,
@@ -26,26 +37,79 @@ function machineSocket({ knowsCode = true }: { knowsCode?: boolean } = {}) {
       onmessage: null as ((event: { data: string }) => void) | null,
       closed: false,
       send(raw: string) {
-        const request = JSON.parse(raw) as { id: string; payload: { nonce: string } };
-        void proof("server", request.payload.nonce, knowsCode ? CODE : "guessing").then((p) => {
+        void (async () => {
+          const request = JSON.parse(raw) as {
+            id: string;
+            type: string;
+            payload: {
+              sequence?: number;
+              body?: string;
+              mac?: string;
+              invite?: { nonce: string };
+            };
+          };
+          if (request.type === "hello") {
+            const clientNonce = request.payload.invite!.nonce;
+            const p = await channelServerProof(secret, context, clientNonce, serverNonce);
+            key = await deriveChannelSessionKey(secret, context, clientNonce, serverNonce);
+            socket.onmessage?.({
+              data: JSON.stringify({
+                type: "result",
+                id: request.id,
+                ok: true,
+                payload: {
+                  type: "hello",
+                  data: {
+                    daemonVersion: "test",
+                    protocolVersion: 2,
+                    machineId: "m_1",
+                    fingerprint: "AAAA-BBBB",
+                    transport: "forwarded",
+                    machineName: "工作机",
+                    proof: p,
+                    serverNonce,
+                  },
+                },
+              }),
+            });
+            return;
+          }
+
+          if (!key) throw new Error("claim arrived before the fake handshake completed");
+          const plaintext = await openChannelFrame(
+            key,
+            "client-to-daemon",
+            request.payload.sequence!,
+            request.payload.body!,
+            request.payload.mac!,
+          );
+          const inner = JSON.parse(plaintext) as { id: string };
+          const reply = JSON.stringify({
+            type: "result",
+            id: inner.id,
+            ok: true,
+            payload: {
+              type: "claimed",
+              data: {
+                machineId: "m_1",
+                deviceId: "d_1",
+                secret: "s_1",
+                machineName: "工作机",
+                fingerprint: "AAAA-BBBB",
+                proof: "",
+              },
+            },
+          });
+          const sealed = await sealChannelFrame(key, "daemon-to-client", 1, reply);
           socket.onmessage?.({
             data: JSON.stringify({
-              type: "result",
-              id: request.id,
-              ok: true,
-              payload: {
-                type: "claimed",
-                data: {
-                  deviceId: "d_1",
-                  secret: "s_1",
-                  machineName: "工作机",
-                  fingerprint: "AAAA-BBBB",
-                  proof: p,
-                },
-              },
+              type: "authenticated",
+              sequence: 1,
+              body: sealed.body,
+              mac: sealed.mac,
             }),
           });
-        });
+        })();
       },
       close() {
         socket.closed = true;
@@ -79,6 +143,10 @@ function stubClient() {
 
 beforeEach(() => {
   localStorage.clear();
+  // Also clears the tab-only fallback left by a test that deliberately blocks
+  // persistent storage.
+  forgetMachine("__test_reset__", localStorage);
+  localStorage.clear();
   window.location.hash = "";
 });
 
@@ -92,6 +160,7 @@ describe("redeeming a pairing invite", () => {
     const machine = await claimMachine(ENDPOINT, CODE, "手机上的 Safari", machineSocket());
 
     expect(machine).toMatchObject({
+      machineId: "m_1",
       deviceId: "d_1",
       secret: "s_1",
       name: "工作机",
@@ -122,6 +191,103 @@ describe("redeeming a pairing invite", () => {
     };
 
     await expect(claimMachine(ENDPOINT, CODE, "手机", dead)).rejects.toThrow(/过期/);
+  });
+
+  it("times out and closes a WebSocket stranded before open", async () => {
+    let closed = false;
+    const stranded = () =>
+      ({
+        onopen: null,
+        onclose: null,
+        onerror: null,
+        onmessage: null,
+        send() {},
+        close() {
+          closed = true;
+        },
+      }) as WebSocketLike;
+
+    await expect(
+      claimMachine(ENDPOINT, CODE, "手机", stranded, { connectTimeoutMs: 5 }),
+    ).rejects.toThrow(/连接.*超时/);
+    expect(closed).toBe(true);
+  });
+
+  it("times out and closes when the Relay opens but never answers Hello", async () => {
+    let closed = false;
+    const silent = () => {
+      const socket = {
+        onopen: null as (() => void) | null,
+        onclose: null,
+        onerror: null,
+        onmessage: null,
+        send() {},
+        close() {
+          closed = true;
+        },
+      };
+      queueMicrotask(() => socket.onopen?.());
+      return socket as unknown as WebSocketLike;
+    };
+
+    await expect(
+      claimMachine(ENDPOINT, CODE, "手机", silent, { responseTimeoutMs: 5 }),
+    ).rejects.toThrow(/认证回复/);
+    expect(closed).toBe(true);
+  });
+
+  it("times out and closes when authenticated Hello succeeds but claim never returns", async () => {
+    let closed = false;
+    const noClaimReply = (_url: string) => {
+      const context = `invite:${INVITE_ID}`;
+      const secret = INVITE_SECRET;
+      const serverNonce = "server-nonce";
+      const socket = {
+        onopen: null as (() => void) | null,
+        onclose: null,
+        onerror: null,
+        onmessage: null as ((event: { data: string }) => void) | null,
+        sends: 0,
+        send(raw: string) {
+          socket.sends += 1;
+          if (socket.sends !== 1) return;
+          const hello = JSON.parse(raw) as {
+            id: string;
+            payload: { invite: { nonce: string } };
+          };
+          void channelServerProof(
+            secret,
+            context,
+            hello.payload.invite.nonce,
+            serverNonce,
+          ).then((p) =>
+            socket.onmessage?.({
+              data: JSON.stringify({
+                type: "result",
+                id: hello.id,
+                ok: true,
+                payload: {
+                  type: "hello",
+                  data: { serverNonce, proof: p },
+                },
+              }),
+            }),
+          );
+        },
+        close() {
+          closed = true;
+        },
+      };
+      queueMicrotask(() => socket.onopen?.());
+      return socket as unknown as WebSocketLike;
+    };
+
+    await expect(
+      // Leave ample time for both sides' WebCrypto work before testing the
+      // distinct timeout after the authenticated claim request is sent.
+      claimMachine(ENDPOINT, CODE, "手机", noClaimReply, { responseTimeoutMs: 100 }),
+    ).rejects.toThrow(/配对结果/);
+    expect(closed).toBe(true);
   });
 });
 
@@ -181,6 +347,32 @@ describe("the machines this browser remembers", () => {
     expect(listMachines()).toHaveLength(1);
     expect(listMachines()[0]!.name).toBe("改名了");
     expect(forgetMachine(first.machineId)).toEqual([]);
+  });
+
+  it("keeps a consumed one-shot credential usable when storage rejects writes", async () => {
+    const { rememberMachine } = await import("./machines");
+    const blocked = {
+      getItem() {
+        throw new Error("storage blocked");
+      },
+      setItem() {
+        throw new Error("storage blocked");
+      },
+    };
+    const machine = {
+      machineId: "m_volatile",
+      name: "临时工作机",
+      fingerprint: "AAAA-BBBB",
+      endpoint: ENDPOINT,
+      deviceId: "d_volatile",
+      secret: "secret",
+      pairedAt: new Date().toISOString(),
+    };
+
+    expect(rememberMachine(machine, blocked)).toEqual([machine]);
+    expect(listMachines(blocked)).toEqual([machine]);
+    expect(forgetMachine(machine.machineId, blocked)).toEqual([]);
+    expect(listMachines(blocked)).toEqual([]);
   });
 });
 

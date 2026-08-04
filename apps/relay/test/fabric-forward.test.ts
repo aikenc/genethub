@@ -10,9 +10,12 @@ import {
   encodeFabricOpenPayload,
   FabricKind,
   type FabricFrame,
+  FABRIC_INITIAL_STREAM_CREDIT,
   FabricReset,
 } from "../src/forward/fabric-frame.js";
 import { decode, Kind } from "../src/forward/frame.js";
+import { AuthorityHttpError } from "../src/shared/authority-error.js";
+import { config } from "../src/shared/config.js";
 import {
   closed,
   connect,
@@ -27,6 +30,8 @@ import {
 function id(value: number): string {
   return value.toString(16).padStart(32, "0");
 }
+
+const CREDIT = BigInt(FABRIC_INITIAL_STREAM_CREDIT);
 
 function wire(frame: FabricFrame): Buffer {
   return encodeFabricFrame(frame);
@@ -45,6 +50,14 @@ async function nextFabric(socket: WebSocket): Promise<FabricFrame> {
   const decoded = decodeFabricFrame(await nextMessage(socket));
   assert.ok(decoded, "expected a valid Fabric frame");
   return decoded;
+}
+
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (condition()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(message);
 }
 
 describe("Fabric v2 over real WebSockets", () => {
@@ -71,6 +84,7 @@ describe("Fabric v2 over real WebSockets", () => {
       revocationHandle?: string;
       expiresAt?: string | null;
       connectionGeneration?: number;
+      presenceLeaseSeconds?: number;
     } = {},
   ): Promise<WebSocket> {
     authority.grantEndpoint(credential, handle, options);
@@ -98,7 +112,7 @@ describe("Fabric v2 over real WebSockets", () => {
       wire({
         kind: FabricKind.Open,
         streamId: sourceStreamId,
-        value: 0n,
+        value: CREDIT,
         payload: encodeFabricOpenPayload(ticket, Buffer.from(`hello:${ticket}`)),
       }),
     );
@@ -111,7 +125,7 @@ describe("Fabric v2 over real WebSockets", () => {
       wire({
         kind: FabricKind.Accept,
         streamId: incoming.streamId,
-        value: 0n,
+        value: CREDIT,
         payload: Buffer.from(`accepted:${ticket}`),
       }),
     );
@@ -324,7 +338,7 @@ describe("Fabric v2 over real WebSockets", () => {
         kind: FabricKind.Ping,
         streamId: id(0),
         value: 41n,
-        payload: Buffer.from("still-current"),
+        payload: Buffer.alloc(0),
       }),
     );
     assert.deepEqual(await pong, {
@@ -332,7 +346,7 @@ describe("Fabric v2 over real WebSockets", () => {
       flags: 0,
       streamId: id(0),
       value: 41n,
-      payload: Buffer.from("still-current"),
+      payload: Buffer.alloc(0),
     });
     assert.equal(stack.relay.fabricForwarder?.stats().endpoints, 1);
   });
@@ -367,7 +381,7 @@ describe("Fabric v2 over real WebSockets", () => {
         kind: FabricKind.Ping,
         streamId: id(0),
         value: 42n,
-        payload: Buffer.from("fresh"),
+        payload: Buffer.alloc(0),
       }),
     );
     assert.equal((await pong).kind, FabricKind.Pong);
@@ -411,6 +425,157 @@ describe("Fabric v2 over real WebSockets", () => {
       "endpoint:after-authority-sync",
     );
     assert.equal(reopened.readyState, reopened.OPEN);
+  });
+
+  it("coalesces a presence storm to one in-flight and one latest state", async () => {
+    const originalReport = authority.reportEndpointPresence.bind(authority);
+    const attempts: Array<{
+      endpointHandle: string;
+      connectionGeneration: number;
+      state: "online" | "offline";
+    }> = [];
+    const releases: Array<() => void> = [];
+    authority.reportEndpointPresence = async (
+      endpointHandle,
+      connectionGeneration,
+      state,
+    ) => {
+      attempts.push({ endpointHandle, connectionGeneration, state });
+      await new Promise<void>((resolve) => releases.push(resolve));
+    };
+
+    try {
+      const socket = await endpoint(
+        "credential:presence-storm",
+        "endpoint:presence-storm",
+        { connectionGeneration: 77 },
+      );
+      await waitFor(() => attempts.length === 1, "initial presence report did not start");
+
+      for (let index = 0; index < 10_000; index += 1) {
+        stack.relay.fabricForwarder?.resyncPresence();
+      }
+      const didClose = closed(socket);
+      socket.close();
+      await didClose;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.equal(
+        attempts.length,
+        1,
+        "slow Control must not create one Promise/request per heartbeat",
+      );
+      releases.shift()!();
+      await waitFor(() => attempts.length === 2, "latest presence report did not start");
+      assert.deepEqual(attempts[1], {
+        endpointHandle: "endpoint:presence-storm",
+        connectionGeneration: 77,
+        state: "offline",
+      });
+
+      releases.shift()!();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(attempts.length, 2);
+    } finally {
+      for (const release of releases.splice(0)) release();
+      authority.reportEndpointPresence = originalReport;
+    }
+  });
+
+  it("retries transient Fabric presence failure without endpoint traffic", async () => {
+    const originalReport = authority.reportEndpointPresence.bind(authority);
+    let onlineAttempts = 0;
+    authority.reportEndpointPresence = async (handle, generation, state) => {
+      if (state === "online" && ++onlineAttempts === 1) {
+        throw new Error("Control unavailable");
+      }
+      await originalReport(handle, generation, state);
+    };
+    try {
+      const socket = await endpoint("credential:presence-retry", "endpoint:presence-retry");
+      await waitFor(() => onlineAttempts >= 2, "presence retry did not run");
+      assert.equal(socket.readyState, socket.OPEN);
+    } finally {
+      authority.reportEndpointPresence = originalReport;
+    }
+  });
+
+  it("refreshes Fabric from the granted lease independently of heartbeat traffic", async () => {
+    const limits = config.limits as { presenceRefreshMaxSeconds: number };
+    const previous = limits.presenceRefreshMaxSeconds;
+    limits.presenceRefreshMaxSeconds = 0.01;
+    try {
+      await endpoint("credential:presence-refresh", "endpoint:presence-refresh", {
+        presenceLeaseSeconds: 60,
+      });
+      await waitFor(
+        () =>
+          authority.presence.filter(
+            (entry) =>
+              entry.endpointHandle === "endpoint:presence-refresh" &&
+              entry.state === "online",
+          ).length >= 2,
+        "Fabric presence refresh did not run",
+      );
+    } finally {
+      limits.presenceRefreshMaxSeconds = previous;
+    }
+  });
+
+  it("fails Fabric closed on definitive refusal or a missed lease deadline", async () => {
+    const originalReport = authority.reportEndpointPresence.bind(authority);
+    const definitiveAttempts: Array<"online" | "offline"> = [];
+    authority.reportEndpointPresence = async (_handle, _generation, state) => {
+      definitiveAttempts.push(state);
+      throw new AuthorityHttpError("stale generation", 409);
+    };
+    try {
+      const refused = await endpoint("credential:presence-refused", "endpoint:presence-refused");
+      assert.equal(await closed(refused), 1012);
+      await waitFor(
+        () => definitiveAttempts.length === 2,
+        "the fenced endpoint did not report its final offline state",
+      );
+      await waitFor(
+        () =>
+          (
+            stack.relay.fabricForwarder as unknown as {
+              presenceReports: Map<string, unknown>;
+            }
+          ).presenceReports.size === 0,
+        "a definitive offline refusal retained a presence retry queue",
+      );
+      assert.deepEqual(
+        definitiveAttempts,
+        ["online", "offline"],
+        "the definitive offline refusal must complete without another retry",
+      );
+    } finally {
+      authority.reportEndpointPresence = originalReport;
+    }
+
+    const realNow = Date.now;
+    let now = realNow();
+    let attempts = 0;
+    Date.now = () => now;
+    authority.reportEndpointPresence = async (_handle, _generation, state) => {
+      if (state === "online") {
+        attempts += 1;
+        now += 61_000;
+        throw new Error("Control unavailable beyond lease");
+      }
+    };
+    try {
+      const expired = await endpoint("credential:presence-expired", "endpoint:presence-expired", {
+        presenceLeaseSeconds: 60,
+      });
+      assert.equal(await closed(expired), 1012);
+      assert.equal(attempts, 1);
+    } finally {
+      Date.now = realNow;
+      authority.reportEndpointPresence = originalReport;
+    }
   });
 
   it("rejects expired endpoint admission before creating a Fabric connection", async () => {

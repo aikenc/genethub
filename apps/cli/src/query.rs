@@ -401,6 +401,7 @@ fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Snapshot(_) => "session snapshot",
         Reply::Workspace(_) => "workspace",
         Reply::Workspaces(_) => "workspaces",
+        Reply::Directory(_) => "directory",
         Reply::FileTree(_) => "file tree",
         Reply::FileContent(_) => "file content",
         Reply::GitStatus(_) => "git status",
@@ -536,6 +537,7 @@ mod tests {
             transport: TransportKind::Loopback,
             machine_name: "desk".into(),
             proof: None,
+            server_nonce: None,
         });
 
         assert_eq!(data["source"], "localDaemon");

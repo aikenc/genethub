@@ -3,6 +3,7 @@ import {
   FabricStateError,
   type FabricConnectionState,
   type FabricEndpointOptions,
+  type FabricReconnectOptions,
   type FabricSocketLike,
   type FabricStream,
 } from "./endpoint";
@@ -39,6 +40,10 @@ export interface HubWorkspaceFabricOptions {
   streamId?: () => string;
   connectTimeoutMs?: number;
   maxFrameBytes?: number;
+  /** Physical reconnect policy; false disables automatic recovery. */
+  reconnect?: FabricReconnectOptions | false;
+  /** Total deadline for issuing endpoints, routes, and directory reads. */
+  requestTimeoutMs?: number;
   now?: () => number;
   onError?: (error: unknown) => void;
 }
@@ -74,10 +79,17 @@ export class HubWorkspaceFabric {
   private stopped = false;
   private readonly request: typeof globalThis.fetch;
   private readonly now: () => number;
+  private readonly requests = new Set<AbortController>();
 
   constructor(private readonly options: HubWorkspaceFabricOptions = {}) {
     this.request = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.now = options.now ?? Date.now;
+    if (
+      options.requestTimeoutMs !== undefined &&
+      (!Number.isFinite(options.requestTimeoutMs) || options.requestTimeoutMs <= 0)
+    ) {
+      throw new FabricStateError("Hub Fabric request timeout must be positive");
+    }
   }
 
   get connectionState(): FabricConnectionState {
@@ -89,10 +101,10 @@ export class HubWorkspaceFabric {
   }
 
   /**
-   * Establishes or explicitly re-establishes the endpoint connection.
+   * Establishes the endpoint or joins an automatic physical recovery.
    *
-   * A reconnect re-signs the same opaque endpoint id. Nothing calls this on a
-   * timer and openWorkspace never calls it after a disconnect.
+   * Every recovery re-signs the same opaque endpoint id for a fresh one-shot
+   * admission. Existing operations fail as outcome-unknown and are not replayed.
    */
   connect(): Promise<void> {
     if (this.stopped) {
@@ -166,6 +178,8 @@ export class HubWorkspaceFabric {
   close(): void {
     if (this.stopped) return;
     this.stopped = true;
+    for (const controller of this.requests) controller.abort();
+    this.requests.clear();
     this.endpoint?.close();
   }
 
@@ -193,6 +207,9 @@ export class HubWorkspaceFabric {
       ...(this.options.maxFrameBytes === undefined
         ? {}
         : { maxFrameBytes: this.options.maxFrameBytes }),
+      ...(this.options.reconnect === undefined
+        ? {}
+        : { reconnect: this.options.reconnect }),
       ...(this.options.onError ? { onError: this.options.onError } : {}),
     };
     this.endpoint = new FabricEndpoint(endpointOptions);
@@ -216,16 +233,40 @@ export class HubWorkspaceFabric {
   }
 
   private async fetchJson(path: string, init: RequestInit): Promise<unknown> {
-    const response = await this.request(this.url(path), {
-      ...init,
-      credentials: "same-origin",
+    const controller = new AbortController();
+    this.requests.add(controller);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new TypeError("Hub Fabric request timed out"));
+      }, this.options.requestTimeoutMs ?? 10_000);
     });
-    const body = (await response.json().catch(() => null)) as unknown;
-    if (!response.ok) {
-      const code = isRecord(body) && typeof body.error === "string" ? body.error : "request_failed";
-      throw new HubFabricApiError(response.status, code);
+    try {
+      const response = await Promise.race([
+        this.request(this.url(path), {
+          ...init,
+          credentials: "same-origin",
+          signal: controller.signal,
+        }),
+        timeout,
+      ]);
+      const body = (await Promise.race([
+        response.json().catch(() => null),
+        timeout,
+      ])) as unknown;
+      if (!response.ok) {
+        const code =
+          isRecord(body) && typeof body.error === "string"
+            ? body.error
+            : "request_failed";
+        throw new HubFabricApiError(response.status, code);
+      }
+      return body;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      this.requests.delete(controller);
     }
-    return body;
   }
 
   private url(path: string): string {

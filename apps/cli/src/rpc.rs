@@ -1,7 +1,7 @@
 //! Thin WebSocket RPC client for the local daemon (`genethub-cli.md` §3.1 layer A).
 //!
 //! Discovery is the same as the desktop shell: read this channel's
-//! `endpoint.json`, dial `ws://127.0.0.1:<port>/ws?token=…`, then `Hello`.
+//! `endpoint.json`, mint a one-use loopback admission, then `Hello`.
 //! Business commands refuse to invent a daemon — unreachable is an error the
 //! caller must fix with `genet daemon start`.
 
@@ -110,15 +110,19 @@ impl Rpc {
         })?;
         let endpoint: Endpoint = serde_json::from_str(&raw)
             .map_err(|error| ConnectError::Unavailable(format!("parse endpoint.json: {error}")))?;
-        let url = format!(
-            "ws://127.0.0.1:{}/ws?token={}",
-            endpoint.port, endpoint.token
+        let admission = genet_daemon::transport::local::websocket_admission(
+            endpoint.port,
+            &endpoint.token,
+            endpoint.pid,
+            &endpoint.machine_id,
+            &endpoint.fingerprint,
         );
 
-        let (socket, _) = tokio_tungstenite::connect_async(&url)
+        let (socket, _) = tokio_tungstenite::connect_async(&admission.url)
             .await
-            // Never include `url` or the transport error here: either may echo
-            // the query string containing the daemon's full bearer token.
+            // Keep transport internals out of the user error. The URL now holds
+            // only a short-lived proof, but it is still an admission and not a
+            // useful diagnostic.
             .map_err(|_| ConnectError::Unavailable(dial_failure(endpoint.port)))?;
         let (mut sink, mut stream) = socket.split();
 
@@ -172,6 +176,8 @@ impl Rpc {
                 client_name: format!("{}-cli", genet_daemon::channel::CLI_BINARY),
                 protocol_version: PROTOCOL_VERSION,
                 device: None,
+                channel: None,
+                invite: None,
             })
             .await
         {
@@ -184,7 +190,10 @@ impl Rpc {
             }
         };
         rpc.hello = match hello {
-            Reply::Hello(hello) => Some(hello),
+            Reply::Hello(hello) => {
+                verify_local_hello(&hello, &admission)?;
+                Some(hello)
+            }
             other => {
                 return Err(ConnectError::Protocol(format!(
                     "unexpected reply for Hello: {other:?}"
@@ -234,6 +243,32 @@ impl Rpc {
     }
 }
 
+fn verify_local_hello(
+    hello: &HelloResult,
+    admission: &genet_daemon::transport::local::LocalWebSocketAdmission,
+) -> Result<(), ConnectError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let proof_matches = hello.proof.as_deref().is_some_and(|presented| {
+        genet_daemon::transport::auth::token_matches(&admission.server_proof, presented)
+    });
+    if admission.expires_at <= now
+        || hello.protocol_version != PROTOCOL_VERSION
+        || hello.transport != genehub_proto::TransportKind::Loopback
+        || hello.machine_id != admission.machine_id
+        || hello.fingerprint != admission.fingerprint
+        || hello.server_nonce.is_some()
+        || !proof_matches
+    {
+        return Err(ConnectError::Protocol(
+            "the loopback listener did not prove the expected daemon identity".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn dial_failure(port: u16) -> String {
     format!("dial local daemon at loopback port {port} failed")
 }
@@ -250,6 +285,9 @@ impl Drop for Rpc {
 struct Endpoint {
     port: u16,
     token: String,
+    machine_id: String,
+    fingerprint: String,
+    pid: u32,
 }
 
 fn error_code_name(code: genehub_proto::ErrorCode) -> &'static str {
@@ -283,7 +321,59 @@ fn result_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genehub_proto::ErrorCode;
+    use genehub_proto::{ErrorCode, TransportKind};
+
+    fn local_contract() -> (
+        genet_daemon::transport::local::LocalWebSocketAdmission,
+        HelloResult,
+    ) {
+        let expires_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 10;
+        let admission = genet_daemon::transport::local::LocalWebSocketAdmission {
+            url: "ws://127.0.0.1:1/ws".into(),
+            server_proof: "a".repeat(64),
+            challenge: "b".repeat(64),
+            pid: 42,
+            machine_id: "m_local".into(),
+            fingerprint: "fp-local".into(),
+            expires_at,
+        };
+        let hello = HelloResult {
+            daemon_version: "test".into(),
+            protocol_version: PROTOCOL_VERSION,
+            machine_id: admission.machine_id.clone(),
+            fingerprint: admission.fingerprint.clone(),
+            transport: TransportKind::Loopback,
+            machine_name: "local".into(),
+            proof: Some(admission.server_proof.clone()),
+            server_nonce: None,
+        };
+        (admission, hello)
+    }
+
+    #[test]
+    fn local_hello_requires_the_out_of_band_listener_proof_and_identity() {
+        let (admission, hello) = local_contract();
+        verify_local_hello(&hello, &admission).unwrap();
+
+        let mut forged = hello.clone();
+        forged.proof = Some("c".repeat(64));
+        assert!(verify_local_hello(&forged, &admission).is_err());
+
+        let mut wrong_machine = hello;
+        wrong_machine.machine_id = "m_attacker".into();
+        assert!(verify_local_hello(&wrong_machine, &admission).is_err());
+    }
+
+    #[test]
+    fn expired_local_listener_proofs_are_rejected() {
+        let (mut admission, hello) = local_contract();
+        admission.expires_at = 1;
+        assert!(verify_local_hello(&hello, &admission).is_err());
+    }
 
     #[test]
     fn a_remote_error_keeps_its_typed_code_and_message() {

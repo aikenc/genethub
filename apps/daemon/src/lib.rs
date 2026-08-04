@@ -5,6 +5,7 @@
 
 pub mod adapter;
 pub mod channel;
+pub mod channel_auth;
 pub mod config;
 pub mod devices;
 pub mod files;
@@ -61,12 +62,18 @@ impl Daemon {
         })
     }
 
-    pub fn token(&self) -> &str {
-        &self.state.token
+    pub fn websocket_url(&self) -> String {
+        self.websocket_admission().url
     }
 
-    pub fn websocket_url(&self) -> String {
-        transport::local::websocket_url(self.port, &self.state.token)
+    pub fn websocket_admission(&self) -> transport::local::LocalWebSocketAdmission {
+        transport::local::websocket_admission(
+            self.port,
+            &self.state.token,
+            std::process::id(),
+            &self.state.machine.machine_id,
+            &self.state.machine.fingerprint(),
+        )
     }
 
     /// Stops accepting connections and tears down every child process.

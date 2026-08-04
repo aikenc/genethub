@@ -65,7 +65,7 @@ export function Pairing({
         <p className="text-xs text-muted">
           {status.online
             ? "远程可达：手机和其他浏览器现在能找到这台电脑。"
-            : "已配对，但当前连不上 Hub。本机和局域网仍然可用。"}
+            : "已配对，但当前连不上 Hub。同机 loopback 仍可用；跨设备需要 Relay。"}
         </p>
         {claim ? <Claim claim={claim} host={host} /> : null}
         <div className="flex flex-wrap gap-2">

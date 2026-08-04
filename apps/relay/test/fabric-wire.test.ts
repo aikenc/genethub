@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 /** Kept in lockstep with genethub-cloud's copy and digest test. */
-const AGREED_FABRIC_DIGEST = "83651c0a27065a2e9faaec896dc157725da7e6f19e9325eb047c0acb933f27ee";
+const AGREED_FABRIC_DIGEST = "8f4f8e127287e3feaf87ad0de0c25c6cbd5abf1e7fc691e071770ba556151d07";
 
 function normalize(source: string): string {
   return source

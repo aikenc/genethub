@@ -10,7 +10,29 @@ import {
 } from "../src/contract/fabric-wire.js";
 import { RemoteFabricAuthority } from "../src/forward/remote-fabric-authority.js";
 import { startRelay } from "../src/main.js";
+import {
+  AuthorityHttpError,
+  isDefinitiveAuthorityError,
+} from "../src/shared/authority-error.js";
 import { connect, FakeAuthority } from "./harness.js";
+
+async function within<T>(promise: Promise<T>, timeoutMs = 1_000): Promise<T> {
+  let timer!: NodeJS.Timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`test timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function wasAborted(signal: AbortSignal | null): boolean {
+  return signal?.aborted ?? false;
+}
 
 describe("the opaque Fabric authority contract", () => {
   const seen: Array<{ url: string; headers: Headers; body: unknown }> = [];
@@ -36,6 +58,7 @@ describe("the opaque Fabric authority contract", () => {
       revocationHandle: "opaque:revoke:1",
       expiresAt: null,
       connectionGeneration: 7,
+      presenceLeaseSeconds: 90,
     });
 
     const grant = await authority().authorizeEndpoint("one-shot-credential");
@@ -44,6 +67,7 @@ describe("the opaque Fabric authority contract", () => {
       revocationHandle: "opaque:revoke:1",
       expiresAt: null,
       connectionGeneration: 7,
+      presenceLeaseSeconds: 90,
     });
     const call = seen.at(-1)!;
     assert.equal(call.url, `http://control.test${FABRIC_AUTHORIZE_ENDPOINT}`);
@@ -87,6 +111,17 @@ describe("the opaque Fabric authority contract", () => {
     });
   });
 
+  it("treats a fenced Fabric generation as a definitive presence refusal", async () => {
+    reply = new Response(null, { status: 409 });
+    await assert.rejects(
+      authority().reportEndpointPresence("opaque:endpoint:stale", 6, "online"),
+      (error: unknown) =>
+        error instanceof AuthorityHttpError &&
+        error.status === 409 &&
+        isDefinitiveAuthorityError(error),
+    );
+  });
+
   it("fails closed on refusal and control-plane failure", async () => {
     reply = new Response(null, { status: 204 });
     assert.equal(await authority().authorizeEndpoint("expired"), null);
@@ -94,7 +129,56 @@ describe("the opaque Fabric authority contract", () => {
     const broken = new RemoteFabricAuthority("http://control.test", null, async () => {
       throw new Error("ECONNREFUSED");
     });
-    assert.equal(await broken.authorizeRoute("source", "route"), null);
+    await assert.rejects(broken.authorizeRoute("source", "route"), /ECONNREFUSED/);
+  });
+
+  it("aborts and fails closed when an authority POST exceeds its deadline", async () => {
+    let requestSignal: AbortSignal | null = null;
+    const remote = new RemoteFabricAuthority(
+      "http://control.test",
+      "tok",
+      async (_input, init) => {
+        requestSignal = init?.signal ?? null;
+        return await new Promise<Response>(() => {});
+      },
+      { requestTimeoutMs: 25 },
+    );
+
+    await assert.rejects(within(remote.authorizeRoute("source", "route")), /timed out/);
+    assert.equal(wasAborted(requestSignal), true);
+  });
+
+  it("keeps malformed, 5xx and oversized responses distinct from a 204 refusal", async () => {
+    reply = Response.json({ endpointHandle: 7 });
+    await assert.rejects(authority().authorizeEndpoint("malformed"), /invalid endpoint grant/);
+
+    reply = new Response(null, { status: 503 });
+    await assert.rejects(authority().authorizeEndpoint("unavailable"), /returned 503/);
+
+    reply = new Response("{}", {
+      status: 200,
+      headers: { "content-length": "9999999" },
+    });
+    await assert.rejects(authority().authorizeEndpoint("declared-oversized"), /byte limit/);
+
+    const oversized = new RemoteFabricAuthority(
+      "http://control.test",
+      null,
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(65));
+              controller.close();
+            },
+          }),
+        ),
+      { maxAuthorityResponseBytes: 64 },
+    );
+    await assert.rejects(
+      oversized.authorizeEndpoint("oversized"),
+      /byte limit/,
+    );
   });
 
   it("delivers endpoint and route revocations without interpreting their handles", () => {
@@ -107,6 +191,193 @@ describe("the opaque Fabric authority contract", () => {
       { target: "endpoint", handle: "opaque:e" },
       { target: "route", handle: "opaque:r" },
     ]);
+  });
+
+  it("fails closed when the revocation fetch never returns headers", async () => {
+    let requestSignal: AbortSignal | null = null;
+    const remote = new RemoteFabricAuthority(
+      "http://control.test",
+      "tok",
+      async (_input, init) => {
+        requestSignal = init?.signal ?? null;
+        return await new Promise<Response>(() => {});
+      },
+      { requestTimeoutMs: 25 },
+    );
+    let reconnects = 0;
+    let disconnected!: () => void;
+    const failedClosed = new Promise<void>((resolve) => {
+      disconnected = resolve;
+    });
+    const stop = remote.watchRevocations({
+      retryMs: 60_000,
+      onReconnect: () => {
+        reconnects += 1;
+      },
+      onDisconnect: disconnected,
+    });
+
+    try {
+      await within(failedClosed);
+      assert.equal(reconnects, 0);
+      assert.equal(wasAborted(requestSignal), true);
+    } finally {
+      stop();
+    }
+  });
+
+  it("fails closed when SSE headers arrive without an initial sync", async () => {
+    let requestSignal: AbortSignal | null = null;
+    const stream = new ReadableStream<Uint8Array>();
+    const remote = new RemoteFabricAuthority(
+      "http://control.test",
+      "tok",
+      async (_input, init) => {
+        requestSignal = init?.signal ?? null;
+        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      },
+      { firstEventTimeoutMs: 25 },
+    );
+    let reconnects = 0;
+    let disconnected!: () => void;
+    const failedClosed = new Promise<void>((resolve) => {
+      disconnected = resolve;
+    });
+    const stop = remote.watchRevocations({
+      retryMs: 60_000,
+      onReconnect: () => {
+        reconnects += 1;
+      },
+      onDisconnect: disconnected,
+    });
+
+    try {
+      await within(failedClosed);
+      assert.equal(reconnects, 0, "response headers alone must never make Fabric ready");
+      assert.equal(wasAborted(requestSignal), true);
+    } finally {
+      stop();
+    }
+  });
+
+  it("fails closed after a synchronized revocation stream becomes idle", async () => {
+    const encoder = new TextEncoder();
+    let requestSignal: AbortSignal | null = null;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('event: sync\ndata: {"revocations":[]}\n\n'));
+      },
+    });
+    const remote = new RemoteFabricAuthority(
+      "http://control.test",
+      "tok",
+      async (_input, init) => {
+        requestSignal = init?.signal ?? null;
+        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      },
+      { idleTimeoutMs: 25 },
+    );
+    let reconnects = 0;
+    let disconnected!: () => void;
+    const failedClosed = new Promise<void>((resolve) => {
+      disconnected = resolve;
+    });
+    const stop = remote.watchRevocations({
+      retryMs: 60_000,
+      onReconnect: () => {
+        reconnects += 1;
+      },
+      onDisconnect: disconnected,
+    });
+
+    try {
+      await within(failedClosed);
+      assert.equal(reconnects, 1);
+      assert.equal(wasAborted(requestSignal), true);
+    } finally {
+      stop();
+    }
+  });
+
+  it("aborts and fails closed on malformed post-sync event data", async () => {
+    const encoder = new TextEncoder();
+    let requestSignal: AbortSignal | null = null;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'event: sync\ndata: {"revocations":[]}\n\nevent: revoked\ndata: {broken-json}\n\n',
+          ),
+        );
+      },
+    });
+    const remote = new RemoteFabricAuthority(
+      "http://control.test",
+      "tok",
+      async (_input, init) => {
+        requestSignal = init?.signal ?? null;
+        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      },
+    );
+    let reconnects = 0;
+    let disconnected!: () => void;
+    const failedClosed = new Promise<void>((resolve) => {
+      disconnected = resolve;
+    });
+    const stop = remote.watchRevocations({
+      retryMs: 60_000,
+      onReconnect: () => {
+        reconnects += 1;
+      },
+      onDisconnect: disconnected,
+    });
+
+    try {
+      await within(failedClosed);
+      assert.equal(reconnects, 1);
+      assert.equal(wasAborted(requestSignal), true);
+    } finally {
+      stop();
+    }
+  });
+
+  it("aborts and fails closed when an unterminated SSE event exceeds the buffer limit", async () => {
+    const encoder = new TextEncoder();
+    let requestSignal: AbortSignal | null = null;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${"x".repeat(64)}`));
+      },
+    });
+    const remote = new RemoteFabricAuthority(
+      "http://control.test",
+      "tok",
+      async (_input, init) => {
+        requestSignal = init?.signal ?? null;
+        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      },
+      { maxRevocationBufferBytes: 32 },
+    );
+    let reconnects = 0;
+    let disconnected!: () => void;
+    const failedClosed = new Promise<void>((resolve) => {
+      disconnected = resolve;
+    });
+    const stop = remote.watchRevocations({
+      retryMs: 60_000,
+      onReconnect: () => {
+        reconnects += 1;
+      },
+      onDisconnect: disconnected,
+    });
+
+    try {
+      await within(failedClosed);
+      assert.equal(reconnects, 0);
+      assert.equal(wasAborted(requestSignal), true);
+    } finally {
+      stop();
+    }
   });
 
   it("installs the initial revocation sync before re-reporting presence", async () => {
@@ -168,6 +439,115 @@ describe("the opaque Fabric authority contract", () => {
     assert.deepEqual(order, ["revoked:opaque:revoked", "reconnected"]);
   });
 
+  it("waits for Fabric sync-complete after installing every bounded page", async () => {
+    const encoder = new TextEncoder();
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    const remote = new RemoteFabricAuthority("http://control.test", "tok", async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            stream = controller;
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const revoked: string[] = [];
+    let reconnects = 0;
+    remote.onFabricRevoked((event) => revoked.push(event.handle));
+    const stop = remote.watchRevocations({
+      retryMs: 60_000,
+      onReconnect: () => {
+        reconnects += 1;
+      },
+    });
+    try {
+      stream.enqueue(
+        encoder.encode(
+          'event: sync-page\ndata: {"revocations":[{"target":"route","handle":"r1"}]}\n\n',
+        ),
+      );
+      stream.enqueue(
+        encoder.encode(
+          'event: sync-page\ndata: {"revocations":[{"target":"endpoint","handle":"e1"}]}\n\n',
+        ),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.deepEqual(revoked, ["r1", "e1"]);
+      assert.equal(reconnects, 0);
+      stream.enqueue(encoder.encode("event: sync-complete\ndata: {}\n\n"));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(reconnects, 1);
+    } finally {
+      stop();
+    }
+  });
+
+  it("does not report a reconnect until the replacement stream completes a valid sync", async () => {
+    const encoder = new TextEncoder();
+    let fetches = 0;
+    let replacementController!: ReadableStreamDefaultController<Uint8Array>;
+    let replacementStarted!: () => void;
+    const replacementConnected = new Promise<void>((resolve) => {
+      replacementStarted = resolve;
+    });
+    const remote = new RemoteFabricAuthority(
+      "http://control.test",
+      "tok",
+      async () => {
+        fetches += 1;
+        if (fetches === 1) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(
+                  encoder.encode('event: sync\ndata: {"revocations":[]}\n\n'),
+                );
+                controller.close();
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          );
+        }
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              replacementController = controller;
+              replacementStarted();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+      { firstEventTimeoutMs: 1_000, idleTimeoutMs: 1_000 },
+    );
+    let reconnects = 0;
+    let replacementReady!: () => void;
+    const readyAgain = new Promise<void>((resolve) => {
+      replacementReady = resolve;
+    });
+    const stop = remote.watchRevocations({
+      retryMs: 1,
+      onReconnect: () => {
+        reconnects += 1;
+        if (reconnects === 2) replacementReady();
+      },
+    });
+
+    try {
+      await within(replacementConnected);
+      assert.equal(reconnects, 1, "response headers must not complete a reconnect");
+      replacementController.enqueue(encoder.encode("event: sync\n"));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(reconnects, 1, "a partial sync must not complete a reconnect");
+      replacementController.enqueue(encoder.encode('data: {"revocations":[]}\n\n'));
+      await within(readyAgain);
+      assert.equal(reconnects, 2);
+    } finally {
+      stop();
+    }
+  });
+
   it("reports remote Relay readiness only after the initial sync is complete", async () => {
     const encoder = new TextEncoder();
     let streamController!: ReadableStreamDefaultController<Uint8Array>;
@@ -223,8 +603,8 @@ describe("the opaque Fabric authority contract", () => {
       ).json()) as { fabric: { authorityReady: boolean } };
       assert.equal(healthAfter.fabric.authorityReady, true);
     } finally {
-      await relay.close();
       streamController.close();
+      await relay.close();
     }
   });
 

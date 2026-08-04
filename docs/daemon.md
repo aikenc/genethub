@@ -26,9 +26,8 @@ apps/daemon/src/
 ├── config.rs         配置与数据目录
 ├── transport/
 │   ├── local.rs      本地 HTTP + WebSocket（127.0.0.1，回环）
-│   ├── lan.rs        局域网直连（同网段客户端，免走公网）
 │   ├── uplink.rs     出站长连接到 Hub 转发层，供远端客户端接入
-│   └── auth.rs       客户端鉴权：本地 token / 配对凭证
+│   └── auth.rs       远程客户端的配对凭证校验
 ├── proto/            由 packages/proto 生成 + 手写辅助
 ├── session/
 │   ├── manager.rs    会话生命周期、订阅广播、断线重放
@@ -58,10 +57,9 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 | 通道 | 用途 | 优先级 |
 |------|------|--------|
 | `ws://127.0.0.1:<port>/ws` | 同机客户端（桌面壳内的 WebView） | ① 最优 |
-| 局域网直连 | 同网段的手机与另一台电脑 | ② |
-| 出站长连接到 Hub 转发层 | 公网访问；daemon 主动连出，不监听公网端口 | ③ 兜底 |
+| 出站长连接到 Hub/Relay | 另一台设备访问；daemon 主动连出，不监听非 loopback 端口 | ② |
 
-三条通道**说同一套消息**，差别只在鉴权与加密层。客户端按优先级依次尝试，对用户不可见。daemon 永远不在公网监听端口。
+两条通道**说同一套消息**，差别只在鉴权与加密层。客户端按优先级依次尝试，对用户不可见。daemon 永远不在公网或局域网监听特权协议。旧配置中的 `lanEnabled: true` 会让启动明确失败：当前没有 LAN TLS/mTLS，不能把可开 PTY 的机器级 bearer 放进明文 `ws://`。同 Wi-Fi 的访问也走 WSS Relay；只有 `127.0.0.1` 使用明文 WS。
 
 ### 3.2 消息形状
 
@@ -100,8 +98,8 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 
 | 端点 | 用途 |
 |------|------|
-| `GET /health` | 「有没有人在」。托管它的外壳靠这个判断 daemon 是死是活——进程活着但监听卡死，对用户来说是一回事 |
-| `POST /shutdown` | 请求它自己收干净退出。要 token，且**只接受 loopback**：开了局域网监听之后 token 会在内网里走，而「把那台机器关了」不该是一个借来的 token 能干的事 |
+| `GET /health?challenge=…` | 返回 pid、machine id、fingerprint 与 bearer 绑定的 HMAC；challenge 必填且受长度/字符限制。外壳/CLI 必须校验 proof，不能把旧端口上任意 200 服务当 daemon |
+| `POST /shutdown` | 请求它自己收干净退出。只接受 loopback，并校验与 health 分域的 challenge-HMAC；请求不发送长期 bearer |
 
 关停本该用信号，但 Windows 上没有能送达无窗口子进程的信号。少了这个端点，桌面壳在那里只能强杀——而被杀的 daemon 不会去收它派生的 agent 进程。
 
@@ -202,7 +200,7 @@ daemon 不发明一套目录权限系统。已知 Agent 默认以最高模式启
 
 | 面 | 做法 |
 |----|------|
-| 本地端口 | 只绑 `127.0.0.1`，带一次性 token；token 存在只有当前用户可读的文件里 |
+| 本地端口 | 只绑 `127.0.0.1`；长期密钥只在当前用户可读的 `endpoint.json`，客户端拿到的是绑定 pid/机器身份、15 秒有效且单次核销的 HMAC 准入 URL |
 | 远端接入 | 只走出站 relay 连接；**准入由本机的已授权设备列表判断**（§4.3），逐台可撤销 |
 | 工作目录 | 文件与 git 接口限制在已登记的工作区内，拒绝路径穿越 |
 | 命令执行 | 以当前用户权限运行，不内建沙箱；隔离由部署形态负责，见 [security-model.md](./security-model.md) |
@@ -219,17 +217,11 @@ daemon 只跟两个外部对象打交道，而且必须当成两件完全不同�
 
 理由与守则见 [architecture.md](./architecture.md) §6 与 [relay.md](./relay.md)。
 
-**第三个对象只在有人点了「检查更新」的那一刻存在。** `update.check` 去取一个固定地址上的 `latest.json`（默认是本仓库 releases 里那个不带版本号的文件名，所以地址不会变），比一比版本号就回来。没有定时器，启动时不查——产物是一句话、发布页地址（`url`）和本平台安装包地址（`downloadUrl`）。
+发布流程仍生成 `latest*.json` 与 `SHA256SUMS`，但它们只用于人工发现版本和检测下载损坏。清单、二进制与摘要来自同一个发布权限边界；发布主机或流水线若被攻破，攻击者可以一起替换三者，所以这不是独立签名根。
 
-**下载也是 daemon 干的，但仍然只在有人按了之后。** `update.download` 把安装包拉进 `<data>/updates/`，边下边把 `UpdateDownload` 推给每个连着的客户端（`ServerFrame::updateDownload`）。放在 daemon 而不是桌面壳，理由和检查那一半一样：Linux 上根本没有那个壳，而这样一来在手机上按下的下载也能在手机上看着它走完。要下的地址**不从线上来**——请求里没有这个字段，daemon 自己重新查一遍 manifest；一个能指定下载地址的客户端，就是一个能让别人的机器去取互联网上任意文件的客户端。写的时候先写 `.part` 再改名，所以一个下到一半的文件永远不会被当成装得了的安装包；上限一 GiB，免得一份出了岔子的发布把谁的硬盘填满。
+在引入可独立固定、公钥可审计的签名机制前，daemon 的 `update.check` 和 `update.download` 都以 `unsupported` 失败关闭；`update.status` 不返回 `downloadUrl`。旧版本留下的下载状态可以查看或清除，但不会形成新的可执行入口。用户应从固定的官方发布页手动下载，并通过独立可信渠道核对 `SHA256SUMS`。
 
-**装还是用户点。** 下完之后屏幕右下角出一个小框（`UpdateToast`），「立即安装」由桌面壳执行（`install_update`），而且只肯运行 `<data>/updates/` 里的文件——"去跑这个文件"是唯一一句绝不能照单全收的话。「稍后」只是不再问，文件留着：让人为读了一个提示而重下一百兆是种惩罚。装的时候 daemon 会被停掉，正在跑的会话跟着断（`installer.nsh`），所以什么时候付这个代价是用户的决定。壳按 `/UPDATE /P /R` 拉起安装包——覆盖装、进度条、装完自己开回来，中间没有卸载这一步（[desktop-client.md](./desktop-client.md) §6.4）。
-
-Linux 没有桌面壳，对应入口是 `genet update`。CLI 执行构建时内嵌的、按当前频道盖章的 `install.sh`，由脚本下载 tarball 并强制校验 `SHA256SUMS`；替换完成后脚本从安装目录调用新 `genet daemon restart`，所以成功返回意味着运行中的 daemon 也已经切到新版本。它同样只由人触发，不在后台自动升级。
-
-选文件而不是 GitHub API，是因为 API 按来源地址限 60 次/小时，而一间办公室共用一个出口地址。这个查询要么由人触发，要么不发生，所以它也不需要缓存。
-
-`config.json` 里的 `updateManifestUrl` 是这件事的开关：**留空就彻底不查**（客户端点了会被明确告知这台机器关掉了，而不是收到一句"已是最新"）；自建部署也可以指向自己的文件，不必去看别人的 releases。
+Linux 的 `genet update` 同样失败关闭。`scripts/install.sh` 只保留为用户明确执行的首次安装入口，下载基址和所有重定向均被限制为 HTTPS，并强制校验 `SHA256SUMS`；它不能被解释成安全的自动升级器。
 
 ---
 

@@ -19,6 +19,30 @@ pub fn lock_pid(paths: &Paths) -> Option<u32> {
         .ok()
 }
 
+/// Whether another process currently holds the daemon's kernel lock.
+///
+/// File contents are only diagnostics. Unlike a pid probe, the lock is
+/// released by the OS on crash and cannot become true again through pid reuse.
+pub fn instance_locked(paths: &Paths) -> std::io::Result<bool> {
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(paths.lock_file())
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&file);
+            Ok(false)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 /// Whether that pid belongs to a live process.
 #[cfg(unix)]
 pub fn pid_alive(pid: u32) -> bool {

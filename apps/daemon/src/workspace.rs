@@ -10,6 +10,8 @@ use tokio::sync::RwLock;
 
 use crate::config::{Config, WorkspaceEntry};
 
+const MAX_DIRECTORY_ENTRIES: usize = 2000;
+
 /// The only workspace metadata that may leave this machine for the Hub.
 /// Absolute roots and repository details intentionally have no field here.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -47,6 +49,7 @@ pub fn list_directory(requested: Option<&Path>) -> Result<DirectoryListing> {
 
     let mut directories = std::fs::read_dir(&path)
         .with_context(|| format!("could not read {}", path.display()))?
+        .take(MAX_DIRECTORY_ENTRIES)
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
             entry
@@ -304,9 +307,7 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         let config = Arc::new(RwLock::new(Config::default()));
         let config_path = dir.path().join("config.json");
-        // Config::save writes this path before rename. Making it a directory
-        // gives a deterministic write failure even when tests run as root.
-        std::fs::create_dir(config_path.with_extension("json.tmp")).unwrap();
+        crate::config::fail_next_private_save(&config_path);
         let spaces = Workspaces::new(config.clone(), config_path);
 
         assert!(spaces.open(&project, None).await.is_err());
@@ -324,7 +325,7 @@ mod tests {
         let config_path = dir.path().join("config.json");
         let spaces = Workspaces::new(config.clone(), config_path.clone());
         let opened = spaces.open(&project, None).await.unwrap();
-        std::fs::create_dir(config_path.with_extension("json.tmp")).unwrap();
+        crate::config::fail_next_private_save(&config_path);
 
         assert!(spaces.rename(&opened.id, "not-persisted").await.is_err());
         assert_eq!(spaces.get(&opened.id).await.unwrap().name, "project");

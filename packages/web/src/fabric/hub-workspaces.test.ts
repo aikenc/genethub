@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   FabricConnectionError,
   FabricStateError,
+  type FabricReconnectOptions,
   type FabricSocketCloseEvent,
   type FabricSocketLike,
 } from "./endpoint";
@@ -22,6 +23,7 @@ const text = (value: Uint8Array) => new TextDecoder().decode(value);
 class FakeSocket implements FabricSocketLike {
   binaryType = "blob";
   readyState = 0;
+  bufferedAmount = 0;
   onopen: ((event: unknown) => void) | null = null;
   onclose: ((event: FabricSocketCloseEvent) => void) | null = null;
   onerror: ((event: unknown) => void) | null = null;
@@ -54,6 +56,39 @@ class FakeSocket implements FabricSocketLike {
     // Adapter tests only need stale-epoch delivery; endpoint tests cover the
     // full inbound state machine.
     this.onmessage?.({ data: encodeFabricFrame(frame) });
+  }
+}
+
+class ManualReconnectTimer {
+  readonly delays: number[] = [];
+  private readonly pending: Array<{
+    handle: object;
+    callback: () => void;
+    cancelled: boolean;
+  }> = [];
+
+  readonly timer: NonNullable<FabricReconnectOptions["timer"]> = {
+    set: (callback, delayMs) => {
+      const task = { handle: {}, callback, cancelled: false };
+      this.delays.push(delayMs);
+      this.pending.push(task);
+      return task.handle;
+    },
+    clear: (handle) => {
+      const task = this.pending.find((candidate) => candidate.handle === handle);
+      if (task) task.cancelled = true;
+    },
+  };
+
+  get activeCount(): number {
+    return this.pending.filter((task) => !task.cancelled).length;
+  }
+
+  runNext(): void {
+    const task = this.pending.find((candidate) => !candidate.cancelled);
+    if (!task) throw new Error("no reconnect timer is pending");
+    task.cancelled = true;
+    task.callback();
   }
 }
 
@@ -106,12 +141,14 @@ function client(
   fetch: typeof globalThis.fetch,
   ids: string[],
   baseUrl?: string,
+  reconnect?: FabricReconnectOptions | false,
 ): { fabric: HubWorkspaceFabric; sockets: FakeSocket[]; urls: string[] } {
   const sockets: FakeSocket[] = [];
   const urls: string[] = [];
   const fabric = new HubWorkspaceFabric({
     fetch,
     ...(baseUrl ? { baseUrl } : {}),
+    ...(reconnect === undefined ? {} : { reconnect }),
     streamId: () => {
       const next = ids.shift();
       if (!next) throw new Error("test ran out of ids");
@@ -149,6 +186,26 @@ function frames(socket: FakeSocket) {
 }
 
 describe("the resource-first Hub workspace Fabric adapter", () => {
+  it("aborts a hung endpoint issue at the total HTTP deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const signals: AbortSignal[] = [];
+      const fetch = vi.fn((_input: RequestInfo | URL, init: RequestInit = {}) => {
+        signals.push(init.signal as AbortSignal);
+        return new Promise<Response>(() => {});
+      }) as unknown as typeof globalThis.fetch;
+      const fabric = new HubWorkspaceFabric({ fetch, requestTimeoutMs: 25 });
+      const connecting = fabric.connect();
+      const rejected = expect(connecting).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(25);
+      await rejected;
+      expect(signals[0]?.aborted).toBe(true);
+      fabric.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("lists logical workspaces and opens two of them over one endpoint socket", async () => {
     const hub = api(({ path, body }) => {
       if (path === "/app/workspaces") {
@@ -261,7 +318,8 @@ describe("the resource-first Hub workspace Fabric adapter", () => {
     stack.fabric.close();
   });
 
-  it("fails old streams on disconnect and renews admission only on explicit connect", async () => {
+  it("fails old streams and automatically renews one admission without replay", async () => {
+    const timers = new ManualReconnectTimer();
     let endpointIssue = 0;
     const hub = api(({ path, body }) => {
       if (path === "/app/fabric/endpoints") {
@@ -274,7 +332,12 @@ describe("the resource-first Hub workspace Fabric adapter", () => {
       }
       return json({ workspaces: [] });
     });
-    const stack = client(hub.fetch, [id(11), id(12)]);
+    const stack = client(hub.fetch, [id(11), id(12)], undefined, {
+      initialDelayMs: 25,
+      maxDelayMs: 25,
+      jitterRatio: 0,
+      timer: timers.timer,
+    });
     const oldSocket = await establish(stack.fabric, stack.sockets);
     const old = await stack.fabric.openWorkspace("ws_old");
     const oldDone = old.stream.done;
@@ -285,6 +348,7 @@ describe("the resource-first Hub workspace Fabric adapter", () => {
     if (outcome.type !== "connectionClosed") throw new Error("expected disconnect");
     expect(outcome.error).toBeInstanceOf(FabricConnectionError);
     expect(stack.fabric.connectionState).toBe("closed");
+    expect(timers.delays).toEqual([25]);
 
     const before = hub.calls.length;
     await expect(stack.fabric.openWorkspace("ws_no_implicit_retry")).rejects.toBeInstanceOf(
@@ -293,7 +357,11 @@ describe("the resource-first Hub workspace Fabric adapter", () => {
     expect(hub.calls).toHaveLength(before);
     expect(stack.sockets).toHaveLength(1);
 
-    const freshSocket = await establish(stack.fabric, stack.sockets, 1);
+    timers.runNext();
+    await vi.waitFor(() => expect(stack.sockets).toHaveLength(2));
+    const freshSocket = stack.sockets[1]!;
+    freshSocket.open();
+    await vi.waitFor(() => expect(stack.fabric.connectionState).toBe("open"));
     expect(hub.calls.filter((call) => call.path === "/app/fabric/endpoints").map((call) => call.body)).toEqual([
       {},
       { endpointId: "fep_stable" },
@@ -317,6 +385,31 @@ describe("the resource-first Hub workspace Fabric adapter", () => {
     expect(freshSocket.sent).toHaveLength(1);
     stack.fabric.close();
   });
+
+  it.each([4403, 4408] as const)(
+    "does not ask the Hub for another admission after terminal close %i",
+    async (code) => {
+      const timers = new ManualReconnectTimer();
+      let endpointIssue = 0;
+      const hub = api(({ path }) => {
+        if (path === "/app/fabric/endpoints") {
+          endpointIssue += 1;
+          return json(admission("fep_terminal", `admit-${endpointIssue}`));
+        }
+        return json({ workspaces: [] });
+      });
+      const stack = client(hub.fetch, [], undefined, { timer: timers.timer });
+      const socket = await establish(stack.fabric, stack.sockets);
+
+      socket.peerClose(code, code === 4403 ? "revoked" : "expired");
+      expect(stack.fabric.connectionState).toBe("closed");
+      expect(timers.activeCount).toBe(0);
+      await expect(stack.fabric.connect()).rejects.toMatchObject({ code });
+      expect(endpointIssue).toBe(1);
+      expect(stack.sockets).toHaveLength(1);
+      stack.fabric.close();
+    },
+  );
 
   it("abandons an expired one-shot route without sending OPEN", async () => {
     const hub = api(({ path }) => {
@@ -359,6 +452,7 @@ describe("the resource-first Hub workspace Fabric adapter", () => {
   });
 
   it("refuses a resumed admission that silently changes endpoint identity", async () => {
+    const timers = new ManualReconnectTimer();
     let attempt = 0;
     const hub = api(({ path }) => {
       if (path !== "/app/fabric/endpoints") return json({ workspaces: [] });
@@ -369,11 +463,17 @@ describe("the resource-first Hub workspace Fabric adapter", () => {
           : admission("fep_different", "second"),
       );
     });
-    const stack = client(hub.fetch, []);
+    const stack = client(hub.fetch, [], undefined, {
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      jitterRatio: 0,
+      timer: timers.timer,
+    });
     const socket = await establish(stack.fabric, stack.sockets);
     socket.peerClose();
 
     const resumed = stack.fabric.connect();
+    timers.runNext();
     await expect(resumed).rejects.toBeInstanceOf(HubFabricApiError);
     await expect(resumed).rejects.toMatchObject({
       code: "fabric_endpoint_identity_changed",

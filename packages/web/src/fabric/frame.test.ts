@@ -6,6 +6,7 @@ import {
   encodeFabricFrame,
   encodeFabricOpenPayload,
   FABRIC_HEADER_BYTES,
+  FABRIC_MAX_OPERATION_METADATA_BYTES,
   FABRIC_MAX_ROUTE_TICKET_BYTES,
   FABRIC_ZERO_STREAM_ID,
   FabricKind,
@@ -127,6 +128,25 @@ describe("the browser Fabric v2 frame codec", () => {
 
     expect(streamId).toBe("00000000000000000000000000000009");
     expect(attempt).toBe(2);
+  });
+
+  it("bounds opaque OPEN metadata while accepting the exact boundary", () => {
+    const boundary = encodeFabricOpenPayload(
+      "ticket",
+      new Uint8Array(FABRIC_MAX_OPERATION_METADATA_BYTES),
+    );
+    expect(decodeFabricOpenPayload(boundary)?.opaqueHello.byteLength).toBe(
+      FABRIC_MAX_OPERATION_METADATA_BYTES,
+    );
+    expect(() =>
+      encodeFabricOpenPayload(
+        "ticket",
+        new Uint8Array(FABRIC_MAX_OPERATION_METADATA_BYTES + 1),
+      ),
+    ).toThrow(/operation metadata/);
+    const oversized = new Uint8Array(boundary.byteLength + 1);
+    oversized.set(boundary);
+    expect(decodeFabricOpenPayload(oversized)).toBeNull();
   });
 
   it("refuses a random source that can only produce the reserved zero id", () => {

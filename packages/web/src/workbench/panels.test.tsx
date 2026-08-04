@@ -556,13 +556,7 @@ describe("the version section", () => {
     expect(calls.some((call) => call.type === "update.check")).toBe(false);
   });
 
-  /**
-   * The machine downloads, not the shell. What this asserts is the division:
-   * the button asks the daemon, and the address it fetches never travels from
-   * here — a client that could name the file to download could point somebody
-   * else's machine at anything on the internet.
-   */
-  it("has the machine fetch the installer, and says what installing costs", async () => {
+  it("ignores executable URLs from an old daemon and offers only the fixed manual page", async () => {
     const opened: string[] = [];
     const { calls } = connected({
       "update.check": () => ({
@@ -575,35 +569,19 @@ describe("the version section", () => {
           downloadUrl: "https://example.test/GeneHub-setup.exe",
         },
       }),
-      "update.download": () => ({
-        type: "updateDownload",
-        data: { state: "fetching", version: "0.1.18", received: 0 },
-      }),
     });
 
     render(<SettingsPanel host={desktopish("0.1.17", opened)} />);
     await userEvent.click(await screen.findByTestId("check-update"));
 
     expect(await screen.findByText(/有新版本 0\.1\.18/)).toBeTruthy();
-    expect(screen.getByText(/会被打断/)).toBeTruthy();
-
-    await userEvent.click(screen.getByTestId("download-update"));
-    await waitFor(() =>
-      expect(calls.some((call) => call.type === "update.download")).toBe(true),
-    );
-    expect(calls.find((call) => call.type === "update.download")).toEqual({
-      type: "update.download",
-    });
-    // Nothing was handed to the browser: the file is arriving on the machine.
+    expect(screen.getByTestId("manual-update-note")).toHaveTextContent("自动下载和安装暂未启用");
+    expect(screen.queryByTestId("download-update")).toBeNull();
+    expect(calls.some((call) => call.type === "update.download")).toBe(false);
     expect(opened).toEqual([]);
 
-    // And the button stops offering a second download of the same thing.
-    await waitFor(() =>
-      expect(screen.getByTestId("download-update")).toHaveTextContent("已在下载"),
-    );
-
-    await userEvent.click(screen.getByTestId("open-release"));
-    expect(opened).toEqual(["https://example.test/releases/tag/v0.1.18"]);
+    await userEvent.click(screen.getByTestId("manual-update-link"));
+    expect(opened).toEqual(["https://github.com/aikenc/genethub/releases"]);
   });
 
   /// The one answer worth refusing to give: reaching nothing is not the same
@@ -743,13 +721,14 @@ describe("the version section", () => {
     );
     await userEvent.click(await screen.findByTestId("check-update"));
 
-    expect(await screen.findByText("客户端 App 有新版本 0.1.18。")).toBeTruthy();
+    expect(await screen.findByText(/客户端 App 有新版本 0\.1\.18/)).toBeTruthy();
     expect(screen.getByText("daemon 已经是最新的了。")).toBeTruthy();
     expect(screen.getByTestId("remote-version-note")).toHaveTextContent("分别更新");
     expect(screen.queryByText(/只装了一半/)).toBeNull();
 
-    await userEvent.click(screen.getByTestId("download-app-update"));
-    expect(opened).toEqual(["https://example.test/GeneHub-setup.exe"]);
+    expect(screen.queryByTestId("download-app-update")).toBeNull();
+    await userEvent.click(screen.getByTestId("manual-update-link"));
+    expect(opened).toEqual(["https://github.com/aikenc/genethub/releases"]);
   });
 
   /// A browser is not a build of anything, so there is no second number to print.

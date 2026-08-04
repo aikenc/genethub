@@ -1763,6 +1763,8 @@ async fn a_client_speaking_another_protocol_version_is_turned_away() {
             client_name: "from the future".into(),
             protocol_version: 999,
             device: None,
+            channel: None,
+            invite: None,
         })
         .await;
     assert!(error.contains("ProtocolVersion"), "got: {error}");

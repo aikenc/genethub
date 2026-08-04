@@ -7,7 +7,9 @@ import {
   decodeFabricOpenPayload,
   FabricKind,
   type FabricFrame,
+  FABRIC_MAX_STREAM_CREDIT,
   FabricReset,
+  MAX_OPERATION_METADATA_BYTES,
   newFabricStreamId,
   ZERO_STREAM_ID,
 } from "./fabric-frame.js";
@@ -36,6 +38,8 @@ export interface FabricStreamLeg {
   binding: FabricPeerBinding;
   sentFin: boolean;
   lastDataSeq: bigint;
+  sendCredit: bigint;
+  sendWindow: bigint;
 }
 
 export interface FabricPeerBinding {
@@ -55,6 +59,15 @@ export interface FabricCoreOptions {
   revocationTombstoneMs?: number;
   maxRevocationTombstones?: number;
   maxConnectionGenerations?: number;
+  maxPendingPerEndpoint?: number;
+  maxPendingGlobal?: number;
+  maxStreamsPerEndpoint?: number;
+  maxStreamsGlobal?: number;
+}
+
+interface RevocationFence {
+  expiresAt: number;
+  sequence: number;
 }
 
 /**
@@ -82,8 +95,11 @@ export class FabricCore {
     { generation: number; expiresAt: number | null }
   >();
   private readonly routes = new Map<string, FabricPeerBinding>();
-  private readonly revokedEndpoints = new Map<string, number>();
-  private readonly revokedRoutes = new Map<string, number>();
+  private readonly revokedEndpoints = new Map<string, RevocationFence>();
+  private readonly revokedRoutes = new Map<string, RevocationFence>();
+  private revocationSequence = 0;
+  /** Highest forgotten event; older in-flight grants fail closed. */
+  private revocationFloor = 0;
   private readonly now: () => number;
   private readonly nextStreamId: () => string;
   private readonly maxStrikes: number;
@@ -92,6 +108,11 @@ export class FabricCore {
   private readonly revocationTombstoneMs: number;
   private readonly maxRevocationTombstones: number;
   private readonly maxConnectionGenerations: number;
+  private readonly maxPendingPerEndpoint: number;
+  private readonly maxPendingGlobal: number;
+  private readonly maxStreamsPerEndpoint: number;
+  private readonly maxStreamsGlobal: number;
+  private pendingCount = 0;
 
   constructor(
     private readonly authority: FabricAuthority,
@@ -105,12 +126,29 @@ export class FabricCore {
     this.revocationTombstoneMs = options.revocationTombstoneMs ?? 5 * 60_000;
     this.maxRevocationTombstones = options.maxRevocationTombstones ?? 4_096;
     this.maxConnectionGenerations = options.maxConnectionGenerations ?? 100_000;
+    this.maxPendingPerEndpoint = options.maxPendingPerEndpoint ?? 32;
+    this.maxPendingGlobal = options.maxPendingGlobal ?? 1024;
+    this.maxStreamsPerEndpoint = options.maxStreamsPerEndpoint ?? 256;
+    this.maxStreamsGlobal = options.maxStreamsGlobal ?? 100_000;
   }
 
-  register(connection: FabricEndpointConnection): FabricEndpointConnection | null {
+  revocationCheckpoint(): number {
+    return this.revocationSequence;
+  }
+
+  register(
+    connection: FabricEndpointConnection,
+    revocationCheckpoint = this.revocationSequence,
+  ): FabricEndpointConnection | null {
     this.pruneRevocations();
     this.pruneConnectionGenerations();
-    if (this.revokedEndpoints.has(connection.context.revocationHandle)) {
+    if (
+      this.wasRevokedSince(
+        this.revokedEndpoints,
+        connection.context.revocationHandle,
+        revocationCheckpoint,
+      )
+    ) {
       connection.closed = true;
       connection.close(4403);
       return null;
@@ -152,7 +190,9 @@ export class FabricCore {
     if (this.endpoints.get(connection.context.endpointHandle) === connection) {
       this.endpoints.delete(connection.context.endpointHandle);
     }
+    this.pendingCount = Math.max(0, this.pendingCount - connection.pending.size);
     connection.pending.clear();
+    connection.tombstones.clear();
 
     const bindings = new Set([...connection.streams.values()].map((leg) => leg.binding));
     for (const binding of bindings) {
@@ -167,7 +207,27 @@ export class FabricCore {
 
   async handle(connection: FabricEndpointConnection, frame: FabricFrame): Promise<void> {
     if (!this.isCurrent(connection)) return;
+    if (this.expireEndpoint(connection)) return;
     this.pruneTombstones(connection);
+
+    const existing = connection.streams.get(frame.streamId);
+    if (existing && existing.binding.expiresAt <= this.now()) {
+      this.closeBinding(existing.binding, FabricReset.Expired);
+      return;
+    }
+
+    // Any frame that races an OPEN authorization for the same local id
+    // cancels that reservation. In particular RESET must not be followed by a
+    // delayed grant resurrecting a stream the endpoint already abandoned.
+    if (frame.kind !== FabricKind.Open && connection.pending.has(frame.streamId)) {
+      this.cancelPending(connection, frame.streamId);
+      if (frame.kind === FabricKind.Reset) {
+        this.remember(connection, frame.streamId);
+      } else {
+        this.reject(connection, frame.streamId, FabricReset.ProtocolViolation);
+      }
+      return;
+    }
 
     switch (frame.kind) {
       case FabricKind.Open:
@@ -189,6 +249,10 @@ export class FabricCore {
         this.reset(connection, frame);
         return;
       case FabricKind.Ping:
+        if (frame.payload.length !== 0) {
+          this.strike(connection);
+          return;
+        }
         connection.send({
           kind: FabricKind.Pong,
           streamId: ZERO_STREAM_ID,
@@ -197,6 +261,7 @@ export class FabricCore {
         });
         return;
       case FabricKind.Pong:
+        if (frame.payload.length !== 0) this.strike(connection);
         return;
       case FabricKind.Incoming:
         this.unknownOrViolation(connection, frame.streamId);
@@ -223,6 +288,7 @@ export class FabricCore {
     this.pruneRevocations();
     const now = this.now();
     for (const connection of [...this.endpoints.values()]) {
+      this.pruneTombstones(connection);
       const expiry = parseExpiry(connection.context.expiresAt);
       if (expiry !== null && expiry <= now) {
         this.unregister(connection, FabricReset.Expired);
@@ -236,12 +302,10 @@ export class FabricCore {
   }
 
   stats(): { endpoints: number; streams: number; pendingOpens: number } {
-    let pendingOpens = 0;
-    for (const endpoint of this.endpoints.values()) pendingOpens += endpoint.pending.size;
     return {
       endpoints: this.endpoints.size,
       streams: this.routes.size,
-      pendingOpens,
+      pendingOpens: this.pendingCount,
     };
   }
 
@@ -261,23 +325,50 @@ export class FabricCore {
         // authorization already in flight. Leaving the reservation in place
         // would let the first asynchronous result create a binding after we
         // had told the endpoint that the id was rejected.
-        source.pending.delete(frame.streamId);
+        this.cancelPending(source, frame.streamId);
         this.reject(source, frame.streamId, FabricReset.DuplicateStream);
       }
       return;
     }
 
     const opening = decodeFabricOpenPayload(frame.payload);
-    if (!opening || frame.value !== 0n) {
+    if (!opening || !validInitialCredit(frame.value)) {
       this.reject(source, frame.streamId, FabricReset.MalformedOpen);
       return;
     }
 
+    if (
+      source.pending.size >= this.maxPendingPerEndpoint ||
+      this.pendingCount >= this.maxPendingGlobal ||
+      source.streams.size >= this.maxStreamsPerEndpoint ||
+      this.routes.size >= this.maxStreamsGlobal
+    ) {
+      this.reject(source, frame.streamId, FabricReset.TooSlow);
+      return;
+    }
+
     const reservation = Symbol(frame.streamId);
+    const revocationCheckpoint = this.revocationSequence;
     source.pending.set(frame.streamId, reservation);
-    const grant = await this.authority
-      .authorizeRoute(source.context.endpointHandle, opening.routeTicket)
-      .catch(() => null);
+    this.pendingCount += 1;
+    let grant;
+    try {
+      grant = await this.authority.authorizeRoute(
+        source.context.endpointHandle,
+        opening.routeTicket,
+      );
+    } catch {
+      if (
+        this.isCurrent(source) &&
+        source.pending.get(frame.streamId) === reservation
+      ) {
+        this.cancelPending(source, frame.streamId);
+        // Control unavailability is transient, unlike an authoritative null.
+        // TooSlow is the existing retryable stream-local reset reason.
+        this.reject(source, frame.streamId, FabricReset.TooSlow, false);
+      }
+      return;
+    }
 
     if (
       !this.isCurrent(source) ||
@@ -285,14 +376,21 @@ export class FabricCore {
     ) {
       return;
     }
-    source.pending.delete(frame.streamId);
+    if (this.expireEndpoint(source)) return;
+    this.cancelPending(source, frame.streamId);
 
     if (!grant) {
       this.reject(source, frame.streamId, FabricReset.RouteDenied, false);
       return;
     }
     this.pruneRevocations();
-    if (this.revokedRoutes.has(grant.routeHandle)) {
+    if (
+      this.wasRevokedSince(
+        this.revokedRoutes,
+        grant.routeHandle,
+        revocationCheckpoint,
+      )
+    ) {
       this.reject(source, frame.streamId, FabricReset.Revoked, false);
       return;
     }
@@ -307,8 +405,12 @@ export class FabricCore {
     }
 
     const target = this.endpoints.get(grant.targetEndpointHandle);
-    if (!target || target.closed) {
+    if (!target || target.closed || this.expireEndpoint(target)) {
       this.reject(source, frame.streamId, FabricReset.TargetOffline, false);
+      return;
+    }
+    if (target.streams.size >= this.maxStreamsPerEndpoint) {
+      this.reject(source, frame.streamId, FabricReset.TooSlow, false);
       return;
     }
     const targetStreamId = this.allocateStreamId(target);
@@ -324,6 +426,8 @@ export class FabricCore {
       binding,
       sentFin: false,
       lastDataSeq: 0n,
+      sendCredit: 0n,
+      sendWindow: 0n,
     };
     const responder: FabricStreamLeg = {
       connection: target,
@@ -331,6 +435,8 @@ export class FabricCore {
       binding,
       sentFin: false,
       lastDataSeq: 0n,
+      sendCredit: frame.value,
+      sendWindow: frame.value,
     };
     Object.assign(binding, {
       initiator,
@@ -349,7 +455,7 @@ export class FabricCore {
     target.send({
       kind: FabricKind.Incoming,
       streamId: targetStreamId,
-      value: 0n,
+      value: frame.value,
       payload: opening.opaqueHello,
     });
   }
@@ -361,7 +467,8 @@ export class FabricCore {
     if (
       binding.phase !== "opening" ||
       leg !== binding.responder ||
-      frame.value !== 0n
+      !validInitialCredit(frame.value) ||
+      frame.payload.length > MAX_OPERATION_METADATA_BYTES
     ) {
       this.closeBinding(binding, FabricReset.ProtocolViolation);
       this.strike(connection);
@@ -369,10 +476,12 @@ export class FabricCore {
     }
     binding.phase = "active";
     const peer = binding.initiator;
+    peer.sendCredit = frame.value;
+    peer.sendWindow = frame.value;
     peer.connection.send({
       kind: FabricKind.Accept,
       streamId: peer.localStreamId,
-      value: 0n,
+      value: frame.value,
       payload: frame.payload,
     });
   }
@@ -380,15 +489,19 @@ export class FabricCore {
   private data(connection: FabricEndpointConnection, frame: FabricFrame): void {
     const leg = connection.streams.get(frame.streamId);
     if (!leg) return this.unknownOrViolation(connection, frame.streamId);
+    const cost = BigInt(frame.payload.length);
     if (
       leg.binding.phase !== "active" ||
       leg.sentFin ||
-      frame.value !== leg.lastDataSeq + 1n
+      frame.value !== leg.lastDataSeq + 1n ||
+      cost <= 0n ||
+      cost > leg.sendCredit
     ) {
       this.closeBinding(leg.binding, FabricReset.ProtocolViolation);
       this.strike(connection);
       return;
     }
+    leg.sendCredit -= cost;
     leg.lastDataSeq = frame.value;
     this.forward(leg, frame);
   }
@@ -399,11 +512,18 @@ export class FabricCore {
   ): void {
     const leg = connection.streams.get(frame.streamId);
     if (!leg) return this.unknownOrViolation(connection, frame.streamId);
-    if (leg.binding.phase !== "active" || frame.value === 0n || frame.payload.length !== 0) {
+    const peer = this.peerOf(leg);
+    if (
+      leg.binding.phase !== "active" ||
+      frame.value === 0n ||
+      frame.payload.length !== 0 ||
+      peer.sendCredit + frame.value > peer.sendWindow
+    ) {
       this.closeBinding(leg.binding, FabricReset.ProtocolViolation);
       this.strike(connection);
       return;
     }
+    peer.sendCredit += frame.value;
     this.forward(leg, frame);
   }
 
@@ -429,6 +549,11 @@ export class FabricCore {
   private reset(connection: FabricEndpointConnection, frame: FabricFrame): void {
     const leg = connection.streams.get(frame.streamId);
     if (!leg) return;
+    if (frame.value === 0n || frame.payload.length !== 0) {
+      this.closeBinding(leg.binding, FabricReset.ProtocolViolation);
+      this.strike(connection);
+      return;
+    }
     const peer = this.peerOf(leg);
     peer.connection.send({
       kind: FabricKind.Reset,
@@ -518,6 +643,11 @@ export class FabricCore {
     connection.close(4400);
   }
 
+  private cancelPending(connection: FabricEndpointConnection, streamId: string): void {
+    if (!connection.pending.delete(streamId)) return;
+    this.pendingCount = Math.max(0, this.pendingCount - 1);
+  }
+
   private allocateStreamId(connection: FabricEndpointConnection): string | null {
     this.pruneTombstones(connection);
     for (let attempt = 0; attempt < 32; attempt += 1) {
@@ -551,25 +681,45 @@ export class FabricCore {
     }
   }
 
-  private rememberRevocation(table: Map<string, number>, handle: string): void {
+  private rememberRevocation(
+    table: Map<string, RevocationFence>,
+    handle: string,
+  ): void {
     // Delete first so refreshing an existing handle also refreshes its
     // insertion order for bounded eviction.
     table.delete(handle);
-    table.set(handle, this.now() + this.revocationTombstoneMs);
+    table.set(handle, {
+      expiresAt: this.now() + this.revocationTombstoneMs,
+      sequence: ++this.revocationSequence,
+    });
     while (table.size > this.maxRevocationTombstones) {
-      const oldest = table.keys().next().value as string | undefined;
+      const oldest = table.entries().next().value as
+        | [string, RevocationFence]
+        | undefined;
       if (!oldest) break;
-      table.delete(oldest);
+      table.delete(oldest[0]);
+      this.revocationFloor = Math.max(this.revocationFloor, oldest[1].sequence);
     }
   }
 
   private pruneRevocations(): void {
     const now = this.now();
     for (const table of [this.revokedEndpoints, this.revokedRoutes]) {
-      for (const [handle, expiresAt] of table) {
-        if (expiresAt <= now) table.delete(handle);
+      for (const [handle, fence] of table) {
+        if (fence.expiresAt <= now) {
+          table.delete(handle);
+          this.revocationFloor = Math.max(this.revocationFloor, fence.sequence);
+        }
       }
     }
+  }
+
+  private wasRevokedSince(
+    table: Map<string, RevocationFence>,
+    handle: string,
+    checkpoint: number,
+  ): boolean {
+    return table.has(handle) || checkpoint < this.revocationFloor;
   }
 
   private pruneConnectionGenerations(): void {
@@ -585,6 +735,14 @@ export class FabricCore {
     }
   }
 
+  private expireEndpoint(connection: FabricEndpointConnection): boolean {
+    const expiry = parseExpiry(connection.context.expiresAt);
+    if (expiry === null || expiry > this.now()) return false;
+    this.unregister(connection, FabricReset.Expired);
+    connection.close(4408);
+    return true;
+  }
+
   private isCurrent(connection: FabricEndpointConnection): boolean {
     return (
       !connection.closed &&
@@ -597,4 +755,8 @@ function parseExpiry(value: string | null): number | null {
   if (value === null) return null;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function validInitialCredit(value: bigint): boolean {
+  return value > 0n && value <= BigInt(FABRIC_MAX_STREAM_CREDIT);
 }

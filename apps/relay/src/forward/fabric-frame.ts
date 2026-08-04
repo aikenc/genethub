@@ -5,6 +5,16 @@ export const FABRIC_STREAM_ID_BYTES = 16;
 export const FABRIC_HEADER_BYTES = 1 + 1 + 2 + FABRIC_STREAM_ID_BYTES + 8;
 export const ZERO_STREAM_ID = "0".repeat(FABRIC_STREAM_ID_BYTES * 2);
 export const MAX_ROUTE_TICKET_BYTES = 4096;
+/**
+ * OPEN metadata is retained while Control authorizes a route, so it needs a
+ * much smaller limit than an active DATA frame. This keeps the global pending
+ * OPEN budget from becoming a multi-gigabyte memory reservation.
+ */
+export const MAX_OPERATION_METADATA_BYTES = 16 * 1024;
+/** Default receive window advertised independently by each stream endpoint. */
+export const FABRIC_INITIAL_STREAM_CREDIT = 256 * 1024;
+/** Hard protocol cap for an advertised per-stream receive window. */
+export const FABRIC_MAX_STREAM_CREDIT = 4 * 1024 * 1024;
 
 export const FabricKind = {
   Open: 1,
@@ -119,6 +129,11 @@ export function encodeFabricOpenPayload(routeTicket: string, opaqueHello: Buffer
   if (ticket.length === 0 || ticket.length > MAX_ROUTE_TICKET_BYTES) {
     throw new Error(`Fabric route ticket must be 1..${MAX_ROUTE_TICKET_BYTES} bytes`);
   }
+  if (opaqueHello.length > MAX_OPERATION_METADATA_BYTES) {
+    throw new Error(
+      `Fabric operation metadata must be at most ${MAX_OPERATION_METADATA_BYTES} bytes`,
+    );
+  }
   const out = Buffer.allocUnsafe(2 + ticket.length + opaqueHello.length);
   out.writeUInt16BE(ticket.length, 0);
   ticket.copy(out, 2);
@@ -132,7 +147,8 @@ export function decodeFabricOpenPayload(payload: Buffer): FabricOpenPayload | nu
   if (
     ticketLength === 0 ||
     ticketLength > MAX_ROUTE_TICKET_BYTES ||
-    2 + ticketLength > payload.length
+    2 + ticketLength > payload.length ||
+    payload.length - 2 - ticketLength > MAX_OPERATION_METADATA_BYTES
   ) {
     return null;
   }

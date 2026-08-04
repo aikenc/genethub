@@ -261,7 +261,6 @@ async fn exit_code(child: &Mutex<Option<tokio::process::Child>>) -> Option<i32> 
 pub fn without_a_window(command: &mut tokio::process::Command) {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }

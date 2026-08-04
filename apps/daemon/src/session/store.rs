@@ -89,13 +89,8 @@ impl Store {
     }
 
     pub fn save_meta(&self, meta: &SessionMeta) -> Result<()> {
-        let dir = self.dir(&meta.workspace_id);
-        fs::create_dir_all(&dir)?;
         let path = self.meta_path(&meta.workspace_id, &meta.id);
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(meta)?)?;
-        fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::config::save_private(&path, serde_json::to_string_pretty(meta)?.as_bytes())
     }
 
     pub fn load_meta(&self, workspace_id: &str, session_id: &str) -> Result<SessionMeta> {
@@ -120,6 +115,7 @@ impl Store {
         fs::create_dir_all(&dir)?;
         let path = self.timeline_path(workspace_id, session_id);
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        crate::config::restrict_to_owner(&path)?;
         for item in items {
             writeln!(file, "{}", serde_json::to_string(item)?)?;
         }
@@ -138,18 +134,12 @@ impl Store {
         session_id: &str,
         items: &[TimelineItem],
     ) -> Result<()> {
-        let dir = self.dir(workspace_id);
-        fs::create_dir_all(&dir)?;
         let path = self.timeline_path(workspace_id, session_id);
-        let tmp = path.with_extension("jsonl.tmp");
-        let mut file = File::create(&tmp)?;
+        let mut body = Vec::new();
         for item in items {
-            writeln!(file, "{}", serde_json::to_string(item)?)?;
+            writeln!(body, "{}", serde_json::to_string(item)?)?;
         }
-        file.flush()?;
-        file.sync_all()?;
-        fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::config::save_private(&path, &body)
     }
 
     /// Reads the timeline back, skipping lines we cannot parse.
@@ -383,6 +373,15 @@ mod tests {
         assert_eq!(store.load_items("w1", "s1").unwrap(), vec![overview]);
         let raw = fs::read_to_string(dir.path().join("w1/s1.jsonl")).unwrap();
         assert!(!raw.contains("kind\":\"shell"));
+
+        let final_item = TimelineItem::AssistantMessage {
+            id: "final".into(),
+            text: "second replacement".into(),
+        };
+        store
+            .replace_items("w1", "s1", std::slice::from_ref(&final_item))
+            .unwrap();
+        assert_eq!(store.load_items("w1", "s1").unwrap(), vec![final_item]);
     }
 
     /// A truncated tail is the normal outcome of a power cut on an append-only
@@ -435,6 +434,13 @@ mod tests {
         assert_eq!(
             store.load_meta("w1", "s1").unwrap().title.as_deref(),
             Some("demo")
+        );
+
+        older.title = Some("saved again".into());
+        store.save_meta(&older).unwrap();
+        assert_eq!(
+            store.load_meta("w1", "s1").unwrap().title.as_deref(),
+            Some("saved again")
         );
     }
 

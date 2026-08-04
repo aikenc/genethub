@@ -109,25 +109,31 @@ impl Registry {
     }
 
     pub async fn refresh(&self, providers: &ProviderMap) -> Vec<AgentInfo> {
-        let mut infos = Vec::new();
-        for adapter in &self.adapters {
-            let probe = adapter.probe().await;
-            // Cataloguing an absent agent would spawn a process that is not
-            // there; skip straight to an empty catalog.
-            let catalog = if matches!(probe, ProbeState::Ready) {
-                adapter.catalog(providers).await
-            } else {
-                Default::default()
-            };
-            infos.push(AgentInfo {
-                id: adapter.id().to_string(),
-                label: adapter.label().to_string(),
-                probe,
-                capabilities: adapter.capabilities(),
-                catalog,
-                builtin: adapter.builtin(),
-            });
-        }
+        // These probes are independent subprocesses. Running them serially
+        // made the first AgentList wait for every optional CLI's timeout in
+        // sequence, which looked like a dead connection on a cold install.
+        // `join_all` preserves registry order while bounding the wait to the
+        // slowest probe instead of the sum of all of them.
+        let infos =
+            futures_util::future::join_all(self.adapters.iter().map(|adapter| async move {
+                let probe = adapter.probe().await;
+                // Cataloguing an absent agent would spawn a process that is not
+                // there; skip straight to an empty catalog.
+                let catalog = if matches!(probe, ProbeState::Ready) {
+                    adapter.catalog(providers).await
+                } else {
+                    Default::default()
+                };
+                AgentInfo {
+                    id: adapter.id().to_string(),
+                    label: adapter.label().to_string(),
+                    probe,
+                    capabilities: adapter.capabilities(),
+                    catalog,
+                    builtin: adapter.builtin(),
+                }
+            }))
+            .await;
         *self.cache.write().await = Some(infos.clone());
         infos
     }

@@ -20,7 +20,7 @@
 | 鉴权决策 | 判断票据有效需要账号与撤销状态，那是控制面的数据。relay 只执行答案 |
 | 存储 | 存东西的 relay 就是需要被信任的 relay。它的全部状态是内存里的在线表，重启即空 |
 | 解析 payload | 一旦开始理解流量，"它看不到内容"就不再是一句能验证的话 |
-| 提供 HTTP 业务接口 | 除了 `/api/health`，它只有两个 WebSocket 端点 |
+| 提供 HTTP 业务接口 | 除了 `/api/health`（liveness）与 `/api/ready`（readiness），只有两个 legacy WS 入口与一个 endpoint-neutral Fabric WS 入口 |
 
 这些不是自律，是有测试守着的（`test/boundaries.test.ts`）：依赖方向、数据路径上不许出现 JSON 解析、依赖清单里不许出现数据库。
 
@@ -30,11 +30,19 @@
 
 | 路径 | 谁连 | 凭证 |
 |------|------|------|
-| `GET /forward/daemon` (WS) | 机器上的 daemon | `Authorization: Bearer <daemonId>.<secret>` |
+| `GET /forward/daemon` (WS) | 机器上的 daemon | `Authorization: Bearer <一次性 uplink admission>` |
 | `GET /forward/client` (WS) | 浏览器 / 手机 | `?ticket=<票据>` |
+| `GET /fabric/v2` (WS) | 浏览器、CLI、daemon 等统一 endpoint | 短期 endpoint credential；一条连接复用多条 route |
 | `GET /api/health` | 运维 | 无 |
+| `GET /api/ready` | 部署 readiness；远端撤销流完成初始 sync 后才返回 200 | 无 |
 
 客户端票据走查询串是不得已：浏览器发起 WebSocket 握手时无法设置请求头。
+
+托管模式下，daemon 在**每次**连接或重连前，先把长期 enrollment secret 只发给 Control 的 HTTPS
+`POST /api/relay/v1/uplink-admissions`，换回 60 秒内有效、一次性、只可用于 v1 uplink 的随机票据。
+Relay 的握手、内存和日志边界只能接触这张短票；Control 在 `authorizeDaemon` 中原子核销它，不再接受
+`<daemonId>.<secret>`。Control 暂时不可达或返回 5xx 时 daemon 退避重试换票，不会降级把长期 secret
+交给 Relay；只有 Control 明确返回 401/403 才视为 enrollment 已失效。
 
 ---
 
@@ -92,6 +100,9 @@ relay 只能问三个问题、订阅一件事，定义在 `src/contract/wire.ts`
 **撤销由 relay 主动订阅，而不是控制面回调 relay。** 这样控制面永远不需要连得上 relay——家里那台自建 relay 因此不需要公网入口。重连时控制面先推一份最近撤销列表，补上断线期间漏掉的。
 
 **控制面不可达时一律拒绝**。宁可这一分钟谁都连不上，也不能因为控制面抽风就放所有人进来。
+拒绝状态仍要可恢复：只有 Control 明确返回 204（票据无效/已消费）才映射为 WebSocket 握手 403；
+网络失败、超时、5xx、非预期响应或无法解析的 grant 一律映射为 503。这样客户端可以退避重试，daemon
+也能换一张新短票，而不会把控制面抖动误报成永久撤销。
 
 ---
 
@@ -100,14 +111,22 @@ relay 只能问三个问题、订阅一件事，定义在 `src/contract/wire.ts`
 | 项 | 环境变量 | 默认 |
 |----|---------|------|
 | 模式 | `RELAY_MODE` | `control` |
-| 自建模式的 join token | `RELAY_JOIN_TOKEN` | 自动生成并打印 |
+| Control 地址 | `RELAY_CONTROL_ORIGIN` | control 模式必填；远端必须 HTTPS，只有字面 loopback 可 HTTP |
+| Control bearer | `RELAY_CONTROL_TOKEN` | control 模式必填；缺失时 Relay 拒绝启动 |
+| 自建模式的 join token | `RELAY_JOIN_TOKEN` | 只有字面 `127/8` 或 `::1` 可省略（不接受 `localhost`）；其余监听必须为 32–256 个随机 base64url/hex 字符，Relay 不生成也不打印 |
 | 最大在线机器数 | `RELAY_MAX_DAEMONS` | 5000 |
+| Legacy admission 代际 fence 上限 | `RELAY_MAX_LEGACY_GENERATION_FENCES` | 100000；满额后此前未见过的机器 fail-close，已有机器可用更高 generation 重连；普通断线、Authority 抖动都不清 fence |
 | 单机最大客户端 | `RELAY_MAX_CLIENTS_PER_MACHINE` | 8 |
 | 单连接缓冲上限 | `RELAY_MAX_BUFFERED_BYTES` | 8 MiB |
+| 全进程发送队列上限 | `RELAY_MAX_OUTBOUND_QUEUED_BYTES` | 64 MiB |
+| 握手凭证上限 | `RELAY_MAX_ADMISSION_CREDENTIAL_BYTES` | 4 KiB（按 UTF-8 字节） |
 | 单帧上限 | `RELAY_MAX_FRAME_BYTES` | 4 MiB |
+| Control JSON 响应上限 | `RELAY_MAX_AUTHORITY_RESPONSE_BYTES` | 16 KiB |
+| Control 撤销 SSE 单事件上限 | `RELAY_MAX_REVOCATION_BUFFER_BYTES` | 1 MiB |
+| Presence 本地刷新硬上限 | `RELAY_PRESENCE_REFRESH_MAX` | 30s；Legacy/Fabric 实际都取 Control grant 租约一半与此值的较小者 |
 | 心跳 | `RELAY_HEARTBEAT` | 30s |
 
-缓冲超限直接断开那一个慢读者。给一个跟不上的连接无限缓冲，代价会落到所有人身上。
+单连接或全进程发送预算超限都只断开触发发送的慢连接；已经健康的其他连接不受牵连。每笔预算在 `ws.send` 回调、错误或 socket 关闭时只释放一次。
 
 ---
 
@@ -119,6 +138,17 @@ relay 只能问三个问题、订阅一件事，定义在 `src/contract/wire.ts`
 
 ## 8. 现状与限制
 
-relay 转发的是 TLS 解密之后的应用层字节。它在代码上不解析、不存储，但**技术上具备读取能力**——真正的端到端加密（两端基于公钥直接握手，relay 只见密文）尚未实现，在路线图上。
+### 8.1 严格短票切换的发布约束
 
-在那之前，请不要把"平台看不到你的内容"当成已经成立的结论。可以成立的是：代码开源、不落库、可自建。见 [security-model.md](./security-model.md)。
+这是一个有意的、不向旧认证降级的 wire 安全边界，因此**不能把新 Control 与旧 daemon 任意滚动混跑**：
+
+- 先上新 daemon、Control 仍旧：换票接口返回 404，新 daemon 保持离线并重试，不泄漏长期 secret。
+- 先上严格新 Control、daemon 仍旧：旧 daemon 仍发送 `<daemonId>.<secret>`，会被拒绝。
+
+无停机迁移需要先发布一个过渡 Control（先提供换票接口，旧 authority 仅在受控迁移窗口保留），待所有
+daemon 已升级后再部署本节描述的严格 authority；否则必须安排一次协调维护窗口。最终严格版本不提供
+运行时 fallback 或长期 secret 兼容开关，避免迁移遗留永久扩大 Relay 泄漏面的半成品状态。
+
+转发通道的初始 Hello 只带固定客户端标签、opaque capability/invite id、随机 nonce 与 HMAC proof；双向证明通过后，业务帧全部是带严格序号的 AES-256-GCM + HMAC 密文。Relay 仍能看到 IP、时序、长度、channel id，也能丢包或断线，但单独拿不到 secret，不能读取或伪造业务内容。
+
+托管 Control 会生成 channel secret，并分别交给浏览器与 daemon，所以“Relay 不知道内容”不等于“平台零知识”；当前也没有公钥握手或前向保密。准确边界见 [security-model.md](./security-model.md)。
