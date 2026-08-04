@@ -20,6 +20,7 @@ import type {
 } from "@genehub/proto";
 import { create } from "zustand";
 
+import type { Host } from "../host";
 import type { Client, ConnectionState } from "../protocol/client";
 import { applySequenced, emptyTimeline, fromSnapshot, type TimelineState } from "./timeline";
 
@@ -128,8 +129,11 @@ interface WorkbenchState {
    * ask too, and both have to end up on the same screen.
    */
   update: UpdateStatus | null;
+  /** The desktop shell's answer, independent of the selected machine. */
+  appUpdate: UpdateStatus | null;
   /** A check is in flight. Shared, for the same reason `update` is. */
   updating: boolean;
+  appUpdating: boolean;
   /**
    * How far the machine has got fetching the installer.
    *
@@ -164,6 +168,8 @@ interface WorkbenchState {
   loadLog(name?: string): Promise<void>;
   /** Asks the machine whether a newer build has been published. */
   checkUpdate(): Promise<void>;
+  /** Checks both the selected daemon and, when present, this desktop App. */
+  checkUpdates(host: Host): Promise<void>;
   /**
    * Asks the machine to fetch the installer. Returns once it has started, not
    * once it has finished: what happens after that arrives as pushes.
@@ -245,7 +251,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   settings: null,
   log: null,
   update: null,
+  appUpdate: null,
   updating: false,
+  appUpdating: false,
   download: { state: "idle" },
 
   async attach(client) {
@@ -670,6 +678,19 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     } finally {
       set({ updating: false });
     }
+  },
+
+  async checkUpdates(host) {
+    set({ appUpdate: null, appUpdating: Boolean(host.checkAppUpdate) });
+    await Promise.all([
+      get().checkUpdate(),
+      host.checkAppUpdate
+        ? host
+            .checkAppUpdate()
+            .then((appUpdate) => set({ appUpdate }))
+            .finally(() => set({ appUpdating: false }))
+        : Promise.resolve(),
+    ]);
   },
 
   async downloadUpdate() {

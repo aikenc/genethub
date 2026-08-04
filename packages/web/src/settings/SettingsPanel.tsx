@@ -27,13 +27,7 @@ const OFFERED = [
  * A client that is compromised later should not be able to read out a
  * credential it never saw.
  */
-export function SettingsPanel({
-  host,
-  endpoint,
-}: {
-  host: Host;
-  endpoint?: Endpoint | null;
-}) {
+export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpoint | null }) {
   const {
     settings,
     loadSettings,
@@ -55,10 +49,7 @@ export function SettingsPanel({
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 overflow-y-auto p-4">
-      <Machine
-        identity={client?.identity ?? null}
-        expected={endpoint?.fingerprint}
-      />
+      <Machine identity={client?.identity ?? null} expected={endpoint?.fingerprint} />
 
       <Appearance />
 
@@ -72,12 +63,8 @@ export function SettingsPanel({
             <ProviderRow
               key={provider.id}
               provider={provider}
-              onSave={(input) =>
-                setProvider({ providerId: provider.id, ...input })
-              }
-              onForget={
-                provider.custom ? () => forgetProvider(provider.id) : undefined
-              }
+              onSave={(input) => setProvider({ providerId: provider.id, ...input })}
+              onForget={provider.custom ? () => forgetProvider(provider.id) : undefined}
             />
           ))}
         </div>
@@ -91,14 +78,9 @@ export function SettingsPanel({
         <h2 className="mb-2 text-sm font-medium">Agent</h2>
         <ul className="flex flex-col gap-1 text-sm">
           {agents.map((agent) => (
-            <li
-              key={agent.id}
-              className="flex items-center gap-2 rounded bg-surface px-3 py-2"
-            >
+            <li key={agent.id} className="flex items-center gap-2 rounded bg-surface px-3 py-2">
               <span>{agent.label}</span>
-              {agent.builtin ? (
-                <span className="text-xs text-muted">内置</span>
-              ) : null}
+              {agent.builtin ? <span className="text-xs text-muted">内置</span> : null}
               <span className="ml-auto text-xs text-muted">
                 {agent.probe.state === "ready"
                   ? "可用"
@@ -128,7 +110,7 @@ export function SettingsPanel({
         />
       </section>
 
-      <Version host={host} daemonVersion={client?.identity?.daemonVersion} />
+      <Version host={host} endpoint={endpoint} daemonVersion={client?.identity?.daemonVersion} />
     </div>
   );
 }
@@ -168,14 +150,10 @@ function Appearance() {
             ))}
           </div>
           {preference === "system" ? (
-            <span className="text-muted">
-              系统现在是{resolved === "dark" ? "暗色" : "亮色"}。
-            </span>
+            <span className="text-muted">系统现在是{resolved === "dark" ? "暗色" : "亮色"}。</span>
           ) : null}
         </div>
-        <p className="text-faint">
-          只对这台设备上的这个客户端生效。同一台机器从手机连过来，那边可以是另一个颜色。
-        </p>
+        <p className="text-faint">只对这台设备上的这个客户端生效。同一台机器从手机连过来，那边可以是另一个颜色。</p>
       </div>
     </section>
   );
@@ -202,35 +180,34 @@ const PREFIX: Record<string, string> = {
   dev: "开发版 ",
 };
 const devSuffix = () =>
-  CHANNEL === "dev" && import.meta.env.VITE_GENEHUB_DEV_NAME
-    ? ` ${import.meta.env.VITE_GENEHUB_DEV_NAME}`
-    : "";
+  CHANNEL === "dev" && import.meta.env.VITE_GENEHUB_DEV_NAME ? ` ${import.meta.env.VITE_GENEHUB_DEV_NAME}` : "";
 const shown = (version: string) =>
   `${version === UNRELEASED ? "开发版" : `${PREFIX[CHANNEL] ?? ""}${version}`}${devSuffix()}`;
 
 /**
  * Which build this is, and whether a newer one has been published.
  *
- * Two numbers rather than one because they are two executables. A release stamps
- * one version into both (`scripts/version.mjs`), so seeing them disagree means an
- * upgrade only half landed — a real outcome on Windows, where the daemon holds
- * its own file open while an installer wants to replace it (`installer.nsh`).
- * Printing both is what turns that from a puzzle into a sentence.
+ * Two numbers rather than one because they are two executables. A local Windows
+ * bundle stamps one version into both, so disagreement there means an upgrade
+ * only half landed. A remote daemon belongs to another machine and legitimately
+ * updates on a different schedule; the endpoint decides which sentence applies.
  *
- * The check is a button and never a timer. When there is something newer, the
- * machine fetches the installer into its own data folder and says so in the
- * corner of the screen (`UpdateToast`); installing still stops the daemon and
- * whatever an agent was mid-turn, and when to pay that is the user's call.
+ * The check is a button and never a timer. The selected daemon checks itself;
+ * the desktop shell checks its own Windows App. A local bundle can still fetch
+ * through its daemon, while a remote client opens the installer on this computer.
  */
 function Version({
   host,
+  endpoint,
   daemonVersion,
 }: {
   host: Host;
+  endpoint?: Endpoint | null;
   daemonVersion?: string;
 }) {
-  const { update, updating, checkUpdate, client } = useWorkbench();
+  const { update, appUpdate, updating, appUpdating, checkUpdates, client } = useWorkbench();
   const [app, setApp] = useState<string | null>(null);
+  const localBundle = endpoint?.via === "loopback";
 
   useEffect(() => {
     void host.appVersion?.().then(setApp);
@@ -241,9 +218,7 @@ function Version({
       <h2 className="mb-2 text-sm font-medium">版本</h2>
       <div className="flex flex-col gap-2 rounded bg-surface px-3 py-2 text-xs">
         <div className="flex flex-wrap items-center gap-3">
-          {app ? (
-            <span data-testid="app-version">应用 {shown(app)}</span>
-          ) : null}
+          {app ? <span data-testid="app-version">应用 {shown(app)}</span> : null}
           <span className="text-muted" data-testid="daemon-version">
             daemon {daemonVersion ? shown(daemonVersion) : "未连接"}
           </span>
@@ -254,10 +229,10 @@ function Version({
             // The machine is what does the looking, so with no connection there
             // is nothing to ask — and a button that can only answer "还没连上"
             // should not be pressable in the first place.
-            disabled={updating || !client}
-            onClick={() => void checkUpdate()}
+            disabled={updating || appUpdating || !client}
+            onClick={() => void checkUpdates(host)}
           >
-            {updating ? "检查中…" : "检查更新"}
+            {updating || appUpdating ? "检查中…" : "检查更新"}
           </button>
         </div>
         {/* The page is a third artefact, served from wherever it was last
@@ -269,21 +244,24 @@ function Version({
             Its own line, and selectable: it is long, it is meant to be quoted
             into a bug report, and above it sits a button it must never push off
             the row. */}
-        <code
-          className="select-all break-all font-mono text-faint"
-          data-testid="page-build"
-        >
+        <code className="select-all break-all font-mono text-faint" data-testid="page-build">
           页面 {BUILD}
         </code>
         {/* Not for a build from source: a developer running a fresh shell against
             an installed daemon is not a broken upgrade, and saying so would be
             crying wolf at the one person who can tell the difference. */}
-        {app && daemonVersion && app !== daemonVersion && app !== UNRELEASED ? (
+        {localBundle && app && daemonVersion && app !== daemonVersion && app !== UNRELEASED ? (
           <p role="alert" className="text-danger">
             两个版本不一致，上次升级大概只装了一半。重新装一遍安装包，或者从托盘退出再打开。
           </p>
         ) : null}
-        <Answer status={update} host={host} />
+        {!localBundle && app && daemonVersion && app !== daemonVersion ? (
+          <p className="text-muted" data-testid="remote-version-note">
+            客户端 App 和远程 daemon 分别更新，版本可以不同。
+          </p>
+        ) : null}
+        {appUpdate && (!localBundle || appUpdate.newer) ? <AppAnswer status={appUpdate} host={host} /> : null}
+        <Answer status={update} host={host} subject={localBundle ? "整机" : "daemon"} />
       </div>
     </section>
   );
@@ -296,7 +274,7 @@ function Version({
  * nothing looks broken, and a check that reached nothing must never be allowed to
  * read as "you are up to date".
  */
-function Answer({ status, host }: { status: UpdateStatus | null; host: Host }) {
+function Answer({ status, host, subject }: { status: UpdateStatus | null; host: Host; subject: "整机" | "daemon" }) {
   const { download, downloadUpdate } = useWorkbench();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -305,7 +283,7 @@ function Answer({ status, host }: { status: UpdateStatus | null; host: Host }) {
   if (status.problem) {
     return (
       <p role="alert" className="text-danger">
-        没查到有没有新版本：{status.problem}
+        没查到 {subject} 有没有新版本：{status.problem}
       </p>
     );
   }
@@ -313,14 +291,11 @@ function Answer({ status, host }: { status: UpdateStatus | null; host: Host }) {
   // scale at all, and "已经是最新的了" would be a claim nobody can check.
   if (status.current === UNRELEASED) {
     return (
-      <p className="text-muted">
-        这是从源码构建的开发版，不跟发布版本比较。最新发布是{" "}
-        {status.latest ?? "未知"}。
-      </p>
+      <p className="text-muted">这是从源码构建的开发版，不跟发布版本比较。最新发布是 {status.latest ?? "未知"}。</p>
     );
   }
   if (!status.newer) {
-    return <p className="text-muted">已经是最新的了。</p>;
+    return <p className="text-muted">{subject} 已经是最新的了。</p>;
   }
 
   const installer = status.downloadUrl;
@@ -344,7 +319,9 @@ function Answer({ status, host }: { status: UpdateStatus | null; host: Host }) {
   return (
     <div className="flex flex-col gap-1">
       <p className="flex flex-wrap items-center gap-2">
-        <span>有新版本 {status.latest}。</span>
+        <span>
+          {subject} 有新版本 {status.latest}。
+        </span>
         {installer ? (
           <button
             type="button"
@@ -376,9 +353,7 @@ function Answer({ status, host }: { status: UpdateStatus | null; host: Host }) {
             打开下载页
           </button>
         ) : null}
-        <span className="text-faint">
-          装的时候这台机器上正在跑的会话会被打断，选个合适的时候。
-        </span>
+        <span className="text-faint">装的时候这台机器上正在跑的会话会被打断，选个合适的时候。</span>
       </p>
       {error ? (
         <p role="alert" className="text-danger">
@@ -386,6 +361,48 @@ function Answer({ status, host }: { status: UpdateStatus | null; host: Host }) {
         </p>
       ) : null}
     </div>
+  );
+}
+
+function AppAnswer({ status, host }: { status: UpdateStatus; host: Host }) {
+  if (status.problem) {
+    return (
+      <p role="alert" className="text-danger">
+        没查到客户端 App 有没有新版本：{status.problem}
+      </p>
+    );
+  }
+  if (status.current === UNRELEASED) {
+    return <p className="text-muted">客户端 App 是源码构建的开发版，不跟发布版本比较。</p>;
+  }
+  if (!status.newer) {
+    return <p className="text-muted">客户端 App 已经是最新的了。</p>;
+  }
+  const installer = status.downloadUrl;
+  const notes = status.url && status.url !== installer ? status.url : null;
+  return (
+    <p className="flex flex-wrap items-center gap-2">
+      <span>客户端 App 有新版本 {status.latest}。</span>
+      {installer ? (
+        <button
+          type="button"
+          data-testid="download-app-update"
+          className="underline decoration-dotted hover:text-accent"
+          onClick={() => host.openExternal(installer)}
+        >
+          下载到这台电脑
+        </button>
+      ) : null}
+      {notes ? (
+        <button
+          type="button"
+          className="underline decoration-dotted hover:text-accent"
+          onClick={() => host.openExternal(notes)}
+        >
+          查看说明
+        </button>
+      ) : null}
+    </p>
   );
 }
 
@@ -406,8 +423,7 @@ function Machine({
   expected?: string;
 }) {
   if (!identity) return null;
-  const mismatched =
-    expected !== undefined && expected !== identity.fingerprint;
+  const mismatched = expected !== undefined && expected !== identity.fingerprint;
 
   return (
     <section>
@@ -415,16 +431,11 @@ function Machine({
       <div className="flex flex-col gap-1 rounded bg-surface px-3 py-2 text-xs">
         <div className="flex items-center gap-2">
           <span className="text-muted">公钥指纹</span>
-          <code
-            data-testid="fingerprint"
-            className="font-mono text-sm tracking-wider"
-          >
+          <code data-testid="fingerprint" className="font-mono text-sm tracking-wider">
             {identity.fingerprint}
           </code>
         </div>
-        <p className="text-muted">
-          在别的设备上连到这台机器时，核对这串指纹是否一致；不一致说明连的不是这台机器。
-        </p>
+        <p className="text-muted">在别的设备上连到这台机器时，核对这串指纹是否一致；不一致说明连的不是这台机器。</p>
         {/* The version used to be here too, and moved to its own section: this
             one is about which machine answered, and a build number sat in it
             only because there was nowhere else to print one. */}
@@ -450,16 +461,16 @@ function Machine({
  */
 function rows(configured?: ProviderInfo[]): ProviderInfo[] {
   const known = configured ?? [];
-  const missing = OFFERED.filter(
-    (offer) => !known.some((entry) => entry.id === offer.id),
-  ).map((offer): ProviderInfo => ({
-    id: offer.id,
-    label: offer.label,
-    hasApiKey: false,
-    dialect: "openai",
-    custom: false,
-    models: [],
-  }));
+  const missing = OFFERED.filter((offer) => !known.some((entry) => entry.id === offer.id)).map(
+    (offer): ProviderInfo => ({
+      id: offer.id,
+      label: offer.label,
+      hasApiKey: false,
+      dialect: "openai",
+      custom: false,
+      models: [],
+    }),
+  );
   return [...known, ...missing].sort((a, b) => {
     // The ones we ship first, in the order they are offered; then the rest.
     const rank = (entry: ProviderInfo) => {
@@ -517,9 +528,7 @@ function ProviderRow({
           type="button"
           data-testid={`save-${provider.id}`}
           className="rounded bg-accent px-3 py-1 text-xs text-white disabled:opacity-40"
-          disabled={
-            busy || (key.length === 0 && url === (provider.baseUrl ?? ""))
-          }
+          disabled={busy || (key.length === 0 && url === (provider.baseUrl ?? ""))}
           onClick={async () => {
             setBusy(true);
             try {
@@ -707,11 +716,7 @@ function AddProvider({
         >
           {busy ? "保存中…" : "添加"}
         </button>
-        <button
-          type="button"
-          className="rounded border border-line px-3 py-1 text-xs"
-          onClick={() => setOpen(false)}
-        >
+        <button type="button" className="rounded border border-line px-3 py-1 text-xs" onClick={() => setOpen(false)}>
           取消
         </button>
       </div>

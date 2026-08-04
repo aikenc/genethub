@@ -27,9 +27,9 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# No HTTP client here on purpose. Fetching an installer is the daemon's job
-# (`updates::Downloader`): it is the half that exists on Linux too, and the half
-# a phone can watch. This shell only runs the file that arrives.
+# Only the small App manifest is fetched here. A remote Linux daemon cannot
+# answer which Windows App release this client needs.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]

@@ -157,7 +157,7 @@ function Items({
     newSession,
     openWorkspace,
     activeWorkspaceId,
-    checkUpdate,
+    checkUpdates,
     claimLink,
   } = useWorkbench();
   const { preference, setPreference } = useTheme();
@@ -228,7 +228,7 @@ function Items({
           answer lands in the version section of settings either way. */}
       <Item
         onSelect={run(() => {
-          void checkUpdate();
+          void checkUpdates(host);
           openTab("settings");
         })}
       >

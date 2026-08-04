@@ -349,6 +349,10 @@ const tsModule = (channel) => `// Which release channel this build belongs to.
 // its channel in before it compiles.
 export const CHANNEL: ${CHANNEL_TYPE} = "${value("channel", channel)}";
 export const PRODUCT = "${value("product", channel)}";
+// The desktop shell checks its own release independently from whichever
+// daemon the workbench currently controls. In a browser this stays unused;
+// in a source build it is empty, because dev is not on a release scale.
+export const MANIFEST_URL = "${value("manifest_url", channel)}";
 `;
 
 const shellEnv = (channel) => `# Written by scripts/channel.mjs — edit that script, not this file.

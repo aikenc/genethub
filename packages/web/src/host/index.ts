@@ -8,14 +8,10 @@
  */
 
 import type { HubMachine } from "@genehub/proto";
+import type { UpdateStatus } from "@genehub/proto";
 
-import {
-  findMachine,
-  listMachines,
-  type PairedMachine,
-  readPairingLink,
-  rememberMachine,
-} from "../devices/machines";
+import { MANIFEST_URL } from "../channel";
+import { findMachine, listMachines, type PairedMachine, readPairingLink, rememberMachine } from "../devices/machines";
 import { Client, type WebSocketLike } from "../protocol/client";
 
 /**
@@ -161,10 +157,19 @@ export interface Host {
    * Absent in a browser, which is not a build of anything: the page arrived from
    * wherever it is served, and the only version worth printing there is the one
    * the machine reported. Present on the desktop because the thing a person
-   * reinstalls is the shell, and because it disagreeing with the daemon's number
-   * is how a half-finished upgrade shows itself.
+   * reinstalls is the shell. When the selected daemon is local, disagreement is
+   * how a half-finished bundle upgrade shows itself; with a remote daemon the
+   * two belong to different machines and update independently.
    */
   appVersion?(): Promise<string | null>;
+  /**
+   * Checks the desktop shell itself, on the client where it is installed.
+   *
+   * This must not go through the selected daemon: that daemon may be a Linux
+   * server on the other side of a relay, whose version and platform answer a
+   * different update question.
+   */
+  checkAppUpdate?(): Promise<UpdateStatus>;
   /** The shell asking the workbench to show remote access, e.g. from a tray menu. */
   onPairRequested?(listener: () => void): () => void;
   /**
@@ -209,7 +214,9 @@ export interface Host {
  * machine whose daemon is running perfectly.
  */
 interface TauriGlobal {
-  core: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> };
+  core: {
+    invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
+  };
   event?: {
     listen(name: string, handler: () => void): Promise<() => void>;
   };
@@ -335,7 +342,12 @@ export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Hos
       // wrong trade at the moment somebody is trying to open their own laptop.
       const account = here ? await hubMachines(here.url, socketFactory).catch(() => []) : [];
       return [
-        { id: LOCAL_TARGET, label: "这台电脑", kind: "local" as const, online: here !== null },
+        {
+          id: LOCAL_TARGET,
+          label: "这台电脑",
+          kind: "local" as const,
+          online: here !== null,
+        },
         ...paired,
         // By fingerprint, because the Hub's ids and the ids a local pairing
         // recorded are different namespaces for the same computers. The one
@@ -374,7 +386,10 @@ export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Hos
       const switched = await onDaemon(
         here.url,
         async (client) => {
-          const ticket = await client.call({ type: "hub.connect", payload: { machineId: id } });
+          const ticket = await client.call({
+            type: "hub.connect",
+            payload: { machineId: id },
+          });
           if (ticket?.type !== "hubTicket") return null;
           const machines = await client.call({ type: "hub.machines" }).catch(() => null);
           const account = machines?.type === "hubMachines" ? machines.data : [];
@@ -428,6 +443,9 @@ export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Hos
     async appVersion() {
       return tauri.core.invoke<string>("app_version");
     },
+    async checkAppUpdate() {
+      return tauri.core.invoke<UpdateStatus>("app_update_status", { manifestUrl: MANIFEST_URL });
+    },
     onEndpointChange(listener) {
       return subscribe(tauri, "genehub://daemon", listener);
     },
@@ -461,10 +479,7 @@ export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Hos
  * (`genethub-cloud/desktop/README.md`). An empty list is the honest answer for
  * a machine that was never paired with a Hub.
  */
-async function hubMachines(
-  url: string,
-  socketFactory?: (url: string) => WebSocketLike,
-): Promise<HubMachine[]> {
+async function hubMachines(url: string, socketFactory?: (url: string) => WebSocketLike): Promise<HubMachine[]> {
   const reply = await onDaemon(url, (client) => client.call({ type: "hub.machines" }), socketFactory);
   return reply?.type === "hubMachines" ? reply.data : [];
 }
@@ -482,7 +497,11 @@ async function onDaemon<T>(
   exchange: (client: Client) => Promise<T>,
   socketFactory?: (url: string) => WebSocketLike,
 ): Promise<T> {
-  const client = new Client({ url, clientName: "genehub-app", ...(socketFactory ? { socketFactory } : {}) });
+  const client = new Client({
+    url,
+    clientName: "genehub-app",
+    ...(socketFactory ? { socketFactory } : {}),
+  });
   // Wait until ready (or give up) rather than failing on the first
   // `reconnecting` flicker: a daemon that is mid-restart would otherwise make
   // every machine switch and every Hub directory read look permanently dead.

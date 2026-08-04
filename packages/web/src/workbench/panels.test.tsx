@@ -638,7 +638,7 @@ describe("the version section", () => {
     render(<SettingsPanel host={desktopish("0.1.17")} />);
     await userEvent.click(await screen.findByTestId("check-update"));
 
-    expect(await screen.findByText("已经是最新的了。")).toBeTruthy();
+    expect(await screen.findByText("daemon 已经是最新的了。")).toBeTruthy();
   });
 
   /**
@@ -706,9 +706,50 @@ describe("the version section", () => {
   it("points out that the two halves are on different versions", async () => {
     connected({});
 
-    render(<SettingsPanel host={desktopish("0.1.18")} />);
+    render(
+      <SettingsPanel
+        host={desktopish("0.1.18")}
+        endpoint={{ url: "ws://127.0.0.1:1/ws", via: "loopback", label: "本机" }}
+      />,
+    );
 
     expect(await screen.findByRole("alert")).toHaveTextContent("只装了一半");
+  });
+
+  it("checks the client App separately when controlling a remote daemon", async () => {
+    const opened: string[] = [];
+    connected({
+      "update.check": () => ({
+        type: "update",
+        data: { current: "0.1.18", latest: "0.1.18", newer: false },
+      }),
+    });
+    const host = {
+      ...desktopish("0.1.16", opened),
+      checkAppUpdate: async () => ({
+        current: "0.1.16",
+        latest: "0.1.18",
+        newer: true,
+        url: "https://example.test/releases/tag/v0.1.18",
+        downloadUrl: "https://example.test/GeneHub-setup.exe",
+      }),
+    };
+
+    render(
+      <SettingsPanel
+        host={host}
+        endpoint={{ url: "wss://example.test/forward/client", via: "relay", label: "服务器" }}
+      />,
+    );
+    await userEvent.click(await screen.findByTestId("check-update"));
+
+    expect(await screen.findByText("客户端 App 有新版本 0.1.18。")).toBeTruthy();
+    expect(screen.getByText("daemon 已经是最新的了。")).toBeTruthy();
+    expect(screen.getByTestId("remote-version-note")).toHaveTextContent("分别更新");
+    expect(screen.queryByText(/只装了一半/)).toBeNull();
+
+    await userEvent.click(screen.getByTestId("download-app-update"));
+    expect(opened).toEqual(["https://example.test/GeneHub-setup.exe"]);
   });
 
   /// A browser is not a build of anything, so there is no second number to print.

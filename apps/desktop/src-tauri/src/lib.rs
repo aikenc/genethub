@@ -1,5 +1,5 @@
-pub mod daemon;
 mod channel;
+pub mod daemon;
 mod tray;
 
 use std::path::{Path, PathBuf};
@@ -329,6 +329,140 @@ fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppManifest {
+    version: String,
+    page: Option<String>,
+    #[serde(default)]
+    platforms: std::collections::HashMap<String, AppPlatform>,
+}
+
+#[derive(serde::Deserialize)]
+struct AppPlatform {
+    url: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateStatus {
+    current: String,
+    latest: Option<String>,
+    newer: bool,
+    url: Option<String>,
+    download_url: Option<String>,
+    problem: Option<String>,
+}
+
+/// Checks this desktop App, not whichever daemon the workbench is controlling.
+/// A remote Linux daemon has a different version and no Windows installer, so
+/// routing this through `update.check` hid stale client Apps.
+#[tauri::command]
+async fn app_update_status(app: tauri::AppHandle, manifest_url: String) -> AppUpdateStatus {
+    let current = app.package_info().version.to_string();
+    if manifest_url.is_empty() {
+        return empty_app_status(current);
+    }
+    if !manifest_url.starts_with("https://github.com/aikenc/genethub/releases/") {
+        return AppUpdateStatus {
+            current,
+            latest: None,
+            newer: false,
+            url: None,
+            download_url: None,
+            problem: Some("客户端 App 的更新地址不是 GeneHub 发布地址".to_string()),
+        };
+    }
+    match fetch_app_manifest(&manifest_url).await {
+        Ok(manifest) => app_status(&current, manifest),
+        Err(problem) => AppUpdateStatus {
+            current,
+            latest: None,
+            newer: false,
+            url: None,
+            download_url: None,
+            problem: Some(problem),
+        },
+    }
+}
+
+fn empty_app_status(current: String) -> AppUpdateStatus {
+    AppUpdateStatus {
+        current,
+        latest: None,
+        newer: false,
+        url: None,
+        download_url: None,
+        problem: None,
+    }
+}
+
+async fn fetch_app_manifest(url: &str) -> Result<AppManifest, String> {
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| error.to_string())?
+        .get(url)
+        .header(reqwest::header::USER_AGENT, channel::CLI_BINARY)
+        .send()
+        .await
+        .map_err(|error| format!("检查客户端 App 更新失败：{error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("发布服务器返回 {}", response.status()));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("更新清单无法读取：{error}"))
+}
+
+fn app_status(current: &str, manifest: AppManifest) -> AppUpdateStatus {
+    let download_url = manifest
+        .platforms
+        .get("windows-x86_64")
+        .and_then(|platform| platform.url.clone());
+    AppUpdateStatus {
+        current: current.to_string(),
+        latest: Some(manifest.version.clone()),
+        newer: is_newer(current, &manifest.version),
+        url: manifest.page.or_else(|| download_url.clone()),
+        download_url,
+        problem: None,
+    }
+}
+
+fn is_newer(current: &str, latest: &str) -> bool {
+    if current == "0.0.0" {
+        return false;
+    }
+    let parts = |version: &str| {
+        version
+            .trim_start_matches('v')
+            .split('.')
+            .map(|piece| {
+                piece
+                    .chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect::<String>()
+                    .parse::<u64>()
+                    .unwrap_or(0)
+            })
+            .collect::<Vec<_>>()
+    };
+    let mine = parts(current);
+    let theirs = parts(latest);
+    let width = mine.len().max(theirs.len());
+    (0..width)
+        .map(|index| {
+            (
+                mine.get(index).unwrap_or(&0),
+                theirs.get(index).unwrap_or(&0),
+            )
+        })
+        .find(|(mine, theirs)| mine != theirs)
+        .is_some_and(|(mine, theirs)| theirs > mine)
+}
+
 #[tauri::command]
 fn notify(app: tauri::AppHandle, title: String, body: Option<String>) {
     use tauri_plugin_notification::NotificationExt;
@@ -476,6 +610,7 @@ pub fn run() {
             window_close,
             set_window_background,
             app_version,
+            app_update_status,
             notify,
             pick_directory
         ])
@@ -515,5 +650,48 @@ fn tracing_line(message: &str) {
             use std::io::Write;
             let _ = writeln!(file, "{message}");
         }
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    fn manifest(version: &str) -> AppManifest {
+        AppManifest {
+            version: version.to_string(),
+            page: Some("https://example.test/releases/v8".to_string()),
+            platforms: std::collections::HashMap::from([
+                (
+                    "linux-x86_64".to_string(),
+                    AppPlatform {
+                        url: Some("https://example.test/genet.tar.gz".to_string()),
+                    },
+                ),
+                (
+                    "windows-x86_64".to_string(),
+                    AppPlatform {
+                        url: Some("https://example.test/GeneHub-setup.exe".to_string()),
+                    },
+                ),
+            ]),
+        }
+    }
+
+    #[test]
+    fn app_check_uses_the_windows_asset_and_its_own_version() {
+        let status = app_status("0.4.0-beta.7", manifest("0.4.0-beta.8"));
+        assert!(status.newer);
+        assert_eq!(status.current, "0.4.0-beta.7");
+        assert_eq!(status.latest.as_deref(), Some("0.4.0-beta.8"));
+        assert_eq!(
+            status.download_url.as_deref(),
+            Some("https://example.test/GeneHub-setup.exe")
+        );
+    }
+
+    #[test]
+    fn source_builds_are_not_told_to_replace_themselves() {
+        assert!(!app_status("0.0.0", manifest("9.0.0")).newer);
     }
 }
