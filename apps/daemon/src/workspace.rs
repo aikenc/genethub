@@ -361,13 +361,15 @@ mod tests {
         let listing = list_directory(Some(dir.path())).unwrap();
         assert_eq!(listing.directories.len(), 1);
         assert_eq!(listing.directories[0].name, "project");
-        assert_eq!(
-            listing.parent.as_deref(),
-            dir.path()
-                .parent()
-                .map(|path| path.to_string_lossy())
-                .as_deref()
-        );
+        let expected_parent = dir
+            .path()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string();
+        assert_eq!(listing.parent.as_deref(), Some(expected_parent.as_str()));
     }
 
     #[tokio::test]
