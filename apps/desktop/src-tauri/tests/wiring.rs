@@ -397,9 +397,15 @@ fn desktop_bundling_is_explicitly_limited_to_windows_and_macos() {
             && script.contains("support only Windows and macOS"),
         "the bundle entry point must fail before building on unsupported hosts"
     );
+    let executable = script
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
     for removed in ["dpkg-deb", "appimage", r#"linux: "deb""#] {
         assert!(
-            !script.to_ascii_lowercase().contains(removed),
+            !executable.contains(removed),
             "unsupported Linux desktop packaging leaked back in through {removed}"
         );
     }

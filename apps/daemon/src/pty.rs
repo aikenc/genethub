@@ -293,10 +293,7 @@ mod tests {
                         terminals.write(pty_id, "\u{1b}[1;1R").await.unwrap();
                         answered_cursor_queries += 1;
                     }
-                    if ["# ", "$ ", ">", "% "]
-                        .iter()
-                        .any(|prompt| output.ends_with(prompt))
-                    {
+                    if shell_prompt_visible(&output, cfg!(windows)) {
                         return;
                     }
                 }
@@ -305,6 +302,28 @@ mod tests {
             }
         }
         panic!("the shell never printed its startup prompt; output: {output:?}");
+    }
+
+    fn shell_prompt_visible(output: &str, windows: bool) -> bool {
+        let unix_prompt = ["# ", "$ ", "% "]
+            .iter()
+            .any(|prompt| output.ends_with(prompt));
+        // ConPTY appends OSC title and cursor-visibility controls after
+        // cmd.exe's `C:\\...>` prompt, so the visible prompt is not the final
+        // byte in the raw stream.
+        unix_prompt || (windows && output.contains('>'))
+    }
+
+    #[test]
+    fn a_conpty_prompt_remains_visible_before_trailing_terminal_controls() {
+        let startup = concat!(
+            "\u{1b}[6nMicrosoft Windows\r\n",
+            "C:\\Users\\runner\\Temp>",
+            "\u{1b}]0;Administrator: cmd.exe\u{7}\u{1b}[?25h"
+        );
+        assert!(shell_prompt_visible(startup, true));
+        assert!(!shell_prompt_visible("\u{1b}[6n", true));
+        assert!(!shell_prompt_visible(startup, false));
     }
 
     #[tokio::test]
