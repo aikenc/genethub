@@ -41,6 +41,9 @@
 //!   `thread/tokenUsage/updated` carries the token counts, `turn/plan/updated`
 //!   the todo list, and a `contextCompaction` item (or `thread/compacted`)
 //!   marks the history being pruned.
+//!   The connection also carries notifications from sub-agent threads. Every
+//!   timeline notification is therefore matched against both this session's
+//!   thread and its turn before it reaches GeneHub's single-turn event model.
 //! - Approvals are requests *from* the CLI, split by what is being approved:
 //!   `item/commandExecution/requestApproval` and
 //!   `item/fileChange/requestApproval`, both answered
@@ -319,6 +322,10 @@ impl AgentAdapter for CodexAdapter {
         let pending: PendingMap = Arc::default();
         let asks: AskMap = Arc::default();
         let turn = Arc::new(Mutex::new(TurnState::default()));
+        // A resumed thread is known before `thread/resume` can replay any of its
+        // notifications. A brand-new one is filled from `thread/start` below.
+        let thread: SharedThread =
+            Arc::new(std::sync::Mutex::new(resume_thread_id(&config.resume)));
 
         // The lists a later `set_model` / `set_effort` is checked against. The
         // CLI does not check them for us, and a picker that "succeeds" onto a
@@ -362,8 +369,9 @@ impl AgentAdapter for CodexAdapter {
             next_id: AtomicI64::new(1),
             child: child.clone(),
             // `std`, not `tokio`: `persistence()` is synchronous, and this value
-            // is only ever held for a single field read or write.
-            thread: std::sync::Mutex::new(None),
+            // is only ever held for a single field read or write. The reader
+            // shares it so multiplexed sub-agent notifications can be rejected.
+            thread: thread.clone(),
             mode: Mutex::new(mode),
             model: Mutex::new(model),
             effort: Mutex::new(effort),
@@ -379,6 +387,7 @@ impl AgentAdapter for CodexAdapter {
             pending,
             asks,
             turn,
+            thread,
             child,
             said: said.clone(),
         }));
@@ -595,7 +604,15 @@ fn default_model_in(listed: &Value) -> Option<(String, Option<String>)> {
 }
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
-type AskMap = Arc<Mutex<HashMap<String, Ask>>>;
+type AskMap = Arc<Mutex<HashMap<String, PendingAsk>>>;
+type SharedThread = Arc<std::sync::Mutex<Option<String>>>;
+
+struct PendingAsk {
+    /// JSON-RPC ids may be either integers or strings and must be echoed with
+    /// their original type in the response.
+    upstream_id: Value,
+    response: Ask,
+}
 
 /// What the CLI is waiting for us to answer, and in which shape.
 enum Ask {
@@ -620,8 +637,9 @@ enum Kind {
 struct TurnState {
     /// Our own id for the turn in flight.
     id: Option<String>,
-    /// The CLI's id for the same turn, learned from `turn/started`. Without it
-    /// there is nothing to interrupt: `turn/interrupt` is addressed to a turn.
+    /// The CLI's id for the same turn, learned from `turn/started` or its RPC
+    /// response. Without it there is nothing to interrupt: `turn/interrupt` is
+    /// addressed to a turn.
     codex_turn: Option<String>,
     /// Items the timeline has already been told about, so a delta can tell
     /// "extend that one" from "this is the first anyone has heard of it".
@@ -643,7 +661,7 @@ struct CodexSession {
     turn: Arc<Mutex<TurnState>>,
     next_id: AtomicI64,
     child: Arc<Mutex<Option<Child>>>,
-    thread: std::sync::Mutex<Option<String>>,
+    thread: SharedThread,
     mode: Mutex<String>,
     model: Mutex<Option<String>>,
     effort: Mutex<Option<String>>,
@@ -817,22 +835,29 @@ impl AgentSession for CodexSession {
             params["effort"] = json!(effort);
         }
 
-        // The reply only says the turn was accepted; the timeline and the end of
-        // the turn arrive as notifications. A refusal, though, is this turn's
-        // failure, and nothing else is going to report it.
-        if let Err(error) = self.call("turn/start", params).await {
-            let mut state = self.turn.lock().await;
-            if state.id.as_deref() == Some(turn_id.as_str()) {
-                state.id = None;
+        // The timeline and the end arrive as notifications. The response also
+        // names the accepted turn, which closes the small window where Send has
+        // returned but `turn/started` has not yet been translated for Interrupt.
+        let started = match self.call("turn/start", params).await {
+            Ok(started) => started,
+            Err(error) => {
+                let mut state = self.turn.lock().await;
+                if state.id.as_deref() == Some(turn_id.as_str()) {
+                    state.id = None;
+                }
+                let _ = self.events.send(SessionEvent::TurnFailed {
+                    turn_id,
+                    error: TurnError {
+                        code: TurnErrorCode::Upstream,
+                        message: error.to_string(),
+                    },
+                });
+                return Err(error);
             }
-            let _ = self.events.send(SessionEvent::TurnFailed {
-                turn_id,
-                error: TurnError {
-                    code: TurnErrorCode::Upstream,
-                    message: error.to_string(),
-                },
-            });
-            return Err(error);
+        };
+        if let Some(upstream_turn) = notification_turn_id(&started) {
+            let mut state = self.turn.lock().await;
+            bind_started_turn_from_response(&mut state, &turn_id, upstream_turn);
         }
         Ok(turn_id)
     }
@@ -927,13 +952,14 @@ impl AgentSession for CodexSession {
     }
 
     async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()> {
-        let ask = self.asks.lock().await.remove(request_id);
-        // The CLI asked us, so this is a JSON-RPC *response* keyed by its id.
-        let id: i64 = request_id
-            .parse()
-            .map_err(|_| anyhow!("'{request_id}' is not a Codex request id"))?;
-        let result = match ask {
-            Some(Ask::Question { question, options }) => {
+        let pending = self
+            .asks
+            .lock()
+            .await
+            .remove(request_id)
+            .ok_or_else(|| anyhow!("Codex request '{request_id}' is no longer pending"))?;
+        let result = match pending.response {
+            Ask::Question { question, options } => {
                 let picked = match &outcome {
                     PermissionOutcome::Selected { option_id } => options
                         .iter()
@@ -950,8 +976,12 @@ impl AgentSession for CodexSession {
             }
             _ => json!({ "decision": decision(&outcome) }),
         };
-        self.write(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
-            .await?;
+        self.write(json!({
+            "jsonrpc": "2.0",
+            "id": pending.upstream_id,
+            "result": result,
+        }))
+        .await?;
         let _ = self.events.send(SessionEvent::PermissionResolved {
             request_id: request_id.to_string(),
             outcome,
@@ -1118,6 +1148,7 @@ struct Reader {
     pending: PendingMap,
     asks: AskMap,
     turn: Arc<Mutex<TurnState>>,
+    thread: SharedThread,
     child: Arc<Mutex<Option<Child>>>,
     said: Arc<Chatter>,
 }
@@ -1130,6 +1161,7 @@ async fn read_loop(reader: Reader) {
         pending,
         asks,
         turn,
+        thread,
         child,
         said,
     } = reader;
@@ -1146,37 +1178,62 @@ async fn read_loop(reader: Reader) {
             .get("method")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let id = frame.get("id").and_then(Value::as_i64);
+        // Preserve the wire type: app-server's RequestId is string | integer,
+        // and a server request has to receive exactly the id it sent us.
+        let id = frame.get("id").cloned();
         let params = frame.get("params").cloned().unwrap_or(Value::Null);
 
         match (id, method) {
             // A reply to something we sent.
             (Some(id), None) => {
-                if let Some(sender) = pending.lock().await.remove(&id) {
-                    let outcome = match frame.get("error") {
-                        Some(error) => Err(error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown error")
-                            .to_string()),
-                        None => Ok(frame.get("result").cloned().unwrap_or(Value::Null)),
-                    };
-                    let _ = sender.send(outcome);
+                if let Some(id) = id.as_i64() {
+                    if let Some(sender) = pending.lock().await.remove(&id) {
+                        let outcome = match frame.get("error") {
+                            Some(error) => Err(error
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown error")
+                                .to_string()),
+                            None => Ok(frame.get("result").cloned().unwrap_or(Value::Null)),
+                        };
+                        let _ = sender.send(outcome);
+                    }
                 }
             }
             // A request from the CLI: it is waiting on a reply keyed by this id.
             (Some(id), Some(method)) => {
+                let expected_thread = thread
+                    .lock()
+                    .expect("the thread id is never poisoned")
+                    .clone();
+                let surface = if is_interactive_request(&method) {
+                    let state = turn.lock().await;
+                    is_current_scope(&params, expected_thread.as_deref(), &state)
+                } else {
+                    true
+                };
                 translate_ask(Asked {
                     id,
                     method,
                     params,
+                    surface,
                     stdin: &stdin,
                     asks: &asks,
                     events: &events,
                 })
                 .await;
             }
-            (None, Some(method)) => translate(&method, &params, &turn, &events).await,
+            (None, Some(method)) => {
+                let expected_thread = thread
+                    .lock()
+                    .expect("the thread id is never poisoned")
+                    .clone();
+                if method == "serverRequest/resolved" {
+                    resolve_ask(&params, expected_thread.as_deref(), &asks, &events).await;
+                } else {
+                    translate(&method, &params, expected_thread.as_deref(), &turn, &events).await;
+                }
+            }
             (None, None) => {}
         }
     }
@@ -1198,12 +1255,57 @@ async fn read_loop(reader: Reader) {
 
 /// One request the CLI is waiting on.
 struct Asked<'a> {
-    id: i64,
+    id: Value,
     method: String,
     params: Value,
+    /// Only the active root turn may put the session into Waiting. Foreign
+    /// requests are answered conservatively without impersonating root.
+    surface: bool,
     stdin: &'a Mutex<ChildStdin>,
     asks: &'a AskMap,
     events: &'a broadcast::Sender<SessionEvent>,
+}
+
+/// The UI only needs an opaque string, while the response must preserve the
+/// JSON-RPC id's original string/integer type. Prefixing string ids also keeps
+/// integer `1` distinct from string `"1"` in the pending map.
+fn request_key(id: &Value) -> Option<String> {
+    match id {
+        Value::Number(number) if number.as_i64().is_some() => Some(number.to_string()),
+        Value::String(text) => Some(format!("string:{text}")),
+        _ => None,
+    }
+}
+
+fn is_interactive_request(method: &str) -> bool {
+    matches!(
+        method,
+        "item/commandExecution/requestApproval"
+            | "item/fileChange/requestApproval"
+            | "item/tool/requestUserInput"
+            | "tool/requestUserInput"
+    )
+}
+
+/// A foreign or stale turn still needs an immediate answer or app-server will
+/// wait forever. These are the least-authority protocol-valid responses.
+fn unattended_request_result(method: &str) -> Option<Value> {
+    match method {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+            Some(json!({ "decision": "decline" }))
+        }
+        "item/tool/requestUserInput" | "tool/requestUserInput" => Some(json!({ "answers": {} })),
+        _ => None,
+    }
+}
+
+fn is_current_scope(params: &Value, expected_thread: Option<&str>, state: &TurnState) -> bool {
+    let Some(expected_thread) = expected_thread else {
+        return false;
+    };
+    state.id.is_some()
+        && params.get("threadId").and_then(Value::as_str) == Some(expected_thread)
+        && is_current_turn(params, state)
 }
 
 async fn translate_ask(asked: Asked<'_>) {
@@ -1211,11 +1313,23 @@ async fn translate_ask(asked: Asked<'_>) {
         id,
         method,
         params,
+        surface,
         stdin,
         asks,
         events,
     } = asked;
-    let request_id = id.to_string();
+    let Some(request_id) = request_key(&id) else {
+        answer(
+            stdin,
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32600, "message": "Invalid Codex request id" },
+            }),
+        )
+        .await;
+        return;
+    };
     let item_id = params
         .get("itemId")
         .and_then(Value::as_str)
@@ -1239,9 +1353,26 @@ async fn translate_ask(asked: Asked<'_>) {
         });
     };
 
+    if !surface {
+        if let Some(result) = unattended_request_result(&method) {
+            answer(
+                stdin,
+                json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            )
+            .await;
+            return;
+        }
+    }
+
     match method.as_str() {
         "item/commandExecution/requestApproval" => {
-            asks.lock().await.insert(request_id.clone(), Ask::Decision);
+            asks.lock().await.insert(
+                request_id.clone(),
+                PendingAsk {
+                    upstream_id: id,
+                    response: Ask::Decision,
+                },
+            );
             let command = command_text(params.get("command"));
             ask(if command.is_empty() {
                 "Run a command?".to_string()
@@ -1250,7 +1381,13 @@ async fn translate_ask(asked: Asked<'_>) {
             });
         }
         "item/fileChange/requestApproval" => {
-            asks.lock().await.insert(request_id.clone(), Ask::Decision);
+            asks.lock().await.insert(
+                request_id.clone(),
+                PendingAsk {
+                    upstream_id: id,
+                    response: Ask::Decision,
+                },
+            );
             ask("Apply file changes?".to_string());
         }
         // Both names: the second is what builds before 0.143 called it.
@@ -1269,9 +1406,12 @@ async fn translate_ask(asked: Asked<'_>) {
                     let options = question.options.clone();
                     asks.lock().await.insert(
                         request_id.clone(),
-                        Ask::Question {
-                            question: question.id,
-                            options: options.clone(),
+                        PendingAsk {
+                            upstream_id: id,
+                            response: Ask::Question {
+                                question: question.id,
+                                options: options.clone(),
+                            },
                         },
                     );
                     let _ = events.send(SessionEvent::PermissionRequested {
@@ -1338,6 +1478,31 @@ async fn answer(stdin: &Mutex<ChildStdin>, value: Value) {
     }
 }
 
+/// app-server may clear a request because another client answered it or its
+/// turn ended. Remove the pending UI card without sending a second response.
+async fn resolve_ask(
+    params: &Value,
+    expected_thread: Option<&str>,
+    asks: &AskMap,
+    events: &broadcast::Sender<SessionEvent>,
+) {
+    let Some(expected_thread) = expected_thread else {
+        return;
+    };
+    if params.get("threadId").and_then(Value::as_str) != Some(expected_thread) {
+        return;
+    }
+    let Some(request_id) = params.get("requestId").and_then(request_key) else {
+        return;
+    };
+    if asks.lock().await.remove(&request_id).is_some() {
+        let _ = events.send(SessionEvent::PermissionResolved {
+            request_id,
+            outcome: PermissionOutcome::Canceled,
+        });
+    }
+}
+
 struct Question {
     id: String,
     header: String,
@@ -1383,33 +1548,56 @@ fn question_in(value: &Value) -> Option<Question> {
 async fn translate(
     method: &str,
     params: &Value,
+    expected_thread: Option<&str>,
     turn: &Mutex<TurnState>,
     events: &broadcast::Sender<SessionEvent>,
 ) {
+    // This warning belongs to the process, not to any conversation. All other
+    // notifications handled below are thread-scoped in app-server v2; missing
+    // provenance is ambiguous and is safer to ignore than to attach to root.
+    if method == "configWarning" {
+        // Read outside the macro: `tracing`'s own `Value` trait is in scope
+        // inside one, and it would shadow `serde_json::Value` here.
+        let summary = params
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("no summary");
+        tracing::warn!("codex config warning: {summary}");
+        return;
+    }
+    let Some(expected_thread) = expected_thread else {
+        return;
+    };
+    if params.get("threadId").and_then(Value::as_str) != Some(expected_thread) {
+        return;
+    }
+
     let mut state = turn.lock().await;
     match method {
-        "turn/started" => {
-            state.codex_turn = params
-                .get("turn")
-                .and_then(|turn| turn.get("id"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
+        // A duplicate is harmless; a second distinct start while this GeneHub
+        // turn is already bound is stale and must not hijack it.
+        "turn/started" if state.id.is_some() && state.codex_turn.is_none() => {
+            state.codex_turn = notification_turn_id(params).map(str::to_string);
         }
-        "turn/completed" => finish(&mut state, params, events),
-        "thread/tokenUsage/updated" => {
+        "turn/completed" if is_current_turn(params, &state) => finish(&mut state, params, events),
+        "thread/tokenUsage/updated" if state.id.is_none() || is_current_turn(params, &state) => {
             if let Some(usage) = usage_in(params) {
                 state.usage = usage;
             }
         }
-        "item/started" | "item/completed" => {
+        "item/started" | "item/completed" if is_current_turn(params, &state) => {
             if let Some(item) = params.get("item") {
                 item_frame(item, method == "item/completed", &mut state, events);
             }
         }
-        "item/agentMessage/delta" => stream(params, Kind::Assistant, &mut state, events),
-        "item/reasoning/summaryTextDelta" => stream(params, Kind::Reasoning, &mut state, events),
-        "turn/plan/updated" => plan(params, &mut state, events),
-        "thread/compacted" => {
+        "item/agentMessage/delta" if is_current_turn(params, &state) => {
+            stream(params, Kind::Assistant, &mut state, events)
+        }
+        "item/reasoning/summaryTextDelta" if is_current_turn(params, &state) => {
+            stream(params, Kind::Reasoning, &mut state, events)
+        }
+        "turn/plan/updated" if is_current_turn(params, &state) => plan(params, &mut state, events),
+        "thread/compacted" if is_current_turn(params, &state) => {
             if let Some(turn_id) = state.id.clone() {
                 let _ = events.send(SessionEvent::Item {
                     turn_id,
@@ -1420,20 +1608,38 @@ async fn translate(
                 });
             }
         }
-        // It volunteers these on startup, and they are about the machine rather
-        // than the conversation: on this Linux box, no bubblewrap means no
-        // sandbox. Worth a line in the log, not a card in the timeline.
-        "configWarning" => {
-            // Read outside the macro: `tracing`'s own `Value` trait is in scope
-            // inside one, and it would shadow `serde_json::Value` here.
-            let summary = params
-                .get("summary")
-                .and_then(Value::as_str)
-                .unwrap_or("no summary");
-            tracing::warn!("codex config warning: {summary}");
-        }
         _ => {}
     }
+}
+
+/// The upstream turn named by a v2 notification. Most carry `turnId`; the two
+/// lifecycle frames carry the same id inside their `turn` object.
+fn notification_turn_id(params: &Value) -> Option<&str> {
+    params.get("turnId").and_then(Value::as_str).or_else(|| {
+        params
+            .get("turn")
+            .and_then(|turn| turn.get("id"))
+            .and_then(Value::as_str)
+    })
+}
+
+fn bind_started_turn_from_response(state: &mut TurnState, genehub_turn: &str, upstream_turn: &str) {
+    if state.id.as_deref() != Some(genehub_turn) {
+        return;
+    }
+    match state.codex_turn.as_deref() {
+        Some(bound) if bound != upstream_turn => tracing::warn!(
+            "codex turn/start response replaced notification turn {bound} with {upstream_turn}"
+        ),
+        _ => {}
+    }
+    // This response is correlated to our own `turn/start` RPC, so it is
+    // authoritative if a stale same-thread start raced ahead.
+    state.codex_turn = Some(upstream_turn.to_string());
+}
+
+fn is_current_turn(params: &Value, state: &TurnState) -> bool {
+    state.codex_turn.as_deref() == notification_turn_id(params) && state.codex_turn.is_some()
 }
 
 /// Closes out the turn in flight.
@@ -1675,10 +1881,13 @@ fn item_frame(
             let path = text_of("agentPath");
             emit(TimelineItem::ToolCall {
                 id,
-                name: if path.is_empty() {
-                    "Sub-agent".to_string()
-                } else {
-                    path
+                name: match path.as_str() {
+                    "" => "Sub-agent".to_string(),
+                    // `/root` is the canonical main-agent path and commonly
+                    // appears when a child sends its result back. Showing the
+                    // raw path made that return look like a child named root.
+                    "/root" => "Main agent".to_string(),
+                    _ => path,
                 },
                 status: match item.get("kind").and_then(Value::as_str) {
                     Some("interrupted") => ToolStatus::Canceled,
@@ -1842,6 +2051,633 @@ mod tests {
             id: Some("t1".into()),
             ..TurnState::default()
         }
+    }
+
+    #[test]
+    fn request_keys_preserve_json_rpc_id_types() {
+        assert_eq!(request_key(&json!(7)).as_deref(), Some("7"));
+        assert_eq!(request_key(&json!("7")).as_deref(), Some("string:7"));
+        assert_eq!(request_key(&Value::Null), None);
+    }
+
+    #[test]
+    fn foreign_interactive_requests_have_least_authority_replies() {
+        assert_eq!(
+            unattended_request_result("item/commandExecution/requestApproval"),
+            Some(json!({ "decision": "decline" }))
+        );
+        assert_eq!(
+            unattended_request_result("item/fileChange/requestApproval"),
+            Some(json!({ "decision": "decline" }))
+        );
+        assert_eq!(
+            unattended_request_result("item/tool/requestUserInput"),
+            Some(json!({ "answers": {} }))
+        );
+    }
+
+    #[test]
+    fn only_the_active_root_scope_can_surface_an_interactive_request() {
+        let mut state = state();
+        state.codex_turn = Some("root-turn".into());
+        assert!(is_current_scope(
+            &json!({ "threadId": "root-thread", "turnId": "root-turn" }),
+            Some("root-thread"),
+            &state,
+        ));
+        assert!(!is_current_scope(
+            &json!({ "threadId": "child-thread", "turnId": "root-turn" }),
+            Some("root-thread"),
+            &state,
+        ));
+        assert!(!is_current_scope(
+            &json!({ "threadId": "root-thread", "turnId": "stale-turn" }),
+            Some("root-thread"),
+            &state,
+        ));
+        state.id = None;
+        assert!(!is_current_scope(
+            &json!({ "threadId": "root-thread", "turnId": "root-turn" }),
+            Some("root-thread"),
+            &state,
+        ));
+    }
+
+    #[tokio::test]
+    async fn server_resolution_clears_only_the_root_threads_pending_request() {
+        let asks: AskMap = Arc::default();
+        asks.lock().await.insert(
+            "7".into(),
+            PendingAsk {
+                upstream_id: json!(7),
+                response: Ask::Decision,
+            },
+        );
+        let (events, mut seen) = broadcast::channel(4);
+
+        resolve_ask(
+            &json!({ "threadId": "child-thread", "requestId": 7 }),
+            Some("root-thread"),
+            &asks,
+            &events,
+        )
+        .await;
+        assert!(asks.lock().await.contains_key("7"));
+
+        resolve_ask(
+            &json!({ "threadId": "root-thread", "requestId": 7 }),
+            Some("root-thread"),
+            &asks,
+            &events,
+        )
+        .await;
+        assert!(asks.lock().await.is_empty());
+        assert!(matches!(
+            seen.try_recv().expect("the external resolution"),
+            SessionEvent::PermissionResolved {
+                ref request_id,
+                outcome: PermissionOutcome::Canceled,
+            } if request_id == "7"
+        ));
+    }
+
+    #[test]
+    fn turn_start_response_is_authoritative_but_cannot_revive_a_finished_turn() {
+        let mut active = state();
+        active.codex_turn = Some("stale-turn".into());
+        bind_started_turn_from_response(&mut active, "t1", "root-turn");
+        assert_eq!(active.codex_turn.as_deref(), Some("root-turn"));
+
+        let mut finished = TurnState::default();
+        bind_started_turn_from_response(&mut finished, "t1", "root-turn");
+        assert_eq!(finished.codex_turn, None);
+    }
+
+    /// app-server multiplexes root and sub-agent threads over one connection.
+    /// A child finishing first must not leak its final answer into the root
+    /// timeline or consume the root GeneHub turn.
+    #[tokio::test]
+    async fn a_child_thread_cannot_write_to_or_complete_the_root_turn() {
+        let (events, mut seen) = broadcast::channel(16);
+        let turn = Mutex::new(state());
+
+        translate(
+            "turn/started",
+            &json!({
+                "threadId": "root-thread",
+                "turn": {
+                    "id": "root-turn",
+                    "items": [],
+                    "itemsView": "full",
+                    "status": "inProgress",
+                    "error": null,
+                    "startedAt": 1,
+                    "completedAt": null,
+                    "durationMs": null,
+                },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+
+        let child_frames = [
+            (
+                "turn/started",
+                json!({
+                    "threadId": "child-thread",
+                    "turn": {
+                        "id": "child-turn", "items": [], "itemsView": "full",
+                        "status": "inProgress", "error": null, "startedAt": 2,
+                        "completedAt": null, "durationMs": null,
+                    },
+                }),
+            ),
+            (
+                "turn/started",
+                json!({
+                    "threadId": "other-child-thread",
+                    "turn": {
+                        "id": "other-child-turn", "items": [], "itemsView": "full",
+                        "status": "inProgress", "error": null, "startedAt": 3,
+                        "completedAt": null, "durationMs": null,
+                    },
+                }),
+            ),
+            (
+                "item/started",
+                json!({
+                    "threadId": "child-thread",
+                    "turnId": "child-turn",
+                    "startedAtMs": 4_000,
+                    "item": {
+                        "type": "agentMessage", "id": "child-final", "text": "",
+                        "phase": "final_answer", "memoryCitation": null,
+                    },
+                }),
+            ),
+            (
+                "item/agentMessage/delta",
+                json!({
+                    "threadId": "child-thread",
+                    "turnId": "child-turn",
+                    "itemId": "child-final",
+                    "delta": "Audit complete and returned to the parent agent.",
+                }),
+            ),
+            (
+                "item/completed",
+                json!({
+                    "threadId": "child-thread",
+                    "turnId": "child-turn",
+                    "completedAtMs": 5_000,
+                    "item": {
+                        "type": "agentMessage",
+                        "id": "child-final",
+                        "text": "Audit complete and returned to the parent agent.",
+                        "phase": "final_answer",
+                        "memoryCitation": null,
+                    },
+                }),
+            ),
+            (
+                "thread/tokenUsage/updated",
+                json!({
+                    "threadId": "child-thread",
+                    "turnId": "child-turn",
+                    "tokenUsage": {
+                        "last": {
+                            "inputTokens": 67_092,
+                            "cachedInputTokens": 65_280,
+                            "outputTokens": 231,
+                            "reasoningOutputTokens": 0,
+                            "totalTokens": 67_323,
+                        },
+                        "total": {
+                            "inputTokens": 67_092,
+                            "cachedInputTokens": 65_280,
+                            "outputTokens": 231,
+                            "reasoningOutputTokens": 0,
+                            "totalTokens": 67_323,
+                        },
+                        "modelContextWindow": 258_400,
+                    },
+                }),
+            ),
+            (
+                "turn/completed",
+                json!({
+                    "threadId": "child-thread",
+                    "turn": {
+                        "id": "child-turn", "items": [], "itemsView": "full",
+                        "status": "completed", "error": null, "startedAt": 2,
+                        "completedAt": 5, "durationMs": 3_000,
+                    },
+                }),
+            ),
+        ];
+        for (method, params) in child_frames {
+            translate(method, &params, Some("root-thread"), &turn, &events).await;
+        }
+
+        assert!(matches!(
+            seen.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        {
+            let state = turn.lock().await;
+            assert_eq!(state.id.as_deref(), Some("t1"));
+            assert_eq!(state.codex_turn.as_deref(), Some("root-turn"));
+            assert_eq!(state.usage.input_tokens, 0);
+        }
+
+        translate(
+            "item/started",
+            &json!({
+                "threadId": "root-thread",
+                "turnId": "root-turn",
+                "startedAtMs": 5_500,
+                "item": {
+                    "type": "agentMessage", "id": "root-final", "text": "",
+                    "phase": "final_answer", "memoryCitation": null,
+                },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+        translate(
+            "item/agentMessage/delta",
+            &json!({
+                "threadId": "root-thread",
+                "turnId": "root-turn",
+                "itemId": "root-final",
+                "delta": "Done.",
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+        translate(
+            "item/completed",
+            &json!({
+                "threadId": "root-thread",
+                "turnId": "root-turn",
+                "completedAtMs": 5_600,
+                "item": {
+                    "type": "agentMessage", "id": "root-final", "text": "Done.",
+                    "phase": "final_answer", "memoryCitation": null,
+                },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+        translate(
+            "thread/tokenUsage/updated",
+            &json!({
+                "threadId": "root-thread",
+                "turnId": "root-turn",
+                "tokenUsage": {
+                    "last": {
+                        "inputTokens": 101,
+                        "cachedInputTokens": 61,
+                        "outputTokens": 13,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 114,
+                    },
+                    "total": {
+                        "inputTokens": 101,
+                        "cachedInputTokens": 61,
+                        "outputTokens": 13,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 114,
+                    },
+                    "modelContextWindow": 258_400,
+                },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+        translate(
+            "turn/completed",
+            &json!({
+                "threadId": "root-thread",
+                "turn": {
+                    "id": "root-turn", "items": [], "itemsView": "full",
+                    "status": "completed", "error": null, "startedAt": 1,
+                    "completedAt": 6, "durationMs": 5_000,
+                },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+
+        assert!(matches!(
+            seen.try_recv().expect("the root answer started"),
+            SessionEvent::Item {
+                ref turn_id,
+                item: TimelineItem::AssistantMessage { ref id, ref text },
+            } if turn_id == "t1" && id == "root-final" && text.is_empty()
+        ));
+        assert!(matches!(
+            seen.try_recv().expect("the root answer delta"),
+            SessionEvent::ItemDelta {
+                turn_id,
+                item_id,
+                delta: ItemDelta::Text { delta },
+            } if turn_id == "t1" && item_id == "root-final" && delta == "Done."
+        ));
+        assert!(matches!(
+            seen.try_recv().expect("the root answer completed"),
+            SessionEvent::Item {
+                ref turn_id,
+                item: TimelineItem::AssistantMessage { ref id, ref text },
+            } if turn_id == "t1" && id == "root-final" && text == "Done."
+        ));
+        assert!(matches!(
+            seen.try_recv().expect("the root completion"),
+            SessionEvent::TurnCompleted {
+                ref turn_id,
+                ref usage,
+                ref fork_checkpoint,
+                ..
+            } if turn_id == "t1"
+                && usage.input_tokens == 101
+                && usage.cache_read_tokens == 61
+                && usage.output_tokens == 13
+                && fork_checkpoint.as_deref() == Some("root-turn")
+        ));
+        assert!(matches!(
+            seen.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        let state = turn.lock().await;
+        assert_eq!(state.id, None);
+        assert_eq!(state.codex_turn, None);
+    }
+
+    /// Thread and turn ids are separate gates. This intentionally reuses the
+    /// root turn id on a foreign thread so the test fails if thread filtering
+    /// is ever removed while turn filtering remains.
+    #[tokio::test]
+    async fn a_foreign_thread_is_rejected_even_if_its_turn_id_matches() {
+        let (events, mut seen) = broadcast::channel(8);
+        let turn = Mutex::new(state());
+        translate(
+            "turn/started",
+            &json!({
+                "threadId": "root-thread",
+                "turn": { "id": "root-turn", "items": [], "status": "inProgress" },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+
+        translate(
+            "item/completed",
+            &json!({
+                "threadId": "child-thread",
+                "turnId": "root-turn",
+                "completedAtMs": 1,
+                "item": { "type": "agentMessage", "id": "foreign", "text": "not root" },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+        translate(
+            "turn/completed",
+            &json!({
+                "threadId": "child-thread",
+                "turn": { "id": "root-turn", "items": [], "status": "completed" },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+        translate(
+            "turn/completed",
+            &json!({
+                "turn": { "id": "root-turn", "items": [], "status": "completed" },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+
+        assert!(matches!(
+            seen.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        let state = turn.lock().await;
+        assert_eq!(state.id.as_deref(), Some("t1"));
+        assert_eq!(state.codex_turn.as_deref(), Some("root-turn"));
+    }
+
+    /// A notification from the right thread can still be stale. It must match
+    /// the root turn learned from `turn/started` before touching shared state.
+    #[tokio::test]
+    async fn a_stale_turn_on_the_root_thread_cannot_mutate_the_current_turn() {
+        let (events, mut seen) = broadcast::channel(8);
+        let turn = Mutex::new(state());
+        translate(
+            "turn/started",
+            &json!({
+                "threadId": "root-thread",
+                "turn": { "id": "root-turn", "items": [], "status": "inProgress" },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+
+        for (method, params) in [
+            (
+                "item/completed",
+                json!({
+                    "threadId": "root-thread",
+                    "turnId": "stale-turn",
+                    "completedAtMs": 1,
+                    "item": { "type": "agentMessage", "id": "stale", "text": "old" },
+                }),
+            ),
+            (
+                "thread/tokenUsage/updated",
+                json!({
+                    "threadId": "root-thread",
+                    "turnId": "stale-turn",
+                    "tokenUsage": { "last": { "inputTokens": 999 } },
+                }),
+            ),
+            (
+                "turn/completed",
+                json!({
+                    "threadId": "root-thread",
+                    "turn": { "id": "stale-turn", "items": [], "status": "completed" },
+                }),
+            ),
+        ] {
+            translate(method, &params, Some("root-thread"), &turn, &events).await;
+        }
+
+        assert!(matches!(
+            seen.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        {
+            let state = turn.lock().await;
+            assert_eq!(state.id.as_deref(), Some("t1"));
+            assert_eq!(state.codex_turn.as_deref(), Some("root-turn"));
+            assert_eq!(state.usage.input_tokens, 0);
+        }
+
+        translate(
+            "turn/completed",
+            &json!({
+                "threadId": "root-thread",
+                "turn": { "id": "root-turn", "items": [], "status": "completed" },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+        assert!(matches!(
+            seen.try_recv().expect("the current root turn completes"),
+            SessionEvent::TurnCompleted { .. }
+        ));
+    }
+
+    /// Resume may replay the root thread's last usage while no turn is active.
+    /// Keeping it preserves the adapter's existing cross-turn usage behavior.
+    #[tokio::test]
+    async fn idle_root_usage_is_kept_for_the_next_completed_turn() {
+        let (events, mut seen) = broadcast::channel(4);
+        let turn = Mutex::new(TurnState::default());
+        translate(
+            "thread/tokenUsage/updated",
+            &json!({
+                "threadId": "root-thread",
+                "turnId": "previous-turn",
+                "tokenUsage": { "last": {
+                    "inputTokens": 120,
+                    "cachedInputTokens": 40,
+                    "outputTokens": 7,
+                } },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+
+        assert!(matches!(
+            seen.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        {
+            let mut state = turn.lock().await;
+            assert_eq!(state.usage.input_tokens, 120);
+            assert_eq!(state.usage.cache_read_tokens, 40);
+            assert_eq!(state.usage.output_tokens, 7);
+            let usage = state.usage.clone();
+            *state = TurnState {
+                id: Some("next-genehub-turn".into()),
+                usage,
+                ..TurnState::default()
+            };
+        }
+
+        translate(
+            "turn/started",
+            &json!({
+                "threadId": "root-thread",
+                "turn": { "id": "next-root-turn", "items": [], "status": "inProgress" },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+        translate(
+            "turn/completed",
+            &json!({
+                "threadId": "root-thread",
+                "turn": { "id": "next-root-turn", "items": [], "status": "completed" },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+        assert!(matches!(
+            seen.try_recv().expect("the next completed turn"),
+            SessionEvent::TurnCompleted { ref usage, .. }
+                if usage.input_tokens == 120
+                    && usage.cache_read_tokens == 40
+                    && usage.output_tokens == 7
+        ));
+    }
+
+    /// Root-thread collaboration summaries mention child ids inside the item;
+    /// those are content, not notification provenance, and remain visible.
+    #[tokio::test]
+    async fn root_thread_sub_agent_activity_remains_visible() {
+        let (events, mut seen) = broadcast::channel(4);
+        let turn = Mutex::new(state());
+        translate(
+            "turn/started",
+            &json!({
+                "threadId": "root-thread",
+                "turn": { "id": "root-turn", "items": [], "status": "inProgress" },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+        translate(
+            "item/completed",
+            &json!({
+                "threadId": "root-thread",
+                "turnId": "root-turn",
+                "completedAtMs": 1,
+                "item": {
+                    "type": "subAgentActivity",
+                    "id": "return-to-root",
+                    "agentThreadId": "child-thread",
+                    "agentPath": "/root",
+                    "kind": "interacted",
+                },
+            }),
+            Some("root-thread"),
+            &turn,
+            &events,
+        )
+        .await;
+
+        assert!(matches!(
+            seen.try_recv().expect("the root collaboration summary"),
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall { ref name, .. },
+                ..
+            } if name == "Main agent"
+        ));
     }
 
     /// The three pickers are the whole reason this adapter reads `model/list`,
