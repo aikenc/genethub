@@ -1,0 +1,145 @@
+import { describe, expect, it } from "vitest";
+
+import { agentAssets } from "../../assets/agents";
+import agentConfig from "./agents.json";
+import modelConfig from "./model-aliases.json";
+import {
+  resolveAgentPresentation,
+  resolveEffortBadge,
+  resolveModeBadge,
+  resolveModelPresentation,
+  truncateGraphemes,
+} from "./resolve";
+import badgeConfig from "./runtime-badges.json";
+
+describe("Agent presentation catalog", () => {
+  it("matches exact built-in and configured ACP ids", () => {
+    expect(resolveAgentPresentation({ id: "cursor", label: "Cursor" }).kind).toBe("icon");
+    expect(resolveAgentPresentation({ id: "acp:goose", label: "goose" }).kind).toBe("icon");
+    expect(resolveAgentPresentation({ id: "claude", label: "Claude Code" })).toMatchObject({
+      kind: "glyph",
+      glyph: "✱",
+    });
+    expect(
+      resolveAgentPresentation({ id: "acp:github-copilot", label: "GitHub Copilot" }),
+    ).toEqual({ kind: "text", label: "GitHub Copilot" });
+  });
+
+  it("does not guess a vendor icon from an arbitrary custom Agent label", () => {
+    expect(resolveAgentPresentation({ id: "acp:private", label: "My Codex wrapper" })).toEqual({
+      kind: "text",
+      label: "My Codex wrapper",
+    });
+  });
+});
+
+describe("presentation catalog integrity", () => {
+  it("keeps supported schema versions and unique exact keys", () => {
+    expect(agentConfig.version).toBe(1);
+    expect(modelConfig.version).toBe(1);
+    expect(badgeConfig.version).toBe(1);
+
+    const agentIds = agentConfig.agents.flatMap((rule) => rule.ids);
+    expect(new Set(agentIds).size).toBe(agentIds.length);
+    const modelKeys = modelConfig.exact.map(
+      (rule) => `${rule.agentId ?? "*"}\u0000${rule.modelId}`,
+    );
+    expect(new Set(modelKeys).size).toBe(modelKeys.length);
+    const permissionKeys = badgeConfig.permissions.flatMap((rule) =>
+      rule.agentIds.flatMap((agentId) => rule.ids.map((modeId) => `${agentId}\u0000${modeId}`)),
+    );
+    expect(new Set(permissionKeys).size).toBe(permissionKeys.length);
+  });
+
+  it("references only bundled assets and keeps labels non-empty", () => {
+    for (const rule of agentConfig.agents) {
+      expect(rule.ids.every(Boolean)).toBe(true);
+      expect(rule.label.trim()).not.toBe("");
+      if ("assetId" in rule && rule.assetId) expect(agentAssets).toHaveProperty(rule.assetId);
+    }
+    for (const rule of modelConfig.exact) {
+      expect(rule.modelId.trim()).not.toBe("");
+      expect(rule.shortLabel.trim()).not.toBe("");
+    }
+    expect(modelConfig.fallback.maxGraphemes).toBe(8);
+  });
+});
+
+describe("model display names", () => {
+  it("uses a scoped exact mapping before the runtime label", () => {
+    expect(
+      resolveModelPresentation({
+        agentId: "codex",
+        modelId: "codex-auto-review",
+        modelLabel: "GPT-5.6-Luna",
+      }),
+    ).toMatchObject({ shortLabel: "5.6 Luna·审查", source: "scoped-map" });
+  });
+
+  it("uses the first eight graphemes of an unmapped runtime label", () => {
+    expect(
+      resolveModelPresentation({
+        agentId: "genet",
+        modelId: "provider/anything",
+        modelLabel: "一二三四五六七八九十",
+      }).shortLabel,
+    ).toBe("一二三四五六七八…");
+  });
+
+  it("falls back to the last provider/id segment when no label exists", () => {
+    expect(
+      resolveModelPresentation({
+        agentId: "genet",
+        modelId: "private-provider/long-model-name",
+      }).shortLabel,
+    ).toBe("long-mod…");
+  });
+
+  it("does not split a joined emoji grapheme", () => {
+    expect(truncateGraphemes("👨‍👩‍👧‍👦abcdefghi", 8)).toBe("👨‍👩‍👧‍👦abcdefg…");
+  });
+});
+
+describe("runtime emoji badges", () => {
+  it("does not invent a thinking level when the Agent supplied no default", () => {
+    expect(resolveEffortBadge(null)).toEqual({ emoji: "🧠", shortLabel: "默认", fullLabel: "默认" });
+  });
+
+  it("only shows the unlock emoji for known unrestricted modes", () => {
+    expect(
+      resolveModeBadge({
+        agentId: "codex",
+        permissions: true,
+        modeId: "full-access",
+        modeLabel: "Full access",
+      }),
+    ).toMatchObject({ emoji: "🔓", risk: "unrestricted" });
+    expect(
+      resolveModeBadge({
+        agentId: "codex",
+        permissions: true,
+        modeId: "vendor-new-mode",
+        modeLabel: "Vendor mode",
+      }),
+    ).toMatchObject({ emoji: "🛡️", risk: "unknown" });
+    expect(
+      resolveModeBadge({
+        agentId: "acp:codex",
+        permissions: true,
+        modeId: "full-access",
+        modeLabel: "Vendor full access",
+      }),
+    ).toMatchObject({ emoji: "🛡️", fullLabel: "Vendor full access", risk: "unknown" });
+  });
+
+  it("uses a neutral settings badge for a non-permission mode axis", () => {
+    expect(
+      resolveModeBadge({
+        agentId: "acp:goose",
+        permissions: false,
+        modeId: "agent",
+        modeLabel: "Agent",
+      }),
+    ).toMatchObject({ emoji: "⚙️", fullLabel: "Agent" });
+  });
+});

@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-08-04",
+  "assets": [
+    {
+      "id": "genet",
+      "files": {
+        "genet.svg": "47cb6ee485edf9d6c34da83081018800600bedb3b5fbcfcc73e45a6f317f42d0"
+      },
+      "sourceUrl": "../../../../../apps/desktop/src-tauri/icons/icon.png",
+      "license": "GeneHub project asset",
+      "redistributionNote": "Web-sized GeneHub-owned mark derived from the desktop application icon."
+    },
+    {
+      "id": "acp",
+      "files": {
+        "acp.svg": "806fccac704ef09288556496640811de80ce37aa68bd9f60c54772453d80e779"
+      },
+      "sourceUrl": "local",
+      "license": "GeneHub project asset",
+      "redistributionNote": "Neutral protocol plug drawn for GeneHub; it is not an ACP vendor mark."
+    },
+    {
+      "id": "opencode",
+      "files": {
+        "opencode-dark.svg": "7b6754ba20326d0d343a5b19480406a35cb7cbbbad44530ac0420924b0e1013f",
+        "opencode-light.svg": "56ed25f61140adcedebdf7392049608b5b2aa4cbb4b063a697c33aa867e40dce"
+      },
+      "sourceUrl": "https://github.com/anomalyco/opencode/tree/dev/packages/console/app/src/asset/brand",
+      "license": "MIT repository; product marks remain their owners' trademarks",
+      "licenseUrl": "https://github.com/anomalyco/opencode/blob/dev/LICENSE",
+      "redistributionNote": "Official square light/dark marks, geometry and colours unchanged."
+    },
+    {
+      "id": "cursor",
+      "files": {
+        "cursor-dark.svg": "a70910efe62e13a6ed92cefbff8d0252a40ab4140d79f570cd5f25c17bb6ddee",
+        "cursor-light.svg": "f466c9f7151b5b48f35b8506ca5a94596c9d1142d6af6cdfdc31f017d4f464d9"
+      },
+      "sourceUrl": "https://cursor.com/en-US/brand",
+      "license": "Cursor brand asset",
+      "trademarkPolicyUrl": "https://cursor.com/en-US/brand",
+      "redistributionNote": "Official 2D cube light/dark variants, geometry and colours unchanged."
+    },
+    {
+      "id": "goose",
+      "files": {
+        "goose.svg": "27cb1fef4a85a1779394dbfd0c7d5285d8cb6b120b36446b1cdbd9aad798da0b"
+      },
+      "sourceUrl": "https://github.com/aaif-goose/goose/blob/main/documentation/static/img/goose.svg",
+      "license": "Apache-2.0 repository; section 6 does not grant trademark rights",
+      "licenseUrl": "https://github.com/aaif-goose/goose/blob/main/LICENSE",
+      "redistributionNote": "Official unmodified SVG used only to identify configured goose agents."
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "ids": ["genet"],
+      "label": "GeneHub Agent",
+      "assetId": "genet"
+    },
+    {
+      "ids": ["opencode", "acp:opencode"],
+      "label": "OpenCode",
+      "assetId": "opencode"
+    },
+    {
+      "ids": ["claude", "acp:claude", "acp:claude-code"],
+      "label": "Claude Code",
+      "glyph": "✱"
+    },
+    {
+      "ids": ["codex", "acp:codex", "acp:codex-acp"],
+      "label": "Codex"
+    },
+    {
+      "ids": ["cursor", "acp:cursor", "acp:cursor-agent"],
+      "label": "Cursor",
+      "assetId": "cursor"
+    },
+    {
+      "ids": ["acp"],
+      "label": "ACP",
+      "assetId": "acp"
+    },
+    {
+      "ids": ["acp:goose", "goose"],
+      "label": "goose",
+      "assetId": "goose"
+    },
+    {
+      "ids": ["acp:github-copilot-cli", "acp:github-copilot", "acp:copilot", "github-copilot-cli"],
+      "label": "GitHub Copilot"
+    },
+    {
+      "ids": ["acp:gemini", "acp:gemini-cli", "gemini"],
+      "label": "Gemini"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "fallback": {
+    "maxGraphemes": 8,
+    "ellipsis": "…"
+  },
+  "exact": [
+    { "agentId": "codex", "modelId": "gpt-5.6-sol", "shortLabel": "5.6 Sol" },
+    { "agentId": "codex", "modelId": "gpt-5.6-terra", "shortLabel": "5.6 Terra" },
+    { "agentId": "codex", "modelId": "codex-auto-review", "shortLabel": "5.6 Luna·审查" },
+    { "agentId": "codex", "modelId": "gpt-5.6-luna", "shortLabel": "5.6 Luna" },
+    { "agentId": "codex", "modelId": "gpt-5.5", "shortLabel": "5.5" },
+    { "agentId": "codex", "modelId": "gpt-5.4", "shortLabel": "5.4" },
+    { "agentId": "codex", "modelId": "gpt-5.4-mini", "shortLabel": "5.4 Mini" },
+    { "agentId": "codex", "modelId": "gpt-5.3-codex-spark", "shortLabel": "5.3 Spark" },
+    { "agentId": "claude", "modelId": "default", "shortLabel": "Default" },
+    { "agentId": "claude", "modelId": "sonnet", "shortLabel": "Sonnet" },
+    { "agentId": "claude", "modelId": "opus", "shortLabel": "Opus" }
+  ]
+}

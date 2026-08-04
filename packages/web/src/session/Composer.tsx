@@ -1,5 +1,6 @@
 import type { AgentInfo, Attachment, CommandInfo } from "@genehub/proto";
-import { useMemo, useState } from "react";
+import { Paperclip } from "lucide-react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { attachmentPreviewUrl, AttachmentTooLarge, fileToAttachment, imageFilesFromClipboard } from "./attachments";
 import { ComposerControls } from "./ComposerControls";
@@ -9,11 +10,8 @@ import { ComposerControls } from "./ComposerControls";
  *
  * Enter sends, shift+enter breaks the line. While a turn is running the send
  * control becomes stop — one affordance, because the user's intent is never
- * ambiguous. Model and mode live here too, as chips under the text.
- *
- * On a phone those chips cover the timeline if they stay open, so the composer
- * collapses to the field (plus the agent picker on a brand-new conversation)
- * until it is focused. Desktop keeps the chips visible.
+ * ambiguous. Agent and runtime settings live in one quiet footer summary; its
+ * responsive detail panel keeps the richer catalog out of the conversation.
  *
  * Typing `/` opens the agent's own command list, when it has one. Running a
  * command needs nothing special — it goes out as ordinary text — so this is only
@@ -37,6 +35,7 @@ export function Composer({
   onPickModel,
   onPickMode,
   onPickEffort,
+  onHeightChange,
 }: {
   running: boolean;
   disabled?: boolean;
@@ -59,15 +58,20 @@ export function Composer({
   onPickModel(id: string): void;
   onPickMode(id: string): void;
   onPickEffort?(id: string): void;
+  /** The card grows with text and attachments while floating over the
+   * timeline. Its owner uses this to keep the last message and permission
+   * prompt above the real card instead of a guessed fixed offset. */
+  onHeightChange?(height: number): void;
 }) {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [pasteNotice, setPasteNotice] = useState<string | null>(null);
   const [highlighted, setHighlighted] = useState(0);
   const [dismissed, setDismissed] = useState(false);
-  // Phone only: chips stay tucked away until the field (or a chip) is focused.
-  const [expanded, setExpanded] = useState(false);
-  const mobileChrome = expanded ? "full" : agentLocked ? "hidden" : "agent";
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const picker = useRef<HTMLInputElement>(null);
+  const card = useRef<HTMLDivElement>(null);
 
   // Only while the draft *is* one slash token: a command has to lead the message
   // for the agent to treat it as one, so offering the menu mid-sentence would be
@@ -86,7 +90,7 @@ export function Composer({
       })
       .slice(0, 8);
   }, [commands, typing, dismissed]);
-  const open = matches.length > 0;
+  const open = matches.length > 0 && !settingsOpen;
   const chosen = matches[Math.min(highlighted, matches.length - 1)];
 
   const complete = (command: CommandInfo) => {
@@ -105,9 +109,9 @@ export function Composer({
     onSend(text, attachments);
   };
 
-  const addPastedImages = async (files: File[]) => {
+  const addFiles = async (files: File[]) => {
     if (!attachmentsSupported) {
-      setPasteNotice("当前 agent 还不支持贴图");
+      setPasteNotice("当前 Agent 还不支持附件");
       return;
     }
     try {
@@ -115,9 +119,32 @@ export function Composer({
       setAttachments((current) => [...current, ...added]);
       setPasteNotice(null);
     } catch (error) {
-      setPasteNotice(error instanceof AttachmentTooLarge ? error.message : "读取图片失败");
+      setPasteNotice(error instanceof AttachmentTooLarge ? error.message : "读取文件失败");
     }
   };
+
+  useLayoutEffect(() => {
+    if (textarea.current) resizeComposerTextarea(textarea.current);
+  }, [draft]);
+
+  useLayoutEffect(() => {
+    const element = card.current;
+    if (!element || !onHeightChange) return;
+    const update = () => onHeightChange(Math.ceil(element.getBoundingClientRect().height));
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [onHeightChange]);
+
+  useLayoutEffect(() => {
+    const update = () => {
+      if (textarea.current) resizeComposerTextarea(textarea.current);
+    };
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
 
   return (
     <div
@@ -163,18 +190,14 @@ export function Composer({
         </div>
       ) : null}
       <div
+        ref={card}
         className="pointer-events-auto mx-auto max-w-chat rounded-2xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur"
-        onFocus={() => setExpanded(true)}
-        onBlur={(event) => {
-          // Stay open while focus moves between the field and a chip; only
-          // tuck away once focus has left the composer entirely.
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-            setExpanded(false);
-          }
-        }}
       >
         {attachments.length > 0 ? (
-          <div className="flex flex-wrap gap-2 px-4 pt-3" aria-label="待发送的图片">
+          <div
+            className="flex flex-nowrap gap-2 overflow-x-auto px-4 pt-3"
+            aria-label="待发送的文件"
+          >
             {attachments.map((attachment, index) => (
               <div key={index} className="group relative h-14 w-14 shrink-0">
                 <img
@@ -195,11 +218,8 @@ export function Composer({
           </div>
         ) : null}
         <textarea
-          // Phone: one line while idle so the chips can tuck away without
-          // leaving a tall empty field. Desktop sizing is unchanged (`md:`).
-          className={`max-h-40 min-h-[56px] w-full resize-none bg-transparent px-4 pt-3.5 text-base text-fg outline-none placeholder:text-faint md:min-h-[52px] md:pt-3 md:text-sm ${
-            expanded ? "" : "max-md:min-h-11 max-md:pt-2.5"
-          }`}
+          ref={textarea}
+          className="h-[72px] min-h-[72px] max-h-[120px] w-full resize-none overflow-y-hidden bg-transparent px-4 py-3 text-base leading-6 text-fg outline-none placeholder:text-faint md:text-sm"
           placeholder="描述任务，或直接说你想改什么"
           aria-label="任务描述"
           value={draft}
@@ -218,7 +238,7 @@ export function Composer({
             // insert a thumbnail at. Only the image is kept, same as most
             // chat apps' composers when a screenshot lands in an empty draft.
             event.preventDefault();
-            void addPastedImages(files);
+            void addFiles(files);
           }}
           onKeyDown={(event) => {
             if (open) {
@@ -248,12 +268,12 @@ export function Composer({
             }
           }}
         />
-        {pasteNotice ? <p className="px-4 pt-1 text-xs text-muted">{pasteNotice}</p> : null}
-        <div
-          className={`flex items-center gap-2 px-2 pb-2 pt-0.5 md:pt-0 ${
-            mobileChrome === "hidden" ? "max-md:justify-end" : ""
-          }`}
-        >
+        {pasteNotice ? (
+          <p className="px-4 pt-1 text-xs text-muted" role="alert">
+            {pasteNotice}
+          </p>
+        ) : null}
+        <div className="flex flex-nowrap items-center gap-1 px-2 pb-2 pt-0.5">
           <ComposerControls
             agents={agents}
             agentId={agentId}
@@ -262,12 +282,40 @@ export function Composer({
             effortId={effortId ?? null}
             disabled={disabled || running}
             agentLocked={agentLocked}
-            mobileChrome={mobileChrome}
+            onOpenChange={setSettingsOpen}
             onPickAgent={onPickAgent}
             onPickModel={onPickModel}
             onPickMode={onPickMode}
             onPickEffort={onPickEffort ?? (() => {})}
           />
+          <input
+            ref={picker}
+            type="file"
+            accept="image/*"
+            multiple
+            tabIndex={-1}
+            className="hidden"
+            onChange={(event) => {
+              const files = Array.from(event.currentTarget.files ?? []);
+              event.currentTarget.value = "";
+              if (files.length > 0) void addFiles(files);
+            }}
+          />
+          <button
+            type="button"
+            aria-label={
+              attachmentsSupported ? "添加文件" : "添加文件（当前 Agent 不支持附件）"
+            }
+            title={attachmentsSupported ? "添加文件（当前支持图片）" : "当前 Agent 不支持附件"}
+            disabled={disabled || running || !attachmentsSupported}
+            onClick={() => {
+              setDismissed(true);
+              picker.current?.click();
+            }}
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg disabled:opacity-30 md:h-8 md:w-8"
+          >
+            <Paperclip className="h-4 w-4" aria-hidden />
+          </button>
           {running ? (
             <button
               type="button"
@@ -299,4 +347,21 @@ export function Composer({
       </div>
     </div>
   );
+}
+
+export const COMPOSER_TEXTAREA_MIN_HEIGHT = 72;
+export const COMPOSER_TEXTAREA_MAX_HEIGHT = 120;
+
+/** Fit two to four 24px lines plus vertical padding. Kept as a small exported
+ * function so the clamp can be tested without asking jsdom to perform layout. */
+export function resizeComposerTextarea(element: HTMLTextAreaElement): number {
+  element.style.height = "auto";
+  const contentHeight = element.scrollHeight || COMPOSER_TEXTAREA_MIN_HEIGHT;
+  const height = Math.min(
+    COMPOSER_TEXTAREA_MAX_HEIGHT,
+    Math.max(COMPOSER_TEXTAREA_MIN_HEIGHT, contentHeight),
+  );
+  element.style.height = `${height}px`;
+  element.style.overflowY = contentHeight > COMPOSER_TEXTAREA_MAX_HEIGHT ? "auto" : "hidden";
+  return height;
 }

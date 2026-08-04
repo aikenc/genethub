@@ -213,3 +213,18 @@ input:focus-visible {
   outline: 1px solid rgb(var(--accent-bright) / 0.5);
   outline-offset: 1px;
 }
+
+/* Vendor marks ship with the light/dark colours their owners supplied. The
+ * application theme can differ from the OS theme, so a CSS class on the app —
+ * not `prefers-color-scheme` — chooses the matching bundled file. */
+.agent-brand-light {
+  display: none;
+}
+
+.light .agent-brand-dark {
+  display: none;
+}
+
+.light .agent-brand-light {
+  display: block;
+}

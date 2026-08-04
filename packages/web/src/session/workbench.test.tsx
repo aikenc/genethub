@@ -1,11 +1,16 @@
 import type { AgentInfo, TimelineItem } from "@genehub/proto";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { useWorkbench } from "./store";
-import { Composer } from "./Composer";
+import {
+  COMPOSER_TEXTAREA_MAX_HEIGHT,
+  COMPOSER_TEXTAREA_MIN_HEIGHT,
+  Composer,
+  resizeComposerTextarea,
+} from "./Composer";
 import { ComposerControls } from "./ComposerControls";
 import { PermissionCard } from "./Permission";
 import { TimelineView } from "./TimelineView";
@@ -196,7 +201,7 @@ function composerProps(overrides: Partial<ComponentProps<typeof Composer>> = {})
 }
 
 describe("the controls offered to the user", () => {
-  it("does not offer a model picker for an agent that cannot switch models", () => {
+  it("does not offer a model section for an agent that cannot switch models", async () => {
     const fixed = agent({
       id: "fixed",
       capabilities: { ...agent().capabilities, setModel: false, setMode: false },
@@ -208,36 +213,40 @@ describe("the controls offered to the user", () => {
         agentId="fixed"
         modelId={null}
         modeId={null}
-      effortId={null}
+        effortId={null}
         onPickAgent={() => {}}
         onPickModel={() => {}}
         onPickMode={() => {}}
-      onPickEffort={() => {}}
+        onPickEffort={() => {}}
       />,
     );
 
-    expect(screen.getByLabelText("agent")).toBeInTheDocument();
-    expect(screen.queryByLabelText("模型")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("模式")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
+    const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
+    expect(within(dialog).getByText("Agent")).toBeInTheDocument();
+    expect(within(dialog).queryByText("模型")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("模式")).not.toBeInTheDocument();
   });
 
-  it("leaves an agent that is not installed out of the picker entirely", () => {
+  it("leaves an agent that is not installed out of the picker entirely", async () => {
     render(
       <ComposerControls
         agents={[agent(), agent({ id: "opencode", label: "OpenCode", probe: { state: "notInstalled" } })]}
         agentId="genet"
         modelId={null}
         modeId={null}
-      effortId={null}
+        effortId={null}
         onPickAgent={() => {}}
         onPickModel={() => {}}
         onPickMode={() => {}}
-      onPickEffort={() => {}}
+        onPickEffort={() => {}}
       />,
     );
 
-    const picker = screen.getByLabelText("agent") as HTMLSelectElement;
-    expect([...picker.options].map((option) => option.textContent)).toEqual(["GeneHub Agent"]);
+    await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
+    const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
+    expect(within(dialog).getByRole("radio", { name: "GeneHub Agent" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("radio", { name: "OpenCode" })).not.toBeInTheDocument();
   });
 
   it("sends on enter and keeps shift+enter for a new line", async () => {
@@ -259,8 +268,21 @@ describe("the controls offered to the user", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
-  /** Pasting a screenshot is the core way an image enters a conversation
-   * here (`Composer.tsx`) — no separate file picker exists yet. */
+  it("grows the textarea from two to four lines and then scrolls internally", () => {
+    const box = document.createElement("textarea");
+    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 40 });
+    expect(resizeComposerTextarea(box)).toBe(COMPOSER_TEXTAREA_MIN_HEIGHT);
+    expect(box.style.overflowY).toBe("hidden");
+
+    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 96 });
+    expect(resizeComposerTextarea(box)).toBe(96);
+
+    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 180 });
+    expect(resizeComposerTextarea(box)).toBe(COMPOSER_TEXTAREA_MAX_HEIGHT);
+    expect(box.style.overflowY).toBe("auto");
+  });
+
+  /** Pasting and the one paperclip entry both use the same attachment path. */
   function pasteImage(box: HTMLElement, name = "shot.png") {
     const file = new File(["fake-bytes"], name, { type: "image/png" });
     fireEvent.paste(box, {
@@ -286,12 +308,33 @@ describe("the controls offered to the user", () => {
     expect(screen.queryByAltText("shot.png")).not.toBeInTheDocument();
   });
 
+  it("uses one file button for images and resets the picker after every choice", async () => {
+    const onSend = vi.fn();
+    const { container } = render(
+      <Composer {...composerProps({ onSend, attachmentsSupported: true })} />,
+    );
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(["fake-bytes"], "picked.png", { type: "image/png" });
+
+    expect(screen.getByRole("button", { name: "添加文件" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /添加图片/ })).not.toBeInTheDocument();
+    await userEvent.upload(input, file);
+    await waitFor(() => expect(screen.getByAltText("picked.png")).toBeInTheDocument());
+    expect(input.value).toBe("");
+
+    await userEvent.click(screen.getByLabelText("发送"));
+    expect(onSend).toHaveBeenCalledWith(
+      "",
+      expect.arrayContaining([expect.objectContaining({ name: "picked.png" })]),
+    );
+  });
+
   it("leaves a pasted screenshot as an inert paste when the agent can't take attachments", async () => {
     const onSend = vi.fn();
     render(<Composer {...composerProps({ onSend, attachmentsSupported: false })} />);
 
     pasteImage(screen.getByLabelText("任务描述"));
-    await waitFor(() => expect(screen.getByText("当前 agent 还不支持贴图")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("当前 Agent 还不支持附件")).toBeInTheDocument());
     expect(screen.queryByAltText("shot.png")).not.toBeInTheDocument();
   });
 
@@ -305,28 +348,23 @@ describe("the controls offered to the user", () => {
     expect(onInterrupt).toHaveBeenCalled();
   });
 
-  it("on a phone, keeps chips collapsed until the field is focused", async () => {
-    const user = userEvent.setup();
+  it("keeps a two-line input and the same compact footer when it is focused", async () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
 
-    const chrome = document.querySelector("[data-mobile-chrome]");
-    expect(chrome).toHaveAttribute("data-mobile-chrome", "hidden");
-
-    await user.click(screen.getByLabelText("任务描述"));
-    expect(chrome).toHaveAttribute("data-mobile-chrome", "full");
-
-    await user.click(document.body);
-    expect(chrome).toHaveAttribute("data-mobile-chrome", "hidden");
+    const box = screen.getByLabelText("任务描述");
+    const summary = screen.getByRole("button", { name: /Agent：GeneHub Agent/ });
+    expect(box).toHaveAttribute("rows", "2");
+    await userEvent.click(box);
+    expect(summary).toHaveAttribute("aria-expanded", "false");
+    expect(document.querySelectorAll('select')).toHaveLength(0);
   });
 
-  it("keeps the agent picker visible on a new conversation even while collapsed", () => {
-    render(<Composer {...composerProps({ agentLocked: false })} />);
-
-    expect(document.querySelector("[data-mobile-chrome]")).toHaveAttribute(
-      "data-mobile-chrome",
-      "agent",
-    );
-    expect(screen.getByLabelText("agent")).toBeInTheDocument();
+  it("keeps the rich settings viewable when Agent switching is locked", async () => {
+    render(<Composer {...composerProps({ agentLocked: true })} />);
+    await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
+    const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
+    expect(within(dialog).getByRole("radio", { name: "GeneHub Agent" })).toBeDisabled();
+    expect(within(dialog).getByText(/当前会话已有内容/)).toBeInTheDocument();
   });
 
   it("asks for approval in the timeline and reports which option was chosen", async () => {

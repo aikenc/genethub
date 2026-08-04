@@ -87,6 +87,7 @@ export function App({
   >(() => (host.pendingPairing?.() ? "working" : "idle"));
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [composerHeight, setComposerHeight] = useState(128);
   // Two different questions. `sessionsOpen` is the phone's drawer, which starts
   // shut because it covers the conversation; `sidebarHidden` is someone on a
   // desktop asking for the room back, which starts false because the left
@@ -115,6 +116,7 @@ export function App({
   const agentId = session?.agentId ?? draft?.agentId ?? null;
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
   const composing = Boolean(workbench.activeSessionId || draft);
+  const composerSpace = `calc(${composerHeight}px + var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)) + 0.5rem)`;
 
   // The frame the compositor paints while a window is being resized is the
   // shell's, not the page's, so it has to be told which palette is in force —
@@ -335,10 +337,12 @@ export function App({
             {workbench.connection === "ready" ? null : (
               <span
                 role="status"
-                className="shrink-0 text-[11px] text-danger"
+                className={`shrink-0 text-[11px] ${
+                  workbench.connection === "closed" ? "text-danger" : "text-accent-bright"
+                }`}
                 title={endpoint.label}
               >
-                {workbench.connection === "closed" ? "已断开" : "连接中"}
+                {workbench.connection === "closed" ? "已断开" : "连接中…"}
               </span>
             )}
             <button
@@ -386,11 +390,17 @@ export function App({
                         endpoint={endpoint}
                       />
                     </div>
-                    <div className="min-h-0 flex-1 overflow-hidden pb-28">
+                    <div
+                      className="min-h-0 flex-1 overflow-hidden"
+                      style={{ paddingBottom: composerSpace }}
+                    >
                       <TimelineView state={workbench.timeline} />
                     </div>
                     {workbench.timeline.pendingPermission ? (
-                      <div className="absolute inset-x-0 bottom-28 z-20 px-4">
+                      <div
+                        className="absolute inset-x-0 z-20 px-4"
+                        style={{ bottom: composerSpace }}
+                      >
                         <div className="mx-auto max-w-chat">
                           <PermissionCard
                             request={workbench.timeline.pendingPermission}
@@ -415,6 +425,7 @@ export function App({
                         currentAgent?.capabilities.attachments ?? false
                       }
                       commands={currentAgent?.catalog.commands}
+                      onHeightChange={setComposerHeight}
                       onSend={(text, attachments) =>
                         void workbench.send(text, attachments)
                       }
