@@ -103,8 +103,27 @@ describe("the compact runtime summary", () => {
       }),
     ).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("DeepSeek…")).toBeInTheDocument();
-    expect(screen.getByText("🤔")).toHaveAttribute("aria-hidden");
-    expect(screen.queryByText("中")).not.toBeInTheDocument();
+    expect(screen.getByText("🤔中")).toHaveAttribute("aria-hidden");
+  });
+
+  it.each([
+    ["low", "低"],
+    ["medium", "中"],
+    ["high", "高"],
+  ])("shows the %s thinking level beside its emoji", (effortId, label) => {
+    controls({ effortId });
+    expect(screen.getByText(`🤔${label}`)).toHaveAttribute("aria-hidden");
+    expect(
+      screen.getByRole("button", { name: new RegExp(`思考强度：${label}`) }),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    [true, "text-[11px]"],
+    [false, "text-[14px]"],
+  ])("keeps an Agent glyph inside the compact=%s runtime row", (compact, size) => {
+    controls({ agentId: "claude", compact });
+    expect(screen.getByText("✱")).toHaveClass(size, "leading-none");
   });
 
   it("uses the scoped friendly name for a known Codex model", () => {

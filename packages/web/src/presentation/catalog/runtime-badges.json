@@ -9,7 +9,7 @@
     "high": { "shortLabel": "高", "fullLabel": "高" },
     "xhigh": { "shortLabel": "极", "fullLabel": "极高" },
     "max": { "shortLabel": "满", "fullLabel": "最大" },
-    "ultra": { "shortLabel": "满", "fullLabel": "超高" }
+    "ultra": { "shortLabel": "超", "fullLabel": "超高" }
   },
   "permissions": [
     {

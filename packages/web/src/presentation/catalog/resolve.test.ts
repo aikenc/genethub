@@ -131,6 +131,30 @@ describe("runtime emoji badges", () => {
     expect(resolveEffortBadge(null)).toEqual({ emoji: "🤔", shortLabel: "默认", fullLabel: "默认" });
   });
 
+  it.each([
+    ["off", "关", "关闭"],
+    ["minimal", "微", "极低"],
+    ["low", "低", "低"],
+    ["medium", "中", "中"],
+    ["high", "高", "高"],
+    ["xhigh", "极", "极高"],
+    ["max", "满", "最大"],
+    ["ultra", "超", "超高"],
+  ])(
+    "keeps the %s thinking level distinct in the compact badge",
+    (id, shortLabel, fullLabel) => {
+      expect(resolveEffortBadge(id)).toEqual({ emoji: "🤔", shortLabel, fullLabel });
+    },
+  );
+
+  it("keeps an unknown Agent-supplied thinking level instead of changing its wire value", () => {
+    expect(resolveEffortBadge("extreme")).toEqual({
+      emoji: "🤔",
+      shortLabel: "ex",
+      fullLabel: "extreme",
+    });
+  });
+
   it("separates a permission policy from an ACP workflow selector", () => {
     expect(resolveAgentProfile("codex").modeKind).toBe("permission");
     expect(resolveAgentProfile("claude").modeKind).toBe("permission");

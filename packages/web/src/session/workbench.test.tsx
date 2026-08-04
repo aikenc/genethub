@@ -367,30 +367,98 @@ describe("the controls offered to the user", () => {
     const box = screen.getByLabelText("任务描述");
     const summary = screen.getByRole("button", { name: /Agent：GeneHub Agent/ });
     const card = box.closest("[data-composer-state]");
+    const inputSlot = box.closest('[data-composer-slot="input"]');
+    const runtimeRow = card?.querySelector('[data-composer-slot="runtime"]');
+    const actionsRow = card?.querySelector('[data-composer-slot="actions"]');
+    const fileButton = screen.getByRole("button", { name: /添加文件/ });
+    const sendButton = screen.getByRole("button", { name: "发送" });
     expect(box).toHaveAttribute("rows", "1");
     expect(box).toHaveAttribute("data-expanded", "false");
     expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_COLLAPSED_HEIGHT}px` });
     expect(card).toHaveAttribute("data-composer-state", "idle");
+    expect(inputSlot).toHaveClass("col-start-1", "row-start-1");
+    expect(inputSlot).not.toHaveClass("col-span-2");
+    expect(runtimeRow).toHaveAttribute("data-row-units", "0.5");
+    expect(runtimeRow).toHaveClass("h-3", "row-start-2");
+    expect(actionsRow).toHaveAttribute("data-row-units", "1.25");
+    expect(actionsRow).toHaveClass("h-8", "row-span-2", "self-center");
     expect(summary).toHaveClass(
       "h-3",
-      "text-[9px]",
+      "text-[11px]",
       "!min-h-0",
       "!min-w-0",
       "after:-inset-y-1.5",
     );
-    expect(screen.getByRole("button", { name: /添加文件/ })).toHaveClass("h-10", "w-10");
-    expect(screen.getByRole("button", { name: "发送" })).toHaveClass("h-10", "w-10");
+    expect(summary.firstElementChild).toHaveClass("opacity-75");
+    expect(fileButton).toHaveClass("h-[30px]", "w-[30px]", "!min-h-0", "!min-w-0");
+    expect(sendButton).toHaveClass("h-[30px]", "w-[30px]", "!min-h-0", "!min-w-0");
     await userEvent.click(box);
     expect(box).toHaveAttribute("data-expanded", "true");
     expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT}px` });
     expect(card).toHaveAttribute("data-composer-state", "active");
-    expect(summary).toHaveClass("h-5", "text-[11px]");
+    expect(inputSlot).toHaveClass("col-span-2", "col-start-1", "row-start-1");
+    expect(runtimeRow).toHaveAttribute("data-row-units", "1");
+    expect(runtimeRow).toHaveClass("h-6", "row-start-2");
+    expect(actionsRow).toHaveAttribute("data-row-units", "1");
+    expect(actionsRow).toHaveClass("h-6", "row-start-2");
+    expect(summary).toHaveClass("h-6", "text-[12px]");
+    expect(fileButton).toHaveClass("h-6", "w-6");
+    expect(sendButton).toHaveClass("h-6", "w-6");
     expect(summary).toHaveAttribute("aria-expanded", "false");
     expect(document.querySelectorAll('select')).toHaveLength(0);
 
     fireEvent.blur(box);
     expect(box).toHaveAttribute("data-expanded", "false");
     expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_COLLAPSED_HEIGHT}px` });
+  });
+
+  it("keeps the expanded row stable while runtime settings take focus", async () => {
+    render(<Composer {...composerProps({ agentLocked: true })} />);
+
+    const box = screen.getByLabelText("任务描述");
+    const card = box.closest("[data-composer-state]");
+    await userEvent.click(box);
+    expect(card).toHaveAttribute("data-composer-state", "active");
+
+    await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
+    expect(screen.getByRole("dialog", { name: "Agent 与运行设置" })).toBeInTheDocument();
+    expect(card).toHaveAttribute("data-composer-state", "active");
+    expect(box).toHaveAttribute("data-expanded", "true");
+
+    await userEvent.click(screen.getByRole("button", { name: "关闭运行设置" }));
+    expect(card).toHaveAttribute("data-composer-state", "idle");
+    expect(box).toHaveAttribute("data-expanded", "false");
+  });
+
+  it("does not collapse before an active file-button click reaches the picker", async () => {
+    const { container } = render(
+      <Composer {...composerProps({ attachmentsSupported: true })} />,
+    );
+    const box = screen.getByLabelText("任务描述");
+    const card = box.closest("[data-composer-state]");
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const pickerClick = vi.spyOn(picker, "click").mockImplementation(() => {});
+
+    await userEvent.click(box);
+    await userEvent.click(screen.getByRole("button", { name: /添加文件/ }));
+
+    expect(pickerClick).toHaveBeenCalledOnce();
+    expect(card).toHaveAttribute("data-composer-state", "active");
+    expect(box).toHaveFocus();
+  });
+
+  it("sends before a pointer-triggered collapse returns to the idle row", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...composerProps({ onSend })} />);
+    const box = screen.getByLabelText("任务描述");
+    const card = box.closest("[data-composer-state]");
+
+    await userEvent.type(box, "继续调整");
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(onSend).toHaveBeenCalledWith("继续调整", []);
+    expect(card).toHaveAttribute("data-composer-state", "idle");
+    expect(box).toHaveAttribute("data-expanded", "false");
   });
 
   it("keeps the rich settings viewable when Agent switching is locked", async () => {

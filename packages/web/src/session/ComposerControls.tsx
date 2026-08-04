@@ -201,56 +201,63 @@ export function ComposerControls({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={panelId}
+        onMouseDown={(event) => event.preventDefault()}
         onClick={() => setPanelOpen(true)}
-        className={`flex !min-h-0 !min-w-0 flex-1 items-center overflow-hidden text-left text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${
+        className={`flex !min-h-0 !min-w-0 flex-1 items-center text-left text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${
           compact
-            ? "relative h-3 min-h-0 gap-1 rounded px-1 text-[9px] leading-none after:absolute after:-inset-y-1.5 after:inset-x-0 after:content-['']"
-            : "h-5 min-h-0 gap-1.5 rounded-md px-1.5 text-[11px] leading-none"
+            ? "relative h-3 min-h-0 rounded px-1 text-[11px] leading-3 after:absolute after:-inset-y-1.5 after:inset-x-0 after:content-['']"
+            : "h-6 min-h-0 rounded-md px-1.5 text-[12px] leading-6"
         }`}
       >
-        {selection.current ? (
-          <AgentMark
-            agent={selection.current}
-            className={compact ? "h-3 w-3" : "h-4 w-4"}
-            textClassName={compact ? "max-w-16 text-[9px]" : "max-w-24 text-[11px]"}
-            glyphClassName={compact ? "text-xs" : "text-sm"}
-          />
-        ) : null}
-        {agentAvailability ? (
-          <span
-            className="shrink-0 whitespace-nowrap text-danger"
-            title={agentAvailability.fullLabel}
-          >
-            {agentAvailability.shortLabel}
+        <span
+          className={`flex min-w-0 flex-1 items-center overflow-hidden opacity-75 ${
+            compact ? "gap-1" : "gap-1.5"
+          }`}
+        >
+          {selection.current ? (
+            <AgentMark
+              agent={selection.current}
+              className={compact ? "h-3 w-3" : "h-4 w-4"}
+              textClassName={compact ? "max-w-16 text-[11px]" : "max-w-24 text-[12px]"}
+              glyphClassName={compact ? "text-[11px]" : "text-[14px]"}
+            />
+          ) : null}
+          {agentAvailability ? (
+            <span
+              className="shrink-0 whitespace-nowrap text-danger"
+              title={agentAvailability.fullLabel}
+            >
+              {agentAvailability.shortLabel}
+            </span>
+          ) : null}
+          {model ? (
+            <span className="min-w-0 truncate text-muted" title={model.fullLabel}>
+              {model.shortLabel}
+            </span>
+          ) : selection.current && agentPresentation && agentPresentation.kind !== "text" ? (
+            <span className="min-w-0 truncate text-muted" title={agentPresentation.label}>
+              {agentPresentation.label}
+            </span>
+          ) : null}
+          {effort ? (
+            <span
+              className="shrink-0 whitespace-nowrap text-muted"
+              title={`思考强度：${effort.fullLabel}`}
+            >
+              <span aria-hidden>{effort.emoji}{effort.shortLabel}</span>
+            </span>
+          ) : null}
+          {mode ? (
+            <span
+              className="shrink-0 whitespace-nowrap text-muted"
+              title={`${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}`}
+            >
+              <span aria-hidden>{mode.emoji}</span>
+            </span>
+          ) : null}
+          <span className="ml-auto shrink-0 text-[8px] text-faint" aria-hidden>
+            ▾
           </span>
-        ) : null}
-        {model ? (
-          <span className="min-w-0 truncate text-muted" title={model.fullLabel}>
-            {model.shortLabel}
-          </span>
-        ) : selection.current && agentPresentation && agentPresentation.kind !== "text" ? (
-          <span className="min-w-0 truncate text-muted" title={agentPresentation.label}>
-            {agentPresentation.label}
-          </span>
-        ) : null}
-        {effort ? (
-          <span
-            className="shrink-0 whitespace-nowrap text-muted"
-            title={`思考强度：${effort.fullLabel}`}
-          >
-            <span aria-hidden>{effort.emoji}</span>
-          </span>
-        ) : null}
-        {mode ? (
-          <span
-            className="shrink-0 whitespace-nowrap text-muted"
-            title={`${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}`}
-          >
-            <span aria-hidden>{mode.emoji}</span>
-          </span>
-        ) : null}
-        <span className="ml-auto shrink-0 text-[8px] text-faint" aria-hidden>
-          ▾
         </span>
       </button>
 

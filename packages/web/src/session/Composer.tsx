@@ -225,7 +225,14 @@ export function Composer({
           </div>
         ) : null}
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-x-1 px-1.5 py-0.5">
-          <div className="min-w-0">
+          <div
+            data-composer-slot="input"
+            className={`min-w-0 ${
+              active
+                ? "col-span-2 col-start-1 row-start-1"
+                : "col-start-1 row-start-1"
+            }`}
+          >
             <textarea
               ref={textarea}
               data-expanded={active}
@@ -289,29 +296,45 @@ export function Composer({
               }}
             />
             {pasteNotice ? (
-              <p className="px-3 py-1 text-xs text-muted" role="alert">
+              <p
+                data-composer-slot="notice"
+                className="px-3 py-1 text-xs text-muted"
+                role="alert"
+              >
                 {pasteNotice}
               </p>
             ) : null}
-            <div className="flex min-w-0">
-              <ComposerControls
-                agents={agents}
-                agentId={agentId}
-                modelId={modelId}
-                modeId={modeId}
-                effortId={effortId ?? null}
-                compact={!active}
-                disabled={disabled || running}
-                agentLocked={agentLocked}
-                onOpenChange={setSettingsOpen}
-                onPickAgent={onPickAgent}
-                onPickModel={onPickModel}
-                onPickMode={onPickMode}
-                onPickEffort={onPickEffort ?? (() => {})}
-              />
-            </div>
           </div>
-          <div className="flex flex-nowrap items-center gap-1">
+          <div
+            data-composer-slot="runtime"
+            data-row-units={active ? "1" : "0.5"}
+            className={`col-start-1 row-start-2 flex min-w-0 items-center ${
+              active ? "h-6" : "h-3"
+            }`}
+          >
+            <ComposerControls
+              agents={agents}
+              agentId={agentId}
+              modelId={modelId}
+              modeId={modeId}
+              effortId={effortId ?? null}
+              compact={!active}
+              disabled={disabled || running}
+              agentLocked={agentLocked}
+              onOpenChange={setSettingsOpen}
+              onPickAgent={onPickAgent}
+              onPickModel={onPickModel}
+              onPickMode={onPickMode}
+              onPickEffort={onPickEffort ?? (() => {})}
+            />
+          </div>
+          <div
+            data-composer-slot="actions"
+            data-row-units={active ? "1" : "1.25"}
+            className={`col-start-2 flex flex-nowrap items-center gap-1 self-center ${
+              active ? "row-start-2 h-6" : "row-span-2 row-start-1 h-8"
+            }`}
+          >
             <input
               ref={picker}
               type="file"
@@ -334,11 +357,14 @@ export function Composer({
               }
               title={attachmentsSupported ? "添加文件（当前仅支持图片）" : "当前 Agent 不支持附件"}
               disabled={disabled || running || !attachmentsSupported}
+              onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setDismissed(true);
                 picker.current?.click();
               }}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg disabled:opacity-30"
+              className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg disabled:opacity-30 ${
+                active ? "h-6 w-6" : "h-[30px] w-[30px]"
+              }`}
             >
               <Paperclip className="h-4 w-4" aria-hidden />
             </button>
@@ -346,8 +372,11 @@ export function Composer({
               <button
                 type="button"
                 aria-label="停止"
+                onMouseDown={(event) => event.preventDefault()}
                 onClick={onInterrupt}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger"
+                className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger ${
+                  active ? "h-6 w-6" : "h-[30px] w-[30px]"
+                }`}
               >
                 <span className="h-3 w-3 rounded-[2px] bg-current" />
               </button>
@@ -355,9 +384,15 @@ export function Composer({
               <button
                 type="button"
                 aria-label="发送"
-                onClick={send}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  send();
+                  textarea.current?.blur();
+                }}
                 disabled={disabled || (draft.trim().length === 0 && attachments.length === 0)}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent text-white disabled:opacity-30"
+                className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white disabled:opacity-30 ${
+                  active ? "h-6 w-6" : "h-[30px] w-[30px]"
+                }`}
               >
                 <svg
                   viewBox="0 0 16 16"
