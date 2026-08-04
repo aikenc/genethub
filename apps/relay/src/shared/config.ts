@@ -49,6 +49,12 @@ export const config = {
   limits: {
     maxDaemons: intFromEnv("RELAY_MAX_DAEMONS", 5000),
     maxClientsPerMachine: intFromEnv("RELAY_MAX_CLIENTS_PER_MACHINE", 8),
+    /** All endpoint kinds share this one Fabric admission budget. */
+    maxFabricEndpoints: intFromEnv("RELAY_MAX_FABRIC_ENDPOINTS", 10_000),
+    /** Bounds raw upgrades waiting on the remote admission authority. */
+    maxFabricPendingUpgrades: intFromEnv("RELAY_MAX_FABRIC_PENDING_UPGRADES", 256),
+    /** Protocol faults are scoped to a socket until this bounded threshold. */
+    maxFabricStrikes: intFromEnv("RELAY_MAX_FABRIC_STRIKES", 8),
     /** Bytes buffered for one peer before we consider it too slow and cut it. */
     maxBufferedBytes: intFromEnv("RELAY_MAX_BUFFERED_BYTES", 8 * 1024 * 1024),
     /** Largest single frame we will relay. */

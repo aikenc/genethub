@@ -7,6 +7,13 @@ import type {
   PresenceState,
   Revocation,
 } from "../src/contract/index.js";
+import type {
+  FabricAuthority,
+  FabricEndpointGrant,
+  FabricPresenceState,
+  FabricRevocation,
+  FabricRouteGrant,
+} from "../src/contract/fabric.js";
 import { startRelay, type Relay } from "../src/main.js";
 
 /**
@@ -65,9 +72,76 @@ export class FakeAuthority implements ChannelAuthority {
   }
 }
 
+/** The endpoint-neutral control-plane half used by Fabric integration tests. */
+export class FakeFabricAuthority implements FabricAuthority {
+  readonly endpointTickets = new Map<string, FabricEndpointGrant>();
+  readonly routeTickets = new Map<string, FabricRouteGrant>();
+  readonly presence: Array<{ endpointHandle: string; state: FabricPresenceState }> = [];
+  readonly calls: string[] = [];
+  private revokeHandler: ((revocation: FabricRevocation) => void) | null = null;
+
+  grantEndpoint(
+    credential: string,
+    endpointHandle: string,
+    options: { revocationHandle?: string; expiresAt?: string | null } = {},
+  ): void {
+    this.endpointTickets.set(credential, {
+      endpointHandle,
+      revocationHandle: options.revocationHandle ?? `revoke:${endpointHandle}`,
+      expiresAt: options.expiresAt ?? null,
+    });
+  }
+
+  grantRoute(
+    ticket: string,
+    targetEndpointHandle: string,
+    options: { routeHandle?: string; expiresAt?: string } = {},
+  ): void {
+    this.routeTickets.set(ticket, {
+      targetEndpointHandle,
+      routeHandle: options.routeHandle ?? `route:${ticket}`,
+      expiresAt: options.expiresAt ?? "2099-01-01T00:00:00.000Z",
+    });
+  }
+
+  async authorizeEndpoint(credential: string): Promise<FabricEndpointGrant | null> {
+    this.calls.push("authorizeEndpoint");
+    const grant = this.endpointTickets.get(credential) ?? null;
+    this.endpointTickets.delete(credential);
+    return grant;
+  }
+
+  async authorizeRoute(
+    sourceEndpointHandle: string,
+    routeTicket: string,
+  ): Promise<FabricRouteGrant | null> {
+    this.calls.push(`authorizeRoute:${sourceEndpointHandle}`);
+    const grant = this.routeTickets.get(routeTicket) ?? null;
+    this.routeTickets.delete(routeTicket);
+    return grant;
+  }
+
+  async reportEndpointPresence(
+    endpointHandle: string,
+    state: FabricPresenceState,
+  ): Promise<void> {
+    this.calls.push("reportEndpointPresence");
+    this.presence.push({ endpointHandle, state });
+  }
+
+  onFabricRevoked(handler: (revocation: FabricRevocation) => void): void {
+    this.revokeHandler = handler;
+  }
+
+  revoke(revocation: FabricRevocation): void {
+    this.revokeHandler?.(revocation);
+  }
+}
+
 export interface TestRelay {
   relay: Relay;
   authority: FakeAuthority;
+  fabricAuthority: FakeFabricAuthority | null;
   origin: string;
   wsOrigin: string;
   json<T = unknown>(path: string, init?: RequestInit): Promise<T>;
@@ -76,12 +150,19 @@ export interface TestRelay {
 
 export async function startTestRelay(
   authority: ChannelAuthority = new FakeAuthority(),
+  fabricAuthority: FabricAuthority | null = null,
 ): Promise<TestRelay> {
-  const relay = await startRelay({ port: 0, host: "127.0.0.1", authority });
+  const relay = await startRelay({
+    port: 0,
+    host: "127.0.0.1",
+    authority,
+    fabricAuthority,
+  });
   const origin = `http://127.0.0.1:${relay.port}`;
   return {
     relay,
     authority: authority as FakeAuthority,
+    fabricAuthority: fabricAuthority as FakeFabricAuthority | null,
     origin,
     wsOrigin: `ws://127.0.0.1:${relay.port}`,
     async json(target, init) {
