@@ -205,6 +205,19 @@ mod tests {
     }
 
     #[test]
+    fn absolute_paths_can_be_written_outside_the_working_directory() {
+        let root = temp_dir("absolute-outside-cwd");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let outside = root.join("elsewhere/result.txt");
+
+        let result = write(&json!({"path": outside, "content": "unrestricted"}), &cwd);
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "unrestricted");
+        assert!(!outside.starts_with(&cwd));
+    }
+
+    #[test]
     fn read_honours_offset_and_limit() {
         let dir = temp_dir("offset");
         std::fs::write(dir.join("f.txt"), "l1\nl2\nl3\nl4\n").unwrap();

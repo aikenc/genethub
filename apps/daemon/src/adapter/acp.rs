@@ -15,8 +15,8 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind,
-    PermissionOutcome, PermissionRequest, ProbeState, SessionEvent, TimelineItem, ToolCallDetail,
-    ToolStatus, TurnError, TurnErrorCode, Usage,
+    PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent,
+    TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -25,7 +25,8 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
 use super::{
-    find_executable, AgentAdapter, AgentSession, Chatter, PromptInput, ProviderMap, SessionConfig,
+    find_executable, AgentAdapter, AgentSession, Chatter, PersistHandle, PromptInput, ProviderMap,
+    SessionConfig,
 };
 
 const EVENT_CAPACITY: usize = 1024;
@@ -106,7 +107,7 @@ impl AgentAdapter for AcpAdapter {
             set_model: true,
             set_mode: true,
             permissions: true,
-            resume: false,
+            resume: true,
             fork: false,
             attachments: true,
         }
@@ -166,8 +167,6 @@ impl AgentAdapter for AcpAdapter {
         let child = Arc::new(Mutex::new(Some(child)));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let pending_permissions: PendingPermissionsMap =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
         let turn = Arc::new(Mutex::new(TurnState::default()));
 
         // Kept: a bridge that exits explains itself on stderr, and that used to
@@ -175,28 +174,25 @@ impl AgentAdapter for AcpAdapter {
         let said = Arc::new(Chatter::default());
         said.watch("acp", Some(stderr)).await;
 
+        let stdin = Arc::new(Mutex::new(stdin));
         let session = AcpSession {
-            stdin: Mutex::new(stdin),
+            stdin: stdin.clone(),
             events: events.clone(),
             pending: pending.clone(),
-            pending_permissions: pending_permissions.clone(),
             turn: turn.clone(),
             next_id: AtomicI64::new(1),
             child: child.clone(),
             said: said.clone(),
             label: self.label.clone(),
+            agent_id: self.id.clone(),
             acp_session: Mutex::new(None),
+            persisted_session: std::sync::Mutex::new(None),
+            resume_method: std::sync::Mutex::new(None),
             model_config_id: Mutex::new(hello.model_config_id),
             mode_config_id: Mutex::new(hello.mode_config_id),
         };
 
-        tokio::spawn(read_loop(
-            stdout,
-            events,
-            pending,
-            pending_permissions,
-            turn,
-        ));
+        tokio::spawn(read_loop(stdout, events, pending, turn));
 
         session.initialize(&config).await?;
         Ok(Box::new(session))
@@ -204,7 +200,6 @@ impl AgentAdapter for AcpAdapter {
 }
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
-type PendingPermissionsMap = Arc<std::sync::Mutex<HashMap<String, Vec<PermissionOption>>>>;
 
 #[derive(Default)]
 struct TurnState {
@@ -225,10 +220,9 @@ impl TurnState {
 }
 
 struct AcpSession {
-    stdin: Mutex<ChildStdin>,
+    stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,
-    pending_permissions: PendingPermissionsMap,
     turn: Arc<Mutex<TurnState>>,
     next_id: AtomicI64,
     child: Arc<Mutex<Option<Child>>>,
@@ -236,9 +230,18 @@ struct AcpSession {
     said: Arc<Chatter>,
     /// The agent's name as the user knows it, for the same failure.
     label: String,
+    agent_id: String,
     acp_session: Mutex<Option<String>>,
+    persisted_session: std::sync::Mutex<Option<String>>,
+    resume_method: std::sync::Mutex<Option<ResumeMethod>>,
     model_config_id: Mutex<Option<String>>,
     mode_config_id: Mutex<Option<String>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResumeMethod {
+    Resume,
+    Load,
 }
 
 impl AcpSession {
@@ -266,25 +269,57 @@ impl AcpSession {
     }
 
     async fn initialize(&self, config: &SessionConfig) -> Result<()> {
-        self.call(
-            "initialize",
-            json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "clientCapabilities": client_capabilities(),
-            }),
-        )
-        .await?;
-
-        let result = self
+        let initialized = self
             .call(
-                "session/new",
-                json!({ "cwd": config.cwd, "mcpServers": [] }),
+                "initialize",
+                json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "clientCapabilities": client_capabilities(),
+                }),
             )
             .await?;
-        let setup = parse_session_new(&result)?;
-        *self.acp_session.lock().await = Some(setup.session_id.clone());
-        *self.model_config_id.lock().await = setup.model_config_id.clone();
-        *self.mode_config_id.lock().await = setup.mode_config_id.clone();
+        let resume_method = resume_method_in(&initialized);
+        *self.resume_method.lock().unwrap() = resume_method;
+
+        let resumed = config
+            .resume
+            .as_ref()
+            .filter(|handle| handle.agent_id == self.agent_id)
+            .and_then(|handle| handle.value.get("sessionId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        let session_id = if let Some(session_id) = resumed {
+            let method = resume_method.ok_or_else(|| {
+                anyhow!("this ACP agent did not advertise session resume or load support")
+            })?;
+            self.call(
+                match method {
+                    ResumeMethod::Resume => "session/resume",
+                    ResumeMethod::Load => "session/load",
+                },
+                json!({
+                    "sessionId": session_id,
+                    "cwd": config.cwd,
+                    "mcpServers": [],
+                }),
+            )
+            .await
+            .with_context(|| format!("resuming ACP session {session_id}"))?;
+            session_id.to_string()
+        } else {
+            let result = self
+                .call(
+                    "session/new",
+                    json!({ "cwd": config.cwd, "mcpServers": [] }),
+                )
+                .await?;
+            let setup = parse_session_new(&result)?;
+            *self.model_config_id.lock().await = setup.model_config_id.clone();
+            *self.mode_config_id.lock().await = setup.mode_config_id.clone();
+            setup.session_id
+        };
+        *self.acp_session.lock().await = Some(session_id.clone());
+        *self.persisted_session.lock().unwrap() = Some(session_id);
 
         if let Some(model_id) = config.model_id.as_ref() {
             self.set_model(model_id).await?;
@@ -465,39 +500,23 @@ impl AgentSession for AcpSession {
         }
     }
 
-    async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()> {
-        let stored = self.pending_permissions.lock().unwrap().remove(request_id);
-        let response = match &outcome {
-            PermissionOutcome::Selected { option_id } => {
-                json!({ "outcome": { "outcome": "selected", "optionId": option_id } })
-            }
-            PermissionOutcome::TimedOut { .. } => {
-                if let Some(options) = stored {
-                    if let Some(reject) = options
-                        .iter()
-                        .find(|option| option.kind == PermissionOptionKind::Reject)
-                    {
-                        json!({ "outcome": { "outcome": "selected", "optionId": reject.id } })
-                    } else {
-                        json!({ "outcome": { "outcome": "cancelled" } })
-                    }
-                } else {
-                    json!({ "outcome": { "outcome": "cancelled" } })
-                }
-            }
-            PermissionOutcome::Canceled => json!({ "outcome": { "outcome": "cancelled" } }),
-        };
-        // The agent asked us, so this is a JSON-RPC *response* keyed by its id.
-        let id: i64 = request_id
-            .parse()
-            .map_err(|_| anyhow!("'{request_id}' is not an ACP request id"))?;
-        self.write(json!({ "jsonrpc": "2.0", "id": id, "result": response }))
-            .await?;
-        let _ = self.events.send(SessionEvent::PermissionResolved {
-            request_id: request_id.to_string(),
-            outcome,
-        });
-        Ok(())
+    async fn respond_permission(
+        &self,
+        _request_id: &str,
+        _outcome: PermissionOutcome,
+    ) -> Result<()> {
+        Err(anyhow!(
+            "ACP permission requests stop the turn and resume as a new turn"
+        ))
+    }
+
+    fn persistence(&self) -> Option<PersistHandle> {
+        self.resume_method.lock().unwrap().as_ref()?;
+        let session_id = self.persisted_session.lock().unwrap().clone()?;
+        Some(PersistHandle {
+            agent_id: self.agent_id.clone(),
+            value: json!({ "sessionId": session_id }),
+        })
     }
 }
 
@@ -592,6 +611,25 @@ fn client_capabilities() -> Value {
             }
         }
     })
+}
+
+fn resume_method_in(initialized: &Value) -> Option<ResumeMethod> {
+    let capabilities = initialized.get("agentCapabilities")?;
+    if capabilities
+        .get("sessionCapabilities")
+        .and_then(|session| session.get("resume"))
+        .is_some()
+    {
+        return Some(ResumeMethod::Resume);
+    }
+    if capabilities
+        .get("loadSession")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some(ResumeMethod::Load);
+    }
+    None
 }
 
 fn parse_session_new(result: &Value) -> Result<Setup> {
@@ -827,7 +865,6 @@ async fn read_loop(
     stdout: tokio::process::ChildStdout,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,
-    pending_permissions: PendingPermissionsMap,
     turn: Arc<Mutex<TurnState>>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
@@ -862,13 +899,17 @@ async fn read_loop(
             continue;
         };
         let params = frame.get("params").cloned().unwrap_or(Value::Null);
+        if method == "session/request_permission" {
+            let Some(id) = frame.get("id").and_then(Value::as_i64) else {
+                tracing::warn!("ACP permission request had no numeric id");
+                continue;
+            };
+            translate_permission(id, &params, &events);
+            continue;
+        }
         let mut state = turn.lock().await;
         match method {
             "session/update" => translate_update(&params, &mut state, &events),
-            "session/request_permission" => {
-                let id = frame.get("id").and_then(Value::as_i64).unwrap_or(-1);
-                translate_permission(id, &params, &events, &pending_permissions);
-            }
             _ => {}
         }
     }
@@ -967,22 +1008,14 @@ fn permission_detail(tool_call: &Value) -> Option<String> {
     None
 }
 
-fn translate_permission(
-    id: i64,
-    params: &Value,
-    events: &broadcast::Sender<SessionEvent>,
-    pending_permissions: &PendingPermissionsMap,
-) {
+fn translate_permission(id: i64, params: &Value, events: &broadcast::Sender<SessionEvent>) {
     let options = permission_options(params);
-    pending_permissions
-        .lock()
-        .unwrap()
-        .insert(id.to_string(), options.clone());
 
     let tool_call = params.get("toolCall");
     let _ = events.send(SessionEvent::PermissionRequested {
         request: PermissionRequest {
             id: id.to_string(),
+            kind: PermissionRequestKind::Permission,
             title: tool_call
                 .and_then(|call| call.get("title"))
                 .and_then(Value::as_str)
@@ -1222,6 +1255,34 @@ mod tests {
         out
     }
 
+    #[test]
+    fn standard_resume_is_preferred_when_the_agent_advertises_it() {
+        let initialized = json!({
+            "agentCapabilities": {
+                "sessionCapabilities": { "resume": {} },
+                "loadSession": true
+            }
+        });
+        assert_eq!(resume_method_in(&initialized), Some(ResumeMethod::Resume));
+    }
+
+    #[test]
+    fn legacy_load_is_used_only_when_explicitly_advertised() {
+        assert_eq!(
+            resume_method_in(&json!({
+                "agentCapabilities": { "loadSession": true }
+            })),
+            Some(ResumeMethod::Load)
+        );
+        assert_eq!(
+            resume_method_in(&json!({
+                "agentCapabilities": { "loadSession": false }
+            })),
+            None
+        );
+        assert_eq!(resume_method_in(&json!({})), None);
+    }
+
     /// A pasted screenshot must become an ACP `image` block, not silently
     /// vanish because the base struct only carries text.
     #[test]
@@ -1355,7 +1416,6 @@ mod tests {
     #[test]
     fn permission_requests_carry_their_options_and_reply_id() {
         let (tx, mut rx) = broadcast::channel(8);
-        let pending: PendingPermissionsMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
         translate_permission(
             42,
             &json!({
@@ -1366,25 +1426,17 @@ mod tests {
                 ]
             }),
             &tx,
-            &pending,
         );
         match &drain(&mut rx)[0] {
             SessionEvent::PermissionRequested { request } => {
                 assert_eq!(request.id, "42", "the id is what we answer on");
+                assert_eq!(request.kind, PermissionRequestKind::Permission);
                 assert_eq!(request.tool_call_id.as_deref(), Some("c1"));
                 assert_eq!(request.options.len(), 2);
                 assert_eq!(request.options[1].kind, PermissionOptionKind::Reject);
             }
             other => panic!("unexpected {other:?}"),
         }
-        assert_eq!(
-            pending
-                .lock()
-                .unwrap()
-                .get("42")
-                .map(|options| options.len()),
-            Some(2)
-        );
     }
 
     #[test]
@@ -1531,9 +1583,20 @@ mod tests {
             eprintln!("skipping discover_cursor_when_installed: cursor-agent not on PATH");
             return;
         };
-        let hello = discover(&program, &["cursor-agent".into(), "acp".into()])
-            .await
-            .expect("cursor-agent should answer a handshake");
+        let hello = discover(
+            &program,
+            &[
+                "cursor-agent".into(),
+                "--force".into(),
+                "--sandbox".into(),
+                "disabled".into(),
+                "--trust".into(),
+                "--approve-mcps".into(),
+                "acp".into(),
+            ],
+        )
+        .await
+        .expect("cursor-agent should answer a handshake");
         assert!(
             !hello.modes.is_empty(),
             "Cursor should list agent/plan/ask modes"

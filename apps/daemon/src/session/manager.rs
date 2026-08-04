@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    Attachment, Catalog, ItemDelta, PermissionOutcome, PermissionRequest, SequencedEvent,
-    SessionEvent, SessionSnapshot, SessionStatus, SessionSummary, TimelineItem, ToolStatus,
-    TurnOutcome, TurnStats, Usage,
+    Attachment, Catalog, ItemDelta, PermissionOptionKind, PermissionOutcome, PermissionRequest,
+    PermissionRequestKind, SequencedEvent, SessionEvent, SessionSnapshot, SessionStatus,
+    SessionSummary, TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 
@@ -84,6 +84,7 @@ impl SessionManager {
             updated_at_ms: now,
             archived: false,
             persist: None,
+            pending_permission: None,
         };
         self.store.save_meta(&meta)?;
         let summary = meta.summary(SessionStatus::Idle);
@@ -165,6 +166,7 @@ impl SessionManager {
             updated_at_ms: now,
             archived: false,
             persist: Some(persist),
+            pending_permission: None,
         };
         self.store.save_meta(&meta)?;
         self.store
@@ -230,9 +232,11 @@ impl SessionManager {
             if meta.archived && !include_archived {
                 continue;
             }
-            // A live session knows its status; a stored one is idle by default.
+            // A suspended approval survives daemon restarts without a live
+            // Agent process or client connection.
             let status = match self.sessions.read().await.get(&meta.id) {
                 Some(live) => *live.status.lock().await,
+                None if meta.pending_permission.is_some() => SessionStatus::Waiting,
                 None => SessionStatus::Idle,
             };
             out.push(meta.summary(status));
@@ -399,6 +403,18 @@ impl SessionManager {
     /// Lazily, on first send: creating a session should not cost a process, or
     /// clicking through the sidebar would spawn one per session.
     async fn ensure_started(&self, live: &Arc<Live>, providers: &ProviderMap) -> Result<()> {
+        self.ensure_started_in_mode(live, providers, None).await
+    }
+
+    /// Starts a stopped native session with an optional one-turn mode override.
+    /// Permission recovery uses the Agent's default (highest) mode without
+    /// rewriting the user's explicit lower-mode choice in session metadata.
+    async fn ensure_started_in_mode(
+        &self,
+        live: &Arc<Live>,
+        providers: &ProviderMap,
+        mode_override: Option<String>,
+    ) -> Result<()> {
         if live.agent.lock().await.is_some() {
             return Ok(());
         }
@@ -439,7 +455,7 @@ impl SessionManager {
                 session_id: meta.id.clone(),
                 cwd: meta.cwd.clone(),
                 model_id: meta.model_id.clone(),
-                mode_id: meta.mode_id.clone(),
+                mode_id: mode_override.or_else(|| meta.mode_id.clone()),
                 effort_id: meta.effort_id.clone(),
                 scratch_dir: scratch,
                 providers: providers.clone(),
@@ -456,6 +472,11 @@ impl SessionManager {
         }
         *live.agent.lock().await = Some(session);
 
+        if let Some(previous) = live.pump.lock().await.take() {
+            if !previous.is_finished() {
+                previous.abort();
+            }
+        }
         let pump = tokio::spawn(pump_events(
             live.clone(),
             receiver,
@@ -601,17 +622,75 @@ impl SessionManager {
         session_id: &str,
         request_id: &str,
         outcome: PermissionOutcome,
+        providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
+        let request = live
+            .pending_permissions
+            .lock()
+            .await
+            .iter()
+            .find(|request| request.id == request_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("no pending interaction called '{request_id}'"))?;
+        let continuation = continuation_for(&request, &outcome)?;
+
+        if let Some(continuation) = continuation {
+            let mode_override = if continuation.elevated {
+                let agent_id = live.meta.lock().await.agent_id.clone();
+                self.registry
+                    .require(&agent_id)?
+                    .catalog(providers)
+                    .await
+                    .default_mode
+            } else {
+                None
+            };
+            self.ensure_started_in_mode(&live, providers, mode_override)
+                .await
+                .context("resuming the stopped Agent session")?;
+            *live.status.lock().await = SessionStatus::Running;
+            let sent = {
+                let agent = live.agent.lock().await;
+                let agent = agent
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("the resumed session has no running agent"))?;
+                agent
+                    .send(PromptInput {
+                        text: continuation.prompt,
+                        attachments: Vec::new(),
+                    })
+                    .await
+            };
+            if let Err(error) = sent {
+                *live.status.lock().await = SessionStatus::Waiting;
+                return Err(error).context("continuing after the user response");
+            }
+        }
+
         {
             let mut pending = live.pending_permissions.lock().await;
             pending.retain(|request| request.id != request_id);
         }
-        let agent = live.agent.lock().await;
-        let agent = agent
-            .as_ref()
-            .ok_or_else(|| anyhow!("the session has no running agent"))?;
-        agent.respond_permission(request_id, outcome).await
+        {
+            let mut meta = live.meta.lock().await;
+            meta.pending_permission = None;
+            meta.updated_at_ms = now_ms();
+            self.store.save_meta(&meta)?;
+        }
+        let resolved = SessionEvent::PermissionResolved {
+            request_id: request_id.to_string(),
+            outcome,
+        };
+        apply(&live, &resolved).await;
+        live.publish(resolved).await;
+        if *live.status.lock().await == SessionStatus::Idle {
+            live.publish(SessionEvent::SessionStatusChanged {
+                status: SessionStatus::Idle,
+            })
+            .await;
+        }
+        Ok(())
     }
 
     pub async fn archive(&self, session_id: &str, archived: bool) -> Result<SessionSummary> {
@@ -710,15 +789,20 @@ impl SessionManager {
 impl Live {
     fn new(meta: SessionMeta) -> Self {
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let pending = meta.pending_permission.clone();
         Live {
             meta: Mutex::new(meta),
-            status: Mutex::new(SessionStatus::Idle),
+            status: Mutex::new(if pending.is_some() {
+                SessionStatus::Waiting
+            } else {
+                SessionStatus::Idle
+            }),
             items: Mutex::new(Vec::new()),
             seq: AtomicU64::new(0),
             replay: Mutex::new(VecDeque::new()),
             events,
             agent: Mutex::new(None),
-            pending_permissions: Mutex::new(Vec::new()),
+            pending_permissions: Mutex::new(pending.into_iter().collect()),
             turn_items: Mutex::new(Vec::new()),
             pump: Mutex::new(None),
         }
@@ -778,62 +862,72 @@ impl Live {
 static STARTING: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// How long an approval may sit with nobody in a position to answer it.
-///
-/// Counted only while no client is subscribed. Someone looking at the approval
-/// card is allowed to think for as long as they like — denying a tool call under
-/// an attentive person's cursor is worse than waiting. But with every window
-/// closed the card is on no screen at all, and the turn, the agent process and
-/// whatever the tool was about to do all wait forever
-/// (`docs/testing.md` §4.2).
-const UNATTENDED_GRACE: Duration = Duration::from_secs(120);
+struct Continuation {
+    elevated: bool,
+    prompt: String,
+}
 
-/// How often the grace is reconsidered. Coarse on purpose: this is a deadline,
-/// not a stopwatch, and it runs once per outstanding approval.
-const UNATTENDED_TICK: Duration = Duration::from_secs(5);
+fn continuation_for(
+    request: &PermissionRequest,
+    outcome: &PermissionOutcome,
+) -> Result<Option<Continuation>> {
+    let PermissionOutcome::Selected { option_id } = outcome else {
+        return Ok(None);
+    };
+    let option = request
+        .options
+        .iter()
+        .find(|option| option.id == *option_id)
+        .ok_or_else(|| anyhow!("'{option_id}' is not an option for this interaction"))?;
 
-/// Answers an approval that nobody can see, once waiting stops being plausible.
-///
-/// It answers through the same door a person does, so the agent hears one denial
-/// on the channel it is listening to and the timeline gets one resolution — the
-/// alternative is a state where the daemon believes it is resolved and the agent
-/// is still blocked.
-async fn deny_when_no_one_can_answer(live: Arc<Live>, request_id: String, grace: Duration) {
-    let mut unattended = Duration::ZERO;
-    loop {
-        tokio::time::sleep(UNATTENDED_TICK).await;
+    match request.kind {
+        PermissionRequestKind::Permission if option.kind == PermissionOptionKind::Reject => {
+            Ok(None)
+        }
+        PermissionRequestKind::Permission => Ok(Some(Continuation {
+            elevated: true,
+            prompt: format!(
+                "The user approved the interrupted permission request: {}. Resume the original \
+                 task from the current conversation state and do not repeat completed work.",
+                option.label
+            ),
+        })),
+        PermissionRequestKind::Question => Ok(Some(Continuation {
+            elevated: false,
+            prompt: format!(
+                "The user answered the interrupted question '{}': {}. Resume the original task \
+                 from the current conversation state and do not repeat completed work.",
+                request.title, option.label
+            ),
+        })),
+    }
+}
 
-        let outstanding = live
-            .pending_permissions
-            .lock()
-            .await
-            .iter()
-            .any(|request| request.id == request_id);
-        if !outstanding {
-            return;
+async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &PermissionRequest) {
+    let agent = live.agent.lock().await.take();
+    let persist = agent.as_ref().and_then(|agent| agent.persistence());
+    {
+        let mut meta = live.meta.lock().await;
+        if let Some(persist) = persist {
+            meta.persist = Some(persist);
         }
-        if live.events.receiver_count() > 0 {
-            // Someone is watching, so the clock goes back to zero: a person who
-            // steps away for a minute and comes back should still find the card.
-            unattended = Duration::ZERO;
-            continue;
+        meta.pending_permission = Some(request.clone());
+        meta.updated_at_ms = now_ms();
+        if let Err(error) = store.save_meta(&meta) {
+            tracing::error!(
+                "could not persist stopped interaction {}: {error}",
+                request.id
+            );
         }
-        unattended += UNATTENDED_TICK;
-        if unattended < grace {
-            continue;
-        }
+    }
 
-        let agent = live.agent.lock().await;
-        let Some(agent) = agent.as_ref() else { return };
-        // The default is named in the outcome rather than implied, because the
-        // audit trail has to say what was applied and by whom.
-        let outcome = PermissionOutcome::TimedOut {
-            applied_default: "deny".into(),
-        };
-        if let Err(error) = agent.respond_permission(&request_id, outcome).await {
-            tracing::warn!("could not deny the unattended approval {request_id}: {error}");
+    if let Some(agent) = agent {
+        // Interruption is best-effort and bounded. The process is closed either
+        // way, so no approval request or live transport has to survive.
+        let _ = tokio::time::timeout(Duration::from_secs(5), agent.interrupt()).await;
+        if let Err(error) = agent.close().await {
+            tracing::warn!("could not close an Agent stopped for interaction: {error}");
         }
-        return;
     }
 }
 
@@ -930,6 +1024,35 @@ async fn pump_events(
             }
         };
 
+        if let SessionEvent::PermissionRequested { request } = &event {
+            stop_agent_for_interaction(&live, &store, request).await;
+
+            // End the old turn before exposing the request. Approval later
+            // starts a new native turn from the Agent's persisted session.
+            if let Some(turn_id) = turns.keys().next().cloned() {
+                let canceled = SessionEvent::TurnCanceled { turn_id };
+                if let Some(stats) = turn_summary(&canceled, &mut turns) {
+                    let summary_event = SessionEvent::Item {
+                        turn_id: stats.turn_id.clone(),
+                        item: TimelineItem::TurnSummary {
+                            id: format!("turn-summary-{}", stats.turn_id),
+                            stats,
+                        },
+                    };
+                    apply(&live, &summary_event).await;
+                    live.publish(summary_event).await;
+                }
+                apply(&live, &canceled).await;
+                live.publish(canceled).await;
+                flush_turn(&live, &store).await;
+            }
+
+            apply(&live, &event).await;
+            live.publish(event).await;
+            live.trim_replay(replay_window).await;
+            break;
+        }
+
         let summary = turn_summary(&event, &mut turns);
         if let Some(stats) = summary {
             let summary_event = SessionEvent::Item {
@@ -945,14 +1068,6 @@ async fn pump_events(
         }
 
         apply(&live, &event).await;
-
-        if let SessionEvent::PermissionRequested { request } = &event {
-            tokio::spawn(deny_when_no_one_can_answer(
-                live.clone(),
-                request.id.clone(),
-                UNATTENDED_GRACE,
-            ));
-        }
 
         let settle = matches!(
             event,
@@ -1061,7 +1176,7 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             }
         }
         SessionEvent::PermissionRequested { request } => {
-            live.pending_permissions.lock().await.push(request.clone());
+            *live.pending_permissions.lock().await = vec![request.clone()];
             *live.status.lock().await = SessionStatus::Waiting;
         }
         SessionEvent::PermissionResolved { request_id, .. } => {
@@ -1072,14 +1187,19 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             };
             let mut status = live.status.lock().await;
             if all_resolved && *status == SessionStatus::Waiting {
-                *status = SessionStatus::Running;
+                *status = SessionStatus::Idle;
             }
         }
         SessionEvent::TurnStarted { .. } => {
             *live.status.lock().await = SessionStatus::Running;
         }
         SessionEvent::TurnCompleted { .. } | SessionEvent::TurnCanceled { .. } => {
-            *live.status.lock().await = SessionStatus::Idle;
+            let pending = !live.pending_permissions.lock().await.is_empty();
+            *live.status.lock().await = if pending {
+                SessionStatus::Waiting
+            } else {
+                SessionStatus::Idle
+            };
         }
         SessionEvent::TurnFailed { error, .. } => {
             // Logged here rather than in each adapter, because every agent's
@@ -1097,7 +1217,12 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             drop(meta);
             // Failed, not closed: the user can send again, but the sidebar must
             // keep the abnormal completion visible until that next attempt.
-            *live.status.lock().await = SessionStatus::Failed;
+            let pending = !live.pending_permissions.lock().await.is_empty();
+            *live.status.lock().await = if pending {
+                SessionStatus::Waiting
+            } else {
+                SessionStatus::Failed
+            };
         }
         SessionEvent::ModelChanged { model_id } => {
             let mut meta = live.meta.lock().await;
@@ -1190,6 +1315,7 @@ mod tests {
             updated_at_ms: 0,
             archived: false,
             persist: None,
+            pending_permission: None,
         }
     }
 
@@ -1431,6 +1557,7 @@ mod tests {
         let live = Arc::new(Live::new(meta()));
         let request = PermissionRequest {
             id: "p1".into(),
+            kind: PermissionRequestKind::Permission,
             title: "Write file".into(),
             detail: None,
             tool_call_id: None,
@@ -1460,11 +1587,11 @@ mod tests {
             .unwrap()
             .pending_permissions
             .is_empty());
-        assert_eq!(*live.status.lock().await, SessionStatus::Running);
+        assert_eq!(*live.status.lock().await, SessionStatus::Idle);
     }
 
     #[tokio::test]
-    async fn resolving_one_of_multiple_permissions_keeps_the_session_waiting() {
+    async fn a_new_interaction_replaces_a_stale_one() {
         let live = Arc::new(Live::new(meta()));
         for id in ["p1", "p2"] {
             apply(
@@ -1472,6 +1599,7 @@ mod tests {
                 &SessionEvent::PermissionRequested {
                     request: PermissionRequest {
                         id: id.into(),
+                        kind: PermissionRequestKind::Permission,
                         title: "Approval".into(),
                         detail: None,
                         tool_call_id: None,
@@ -1497,133 +1625,154 @@ mod tests {
         assert_eq!(*live.status.lock().await, SessionStatus::Waiting);
     }
 
-    /// Stands in for an agent that has asked for approval and is waiting. It only
-    /// has to record the answer: whether the agent then denies or allows is the
-    /// adapter's business, tested where the adapters are.
-    struct WaitingAgent {
-        answers: Arc<Mutex<Vec<(String, PermissionOutcome)>>>,
+    fn interaction(kind: PermissionRequestKind) -> PermissionRequest {
+        PermissionRequest {
+            id: "p1".into(),
+            kind,
+            title: "Continue?".into(),
+            detail: None,
+            tool_call_id: None,
+            options: vec![
+                genehub_proto::PermissionOption {
+                    id: "yes".into(),
+                    label: "Yes".into(),
+                    kind: PermissionOptionKind::AllowOnce,
+                },
+                genehub_proto::PermissionOption {
+                    id: "no".into(),
+                    label: "No".into(),
+                    kind: PermissionOptionKind::Reject,
+                },
+            ],
+        }
+    }
+
+    struct StoppingSession {
         events: broadcast::Sender<SessionEvent>,
+        interrupted: Arc<std::sync::atomic::AtomicBool>,
+        closed: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[async_trait::async_trait]
-    impl AgentSession for WaitingAgent {
+    impl AgentSession for StoppingSession {
         fn events(&self) -> broadcast::Receiver<SessionEvent> {
             self.events.subscribe()
         }
+
         async fn send(&self, _input: PromptInput) -> Result<String> {
-            Ok("t".into())
+            anyhow::bail!("not used")
         }
+
         async fn interrupt(&self) -> Result<()> {
+            self.interrupted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+
         async fn close(&self) -> Result<()> {
+            self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+
         async fn set_model(&self, _model_id: &str) -> Result<()> {
-            Ok(())
+            anyhow::bail!("not used")
         }
+
         async fn set_mode(&self, _mode_id: &str) -> Result<()> {
-            Ok(())
+            anyhow::bail!("not used")
         }
+
         async fn respond_permission(
             &self,
-            request_id: &str,
-            outcome: PermissionOutcome,
+            _request_id: &str,
+            _outcome: PermissionOutcome,
         ) -> Result<()> {
-            self.answers
-                .lock()
-                .await
-                .push((request_id.to_string(), outcome));
-            Ok(())
+            anyhow::bail!("a stopped process is never answered in place")
+        }
+
+        fn persistence(&self) -> Option<crate::adapter::PersistHandle> {
+            Some(crate::adapter::PersistHandle {
+                agent_id: "fake".into(),
+                value: serde_json::json!({ "sessionId": "native-1" }),
+            })
         }
     }
 
-    async fn waiting_on_approval() -> (Arc<Live>, Arc<Mutex<Vec<(String, PermissionOutcome)>>>) {
+    #[tokio::test]
+    async fn an_interaction_is_persisted_before_the_agent_process_is_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
         let live = Arc::new(Live::new(meta()));
-        let answers = Arc::new(Mutex::new(Vec::new()));
-        let (events, _) = broadcast::channel(8);
-        *live.agent.lock().await = Some(Box::new(WaitingAgent {
-            answers: answers.clone(),
+        let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (events, _) = broadcast::channel(1);
+        *live.agent.lock().await = Some(Box::new(StoppingSession {
             events,
+            interrupted: interrupted.clone(),
+            closed: closed.clone(),
         }));
-        apply(
-            &live,
-            &SessionEvent::PermissionRequested {
-                request: PermissionRequest {
-                    id: "p1".into(),
-                    title: "Write file".into(),
-                    detail: None,
-                    tool_call_id: None,
-                    options: vec![],
-                },
+        let request = interaction(PermissionRequestKind::Permission);
+
+        stop_agent_for_interaction(&live, &store, &request).await;
+
+        assert!(live.agent.lock().await.is_none());
+        assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(closed.load(std::sync::atomic::Ordering::SeqCst));
+        let restored = store.load_meta("w1", "s1").unwrap();
+        assert_eq!(restored.pending_permission.unwrap().id, "p1");
+        assert_eq!(
+            restored.persist.unwrap().value["sessionId"],
+            serde_json::json!("native-1")
+        );
+    }
+
+    #[test]
+    fn permission_grants_resume_elevated_but_rejections_do_not_resume() {
+        let request = interaction(PermissionRequestKind::Permission);
+        let grant = continuation_for(
+            &request,
+            &PermissionOutcome::Selected {
+                option_id: "yes".into(),
             },
         )
-        .await;
-        (live, answers)
-    }
-
-    /// The window is closed, the tray is still there, and the agent is blocked on
-    /// a question that is on nobody's screen. Left alone this waits until the
-    /// daemon exits, holding the turn and the agent process with it.
-    #[tokio::test]
-    async fn an_approval_no_one_can_see_is_denied_rather_than_waited_on_forever() {
-        let (live, answers) = waiting_on_approval().await;
-
-        deny_when_no_one_can_answer(live.clone(), "p1".into(), Duration::from_millis(1)).await;
-
-        let answers = answers.lock().await;
-        assert_eq!(answers.len(), 1, "the agent was never answered");
-        assert_eq!(answers[0].0, "p1");
-        // Named, not implied: the audit trail has to distinguish this from a
-        // person who chose to deny.
-        assert!(
-            matches!(
-                &answers[0].1,
-                PermissionOutcome::TimedOut { applied_default } if applied_default == "deny"
-            ),
-            "answered with {:?} instead of a recorded timeout",
-            answers[0].1
-        );
-    }
-
-    /// The opposite mistake, and the worse one: denying a tool call while someone
-    /// is sitting there reading the request. Thinking is not idleness.
-    #[tokio::test]
-    async fn an_approval_someone_is_looking_at_is_left_alone() {
-        let (live, answers) = waiting_on_approval().await;
-        let _watching = live.events.subscribe();
-
-        let verdict = tokio::time::timeout(
-            Duration::from_millis(200),
-            deny_when_no_one_can_answer(live.clone(), "p1".into(), Duration::from_millis(1)),
+        .unwrap()
+        .expect("an allow option resumes");
+        assert!(grant.elevated);
+        assert!(grant.prompt.contains("Yes"));
+        assert!(continuation_for(
+            &request,
+            &PermissionOutcome::Selected {
+                option_id: "no".into(),
+            },
         )
-        .await;
-
-        assert!(
-            verdict.is_err(),
-            "gave up on a request that a subscribed client could still answer"
-        );
-        assert!(answers.lock().await.is_empty());
+        .unwrap()
+        .is_none());
     }
 
-    /// And it has to stop watching once the question is answered, or every
-    /// approval leaves a task behind for the life of the session.
-    #[tokio::test]
-    async fn the_watch_ends_when_the_approval_is_answered() {
-        let (live, answers) = waiting_on_approval().await;
-        live.pending_permissions.lock().await.clear();
-
-        tokio::time::timeout(
-            Duration::from_secs(30),
-            deny_when_no_one_can_answer(live.clone(), "p1".into(), Duration::from_millis(1)),
+    #[test]
+    fn answers_resume_without_changing_the_permission_mode() {
+        let request = interaction(PermissionRequestKind::Question);
+        let continuation = continuation_for(
+            &request,
+            &PermissionOutcome::Selected {
+                option_id: "no".into(),
+            },
         )
-        .await
-        .expect("the watch should return once nothing is pending");
+        .unwrap()
+        .expect("a question answer resumes");
+        assert!(!continuation.elevated);
+        assert!(continuation.prompt.contains("No"));
+    }
 
-        assert!(
-            answers.lock().await.is_empty(),
-            "answered a request that had already been resolved"
-        );
+    #[tokio::test]
+    async fn a_persisted_interaction_rehydrates_as_waiting_without_an_agent() {
+        let mut stored = meta();
+        stored.pending_permission = Some(interaction(PermissionRequestKind::Permission));
+        let live = Live::new(stored);
+        let snapshot = live.snapshot().await.unwrap();
+        assert_eq!(snapshot.summary.status, SessionStatus::Waiting);
+        assert_eq!(snapshot.pending_permissions.len(), 1);
+        assert!(live.agent.lock().await.is_none());
     }
 
     #[tokio::test]

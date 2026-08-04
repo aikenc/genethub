@@ -57,6 +57,10 @@ pub struct TurnStats {
 #[ts(export, export_to = "index.ts")]
 pub struct PermissionRequest {
     pub id: String,
+    /// Permissions resume with elevated authority; questions resume with the
+    /// selected answer but keep the session's chosen permission mode.
+    #[serde(default)]
+    pub kind: PermissionRequestKind,
     pub title: String,
     #[ts(optional)]
     pub detail: Option<String>,
@@ -64,6 +68,15 @@ pub struct PermissionRequest {
     #[ts(optional)]
     pub tool_call_id: Option<String>,
     pub options: Vec<PermissionOption>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum PermissionRequestKind {
+    #[default]
+    Permission,
+    Question,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -92,9 +105,9 @@ pub enum PermissionOutcome {
     Selected {
         option_id: String,
     },
-    /// No client was online long enough to answer. Carries the agent's default
-    /// so the audit trail records what actually happened; §5 of `daemon.md`
-    /// forbids resolving these silently.
+    /// Legacy wire outcome retained so older peers can still decode it. The
+    /// daemon no longer creates approval timers: stopped interactions persist
+    /// until a user responds.
     #[serde(rename_all = "camelCase")]
     TimedOut {
         applied_default: String,
@@ -209,7 +222,7 @@ pub enum SessionEvent {
 pub enum SessionStatus {
     Idle,
     Running,
-    /// The turn is still live but cannot continue until a person responds.
+    /// The turn has stopped and can be resumed after a person responds.
     Waiting,
     /// History is viewable but the underlying agent cannot resume it.
     ReadOnly,

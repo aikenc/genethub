@@ -1,9 +1,8 @@
 import type { PermissionOutcome, PermissionRequest } from "@genehub/proto";
 
 /**
- * An approval sits at the bottom of the timeline rather than in a modal: the
- * user needs the surrounding context to decide, and a dialog hides exactly the
- * thing they are being asked about.
+ * A stopped interaction sits at the bottom of the timeline rather than in a
+ * modal. No Agent process or live browser connection is kept waiting for it.
  */
 export function PermissionCard({
   request,
@@ -16,8 +15,13 @@ export function PermissionCard({
     <div
       className="rounded-lg border border-accent/50 bg-accent/5 px-3 py-3"
       role="group"
-      aria-label="权限请求"
+      aria-label={request.kind === "question" ? "Agent 提问" : "权限请求"}
     >
+      <p className="mb-1 text-xs text-muted">
+        {request.kind === "question"
+          ? "任务已暂停；回答后会从原会话继续。"
+          : "任务已暂停；授权后会以最高权限从原会话继续。"}
+      </p>
       <p className="font-medium">{request.title}</p>
       {request.detail ? (
         <pre className="mt-1 max-h-40 max-w-full overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs text-muted">

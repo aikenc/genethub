@@ -1,12 +1,11 @@
 //! Adapter for Codex, spoken natively over its own `app-server` JSON-RPC
 //! protocol instead of through the `codex-acp` bridge.
 //!
-//! Same trade as Claude Code (`adapter::claude`), and the same thing bought:
-//! per-tool approvals, which this CLI asks for as requests of its own rather
-//! than a policy flag. What it adds on top is a model table with each model's
-//! own thinking levels, and one fewer package for the user to install — a person
-//! who installed `codex` was previously told the agent was unavailable because a
-//! bridge they had never heard of was missing.
+//! Same trade as Claude Code (`adapter::claude`): the native protocol preserves
+//! thread resume, model/effort/mode controls, permission requests and true user
+//! questions without an extra bridge package. A person who installed `codex`
+//! was previously told the agent was unavailable because that bridge was
+//! missing.
 //!
 //! The bill for going native is version drift: these method names and frame
 //! shapes are ours to follow now. They were read off codex-cli 0.145.0 by asking
@@ -16,8 +15,10 @@
 //!
 //! Protocol notes:
 //!
-//! - Spawn `codex app-server`. Line-delimited JSON-RPC on stdio, in both
-//!   directions: an `initialize` request, then an `initialized` notification.
+//! - Spawn `codex app-server` with `approval_policy="never"` and
+//!   `sandbox_mode="danger-full-access"`. Line-delimited JSON-RPC on stdio, in
+//!   both directions: an `initialize` request, then an `initialized`
+//!   notification.
 //! - `clientInfo.name` is `codex_app_server_daemon` rather than our own name.
 //!   This is one of the shapes taken from the other implementation: it treats
 //!   that value as a reserved, non-originating client, on the grounds that this
@@ -50,8 +51,9 @@
 //!   `{"decision":"accept"|"decline"|"cancel"}`, and
 //!   `item/tool/requestUserInput`, which is a question rather than an approval
 //!   and is answered `{"answers":{"<question id>":{"answers":["<label>"]}}}`.
-//!   Anything it asks that we cannot render is still answered: a request left
-//!   hanging is a CLI that waits forever.
+//!   A surfaced interaction is persisted by the session manager, this process
+//!   is closed, and the thread is resumed after the user responds; no request
+//!   is left waiting on a live JSON-RPC connection.
 //! - Not being logged in does not produce an error. `turn/start` is accepted,
 //!   the user's message is echoed back as an item, and then nothing happens —
 //!   no failure, no exit (verified on 0.145.0). So `probe` asks `codex login
@@ -78,8 +80,9 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind,
-    PermissionOutcome, PermissionRequest, ProbeState, SessionEvent, TimelineItem, TodoEntry,
-    TodoStatus, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent,
+    TimelineItem, TodoEntry, TodoStatus, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode,
+    Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -97,6 +100,8 @@ const EVENT_CAPACITY: usize = 1024;
 
 /// The reserved, non-originating client name (see the module doc).
 const CLIENT_NAME: &str = "codex_app_server_daemon";
+const APPROVAL_CONFIG: &str = r#"approval_policy="never""#;
+const SANDBOX_CONFIG: &str = r#"sandbox_mode="danger-full-access""#;
 
 /// How long a request to the CLI may go unanswered. Generous because
 /// `turn/start` is one of these and a cold start on Windows is slow.
@@ -157,9 +162,13 @@ static MODES: [Mode; 3] = [
     },
 ];
 
-/// A session starts in the cautious-but-useful middle, the same way Codex's own
-/// CLI does, rather than in the mode that can do anything.
-const DEFAULT_MODE: &str = "auto";
+/// GeneHub is built for unattended work: a fresh session starts with the
+/// highest native authority. Explicit and persisted lower modes stay intact.
+const DEFAULT_MODE: &str = "full-access";
+
+fn app_server_args() -> [&'static str; 5] {
+    ["app-server", "-c", APPROVAL_CONFIG, "-c", SANDBOX_CONFIG]
+}
 
 fn mode_named(id: &str) -> &'static Mode {
     MODES
@@ -183,6 +192,14 @@ fn sandbox_policy(mode: &Mode) -> Value {
         "danger-full-access" => json!({ "type": "dangerFullAccess" }),
         _ => json!({ "type": "workspaceWrite", "networkAccess": mode.network }),
     }
+}
+
+/// Thread operations carry their own policy. That lets the process itself
+/// launch unrestricted while an explicit read-only/auto selection still wins.
+fn with_thread_policy(mut params: Value, mode: &Mode) -> Value {
+    params["approvalPolicy"] = json!(mode.approval);
+    params["sandbox"] = json!(mode.sandbox);
+    params
 }
 
 #[derive(Default)]
@@ -296,7 +313,7 @@ impl AgentAdapter for CodexAdapter {
 
         let mut command = Command::new(&program);
         command
-            .arg("app-server")
+            .args(app_server_args())
             .current_dir(&config.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -413,7 +430,7 @@ impl AgentAdapter for CodexAdapter {
 async fn discover(program: &Path) -> Option<Hello> {
     let mut command = Command::new(program);
     command
-        .arg("app-server")
+        .args(app_server_args())
         // Somewhere that exists and says nothing about any of the user's
         // projects: this answer is cached for every workspace.
         .current_dir(std::env::temp_dir())
@@ -725,11 +742,7 @@ impl CodexSession {
         }
 
         let mode = mode_named(self.mode.lock().await.as_str());
-        let mut params = json!({
-            "cwd": config.cwd,
-            "approvalPolicy": mode.approval,
-            "sandbox": mode.sandbox,
-        });
+        let mut params = with_thread_policy(json!({ "cwd": config.cwd }), mode);
         if let Some(model) = self.model.lock().await.clone() {
             params["model"] = json!(model);
         }
@@ -749,8 +762,12 @@ impl CodexSession {
     /// its own schedule, and a session the user is still looking at is not
     /// something we should refuse just because it was tidied away.
     async fn reopen(&self, thread_id: &str) -> Result<()> {
+        let mode = mode_named(self.mode.lock().await.as_str());
         match self
-            .call("thread/resume", json!({ "threadId": thread_id }))
+            .call(
+                "thread/resume",
+                with_thread_policy(json!({ "threadId": thread_id }), mode),
+            )
             .await
         {
             Ok(_) => Ok(()),
@@ -758,11 +775,12 @@ impl CodexSession {
                 self.call("thread/unarchive", json!({ "threadId": thread_id }))
                     .await
                     .with_context(|| format!("unarchiving Codex thread {thread_id}"))?;
-                self.call("thread/resume", json!({ "threadId": thread_id }))
-                    .await
-                    .with_context(|| {
-                        format!("resuming Codex thread {thread_id} after unarchive")
-                    })?;
+                self.call(
+                    "thread/resume",
+                    with_thread_policy(json!({ "threadId": thread_id }), mode),
+                )
+                .await
+                .with_context(|| format!("resuming Codex thread {thread_id} after unarchive"))?;
                 Ok(())
             }
             Err(error) => Err(error).with_context(|| format!("resuming Codex thread {thread_id}")),
@@ -923,11 +941,14 @@ impl AgentSession for CodexSession {
         let forked = self
             .call(
                 "thread/fork",
-                json!({
-                    "threadId": thread_id,
-                    "lastTurnId": checkpoint,
-                    "ephemeral": false,
-                }),
+                with_thread_policy(
+                    json!({
+                        "threadId": thread_id,
+                        "lastTurnId": checkpoint,
+                        "ephemeral": false,
+                    }),
+                    mode_named(self.mode.lock().await.as_str()),
+                ),
             )
             .await?;
         let thread_id = forked
@@ -1345,6 +1366,7 @@ async fn translate_ask(asked: Asked<'_>) {
         let _ = events.send(SessionEvent::PermissionRequested {
             request: PermissionRequest {
                 id: request_id.clone(),
+                kind: PermissionRequestKind::Permission,
                 title,
                 detail: reason.clone(),
                 tool_call_id: item_id.clone(),
@@ -1417,6 +1439,7 @@ async fn translate_ask(asked: Asked<'_>) {
                     let _ = events.send(SessionEvent::PermissionRequested {
                         request: PermissionRequest {
                             id: request_id.clone(),
+                            kind: PermissionRequestKind::Question,
                             title: question.header,
                             detail: Some(question.question),
                             tool_call_id: item_id.clone(),
@@ -2736,6 +2759,27 @@ mod tests {
         // An unknown name falls back to the mode a session starts in, not to
         // whichever happens to be first in the list.
         assert_eq!(mode_named("no-such-mode").id, DEFAULT_MODE);
+    }
+
+    #[test]
+    fn app_server_launch_and_thread_defaults_are_unrestricted() {
+        assert_eq!(
+            app_server_args(),
+            [
+                "app-server",
+                "-c",
+                r#"approval_policy="never""#,
+                "-c",
+                r#"sandbox_mode="danger-full-access""#,
+            ]
+        );
+        let params = with_thread_policy(json!({ "threadId": "t1" }), mode_named(DEFAULT_MODE));
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["sandbox"], "danger-full-access");
+
+        let explicit = with_thread_policy(json!({}), mode_named("read-only"));
+        assert_eq!(explicit["approvalPolicy"], "on-request");
+        assert_eq!(explicit["sandbox"], "read-only");
     }
 
     #[test]

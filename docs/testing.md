@@ -138,7 +138,7 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 | 切换 agent | 同一工作区从内置 agent 切到 OpenCode，历史可见、新会话正常 |
 | 切换模型 / 思考档位 | 控件生效；不支持的 agent 不显示该控件（而不是点了报错） |
 | 中止任务 | 停止按钮真的打断，落 `TurnCanceled` 而不是静默结束 |
-| 审批通过 / 拒绝 | 拒绝后 agent 合理收尾且文件未被修改 |
+| 授权暂停 / 恢复 / 拒绝 | 请求出现后 Agent 进程已结束且 session meta 有暂停点；客户端和 daemon 均可离线；批准后从原生会话以最高权限继续，拒绝后不执行原工具 |
 | 配好 Key 就能选模型 | 保存 Key 的**那次回复**里就带着 provider 报上来的模型;不能对话的(embeddings 之类)不出现在选择器里 |
 | Key 被拒 | 设置页显示 provider 原话,模型列表空着但有理由;不静默 |
 | 自定义 provider | 自己加的 provider 能进选择器(名字 `<Provider>:<id>`)、能删;自带的三个不能删 |
@@ -149,7 +149,7 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 | 一句话都没说的进程 | 有退出码，并且指向日志，不是一句话说完就没了 |
 | 隔着一台设备看日志 | `log.tail` 从连接上取回文件末尾（手机上没法打开 PC 的路径）；列出目录里的几个文件 |
 | 日志请求越界 | `../config.json` 之类一律拒绝——这个调用每台配对设备都能发，它是诊断，不是"读任意文件" |
-| 无客户端在线时的审批 | 挂起并计时，超时按默认策略处理**且留审计**——断言"没有静默放行"；反面同样断言：有客户端订阅时**不许**超时拒绝 |
+| 无客户端在线时的授权 | 不启动超时计时器、不保留 Agent 进程或待决 RPC；重启 daemon 后快照仍是 `waiting` 且带同一请求，几天后批准仍能恢复原生 session |
 | 回合中再发一条 | 第二条被拒（`conflict`），进行中的回合不受影响，结束后照样能继续发 |
 | 连接落后丢事件 | 客户端收到 `desync` 自己补齐缺口，不弹提示、不留空洞 |
 | 未配置凭证 | 首条任务给出明确提示，不是静默失败或空白 |
@@ -235,7 +235,7 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 
 真实模式的额外纪律：网络类失败重试 1 次；**断言失败不重试**（重试会掩盖真问题）。
 
-真实模式要串行跑：`cargo test -p genehub-testing --test claude -- --test-threads=1`。并行跑会撞见超时假阳性——几条用例共用本机同一个 CLI 和同一个模型后端，而其中「拒绝权限后等这一轮结束」本身就慢（CLI 被拒后会重试几次才改口用文字回答）。超时不是断言失败，别照着它去改产品代码。
+真实模式要串行跑：`cargo test -p genehub-testing --test claude -- --test-threads=1`。几条用例共用本机同一个 CLI 和同一个模型后端，并行会制造与产品无关的超时假阳性。
 
 ---
 
@@ -280,7 +280,7 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 |------|------|-----------|---------|
 | Rust 单元与集成 | `cargo test --workspace` | 协议、daemon 各模块、agent、旅程（daemon + agent + mock 模型） | **先 `cargo build --workspace --bins`**：旅程要真的拉起 daemon 与 agent 进程，而 `cargo test` 只会把别的包编成测试壳，不会产出可执行文件 |
 | 专项测试（OpenCode） | `testing/tests/opencode.rs` | **真实 OpenCode 进程**接同一个模型后端，事件归一化后进同一条时间线 | PATH 上有 `opencode`，否则跳过并打印原因 |
-| 专项测试（Claude Code） | `testing/tests/claude.rs` | **真实 `claude` 进程**（原生 `stream-json`，非 ACP wrapper）接 DeepSeek 的 Anthropic 兼容端点：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具不落盘 | `JOURNEY_LLM=real` + PATH 上有 `claude`，否则跳过并打印原因；只在真实模式跑（mock 不实现 Anthropic 协议） |
+| 专项测试（Claude Code） | `testing/tests/claude.rs` | **真实 `claude` 进程**（原生 `stream-json`，非 ACP wrapper）接 DeepSeek 的 Anthropic 兼容端点：基本对话、默认 bypass 放行、显式低权限模式下产生可持久化暂停点、daemon 中断请求真的打断生成 | `JOURNEY_LLM=real` + PATH 上有 `claude`，否则跳过并打印原因；只在真实模式跑（mock 不实现 Anthropic 协议） |
 | 专项测试（Cursor） | `testing/tests/cursor.rs` | **真实 `cursor-agent` 进程**（ACP over stdio）跑主旅程：探测的二进制真能起、ACP 握手真有应答、一个回合经归一化事件层进同一条时间线 | `JOURNEY_LLM=real` + PATH 上有登录过的 `cursor-agent`，否则跳过并打印原因；mock 模式不跑（它没有可指向 mock 的后端配置，同 Codex 的处境） |
 | 安装脚本 | `testing/tests/install.rs` | **真的跑 `scripts/install.sh`**：真 curl、真 tar、真 sha256sum、真目录。装完的二进制可执行且真能跑；校验和对不上、或者发布里没有 `SHA256SUMS`，都拒绝安装而不是留下半截文件 | 无（Linux arm64 上跳过并打印原因） |
 | 设备准入 | `testing/tests/devices.rs` | **真实 daemon + 进程内汇合 relay**：新设备经 relay 配对、换到凭证后重连、陌生人被拒、邀请码只能用一次、握手不能重放、撤销当场断连、重启后仍然可达且仍然认得旧设备 | 无 |
@@ -299,7 +299,7 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 
 全栈旅程这一条是分量最重的：其他前端测试都把 socket 假掉了，而"事件发到了一个没人监听的 topic"在假 socket 下和"没有事件"长得一模一样。它上线的第一天就抓到了这个 bug。
 
-两条专项测试同样不能省。OpenCode 是唯一形状不同的 adapter——HTTP 服务加独立事件流，而不是 stdio 子进程；只有让它真的跑起来，才知道归一化层是抽象而不是内置 agent 的别名。它接的模型后端与内置 agent 完全一致（mock 模式下配置文件里指向 mock 服务，真实模式下指向 DeepSeek），因此两种模式共用同一份用例。Claude Code 那条只能在真实模式跑：它说的是 Anthropic Messages 协议而不是 OpenAI 兼容协议，mock 服务没有实现那一套，硬跑只会验证出「mock 也不认识这个协议」这种没意义的失败。它连的是 DeepSeek 官方的 Anthropic 兼容端点，环境变量的配法与限制见 [third-party-agents.md](./third-party-agents.md)。它也是目前唯一验证**逐工具权限控制**（`acceptEdits` 自动放行、默认模式下人工拒绝、daemon 发起的中断真正打断生成）真实生效的地方——这条能力是换原生协议要买回来的东西，只在通用旅程矩阵里测不出来。Codex 现在也是原生适配器（`adapter::codex`），但它还欠一条对称的专项测试，欠的原因和 Claude 那条不一样：它没有可用的第三方后端可指（Codex 只认 Responses API，DeepSeek 只有 Chat Completions，见 [third-party-agents.md](./third-party-agents.md) §4.1），所以真实模式那条要跑就得跑在一个真登录了的 OpenAI 账号上。眼下守住协议翻译的是 `adapter::codex` 里的单元测试——帧形状、审批的三种回法、状态映射、计费统计都在那儿；缺的是端到端那一层，也就是「它真的按我们的模式跑、审批真的拦住了工具」这句话目前只有代码在保证。这一条要么补一份假 `app-server` 来在 mock 模式里覆盖，要么在有登录态的机器上按真实模式跑，两条路都比现在这样什么都没有强。
+两条专项测试同样不能省。OpenCode 是唯一形状不同的 adapter——HTTP 服务加独立事件流，而不是 stdio 子进程；只有让它真的跑起来，才知道归一化层是抽象而不是内置 agent 的别名。它接的模型后端与内置 agent 完全一致（mock 模式下配置文件里指向 mock 服务，真实模式下指向 DeepSeek），因此两种模式共用同一份用例。Claude Code 那条只能在真实模式跑：它说的是 Anthropic Messages 协议而不是 OpenAI 兼容协议，mock 服务没有实现那一套，硬跑只会验证出「mock 也不认识这个协议」这种没意义的失败。它连的是 DeepSeek 官方的 Anthropic 兼容端点，环境变量的配法与限制见 [third-party-agents.md](./third-party-agents.md)。Claude 的专项测试负责证明原生模式与中断控制真的生效；持久化暂停/恢复的跨 Agent 状态机由 daemon 测试覆盖。Codex 现在也是原生适配器（`adapter::codex`），但它还欠一条对称的真实专项测试：它没有可用的第三方后端可指（Codex 只认 Responses API，DeepSeek 只有 Chat Completions，见 [third-party-agents.md](./third-party-agents.md) §4.1），所以要跑在一个真登录了的 OpenAI 账号上。眼下协议翻译、最高权限启动参数、权限与问题分类、状态映射和计费统计由 `adapter::codex` 单元测试守住；端到端仍应在有登录态的机器上补齐。
 
 ---
 

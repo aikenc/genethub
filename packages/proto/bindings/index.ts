@@ -301,11 +301,18 @@ export type PermissionOptionKind = "allowOnce" | "allowAlways" | "reject";
 
 export type PermissionOutcome = { "outcome": "selected", optionId: string, } | { "outcome": "timedOut", appliedDefault: string, } | { "outcome": "canceled" };
 
-export type PermissionRequest = { id: string, title: string, detail?: string, 
+export type PermissionRequest = { id: string,
+/**
+ * Permissions resume with elevated authority; questions resume with the
+ * selected answer but keep the session's chosen permission mode.
+ */
+kind: PermissionRequestKind, title: string, detail?: string,
 /**
  * The tool call this approval gates, when it gates one.
  */
 toolCallId?: string, options: Array<PermissionOption>, };
+
+export type PermissionRequestKind = "permission" | "question";
 
 export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { "state": "unavailable", reason: string, };
 

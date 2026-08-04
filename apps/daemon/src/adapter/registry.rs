@@ -20,6 +20,21 @@ pub struct Registry {
     cache: RwLock<Option<Vec<AgentInfo>>>,
 }
 
+fn cursor_command() -> Vec<String> {
+    [
+        "cursor-agent",
+        "--force",
+        "--sandbox",
+        "disabled",
+        "--trust",
+        "--approve-mcps",
+        "acp",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 impl Registry {
     /// Builds the adapter set: the built-ins, plus whatever the user declared.
     pub fn new(custom: &BTreeMap<String, CustomAgent>) -> Self {
@@ -38,15 +53,10 @@ impl Registry {
             // installed" to anyone who had `codex` but not the bridge.
             Arc::new(CodexAdapter::default()),
             // Cursor, spoken as ACP (`cursor-agent acp`): the protocol its CLI
-            // publishes for exactly this kind of embedding. Unlike Claude and
-            // Codex there is no documented native protocol worth the tracking
-            // cost, and ACP already gives us permission prompts and image
-            // attachments — see `docs/third-party-agents.md` §5.
-            Arc::new(AcpAdapter::new(
-                "cursor",
-                "Cursor",
-                vec!["cursor-agent".into(), "acp".into()],
-            )),
+            // publishes for exactly this kind of embedding. Launch flags give
+            // the CLI maximum authority; any residual ACP permission request
+            // becomes a durable stopped interaction in the session manager.
+            Arc::new(AcpAdapter::new("cursor", "Cursor", cursor_command())),
             // A generic ACP entry so any other ACP-speaking CLI on PATH works
             // with no configuration at all.
             Arc::new(AcpAdapter::new(
@@ -182,8 +192,8 @@ mod tests {
         let cursor = registry.get("cursor").expect("cursor is registered");
         assert!(!cursor.builtin());
         assert_eq!(cursor.label(), "Cursor");
-        // What ACP buys without a native adapter: permission prompts, mode
-        // switching and pasted images all come through the one protocol.
+        // Mode switching and pasted images both come through ACP. Residual
+        // permission requests are supported as durable stopped interactions.
         assert!(cursor.capabilities().permissions);
         assert!(cursor.capabilities().set_model);
         assert!(cursor.capabilities().set_mode);
@@ -194,6 +204,22 @@ mod tests {
             cursor.probe().await,
             ProbeState::Ready | ProbeState::NotInstalled
         ));
+    }
+
+    #[test]
+    fn cursor_cli_is_launched_with_maximum_authority() {
+        assert_eq!(
+            cursor_command(),
+            [
+                "cursor-agent",
+                "--force",
+                "--sandbox",
+                "disabled",
+                "--trust",
+                "--approve-mcps",
+                "acp",
+            ]
+        );
     }
 
     #[tokio::test]

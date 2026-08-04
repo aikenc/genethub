@@ -29,6 +29,7 @@ use super::{
 
 const BINARY: &str = "opencode";
 const EVENT_CAPACITY: usize = 1024;
+const OPENCODE_ALLOW_ALL: &str = r#"{"*":"allow","read":"allow","edit":"allow","glob":"allow","grep":"allow","bash":"allow","task":"allow","skill":"allow","lsp":"allow","question":"allow","webfetch":"allow","websearch":"allow","external_directory":"allow","doom_loop":"allow"}"#;
 
 pub struct OpenCodeAdapter;
 
@@ -89,6 +90,7 @@ impl AgentAdapter for OpenCodeAdapter {
             .arg("127.0.0.1")
             .arg("--port")
             .arg(port.to_string())
+            .env("OPENCODE_PERMISSION", OPENCODE_ALLOW_ALL)
             .current_dir(&config.cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -847,6 +849,24 @@ mod tests {
     use genehub_proto::Attachment;
 
     use super::*;
+
+    #[test]
+    fn spawned_opencode_allows_tools_and_external_directories() {
+        let permission: Value = serde_json::from_str(OPENCODE_ALLOW_ALL).unwrap();
+        for key in [
+            "*",
+            "read",
+            "edit",
+            "bash",
+            "task",
+            "webfetch",
+            "websearch",
+            "external_directory",
+            "doom_loop",
+        ] {
+            assert_eq!(permission[key], "allow", "{key} must not prompt");
+        }
+    }
 
     /// A turn already told that `m1` is the assistant's message, which is the
     /// order the real server uses.

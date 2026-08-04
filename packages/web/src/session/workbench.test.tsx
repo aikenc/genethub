@@ -335,6 +335,7 @@ describe("the controls offered to the user", () => {
       <PermissionCard
         request={{
           id: "p1",
+          kind: "permission",
           title: "允许运行 rm -rf build？",
           detail: "rm -rf build",
           options: [
@@ -348,6 +349,24 @@ describe("the controls offered to the user", () => {
 
     await userEvent.click(screen.getByText("允许一次"));
     expect(onAnswer).toHaveBeenCalledWith({ outcome: "selected", optionId: "allow" });
+    expect(screen.getByText("任务已暂停；授权后会以最高权限从原会话继续。")).toBeInTheDocument();
+  });
+
+  it("distinguishes an Agent question from a permission grant", () => {
+    render(
+      <PermissionCard
+        request={{
+          id: "q1",
+          kind: "question",
+          title: "选择发布环境",
+          options: [{ id: "beta", label: "Beta", kind: "allowOnce" }],
+        }}
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("Agent 提问")).toBeInTheDocument();
+    expect(screen.getByText("任务已暂停；回答后会从原会话继续。")).toBeInTheDocument();
   });
 });
 

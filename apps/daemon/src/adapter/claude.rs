@@ -4,9 +4,9 @@
 //! We still never manage how this CLI reaches a model: env vars and its own
 //! config file are Claude Code's documented surface for that, not ours
 //! (`docs/architecture.md` §3, boundary B1; `docs/third-party-agents.md`).
-//! What going native buys back, relative to the ACP wrapper, is something ACP
-//! does not expose to a client at all: per-tool permission control. Claude
-//! Code's `--permission-prompt-tool stdio` routes every tool call through a
+//! What going native buys back, relative to the ACP wrapper, is Claude's richer
+//! model, effort, resume, command and control surfaces. Claude Code's
+//! `--permission-prompt-tool stdio` routes residual tool prompts through a
 //! `control_request`/`control_response` pair on the same stdio channel used
 //! for the conversation, which is exactly the shape our own
 //! `PermissionRequested`/`respond_permission` pair already needs.
@@ -15,17 +15,11 @@
 //! against Claude Code 2.1.220, see the investigation behind this file):
 //!
 //! - Spawn with `--print --input-format stream-json --output-format
-//!   stream-json --include-partial-messages --verbose --permission-prompt-tool
-//!   stdio`, plus a `--permission-mode` naming "ask me about every tool" —
-//!   which is what forces every tool call through us rather than either
-//!   auto-running or blocking on a TTY prompt that does not exist here.
-//!
-//!   **That mode's name is not the same in every build**, and this cost a user
-//!   a working Claude Code: 2.1.220 calls it `manual` and rejects `default`,
-//!   while another build of the same version line calls it `default` and
-//!   rejects `manual`. Either one hardcoded is a CLI that refuses to start for
-//!   half the installs. So the name is read out of `claude --help` — see
-//!   `ask_mode`.
+//!   stream-json --include-partial-messages --verbose`, enable the CLI's
+//!   dangerous bypass flag, disable its sandbox in inline settings, and default
+//!   `--permission-mode` to `bypassPermissions`. An explicitly selected lower
+//!   mode is still passed through. The ask-mode alias is not stable across
+//!   builds (`manual` versus `default`), so that one is read from `--help`.
 //! - Each user turn is one `{"type":"user","message":{...}}` line on stdin;
 //!   the process stays alive across turns.
 //! - Output is a mix of `{"type":"stream_event","event":{...}}` (the raw
@@ -71,8 +65,9 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, CommandInfo, ItemDelta, ModeInfo, ModelInfo, PermissionOption,
-    PermissionOptionKind, PermissionOutcome, PermissionRequest, ProbeState, SessionEvent,
-    TimelineItem, ToolCallDetail, ToolKind, ToolStatus, TurnError, TurnErrorCode, Usage,
+    PermissionOptionKind, PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolKind, ToolStatus, TurnError, TurnErrorCode,
+    Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -96,6 +91,8 @@ const MODE_DEFAULT: &str = "default";
 const MODE_ACCEPT_EDITS: &str = "acceptEdits";
 const MODE_PLAN: &str = "plan";
 const MODE_BYPASS: &str = "bypassPermissions";
+const DEFAULT_PERMISSION_MODE: &str = MODE_BYPASS;
+const UNRESTRICTED_SETTINGS: &str = r#"{"sandbox":{"enabled":false}}"#;
 
 /// The modes we offer, of the ones this CLI accepts.
 ///
@@ -180,31 +177,9 @@ impl ClaudeAdapter {
             .await
     }
 
-    /// The permission modes to offer for this build: the ones it accepts, of the
-    /// ones we can describe.
+    /// The permission modes to offer for this build.
     async fn modes(&self, program: &std::path::Path) -> Vec<ModeInfo> {
-        let help = self.help(program).await;
-        let mut modes = Vec::new();
-        // Whatever this build calls "ask about everything" leads, because it is
-        // the one that asks — a session should start in the cautious mode and be
-        // moved out of it deliberately.
-        if let Some(ask) = ask_mode_in(help) {
-            modes.push(ModeInfo {
-                id: ask.into(),
-                label: "Default".into(),
-                description: Some("Ask before every tool call".into()),
-            });
-        }
-        for (id, label, description) in MODES {
-            if mode_listed(help, id) {
-                modes.push(ModeInfo {
-                    id: id.into(),
-                    label: label.into(),
-                    description: Some(description.into()),
-                });
-            }
-        }
-        modes
+        modes_in(self.help(program).await)
     }
 
     /// The CLI's answer to an `initialize` control request, asked once per daemon
@@ -234,6 +209,9 @@ async fn initialize(program: &std::path::Path) -> Option<Value> {
             "--output-format",
             "stream-json",
             "--verbose",
+            "--allow-dangerously-skip-permissions",
+            "--settings",
+            UNRESTRICTED_SETTINGS,
         ])
         // Somewhere that exists and says nothing about any of the user's
         // projects: this answer is cached for every workspace.
@@ -453,6 +431,43 @@ fn ask_mode_in(help: &str) -> Option<&'static str> {
     None
 }
 
+fn modes_in(help: &str) -> Vec<ModeInfo> {
+    let mut modes = vec![ModeInfo {
+        id: MODE_BYPASS.into(),
+        label: "Bypass permissions".into(),
+        description: Some("Never ask about tool use".into()),
+    }];
+    if let Some(ask) = ask_mode_in(help) {
+        modes.push(ModeInfo {
+            id: ask.into(),
+            label: "Default".into(),
+            description: Some("Ask before every tool call".into()),
+        });
+    }
+    for (id, label, description) in MODES {
+        if id != MODE_BYPASS && mode_listed(help, id) {
+            modes.push(ModeInfo {
+                id: id.into(),
+                label: label.into(),
+                description: Some(description.into()),
+            });
+        }
+    }
+    modes
+}
+
+fn initial_permission_mode(requested: Option<&str>, help: &str) -> String {
+    if let Some(requested) = requested {
+        if requested == MODE_DEFAULT || requested == "manual" {
+            return ask_mode_in(help).unwrap_or(requested).to_string();
+        }
+        if MODES.iter().any(|(mode, ..)| *mode == requested) {
+            return requested.to_string();
+        }
+    }
+    DEFAULT_PERMISSION_MODE.to_string()
+}
+
 #[async_trait]
 impl AgentAdapter for ClaudeAdapter {
     fn id(&self) -> &str {
@@ -511,9 +526,7 @@ impl AgentAdapter for ClaudeAdapter {
                 // Which model is current is the CLI's to decide; when it does not
                 // say, the first entry it listed is its own recommendation.
                 .or_else(|| models.first().map(|model| model.id.clone())),
-            // Whichever name this build uses for "ask about everything", which
-            // `modes` puts first — a session starts cautious.
-            default_mode: modes.first().map(|mode| mode.id.clone()),
+            default_mode: Some(DEFAULT_PERMISSION_MODE.into()),
             models,
             modes,
         }
@@ -536,6 +549,9 @@ impl AgentAdapter for ClaudeAdapter {
                 "--verbose",
                 "--permission-prompt-tool",
                 "stdio",
+                "--allow-dangerously-skip-permissions",
+                "--settings",
+                UNRESTRICTED_SETTINGS,
             ])
             .current_dir(&config.cwd)
             .stdin(Stdio::piped())
@@ -583,33 +599,8 @@ impl AgentAdapter for ClaudeAdapter {
             });
 
         let help = self.help(&program).await.to_string();
-        let ask_mode = ask_mode_in(&help).map(str::to_string);
-        let initial_mode = config
-            .mode_id
-            .clone()
-            .filter(|id| MODES.iter().any(|(mode, ..)| mode == id) || Some(id) == ask_mode.as_ref())
-            .or_else(|| ask_mode.clone())
-            .unwrap_or_else(|| MODE_DEFAULT.to_string());
-        // Only a name this build actually lists: an unlisted one is not ignored,
-        // it makes the CLI refuse to start (which is how a hardcoded `manual`
-        // once cost a user their Claude Code entirely).
-        match Some(initial_mode.as_str())
-            .filter(|mode| mode_listed(&help, mode))
-            .or(ask_mode.as_deref())
-        {
-            Some(mode) => {
-                command.args(["--permission-mode", mode]);
-            }
-            // A build that names this something we have never seen. Its own
-            // configured default is a better guess than a name it will reject:
-            // starting without the flag at least gets a session, and
-            // `--permission-prompt-tool stdio` still routes whatever it does ask
-            // about through us.
-            None => tracing::warn!(
-                "claude --help lists no permission mode we recognise; \
-                 starting without --permission-mode"
-            ),
-        }
+        let initial_mode = initial_permission_mode(config.mode_id.as_deref(), &help);
+        command.args(["--permission-mode", initial_mode.as_str()]);
 
         // A model picked before the first prompt, which is the ordinary case: the
         // process only starts when there is something to send (see
@@ -1680,7 +1671,8 @@ async fn handle_control_request(
         .and_then(Value::as_str)
         .unwrap_or("a tool");
 
-    let auto_allow = *control.mode.lock().await == MODE_ACCEPT_EDITS
+    let mode = control.mode.lock().await.clone();
+    let auto_allow = (mode == MODE_ACCEPT_EDITS || mode == MODE_BYPASS)
         || control.always_allow.lock().await.contains(tool_name);
     if auto_allow {
         // Auto-approve without ever bothering the frontend: either the whole
@@ -1720,6 +1712,7 @@ async fn handle_control_request(
     let _ = events.send(SessionEvent::PermissionRequested {
         request: PermissionRequest {
             id: request_id.to_string(),
+            kind: PermissionRequestKind::Permission,
             title: format!("Allow {tool_name}?"),
             detail: request
                 .get("description")
@@ -1860,6 +1853,30 @@ mod tests {
             None
         );
         assert_eq!(ask_mode_in(""), None);
+    }
+
+    #[test]
+    fn fresh_sessions_default_to_bypass_but_explicit_lower_modes_survive() {
+        let help = "  --permission-mode <mode>  (choices: \"acceptEdits\", \
+             \"bypassPermissions\", \"manual\", \"plan\")";
+        assert_eq!(initial_permission_mode(None, help), MODE_BYPASS);
+        assert_eq!(initial_permission_mode(Some(MODE_PLAN), help), MODE_PLAN);
+        assert_eq!(
+            initial_permission_mode(Some(MODE_ACCEPT_EDITS), help),
+            MODE_ACCEPT_EDITS
+        );
+        assert_eq!(initial_permission_mode(Some("default"), help), "manual");
+        assert_eq!(initial_permission_mode(Some("unknown"), help), MODE_BYPASS);
+    }
+
+    #[test]
+    fn bypass_is_always_offered_and_cli_sandbox_is_disabled() {
+        assert_eq!(
+            modes_in("").first().map(|mode| mode.id.as_str()),
+            Some(MODE_BYPASS)
+        );
+        let settings: Value = serde_json::from_str(UNRESTRICTED_SETTINGS).unwrap();
+        assert_eq!(settings["sandbox"]["enabled"], false);
     }
 
     /// How hard to think is a second axis, and the CLI reports it per model —
@@ -2486,6 +2503,24 @@ mod tests {
             "a different tool must still ask, Always Allow is per-tool"
         );
 
+        let _ = child.start_kill();
+    }
+
+    #[tokio::test]
+    async fn bypass_mode_answers_residual_tool_prompts_without_the_frontend() {
+        let (mut child, stdin) = fake_stdin();
+        let control = ControlState {
+            mode: Arc::new(Mutex::new(MODE_BYPASS.to_string())),
+            stdin,
+            always_allow: Arc::default(),
+            pending_tools: Arc::default(),
+        };
+        let turn = Arc::new(Mutex::new(state()));
+        let (tx, mut rx) = broadcast::channel(8);
+
+        handle_control_request(&can_use_tool("req1", "Bash"), &turn, &tx, &control).await;
+        assert!(drain(&mut rx).is_empty());
+        assert!(control.pending_tools.lock().await.is_empty());
         let _ = child.start_kill();
     }
 

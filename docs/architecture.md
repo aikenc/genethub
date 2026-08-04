@@ -100,7 +100,15 @@ pub trait AgentAdapter: Send + Sync {
 
 五个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一批 agent**，`opencode` 是**形状差异最大的那个**——它不是 stdio 而是本地 HTTP + SSE，`claude` 和 `codex` 是**我们绕开 ACP、直接说其原生协议的两个**。
 
-这两个为什么值得自己写一份：ACP 是一份公开、双方都维护的契约，代价小；原生协议翻译要我们自己跟着对方的版本走。但 ACP 没有把**逐工具权限控制**（每次工具调用先问一遍，而不是要么全放行要么全不放行）暴露给客户端，而这两个 CLI 自己的协议都有——`claude` 靠 `--permission-prompt-tool stdio` 的控制请求，`codex` 靠它自己反过来发的三条审批请求。`codex` 还多买回两样：它的 `model/list` 会报出每个模型自己的思考档位，而它的 `turn/start` 每回合都带 model / effort / 审批策略，所以三个选择器都是真的。两个都曾经挂在 ACP 上，也都因此让装了 CLI 的人被告知「未安装」——ACP 那条要的是另一个桥接包。详见 [third-party-agents.md](./third-party-agents.md)。
+这两个为什么值得自己写一份：ACP 是一份公开、双方都维护的契约，代价小；原生协议翻译要我们自己跟着对方的版本走。当前 ACP 已有 `session/request_permission` 和标准 `session/resume`，足够覆盖 Cursor 等通用接入；Claude 和 Codex 的原生协议仍提供更完整的模型、思考档位、模式、提问语义与会话恢复能力。`codex` 的 `model/list` 会报出每个模型自己的思考档位，而 `turn/start` 每回合都带 model / effort / 审批策略，所以三个选择器都是真的。两个都曾经挂在额外 ACP 桥接包上，也都因此让只装了官方 CLI 的人被告知「未安装」。详见 [third-party-agents.md](./third-party-agents.md)。
+
+### 3.4 Agent 权限与暂停恢复
+
+GeneHub 面向长期无人值守的机器，默认权限不是“先拦住再等人点”，而是**在操作系统账户允许的范围内尽量放权**。已知 CLI 在启动层和 Agent 自身模式层都选择最高权限；daemon 不再添加工作区写入沙箱。用户显式选择只读或 plan 时才降低权限。
+
+仍然出现的权限请求与真正的 Agent 问题都被建模成一个持久化的“暂停点”，但二者类型分开：批准权限时用 Agent 的最高默认模式恢复，回答问题时保持原模式。daemon 在写入 session meta 后结束当前回合并关闭 Agent 子进程；不保留等待中的 RPC、进程、WebSocket 或浏览器连接。稍后响应时，通过原生 session handle 恢复并开启新的继续回合。状态只有 `running → waiting → running/idle`，重启 daemon 也不丢请求。
+
+这里的“全盘可写”不等于提权：子进程继承 daemon 登录用户的 OS 权限，GeneHub 不绕过 ACL、UAC、macOS 隐私授权、只读文件系统或设备管理策略。
 
 **外部 agent 一律不随包分发**，只检测用户自己安装的。除了体积与授权，还有一条更硬的理由：有些 agent 自带 Node 或其他运行时，打包它们等于把它们的运行时依赖变成我们的，而 PC 端零 Node 运行时是硬约束（[desktop-client.md](./desktop-client.md) §4.1）。
 

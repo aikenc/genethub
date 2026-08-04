@@ -41,10 +41,13 @@ export function emptyTimeline(): TimelineState {
 }
 
 export function fromSnapshot(snapshot: SessionSnapshot): TimelineState {
+  const pendingPermission = snapshot.pendingPermissions?.[0] ?? null;
   return {
     ...emptyTimeline(),
     items: snapshot.items,
-    status: snapshot.summary.status,
+    // Old daemon snapshots may still say `running`; the durable interaction is
+    // authoritative because there is deliberately no live turn behind it.
+    status: pendingPermission ? "waiting" : snapshot.summary.status,
     // The request the agent is waiting on. Dropping it was a hang the user could
     // not get out of: after a reconnect too old to replay, the snapshot is all
     // there is, so a session paused for approval came back with no card to
@@ -54,7 +57,7 @@ export function fromSnapshot(snapshot: SessionSnapshot): TimelineState {
     // Optional access: an older daemon, or a hand-built snapshot, simply has
     // no such array — and losing the whole session view over a missing field
     // is worse than the hang this fixes.
-    pendingPermission: snapshot.pendingPermissions?.[0] ?? null,
+    pendingPermission,
     modelId: snapshot.summary.modelId ?? null,
     modeId: snapshot.summary.modeId ?? null,
     effortId: snapshot.summary.effortId ?? null,
@@ -119,7 +122,11 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
 
     case "permissionResolved":
       return state.pendingPermission?.id === event.requestId
-        ? { ...state, status: "running", pendingPermission: null }
+        ? {
+            ...state,
+            status: state.activeTurn ? "running" : "idle",
+            pendingPermission: null,
+          }
         : state;
 
     case "modelChanged":

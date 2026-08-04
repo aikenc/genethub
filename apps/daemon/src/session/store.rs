@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use genehub_proto::{SessionStatus, SessionSummary, TimelineItem};
+use genehub_proto::{PermissionRequest, SessionStatus, SessionSummary, TimelineItem};
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::PersistHandle;
@@ -37,6 +37,10 @@ pub struct SessionMeta {
     pub archived: bool,
     #[serde(default)]
     pub persist: Option<PersistHandle>,
+    /// A stopped interaction waiting for a user who may return much later.
+    /// Stored in meta so no live socket or Agent process is required.
+    #[serde(default)]
+    pub pending_permission: Option<PermissionRequest>,
 }
 
 impl SessionMeta {
@@ -278,7 +282,9 @@ fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genehub_proto::ToolStatus;
+    use genehub_proto::{
+        PermissionOption, PermissionOptionKind, PermissionRequestKind, ToolStatus,
+    };
 
     fn meta(id: &str) -> SessionMeta {
         SessionMeta {
@@ -294,6 +300,7 @@ mod tests {
             updated_at_ms: 2,
             archived: false,
             persist: None,
+            pending_permission: None,
         }
     }
 
@@ -429,6 +436,32 @@ mod tests {
             store.load_meta("w1", "s1").unwrap().title.as_deref(),
             Some("demo")
         );
+    }
+
+    #[test]
+    fn a_stopped_interaction_survives_a_daemon_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let mut session = meta("s1");
+        session.pending_permission = Some(PermissionRequest {
+            id: "p1".into(),
+            kind: PermissionRequestKind::Permission,
+            title: "Write outside the workspace?".into(),
+            detail: Some("/tmp/report.txt".into()),
+            options: vec![PermissionOption {
+                id: "allow".into(),
+                label: "Allow".into(),
+                kind: PermissionOptionKind::AllowOnce,
+            }],
+            tool_call_id: Some("call-1".into()),
+        });
+        store.save_meta(&session).unwrap();
+
+        let restored = Store::new(dir.path()).load_meta("w1", "s1").unwrap();
+        let request = restored.pending_permission.unwrap();
+        assert_eq!(request.id, "p1");
+        assert_eq!(request.kind, PermissionRequestKind::Permission);
+        assert_eq!(request.tool_call_id.as_deref(), Some("call-1"));
     }
 
     #[test]

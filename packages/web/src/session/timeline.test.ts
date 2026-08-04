@@ -136,6 +136,7 @@ describe("the session timeline", () => {
   it("shows an approval request and takes it down once it is answered", () => {
     const request = {
       id: "p1",
+      kind: "permission" as const,
       title: "run this?",
       options: [{ id: "yes", label: "Allow", kind: "allowOnce" as const }],
     };
@@ -153,6 +154,7 @@ describe("the session timeline", () => {
   it("does not clear an approval that a different request resolved", () => {
     const request = {
       id: "p1",
+      kind: "permission" as const,
       title: "run this?",
       options: [],
     };
@@ -186,6 +188,7 @@ describe("the session timeline", () => {
       pendingPermissions: [
         {
           id: "p1",
+          kind: "permission",
           turnId: "t1",
           title: "写文件",
           detail: null,
@@ -199,7 +202,7 @@ describe("the session timeline", () => {
     // A snapshot cannot recover the transient turn id, but it does recover the
     // durable fact the composer needs in order to keep showing Stop.
     expect(state.activeTurn).toBeNull();
-    expect(state.status).toBe("running");
+    expect(state.status).toBe("waiting");
     expect(state.seq).toBe(42);
   });
 

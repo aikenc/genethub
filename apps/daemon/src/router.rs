@@ -330,14 +330,17 @@ pub async fn handle(
             session_id,
             request_id,
             outcome,
-        } => match state
-            .sessions
-            .respond_permission(&session_id, &request_id, outcome)
-            .await
-        {
-            Ok(()) => Handled::ok(Reply::Ack),
-            Err(error) => failed(error),
-        },
+        } => {
+            let providers = state.providers().await;
+            match state
+                .sessions
+                .respond_permission(&session_id, &request_id, outcome, &providers)
+                .await
+            {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
 
         Request::SettingsGet => Handled::ok(Reply::Settings(state.settings().await)),
 

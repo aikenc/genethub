@@ -111,7 +111,7 @@ describe("live session status in the sidebar", () => {
       sessionId: "s1",
       event: {
         type: "permissionRequested",
-        request: { id: "p1", title: "允许？", options: [] },
+        request: { id: "p1", kind: "permission", title: "允许？", options: [] },
       },
     });
     expect(useWorkbench.getState().sessions[0]?.status).toBe("waiting");

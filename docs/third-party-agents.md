@@ -4,9 +4,11 @@
 
 ---
 
-## 1. 一句话原则
+## 1. 两条原则
 
 **GeneHub 只对接 CLI，不管 CLI 内部通讯。**
+
+**Agent 默认以它能获得的最高权限启动；异常授权请求是持久化暂停点，不是一次实时 RPC 等待。**
 
 一个 agent 能不能用、接的是哪个模型、密钥存在哪，都是那个 CLI 自己的事，由用户按那个 CLI 自己的文档配置（环境变量、它自己的配置文件、或登录态）。daemon 该做的只有两件事：
 
@@ -14,6 +16,8 @@
 2. 拉起子进程，按它公开的协议（stdio JSONL / ACP / HTTP+SSE）收发帧，翻译成本项目统一的时间线事件。
 
 daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或者在中间做协议转换。做了就等于把它的实现细节焊进了我们的抽象层，下一个版本它一改内部协议，我们就得跟着改——这正是 [architecture.md](./architecture.md) 反复强调不能做的事。
+
+“最高权限”仍受操作系统账户边界约束：Agent 可以读写该 daemon 用户本来就能读写的路径、执行命令和联网，但不会绕过 ACL、UAC、macOS 隐私授权、只读挂载或企业策略。GeneHub 不再额外把它关进“仅工作区可写”的沙箱。
 
 ---
 
@@ -28,7 +32,31 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | `cursor` | 子进程 + ACP over stdio | 探测 `cursor-agent` 二进制本身，说它自己发布的 ACP（`cursor-agent acp`），见 §5 |
 | `acp` | 子进程 + ACP over stdio | 兜底条目，探测一个叫 `acp-agent` 的二进制；真正常用的是下面的自定义声明 |
 
-`claude` 在代码里是 `adapter::claude::ClaudeAdapter`——直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。换原生协议不是图省事，是为了拿回 ACP 不暴露给客户端的能力：**逐个工具调用的权限控制**。`claude --permission-mode manual --permission-prompt-tool stdio` 会把每一次工具调用都变成一个 `control_request`/`control_response` 往返，和 daemon 自己的 `PermissionRequested`/`respondPermission` 正好对上；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `apps/daemon/src/adapter/claude.rs` 顶部的模块文档。
+`claude` 在代码里是 `adapter::claude::ClaudeAdapter`——直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。原生协议让我们保留模型、思考档位、模式、真实提问与权限请求的完整语义；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `apps/daemon/src/adapter/claude.rs` 顶部的模块文档。
+
+### 2.1 默认放权矩阵
+
+| Agent | daemon 启动时的默认放权 |
+|-------|-------------------------|
+| Genet | 不做工作区目录限制；文件工具接受绝对路径，命令继承 daemon 用户权限 |
+| OpenCode | `OPENCODE_PERMISSION` 注入全工具、外部目录与网络全允许策略 |
+| Claude Code | `bypassPermissions` + `--allow-dangerously-skip-permissions`，并关闭 CLI sandbox |
+| Codex | `approval_policy="never"` + `sandbox_mode="danger-full-access"`，新会话默认 `full-access` |
+| Cursor | `--force --sandbox disabled --trust --approve-mcps acp` |
+| 自定义 ACP | command 原样启动；GeneHub 不能猜某个未知 CLI 的私有放权参数，接入声明应自行带上 |
+
+用户显式选择只读、plan 等较低模式时仍尊重选择；这里只规定“未选择时”的产品默认值。
+
+### 2.2 授权请求不是长连接
+
+最高权限启动后，正常任务不应再频繁请求授权。若 CLI 仍发出权限请求，或 Agent 发出必须由用户决定的选择题，daemon 执行同一套简单状态机：
+
+1. 保存原生会话句柄与请求卡片，结束当前回合并关闭 Agent 进程；浏览器、WebSocket 和 stdio 都不需要继续在线。
+2. daemon 重启后仍从 session meta 恢复为 `waiting`，用户几小时或几天后回来仍能看到同一张卡片。
+3. 批准权限时，以该 Agent 的最高默认模式恢复原生会话并继续原任务；回答普通问题时，以用户原来选择的模式恢复。
+4. 拒绝或取消只清掉暂停点，不偷偷重启 Agent。下一条用户消息仍可从原生会话继续。
+
+恢复优先使用各家的原生 session id；ACP 优先用标准 `session/resume`，仅在 Agent 明确只声明旧的 `loadSession` 能力时使用 `session/load`。给 Agent 的恢复提示是 daemon 内部控制消息，不会伪装成用户在时间线里又说了一句话。
 
 ```bash
 npm install -g @anthropic-ai/claude-code
@@ -64,7 +92,7 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash
 
 - `acceptEdits` 模式下真实工具调用不经过一次提问就落盘；
 - daemon 自己的中断请求真的能打断一个正在生成的回合，而不只是杀掉进程；
-- 默认模式下拒绝一次权限请求，工具调用真的不会碰到文件系统；
+- 显式选择较低权限模式时，拒绝一次权限请求，工具调用真的不会碰到文件系统；
 - 模型和模式选择器里列出来的每一项，都是这台机器上的 CLI 自己报的、并且它真的会接受。
 
 ### 3.1 模型和模式：问 CLI，不写死
@@ -72,7 +100,7 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash
 Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它握一次手问出来的：
 
 - 模型：一个 `{"subtype":"initialize"}` 控制请求，它会回自己的模型别名表（`default`、`opus`、`sonnet`……，带 `displayName` 和是否支持 effort 档位）。这些别名原样进选择器，切换时原样发回 `set_model`——列表和参数是同一个来源，就不存在「我们以为它有」这种事。某个别名背后到底是哪个模型，仍然是 Claude Code 自己的事（环境变量、它自己的配置文件），我们只显示不决定（[architecture.md](./architecture.md) §3 边界 B1）。
-- 模式：从 `claude --help` 的 `--permission-mode` 选项里读这台机器接受哪些名字，只提供其中我们能说清含义的：默认（逐个询问）、`acceptEdits`、`plan`、`bypassPermissions`。2.1.220 还接受 `auto` 和 `dontAsk`，但 CLI 里外都没有一句话说这两个跟上面几个有什么区别——说不清效果的开关比没有这个开关更糟，所以先不放。
+- 模式：从 `claude --help` 的 `--permission-mode` 选项里读这台机器接受哪些名字，并始终提供最高权限的 `bypassPermissions` 作为默认值；`acceptEdits`、`plan` 以及该版本接受的默认/手动模式仍可由用户显式选择。
 - 会话中途切换走的都是原生控制请求（`set_model` / `set_permission_mode`），并且**等它回话**：控制请求失败就报错，不会让选择器动了而实际什么都没变。
 
 思考强度（effort）：`initialize` 回的模型表里每个模型都带自己的档位（`supportedEffortLevels`，这台机器上是 `low/medium/high/xhigh/max`），启动时按 `--effort` 传，会话中途用 `set_model` 控制请求只发 `effort` 字段切换——不带模型，因为在哪个模型上是 CLI 自己的状态（它自己的 `/model` 命令也能改），带上反而会把它悄悄改回去。校验依然在我们这边：`effort: "nonsense"` 它同样回 `success`，然后继续用原来的档位。
@@ -83,11 +111,11 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 
 有一个例外要写下来：这个 CLI 不校验模型名。给它一个根本不存在的模型，它照样回 `success`、打印一句 "Set model to <你输入的东西>"，然后继续用原来那个模型。所以校验在我们这边——只有它自己列过的别名才发得出去。
 
-`acceptEdits` 是另一个例外方向：除了告诉 CLI，daemon 自己也拦着不问（按工具名的白名单那套机制）。旧版本 CLI 万一不认 `set_permission_mode`，用户选的「不要再问我」也还是成立的。
+`bypassPermissions` 下若旧版本 CLI 仍产生残余工具请求，adapter 直接允许，不把正常工作变成一次暂停。显式选择 `acceptEdits` 等较低档位时，仍按该档位的原生语义处理。
 
 不是「DeepSeek 能不能连 Claude Code」——后者是 DeepSeek 自己的产品能力，我们只是借用。
 
-`can_use_tool` 的三个选项现在是 Allow / **Always Allow** / Deny：Claude Code 的 stdio 协议本身没有「记住这次选择」的字段（见 `claude.rs` 顶部模块文档），所以 Always Allow 是 daemon 自己按工具名维护的一份进程内白名单——同一个会话里选过一次之后，同名工具不再打扰前端，换一个工具名要重新问。
+在显式较低权限模式下，`can_use_tool` 的选项仍会被归一化成暂停卡片；但 daemon 不再维持一个等待回复的 Claude 进程，批准后恢复同一个原生会话继续。
 
 粘贴图片现在会作为附件随消息一起发：`claude`（Anthropic 内容块）、`codex`（先落到 scratch 再发 `localImage` 路径）、`opencode`（`file` part + data URL）、经 `acp` 声明的 agent（ACP `image` 内容块）都会转发；`genet` 自己的 provider 层还不接受图片，见 [roadmap.md](./roadmap.md)「明确不做」。
 
@@ -95,13 +123,13 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 
 ## 4. Codex：直接说它自己的 `app-server` 协议
 
-`codex` 在代码里是 `adapter::codex::CodexAdapter`——拉起 `codex app-server`，说它自己的 JSON-RPC（stdio、双向），不经过任何 wrapper。理由和 Claude Code（§3）完全一样：**逐个工具调用的权限控制**，ACP 不把这条暴露给客户端。顺带还去掉了一个没人猜得到的安装步骤——之前注册的是 `codex-acp` 桥接包，于是装了 `codex` 的人被告知「Codex 未安装」。
+`codex` 在代码里是 `adapter::codex::CodexAdapter`——拉起 `codex app-server`，说它自己的 JSON-RPC（stdio、双向），不经过任何 wrapper。这样能完整保留 thread 恢复、模型、思考档位、沙箱模式，以及权限请求和真实用户问题的区别。顺带还去掉了一个没人猜得到的安装步骤——之前注册的是 `codex-acp` 桥接包，于是装了 `codex` 的人被告知「Codex 未安装」。
 
 协议细节（版本漂移从此归我们跟：以下是对着 codex-cli 0.145.0 实测的）见 `apps/daemon/src/adapter/codex.rs` 顶部的模块文档。挑几条影响用户能看见什么的：
 
 - **三个选择器都是真的，而且一个 RPC 都不用额外发。** 这个 CLI 的 `turn/start` 参数里同时带着 model、`effort`、`approvalPolicy` 和 `sandboxPolicy`，所以「切模型」「切档位」「切模式」在我们这边只是记下来，下一回合原样带过去。首个 prompt 之前进程还没起（`session::manager::ensure_started`），这也是唯一能让那时的选择不被丢掉的接法。
 - **模型表和档位问它要。** `model/list` 回的每个模型都带自己的 `supportedReasoningEfforts`（这台机器上是 `low/medium/high/xhigh/max/ultra`）和一个默认档位，原样进选择器。校验在我们这边：它不会替我们拒绝一个不存在的模型名，只会在下一回合安静地用回原来那个。
-- **模式是两个设置的组合，不是一个开关。** 它自己的词汇是 `approvalPolicy`（`on-request` / `never`）加 `sandbox`（`read-only` / `workspace-write` / `danger-full-access`）。摆在界面上的是三档能说清含义的组合：只读、默认（工作区内可写、越界要问）、完全放行（不问且允许联网）。
+- **模式是两个设置的组合，不是一个开关。** 它自己的词汇是 `approvalPolicy`（`on-request` / `never`）加 `sandbox`（`read-only` / `workspace-write` / `danger-full-access`）。界面仍可显式选择较低档位，但默认是完全放行：不询问、全盘可写并允许联网。启动 `app-server` 本身也带同样的最高权限配置，避免“会话选了 full-access，宿主进程却仍被另一层沙箱拦住”。
 - **审批按对象分成三条请求**，都是它反过来问我们：命令执行、文件改动（都回 `{"decision":"accept"|"decline"|"cancel"}`），以及一条「问用户」的选择题（回 `{"answers":{...}}`）。它问什么我们都得回——一条不回，它就一直等。所以渲染不了的（多个问题一次问、要自由文本、MCP 的表单）也照样回，回的是「没人回答」而不是替用户选一个。
 - **没登录不会报错，会挂着。** 未登录时 `turn/start` 照样被接受、用户消息照样回显，然后什么都不发生：没有失败帧，也不退出。所以 `probe` 直接问 `codex login status`，未登录就报 `Unavailable` 并写清那一行命令，而不是让第一条 prompt 在那儿转圈。
 
@@ -130,6 +158,8 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 ## 5. Cursor：走它自己发布的 ACP
 
 `cursor` 在代码里是 `adapter::acp::AcpAdapter` 的一个默认条目——拉起 `cursor-agent acp`，说 [ACP](https://agentclientprotocol.com/)，这个 CLI 自己发布的嵌入协议。没有像 Claude 和 Codex 那样写原生适配器，因为 Cursor 没有一份公开的、值得跟进维护的原生协议，而 ACP 已经把我们需要的暴露出来了：权限请求（`session/request_permission`）、模式切换和图片附件都在协议里。
+
+实际启动命令会附带 `--force --sandbox disabled --trust --approve-mcps`，因此 Cursor 自己的 CLI 层也默认放权；若仍收到 ACP 权限请求，就进入 §2.2 的持久化暂停/恢复流程。
 
 ```bash
 curl https://cursor.com/install -fsS | bash
