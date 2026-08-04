@@ -53,6 +53,15 @@ export const config = {
     maxFabricEndpoints: intFromEnv("RELAY_MAX_FABRIC_ENDPOINTS", 10_000),
     /** Bounds raw upgrades waiting on the remote admission authority. */
     maxFabricPendingUpgrades: intFromEnv("RELAY_MAX_FABRIC_PENDING_UPGRADES", 256),
+    /**
+     * Bounds reconnect replay fences without ever evicting a live security
+     * fence. Once full, new endpoint identities fail closed until an expiring
+     * identity can be pruned or the stateless relay is restarted.
+     */
+    maxFabricGenerationFences: intFromEnv(
+      "RELAY_MAX_FABRIC_GENERATION_FENCES",
+      100_000,
+    ),
     /** Protocol faults are scoped to a socket until this bounded threshold. */
     maxFabricStrikes: intFromEnv("RELAY_MAX_FABRIC_STRIKES", 8),
     /** Bytes buffered for one peer before we consider it too slow and cut it. */

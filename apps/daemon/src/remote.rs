@@ -21,7 +21,6 @@ use crate::transport::uplink::{Admission, Uplink};
 
 pub struct Remote {
     attached: Mutex<Option<Attached>>,
-    paths: Paths,
     pty: broadcast::Sender<ServerFrame>,
     /// Weak for the same reason the Hub link's is: the state owns this.
     state: Weak<AppState>,
@@ -35,10 +34,9 @@ struct Attached {
 pub type SharedRemote = Arc<Remote>;
 
 impl Remote {
-    pub fn new(paths: Paths, pty: broadcast::Sender<ServerFrame>) -> SharedRemote {
+    pub fn new(_paths: Paths, pty: broadcast::Sender<ServerFrame>) -> SharedRemote {
         Arc::new(Remote {
             attached: Mutex::new(None),
-            paths,
             pty,
             state: Weak::new(),
         })
@@ -106,7 +104,7 @@ impl Remote {
         });
         drop(attached);
 
-        self.persist(Some(config))?;
+        self.persist(Some(config)).await?;
         Ok(self.status().await)
     }
 
@@ -116,7 +114,7 @@ impl Remote {
         if let Some(previous) = self.attached.lock().await.take() {
             previous.uplink.stop();
         }
-        self.persist(None)?;
+        self.persist(None).await?;
         Ok(self.status().await)
     }
 
@@ -127,11 +125,15 @@ impl Remote {
         }
     }
 
-    fn persist(&self, config: Option<Rendezvous>) -> Result<()> {
-        let path = self.paths.state_file();
-        let mut machine = MachineState::load_or_create(&path)?;
-        machine.rendezvous = config;
-        machine.save(&path)
+    async fn persist(&self, config: Option<Rendezvous>) -> Result<()> {
+        self.state
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("the daemon is shutting down"))?
+            .mutate_machine_state(|machine| {
+                machine.rendezvous = config;
+                Ok(())
+            })
+            .await
     }
 }
 

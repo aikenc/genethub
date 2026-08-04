@@ -13,7 +13,7 @@ import {
   type FabricEndpointConnection,
   type FabricEndpointContext,
 } from "./fabric-core.js";
-import { decodeFabricFrame, encodeFabricFrame } from "./fabric-frame.js";
+import { decodeFabricFrame, encodeFabricFrame, FabricReset } from "./fabric-frame.js";
 
 interface SocketPeer {
   readonly socket: WebSocket;
@@ -69,11 +69,19 @@ export class FabricForwarder {
   private readonly core: FabricCore;
   private heartbeat: NodeJS.Timeout | null = null;
   private closing = false;
+  private authorityReady: boolean;
+  /** Invalidates every admission that crossed an authority outage. */
+  private authorityEpoch = 0;
 
-  constructor(private readonly authority: FabricAuthority) {
+  constructor(
+    private readonly authority: FabricAuthority,
+    options: { authorityReady?: boolean } = {},
+  ) {
     this.core = new FabricCore(authority, {
       maxStrikes: config.limits.maxFabricStrikes,
+      maxConnectionGenerations: config.limits.maxFabricGenerationFences,
     });
+    this.authorityReady = options.authorityReady ?? true;
     authority.onFabricRevoked((revocation) => this.core.revoke(revocation));
   }
 
@@ -94,6 +102,11 @@ export class FabricForwarder {
         }
         peer.alive = false;
         peer.socket.ping();
+        this.reportPresence(
+          peer.connection.context.endpointHandle,
+          peer.connection.context.connectionGeneration,
+          "online",
+        );
       }
     }, config.limits.heartbeatSeconds * 1000);
     this.heartbeat.unref?.();
@@ -103,6 +116,10 @@ export class FabricForwarder {
     return this.core.stats();
   }
 
+  authorityAvailable(): boolean {
+    return this.authorityReady && !this.closing;
+  }
+
   /** Reasserts only the endpoint sockets this relay currently owns. */
   resyncPresence(): void {
     for (const peer of this.peers) {
@@ -110,13 +127,50 @@ export class FabricForwarder {
         peer.presenceOnline &&
         this.core.current(peer.connection.context.endpointHandle) === peer.connection
       ) {
-        this.reportPresence(peer.connection.context.endpointHandle, "online");
+        this.reportPresence(
+          peer.connection.context.endpointHandle,
+          peer.connection.context.connectionGeneration,
+          "online",
+        );
       }
+    }
+  }
+
+  /** Opens admission only after the authority installed its initial sync. */
+  authoritySynchronized(): void {
+    if (this.closing) return;
+    this.authorityReady = true;
+    this.resyncPresence();
+  }
+
+  /** Drops every binding when revocations can no longer be observed. */
+  authorityDisconnected(): void {
+    this.authorityReady = false;
+    this.authorityEpoch += 1;
+    // Do not leave already-started authorization requests attached to raw
+    // sockets. The epoch check below is the second line of defence in case a
+    // custom Duplex cannot be destroyed synchronously.
+    for (const socket of this.pendingSockets) socket.destroy();
+    this.pendingSockets.clear();
+    for (const peer of [...this.peers]) {
+      if (!this.peers.delete(peer)) continue;
+      const wasOnline = peer.presenceOnline;
+      peer.presenceOnline = false;
+      this.core.unregister(peer.connection, FabricReset.Revoked);
+      if (wasOnline) {
+        this.reportPresence(
+          peer.connection.context.endpointHandle,
+          peer.connection.context.connectionGeneration,
+          "offline",
+        );
+      }
+      peer.socket.close(1012, "authority disconnected");
     }
   }
 
   close(): void {
     this.closing = true;
+    this.authorityReady = false;
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = null;
     for (const socket of this.pendingSockets) socket.destroy();
@@ -126,7 +180,11 @@ export class FabricForwarder {
       peer.presenceOnline = false;
       this.core.unregister(peer.connection);
       if (wasOnline) {
-        this.reportPresence(peer.connection.context.endpointHandle, "offline");
+        this.reportPresence(
+          peer.connection.context.endpointHandle,
+          peer.connection.context.connectionGeneration,
+          "offline",
+        );
       }
       peer.socket.close(1001, "relay shutting down");
     }
@@ -138,13 +196,16 @@ export class FabricForwarder {
     socket: Duplex,
     head: Buffer,
   ): Promise<void> {
-    if (this.closing) return reject(socket, 503, "Service Unavailable");
+    if (this.closing || !this.authorityReady) {
+      return reject(socket, 503, "Service Unavailable");
+    }
     const credential = credentialOf(request);
     if (!credential) return reject(socket, 401, "Unauthorized");
     if (this.pendingSockets.size >= config.limits.maxFabricPendingUpgrades) {
       return reject(socket, 503, "Service Unavailable");
     }
 
+    const admissionEpoch = this.authorityEpoch;
     this.pendingSockets.add(socket);
     const grant = await this.authority
       .authorizeEndpoint(credential)
@@ -157,12 +218,19 @@ export class FabricForwarder {
       socket.destroy();
       return;
     }
+    // The revocation stream may have dropped while endpoint admission was in
+    // flight. Never install that response into an unsynchronized forwarder.
+    if (!this.authorityReady || this.authorityEpoch !== admissionEpoch) {
+      return reject(socket, 503, "Service Unavailable");
+    }
     if (!grant) return reject(socket, 403, "Forbidden");
 
     const expiresAt = parseExpiry(grant.expiresAt);
     if (
       !grant.endpointHandle ||
       !grant.revocationHandle ||
+      !Number.isSafeInteger(grant.connectionGeneration) ||
+      grant.connectionGeneration < 1 ||
       (grant.expiresAt !== null && (expiresAt === null || expiresAt <= Date.now()))
     ) {
       return reject(socket, 403, "Forbidden");
@@ -182,6 +250,7 @@ export class FabricForwarder {
         endpointHandle: grant.endpointHandle,
         revocationHandle: grant.revocationHandle,
         expiresAt: grant.expiresAt,
+        connectionGeneration: grant.connectionGeneration,
         connectionEpoch: randomBytes(16).toString("hex"),
       });
     });
@@ -216,7 +285,7 @@ export class FabricForwarder {
     this.peers.add(peer);
     previous?.close(4000);
     peer.presenceOnline = true;
-    this.reportPresence(context.endpointHandle, "online");
+    this.reportPresence(context.endpointHandle, context.connectionGeneration, "online");
 
     socket.on("pong", () => {
       peer.alive = true;
@@ -243,7 +312,11 @@ export class FabricForwarder {
       this.core.unregister(connection);
       if (peer.presenceOnline && (!replacement || replacement === connection)) {
         peer.presenceOnline = false;
-        this.reportPresence(context.endpointHandle, "offline");
+        this.reportPresence(
+          context.endpointHandle,
+          context.connectionGeneration,
+          "offline",
+        );
       }
     };
     socket.on("close", shutdown);
@@ -262,12 +335,15 @@ export class FabricForwarder {
   /** Keeps online/offline writes ordered even when the control plane is slow. */
   private reportPresence(
     endpointHandle: string,
+    connectionGeneration: number,
     state: "online" | "offline",
   ): void {
     const previous = this.presenceReports.get(endpointHandle) ?? Promise.resolve();
     const report = previous
       .catch(() => {})
-      .then(() => this.authority.reportEndpointPresence(endpointHandle, state))
+      .then(() =>
+        this.authority.reportEndpointPresence(endpointHandle, connectionGeneration, state),
+      )
       .catch((error: unknown) => {
         log.warn("fabric: presence report failed", { state, error: String(error) });
       });

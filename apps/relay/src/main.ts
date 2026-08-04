@@ -1,10 +1,11 @@
-//! The relay: it moves bytes and knows nothing about them.
+//! The relay: it moves bytes without interpreting their product meaning.
 //!
 //! Everything with an opinion — accounts, machines, tickets, audit — lives
 //! behind the contract in `src/contract/`, reached over HTTP. That is what
-//! makes this process safe to hand to someone else to run: the worst a hostile
-//! relay operator can do is drop traffic or observe who talks to whom, which is
-//! stated plainly in `docs/security-model.md` rather than glossed over.
+//! keeps this process free of product authorization and persistence. Until
+//! endpoints add E2EE, TLS terminates here: an operator can still observe or
+//! alter forwarded bytes as well as metadata, delay them, or drop them. The
+//! narrower current claim is stated in `docs/security-model.md`.
 
 import type { Server } from "node:http";
 
@@ -27,6 +28,8 @@ export interface Relay {
   port: number;
   forwarder: Forwarder;
   fabricForwarder: FabricForwarder | null;
+  /** Resolves after the remote Fabric authority installs its first sync. */
+  fabricReady: Promise<void>;
   close(): Promise<void>;
 }
 
@@ -80,7 +83,21 @@ export async function startRelay(
 
   const app = new Hono();
   const forwarder = new Forwarder(authority);
-  const fabricForwarder = fabricAuthority ? new FabricForwarder(fabricAuthority) : null;
+  const fabricAuthorityIsRemote = fabricAuthority instanceof RemoteFabricAuthority;
+  const fabricForwarder = fabricAuthority
+    ? new FabricForwarder(fabricAuthority, {
+        // A remote authority is unsafe until its revocation stream has
+        // delivered the mandatory initial sync. In-process test authorities do
+        // not have an external stream and start ready by construction.
+        authorityReady: !fabricAuthorityIsRemote,
+      })
+    : null;
+  let resolveInitialFabricSync: (() => void) | null = null;
+  const initialFabricSync = fabricAuthorityIsRemote
+    ? new Promise<void>((resolve) => {
+        resolveInitialFabricSync = resolve;
+      })
+    : Promise.resolve();
   // A revocation the relay never hears about is a machine that stays reachable
   // after its owner cut it off, so the subscription is not optional. Its
   // reconnect is also the resync signal: the control plane boots every machine
@@ -91,9 +108,16 @@ export async function startRelay(
       ? authority.watchRevocations({ onReconnect: () => forwarder.resyncPresence() })
       : () => {};
   const stopWatchingFabric =
-    fabricAuthority instanceof RemoteFabricAuthority && fabricForwarder
+    fabricAuthorityIsRemote &&
+    fabricAuthority instanceof RemoteFabricAuthority &&
+    fabricForwarder
       ? fabricAuthority.watchRevocations({
-          onReconnect: () => fabricForwarder.resyncPresence(),
+          onReconnect: () => {
+            fabricForwarder.authoritySynchronized();
+            resolveInitialFabricSync?.();
+            resolveInitialFabricSync = null;
+          },
+          onDisconnect: () => fabricForwarder.authorityDisconnected(),
         })
       : () => {};
 
@@ -101,7 +125,14 @@ export async function startRelay(
     c.json({
       status: "ok",
       forward: forwarder.stats(),
-      ...(fabricForwarder ? { fabric: fabricForwarder.stats() } : {}),
+      ...(fabricForwarder
+        ? {
+            fabric: {
+              ...fabricForwarder.stats(),
+              authorityReady: fabricForwarder.authorityAvailable(),
+            },
+          }
+        : {}),
     }),
   );
 
@@ -124,6 +155,7 @@ export async function startRelay(
     port: boundPort,
     forwarder,
     fabricForwarder,
+    fabricReady: initialFabricSync,
     async close() {
       stopWatching();
       stopWatchingFabric();

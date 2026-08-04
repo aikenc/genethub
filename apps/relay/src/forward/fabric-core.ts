@@ -54,6 +54,7 @@ export interface FabricCoreOptions {
   maxTombstonesPerEndpoint?: number;
   revocationTombstoneMs?: number;
   maxRevocationTombstones?: number;
+  maxConnectionGenerations?: number;
 }
 
 /**
@@ -66,6 +67,20 @@ export interface FabricCoreOptions {
  */
 export class FabricCore {
   private readonly endpoints = new Map<string, FabricEndpointConnection>();
+  /**
+   * Highest authority-issued admission generation observed for each endpoint.
+   *
+   * This deliberately outlives the socket. Otherwise an older authorization
+   * response that was delayed in flight could become current after the newer
+   * socket disconnected. Expiring client identities are pruned after their
+   * authority expiry; non-expiring node identities are stable and remain
+   * fenced for this process lifetime. Reusing either with a reset generation
+   * is invalid.
+   */
+  private readonly connectionGenerations = new Map<
+    string,
+    { generation: number; expiresAt: number | null }
+  >();
   private readonly routes = new Map<string, FabricPeerBinding>();
   private readonly revokedEndpoints = new Map<string, number>();
   private readonly revokedRoutes = new Map<string, number>();
@@ -76,6 +91,7 @@ export class FabricCore {
   private readonly maxTombstones: number;
   private readonly revocationTombstoneMs: number;
   private readonly maxRevocationTombstones: number;
+  private readonly maxConnectionGenerations: number;
 
   constructor(
     private readonly authority: FabricAuthority,
@@ -88,16 +104,37 @@ export class FabricCore {
     this.maxTombstones = options.maxTombstonesPerEndpoint ?? 512;
     this.revocationTombstoneMs = options.revocationTombstoneMs ?? 5 * 60_000;
     this.maxRevocationTombstones = options.maxRevocationTombstones ?? 4_096;
+    this.maxConnectionGenerations = options.maxConnectionGenerations ?? 100_000;
   }
 
   register(connection: FabricEndpointConnection): FabricEndpointConnection | null {
     this.pruneRevocations();
+    this.pruneConnectionGenerations();
     if (this.revokedEndpoints.has(connection.context.revocationHandle)) {
       connection.closed = true;
       connection.close(4403);
       return null;
     }
     const handle = connection.context.endpointHandle;
+    const generation = connection.context.connectionGeneration;
+    const observed = this.connectionGenerations.get(handle);
+    if (observed !== undefined && generation <= observed.generation) {
+      connection.closed = true;
+      connection.close(4409);
+      return null;
+    }
+    if (
+      observed === undefined &&
+      this.connectionGenerations.size >= this.maxConnectionGenerations
+    ) {
+      connection.closed = true;
+      connection.close(4429);
+      return null;
+    }
+    this.connectionGenerations.set(handle, {
+      generation,
+      expiresAt: parseExpiry(connection.context.expiresAt),
+    });
     const previous = this.endpoints.get(handle) ?? null;
     if (previous && previous !== connection) {
       this.unregister(previous, FabricReset.EndpointClosed);
@@ -195,6 +232,7 @@ export class FabricCore {
     for (const binding of [...this.routes.values()]) {
       if (binding.expiresAt <= now) this.closeBinding(binding, FabricReset.Expired);
     }
+    this.pruneConnectionGenerations();
   }
 
   stats(): { endpoints: number; streams: number; pendingOpens: number } {
@@ -530,6 +568,19 @@ export class FabricCore {
     for (const table of [this.revokedEndpoints, this.revokedRoutes]) {
       for (const [handle, expiresAt] of table) {
         if (expiresAt <= now) table.delete(handle);
+      }
+    }
+  }
+
+  private pruneConnectionGenerations(): void {
+    const now = this.now();
+    for (const [handle, fence] of this.connectionGenerations) {
+      if (
+        fence.expiresAt !== null &&
+        fence.expiresAt <= now &&
+        !this.endpoints.has(handle)
+      ) {
+        this.connectionGenerations.delete(handle);
       }
     }
   }

@@ -8,6 +8,8 @@
 
 mod control;
 mod hub;
+mod output;
+mod query;
 mod rpc;
 mod update;
 
@@ -34,6 +36,9 @@ async fn main() {
     }
 
     let code = match args.first().map(String::as_str) {
+        Some("schema" | "context" | "capabilities" | "workspace" | "session") => {
+            query::run(&args).await
+        }
         Some("daemon") => control::daemon(&args[1..]).await,
         Some("status") => control::status(&args[1..]).await,
         Some("hub") => hub::hub(&args[1..]).await,
@@ -47,6 +52,14 @@ pub fn usage() -> i32 {
     eprintln!(
         "usage:
   genet status                      overview: channel, version, daemon, hub
+  genet schema [command]            static CLI input/output schemas
+  genet context                     explicit local-daemon execution context
+  genet capabilities                static read-only capability surface
+  genet workspace list              list local daemon workspaces
+  genet workspace show <id>         show one workspace by exact id
+  genet session list [--workspace <id>]
+                                    list local daemon sessions
+  genet session get <id>            get one session snapshot
   genet update                      install the latest Linux build and restart daemon
   genet daemon run                  run the daemon in the foreground (systemd)
   genet daemon start                start the daemon in the background
@@ -72,10 +85,7 @@ pub fn usage() -> i32 {
 /// error on stdout, and an exit code from the frozen set.
 pub fn fail(code: &str, message: &str, exit: i32) -> ! {
     eprintln!("error: {message}");
-    println!(
-        "{}",
-        serde_json::json!({"error": {"code": code, "message": message}})
-    );
+    println!("{}", output::generic_error_envelope(code, message));
     std::process::exit(exit);
 }
 

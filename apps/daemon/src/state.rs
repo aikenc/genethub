@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use genehub_proto::{ProviderInfo, ServerFrame, Settings};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 use crate::adapter::registry::Registry;
 use crate::adapter::ProviderMap;
@@ -21,6 +21,10 @@ pub struct AppState {
     pub paths: Paths,
     pub config: Arc<RwLock<Config>>,
     pub machine: MachineState,
+    /// Serializes every read-modify-write of the durable machine identity.
+    /// Link and rendezvous settings share one file and must never overwrite
+    /// each other's fields from independently loaded snapshots.
+    machine_state_write: Mutex<()>,
     pub registry: Arc<Registry>,
     pub sessions: SessionManager,
     pub workspaces: Workspaces,
@@ -98,7 +102,9 @@ async fn config_lan(config: &Arc<RwLock<Config>>) -> bool {
 impl AppState {
     pub async fn build(paths: Paths) -> Result<(Shared, mpsc::UnboundedReceiver<PtyMessage>)> {
         paths.ensure()?;
-        let config = Config::load(&paths.config_file())?;
+        let mut config = Config::load(&paths.config_file())?;
+        config.ensure_workspace_catalog_generation(&paths.config_file())?;
+        config.refresh_workspace_catalog_facts(&paths.config_file())?;
         let machine = MachineState::load_or_create(&paths.state_file())?;
         let devices = Devices::load(paths.devices_file());
 
@@ -125,6 +131,7 @@ impl AppState {
             paths,
             config,
             machine,
+            machine_state_write: Mutex::new(()),
             registry,
             sessions,
             workspaces,
@@ -140,6 +147,18 @@ impl AppState {
             shutdown: Arc::new(tokio::sync::Notify::new()),
         });
         Ok((state, pty_rx))
+    }
+
+    pub(crate) async fn mutate_machine_state<T>(
+        &self,
+        mutate: impl FnOnce(&mut MachineState) -> Result<T>,
+    ) -> Result<T> {
+        let _guard = self.machine_state_write.lock().await;
+        let path = self.paths.state_file();
+        let mut machine = MachineState::load(&path)?;
+        let result = mutate(&mut machine)?;
+        machine.save(&path)?;
+        Ok(result)
     }
 
     /// Providers as everything downstream should see them: address filled in,
@@ -368,5 +387,48 @@ impl AppState {
         if let Some(fanout) = self.fanout.get() {
             let _ = fanout.send(frame);
         }
+    }
+}
+
+#[cfg(test)]
+mod machine_state_tests {
+    use super::*;
+    use crate::config::{Enrollment, Rendezvous};
+
+    #[tokio::test]
+    async fn independent_machine_state_updates_merge_instead_of_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        let state_path = paths.state_file();
+        let (state, _) = AppState::build(paths).await.unwrap();
+        let enrollment = Enrollment {
+            hub_url: "https://hub.example".into(),
+            machine_id: "mch_test".into(),
+            uplink_url: "wss://relay.example/forward/daemon".into(),
+            fabric_url: Some("wss://relay.example/fabric/v2".into()),
+            daemon_id: "dmn_test".into(),
+            secret: "secret".into(),
+            workspace_catalog_generation: Some("wcg_test".into()),
+        };
+        let rendezvous = Rendezvous {
+            relay_url: "https://self-hosted.example".into(),
+            join_token: Some("join".into()),
+        };
+
+        let (hub, remote) = tokio::join!(
+            state.mutate_machine_state(|machine| {
+                machine.enrollment = Some(enrollment);
+                Ok(())
+            }),
+            state.mutate_machine_state(|machine| {
+                machine.rendezvous = Some(rendezvous);
+                Ok(())
+            }),
+        );
+        hub.unwrap();
+        remote.unwrap();
+        let persisted = MachineState::load(&state_path).unwrap();
+        assert!(persisted.enrollment.is_some());
+        assert!(persisted.rendezvous.is_some());
     }
 }

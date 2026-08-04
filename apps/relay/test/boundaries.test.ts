@@ -35,9 +35,10 @@ function resolveLocal(file: string, specifier: string): string | null {
 }
 
 /**
- * The relay's claim is that it cannot read what it carries and cannot decide
- * who may connect. Both are only worth something if something fails when they
- * stop being true (`docs/architecture.md` §6.5).
+ * The relay's current claim is that its forwarding code does not parse
+ * application payloads and cannot decide product authorization. TLS still
+ * terminates here, so cryptographic content secrecy requires future E2EE.
+ * Both enforceable boundaries need a test (`docs/architecture.md` §6.5).
  */
 describe("what the relay is allowed to know", () => {
   it("keeps the forwarding layer to contract and shared", () => {

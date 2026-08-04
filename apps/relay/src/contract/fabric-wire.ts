@@ -22,6 +22,8 @@ export interface FabricAuthorizeEndpointResponse {
   endpointHandle: string;
   revocationHandle: string;
   expiresAt: string | null;
+  /** Cloud-issued fencing value for every presence report from this socket. */
+  connectionGeneration: number;
 }
 
 export interface FabricAuthorizeRouteRequest {
@@ -37,6 +39,7 @@ export interface FabricAuthorizeRouteResponse {
 
 export interface FabricPresenceRequest {
   endpointHandle: string;
+  connectionGeneration: number;
   state: "online" | "offline";
 }
 

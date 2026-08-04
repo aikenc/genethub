@@ -53,9 +53,10 @@ export class RemoteFabricAuthority implements FabricAuthority {
 
   async reportEndpointPresence(
     endpointHandle: string,
+    connectionGeneration: number,
     state: FabricPresenceState,
   ): Promise<void> {
-    await this.post(FABRIC_PRESENCE, { endpointHandle, state });
+    await this.post(FABRIC_PRESENCE, { endpointHandle, connectionGeneration, state });
   }
 
   onFabricRevoked(handler: (revocation: FabricRevocation) => void): void {
@@ -72,7 +73,13 @@ export class RemoteFabricAuthority implements FabricAuthority {
    * revocation. The relay dials the control plane, preserving the same NAT and
    * self-hosting boundary as the v1 authority adapter.
    */
-  watchRevocations(options: { retryMs?: number; onReconnect?: () => void } = {}): () => void {
+  watchRevocations(
+    options: {
+      retryMs?: number;
+      onReconnect?: () => void;
+      onDisconnect?: () => void;
+    } = {},
+  ): () => void {
     const retryMs = options.retryMs ?? 3000;
     let stopped = false;
     let controller: AbortController | null = null;
@@ -89,6 +96,11 @@ export class RemoteFabricAuthority implements FabricAuthority {
           }
         }
         if (stopped) return;
+        // Existing operation bindings cannot outlive our ability to hear
+        // revocations. Failing closed here removes the old lookback window as
+        // a security boundary; endpoints obtain fresh one-shot admission when
+        // the authority stream is healthy again.
+        options.onDisconnect?.();
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, retryMs);
           timer.unref?.();
@@ -241,10 +253,18 @@ function endpointGrant(value: unknown): FabricAuthorizeEndpointResponse | null {
   const grant = value as Partial<FabricAuthorizeEndpointResponse>;
   if (!opaqueHandle(grant.endpointHandle) || !opaqueHandle(grant.revocationHandle)) return null;
   if (grant.expiresAt !== null && typeof grant.expiresAt !== "string") return null;
+  if (
+    typeof grant.connectionGeneration !== "number" ||
+    !Number.isSafeInteger(grant.connectionGeneration) ||
+    grant.connectionGeneration < 1
+  ) {
+    return null;
+  }
   return {
     endpointHandle: grant.endpointHandle,
     revocationHandle: grant.revocationHandle,
     expiresAt: grant.expiresAt,
+    connectionGeneration: grant.connectionGeneration,
   };
 }
 

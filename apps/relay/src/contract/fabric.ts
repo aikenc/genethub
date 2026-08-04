@@ -7,6 +7,8 @@ export interface FabricEndpointGrant {
   endpointHandle: string;
   revocationHandle: string;
   expiresAt: string | null;
+  /** Authority-issued monotonic fence for this physical connection. */
+  connectionGeneration: number;
 }
 
 export interface FabricRouteGrant {
@@ -30,6 +32,7 @@ export interface FabricAuthority {
   ): Promise<FabricRouteGrant | null>;
   reportEndpointPresence(
     endpointHandle: string,
+    connectionGeneration: number,
     state: FabricPresenceState,
   ): Promise<void>;
   onFabricRevoked(handler: (revocation: FabricRevocation) => void): void;

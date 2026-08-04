@@ -130,6 +130,15 @@ pub struct Config {
     pub lan_enabled: bool,
     pub agents: AgentsConfig,
     pub workspaces: Vec<WorkspaceEntry>,
+    /// Identifies one lifetime of the local workspace catalogue.
+    ///
+    /// This is deliberately unrelated to the machine identity and to any Hub
+    /// row id. If the local configuration is recreated, the new generation
+    /// cannot be mistaken for a delayed snapshot from the old one.
+    pub workspace_catalog_generation: String,
+    /// Monotonically increases whenever the safe, path-free catalogue changes.
+    /// The Hub uses it to reject a delayed snapshot after a newer one.
+    pub workspace_catalog_revision: u64,
     /// How many events per session stay replayable after a disconnect.
     pub replay_window: usize,
     /// Where to look when someone asks whether there is a newer build.
@@ -148,6 +157,8 @@ impl Default for Config {
             lan_enabled: false,
             agents: AgentsConfig::default(),
             workspaces: Vec::new(),
+            workspace_catalog_generation: String::new(),
+            workspace_catalog_revision: 0,
             replay_window: 2048,
             update_manifest_url: crate::channel::DEFAULT_MANIFEST_URL.to_string(),
         }
@@ -203,6 +214,11 @@ pub struct WorkspaceEntry {
     pub id: String,
     pub name: String,
     pub root: PathBuf,
+    /// A revisioned catalogue fact, sampled when the daemon starts or the
+    /// workspace is first opened. Keeping it in config prevents a filesystem
+    /// change from producing a different Hub snapshot at the same revision.
+    #[serde(default)]
+    pub is_git_repo: bool,
 }
 
 impl Config {
@@ -226,6 +242,41 @@ impl Config {
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, body)?;
         fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Makes the catalogue generation durable before it is ever uploaded.
+    ///
+    /// Older configuration files predate this field. Generating an id only in
+    /// memory would give them a different generation after every restart and
+    /// make the Hub correctly reject what looked like a catalogue replacement.
+    pub fn ensure_workspace_catalog_generation(&mut self, path: &Path) -> Result<()> {
+        if self.workspace_catalog_generation.is_empty() {
+            self.workspace_catalog_generation = format!("wcg_{}", uuid::Uuid::new_v4().simple());
+            self.save(path)?;
+        }
+        Ok(())
+    }
+
+    /// Refreshes filesystem-derived catalogue facts under a new revision.
+    ///
+    /// The Hub rejects two different complete snapshots that claim the same
+    /// revision. Sampling `.git` directly while serializing would therefore
+    /// make a repository initialized between daemon restarts permanently
+    /// conflict with its previous snapshot.
+    pub fn refresh_workspace_catalog_facts(&mut self, path: &Path) -> Result<()> {
+        let mut changed = false;
+        for workspace in &mut self.workspaces {
+            let is_git_repo = workspace.root.join(".git").exists();
+            if workspace.is_git_repo != is_git_repo {
+                workspace.is_git_repo = is_git_repo;
+                changed = true;
+            }
+        }
+        if changed {
+            self.workspace_catalog_revision = self.workspace_catalog_revision.saturating_add(1);
+            self.save(path)?;
+        }
         Ok(())
     }
 }
@@ -261,9 +312,24 @@ pub struct Enrollment {
     /// The Hub's id for this machine, shown in the owner's list.
     pub machine_id: String,
     pub uplink_url: String,
+    /// Endpoint-neutral Fabric address advertised by a v2-capable Hub.
+    ///
+    /// Optional for state written by older Hubs. Merely remembering the
+    /// address does not route incoming Fabric streams into the daemon's local
+    /// RPC; that requires the separate end-to-end capability boundary.
+    #[serde(default)]
+    pub fabric_url: Option<String>,
     pub daemon_id: String,
     /// Presented on the uplink. Only its hash ever left this machine.
     pub secret: String,
+    /// Last workspace catalogue generation durably acknowledged by this Hub.
+    ///
+    /// This lives beside the enrollment rather than in `config.json`: if the
+    /// local workspace registry is recreated, the daemon must still be able to
+    /// name the generation it is replacing. Without that compare-and-swap an
+    /// old process could overwrite a newer registry snapshot.
+    #[serde(default)]
+    pub workspace_catalog_generation: Option<String>,
 }
 
 impl Enrollment {
@@ -274,11 +340,16 @@ impl Enrollment {
 }
 
 impl MachineState {
+    pub fn load(path: &Path) -> Result<Self> {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("reading machine state at {}", path.display()))?;
+        serde_json::from_str(&raw)
+            .with_context(|| format!("parsing machine state at {}", path.display()))
+    }
+
     pub fn load_or_create(path: &Path) -> Result<Self> {
-        if let Ok(raw) = fs::read_to_string(path) {
-            if let Ok(state) = serde_json::from_str(&raw) {
-                return Ok(state);
-            }
+        if path.exists() {
+            return Self::load(path);
         }
         let state = MachineState {
             machine_id: format!("m_{}", uuid::Uuid::new_v4().simple()),
@@ -294,8 +365,10 @@ impl MachineState {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, serde_json::to_string_pretty(self)?)?;
-        restrict_to_owner(path)?;
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        restrict_to_owner(&tmp)?;
+        fs::rename(&tmp, path)?;
         Ok(())
     }
 
@@ -366,6 +439,7 @@ mod tests {
             id: "w1".into(),
             name: "demo".into(),
             root: PathBuf::from("/tmp/demo"),
+            is_git_repo: false,
         });
         config.save(&path).unwrap();
 
@@ -373,6 +447,49 @@ mod tests {
         assert_eq!(loaded.port, 1234);
         assert_eq!(loaded.workspaces.len(), 1);
         assert_eq!(loaded.workspaces[0].name, "demo");
+    }
+
+    #[test]
+    fn an_old_config_gets_one_durable_workspace_catalog_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"port":1234}"#).unwrap();
+
+        let mut first = Config::load(&path).unwrap();
+        assert!(first.workspace_catalog_generation.is_empty());
+        first.ensure_workspace_catalog_generation(&path).unwrap();
+        let generation = first.workspace_catalog_generation.clone();
+        assert!(generation.starts_with("wcg_"));
+
+        let mut restarted = Config::load(&path).unwrap();
+        restarted
+            .ensure_workspace_catalog_generation(&path)
+            .unwrap();
+        assert_eq!(restarted.workspace_catalog_generation, generation);
+    }
+
+    #[test]
+    fn filesystem_catalog_facts_advance_the_revision_before_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = Config::default();
+        config.workspaces.push(WorkspaceEntry {
+            id: "w1".into(),
+            name: "project".into(),
+            root: project.clone(),
+            is_git_repo: false,
+        });
+
+        config.refresh_workspace_catalog_facts(&path).unwrap();
+        assert_eq!(config.workspace_catalog_revision, 0);
+        std::fs::create_dir(project.join(".git")).unwrap();
+        config.refresh_workspace_catalog_facts(&path).unwrap();
+        assert!(config.workspaces[0].is_git_repo);
+        assert_eq!(config.workspace_catalog_revision, 1);
+        config.refresh_workspace_catalog_facts(&path).unwrap();
+        assert_eq!(config.workspace_catalog_revision, 1);
     }
 
     /// The two roots must never be the same tree: uninstall deletes the data

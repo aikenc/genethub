@@ -10,9 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use genehub_proto::{Reply, Request, ServerFrame, PROTOCOL_VERSION};
+use genehub_proto::{HelloResult, ProtocolError, Reply, Request, ServerFrame, PROTOCOL_VERSION};
 use genet_daemon::config::Paths;
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -22,7 +21,56 @@ use crate::{fail, EXIT_UNREACHABLE};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Reply, String>>>>>;
+type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Reply, RpcError>>>>>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RpcError {
+    Remote(ProtocolError),
+    Transport(String),
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RpcError::Remote(error) => {
+                write!(
+                    formatter,
+                    "{}: {}",
+                    error_code_name(error.code),
+                    error.message
+                )
+            }
+            RpcError::Transport(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for RpcError {}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectError {
+    Unavailable(String),
+    Rejected(ProtocolError),
+    Protocol(String),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectError::Unavailable(message) | ConnectError::Protocol(message) => {
+                formatter.write_str(message)
+            }
+            ConnectError::Rejected(error) => write!(
+                formatter,
+                "{}: {}",
+                error_code_name(error.code),
+                error.message
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConnectError {}
 
 pub struct Rpc {
     outbound: mpsc::UnboundedSender<Message>,
@@ -30,6 +78,7 @@ pub struct Rpc {
     next_id: AtomicU64,
     reader: tokio::task::JoinHandle<()>,
     writer: tokio::task::JoinHandle<()>,
+    hello: Option<HelloResult>,
 }
 
 impl Rpc {
@@ -41,7 +90,7 @@ impl Rpc {
             Err(error) => fail(
                 "daemon_unreachable",
                 &format!(
-                    "{error:#}; run `{} daemon start`",
+                    "{error}; run `{} daemon start`",
                     genet_daemon::channel::CLI_BINARY
                 ),
                 EXIT_UNREACHABLE,
@@ -49,15 +98,18 @@ impl Rpc {
         }
     }
 
-    pub async fn connect() -> Result<Self> {
-        let paths = Paths::discover().context("locate the data directory")?;
-        let raw = std::fs::read_to_string(paths.endpoint_file()).with_context(|| {
-            format!(
-                "read {}; is the daemon running?",
-                paths.endpoint_file().display()
-            )
+    pub async fn connect() -> Result<Self, ConnectError> {
+        let paths = Paths::discover().map_err(|error| {
+            ConnectError::Unavailable(format!("locate the data directory: {error:#}"))
         })?;
-        let endpoint: Endpoint = serde_json::from_str(&raw).context("parse endpoint.json")?;
+        let raw = std::fs::read_to_string(paths.endpoint_file()).map_err(|error| {
+            ConnectError::Unavailable(format!(
+                "read {}; is the daemon running? {error}",
+                paths.endpoint_file().display()
+            ))
+        })?;
+        let endpoint: Endpoint = serde_json::from_str(&raw)
+            .map_err(|error| ConnectError::Unavailable(format!("parse endpoint.json: {error}")))?;
         let url = format!(
             "ws://127.0.0.1:{}/ws?token={}",
             endpoint.port, endpoint.token
@@ -65,7 +117,9 @@ impl Rpc {
 
         let (socket, _) = tokio_tungstenite::connect_async(&url)
             .await
-            .with_context(|| format!("dial {url}"))?;
+            // Never include `url` or the transport error here: either may echo
+            // the query string containing the daemon's full bearer token.
+            .map_err(|_| ConnectError::Unavailable(dial_failure(endpoint.port)))?;
         let (mut sink, mut stream) = socket.split();
 
         let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<Message>();
@@ -95,62 +149,93 @@ impl Rpc {
                 } = frame
                 {
                     if let Some(sender) = reader_pending.lock().await.remove(&id) {
-                        let outcome = if ok {
-                            Ok(payload.unwrap_or(Reply::Ack))
-                        } else {
-                            Err(error
-                                .map(|error| {
-                                    format!("{}: {}", error_code_name(error.code), error.message)
-                                })
-                                .unwrap_or_else(|| "unknown error".into()))
-                        };
+                        let outcome = result_outcome(ok, payload, error);
                         let _ = sender.send(outcome);
                     }
                 }
             }
             for (_, sender) in reader_pending.lock().await.drain() {
-                let _ = sender.send(Err("the connection closed".into()));
+                let _ = sender.send(Err(RpcError::Transport("the connection closed".into())));
             }
         });
 
-        let rpc = Self {
+        let mut rpc = Self {
             outbound,
             pending,
             next_id: AtomicU64::new(1),
             reader,
             writer,
+            hello: None,
         };
-        rpc.call(Request::Hello {
-            client_name: format!("{}-cli", genet_daemon::channel::CLI_BINARY),
-            protocol_version: PROTOCOL_VERSION,
-            device: None,
-        })
-        .await
-        .context("Hello handshake")?;
+        let hello = match rpc
+            .call(Request::Hello {
+                client_name: format!("{}-cli", genet_daemon::channel::CLI_BINARY),
+                protocol_version: PROTOCOL_VERSION,
+                device: None,
+            })
+            .await
+        {
+            Ok(reply) => reply,
+            Err(RpcError::Remote(error)) => return Err(ConnectError::Rejected(error)),
+            Err(RpcError::Transport(message)) => {
+                return Err(ConnectError::Unavailable(format!(
+                    "Hello handshake: {message}"
+                )))
+            }
+        };
+        rpc.hello = match hello {
+            Reply::Hello(hello) => Some(hello),
+            other => {
+                return Err(ConnectError::Protocol(format!(
+                    "unexpected reply for Hello: {other:?}"
+                )))
+            }
+        };
         Ok(rpc)
     }
 
-    pub async fn call(&self, request: Request) -> Result<Reply> {
-        let id = format!("c{}", self.next_id.fetch_add(1, Ordering::SeqCst));
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id.clone(), tx);
+    pub fn hello(&self) -> &HelloResult {
+        self.hello
+            .as_ref()
+            .expect("Rpc is returned only after the Hello handshake")
+    }
 
-        let mut envelope = serde_json::to_value(&request)?;
+    pub async fn call(&self, request: Request) -> Result<Reply, RpcError> {
+        let id = format!("c{}", self.next_id.fetch_add(1, Ordering::SeqCst));
+        let mut envelope = serde_json::to_value(&request)
+            .map_err(|error| RpcError::Transport(format!("encode request: {error}")))?;
         envelope
             .as_object_mut()
-            .ok_or_else(|| anyhow!("a request must encode as an object"))?
-            .insert("id".into(), json!(id));
-        self.outbound
+            .ok_or_else(|| RpcError::Transport("a request must encode as an object".into()))?
+            .insert("id".into(), json!(&id));
+
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id.clone(), tx);
+        if self
+            .outbound
             .send(Message::Text(envelope.to_string()))
-            .map_err(|_| anyhow!("the connection closed"))?;
+            .is_err()
+        {
+            self.pending.lock().await.remove(&id);
+            return Err(RpcError::Transport("the connection closed".into()));
+        }
 
         match tokio::time::timeout(CALL_TIMEOUT, rx).await {
             Ok(Ok(Ok(reply))) => Ok(reply),
-            Ok(Ok(Err(message))) => bail!("{message}"),
-            Ok(Err(_)) => bail!("the connection closed before answering"),
-            Err(_) => bail!("timed out waiting for a reply"),
+            Ok(Ok(Err(error))) => Err(error),
+            Ok(Err(_)) => Err(RpcError::Transport(
+                "the connection closed before answering".into(),
+            )),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                Err(RpcError::Transport("timed out waiting for a reply".into()))
+            }
         }
     }
+}
+
+fn dial_failure(port: u16) -> String {
+    format!("dial local daemon at loopback port {port} failed")
 }
 
 impl Drop for Rpc {
@@ -178,5 +263,59 @@ fn error_code_name(code: genehub_proto::ErrorCode) -> &'static str {
         Forbidden => "forbidden",
         Internal => "internal",
         ProtocolVersion => "protocol_mismatch",
+    }
+}
+
+fn result_outcome(
+    ok: bool,
+    payload: Option<Reply>,
+    error: Option<ProtocolError>,
+) -> Result<Reply, RpcError> {
+    if ok {
+        return Ok(payload.unwrap_or(Reply::Ack));
+    }
+    Err(match error {
+        Some(error) => RpcError::Remote(error),
+        None => RpcError::Transport("the daemon returned a failed result without an error".into()),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use genehub_proto::ErrorCode;
+
+    #[test]
+    fn a_remote_error_keeps_its_typed_code_and_message() {
+        let error = ProtocolError {
+            code: ErrorCode::Forbidden,
+            message: "outside the workspace".into(),
+        };
+        let outcome = result_outcome(false, None, Some(error.clone())).unwrap_err();
+
+        assert_eq!(outcome, RpcError::Remote(error));
+        assert_eq!(outcome.to_string(), "forbidden: outside the workspace");
+    }
+
+    #[test]
+    fn a_success_without_a_payload_is_the_protocol_ack() {
+        assert_eq!(result_outcome(true, None, None).unwrap(), Reply::Ack);
+    }
+
+    #[test]
+    fn a_malformed_failed_result_is_not_mistaken_for_a_business_error() {
+        assert!(matches!(
+            result_outcome(false, None, None),
+            Err(RpcError::Transport(_))
+        ));
+    }
+
+    #[test]
+    fn dial_errors_cannot_echo_the_loopback_bearer_token() {
+        let sentinel = "full-local-daemon-secret";
+        let message = dial_failure(43123);
+        assert!(!message.contains(sentinel));
+        assert!(!message.contains("token="));
+        assert_eq!(message, "dial local daemon at loopback port 43123 failed");
     }
 }

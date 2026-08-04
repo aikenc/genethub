@@ -42,11 +42,15 @@ class TestConnection implements FabricEndpointConnection {
   closed = false;
   strikes = 0;
 
-  constructor(handle: string, options: { epoch?: string; expiresAt?: string | null } = {}) {
+  constructor(
+    handle: string,
+    options: { epoch?: string; expiresAt?: string | null; connectionGeneration?: number } = {},
+  ) {
     this.context = Object.freeze({
       endpointHandle: handle,
       revocationHandle: `revoke:${handle}`,
       expiresAt: options.expiresAt ?? null,
+      connectionGeneration: options.connectionGeneration ?? 1,
       connectionEpoch: options.epoch ?? `epoch:${handle}`,
     });
   }
@@ -85,6 +89,7 @@ class TestAuthority implements FabricAuthority {
 
   async reportEndpointPresence(
     _endpointHandle: string,
+    _connectionGeneration: number,
     _state: FabricPresenceState,
   ): Promise<void> {}
 
@@ -245,7 +250,10 @@ describe("Fabric endpoint-neutral routing", () => {
     core.register(target);
     await establish(core, authority, oldSource, target, id(6), "old-route");
 
-    const replacement = new TestConnection("endpoint:source", { epoch: "epoch:new" });
+    const replacement = new TestConnection("endpoint:source", {
+      epoch: "epoch:new",
+      connectionGeneration: 2,
+    });
     assert.equal(core.register(replacement), oldSource);
     assert.equal(oldSource.closed, true);
     assert.equal(last(target).value, BigInt(FabricReset.EndpointClosed));
@@ -257,6 +265,68 @@ describe("Fabric endpoint-neutral routing", () => {
     const peer = await establish(core, authority, replacement, target, id(6), "new-route");
     await core.handle(replacement, frame(FabricKind.Data, id(6), 1n, Buffer.from("fresh")));
     assert.deepEqual(last(target), frame(FabricKind.Data, peer, 1n, Buffer.from("fresh")));
+  });
+
+  it("keeps the highest connection generation as a replay fence after disconnect", () => {
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority);
+    const current = new TestConnection("endpoint:source", {
+      epoch: "epoch:current",
+      connectionGeneration: 8,
+    });
+    core.register(current);
+
+    const equal = new TestConnection("endpoint:source", {
+      epoch: "epoch:equal",
+      connectionGeneration: 8,
+    });
+    assert.equal(core.register(equal), null);
+    assert.equal(equal.closed, true);
+    assert.deepEqual(equal.closeCodes, [4409]);
+    assert.equal(core.current("endpoint:source"), current);
+
+    core.unregister(current);
+    const stale = new TestConnection("endpoint:source", {
+      epoch: "epoch:stale",
+      connectionGeneration: 7,
+    });
+    assert.equal(core.register(stale), null);
+    assert.equal(stale.closed, true);
+    assert.deepEqual(stale.closeCodes, [4409]);
+    assert.equal(core.current("endpoint:source"), null);
+
+    const newer = new TestConnection("endpoint:source", {
+      epoch: "epoch:newer",
+      connectionGeneration: 9,
+    });
+    assert.equal(core.register(newer), null);
+    assert.equal(newer.closed, false);
+    assert.equal(core.current("endpoint:source"), newer);
+  });
+
+  it("bounds generation fences by failing closed and prunes expired client identities", () => {
+    let now = Date.parse("2030-01-01T00:00:00.000Z");
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority, {
+      now: () => now,
+      maxConnectionGenerations: 1,
+    });
+    const expiring = new TestConnection("endpoint:expiring", {
+      expiresAt: "2030-01-01T00:00:10.000Z",
+    });
+    core.register(expiring);
+    core.unregister(expiring);
+
+    const refused = new TestConnection("endpoint:other");
+    core.register(refused);
+    assert.equal(refused.closed, true);
+    assert.deepEqual(refused.closeCodes, [4429]);
+
+    now = Date.parse("2030-01-01T00:00:11.000Z");
+    const admitted = new TestConnection("endpoint:other");
+    core.register(admitted);
+    assert.equal(admitted.closed, false);
+    assert.equal(core.current("endpoint:other"), admitted);
   });
 
   it("cleans route and endpoint bindings on revocation", async () => {

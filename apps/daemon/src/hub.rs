@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::Enrollment;
+use crate::workspace::WorkspaceCatalog;
 
 /// What the user has to type in, and where.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,11 +50,23 @@ struct PollReply {
 struct EnrollReply {
     machine_id: String,
     uplink_url: String,
+    #[serde(default)]
+    fabric_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Directory {
     machines: Vec<HubMachine>,
+}
+
+/// Short-lived, one-use admission for the node's endpoint-neutral Fabric WS.
+/// The reusable enrollment secret is sent only to the Hub HTTP boundary and
+/// never appears in the Relay URL or WebSocket headers.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FabricAdmission {
+    pub url: String,
+    pub admission_expires_at: String,
 }
 
 pub struct Client {
@@ -161,6 +174,73 @@ impl Client {
         Ok(reply.machines)
     }
 
+    /// Publishes the complete safe workspace catalogue for this node.
+    ///
+    /// It intentionally remains a small HTTP bootstrap call during the Fabric
+    /// migration. The body type has no field for an absolute path, and the
+    /// node's existing credential is presented only as an Authorization
+    /// header. Real-time operations use the single Fabric socket instead.
+    pub async fn sync_workspace_catalog(
+        &self,
+        enrollment: &Enrollment,
+        catalog: &WorkspaceCatalog,
+        replaces_generation: Option<&str>,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Upload<'a> {
+            #[serde(flatten)]
+            catalog: &'a WorkspaceCatalog,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            replaces_generation: Option<&'a str>,
+        }
+
+        let response = self
+            .http
+            .put(self.url("/api/fabric/v2/workspace-catalog"))
+            .bearer_auth(&enrollment.secret)
+            .json(&Upload {
+                catalog,
+                replaces_generation,
+            })
+            .send()
+            .await
+            .context("publishing the workspace catalogue")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "the Hub refused the workspace catalogue: {}",
+                response.status()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Exchanges the reusable node credential for one Relay-safe admission.
+    ///
+    /// The daemon does not dial or attach business handlers in this phase; the
+    /// method pins the trust boundary for that next step so no implementation
+    /// needs to expose `Enrollment::secret` to a Relay.
+    pub async fn fabric_admission(&self, enrollment: &Enrollment) -> Result<FabricAdmission> {
+        let response = self
+            .http
+            .post(self.url("/api/fabric/v2/endpoints"))
+            .bearer_auth(&enrollment.secret)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .context("requesting a one-use Fabric admission")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "the Hub refused Fabric admission: {}",
+                response.status()
+            ));
+        }
+        response
+            .json()
+            .await
+            .context("reading the Fabric admission reply")
+    }
+
     /// A one-time address for reaching one of them through the forwarding layer.
     pub async fn ticket(&self, enrollment: &Enrollment, machine_id: &str) -> Result<HubTicket> {
         let response = self
@@ -258,8 +338,10 @@ impl Client {
             hub_url: self.origin.clone(),
             machine_id: reply.machine_id,
             uplink_url: reply.uplink_url,
+            fabric_url: reply.fabric_url,
             daemon_id: daemon_id.to_string(),
             secret,
+            workspace_catalog_generation: None,
         })
     }
 
@@ -340,5 +422,143 @@ mod tests {
             client.url("/api/device-authorizations"),
             "http://myteam.devcloud.woa.com/relay-dev-0/api/device-authorizations"
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_catalog_upload_is_path_free_and_uses_the_node_credential() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 8192];
+            let mut used = 0usize;
+            loop {
+                let read = socket.read(&mut buffer[used..]).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                used += read;
+                let request = String::from_utf8_lossy(&buffer[..used]);
+                let Some(header_end) = request.find("\r\n\r\n") else {
+                    continue;
+                };
+                let length = request[..header_end]
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if used >= header_end + 4 + length {
+                    break;
+                }
+            }
+            let request = String::from_utf8(buffer[..used].to_vec()).unwrap();
+            let _ = seen_tx.send(request);
+            socket
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let enrollment = Enrollment {
+            hub_url: origin.clone(),
+            machine_id: "mch_private".into(),
+            uplink_url: "ws://relay.test/forward/daemon".into(),
+            fabric_url: Some("ws://relay.test/fabric/v2".into()),
+            daemon_id: "dmn_private".into(),
+            secret: "node-secret".into(),
+            workspace_catalog_generation: Some("wcg_previous".into()),
+        };
+        let catalog = WorkspaceCatalog {
+            generation: "wcg_public".into(),
+            revision: 7,
+            workspaces: vec![crate::workspace::CatalogWorkspace {
+                local_workspace_id: "w_opaque".into(),
+                reported_name: "Project".into(),
+                is_git_repo: true,
+            }],
+        };
+
+        Client::new(&origin)
+            .sync_workspace_catalog(&enrollment, &catalog, Some("wcg_previous"))
+            .await
+            .unwrap();
+        let request = seen_rx.await.unwrap();
+        assert!(request.starts_with("PUT /api/fabric/v2/workspace-catalog "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer node-secret"));
+        let body = request.split("\r\n\r\n").nth(1).unwrap();
+        let json: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(json["generation"], "wcg_public");
+        assert_eq!(json["replacesGeneration"], "wcg_previous");
+        assert_eq!(json["revision"], 7);
+        assert_eq!(json["workspaces"][0]["localWorkspaceId"], "w_opaque");
+        assert!(json.get("machineId").is_none());
+        assert!(json.get("daemonId").is_none());
+        assert!(
+            !body.contains("/"),
+            "no local path may enter the catalogue body"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_fabric_admission_keeps_the_reusable_secret_at_the_hub_boundary() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 4096];
+            let used = socket.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8(buffer[..used].to_vec()).unwrap();
+            let _ = seen_tx.send(request);
+            let body = r#"{"url":"wss://relay.example/fabric/v2?ticket=one-use","admissionExpiresAt":"2030-01-01T00:00:00.000Z"}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let enrollment = Enrollment {
+            hub_url: origin.clone(),
+            machine_id: "mch_private".into(),
+            uplink_url: "ws://relay.example/forward/daemon".into(),
+            fabric_url: Some("ws://relay.example/fabric/v2".into()),
+            daemon_id: "dmn_private".into(),
+            secret: "long-lived-node-secret".into(),
+            workspace_catalog_generation: None,
+        };
+
+        let admission = Client::new(&origin)
+            .fabric_admission(&enrollment)
+            .await
+            .unwrap();
+        assert_eq!(
+            admission.url,
+            "wss://relay.example/fabric/v2?ticket=one-use"
+        );
+        assert_eq!(admission.admission_expires_at, "2030-01-01T00:00:00.000Z");
+        let request = seen_rx.await.unwrap();
+        assert!(request.starts_with("POST /api/fabric/v2/endpoints "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer long-lived-node-secret"));
+        assert!(!admission.url.contains("long-lived-node-secret"));
     }
 }

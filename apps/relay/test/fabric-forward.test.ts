@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, afterEach, before, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import { WebSocket } from "ws";
 
 import { FABRIC_PATH } from "../src/contract/fabric-wire.js";
@@ -53,23 +53,25 @@ describe("Fabric v2 over real WebSockets", () => {
   const sockets = new Set<WebSocket>();
   let stack: TestRelay;
 
-  before(async () => {
+  beforeEach(async () => {
     stack = await startTestRelay(legacy, authority);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     for (const socket of sockets) socket.terminate();
     sockets.clear();
-  });
-
-  after(async () => {
     await stack.stop();
   });
 
   async function endpoint(
     credential: string,
     handle: string,
-    options: { bearer?: boolean; revocationHandle?: string; expiresAt?: string | null } = {},
+    options: {
+      bearer?: boolean;
+      revocationHandle?: string;
+      expiresAt?: string | null;
+      connectionGeneration?: number;
+    } = {},
   ): Promise<WebSocket> {
     authority.grantEndpoint(credential, handle, options);
     const result = options.bearer
@@ -232,7 +234,9 @@ describe("Fabric v2 over real WebSockets", () => {
   });
 
   it("cleans old epochs, route revocations, and endpoint revocations", async () => {
-    const oldSource = await endpoint("credential:old-source", "endpoint:source");
+    const oldSource = await endpoint("credential:old-source", "endpoint:source", {
+      connectionGeneration: 3,
+    });
     const target = await endpoint("credential:reconnect-target", "endpoint:target");
     await openRoute(
       oldSource,
@@ -245,7 +249,9 @@ describe("Fabric v2 over real WebSockets", () => {
 
     const oldClosed = closed(oldSource);
     const targetReset = nextFabric(target);
-    const replacement = await endpoint("credential:new-source", "endpoint:source");
+    const replacement = await endpoint("credential:new-source", "endpoint:source", {
+      connectionGeneration: 4,
+    });
     assert.equal(await oldClosed, 4000);
     assert.equal((await targetReset).value, BigInt(FabricReset.EndpointClosed));
 
@@ -267,6 +273,144 @@ describe("Fabric v2 over real WebSockets", () => {
     authority.revoke({ target: "endpoint", handle: "revoke:endpoint:source" });
     assert.equal(await replacementClosed, 4403);
     assert.equal(stack.relay.fabricForwarder?.stats().streams, 0);
+    assert.ok(
+      authority.presence.some(
+        (presence) =>
+          presence.endpointHandle === "endpoint:source" &&
+          presence.connectionGeneration === 3 &&
+          presence.state === "online",
+      ),
+    );
+    assert.ok(
+      authority.presence.some(
+        (presence) =>
+          presence.endpointHandle === "endpoint:source" &&
+          presence.connectionGeneration === 4 &&
+          presence.state === "online",
+      ),
+      "presence carries the authority-issued reconnect fence",
+    );
+  });
+
+  it("does not let a delayed stale or equal admission replace the newest socket", async () => {
+    const staleCredential = "credential:delayed-stale";
+    authority.grantEndpoint(staleCredential, "endpoint:generation-fence", {
+      connectionGeneration: 12,
+    });
+    const held = authority.holdEndpointAuthorization(staleCredential);
+    const delayedStale = connect(`${stack.wsOrigin}${FABRIC_PATH}?ticket=${staleCredential}`);
+    await held.started;
+
+    const current = await endpoint(
+      "credential:generation-current",
+      "endpoint:generation-fence",
+      { connectionGeneration: 13 },
+    );
+    held.release();
+    const stale = opened(await delayedStale);
+    sockets.add(stale);
+    assert.equal(await closed(stale), 4409);
+
+    const equal = await endpoint(
+      "credential:generation-equal",
+      "endpoint:generation-fence",
+      { connectionGeneration: 13 },
+    );
+    assert.equal(await closed(equal), 4409);
+
+    const pong = nextFabric(current);
+    current.send(
+      wire({
+        kind: FabricKind.Ping,
+        streamId: id(0),
+        value: 41n,
+        payload: Buffer.from("still-current"),
+      }),
+    );
+    assert.deepEqual(await pong, {
+      kind: FabricKind.Pong,
+      flags: 0,
+      streamId: id(0),
+      value: 41n,
+      payload: Buffer.from("still-current"),
+    });
+    assert.equal(stack.relay.fabricForwarder?.stats().endpoints, 1);
+  });
+
+  it("never installs an admission that crossed an authority outage", async () => {
+    const heldCredential = "credential:held-across-outage";
+    authority.grantEndpoint(heldCredential, "endpoint:outage-fence", {
+      connectionGeneration: 21,
+    });
+    const held = authority.holdEndpointAuthorization(heldCredential);
+    const staleAttempt = connect(
+      `${stack.wsOrigin}${FABRIC_PATH}?ticket=${heldCredential}`,
+    );
+    await held.started;
+
+    stack.relay.fabricForwarder?.authorityDisconnected();
+    stack.relay.fabricForwarder?.authoritySynchronized();
+    held.release();
+
+    const staleResult = await staleAttempt;
+    assert.ok("error" in staleResult, "the pre-outage raw upgrade must be destroyed");
+    assert.equal(stack.relay.fabricForwarder?.stats().endpoints, 0);
+
+    const fresh = await endpoint(
+      "credential:fresh-after-outage",
+      "endpoint:outage-fence",
+      { connectionGeneration: 22 },
+    );
+    const pong = nextFabric(fresh);
+    fresh.send(
+      wire({
+        kind: FabricKind.Ping,
+        streamId: id(0),
+        value: 42n,
+        payload: Buffer.from("fresh"),
+      }),
+    );
+    assert.equal((await pong).kind, FabricKind.Pong);
+    assert.equal(stack.relay.fabricForwarder?.stats().endpoints, 1);
+  });
+
+  it("drops every active operation when the revocation authority disconnects", async () => {
+    const source = await endpoint("credential:authority-source", "endpoint:authority-source", {
+      connectionGeneration: 11,
+    });
+    const target = await endpoint("credential:authority-target", "endpoint:authority-target", {
+      connectionGeneration: 5,
+    });
+    await openRoute(
+      source,
+      target,
+      id(30),
+      "ticket:authority-route",
+      "endpoint:authority-target",
+    );
+
+    const sourceClosed = closed(source);
+    const targetClosed = closed(target);
+    stack.relay.fabricForwarder?.authorityDisconnected();
+    assert.equal(await sourceClosed, 1012);
+    assert.equal(await targetClosed, 1012);
+    assert.deepEqual(stack.relay.fabricForwarder?.stats(), {
+      endpoints: 0,
+      streams: 0,
+      pendingOpens: 0,
+    });
+
+    authority.grantEndpoint("credential:during-outage", "endpoint:during-outage");
+    assert.deepEqual(
+      await connect(`${stack.wsOrigin}${FABRIC_PATH}?ticket=credential:during-outage`),
+      { error: "503" },
+    );
+    stack.relay.fabricForwarder?.authoritySynchronized();
+    const reopened = await endpoint(
+      "credential:after-authority-sync",
+      "endpoint:after-authority-sync",
+    );
+    assert.equal(reopened.readyState, reopened.OPEN);
   });
 
   it("rejects expired endpoint admission before creating a Fabric connection", async () => {

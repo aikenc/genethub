@@ -76,19 +76,49 @@ export class FakeAuthority implements ChannelAuthority {
 export class FakeFabricAuthority implements FabricAuthority {
   readonly endpointTickets = new Map<string, FabricEndpointGrant>();
   readonly routeTickets = new Map<string, FabricRouteGrant>();
-  readonly presence: Array<{ endpointHandle: string; state: FabricPresenceState }> = [];
+  readonly presence: Array<{
+    endpointHandle: string;
+    connectionGeneration: number;
+    state: FabricPresenceState;
+  }> = [];
   readonly calls: string[] = [];
   private revokeHandler: ((revocation: FabricRevocation) => void) | null = null;
+  private readonly endpointAuthorizationGates = new Map<
+    string,
+    { started: () => void; released: Promise<void> }
+  >();
+
+  /** Delays one already-redeemed response to model network reordering. */
+  holdEndpointAuthorization(credential: string): {
+    started: Promise<void>;
+    release(): void;
+  } {
+    let markStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.endpointAuthorizationGates.set(credential, { started: markStarted, released });
+    return { started, release };
+  }
 
   grantEndpoint(
     credential: string,
     endpointHandle: string,
-    options: { revocationHandle?: string; expiresAt?: string | null } = {},
+    options: {
+      revocationHandle?: string;
+      expiresAt?: string | null;
+      connectionGeneration?: number;
+    } = {},
   ): void {
     this.endpointTickets.set(credential, {
       endpointHandle,
       revocationHandle: options.revocationHandle ?? `revoke:${endpointHandle}`,
       expiresAt: options.expiresAt ?? null,
+      connectionGeneration: options.connectionGeneration ?? 1,
     });
   }
 
@@ -108,6 +138,12 @@ export class FakeFabricAuthority implements FabricAuthority {
     this.calls.push("authorizeEndpoint");
     const grant = this.endpointTickets.get(credential) ?? null;
     this.endpointTickets.delete(credential);
+    const gate = this.endpointAuthorizationGates.get(credential);
+    if (gate) {
+      gate.started();
+      await gate.released;
+      this.endpointAuthorizationGates.delete(credential);
+    }
     return grant;
   }
 
@@ -123,10 +159,11 @@ export class FakeFabricAuthority implements FabricAuthority {
 
   async reportEndpointPresence(
     endpointHandle: string,
+    connectionGeneration: number,
     state: FabricPresenceState,
   ): Promise<void> {
     this.calls.push("reportEndpointPresence");
-    this.presence.push({ endpointHandle, state });
+    this.presence.push({ endpointHandle, connectionGeneration, state });
   }
 
   onFabricRevoked(handler: (revocation: FabricRevocation) => void): void {
