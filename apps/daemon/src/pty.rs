@@ -272,14 +272,28 @@ mod tests {
     /// Interactive startup files can query the terminal and consume input sent
     /// before the prompt exists. A real person cannot press Enter before the
     /// terminal is visible; tests must honor that same boundary.
-    async fn wait_until_ready(inbound: &mut mpsc::Receiver<PtyMessage>) {
+    async fn wait_until_ready(
+        terminals: &Terminals,
+        pty_id: &str,
+        inbound: &mut mpsc::Receiver<PtyMessage>,
+    ) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let mut output = String::new();
+        let mut answered_cursor_queries = 0usize;
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(Duration::from_millis(500), inbound.recv()).await {
                 Ok(Some(PtyMessage::Output { data, .. })) => {
                     output.push_str(&data);
-                    if ["# ", "$ ", "> ", "% "]
+                    // Windows ConPTY asks the terminal emulator where its
+                    // cursor is before cmd.exe prints the first prompt. The
+                    // real xterm.js client answers this DSR request; this raw
+                    // PTY test must emulate the same minimum behavior.
+                    let cursor_queries = output.matches("\u{1b}[6n").count();
+                    while answered_cursor_queries < cursor_queries {
+                        terminals.write(pty_id, "\u{1b}[1;1R").await.unwrap();
+                        answered_cursor_queries += 1;
+                    }
+                    if ["# ", "$ ", ">", "% "]
                         .iter()
                         .any(|prompt| output.ends_with(prompt))
                     {
@@ -299,7 +313,7 @@ mod tests {
         let (terminals, mut inbound) = Terminals::new();
         let id = terminals.open(dir.path(), 80, 24).await.unwrap();
 
-        wait_until_ready(&mut inbound).await;
+        wait_until_ready(&terminals, &id, &mut inbound).await;
         terminals.write(&id, "echo genehub-marker\r").await.unwrap();
         let output = collect_output(&mut inbound, "genehub-marker").await;
         assert!(output.contains("genehub-marker"), "got: {output:?}");
@@ -312,7 +326,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, mut inbound) = Terminals::new();
         let id = terminals.open(dir.path(), 80, 24).await.unwrap();
-        wait_until_ready(&mut inbound).await;
+        wait_until_ready(&terminals, &id, &mut inbound).await;
         // xterm sends carriage return for Enter. A bare line feed is output
         // translation on a terminal, not the key that submits the command.
         terminals.write(&id, "exit\r").await.unwrap();

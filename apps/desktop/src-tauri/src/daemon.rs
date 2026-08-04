@@ -40,7 +40,7 @@ pub struct Endpoint {
 
 impl Endpoint {
     fn admission(&self, pid: u32) -> DialEndpoint {
-        let challenge = health_challenge();
+        let challenge = health_challenge(&self.token);
         let expires_at = unix_seconds().saturating_add(15);
         let proof = websocket_proof(
             &self.token,
@@ -516,7 +516,7 @@ pub enum Watch {
 /// Hand-rolled rather than pulling in an HTTP client: one request, to loopback,
 /// whose only interesting answer is "it arrived".
 fn ask_to_stop(endpoint: &Endpoint, pid: u32) {
-    let challenge = health_challenge();
+    let challenge = health_challenge(&endpoint.token);
     let expires_at = unix_seconds().saturating_add(15);
     let proof = shutdown_proof(
         &endpoint.token,
@@ -543,7 +543,7 @@ fn ask_to_stop(endpoint: &Endpoint, pid: u32) {
 
 /// Whether the exact private endpoint owns this listener.
 fn health(endpoint: &Endpoint, pid: u32) -> bool {
-    let challenge = health_challenge();
+    let challenge = health_challenge(&endpoint.token);
     let Ok(address) = format!("127.0.0.1:{}", endpoint.port).parse() else {
         return false;
     };
@@ -598,19 +598,28 @@ fn read_loopback_response(reader: &mut impl Read) -> std::io::Result<Vec<u8>> {
     Ok(answer)
 }
 
-fn health_challenge() -> String {
+fn health_challenge(token: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
     use std::sync::atomic::{AtomicU64, Ordering};
+
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!(
-        "{:x}-{:x}-{:x}",
-        std::process::id(),
-        nanos,
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(token.as_bytes())
+        .expect("HMAC accepts every bearer length");
+    mac.update(b"genehub-loopback-challenge-v1");
+    mac.update(&std::process::id().to_be_bytes());
+    mac.update(&nanos.to_be_bytes());
+    mac.update(&sequence.to_be_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn health_proof(
