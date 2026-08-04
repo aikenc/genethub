@@ -1065,12 +1065,13 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             *live.status.lock().await = SessionStatus::Waiting;
         }
         SessionEvent::PermissionResolved { request_id, .. } => {
-            live.pending_permissions
-                .lock()
-                .await
-                .retain(|request| &request.id != request_id);
+            let all_resolved = {
+                let mut pending = live.pending_permissions.lock().await;
+                pending.retain(|request| &request.id != request_id);
+                pending.is_empty()
+            };
             let mut status = live.status.lock().await;
-            if *status == SessionStatus::Waiting {
+            if all_resolved && *status == SessionStatus::Waiting {
                 *status = SessionStatus::Running;
             }
         }
@@ -1460,6 +1461,40 @@ mod tests {
             .pending_permissions
             .is_empty());
         assert_eq!(*live.status.lock().await, SessionStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn resolving_one_of_multiple_permissions_keeps_the_session_waiting() {
+        let live = Arc::new(Live::new(meta()));
+        for id in ["p1", "p2"] {
+            apply(
+                &live,
+                &SessionEvent::PermissionRequested {
+                    request: PermissionRequest {
+                        id: id.into(),
+                        title: "Approval".into(),
+                        detail: None,
+                        tool_call_id: None,
+                        options: vec![],
+                    },
+                },
+            )
+            .await;
+        }
+
+        apply(
+            &live,
+            &SessionEvent::PermissionResolved {
+                request_id: "p1".into(),
+                outcome: PermissionOutcome::Canceled,
+            },
+        )
+        .await;
+
+        let snapshot = live.snapshot().await.unwrap();
+        assert_eq!(snapshot.pending_permissions.len(), 1);
+        assert_eq!(snapshot.pending_permissions[0].id, "p2");
+        assert_eq!(*live.status.lock().await, SessionStatus::Waiting);
     }
 
     /// Stands in for an agent that has asked for approval and is waiting. It only
