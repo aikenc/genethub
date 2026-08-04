@@ -9,6 +9,7 @@ import {
   COMPOSER_TEXTAREA_COLLAPSED_HEIGHT,
   COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT,
   COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT,
+  COMPOSER_TEXTAREA_PHONE_COLLAPSED_HEIGHT,
   COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT,
   COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT,
   Composer,
@@ -275,14 +276,16 @@ describe("the controls offered to the user", () => {
   it("uses one idle line, three-to-five phone lines, and four-to-seven desktop lines", () => {
     const box = document.createElement("textarea");
     Object.defineProperty(box, "scrollHeight", { configurable: true, value: 40 });
-    expect(resizeComposerTextarea(box, false, false)).toBe(COMPOSER_TEXTAREA_COLLAPSED_HEIGHT);
+    expect(resizeComposerTextarea(box, false, false)).toBe(COMPOSER_TEXTAREA_PHONE_COLLAPSED_HEIGHT);
     expect(box.style.overflowY).toBe("hidden");
 
-    expect(resizeComposerTextarea(box, true, false)).toBe(COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT);
-    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 104 });
-    expect(resizeComposerTextarea(box, true, false)).toBe(104);
+    expect(resizeComposerTextarea(box, false, true)).toBe(COMPOSER_TEXTAREA_COLLAPSED_HEIGHT);
 
-    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 180 });
+    expect(resizeComposerTextarea(box, true, false)).toBe(COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT);
+    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 156 });
+    expect(resizeComposerTextarea(box, true, false)).toBe(156);
+
+    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 240 });
     expect(resizeComposerTextarea(box, true, false)).toBe(COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT);
     expect(box.style.overflowY).toBe("auto");
 
@@ -375,35 +378,52 @@ describe("the controls offered to the user", () => {
     expect(box).toHaveAttribute("rows", "1");
     expect(box).toHaveAttribute("data-expanded", "false");
     expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_COLLAPSED_HEIGHT}px` });
+    expect(box).toHaveClass(
+      "leading-9",
+      "md:leading-6",
+      "py-[3px]",
+      "md:py-0.5",
+      "focus-visible:outline-transparent",
+    );
     expect(card).toHaveAttribute("data-composer-state", "idle");
+    expect(card).toHaveClass("border-line-strong");
     expect(inputSlot).toHaveClass("col-start-1", "row-start-1");
     expect(inputSlot).not.toHaveClass("col-span-2");
     expect(runtimeRow).toHaveAttribute("data-row-units", "0.5");
-    expect(runtimeRow).toHaveClass("h-3", "row-start-2");
+    expect(runtimeRow).toHaveClass("h-[18px]", "md:h-3", "row-start-2");
     expect(actionsRow).toHaveAttribute("data-row-units", "1.25");
-    expect(actionsRow).toHaveClass("h-8", "row-span-2", "self-center");
+    expect(actionsRow).toHaveClass("h-[45px]", "md:h-8", "row-span-2", "self-center");
     expect(summary).toHaveClass(
-      "h-3",
-      "text-[11px]",
+      "h-[18px]",
+      "md:h-3",
+      "text-[14px]",
+      "md:text-[11px]",
       "!min-h-0",
       "!min-w-0",
       "after:-inset-y-1.5",
+      "focus-visible:outline-muted/60",
     );
+    expect(summary).not.toHaveClass("focus-visible:outline-accent");
     expect(summary.firstElementChild).toHaveClass("opacity-75");
-    expect(fileButton).toHaveClass("h-[30px]", "w-[30px]", "!min-h-0", "!min-w-0");
-    expect(sendButton).toHaveClass("h-[30px]", "w-[30px]", "!min-h-0", "!min-w-0");
+    expect(fileButton).toHaveClass("h-[45px]", "w-[45px]", "md:h-[30px]", "md:w-[30px]", "!min-h-0", "!min-w-0");
+    expect(sendButton).toHaveClass("h-[45px]", "w-[45px]", "md:h-[30px]", "md:w-[30px]", "!min-h-0", "!min-w-0");
+    expect(fileButton).toHaveClass("focus-visible:outline-muted/60");
+    expect(sendButton).toHaveClass("focus-visible:outline-muted/60");
     await userEvent.click(box);
     expect(box).toHaveAttribute("data-expanded", "true");
     expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT}px` });
+    expect(box).toHaveClass("leading-9", "md:leading-6", "py-1.5", "md:py-1");
     expect(card).toHaveAttribute("data-composer-state", "active");
+    expect(card).toHaveClass("border-muted/50");
+    expect(card).not.toHaveClass("border-accent/60");
     expect(inputSlot).toHaveClass("col-span-2", "col-start-1", "row-start-1");
     expect(runtimeRow).toHaveAttribute("data-row-units", "1");
-    expect(runtimeRow).toHaveClass("h-6", "row-start-2");
+    expect(runtimeRow).toHaveClass("h-9", "md:h-6", "row-start-2");
     expect(actionsRow).toHaveAttribute("data-row-units", "1");
-    expect(actionsRow).toHaveClass("h-6", "row-start-2");
-    expect(summary).toHaveClass("h-6", "text-[12px]");
-    expect(fileButton).toHaveClass("h-6", "w-6");
-    expect(sendButton).toHaveClass("h-6", "w-6");
+    expect(actionsRow).toHaveClass("h-9", "md:h-6", "row-start-2");
+    expect(summary).toHaveClass("h-9", "md:h-6", "text-[14px]", "md:text-[12px]");
+    expect(fileButton).toHaveClass("h-9", "w-9", "md:h-6", "md:w-6");
+    expect(sendButton).toHaveClass("h-9", "w-9", "md:h-6", "md:w-6");
     expect(summary).toHaveAttribute("aria-expanded", "false");
     expect(document.querySelectorAll('select')).toHaveLength(0);
 

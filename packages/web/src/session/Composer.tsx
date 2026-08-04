@@ -197,7 +197,7 @@ export function Composer({
         ref={card}
         data-composer-state={active ? "active" : "idle"}
         className={`pointer-events-auto mx-auto max-w-chat rounded-2xl border bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur transition-colors ${
-          focused ? "border-accent/60" : "border-line-strong"
+          focused ? "border-muted/50" : "border-line-strong"
         }`}
       >
         {attachments.length > 0 ? (
@@ -224,7 +224,7 @@ export function Composer({
             ))}
           </div>
         ) : null}
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-x-1 px-1.5 py-0.5">
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-x-1 px-1.5 py-1 md:py-0.5">
           <div
             data-composer-slot="input"
             className={`min-w-0 ${
@@ -236,8 +236,8 @@ export function Composer({
             <textarea
               ref={textarea}
               data-expanded={active}
-              className={`block w-full resize-none overflow-y-hidden bg-transparent px-3 text-base leading-6 text-fg outline-none placeholder:text-faint md:text-sm ${
-                active ? "py-1" : "py-0.5"
+              className={`block w-full resize-none overflow-y-hidden bg-transparent px-3 text-base leading-9 text-fg outline-none placeholder:text-faint focus-visible:outline-transparent md:text-sm md:leading-6 ${
+                active ? "py-1.5 md:py-1" : "py-[3px] md:py-0.5"
               }`}
               placeholder="描述任务…"
               aria-label="任务描述"
@@ -309,7 +309,7 @@ export function Composer({
             data-composer-slot="runtime"
             data-row-units={active ? "1" : "0.5"}
             className={`col-start-1 row-start-2 flex min-w-0 items-center ${
-              active ? "h-6" : "h-3"
+              active ? "h-9 md:h-6" : "h-[18px] md:h-3"
             }`}
           >
             <ComposerControls
@@ -332,7 +332,7 @@ export function Composer({
             data-composer-slot="actions"
             data-row-units={active ? "1" : "1.25"}
             className={`col-start-2 flex flex-nowrap items-center gap-1 self-center ${
-              active ? "row-start-2 h-6" : "row-span-2 row-start-1 h-8"
+              active ? "row-start-2 h-9 md:h-6" : "row-span-2 row-start-1 h-[45px] md:h-8"
             }`}
           >
             <input
@@ -362,11 +362,11 @@ export function Composer({
                 setDismissed(true);
                 picker.current?.click();
               }}
-              className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg disabled:opacity-30 ${
-                active ? "h-6 w-6" : "h-[30px] w-[30px]"
+              className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 ${
+                active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
               }`}
             >
-              <Paperclip className="h-4 w-4" aria-hidden />
+              <Paperclip className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
             </button>
             {running ? (
               <button
@@ -374,11 +374,11 @@ export function Composer({
                 aria-label="停止"
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={onInterrupt}
-                className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger ${
-                  active ? "h-6 w-6" : "h-[30px] w-[30px]"
+                className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 ${
+                  active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
                 }`}
               >
-                <span className="h-3 w-3 rounded-[2px] bg-current" />
+                <span className="h-[18px] w-[18px] rounded-[3px] bg-current md:h-3 md:w-3 md:rounded-[2px]" />
               </button>
             ) : (
               <button
@@ -390,13 +390,13 @@ export function Composer({
                   textarea.current?.blur();
                 }}
                 disabled={disabled || (draft.trim().length === 0 && attachments.length === 0)}
-                className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white disabled:opacity-30 ${
-                  active ? "h-6 w-6" : "h-[30px] w-[30px]"
+                className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 ${
+                  active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
                 }`}
               >
                 <svg
                   viewBox="0 0 16 16"
-                  className="h-4 w-4"
+                  className="h-6 w-6 md:h-4 md:w-4"
                   fill="currentColor"
                   aria-hidden
                 >
@@ -412,23 +412,28 @@ export function Composer({
 }
 
 export const COMPOSER_TEXTAREA_COLLAPSED_HEIGHT = 28;
-export const COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT = 80;
-export const COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT = 128;
+export const COMPOSER_TEXTAREA_PHONE_COLLAPSED_HEIGHT = 42;
+export const COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT = 120;
+export const COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT = 192;
 export const COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT = 104;
 export const COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT = 176;
 export const COMPOSER_DESKTOP_BREAKPOINT = 768;
 
-/** Idle is exactly one 24px line. Focus expands to three-to-five lines on a
- * phone and four-to-seven on a wider screen, then scrolls internally. */
+/** Idle is one line: 36px on a phone and 24px on a wider screen. Focus expands
+ * to roughly three-to-five phone lines or four-to-seven desktop lines, then
+ * scrolls internally. */
 export function resizeComposerTextarea(
   element: HTMLTextAreaElement,
   active: boolean,
   desktop = isDesktopComposerViewport(),
 ): number {
   if (!active) {
-    element.style.height = `${COMPOSER_TEXTAREA_COLLAPSED_HEIGHT}px`;
+    const height = desktop
+      ? COMPOSER_TEXTAREA_COLLAPSED_HEIGHT
+      : COMPOSER_TEXTAREA_PHONE_COLLAPSED_HEIGHT;
+    element.style.height = `${height}px`;
     element.style.overflowY = "hidden";
-    return COMPOSER_TEXTAREA_COLLAPSED_HEIGHT;
+    return height;
   }
 
   const minHeight = desktop

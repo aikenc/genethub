@@ -119,11 +119,11 @@ describe("the compact runtime summary", () => {
   });
 
   it.each([
-    [true, "text-[11px]"],
-    [false, "text-[14px]"],
-  ])("keeps an Agent glyph inside the compact=%s runtime row", (compact, size) => {
+    [true, "text-[14px]", "md:text-[11px]"],
+    [false, "text-[18px]", "md:text-[14px]"],
+  ])("keeps a responsive Agent glyph inside the compact=%s runtime row", (compact, phoneSize, desktopSize) => {
     controls({ agentId: "claude", compact });
-    expect(screen.getByText("✱")).toHaveClass(size, "leading-none");
+    expect(screen.getByText("✱")).toHaveClass(phoneSize, desktopSize, "leading-none");
   });
 
   it("uses the scoped friendly name for a known Codex model", () => {

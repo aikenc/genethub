@@ -203,23 +203,23 @@ export function ComposerControls({
         aria-controls={panelId}
         onMouseDown={(event) => event.preventDefault()}
         onClick={() => setPanelOpen(true)}
-        className={`flex !min-h-0 !min-w-0 flex-1 items-center text-left text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${
+        className={`flex !min-h-0 !min-w-0 flex-1 items-center text-left text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 ${
           compact
-            ? "relative h-3 min-h-0 rounded px-1 text-[11px] leading-3 after:absolute after:-inset-y-1.5 after:inset-x-0 after:content-['']"
-            : "h-6 min-h-0 rounded-md px-1.5 text-[12px] leading-6"
+            ? "relative h-[18px] min-h-0 rounded px-1 text-[14px] leading-[18px] after:absolute after:-inset-y-1.5 after:inset-x-0 after:content-[''] md:h-3 md:text-[11px] md:leading-3"
+            : "h-9 min-h-0 rounded-md px-1.5 text-[14px] leading-9 md:h-6 md:text-[12px] md:leading-6"
         }`}
       >
         <span
           className={`flex min-w-0 flex-1 items-center overflow-hidden opacity-75 ${
-            compact ? "gap-1" : "gap-1.5"
+            compact ? "gap-1.5 md:gap-1" : "gap-2 md:gap-1.5"
           }`}
         >
           {selection.current ? (
             <AgentMark
               agent={selection.current}
-              className={compact ? "h-3 w-3" : "h-4 w-4"}
-              textClassName={compact ? "max-w-16 text-[11px]" : "max-w-24 text-[12px]"}
-              glyphClassName={compact ? "text-[11px]" : "text-[14px]"}
+              className={compact ? "h-4 w-4 md:h-3 md:w-3" : "h-5 w-5 md:h-4 md:w-4"}
+              textClassName={compact ? "max-w-16 text-[14px] md:text-[11px]" : "max-w-24 text-[14px] md:text-[12px]"}
+              glyphClassName={compact ? "text-[14px] md:text-[11px]" : "text-[18px] md:text-[14px]"}
             />
           ) : null}
           {agentAvailability ? (
@@ -255,7 +255,7 @@ export function ComposerControls({
               <span aria-hidden>{mode.emoji}</span>
             </span>
           ) : null}
-          <span className="ml-auto shrink-0 text-[8px] text-faint" aria-hidden>
+          <span className="ml-auto shrink-0 text-[12px] text-faint md:text-[8px]" aria-hidden>
             ▾
           </span>
         </span>
