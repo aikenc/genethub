@@ -1758,6 +1758,9 @@ fn detail_from_tool(name: &str, input: &Value, result: Option<&str>) -> ToolCall
             overview: str_field("description"),
             input: str_field("command"),
             output: result.unwrap_or_default().to_string(),
+            // A shell command's output path (if any) is not a tool argument;
+            // the session boundary's turn-scoped workspace diff finds it.
+            paths: Vec::new(),
         },
         "Read" => ToolCallDetail::Read {
             path: str_field("file_path"),
@@ -2685,6 +2688,7 @@ mod tests {
                         overview: String::new(),
                         input: "ls".into(),
                         output: "a.txt".into(),
+                        paths: Vec::new(),
                     }
                 );
             }

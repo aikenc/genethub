@@ -32,6 +32,7 @@ axum = { version = "0.8", features = ["ws"] }
 cap-std = "4.0.2"
 dirs = "6"
 libc = "0.2"
+mime_guess = "2"
 portable-pty = "0.9"
 sha2 = "0.10"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

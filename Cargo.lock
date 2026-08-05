@@ -628,6 +628,7 @@ dependencies = [
  "hmac",
  "ignore",
  "libc",
+ "mime_guess",
  "portable-pty",
  "reqwest",
  "serde",

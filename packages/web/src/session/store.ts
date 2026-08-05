@@ -11,6 +11,8 @@ import type {
   LogTail,
   RemoteAccess,
   PermissionOutcome,
+  ResourceContent,
+  ResourceMeta,
   SessionSnapshot,
   SessionSummary,
   Settings,
@@ -161,6 +163,17 @@ interface WorkbenchState {
   loadTree(path?: string): Promise<void>;
   openFile(path: string): Promise<void>;
   saveFile(content: string): Promise<void>;
+  /**
+   * A resource's metadata, without its bytes — cheap enough to call before
+   * deciding whether `readResource` is worth the round trip.
+   */
+  statResource(path: string): Promise<ResourceMeta | null>;
+  /**
+   * Every byte of a workspace resource, regardless of content. Unlike
+   * `openFile`/`file.read`, this never refuses a binary file — it exists
+   * specifically for the artifact preview cards `file.read` cannot serve.
+   */
+  readResource(path: string): Promise<ResourceContent | null>;
   refreshGit(): Promise<void>;
   loadDiff(path?: string): Promise<void>;
   commit(message: string, paths?: string[]): Promise<void>;
@@ -612,6 +625,22 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (!workspaceId) return;
     const reply = await client.call({ type: "file.read", payload: { workspaceId, path } });
     if (reply?.type === "fileContent") set({ file: reply.data });
+  },
+
+  async statResource(path) {
+    const client = require_(get().client);
+    const workspaceId = currentWorkspace(get());
+    if (!workspaceId) return null;
+    const reply = await client.call({ type: "resource.stat", payload: { workspaceId, path } });
+    return reply?.type === "resourceMeta" ? reply.data : null;
+  },
+
+  async readResource(path) {
+    const client = require_(get().client);
+    const workspaceId = currentWorkspace(get());
+    if (!workspaceId) return null;
+    const reply = await client.call({ type: "resource.read", payload: { workspaceId, path } });
+    return reply?.type === "resourceContent" ? reply.data : null;
   },
 
   async saveFile(content) {

@@ -159,14 +159,47 @@ pub fn condense_item(item: &TimelineItem) -> TimelineItem {
     }
 }
 
+/// Structured paths are capped hard: this is a fact for artifact discovery to
+/// key off, not a place to smuggle file content back into the session.
+const MAX_PATHS: usize = 8;
+const MAX_PATH_BYTES: usize = 512;
+
+/// Bounds and de-duplicates the paths a tool call touched.
+///
+/// Byte-bounded rather than char-bounded because a path is an opaque
+/// filesystem name, not prose meant to display — cutting on a byte boundary
+/// that happens to split a multibyte character is an acceptable cost for a
+/// value nobody reads past the point where it stopped being useful anyway.
+fn bound_paths(mut paths: Vec<String>) -> Vec<String> {
+    paths.retain(|path| !path.trim().is_empty());
+    paths.dedup();
+    paths.truncate(MAX_PATHS);
+    paths
+        .into_iter()
+        .map(|path| clip_bytes(&path, MAX_PATH_BYTES))
+        .collect()
+}
+
+fn clip_bytes(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
 /// Converts every adapter-specific tool shape into the only shape sessions retain.
 fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> ToolCallDetail {
-    let (kind, provided, input, output) = match detail {
+    let (kind, provided, input, output, paths) = match detail {
         ToolCallDetail::Overview {
             tool_kind,
             overview,
             input,
             output,
+            paths,
         } => (
             if *tool_kind == ToolKind::Other {
                 kind_from_name(fallback_name.unwrap_or_default())
@@ -180,6 +213,7 @@ fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> Tool
             },
             input.clone(),
             output.clone(),
+            paths.clone(),
         ),
         ToolCallDetail::Shell {
             command, output, ..
@@ -188,19 +222,29 @@ fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> Tool
             String::new(),
             command.clone(),
             output.clone(),
+            Vec::new(),
         ),
-        ToolCallDetail::Read { path, content, .. } => {
-            (ToolKind::Read, String::new(), path.clone(), content.clone())
-        }
+        ToolCallDetail::Read { path, content, .. } => (
+            ToolKind::Read,
+            String::new(),
+            path.clone(),
+            content.clone(),
+            vec![path.clone()],
+        ),
         ToolCallDetail::Write { path, content } => (
             ToolKind::Write,
             String::new(),
             path.clone(),
             content.clone(),
+            vec![path.clone()],
         ),
-        ToolCallDetail::Edit { path, diff } => {
-            (ToolKind::Edit, String::new(), path.clone(), diff.clone())
-        }
+        ToolCallDetail::Edit { path, diff } => (
+            ToolKind::Edit,
+            String::new(),
+            path.clone(),
+            diff.clone(),
+            vec![path.clone()],
+        ),
         ToolCallDetail::Search { query, matches } => {
             let output = matches
                 .iter()
@@ -213,16 +257,27 @@ fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> Tool
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            (ToolKind::Search, String::new(), query.clone(), output)
+            (
+                ToolKind::Search,
+                String::new(),
+                query.clone(),
+                output,
+                Vec::new(),
+            )
         }
-        ToolCallDetail::Fetch { url, summary } => {
-            (ToolKind::Fetch, String::new(), url.clone(), summary.clone())
-        }
+        ToolCallDetail::Fetch { url, summary } => (
+            ToolKind::Fetch,
+            String::new(),
+            url.clone(),
+            summary.clone(),
+            Vec::new(),
+        ),
         ToolCallDetail::Plan { markdown } => (
             ToolKind::Plan,
             String::new(),
             markdown.clone(),
             String::new(),
+            Vec::new(),
         ),
         ToolCallDetail::SubAgent {
             agent,
@@ -230,7 +285,13 @@ fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> Tool
             items,
         } => {
             let output = items.iter().find_map(item_overview).unwrap_or_default();
-            (ToolKind::SubAgent, agent.clone(), prompt.clone(), output)
+            (
+                ToolKind::SubAgent,
+                agent.clone(),
+                prompt.clone(),
+                output,
+                Vec::new(),
+            )
         }
         ToolCallDetail::Unknown { raw } => {
             let input = raw_field(raw, &["input", "arguments"]);
@@ -242,6 +303,7 @@ fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> Tool
                 provided,
                 first_nonempty(&[&input, &encoded]).to_string(),
                 output,
+                Vec::new(),
             )
         }
     };
@@ -251,6 +313,7 @@ fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> Tool
         overview: header(&provided, &input, &output, fallback),
         input: one_line(&input, TOOL_LINE_CHARS),
         output: output_excerpt(&output),
+        paths: bound_paths(paths),
     }
 }
 
@@ -375,6 +438,7 @@ mod tests {
                     input,
                     output,
                     tool_kind,
+                    ..
                 } = detail
                 else {
                     panic!("unexpected detail")
@@ -415,6 +479,71 @@ mod tests {
                 .lines()
                 .all(|line| line.chars().count() <= TOOL_LINE_CHARS));
         }
+    }
+
+    #[test]
+    fn write_edit_and_read_carry_their_path_into_the_condensed_overview() {
+        for (detail, expected) in [
+            (
+                ToolCallDetail::Write {
+                    path: "out/chart.png".into(),
+                    content: "bytes".into(),
+                },
+                "out/chart.png",
+            ),
+            (
+                ToolCallDetail::Edit {
+                    path: "src/main.rs".into(),
+                    diff: "@@ diff @@".into(),
+                },
+                "src/main.rs",
+            ),
+            (
+                ToolCallDetail::Read {
+                    path: "README.md".into(),
+                    content: "whole file".into(),
+                    truncated: false,
+                },
+                "README.md",
+            ),
+        ] {
+            match condense_detail(&detail, Some("fallback")) {
+                ToolCallDetail::Overview { paths, .. } => assert_eq!(paths, vec![expected]),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_shell_call_has_no_structured_path() {
+        let detail = ToolCallDetail::Shell {
+            command: "python3 analyze.py".into(),
+            output: "wrote chart.png".into(),
+            exit_code: Some(0),
+        };
+        match condense_detail(&detail, Some("fallback")) {
+            ToolCallDetail::Overview { paths, .. } => assert!(
+                paths.is_empty(),
+                "shell output is not a structured path; that is L0's turn-boundary diff's job"
+            ),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paths_are_bounded_in_count_and_length() {
+        let many: Vec<String> = (0..20).map(|i| format!("file-{i}.txt")).collect();
+        let bounded = bound_paths(many);
+        assert_eq!(bounded.len(), MAX_PATHS);
+
+        let long = "x".repeat(MAX_PATH_BYTES + 100);
+        let bounded = bound_paths(vec![long]);
+        assert_eq!(bounded.len(), 1);
+        assert!(bounded[0].len() <= MAX_PATH_BYTES);
+
+        // Blank entries and exact duplicates do not eat into the budget.
+        let bounded = bound_paths(vec!["a.txt".into(), "a.txt".into(), "".into(), "  ".into()]);
+        assert_eq!(bounded, vec!["a.txt".to_string()]);
     }
 
     #[test]
@@ -506,6 +635,7 @@ mod tests {
                     input,
                     output,
                     tool_kind,
+                    ..
                 } => {
                     assert_eq!(overview, "make");
                     assert_eq!(input, "make");

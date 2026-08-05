@@ -1,6 +1,8 @@
 import type { ToolCallDetail, ToolKind, ToolStatus } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
+import { ArtifactCard } from "./ArtifactCard";
+
 export function ToolCallView({
   name,
   status,
@@ -16,6 +18,7 @@ export function ToolCallView({
   // app reconnects to an older daemon or renders a legacy in-memory fixture.
   const output = boundedOutput(toolOutput(detail));
   const summary = oneLine(summarize(detail), 64);
+  const paths = detail.kind === "overview" ? detail.paths : [];
 
   useEffect(() => {
     if (status === "error") setOpen(true);
@@ -48,6 +51,13 @@ export function ToolCallView({
           {open ? "收起输出" : "查看输出"}
         </button>
       </header>
+      {paths.length > 0 ? (
+        <div className="flex flex-col gap-1.5 border-t border-line px-3 py-2">
+          {paths.map((path) => (
+            <ArtifactCard key={path} path={path} />
+          ))}
+        </div>
+      ) : null}
       {open ? (
         <div className="min-w-0 border-t border-line px-3 py-2 text-[13px]">
           <div className="mb-1 flex items-center justify-between">

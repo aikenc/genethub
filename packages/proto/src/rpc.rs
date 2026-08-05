@@ -323,6 +323,30 @@ pub enum Request {
         content: String,
     },
 
+    // -- resources -----------------------------------------------------------
+    // `file.*` above is the editor's contract: text in, text out, binary
+    // refused. `resource.*` is the artifact viewer's contract: any byte in
+    // the workspace, readable regardless of what it is. The two overlap in
+    // scope but not in shape — see `docs/specs/artifact-skill.md` §6.
+    /// Metadata only, no bytes. Lets a client decide whether a resource is
+    /// worth fetching before paying for the read.
+    #[serde(rename = "resource.stat", rename_all = "camelCase")]
+    ResourceStat { workspace_id: String, path: String },
+    /// Every byte of a resource, base64-encoded, regardless of content.
+    #[serde(rename = "resource.read", rename_all = "camelCase")]
+    ResourceRead { workspace_id: String, path: String },
+    /// Same tree shape as `file.tree`, offered under the resource contract so
+    /// a caller that only ever wants `resource.*` need not learn a second
+    /// request family just to enumerate a site directory's files.
+    #[serde(rename = "resource.list", rename_all = "camelCase")]
+    ResourceList {
+        workspace_id: String,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        depth: Option<u32>,
+    },
+
     // -- git ---------------------------------------------------------------
     #[serde(rename = "git.status", rename_all = "camelCase")]
     GitStatus { workspace_id: String },
@@ -407,6 +431,9 @@ pub enum Reply {
     Directory(DirectoryListing),
     FileTree(FileNode),
     FileContent(FileContent),
+    ResourceMeta(ResourceMeta),
+    ResourceContent(ResourceContent),
+    ResourceList(FileNode),
     GitStatus(GitStatus),
     #[serde(rename_all = "camelCase")]
     GitDiff {

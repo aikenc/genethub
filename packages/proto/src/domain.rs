@@ -200,6 +200,45 @@ pub struct FileContent {
     pub is_text: bool,
 }
 
+/// Metadata for a resource, without paying for its bytes.
+///
+/// Lets a caller decide whether a file is worth fetching (a 40 MB video is
+/// not) before spending a round trip on the content itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ResourceMeta {
+    pub path: String,
+    #[ts(type = "number")]
+    pub size: u64,
+    /// Daemon-determined, never trusted from the caller — see
+    /// `docs/specs/resource-fabric.md` §7 (`Content-Type` must not be sniffed
+    /// from a caller's claim).
+    pub mime: String,
+    pub is_dir: bool,
+}
+
+/// A resource's full bytes, unlike [`FileContent`] which refuses binary data.
+///
+/// `dataBase64` carries every byte regardless of content: an artifact card
+/// pointing at a PNG needs the PNG, not a placeholder string. Text callers
+/// that already have [`FileContent`] for their case can keep using it; this
+/// exists for the cases that one cannot serve at all.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ResourceContent {
+    pub path: String,
+    pub mime: String,
+    #[ts(type = "number")]
+    pub size: u64,
+    pub data_base64: String,
+    /// True when `size` exceeded the read ceiling and `dataBase64` holds only
+    /// a prefix. The caller decided to fetch anyway (§4 of the surface spec:
+    /// large files default to a file card, not a silent partial preview).
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]

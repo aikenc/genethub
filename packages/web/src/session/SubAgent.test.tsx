@@ -17,6 +17,7 @@ describe("a sub-agent's card", () => {
     overview: "Explore · Find hello.txt",
     input: "Find hello.txt",
     output,
+    paths: [],
   });
 
   it("shows only the bounded output excerpt", async () => {

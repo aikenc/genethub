@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { formatBytes, ResourceBody, useResourcePreview } from "../session/ResourcePreview";
 import { useWorkbench } from "../session/store";
 import { FileTree } from "./FileTree";
 
@@ -47,7 +48,7 @@ export function FilesPanel() {
         {!file ? (
           <p className="m-auto text-sm text-muted">选一个文件</p>
         ) : !file.isText ? (
-          <p className="m-auto text-sm text-muted">{file.path} 不是文本文件</p>
+          <NonTextPreview path={file.path} />
         ) : (
           <>
             <div className="flex items-center gap-2 border-b border-line px-3 py-1.5 text-xs">
@@ -81,6 +82,45 @@ export function FilesPanel() {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * What `file.read` refuses (`FileContent.isText === false`) via the resource
+ * contract instead — same `ResourceBody` renderer an artifact card in the
+ * chat timeline uses, so a screenshot looks the same whichever way it was
+ * opened.
+ */
+function NonTextPreview({ path }: { path: string }) {
+  const { phase, loadAnyway } = useResourcePreview(path, { auto: true });
+
+  return (
+    <div className="m-auto max-w-full space-y-3 p-4 text-center text-sm text-muted">
+      <p className="truncate font-mono text-xs">{path}</p>
+      {phase.step === "stating" || phase.step === "loading" ? <p>加载中…</p> : null}
+      {phase.step === "statError" || phase.step === "loadError" ? (
+        <p className="text-danger">{phase.message}</p>
+      ) : null}
+      {phase.step === "ready" ? (
+        <div className="space-y-2">
+          <p>
+            {phase.meta.mime} · {formatBytes(phase.meta.size)}
+          </p>
+          <button
+            type="button"
+            className="rounded bg-accent px-3 py-1 text-white"
+            onClick={loadAnyway}
+          >
+            加载预览
+          </button>
+        </div>
+      ) : null}
+      {phase.step === "loaded" ? (
+        <div className="text-left">
+          <ResourceBody content={phase.content} />
+        </div>
+      ) : null}
     </div>
   );
 }

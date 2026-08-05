@@ -4,14 +4,24 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 #[cfg(not(unix))]
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
-use genehub_proto::{FileContent, FileNode};
+use genehub_proto::{FileContent, FileNode, ResourceContent, ResourceMeta};
 
 /// Beyond this a file is served truncated: the editor cannot usefully show
 /// more, and shipping it wastes the link.
 const MAX_READ_BYTES: usize = 2 * 1024 * 1024;
+/// The resource contract exists specifically to serve binary content
+/// `file::read` refuses, so its ceiling is generous rather than
+/// editor-sized — big enough for a real screenshot or a short data export,
+/// small enough that a client cannot use it to pull a multi-gigabyte file
+/// through a single JSON envelope. `surface-and-inline.md` §2.2 keeps
+/// anything larger behind an explicit "open" action rather than fetching it
+/// implicitly, so this ceiling only bounds a request a person already made.
+const MAX_RESOURCE_READ_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ENTRIES_PER_DIR: usize = 2000;
 const MAX_TREE_NODES: usize = 10_000;
 
@@ -161,6 +171,69 @@ pub fn read(root: &Path, path: &Path) -> Result<FileContent> {
     })
 }
 
+/// Metadata for a resource, without reading its bytes.
+pub fn stat(root: &Path, path: &Path) -> Result<ResourceMeta> {
+    let directory = workspace_dir(root)?;
+    let relative = workspace_relative(root, path)?;
+    let capability_path = if relative.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        &relative
+    };
+    let metadata = directory
+        .metadata(capability_path)
+        .with_context(|| format!("stat {}", relative.display()))?;
+    let display_path = relative.to_string_lossy().replace('\\', "/");
+    Ok(ResourceMeta {
+        mime: guess_mime(&display_path),
+        path: display_path,
+        size: metadata.len(),
+        is_dir: metadata.is_dir(),
+    })
+}
+
+/// Every byte of a resource, base64-encoded — the read `file::read` refuses
+/// once it decides a file is binary. See `MAX_RESOURCE_READ_BYTES` for the
+/// ceiling and why it differs from the editor's.
+pub fn read_bytes(root: &Path, path: &Path) -> Result<ResourceContent> {
+    let directory = workspace_dir(root)?;
+    let relative = workspace_relative(root, path)?;
+    let file = directory
+        .open(&relative)
+        .with_context(|| format!("reading {}", relative.display()))?;
+    let size = file.metadata()?.len();
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(size)
+            .unwrap_or(MAX_RESOURCE_READ_BYTES + 1)
+            .min(MAX_RESOURCE_READ_BYTES + 1),
+    );
+    file.into_std()
+        .take((MAX_RESOURCE_READ_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > MAX_RESOURCE_READ_BYTES;
+    if truncated {
+        bytes.truncate(MAX_RESOURCE_READ_BYTES);
+    }
+    let display_path = relative.to_string_lossy().replace('\\', "/");
+    Ok(ResourceContent {
+        mime: guess_mime(&display_path),
+        path: display_path,
+        size,
+        data_base64: BASE64.encode(&bytes),
+        truncated,
+    })
+}
+
+/// The daemon decides the MIME type from the file's name; it never trusts a
+/// caller's claim (`docs/specs/resource-fabric.md` §7 red line). Falls back
+/// to `application/octet-stream`, which every client already treats as "no
+/// renderer, offer a download" rather than failing on an unrecognized type.
+fn guess_mime(path: &str) -> String {
+    mime_guess::from_path(path)
+        .first_or_octet_stream()
+        .to_string()
+}
+
 pub fn write(root: &Path, path: &Path, content: &str) -> Result<()> {
     let directory = workspace_dir(root)?;
     let relative = workspace_relative(root, path)?;
@@ -294,6 +367,65 @@ mod tests {
         let content = read(dir.path(), &path).unwrap();
         assert!(!content.is_text);
         assert!(content.content.contains("Binary file"));
+    }
+
+    #[test]
+    fn resource_read_returns_binary_bytes_that_file_read_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        let bytes = [0x89, b'P', b'N', b'G', 0, 1, 2, 3];
+        std::fs::write(&path, bytes).unwrap();
+
+        // The editor contract still refuses it...
+        let via_file = read(dir.path(), &path).unwrap();
+        assert!(!via_file.is_text);
+
+        // ...but the resource contract hands back every byte, round-trippable.
+        let content = read_bytes(dir.path(), &path).unwrap();
+        assert_eq!(content.path, "a.png");
+        assert_eq!(content.mime, "image/png");
+        assert!(!content.truncated);
+        assert_eq!(BASE64.decode(&content.data_base64).unwrap(), bytes);
+    }
+
+    #[test]
+    fn resource_read_truncates_past_the_ceiling_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        std::fs::write(&path, vec![7u8; MAX_RESOURCE_READ_BYTES + 1000]).unwrap();
+        let content = read_bytes(dir.path(), &path).unwrap();
+        assert!(content.truncated);
+        assert_eq!(content.size, (MAX_RESOURCE_READ_BYTES + 1000) as u64);
+        assert_eq!(
+            BASE64.decode(&content.data_base64).unwrap().len(),
+            MAX_RESOURCE_READ_BYTES
+        );
+    }
+
+    #[test]
+    fn resource_stat_reports_size_and_mime_without_reading_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.md");
+        std::fs::write(&path, "# hello").unwrap();
+        let meta = stat(dir.path(), &path).unwrap();
+        assert_eq!(meta.path, "report.md");
+        assert_eq!(meta.size, 7);
+        assert!(!meta.is_dir);
+        assert_eq!(meta.mime, "text/markdown");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resource_read_cannot_escape_the_workspace_via_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.bin"), [1u8, 2, 3]).unwrap();
+        symlink(outside.path(), workspace.path().join("escape")).unwrap();
+
+        let escaped = workspace.path().join("escape/secret.bin");
+        assert!(read_bytes(workspace.path(), &escaped).is_err());
     }
 
     #[test]

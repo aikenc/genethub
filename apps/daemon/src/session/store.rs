@@ -364,6 +364,7 @@ mod tests {
                 overview: "cat secrets".into(),
                 input: "cat secrets".into(),
                 output: "old detailed output".into(),
+                paths: Vec::new(),
             },
         };
         store

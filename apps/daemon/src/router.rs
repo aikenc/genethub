@@ -758,6 +758,59 @@ pub async fn handle(
             }
         }
 
+        Request::ResourceStat { workspace_id, path } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let target = match state.workspaces.resolve(&workspace_id, &path).await {
+                Ok(target) => target,
+                Err(error) => return failed(error),
+            };
+            match files::stat(&workspace.root, &target) {
+                Ok(meta) => Handled::ok(Reply::ResourceMeta(meta)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::ResourceRead { workspace_id, path } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let target = match state.workspaces.resolve(&workspace_id, &path).await {
+                Ok(target) => target,
+                Err(error) => return failed(error),
+            };
+            match files::read_bytes(&workspace.root, &target) {
+                Ok(content) => Handled::ok(Reply::ResourceContent(content)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::ResourceList {
+            workspace_id,
+            path,
+            depth,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let target = match state
+                .workspaces
+                .resolve(&workspace_id, path.as_deref().unwrap_or("."))
+                .await
+            {
+                Ok(target) => target,
+                Err(error) => return failed(error),
+            };
+            match files::tree(&workspace.root, &target, depth.unwrap_or(2).min(8)) {
+                Ok(tree) => Handled::ok(Reply::ResourceList(tree)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::GitStatus { workspace_id } => {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,

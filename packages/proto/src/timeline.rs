@@ -50,6 +50,15 @@ pub enum ToolCallDetail {
         overview: String,
         input: String,
         output: String,
+        /// Workspace-relative paths this tool call touched, structured rather
+        /// than parsed back out of `input`. Populated at the session boundary
+        /// from whichever richer variant this was condensed from (`Write`,
+        /// `Edit`, `Read`) — see `session::overview::condense_detail`.
+        ///
+        /// Bounded to a handful of short entries: this is a fact for artifact
+        /// discovery to key off, not a place to smuggle file content back in.
+        #[serde(default)]
+        paths: Vec<String>,
     },
     #[serde(rename_all = "camelCase")]
     Shell {

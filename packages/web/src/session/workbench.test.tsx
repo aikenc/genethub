@@ -115,6 +115,7 @@ describe("what the user sees in a session", () => {
           overview: "检查构建",
           input: "npm test",
           output: "全部通过",
+          paths: [],
         }}
       />,
     );
@@ -135,6 +136,7 @@ describe("what the user sees in a session", () => {
           overview: "旧机器输出",
           input: "ignored",
           output: [`${"a".repeat(80)}`, "second", "middle", "fourth", "last"].join("\n"),
+          paths: [],
         }}
       />,
     );
