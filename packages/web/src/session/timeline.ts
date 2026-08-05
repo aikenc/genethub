@@ -1,5 +1,9 @@
 import type {
+  BlobPayload,
   PermissionRequest,
+  RoundLayer,
+  RoundSummary,
+  RoundTrunk,
   SequencedEvent,
   SessionEvent,
   SessionSnapshot,
@@ -22,6 +26,14 @@ export interface TimelineState {
   modeId: string | null;
   effortId: string | null;
   seq: number;
+  /** Every round of this session, in order, unexpanded. */
+  rounds: RoundSummary[];
+  /** The trunk index of each round opened so far, by round id. */
+  roundLayers: Record<string, RoundLayer>;
+  /** Trunks pulled in full, by `roundId:trunkIndex`. */
+  roundTrunks: Record<string, RoundTrunk>;
+  /** Tool call and reasoning payloads pulled in full, by blob id. */
+  blobs: Record<string, BlobPayload>;
 }
 
 export function emptyTimeline(): TimelineState {
@@ -37,6 +49,10 @@ export function emptyTimeline(): TimelineState {
     modeId: null,
     effortId: null,
     seq: 0,
+    rounds: [],
+    roundLayers: {},
+    roundTrunks: {},
+    blobs: {},
   };
 }
 
@@ -62,7 +78,28 @@ export function fromSnapshot(snapshot: SessionSnapshot): TimelineState {
     modeId: snapshot.summary.modeId ?? null,
     effortId: snapshot.summary.effortId ?? null,
     seq: snapshot.seq,
+    ...roundsFromSnapshot(snapshot),
   };
+}
+
+/**
+ * The round layer a snapshot arrives with: every round unexpanded, plus
+ * whichever one the daemon was asked to expand.
+ */
+function roundsFromSnapshot(
+  snapshot: SessionSnapshot,
+): Pick<TimelineState, "rounds" | "roundLayers" | "roundTrunks"> {
+  const roundLayers: Record<string, RoundLayer> = {};
+  const roundTrunks: Record<string, RoundTrunk> = {};
+  const expanded = snapshot.expandedRound;
+  if (expanded) {
+    roundLayers[expanded.round.roundId] = expanded;
+    if (expanded.expandedTrunk) {
+      roundTrunks[`${expanded.round.roundId}:${expanded.expandedTrunk.summary.index}`] =
+        expanded.expandedTrunk;
+    }
+  }
+  return { rounds: snapshot.rounds ?? [], roundLayers, roundTrunks };
 }
 
 /**

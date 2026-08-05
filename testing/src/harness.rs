@@ -258,6 +258,8 @@ impl Journey {
                     .call(Request::Subscribe {
                         session_id: summary.id.clone(),
                         since_seq: None,
+                        layered: false,
+                        expand_last_round: false,
                     })
                     .await?;
                 Ok(summary.id)

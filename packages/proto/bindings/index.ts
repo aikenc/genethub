@@ -14,6 +14,21 @@ export type Attachment = { name: string, mime: string, path?: string,
  */
 dataBase64?: string, };
 
+export type BlobKind = "reasoning" | "toolCall";
+
+/**
+ * One compact row in a batch. Full source content is fetched by `blob.get`.
+ */
+export type BlobOverview = { itemId: string, kind: BlobKind, overview: string, blob?: BlobRef, };
+
+export type BlobPayload = { hash: string, value: JsonValue, };
+
+export type BlobRef = { 
+/**
+ * Lowercase SHA-256 of the canonical JSON blob payload.
+ */
+hash: string, bytes: number, };
+
 /**
  * What an agent can do, declared up front.
  *
@@ -69,7 +84,17 @@ channel: ChannelAuth | null,
 /**
  * Temporary proof for encrypted first-device bootstrap.
  */
-invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
+/**
+ * Requests the session/round/blob addressing model instead of a full
+ * historical timeline. Defaults off for protocol-v2 clients.
+ */
+layered: boolean, 
+/**
+ * Prefetches the last round's trunk index and final trunk details in
+ * the subscription response.
+ */
+expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, hash: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
 /**
  * Claims this message as a continuation of a round left open by an
  * interrupt, rather than a new one. Only interrupts need this: the
@@ -427,7 +452,7 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "fileContent", "data": FileContent } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "fileContent", "data": FileContent } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
 
 export type Request = { "type": "hello", "payload": { clientName: string, protocolVersion: number, 
 /**
@@ -445,7 +470,17 @@ channel: ChannelAuth | null,
 /**
  * Temporary proof for encrypted first-device bootstrap.
  */
-invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
+/**
+ * Requests the session/round/blob addressing model instead of a full
+ * historical timeline. Defaults off for protocol-v2 clients.
+ */
+layered: boolean, 
+/**
+ * Prefetches the last round's trunk index and final trunk details in
+ * the subscription response.
+ */
+expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, hash: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
 /**
  * Claims this message as a continuation of a round left open by an
  * interrupt, rather than a new one. Only interrupts need this: the
@@ -483,6 +518,35 @@ name: string | null, } } | { "type": "update.check" } | { "type": "update.downlo
  */
 paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } };
 
+export type RoundBatch = { summary: RoundBatchSummary, blobs: Array<BlobOverview>, };
+
+/**
+ * A semantic group inside a trunk: one monologue and the work following it,
+ * bounded to sixteen blobs even when an agent never narrates.
+ */
+export type RoundBatchSummary = { index: number, firstItemId: string, blobCount: number, text: string, };
+
+/**
+ * A page of visible trunks in one round. `nextCursor` asks for the preceding
+ * page; cursors are opaque to clients.
+ */
+export type RoundLayer = { round: RoundSummary, trunks: Array<RoundTrunkSummary>, nextCursor?: string, expandedTrunk?: RoundTrunk, };
+
+export type RoundLayerOutcome = "completed" | "failed" | "canceled" | "superseded" | "running";
+
+/**
+ * Compact session-layer description of one user request.
+ */
+export type RoundSummary = { roundId: string, userItemId?: string, startedAtMs: number, endedAtMs: number, outcome: RoundLayerOutcome, trunkCount: number, };
+
+export type RoundTrunk = { summary: RoundTrunkSummary, batches: Array<RoundBatch>, };
+
+/**
+ * A visible, bounded section of a round. Trunks are carried by the round
+ * protocol layer; they are not a fourth storage/addressing layer.
+ */
+export type RoundTrunkSummary = { index: number, firstItemId: string, blobCount: number, title: string, batches: Array<RoundBatchSummary>, };
+
 export type SearchMatch = { path: string, line?: number, preview: string, };
 
 /**
@@ -513,7 +577,18 @@ export type SessionSnapshot = { summary: SessionSummary, items: Array<TimelineIt
  * Sequence number this snapshot is current as of. Events with a lower or
  * equal seq have already been folded in.
  */
-seq: number, pendingPermissions: Array<PermissionRequest>, };
+seq: number, pendingPermissions: Array<PermissionRequest>, 
+/**
+ * Present for a layered session open. `items` then contains only the
+ * session narrative; tool calls and reasoning are addressed through the
+ * round layer below instead of being replayed wholesale.
+ */
+rounds?: Array<RoundSummary>, 
+/**
+ * The last round's recent trunk index and last trunk details, prefetched
+ * in the same response for the unread/mobile-first-screen path.
+ */
+expandedRound?: RoundLayer, };
 
 export type SessionStatus = "idle" | "running" | "waiting" | "readOnly" | "failed" | "closed";
 

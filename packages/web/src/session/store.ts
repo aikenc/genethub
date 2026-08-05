@@ -11,6 +11,7 @@ import type {
   LogTail,
   RemoteAccess,
   PermissionOutcome,
+  SequencedEvent,
   SessionSnapshot,
   SessionSummary,
   Settings,
@@ -215,6 +216,10 @@ interface WorkbenchState {
    */
   newSession(workspaceId?: string | null, agentId?: string | null): void;
   selectSession(sessionId: string): Promise<void>;
+  loadRound(roundId: string): Promise<void>;
+  loadOlderTrunks(roundId: string): Promise<void>;
+  loadTrunk(roundId: string, trunkIndex: number): Promise<void>;
+  loadBlob(hash: string): Promise<void>;
   /** Gives a session the name the user typed, on the machine and here. */
   renameSession(sessionId: string, title: string): Promise<void>;
   /** Erases a session. There is no undo; the caller does the asking. */
@@ -244,6 +249,96 @@ interface WorkbenchState {
   revokeDevice(deviceId: string): Promise<void>;
   attachRelay(relayUrl: string, joinToken: string): Promise<void>;
   detachRelay(): Promise<void>;
+}
+
+/**
+ * One session's view, whether it is on screen or warm in a background tab.
+ *
+ * Round and blob state lives inside `TimelineState` rather than beside it, so
+ * a warm tab keeps its expanded rounds along with its messages. Held apart,
+ * switching back to a warm tab would show the previous session's rounds until
+ * a refresh that a warm tab deliberately never makes.
+ */
+function timelineOf(state: WorkbenchState, sessionId: string): TimelineState {
+  return state.sessionTimelines[sessionId] ?? emptyTimeline();
+}
+
+function patchTimeline(
+  sessionId: string,
+  set: (updater: (state: WorkbenchState) => Partial<WorkbenchState>) => void,
+  patch: (timeline: TimelineState) => Partial<TimelineState>,
+): void {
+  set((state) => {
+    const current = timelineOf(state, sessionId);
+    const timeline = { ...current, ...patch(current) };
+    return {
+      sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
+      ...(state.activeSessionId === sessionId ? { timeline } : {}),
+    };
+  });
+}
+
+/**
+ * Whether an event can have changed how the daemon grouped work into trunks.
+ *
+ * That grouping is the daemon's alone, so it cannot be derived from the event.
+ * But most events cannot have moved it, and asking after every one would put a
+ * request behind every token.
+ */
+function changesTheRoundLayer(event: SequencedEvent): boolean {
+  switch (event.event.type) {
+    case "turnCompleted":
+    case "turnFailed":
+    case "turnCanceled":
+      return true;
+    case "item":
+      return (
+        event.event.item.type === "userMessage" ||
+        event.event.item.type === "assistantMessage" ||
+        event.event.item.type === "reasoning" ||
+        event.event.item.type === "toolCall"
+      );
+    default:
+      return false;
+  }
+}
+
+function shouldExpandLastRound(summary: SessionSummary | undefined): boolean {
+  if (!summary || summary.status === "running" || summary.status === "waiting") return true;
+  try {
+    const readAt = Number(localStorage.getItem(`genehub:session-read:${summary.id}`) ?? "0");
+    return !Number.isFinite(readAt) || readAt < summary.updatedAtMs;
+  } catch {
+    return true;
+  }
+}
+
+function markSessionRead(summary: SessionSummary): void {
+  try {
+    localStorage.setItem(`genehub:session-read:${summary.id}`, String(summary.updatedAtMs));
+  } catch {
+    // Storage can be disabled; the safe fallback is to prefetch next time.
+  }
+}
+
+let roundRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleRoundRefresh(get: () => WorkbenchState): void {
+  if (roundRefreshTimer) clearTimeout(roundRefreshTimer);
+  roundRefreshTimer = setTimeout(() => {
+    roundRefreshTimer = null;
+    void get()
+      .loadRound("latest")
+      .then(() => {
+        const round = Object.values(get().timeline.roundLayers)
+          .reverse()
+          .find((layer) => layer.round.outcome === "running")?.round;
+        if (!round) return;
+        const trunks = get().timeline.roundLayers[round.roundId]?.trunks;
+        const last = trunks?.at(-1);
+        if (last) return get().loadTrunk(round.roundId, last.index);
+      });
+  }, 250);
 }
 
 export const useWorkbench = create<WorkbenchState>((set, get) => ({
@@ -456,8 +551,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // it is a synchronous state change rather than a network round trip.
     if (warm) return;
 
-    const { snapshot, replayed } = await client.subscribe(sessionId, {
-      onEvent: (event) => {
+    const { snapshot, replayed } = await client.subscribe(
+      sessionId,
+      {
+        onEvent: (event) => {
         if (event.event.type === "titleChanged") {
           applyTitle(sessionId, event.event.title, set);
         }
@@ -472,8 +569,14 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
             ...(state.activeSessionId === sessionId ? { timeline } : {}),
           };
         });
-      },
-      onResync: (resnapshot, events, reset) => {
+          // The round layer is not derivable from the event stream: only the
+          // daemon knows how work was grouped into trunks. Refresh it for the
+          // session on screen, which is the only one rendering rounds.
+          if (get().activeSessionId === sessionId && changesTheRoundLayer(event)) {
+            scheduleRoundRefresh(get);
+          }
+        },
+        onResync: (resnapshot, events, reset) => {
         const base = reset
           ? fromSnapshot(resnapshot as SessionSnapshot)
           : get().sessionTimelines[sessionId] ?? emptyTimeline();
@@ -486,13 +589,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
           ...(state.activeSessionId === sessionId ? { timeline } : {}),
         }));
+        },
       },
-    });
+      { expandLastRound: shouldExpandLastRound(summary) },
+    );
 
-    const base = fromSnapshot(snapshot as SessionSnapshot);
+    const typedSnapshot = snapshot as SessionSnapshot;
+    const base = fromSnapshot(typedSnapshot);
     // A slower subscription must not repaint whichever session the user opened
     // next. This is easy to hit when switching pages over a relay: both replies
     // are valid, but only the currently selected session owns the timeline.
+    markSessionRead(typedSnapshot.summary);
     const timeline = replayed.reduce(applySequenced, base);
     set((state) => ({
       subscribedSessionIds: state.subscribedSessionIds.includes(sessionId)
@@ -500,6 +607,80 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         : [...state.subscribedSessionIds, sessionId],
       sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
       ...(state.activeSessionId === sessionId ? { timeline } : {}),
+    }));
+  },
+
+  async loadRound(roundId) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const reply = await require_(get().client).call({
+      type: "round.trunk.list",
+      payload: { sessionId, roundId, cursor: null, limit: 20 },
+    });
+    if (reply?.type !== "roundLayer") return;
+    const layer = reply.data;
+    patchTimeline(sessionId, set, (timeline) => ({
+      rounds: [
+        ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),
+        layer.round,
+      ],
+      roundLayers: { ...timeline.roundLayers, [layer.round.roundId]: layer },
+    }));
+  },
+
+  async loadOlderTrunks(roundId) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const cursor = timelineOf(get(), sessionId).roundLayers[roundId]?.nextCursor;
+    if (!cursor) return;
+    const reply = await require_(get().client).call({
+      type: "round.trunk.list",
+      payload: { sessionId, roundId, cursor, limit: 20 },
+    });
+    if (reply?.type !== "roundLayer") return;
+    const older = reply.data;
+    patchTimeline(sessionId, set, (timeline) => {
+      const existing = timeline.roundLayers[roundId];
+      if (!existing) return {};
+      return {
+        roundLayers: {
+          ...timeline.roundLayers,
+          [roundId]: {
+            ...existing,
+            trunks: [...older.trunks, ...existing.trunks],
+            nextCursor: older.nextCursor,
+          },
+        },
+      };
+    });
+  },
+
+  async loadTrunk(roundId, trunkIndex) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const reply = await require_(get().client).call({
+      type: "round.trunk.get",
+      payload: { sessionId, roundId, trunkIndex },
+    });
+    if (reply?.type !== "roundTrunk") return;
+    const trunk = reply.data;
+    patchTimeline(sessionId, set, (timeline) => ({
+      roundTrunks: { ...timeline.roundTrunks, [`${roundId}:${trunkIndex}`]: trunk },
+    }));
+  },
+
+  async loadBlob(hash) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    if (timelineOf(get(), sessionId).blobs[hash]) return;
+    const reply = await require_(get().client).call({
+      type: "blob.get",
+      payload: { sessionId, hash },
+    });
+    if (reply?.type !== "blob") return;
+    const payload = reply.data;
+    patchTimeline(sessionId, set, (timeline) => ({
+      blobs: { ...timeline.blobs, [hash]: payload },
     }));
   },
 

@@ -9,8 +9,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use genehub_proto::{PermissionRequest, SessionStatus, SessionSummary, TimelineItem};
+use genehub_proto::{
+    BlobKind, BlobPayload, BlobRef, PermissionRequest, SessionStatus, SessionSummary, TimelineItem,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::rounds::{self, RoundRecord};
 use crate::adapter::PersistHandle;
@@ -67,6 +71,21 @@ pub struct Store {
     root: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlobBatchRecord {
+    hash: String,
+    value: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlobIndexRecord {
+    item_id: String,
+    kind: BlobKind,
+    blob: BlobRef,
+}
+
 impl Store {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Store { root: root.into() }
@@ -87,6 +106,15 @@ impl Store {
     fn rounds_path(&self, workspace_id: &str, session_id: &str) -> PathBuf {
         self.dir(workspace_id)
             .join(format!("{session_id}.rounds.jsonl"))
+    }
+
+    fn blob_dir(&self, workspace_id: &str, session_id: &str) -> PathBuf {
+        self.dir(workspace_id).join(session_id).join("blobs")
+    }
+
+    fn blob_index_path(&self, workspace_id: &str, session_id: &str) -> PathBuf {
+        self.dir(workspace_id)
+            .join(format!("{session_id}.blobrefs.jsonl"))
     }
 
     fn meta_path(&self, workspace_id: &str, session_id: &str) -> PathBuf {
@@ -179,6 +207,171 @@ impl Store {
         Ok(items)
     }
 
+    /// Stores canonical JSON source content by SHA-256. The first two hash
+    /// characters select an append-only batch file, so a long session does not
+    /// create one filesystem entry per tool call or thinking block.
+    pub fn put_blob(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        item_id: &str,
+        kind: BlobKind,
+        value: Value,
+    ) -> Result<BlobRef> {
+        let encoded = serde_json::to_vec(&value)?;
+        let digest = Sha256::digest(&encoded);
+        let hash = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let blob = BlobRef {
+            hash: hash.clone(),
+            bytes: encoded.len() as u64,
+        };
+        let dir = self.blob_dir(workspace_id, session_id);
+        fs::create_dir_all(&dir)?;
+        let batch_path = dir.join(format!("{}.batch", &hash[..2]));
+        let already_stored = match File::open(&batch_path) {
+            Ok(file) => BufReader::new(file)
+                .lines()
+                .map_while(Result::ok)
+                .filter_map(|line| serde_json::from_str::<BlobBatchRecord>(&line).ok())
+                .any(|record| record.hash == hash),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error).context("opening blob batch"),
+        };
+        if !already_stored {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&batch_path)?;
+            crate::config::restrict_to_owner(&batch_path)?;
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string(&BlobBatchRecord {
+                    hash: hash.clone(),
+                    value,
+                })?
+            )?;
+            file.flush()?;
+        }
+
+        let index_path = self.blob_index_path(workspace_id, session_id);
+        let mut index = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&index_path)?;
+        crate::config::restrict_to_owner(&index_path)?;
+        writeln!(
+            index,
+            "{}",
+            serde_json::to_string(&BlobIndexRecord {
+                item_id: item_id.to_string(),
+                kind,
+                blob: blob.clone(),
+            })?
+        )?;
+        index.flush()?;
+        Ok(blob)
+    }
+
+    pub fn load_blob_refs(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> Result<std::collections::HashMap<String, (BlobKind, BlobRef)>> {
+        let path = self.blob_index_path(workspace_id, session_id);
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(std::collections::HashMap::new())
+            }
+            Err(error) => return Err(error).with_context(|| format!("opening {}", path.display())),
+        };
+        let mut refs = std::collections::HashMap::new();
+        for line in BufReader::new(file).lines() {
+            let line = line?;
+            if let Ok(record) = serde_json::from_str::<BlobIndexRecord>(&line) {
+                refs.insert(record.item_id, (record.kind, record.blob));
+            }
+        }
+        Ok(refs)
+    }
+
+    /// One-time compatibility upgrade for sessions written before source
+    /// blobs existed. Their compact timeline is the only surviving source, so
+    /// it is content-addressed as-is rather than pretending discarded detail
+    /// can be reconstructed.
+    pub fn ensure_blobs_migrated(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        legacy_items: &[TimelineItem],
+    ) -> Result<()> {
+        let marker = self.blob_index_path(workspace_id, session_id);
+        if marker.exists() {
+            return Ok(());
+        }
+        for item in legacy_items {
+            let kind = match item {
+                TimelineItem::Reasoning { .. } => BlobKind::Reasoning,
+                TimelineItem::ToolCall { .. } => BlobKind::ToolCall,
+                _ => continue,
+            };
+            self.put_blob(
+                workspace_id,
+                session_id,
+                item.id(),
+                kind,
+                serde_json::to_value(item)?,
+            )?;
+        }
+        if !marker.exists() {
+            if let Some(parent) = marker.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            File::create(&marker)?;
+            crate::config::restrict_to_owner(&marker)?;
+        }
+        Ok(())
+    }
+
+    pub fn get_blob(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        hash: &str,
+    ) -> Result<Option<BlobPayload>> {
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Ok(None);
+        }
+        let path = self
+            .blob_dir(workspace_id, session_id)
+            .join(format!("{}.batch", &hash[..2]));
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).with_context(|| format!("opening {}", path.display())),
+        };
+        for line in BufReader::new(file).lines() {
+            let line = line?;
+            if let Ok(record) = serde_json::from_str::<BlobBatchRecord>(&line) {
+                if record.hash == hash {
+                    return Ok(Some(BlobPayload {
+                        hash: record.hash,
+                        value: record.value,
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Appends one settled round. Never rewrites an earlier line, for the same
     /// crash-safety reason as `append_items`: a half-written line is losable,
     /// what came before it is not.
@@ -245,10 +438,31 @@ impl Store {
         legacy_items: &[TimelineItem],
     ) -> Result<()> {
         let path = self.rounds_path(workspace_id, session_id);
-        if path.exists() {
+        if !path.exists() {
+            let records = rounds::migrate_legacy(legacy_items);
+            return self.write_rounds(workspace_id, session_id, &records);
+        }
+        let mut records = self.load_rounds(workspace_id, session_id)?;
+        if records
+            .iter()
+            .all(|record| record.schema_version >= rounds::SCHEMA_VERSION)
+        {
             return Ok(());
         }
-        let records = rounds::migrate_legacy(legacy_items);
+        let items_by_id: std::collections::HashMap<&str, &TimelineItem> =
+            legacy_items.iter().map(|item| (item.id(), item)).collect();
+        for record in &mut records {
+            if record.schema_version >= rounds::SCHEMA_VERSION {
+                continue;
+            }
+            let round_items: Vec<TimelineItem> = record
+                .item_ids
+                .iter()
+                .filter_map(|id| items_by_id.get(id.as_str()).map(|item| (*item).clone()))
+                .collect();
+            record.trunk_summaries = rounds::summarize_trunks(&round_items);
+            record.schema_version = rounds::SCHEMA_VERSION;
+        }
         self.write_rounds(workspace_id, session_id, &records)
     }
 
@@ -311,6 +525,8 @@ impl Store {
     pub fn delete(&self, workspace_id: &str, session_id: &str) -> Result<()> {
         let _ = fs::remove_file(self.timeline_path(workspace_id, session_id));
         let _ = fs::remove_file(self.rounds_path(workspace_id, session_id));
+        let _ = fs::remove_file(self.blob_index_path(workspace_id, session_id));
+        let _ = fs::remove_dir_all(self.dir(workspace_id).join(session_id));
         let _ = fs::remove_file(self.meta_path(workspace_id, session_id));
         let _ = fs::remove_dir_all(self.scratch_dir(workspace_id, session_id));
         Ok(())
@@ -552,8 +768,14 @@ mod tests {
         with_trunks.trunk_summaries = vec![rounds::TrunkSummary {
             index: 0,
             first_item_id: "a1".into(),
-            item_count: 3,
-            overview: "reading the config first".into(),
+            blob_count: 3,
+            title: "reading the config first".into(),
+            batches: vec![rounds::BatchSummary {
+                index: 0,
+                first_item_id: "a1".into(),
+                blob_count: 3,
+                text: "reading the config first".into(),
+            }],
         }];
         store.append_round("w1", "s1", &with_trunks).unwrap();
 
@@ -681,6 +903,107 @@ mod tests {
         let loaded = store.load_rounds("w1", "s1").unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].round_id, "legacy_r_t1");
+    }
+
+    #[test]
+    fn schema_one_trunks_upgrade_once_to_sixty_four_sixteen_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let root = dir.path().join("w1");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("s1.rounds.jsonl"),
+            "{\"schemaVersion\":1,\"roundId\":\"r1\",\"startedAtMs\":1,\"endedAtMs\":2,\
+             \"outcome\":\"completed\",\"adapterTurnIds\":[\"t1\"],\
+             \"itemIds\":[\"u1\",\"a1\",\"c1\",\"turn-summary-t1\"],\"blockedMs\":0,\
+             \"trunkSummaries\":[{\"index\":0,\"firstItemId\":\"a1\",\"itemCount\":1,\
+             \"overview\":\"old title\"}]}\n",
+        )
+        .unwrap();
+        let items = vec![
+            TimelineItem::UserMessage {
+                id: "u1".into(),
+                text: "do it".into(),
+                attachments: vec![],
+            },
+            TimelineItem::AssistantMessage {
+                id: "a1".into(),
+                text: "先读取配置。再修改".into(),
+            },
+            TimelineItem::ToolCall {
+                id: "c1".into(),
+                name: "read".into(),
+                status: ToolStatus::Ok,
+                detail: genehub_proto::ToolCallDetail::Read {
+                    path: "a.txt".into(),
+                    content: "source".into(),
+                    truncated: false,
+                },
+            },
+            TimelineItem::TurnSummary {
+                id: "turn-summary-t1".into(),
+                stats: genehub_proto::TurnStats {
+                    turn_id: "t1".into(),
+                    outcome: genehub_proto::TurnOutcome::Completed,
+                    started_at_ms: 1,
+                    finished_at_ms: 2,
+                    duration_ms: 1,
+                    usage: genehub_proto::Usage::default(),
+                    tool_calls: 1,
+                    fork_checkpoint: None,
+                },
+            },
+        ];
+
+        store.ensure_rounds_migrated("w1", "s1", &items).unwrap();
+        let upgraded = store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(upgraded[0].schema_version, rounds::SCHEMA_VERSION);
+        assert_eq!(upgraded[0].trunk_summaries[0].blob_count, 1);
+        assert_eq!(upgraded[0].trunk_summaries[0].title, "先读取配置。");
+        assert_eq!(upgraded[0].trunk_summaries[0].batches.len(), 1);
+
+        store.ensure_rounds_migrated("w1", "s1", &[]).unwrap();
+        assert_eq!(
+            store.load_rounds("w1", "s1").unwrap()[0].trunk_summaries,
+            upgraded[0].trunk_summaries
+        );
+    }
+
+    #[test]
+    fn blobs_are_content_addressed_batched_and_retrievable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let value = serde_json::json!({"type":"reasoning","id":"r1","text":"完整思考"});
+        let first = store
+            .put_blob("w1", "s1", "r1", BlobKind::Reasoning, value.clone())
+            .unwrap();
+        let second = store
+            .put_blob("w1", "s1", "r2", BlobKind::Reasoning, value.clone())
+            .unwrap();
+        assert_eq!(
+            first.hash, second.hash,
+            "equal content deduplicates by hash"
+        );
+        assert_eq!(
+            store
+                .get_blob("w1", "s1", &first.hash)
+                .unwrap()
+                .unwrap()
+                .value,
+            value
+        );
+        let batch = dir
+            .path()
+            .join("w1")
+            .join("s1")
+            .join("blobs")
+            .join(format!("{}.batch", &first.hash[..2]));
+        assert_eq!(
+            std::fs::read_to_string(batch).unwrap().lines().count(),
+            1,
+            "the hash bucket stores equal content only once"
+        );
+        assert_eq!(store.load_blob_refs("w1", "s1").unwrap().len(), 2);
     }
 
     #[test]

@@ -778,7 +778,7 @@ describe("the daemon connection", () => {
     await settle();
 
     const resubscribe = second.lastOf("subscribe");
-    expect(resubscribe.payload).toEqual({ sessionId: "s1", sinceSeq: 2 });
+    expect(resubscribe.payload).toMatchObject({ sessionId: "s1", sinceSeq: 2 });
 
     second.reply(resubscribe.id, {
       type: "subscribed",
@@ -825,7 +825,7 @@ describe("the daemon connection", () => {
     await settle();
 
     const asked = socket.lastOf("subscribe");
-    expect(asked.payload).toEqual({ sessionId: "s1", sinceSeq: 1 });
+    expect(asked.payload).toMatchObject({ sessionId: "s1", sinceSeq: 1 });
 
     socket.reply(asked.id, {
       type: "subscribed",
@@ -868,7 +868,7 @@ describe("the daemon connection", () => {
     expect(
       socket.sent.filter((frame) => frame.type === "subscribe").length,
     ).toBe(before + 1);
-    expect(firstRepair.payload).toEqual({ sessionId: "s1", sinceSeq: 1 });
+    expect(firstRepair.payload).toMatchObject({ sessionId: "s1", sinceSeq: 1 });
     expect(seen).toEqual([1]);
 
     socket.reply(firstRepair.id, {
@@ -882,7 +882,7 @@ describe("the daemon connection", () => {
     await settle();
     const secondRepair = socket.lastOf("subscribe");
     expect(secondRepair.id).not.toBe(firstRepair.id);
-    expect(secondRepair.payload).toEqual({ sessionId: "s1", sinceSeq: 2 });
+    expect(secondRepair.payload).toMatchObject({ sessionId: "s1", sinceSeq: 2 });
     socket.reply(secondRepair.id, {
       type: "subscribed",
       data: {

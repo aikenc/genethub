@@ -64,6 +64,14 @@ pub enum Request {
         #[serde(default)]
         #[ts(type = "number")]
         since_seq: Option<u64>,
+        /// Requests the session/round/blob addressing model instead of a full
+        /// historical timeline. Defaults off for protocol-v2 clients.
+        #[serde(default)]
+        layered: bool,
+        /// Prefetches the last round's trunk index and final trunk details in
+        /// the subscription response.
+        #[serde(default)]
+        expand_last_round: bool,
     },
     #[serde(rename = "unsubscribe", rename_all = "camelCase")]
     Unsubscribe { session_id: String },
@@ -97,6 +105,23 @@ pub enum Request {
     },
     #[serde(rename = "session.get", rename_all = "camelCase")]
     SessionGet { session_id: String },
+    #[serde(rename = "round.trunk.list", rename_all = "camelCase")]
+    RoundTrunkList {
+        session_id: String,
+        round_id: String,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    #[serde(rename = "round.trunk.get", rename_all = "camelCase")]
+    RoundTrunkGet {
+        session_id: String,
+        round_id: String,
+        trunk_index: u32,
+    },
+    #[serde(rename = "blob.get", rename_all = "camelCase")]
+    BlobGet { session_id: String, hash: String },
     #[serde(rename = "session.send", rename_all = "camelCase")]
     SessionSend {
         session_id: String,
@@ -411,6 +436,9 @@ pub enum Reply {
     Session(SessionSummary),
     Sessions(Vec<SessionSummary>),
     Snapshot(SessionSnapshot),
+    RoundLayer(RoundLayer),
+    RoundTrunk(RoundTrunk),
+    Blob(BlobPayload),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),
     Directory(DirectoryListing),

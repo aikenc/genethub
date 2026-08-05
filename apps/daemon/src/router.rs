@@ -250,7 +250,13 @@ pub async fn handle(
         Request::Subscribe {
             session_id,
             since_seq,
-        } => match state.sessions.subscribe(&session_id, since_seq).await {
+            layered,
+            expand_last_round,
+        } => match state
+            .sessions
+            .subscribe(&session_id, since_seq, layered, expand_last_round)
+            .await
+        {
             Ok((snapshot, replayed, reset, receiver)) => Handled {
                 reply: Ok(Reply::Subscribed {
                     snapshot,
@@ -330,6 +336,40 @@ pub async fn handle(
             Ok(snapshot) => Handled::ok(Reply::Snapshot(snapshot)),
             Err(error) => failed(error),
         },
+
+        Request::RoundTrunkList {
+            session_id,
+            round_id,
+            cursor,
+            limit,
+        } => match state
+            .sessions
+            .round_layer(&session_id, &round_id, cursor.as_deref(), limit)
+            .await
+        {
+            Ok(layer) => Handled::ok(Reply::RoundLayer(layer)),
+            Err(error) => failed(error),
+        },
+
+        Request::RoundTrunkGet {
+            session_id,
+            round_id,
+            trunk_index,
+        } => match state
+            .sessions
+            .round_trunk(&session_id, &round_id, trunk_index)
+            .await
+        {
+            Ok(trunk) => Handled::ok(Reply::RoundTrunk(trunk)),
+            Err(error) => failed(error),
+        },
+
+        Request::BlobGet { session_id, hash } => {
+            match state.sessions.blob(&session_id, &hash).await {
+                Ok(blob) => Handled::ok(Reply::Blob(blob)),
+                Err(error) => failed(error),
+            }
+        }
 
         Request::SessionSend {
             session_id,

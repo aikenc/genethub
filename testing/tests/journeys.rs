@@ -1231,6 +1231,65 @@ async fn a_commands_output_stays_behind_the_access_layer() {
         other => panic!("unexpected {other:?}"),
     }
 
+    let snapshot = match journey
+        .client
+        .call(Request::Subscribe {
+            session_id: session.clone(),
+            since_seq: Some(0),
+            layered: true,
+            expand_last_round: true,
+        })
+        .await
+        .expect("layered session opens")
+    {
+        Reply::Subscribed {
+            snapshot,
+            replayed,
+            reset,
+        } => {
+            assert!(reset);
+            assert!(
+                replayed.is_empty(),
+                "historical tool output is not replayed beside the layered snapshot"
+            );
+            snapshot
+        }
+        other => panic!("unexpected {other:?}"),
+    };
+    assert!(snapshot.items.iter().all(|item| !matches!(
+        item,
+        TimelineItem::ToolCall { .. } | TimelineItem::Reasoning { .. }
+    )));
+    let expanded = snapshot
+        .expanded_round
+        .expect("the unread last round is prefetched");
+    let blob_ref = expanded
+        .expanded_trunk
+        .expect("the last trunk is prefetched")
+        .batches
+        .into_iter()
+        .flat_map(|batch| batch.blobs)
+        .find(|blob| blob.kind == genehub_proto::BlobKind::ToolCall)
+        .and_then(|blob| blob.blob)
+        .expect("the tool overview addresses its source blob");
+    let payload = match journey
+        .client
+        .call(Request::BlobGet {
+            session_id: session.clone(),
+            hash: blob_ref.hash,
+        })
+        .await
+        .expect("source blob is fetched on demand")
+    {
+        Reply::Blob(payload) => payload,
+        other => panic!("unexpected {other:?}"),
+    };
+    let source_bytes = payload.value.to_string().len();
+    assert!(
+        source_bytes > 1_000,
+        "the on-demand blob retains substantially more than the overview ({source_bytes} bytes)"
+    );
+
     journey.finish().await;
 }
 
@@ -1263,6 +1322,8 @@ async fn reconnecting_replays_the_gap_without_losing_or_repeating_events() {
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: Some(0),
+            layered: false,
+            expand_last_round: false,
         })
         .await
         .unwrap()
@@ -1318,6 +1379,8 @@ async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
         .call(Request::Subscribe {
             session_id: session,
             since_seq: Some(0),
+            layered: false,
+            expand_last_round: false,
         })
         .await
         .unwrap()
@@ -1404,6 +1467,8 @@ async fn history_survives_a_daemon_restart_and_the_conversation_continues() {
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
+            layered: false,
+            expand_last_round: false,
         })
         .await
         .expect("resubscribed");
@@ -1498,6 +1563,8 @@ async fn a_session_found_in_the_list_can_be_reopened_and_continued() {
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
+            layered: false,
+            expand_last_round: false,
         })
         .await
         .unwrap()
@@ -1737,11 +1804,18 @@ async fn a_completed_round_is_recorded_in_the_round_ledger_on_disk() {
     );
     assert_eq!(trunks[0]["index"], json!(0));
     assert!(
-        !trunks[0]["overview"]
+        !trunks[0]["title"]
             .as_str()
-            .expect("a trunk overview is always a string")
+            .expect("a trunk title is always a string")
             .is_empty(),
-        "a trunk that opened with a monologue must not report a blank overview"
+        "a trunk that opened with a monologue must not report a blank title"
+    );
+    assert!(
+        !trunks[0]["batches"]
+            .as_array()
+            .expect("a trunk always carries its bounded batch index")
+            .is_empty(),
+        "a short trunk still has one visible batch"
     );
 
     journey.finish().await;
@@ -1845,6 +1919,8 @@ async fn a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns() 
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
+            layered: false,
+            expand_last_round: false,
         })
         .await
         .expect("subscribed");
@@ -1873,6 +1949,8 @@ async fn a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns() 
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: Some(seen_up_to),
+            layered: false,
+            expand_last_round: false,
         })
         .await
         .unwrap()
@@ -1923,6 +2001,8 @@ async fn a_second_client_sees_the_same_session_as_the_first() {
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
+            layered: false,
+            expand_last_round: false,
         })
         .await
         .expect("subscribed");

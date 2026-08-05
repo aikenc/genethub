@@ -1,8 +1,8 @@
-import type { AgentInfo, TimelineItem } from "@genehub/proto";
+import type { AgentInfo, RoundLayer, RoundTrunk, TimelineItem } from "@genehub/proto";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useWorkbench } from "./store";
 import {
@@ -19,7 +19,7 @@ import { ComposerControls } from "./ComposerControls";
 import { PermissionCard } from "./Permission";
 import { TimelineView } from "./TimelineView";
 import { ToolCallView } from "./ToolCall";
-import { apply, emptyTimeline } from "./timeline";
+import { apply, emptyTimeline, type TimelineState } from "./timeline";
 
 const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
   id: "genet",
@@ -55,6 +55,17 @@ const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
   ...overrides,
 });
 
+afterEach(() => {
+  useWorkbench.setState({ timeline: emptyTimeline() });
+});
+
+/** Puts one session's round layer on screen, the way a snapshot would. */
+function showRounds(state: TimelineState, layer: Partial<TimelineState>): TimelineState {
+  const timeline = { ...state, ...layer };
+  useWorkbench.setState({ timeline });
+  return timeline;
+}
+
 describe("what the user sees in a session", () => {
   it("shows the reply as it streams rather than only when it finishes", () => {
     let state = emptyTimeline();
@@ -88,157 +99,114 @@ describe("what the user sees in a session", () => {
     expect(screen.getByText("先看看目录结构")).toBeInTheDocument();
   });
 
-  it("leaves a lone tool call ungrouped, same as before this grouping existed", () => {
-    const state = apply(emptyTimeline(), {
-      type: "item",
-      turnId: "t1",
-      item: {
-        type: "toolCall",
-        id: "c1",
-        name: "read_file",
-        status: "ok",
-        detail: { kind: "read", path: "a.txt", content: "hi", truncated: false },
+  it("renders the daemon's visible round, trunk, batch and blob hierarchy", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    const batch = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 2,
+      text: "先检查配置",
+    };
+    const trunkSummary = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 2,
+      title: "先检查配置。",
+      batches: [batch],
+    };
+    const layer: RoundLayer = {
+      round,
+      trunks: [trunkSummary],
+      expandedTrunk: {
+        summary: trunkSummary,
+        batches: [
+          {
+            summary: batch,
+            blobs: [
+              {
+                itemId: "think1",
+                kind: "reasoning",
+                overview: "确认结构",
+                blob: { hash: "ab".repeat(32), bytes: 48 },
+              },
+              {
+                itemId: "tool1",
+                kind: "toolCall",
+                overview: "读取配置",
+                blob: { hash: "cd".repeat(32), bytes: 96 },
+              },
+            ],
+          },
+        ],
       },
-    });
-
-    render(<TimelineView state={state} />);
-    expect(screen.getByTestId("tool-call")).toBeInTheDocument();
-    expect(screen.queryByTestId("work-group")).not.toBeInTheDocument();
-  });
-
-  /**
-   * The original complaint: an agent's tool calls and thinking used to land
-   * on screen one card each, so a long-running task turned into a wall of
-   * collapsed cards the user had to scroll past to find the current state.
-   * A run of several in a row now folds into one group instead.
-   */
-  it("folds a long run of tool calls into one collapsed group", async () => {
-    const tool = (id: string): TimelineItem => ({
-      type: "toolCall",
-      id,
-      name: "grep",
-      status: id === "c1" ? "error" : "ok",
-      detail: { kind: "search", query: "TODO", matches: [] },
-    });
-    let state = emptyTimeline();
-    for (const id of ["c1", "c2", "c3", "c4", "c5"]) {
-      state = apply(state, { type: "item", turnId: "t1", item: tool(id) });
-    }
-    state = apply(state, {
-      type: "turnCompleted",
-      turnId: "t1",
-      usage: {
-        inputTokens: 1,
-        outputTokens: 1,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        costUsd: undefined,
-      },
-    });
-
-    render(<TimelineView state={state} />);
-    expect(screen.queryAllByTestId("tool-call")).toHaveLength(0);
-    const group = screen.getByTestId("work-group");
-    expect(group).toHaveTextContent("运行了 5 次工具（grep）");
-    expect(group).not.toHaveClass("border-danger/50");
-
-    await userEvent.click(within(group).getByRole("button", { name: "展开 5 项" }));
-    expect(screen.getAllByTestId("tool-call")).toHaveLength(5);
-  });
-
-  it("moves the automatic opening with the live tail and closes everything on completion", () => {
-    const readCall = (id: string): TimelineItem => ({
-      type: "toolCall",
-      id,
-      name: "read_file",
-      status: "ok",
-      detail: { kind: "read", path: `${id}.txt`, content: "", truncated: false },
-    });
-    const editCall = (id: string): TimelineItem => ({
-      type: "toolCall",
-      id,
-      name: "edit",
-      status: "ok",
-      detail: { kind: "edit", path: `${id}.txt`, diff: "" },
-    });
-
-    let state = apply(emptyTimeline(), { type: "turnStarted", turnId: "t1", startedAtMs: 1 });
-    state = apply(state, {
-      type: "item",
-      turnId: "t1",
-      item: {
-        type: "assistantMessage",
-        id: "a1",
-        text: "先看看已有文件",
-      },
-    });
-    for (const id of ["c1", "c2", "c3"]) {
-      state = apply(state, { type: "item", turnId: "t1", item: readCall(id) });
-    }
-
-    const view = render(<TimelineView state={state} />);
-    expect(
-      within(screen.getByTestId("work-group")).getByRole("button", { name: "收起" }),
-    ).toBeInTheDocument();
-
-    state = apply(state, {
-      type: "item",
-      turnId: "t1",
-      item: { type: "assistantMessage", id: "a2", text: "现在开始修改" },
-    });
-    for (const id of ["c4", "c5"]) {
-      state = apply(state, { type: "item", turnId: "t1", item: editCall(id) });
-    }
-
-    view.rerender(<TimelineView state={state} />);
-    let groups = screen.getAllByTestId("work-group");
-    expect(groups).toHaveLength(2);
-    // The first batch was open when it was the live tail. It must close now,
-    // rather than preserving the initial `defaultOpen` forever.
-    expect(within(groups[0]!).getByRole("button", { name: "展开 3 项" })).toBeInTheDocument();
-    expect(within(groups[1]!).getByRole("button", { name: "收起" })).toBeInTheDocument();
-    expect(within(groups[1]!).getAllByTestId("tool-call")).toHaveLength(2);
-
-    state = apply(state, {
-      type: "turnCompleted",
-      turnId: "t1",
-      usage: {
-        inputTokens: 1,
-        outputTokens: 1,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        costUsd: undefined,
-      },
-    });
-    view.rerender(<TimelineView state={state} />);
-    groups = screen.getAllByTestId("work-group");
-    expect(within(groups[0]!).getByRole("button", { name: "展开 3 项" })).toBeInTheDocument();
-    expect(within(groups[1]!).getByRole("button", { name: "展开 2 项" })).toBeInTheDocument();
-    expect(screen.queryAllByTestId("tool-call")).toHaveLength(0);
-  });
-
-  it("does not overwrite a user's explicit group choice on rerender", async () => {
-    let state = emptyTimeline();
-    for (const id of ["c1", "c2"]) {
-      state = apply(state, {
+    };
+    const expanded = layer.expandedTrunk as RoundTrunk;
+    const state = showRounds(
+      apply(emptyTimeline(), {
         type: "item",
         turnId: "t1",
-        item: {
-          type: "toolCall",
-          id,
-          name: "grep",
-          status: "ok",
-          detail: { kind: "search", query: "TODO", matches: [] },
-        },
-      });
-    }
+        item: { type: "userMessage", id: "u1", text: "检查项目", attachments: [] },
+      }),
+      { rounds: [round], roundLayers: { r1: layer }, roundTrunks: { "r1:0": expanded } },
+    );
 
+    render(<TimelineView state={state} />);
+    expect(screen.getByTestId("round")).toHaveTextContent("1 个阶段");
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("先检查配置。");
+    expect(screen.getByTestId("round-batch")).toHaveTextContent("先检查配置");
+    expect(screen.getByText("确认结构")).toBeInTheDocument();
+    expect(screen.getByText("读取配置")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /确认结构/ }));
+    expect(screen.getByText("正在加载…")).toBeInTheDocument();
+  });
+
+  it("keeps historical trunks collapsed and preserves a manual expansion", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "t1",
+      blobCount: 1,
+      title: "调用了 1 次工具",
+      batches: [
+        { index: 0, firstItemId: "t1", blobCount: 1, text: "调用了 1 次工具" },
+      ],
+    };
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "运行", attachments: [] },
+      }),
+      { rounds: [round], roundLayers: { r1: { round, trunks: [summary] } } },
+    );
     const view = render(<TimelineView state={state} />);
-    await userEvent.click(screen.getByRole("button", { name: "展开 2 项" }));
-    expect(screen.getByRole("button", { name: "收起" })).toBeInTheDocument();
-
+    const roundCard = screen.getByTestId("round");
+    expect(within(roundCard).getByRole("button", { name: /展开/ })).toBeInTheDocument();
+    await userEvent.click(within(roundCard).getByRole("button", { name: /展开/ }));
+    const trunk = screen.getByTestId("round-trunk");
+    expect(within(trunk).getByRole("button")).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(within(trunk).getByRole("button"));
+    expect(within(trunk).getByRole("button")).toHaveAttribute("aria-expanded", "true");
     view.rerender(<TimelineView state={{ ...state }} />);
-    expect(screen.getByRole("button", { name: "收起" })).toBeInTheDocument();
+    expect(within(screen.getByTestId("round-trunk")).getByRole("button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
   });
 
   it("keeps a successful shell call compact until its details are requested", async () => {

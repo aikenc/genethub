@@ -5,9 +5,10 @@
 //! `workspaceDelta` field, because nothing populates them yet (§8 step 5) —
 //! an empty-looking field would be a false claim of completeness (rule D).
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use genehub_proto::{TimelineItem, TurnOutcome};
+use genehub_proto::{RoundBatchSummary, RoundTrunkSummary, TimelineItem, TurnOutcome};
+use serde::{Deserialize, Serialize};
 
 use super::overview;
 
@@ -15,7 +16,7 @@ use super::overview;
 /// reader could misread rather than merely ignore. A reader that meets a
 /// version it does not know must fall back to a read-only, ledger-less view
 /// of the session rather than guess at the new fields' meaning.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,183 +69,228 @@ pub struct RoundRecord {
     pub trunk_summaries: Vec<TrunkSummary>,
 }
 
-/// One trunk: a bounded slice of a round's tool-call-and-thinking stream,
-/// closed either at a monologue boundary or at [`TRUNK_MAX_ITEMS`] — see
-/// `SessionManager`'s `record_trunk_item`/`close_current_trunk` for the
-/// state machine that produces these. Small and paginable by design: a round
-/// with thousands of items still produces one small record per trunk, not
-/// one record whose size scales with the round.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TrunkSummary {
-    /// Position of this trunk within the round, starting at 0.
-    pub index: u32,
-    /// Id of this trunk's first item — enough to locate it in the round's
-    /// `item_ids` without duplicating them here.
-    pub first_item_id: String,
-    /// How many `ToolCall`/`Reasoning` items this trunk holds. A leading
-    /// monologue is not counted, since it is what `overview` already shows.
-    pub item_count: u32,
-    /// The trunk's headline: its first monologue's text if it opened with
-    /// one, else a deterministic summary synthesized from the tool calls it
-    /// contains — never blank, never a guess dressed up as agent prose
-    /// (rule D).
-    pub overview: String,
-}
+pub type TrunkSummary = RoundTrunkSummary;
+pub type BatchSummary = RoundBatchSummary;
 
-/// Trunks close at a monologue boundary or here, whichever comes first — a
-/// hard cap so an agent that never narrates still produces bounded trunks
-/// (§3.2 direction three).
-pub const TRUNK_MAX_ITEMS: u32 = 32;
+/// A semantic batch never exposes more than sixteen blobs at once.
+pub const BATCH_MAX_BLOBS: u32 = 16;
+/// A visible trunk contains at most four full batches.
+pub const TRUNK_MAX_BLOBS: u32 = 64;
 
-/// The three item kinds that participate in trunk boundaries. Every other
-/// `TimelineItem` variant (user messages, permission requests, plans, turn
-/// summaries, …) is invisible to `TrunkBuilder` — trunks paginate the
-/// tool-call-and-thinking stream, not the round's other item types.
 pub enum TrunkItem<'a> {
-    /// An `AssistantMessage`. Closes the trunk being built if it already
-    /// holds at least one tool call or reasoning block; otherwise merges
-    /// into it, so a run of consecutive monologues does not spray a string
-    /// of empty trunks. Carries no text: a streamed `AssistantMessage`
-    /// typically still holds an empty string the moment its `Item` event
-    /// first arrives (deltas fill it in afterward), so `TrunkBuilder` only
-    /// remembers *which* item opened the trunk — resolving its text is
-    /// `Live::resolve_monologue_text`'s job, done once the boundary is
-    /// known, against the item's current (by-then-final) state.
     Monologue,
-    /// A `Reasoning` block. Counts toward the 32-item cap.
     Reasoning,
-    /// A `ToolCall`, carrying its tool name for the synthesized fallback
-    /// overview. Counts toward the 32-item cap.
     ToolCall(&'a str),
 }
 
-/// A trunk that just closed its boundary bookkeeping, with everything
-/// needed to build a [`TrunkSummary`] except the resolved overview text and
-/// its index. Deliberately stops short of resolving the overview itself:
-/// that needs a live look at the monologue item's *current* text, which
-/// only the caller holding the session's item store can provide (see
-/// `into_summary`).
+#[derive(Debug, Clone, Default)]
+struct BatchBuilder {
+    item_ids: Vec<String>,
+    blob_count: u32,
+    monologue_item_id: Option<String>,
+    first_reasoning_item_id: Option<String>,
+    tool_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClosedBatch {
+    pub first_item_id: String,
+    pub blob_count: u32,
+    pub monologue_item_id: Option<String>,
+    pub first_reasoning_item_id: Option<String>,
+    pub tool_count: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClosedTrunk {
     pub first_item_id: String,
-    pub item_count: u32,
-    /// Id of the trunk's opening monologue, if it had one — look this item
-    /// up for its current text to get the overview.
-    pub monologue_item_id: Option<String>,
-    /// Tool names seen, first-seen order, deduplicated — used only for the
-    /// synthesized fallback overview when this trunk had no monologue.
-    pub tool_names: Vec<String>,
+    pub blob_count: u32,
+    pub first_monologue_item_id: Option<String>,
+    pub batches: Vec<ClosedBatch>,
 }
 
 impl ClosedTrunk {
-    /// Produces the persisted summary. `monologue_text` is the opening
-    /// monologue's current text (`None` if this trunk had none, or if it
-    /// could not be found — treated the same as "no monologue" rather than
-    /// panicking, since a missing item is a should-not-happen, not an
-    /// invariant worth crashing over). An empty string is also treated as
-    /// absent: a monologue that somehow never got any text is no better
-    /// than not having one.
-    pub fn into_summary(self, index: u32, monologue_text: Option<&str>) -> TrunkSummary {
-        let overview = monologue_text
-            .map(|text| overview::shorten(text, overview::SUMMARY_CHARS))
+    pub fn into_summary(self, index: u32, texts: &HashMap<String, String>) -> TrunkSummary {
+        let batches: Vec<BatchSummary> = self
+            .batches
+            .into_iter()
+            .enumerate()
+            .map(|(batch_index, batch)| {
+                let text = batch
+                    .monologue_item_id
+                    .as_ref()
+                    .and_then(|id| texts.get(id))
+                    .map(|text| overview::shorten(text, 100))
+                    .filter(|text| !text.is_empty())
+                    .or_else(|| {
+                        batch
+                            .first_reasoning_item_id
+                            .as_ref()
+                            .and_then(|id| texts.get(id))
+                            .map(|text| overview::shorten(text, 100))
+                            .filter(|text| !text.is_empty())
+                    })
+                    .unwrap_or_else(|| format!("调用了 {} 次工具", batch.tool_count));
+                BatchSummary {
+                    index: batch_index as u32,
+                    first_item_id: batch.first_item_id,
+                    blob_count: batch.blob_count,
+                    text,
+                }
+            })
+            .collect();
+        let title = self
+            .first_monologue_item_id
+            .as_ref()
+            .and_then(|id| texts.get(id))
+            .map(|text| first_sentence(text))
             .filter(|text| !text.is_empty())
-            .unwrap_or_else(|| synthesized_overview(&self.tool_names, self.item_count));
+            .or_else(|| batches.first().map(|batch| overview::clip(&batch.text, 32)))
+            .unwrap_or_else(|| "工作过程".to_string());
         TrunkSummary {
             index,
             first_item_id: self.first_item_id,
-            item_count: self.item_count,
-            overview,
+            blob_count: self.blob_count,
+            title,
+            batches,
         }
     }
 }
 
-/// Accumulates one round's still-open trunk, one item at a time, in round
-/// order. Pure and daemon-state-free by design: `SessionManager` owns *when*
-/// each item arrives and *whether* a round is even open, and resolves the
-/// monologue's text once a boundary is known; this only owns the boundary
-/// arithmetic, so the boundary rules can be unit-tested without any of the
-/// `Live`/`Mutex` machinery around them.
 #[derive(Debug, Clone, Default)]
 pub struct TrunkBuilder {
-    item_ids: Vec<String>,
-    work_count: u32,
-    monologue_item_id: Option<String>,
-    tool_names: Vec<String>,
+    current_batch: BatchBuilder,
+    closed_batches: Vec<ClosedBatch>,
+    blob_count: u32,
+    first_item_id: Option<String>,
+    first_monologue_item_id: Option<String>,
 }
 
 impl TrunkBuilder {
-    /// Feeds one item into the trunk. Returns the just-closed trunk when
-    /// this item crossed a boundary — either because it is a monologue
-    /// arriving after at least one tool call/reasoning block, or because it
-    /// is the item that pushed the tool-call/reasoning count to
-    /// [`TRUNK_MAX_ITEMS`]. Both cannot happen from the same call: a
-    /// monologue never counts toward the cap, so an item cannot be both the
-    /// thing that opens a new trunk and the thing that caps it.
     pub fn push(&mut self, item_id: &str, item: TrunkItem<'_>) -> Option<ClosedTrunk> {
-        let opens_new_trunk = matches!(item, TrunkItem::Monologue) && self.work_count > 0;
-        let closed_by_boundary = if opens_new_trunk { self.close() } else { None };
+        let mut closed_trunk = None;
+        if matches!(item, TrunkItem::Monologue) && self.current_batch.blob_count > 0 {
+            self.close_batch();
+            if self.blob_count >= TRUNK_MAX_BLOBS {
+                closed_trunk = self.close_finished();
+            }
+        }
 
+        if self.first_item_id.is_none() {
+            self.first_item_id = Some(item_id.to_string());
+        }
+        if self.current_batch.item_ids.is_empty() {
+            self.current_batch.item_ids.push(item_id.to_string());
+        } else if !self.current_batch.item_ids.iter().any(|id| id == item_id) {
+            self.current_batch.item_ids.push(item_id.to_string());
+        }
         match item {
             TrunkItem::Monologue => {
-                if self.monologue_item_id.is_none() {
-                    self.monologue_item_id = Some(item_id.to_string());
+                if self.current_batch.monologue_item_id.is_none() {
+                    self.current_batch.monologue_item_id = Some(item_id.to_string());
+                }
+                if self.first_monologue_item_id.is_none() {
+                    self.first_monologue_item_id = Some(item_id.to_string());
                 }
             }
-            TrunkItem::ToolCall(name) => {
-                self.work_count += 1;
-                if !self.tool_names.iter().any(|seen| seen == name) {
-                    self.tool_names.push(name.to_string());
-                }
+            TrunkItem::ToolCall(_) => {
+                self.current_batch.blob_count += 1;
+                self.current_batch.tool_count += 1;
+                self.blob_count += 1;
             }
             TrunkItem::Reasoning => {
-                self.work_count += 1;
+                self.current_batch.blob_count += 1;
+                self.blob_count += 1;
+                if self.current_batch.first_reasoning_item_id.is_none() {
+                    self.current_batch.first_reasoning_item_id = Some(item_id.to_string());
+                }
             }
         }
-        self.item_ids.push(item_id.to_string());
 
-        if closed_by_boundary.is_some() {
-            return closed_by_boundary;
+        if self.current_batch.blob_count >= BATCH_MAX_BLOBS {
+            self.close_batch();
         }
-        if self.work_count >= TRUNK_MAX_ITEMS {
-            return self.close();
+        if self.blob_count >= TRUNK_MAX_BLOBS {
+            return self.close_finished().or(closed_trunk);
         }
-        None
+        closed_trunk
     }
 
-    /// Closes the trunk being built, if it holds anything, and resets the
-    /// builder for the next one. Called both mid-round (a boundary crossed)
-    /// and when the round itself settles — a round ending mid-trunk must
-    /// not silently drop what it had accumulated since the last boundary.
     pub fn close(&mut self) -> Option<ClosedTrunk> {
-        if self.item_ids.is_empty() {
+        self.close_batch();
+        self.close_finished()
+    }
+
+    fn close_batch(&mut self) {
+        if self.current_batch.item_ids.is_empty() {
+            return;
+        }
+        let batch = std::mem::take(&mut self.current_batch);
+        self.closed_batches.push(ClosedBatch {
+            first_item_id: batch.item_ids[0].clone(),
+            blob_count: batch.blob_count,
+            monologue_item_id: batch.monologue_item_id,
+            first_reasoning_item_id: batch.first_reasoning_item_id,
+            tool_count: batch.tool_count,
+        });
+    }
+
+    fn close_finished(&mut self) -> Option<ClosedTrunk> {
+        if self.closed_batches.is_empty() {
             return None;
         }
-        let item_ids = std::mem::take(&mut self.item_ids);
-        let work_count = std::mem::take(&mut self.work_count);
-        let monologue_item_id = self.monologue_item_id.take();
-        let tool_names = std::mem::take(&mut self.tool_names);
         Some(ClosedTrunk {
-            first_item_id: item_ids[0].clone(),
-            item_count: work_count,
-            monologue_item_id,
-            tool_names,
+            first_item_id: self.first_item_id.take().unwrap_or_default(),
+            blob_count: std::mem::take(&mut self.blob_count),
+            first_monologue_item_id: self.first_monologue_item_id.take(),
+            batches: std::mem::take(&mut self.closed_batches),
         })
     }
 }
 
-/// The overview a trunk gets when it closes with no monologue at all —
-/// deterministic and derived only from what actually ran, never a guess
-/// dressed up as agent prose (rule D).
-fn synthesized_overview(tool_names: &[String], work_count: u32) -> String {
-    if tool_names.is_empty() {
-        format!("记录了 {work_count} 次思考")
-    } else {
-        format!(
-            "运行了 {work_count} 次工具（{}）",
-            overview::clip(&tool_names.join(", "), overview::SUMMARY_CHARS)
-        )
+fn first_sentence(text: &str) -> String {
+    let text = text.trim();
+    let end = text
+        .char_indices()
+        .find_map(|(index, character)| {
+            matches!(character, '。' | '！' | '？' | '.' | '!' | '?' | '\n')
+                .then_some(index + character.len_utf8())
+        })
+        .unwrap_or(text.len());
+    overview::clip(text[..end].trim(), 100)
+}
+
+pub fn summarize_trunks(items: &[TimelineItem]) -> Vec<TrunkSummary> {
+    let texts: HashMap<String, String> = items
+        .iter()
+        .filter_map(|item| match item {
+            TimelineItem::AssistantMessage { id, text } | TimelineItem::Reasoning { id, text } => {
+                Some((id.clone(), text.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut builder = TrunkBuilder::default();
+    let mut trunks = Vec::new();
+    for item in items {
+        let kind = match item {
+            TimelineItem::AssistantMessage { .. } => TrunkItem::Monologue,
+            TimelineItem::Reasoning { .. } => TrunkItem::Reasoning,
+            TimelineItem::ToolCall { name, .. } => TrunkItem::ToolCall(name),
+            _ => continue,
+        };
+        if let Some(trunk) = builder.push(item.id(), kind) {
+            trunks.push(trunk);
+        }
     }
+    if let Some(trunk) = builder.close() {
+        trunks.push(trunk);
+    }
+    trunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, trunk)| trunk.into_summary(index as u32, &texts))
+        .collect()
 }
 
 /// Best-effort round ledger for a session written before the round ledger
@@ -260,15 +306,17 @@ fn synthesized_overview(tool_names: &[String], work_count: u32) -> String {
 /// it is still visible in the ordinary timeline view, just not round-addressable.
 pub fn migrate_legacy(items: &[TimelineItem]) -> Vec<RoundRecord> {
     let mut records = Vec::new();
-    let mut segment: Vec<String> = Vec::new();
+    let mut segment: Vec<TimelineItem> = Vec::new();
     for item in items {
-        segment.push(item.id().to_string());
+        segment.push(item.clone());
         if let TimelineItem::TurnSummary { stats, .. } = item {
             let outcome = match stats.outcome {
                 TurnOutcome::Completed => RoundOutcome::Completed,
                 TurnOutcome::Failed => RoundOutcome::Failed,
                 TurnOutcome::Canceled => RoundOutcome::Canceled,
             };
+            let trunk_summaries = summarize_trunks(&segment);
+            let item_ids = segment.iter().map(|item| item.id().to_string()).collect();
             records.push(RoundRecord {
                 schema_version: SCHEMA_VERSION,
                 round_id: format!("legacy_r_{}", stats.turn_id),
@@ -276,14 +324,12 @@ pub fn migrate_legacy(items: &[TimelineItem]) -> Vec<RoundRecord> {
                 ended_at_ms: stats.finished_at_ms,
                 outcome,
                 adapter_turn_ids: vec![stats.turn_id.clone()],
-                item_ids: std::mem::take(&mut segment),
+                item_ids,
                 blocked_ms: 0,
                 synthesized: true,
-                // Which items shared a trunk was never recorded before this
-                // field existed — an empty list is the honest answer, not a
-                // guessed-at reconstruction (rule D).
-                trunk_summaries: Vec::new(),
+                trunk_summaries,
             });
+            segment.clear();
         }
     }
     records
@@ -391,136 +437,93 @@ mod tests {
         assert!(migrate_legacy(&[]).is_empty());
     }
 
-    #[test]
-    fn a_monologue_followed_by_work_stays_open_until_the_next_monologue() {
-        let mut trunk = TrunkBuilder::default();
-        assert!(trunk.push("a1", TrunkItem::Monologue).is_none());
-        assert!(trunk.push("t1", TrunkItem::ToolCall("read_file")).is_none());
-        assert!(trunk.push("t2", TrunkItem::ToolCall("read_file")).is_none());
-        let closed = trunk
-            .push("a2", TrunkItem::Monologue)
-            .expect("a monologue after work closes the previous trunk");
-        assert_eq!(closed.first_item_id, "a1");
-        assert_eq!(
-            closed.item_count, 2,
-            "the opening monologue itself is not counted"
-        );
-        assert_eq!(closed.monologue_item_id, Some("a1".to_string()));
-        assert_eq!(
-            closed.into_summary(0, Some("planning the fix")).overview,
-            "planning the fix"
-        );
+    fn texts(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(id, text)| ((*id).to_string(), (*text).to_string()))
+            .collect()
     }
 
     #[test]
-    fn consecutive_monologues_with_no_work_between_them_merge_into_one_trunk() {
-        let mut trunk = TrunkBuilder::default();
-        assert!(trunk.push("a1", TrunkItem::Monologue).is_none());
+    fn monologues_split_batches_but_not_trunks() {
+        let mut builder = TrunkBuilder::default();
+        builder.push("a1", TrunkItem::Monologue);
+        builder.push("t1", TrunkItem::ToolCall("read"));
+        builder.push("t2", TrunkItem::ToolCall("read"));
         assert!(
-            trunk.push("a2", TrunkItem::Monologue).is_none(),
-            "no work item happened between the two monologues, so this must not close a trunk"
+            builder.push("a2", TrunkItem::Monologue).is_none(),
+            "a monologue starts a batch, not a new trunk"
         );
-        let closed = trunk
-            .push("t1", TrunkItem::ToolCall("run"))
-            .or_else(|| trunk.close())
-            .unwrap_or_else(|| panic!("expected a trunk to close"));
-        assert_eq!(
-            closed.monologue_item_id,
-            Some("a1".to_string()),
-            "the trunk remembers the first monologue seen, not the most recent one"
+        builder.push("r1", TrunkItem::Reasoning);
+        let summary = builder.close().unwrap().into_summary(
+            0,
+            &texts(&[("a1", "先读取配置。再检查环境"), ("a2", "开始修改")]),
         );
+        assert_eq!(summary.blob_count, 3);
+        assert_eq!(summary.title, "先读取配置。");
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches[0].blob_count, 2);
+        assert_eq!(summary.batches[0].text, "先读取配置。再检查环境");
+        assert_eq!(summary.batches[1].text, "开始修改");
     }
 
     #[test]
-    fn a_pure_tool_stream_with_no_monologue_closes_at_the_32_item_cap() {
-        let mut trunk = TrunkBuilder::default();
+    fn a_batch_closes_at_sixteen_blobs_without_a_monologue() {
+        let mut builder = TrunkBuilder::default();
+        for index in 0..BATCH_MAX_BLOBS + 1 {
+            builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
+        }
+        let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches[0].blob_count, 16);
+        assert_eq!(summary.batches[0].text, "调用了 16 次工具");
+        assert_eq!(summary.batches[1].blob_count, 1);
+    }
+
+    #[test]
+    fn a_trunk_closes_at_sixty_four_blobs() {
+        let mut builder = TrunkBuilder::default();
         let mut closed = None;
-        for i in 0..TRUNK_MAX_ITEMS {
-            let id = format!("t{i}");
-            closed = trunk.push(&id, TrunkItem::ToolCall("grep"));
+        for index in 0..TRUNK_MAX_BLOBS {
+            closed = builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
         }
-        let closed = closed.expect("the 32nd tool call must close the trunk on its own");
-        assert_eq!(closed.item_count, TRUNK_MAX_ITEMS);
-        assert_eq!(closed.first_item_id, "t0");
-        assert!(closed.monologue_item_id.is_none());
-        assert_eq!(
-            closed.into_summary(0, None).overview,
-            "运行了 32 次工具（grep）",
-            "no monologue arrived, so the overview is synthesized from the tool names"
-        );
+        let summary = closed
+            .expect("the 64th blob closes the trunk")
+            .into_summary(0, &HashMap::new());
+        assert_eq!(summary.blob_count, 64);
+        assert_eq!(summary.batches.len(), 4);
+        assert!(summary.batches.iter().all(|batch| batch.blob_count == 16));
+        assert_eq!(summary.title, "调用了 16 次工具");
     }
 
     #[test]
-    fn a_pure_reasoning_stream_synthesizes_a_thinking_overview() {
-        let mut trunk = TrunkBuilder::default();
-        for i in 0..TRUNK_MAX_ITEMS - 1 {
-            assert!(trunk.push(&format!("r{i}"), TrunkItem::Reasoning).is_none());
-        }
-        let closed = trunk
-            .push("r31", TrunkItem::Reasoning)
-            .expect("the 32nd item closes the trunk");
-        assert_eq!(closed.into_summary(0, None).overview, "记录了 32 次思考");
+    fn no_monologue_uses_the_first_thinking_text_for_batch_and_trunk() {
+        let mut builder = TrunkBuilder::default();
+        builder.push("r1", TrunkItem::Reasoning);
+        builder.push("t1", TrunkItem::ToolCall("read"));
+        let summary = builder
+            .close()
+            .unwrap()
+            .into_summary(0, &texts(&[("r1", "先确认数据结构，再开始修改")]));
+        assert_eq!(summary.batches[0].text, "先确认数据结构，再开始修改");
+        assert_eq!(summary.title, "先确认数据结构，再开始修改");
     }
 
     #[test]
-    fn distinct_tool_names_are_deduplicated_in_the_synthesized_overview() {
-        let mut trunk = TrunkBuilder::default();
-        trunk.push("t1", TrunkItem::ToolCall("grep"));
-        trunk.push("t2", TrunkItem::ToolCall("read_file"));
-        let closed = trunk
-            .push("t3", TrunkItem::ToolCall("grep"))
-            .or_else(|| trunk.close());
-        assert_eq!(
-            closed.unwrap().into_summary(0, None).overview,
-            "运行了 3 次工具（grep, read_file）"
-        );
+    fn consecutive_monologues_without_work_share_one_batch() {
+        let mut builder = TrunkBuilder::default();
+        builder.push("a1", TrunkItem::Monologue);
+        builder.push("a2", TrunkItem::Monologue);
+        let summary = builder
+            .close()
+            .unwrap()
+            .into_summary(0, &texts(&[("a1", "第一句"), ("a2", "第二句")]));
+        assert_eq!(summary.batches.len(), 1);
+        assert_eq!(summary.batches[0].text, "第一句");
     }
 
     #[test]
     fn closing_an_empty_builder_produces_nothing() {
         assert!(TrunkBuilder::default().close().is_none());
-    }
-
-    #[test]
-    fn a_lone_monologue_with_no_work_at_all_still_closes_into_a_trunk() {
-        let mut trunk = TrunkBuilder::default();
-        trunk.push("a1", TrunkItem::Monologue);
-        let closed = trunk.close().expect("a monologue alone is still a trunk");
-        assert_eq!(closed.item_count, 0);
-        assert_eq!(
-            closed
-                .into_summary(0, Some("just thinking out loud"))
-                .overview,
-            "just thinking out loud"
-        );
-    }
-
-    #[test]
-    fn a_monologue_resolved_to_an_empty_string_falls_back_to_the_synthesized_overview() {
-        // The pathological case `into_summary`'s doc comment calls out: a
-        // monologue item id was captured, but by resolution time its text
-        // is (still, or again) empty. Rather than ship a blank overview,
-        // this must fall back exactly as if there had been no monologue.
-        let mut trunk = TrunkBuilder::default();
-        trunk.push("a1", TrunkItem::Monologue);
-        trunk.push("t1", TrunkItem::ToolCall("grep"));
-        let closed = trunk.close().unwrap();
-        assert_eq!(
-            closed.into_summary(0, Some("")).overview,
-            "运行了 1 次工具（grep）"
-        );
-    }
-
-    #[test]
-    fn a_monologue_item_that_cannot_be_found_falls_back_to_the_synthesized_overview() {
-        let mut trunk = TrunkBuilder::default();
-        trunk.push("a1", TrunkItem::Monologue);
-        trunk.push("t1", TrunkItem::ToolCall("grep"));
-        let closed = trunk.close().unwrap();
-        assert_eq!(
-            closed.into_summary(0, None).overview,
-            "运行了 1 次工具（grep）",
-            "a monologue id with no resolvable text must not produce a blank overview"
-        );
     }
 }

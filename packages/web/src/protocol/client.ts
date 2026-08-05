@@ -233,6 +233,7 @@ interface Subscription {
   resync: Promise<void> | null;
   /** An event/desync arrived while the current repair was in flight. */
   needsResync: boolean;
+  expandLastRound: boolean;
 }
 
 /**
@@ -585,6 +586,7 @@ export class Client {
   async subscribe(
     sessionId: string,
     handlers: Pick<Subscription, "onEvent" | "onResync">,
+    options: { expandLastRound?: boolean } = {},
   ): Promise<{
     snapshot: unknown;
     replayed: SequencedEvent[];
@@ -595,12 +597,18 @@ export class Client {
       ...handlers,
       resync: null,
       needsResync: false,
+      expandLastRound: options.expandLastRound ?? true,
     };
     this.subscriptions.set(sessionId, subscription);
 
     const reply = await this.call({
       type: "subscribe",
-      payload: { sessionId, sinceSeq: 0 },
+      payload: {
+        sessionId,
+        sinceSeq: 0,
+        layered: true,
+        expandLastRound: subscription.expandLastRound,
+      },
     });
     if (reply?.type !== "subscribed") {
       this.subscriptions.delete(sessionId);
@@ -856,7 +864,12 @@ export class Client {
         subscription.needsResync = false;
         const reply = await this.call({
           type: "subscribe",
-          payload: { sessionId, sinceSeq: subscription.seq },
+          payload: {
+            sessionId,
+            sinceSeq: subscription.seq,
+            layered: true,
+            expandLastRound: subscription.expandLastRound,
+          },
         }).catch(() => undefined);
         if (reply?.type !== "subscribed") return;
 

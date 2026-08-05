@@ -1,4 +1,11 @@
-import type { TimelineItem, TurnStats } from "@genehub/proto";
+import type {
+  BlobOverview,
+  RoundBatch,
+  RoundSummary,
+  RoundTrunkSummary,
+  TimelineItem,
+  TurnStats,
+} from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 
 import { Markdown } from "./Markdown";
@@ -37,6 +44,7 @@ export function TimelineView({ state }: { state: TimelineState }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
   const forkSession = useWorkbench((workbench) => workbench.forkSession);
+  const rounds = useWorkbench((workbench) => workbench.timeline.rounds);
   const activeSessionId = useWorkbench((workbench) => workbench.activeSessionId);
   const canFork = useWorkbench((workbench) => {
     const session = workbench.sessions.find((entry) => entry.id === activeSessionId);
@@ -49,7 +57,7 @@ export function TimelineView({ state }: { state: TimelineState }) {
   // to read something — then leave them where they are.
   useEffect(() => {
     if (pinned) bottom.current?.scrollIntoView({ block: "end" });
-  }, [state.items, pinned]);
+  }, [state.items, rounds, pinned]);
 
   return (
     <div
@@ -63,26 +71,20 @@ export function TimelineView({ state }: { state: TimelineState }) {
       }}
     >
       {turns.map((turn, index) => {
-        const blocks = groupIntoBlocks(turn.items);
-        // Only the tail of the turn currently being written should default
-        // open — a long-running task's earlier tool-call batches fold away
-        // as the agent moves on, instead of every batch staying expanded
-        // and turning the screen into a wall of cards (the original
-        // complaint this grouping exists to fix).
-        const isLiveTurn = !turn.stats && index === turns.length - 1 && Boolean(state.activeTurn);
+        const narrative =
+          rounds.length === 0
+            ? turn.items
+            : turn.items.filter(
+                (item) => item.type !== "reasoning" && item.type !== "toolCall",
+              );
+        const itemIds = new Set(turn.items.map((item) => item.id));
+        const turnRounds = rounds.filter(
+          (round) => round.userItemId && itemIds.has(round.userItemId),
+        );
         return (
           <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
-            {blocks.map((block, blockIndex) =>
-              block.kind === "work" ? (
-                <WorkGroup
-                  key={block.items[0]!.id}
-                  items={block.items}
-                  defaultOpen={isLiveTurn && blockIndex === blocks.length - 1}
-                />
-              ) : (
-                <Item key={block.item.id} item={block.item} />
-              ),
-            )}
+            {narrative.map((item) => <Item key={item.id} item={item} />)}
+            {turnRounds.map((round) => <RoundCard key={round.roundId} round={round} />)}
             {turn.stats ? (
               <TurnFooter
                 stats={turn.stats}
@@ -101,6 +103,16 @@ export function TimelineView({ state }: { state: TimelineState }) {
           </section>
         );
       })}
+
+      {rounds
+        .filter(
+          (round) =>
+            !round.userItemId ||
+            !state.items.some(
+              (item) => item.type === "userMessage" && item.id === round.userItemId,
+            ),
+        )
+        .map((round) => <RoundCard key={round.roundId} round={round} />)}
 
       {state.lastError ? (
         <div
@@ -213,94 +225,164 @@ function turnBlocks(items: TimelineItem[]): TurnBlock[] {
   return turns;
 }
 
-/**
- * Groups consecutive `toolCall`/`reasoning` items into a single collapsible
- * unit — the same boundary a long-running round hits on the daemon side
- * (`apps/daemon/src/session/rounds.rs`'s `TrunkBuilder`, `TRUNK_MAX_ITEMS`),
- * mirrored here purely for display: nothing about this changes what the
- * wire sends, it only changes how many cards `TimelineView` puts on screen
- * at once. A run of length 1 is left ungrouped — wrapping a single tool
- * call in a "group of one" toggle would be a regression for the common
- * case this exists to leave alone.
- */
-type RenderBlock = { kind: "single"; item: TimelineItem } | { kind: "work"; items: TimelineItem[] };
+function RoundCard({ round }: { round: RoundSummary }) {
+  const layer = useWorkbench((state) => state.timeline.roundLayers[round.roundId]);
+  const loadRound = useWorkbench((state) => state.loadRound);
+  const loadOlder = useWorkbench((state) => state.loadOlderTrunks);
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open =
+    manualOpen ??
+    (round.outcome === "running" || Boolean(layer?.expandedTrunk));
 
-const WORK_GROUP_MAX_ITEMS = 32;
-
-function groupIntoBlocks(items: TimelineItem[]): RenderBlock[] {
-  const blocks: RenderBlock[] = [];
-  let bucket: TimelineItem[] = [];
-
-  const flush = () => {
-    if (bucket.length === 0) return;
-    if (bucket.length === 1) {
-      blocks.push({ kind: "single", item: bucket[0]! });
-    } else {
-      blocks.push({ kind: "work", items: bucket });
-    }
-    bucket = [];
-  };
-
-  for (const item of items) {
-    if (item.type === "reasoning" || item.type === "toolCall") {
-      bucket.push(item);
-      if (bucket.length >= WORK_GROUP_MAX_ITEMS) flush();
-    } else {
-      flush();
-      blocks.push({ kind: "single", item });
-    }
-  }
-  flush();
-  return blocks;
+  return (
+    <div className="overflow-hidden rounded-xl border border-line bg-surface/60" data-testid="round">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+        aria-expanded={open}
+        onClick={() => {
+          const next = !open;
+          setManualOpen(next);
+          if (next && !layer) void loadRound(round.roundId);
+        }}
+      >
+        <span className="text-xs text-muted">
+          {round.outcome === "running" ? "处理中" : "工作过程"}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-xs text-muted">
+          {round.trunkCount} 个阶段
+        </span>
+        <span className="text-xs text-accent">{open ? "收起" : "展开"}</span>
+      </button>
+      {open ? (
+        <div className="space-y-2 border-t border-line p-2">
+          {!layer ? <p className="px-2 py-1 text-xs text-muted">正在加载…</p> : null}
+          {layer?.nextCursor ? (
+            <button
+              type="button"
+              className="w-full rounded-lg px-2 py-1 text-xs text-accent hover:bg-surface"
+              onClick={() => void loadOlder(round.roundId)}
+            >
+              加载更早阶段
+            </button>
+          ) : null}
+          {layer?.trunks.map((trunk, index) => (
+            <TrunkCard
+              key={trunk.index}
+              round={round}
+              summary={trunk}
+              defaultOpen={
+                round.outcome === "running" && index === layer.trunks.length - 1
+              }
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
-/** A deterministic one-line summary for a collapsed group's header — never
- * a guess dressed up as agent prose, same rule the daemon's own fallback
- * overview follows for the persisted trunk ledger. */
-function summarizeWork(items: TimelineItem[]): string {
-  const toolNames: string[] = [];
-  let reasoningCount = 0;
-  for (const item of items) {
-    if (item.type === "toolCall" && !toolNames.includes(item.name)) toolNames.push(item.name);
-    if (item.type === "reasoning") reasoningCount += 1;
-  }
-  if (toolNames.length === 0) return `进行了 ${reasoningCount} 次思考`;
-  return `运行了 ${items.length} 次工具（${toolNames.join(", ")}）`;
-}
-
-function WorkGroup({ items, defaultOpen }: { items: TimelineItem[]; defaultOpen: boolean }) {
-  // `defaultOpen` changes as the live tail advances. Keeping its initial value
-  // in state made every group that had once been the tail stay open forever.
-  // A null override follows the live default; clicking detaches this group from
-  // that default so ordinary rerenders do not undo the user's explicit choice.
+function TrunkCard({
+  round,
+  summary,
+  defaultOpen,
+}: {
+  round: RoundSummary;
+  summary: RoundTrunkSummary;
+  defaultOpen: boolean;
+}) {
+  const detail = useWorkbench(
+    (state) => state.timeline.roundTrunks[`${round.roundId}:${summary.index}`],
+  );
+  const loadTrunk = useWorkbench((state) => state.loadTrunk);
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
   const open = manualOpen ?? defaultOpen;
 
+  useEffect(() => {
+    if (open && !detail) void loadTrunk(round.roundId, summary.index);
+  }, [detail, loadTrunk, open, round.roundId, summary.index]);
+
   return (
-    <div
-      className="min-w-0 max-w-full overflow-hidden rounded-lg border border-line bg-surface"
-      data-testid="work-group"
-    >
-      <header className="flex min-w-0 items-center gap-2 px-3 py-2 text-xs">
-        <span className="shrink-0 text-base" role="img" aria-label="批量操作">
-          📦
-        </span>
-        <span className="min-w-0 flex-1 truncate text-muted">{summarizeWork(items)}</span>
-        <button
-          type="button"
-          className="shrink-0 text-accent"
-          aria-expanded={open}
-          onClick={() => setManualOpen(!open)}
-        >
-          {open ? "收起" : `展开 ${items.length} 项`}
-        </button>
-      </header>
+    <div className="overflow-hidden rounded-lg border border-line bg-bg" data-testid="round-trunk">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+        aria-expanded={open}
+        onClick={() => setManualOpen(!open)}
+      >
+        <span className="text-xs text-muted">阶段 {summary.index + 1}</span>
+        <span className="min-w-0 flex-1 truncate text-sm">{summary.title}</span>
+        <span className="text-xs text-muted">{summary.blobCount} 项</span>
+      </button>
       {open ? (
-        <div className="space-y-2 border-t border-line px-3 py-2">
-          {items.map((item) => (
-            <Item key={item.id} item={item} />
+        <div className="space-y-2 border-t border-line p-2">
+          {!detail ? <p className="px-2 py-1 text-xs text-muted">正在加载…</p> : null}
+          {detail?.batches.map((batch, index) => (
+            <BatchCard
+              key={batch.summary.index}
+              batch={batch}
+              defaultOpen={
+                round.outcome === "running" &&
+                index === detail.batches.length - 1
+              }
+            />
           ))}
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+function BatchCard({ batch, defaultOpen }: { batch: RoundBatch; defaultOpen: boolean }) {
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = manualOpen ?? defaultOpen;
+  return (
+    <div className="overflow-hidden rounded-lg bg-surface" data-testid="round-batch">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+        aria-expanded={open}
+        onClick={() => setManualOpen(!open)}
+      >
+        <span className="min-w-0 flex-1 truncate text-xs">{batch.summary.text}</span>
+        <span className="text-xs text-muted">{batch.summary.blobCount} 项</span>
+      </button>
+      {open ? (
+        <div className="space-y-1 border-t border-line px-2 py-2">
+          {batch.blobs.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function BlobRow({ blob }: { blob: BlobOverview }) {
+  const payload = useWorkbench((state) =>
+    blob.blob ? state.timeline.blobs[blob.blob.hash] : undefined,
+  );
+  const loadBlob = useWorkbench((state) => state.loadBlob);
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-md bg-bg">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs"
+        aria-expanded={open}
+        disabled={!blob.blob}
+        onClick={() => {
+          const next = !open;
+          setOpen(next);
+          if (next && blob.blob && !payload) void loadBlob(blob.blob.hash);
+        }}
+      >
+        <span className="text-muted">{blob.kind === "reasoning" ? "思考" : "工具"}</span>
+        <span className="min-w-0 flex-1 truncate">{blob.overview}</span>
+        {blob.blob ? <span className="text-accent">{open ? "收起" : "详情"}</span> : null}
+      </button>
+      {open ? (
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap border-t border-line p-2 text-xs">
+          {payload ? JSON.stringify(payload.value, null, 2) : "正在加载…"}
+        </pre>
       ) : null}
     </div>
   );

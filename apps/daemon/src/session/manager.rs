@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    Attachment, Catalog, ItemDelta, PermissionOptionKind, PermissionOutcome, PermissionRequest,
-    PermissionRequestKind, SequencedEvent, SessionEvent, SessionSnapshot, SessionStatus,
-    SessionSummary, TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
+    Attachment, BlobKind, BlobOverview, BlobPayload, Catalog, ItemDelta, PermissionOptionKind,
+    PermissionOutcome, PermissionRequest, PermissionRequestKind, RoundBatch, RoundLayer,
+    RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionEvent, SessionSnapshot,
+    SessionStatus, SessionSummary, TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
 };
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
@@ -96,6 +97,16 @@ struct ActiveRound {
     closed_trunks: Vec<TrunkSummary>,
 }
 
+#[derive(Debug, Clone)]
+struct RoundView {
+    round_id: String,
+    started_at_ms: i64,
+    ended_at_ms: i64,
+    outcome: RoundLayerOutcome,
+    item_ids: Vec<String>,
+    trunks: Vec<TrunkSummary>,
+}
+
 impl ActiveRound {
     /// Feeds one item into this round's trunk pagination, if the item is one
     /// of the three kinds trunks track (`TrunkItem`). A no-op for every
@@ -123,10 +134,13 @@ impl ActiveRound {
 
     /// Resolves a closed trunk into its final `TrunkSummary` — assigning it
     /// the next index — and appends it to this round's trunk list.
-    fn push_resolved_trunk(&mut self, closed: rounds::ClosedTrunk, monologue_text: Option<&str>) {
+    fn push_resolved_trunk(
+        &mut self,
+        closed: rounds::ClosedTrunk,
+        texts: &HashMap<String, String>,
+    ) {
         let index = self.closed_trunks.len() as u32;
-        self.closed_trunks
-            .push(closed.into_summary(index, monologue_text));
+        self.closed_trunks.push(closed.into_summary(index, texts));
     }
 }
 
@@ -285,6 +299,12 @@ impl SessionManager {
         // Old session logs may predate the overview-only boundary. Never let
         // their historical tool payloads or reasoning leak back to a client.
         let loaded = self.store.load_items(&meta.workspace_id, &meta.id)?;
+        if let Err(error) = self
+            .store
+            .ensure_blobs_migrated(&meta.workspace_id, &meta.id, &loaded)
+        {
+            tracing::warn!("could not migrate blob references for {}: {error}", meta.id);
+        }
         let items: Vec<TimelineItem> = loaded.iter().map(overview::condense_item).collect();
         if items != loaded {
             self.store
@@ -350,6 +370,239 @@ impl SessionManager {
         live.snapshot().await
     }
 
+    async fn snapshot_for_open(
+        &self,
+        session_id: &str,
+        layered: bool,
+        expand_last_round: bool,
+    ) -> Result<SessionSnapshot> {
+        let live = self.live(session_id).await?;
+        let mut snapshot = live.snapshot().await?;
+        if !layered {
+            return Ok(snapshot);
+        }
+        let items = snapshot.items.clone();
+        let views = self.round_views(&live, &items).await?;
+        snapshot.items.retain(|item| {
+            !matches!(
+                item,
+                TimelineItem::Reasoning { .. } | TimelineItem::ToolCall { .. }
+            )
+        });
+        snapshot.rounds = Some(
+            views
+                .iter()
+                .map(|view| round_summary(view, &items))
+                .collect(),
+        );
+        if expand_last_round {
+            if let Some(last) = views.last() {
+                snapshot.expanded_round = Some(
+                    self.build_round_layer(&live, last, &items, None, 20, true)
+                        .await?,
+                );
+            }
+        }
+        Ok(snapshot)
+    }
+
+    async fn round_views(
+        &self,
+        live: &Arc<Live>,
+        items: &[TimelineItem],
+    ) -> Result<Vec<RoundView>> {
+        let meta = live.meta.lock().await.clone();
+        let mut views: Vec<RoundView> = self
+            .store
+            .load_rounds(&meta.workspace_id, &meta.id)?
+            .into_iter()
+            .map(|record| RoundView {
+                round_id: record.round_id,
+                started_at_ms: record.started_at_ms,
+                ended_at_ms: record.ended_at_ms,
+                outcome: match record.outcome {
+                    RoundOutcome::Completed => RoundLayerOutcome::Completed,
+                    RoundOutcome::Failed => RoundLayerOutcome::Failed,
+                    RoundOutcome::Canceled => RoundLayerOutcome::Canceled,
+                    RoundOutcome::Superseded => RoundLayerOutcome::Superseded,
+                },
+                item_ids: record.item_ids,
+                trunks: record.trunk_summaries,
+            })
+            .collect();
+        if let Some(active) = live.active_round.lock().await.clone() {
+            if active.outcome.is_none() {
+                let item_ids = live.round_items.lock().await.clone();
+                let by_id: HashMap<&str, &TimelineItem> =
+                    items.iter().map(|item| (item.id(), item)).collect();
+                let round_items: Vec<TimelineItem> = item_ids
+                    .iter()
+                    .filter_map(|id| by_id.get(id.as_str()).map(|item| (*item).clone()))
+                    .collect();
+                views.push(RoundView {
+                    round_id: active.round_id,
+                    started_at_ms: active.started_at_ms,
+                    ended_at_ms: 0,
+                    outcome: RoundLayerOutcome::Running,
+                    item_ids,
+                    trunks: rounds::summarize_trunks(&round_items),
+                });
+            }
+        }
+        Ok(views)
+    }
+
+    async fn build_round_layer(
+        &self,
+        live: &Arc<Live>,
+        view: &RoundView,
+        items: &[TimelineItem],
+        cursor: Option<&str>,
+        limit: u32,
+        expand_last_trunk: bool,
+    ) -> Result<RoundLayer> {
+        let end = parse_trunk_cursor(cursor, view.trunks.len())?;
+        let limit = limit.clamp(1, 100) as usize;
+        let start = end.saturating_sub(limit);
+        let trunks = view.trunks[start..end].to_vec();
+        let expanded_trunk = if expand_last_trunk {
+            if let Some(summary) = trunks.last() {
+                Some(
+                    self.build_round_trunk(live, view, items, summary.index)
+                        .await?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok(RoundLayer {
+            round: round_summary(view, items),
+            trunks,
+            next_cursor: (start > 0).then(|| format!("before:{start}")),
+            expanded_trunk,
+        })
+    }
+
+    async fn build_round_trunk(
+        &self,
+        live: &Arc<Live>,
+        view: &RoundView,
+        items: &[TimelineItem],
+        trunk_index: u32,
+    ) -> Result<RoundTrunk> {
+        let summary = view
+            .trunks
+            .get(trunk_index as usize)
+            .cloned()
+            .ok_or_else(|| anyhow!("no such trunk: {trunk_index}"))?;
+        let meta = live.meta.lock().await.clone();
+        let refs = self.store.load_blob_refs(&meta.workspace_id, &meta.id)?;
+        let positions: HashMap<&str, usize> = view
+            .item_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (id.as_str(), index))
+            .collect();
+        let by_id: HashMap<&str, &TimelineItem> =
+            items.iter().map(|item| (item.id(), item)).collect();
+        let trunk_start = *positions
+            .get(summary.first_item_id.as_str())
+            .ok_or_else(|| anyhow!("trunk start item is missing"))?;
+        let trunk_end = view
+            .trunks
+            .get(trunk_index as usize + 1)
+            .and_then(|next| positions.get(next.first_item_id.as_str()).copied())
+            .unwrap_or(view.item_ids.len());
+        let mut batches = Vec::new();
+        for (batch_position, batch_summary) in summary.batches.iter().enumerate() {
+            let batch_start = *positions
+                .get(batch_summary.first_item_id.as_str())
+                .ok_or_else(|| anyhow!("batch start item is missing"))?;
+            let batch_end = summary
+                .batches
+                .get(batch_position + 1)
+                .and_then(|next| positions.get(next.first_item_id.as_str()).copied())
+                .unwrap_or(trunk_end);
+            let mut blobs = Vec::new();
+            for id in &view.item_ids[batch_start.max(trunk_start)..batch_end] {
+                let Some(item) = by_id.get(id.as_str()) else {
+                    continue;
+                };
+                let (kind, overview) = match item {
+                    TimelineItem::Reasoning { text, .. } => (BlobKind::Reasoning, text.clone()),
+                    TimelineItem::ToolCall { name, detail, .. } => {
+                        let overview = match detail {
+                            genehub_proto::ToolCallDetail::Overview { overview, .. } => {
+                                overview.clone()
+                            }
+                            _ => name.clone(),
+                        };
+                        (BlobKind::ToolCall, overview)
+                    }
+                    _ => continue,
+                };
+                blobs.push(BlobOverview {
+                    item_id: id.clone(),
+                    kind,
+                    overview,
+                    blob: refs.get(id).map(|(_, blob)| blob.clone()),
+                });
+            }
+            batches.push(RoundBatch {
+                summary: batch_summary.clone(),
+                blobs,
+            });
+        }
+        Ok(RoundTrunk { summary, batches })
+    }
+
+    pub async fn round_layer(
+        &self,
+        session_id: &str,
+        round_id: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<RoundLayer> {
+        let live = self.live(session_id).await?;
+        let items = live.items.lock().await.clone();
+        let views = self.round_views(&live, &items).await?;
+        let view = if round_id == "latest" {
+            views.last()
+        } else {
+            views.iter().find(|view| view.round_id == round_id)
+        }
+        .ok_or_else(|| anyhow!("no such round: {round_id}"))?;
+        self.build_round_layer(&live, view, &items, cursor, limit.unwrap_or(20), false)
+            .await
+    }
+
+    pub async fn round_trunk(
+        &self,
+        session_id: &str,
+        round_id: &str,
+        trunk_index: u32,
+    ) -> Result<RoundTrunk> {
+        let live = self.live(session_id).await?;
+        let items = live.items.lock().await.clone();
+        let views = self.round_views(&live, &items).await?;
+        let view = views
+            .iter()
+            .find(|view| view.round_id == round_id)
+            .ok_or_else(|| anyhow!("no such round: {round_id}"))?;
+        self.build_round_trunk(&live, view, &items, trunk_index)
+            .await
+    }
+
+    pub async fn blob(&self, session_id: &str, hash: &str) -> Result<BlobPayload> {
+        let live = self.live(session_id).await?;
+        let meta = live.meta.lock().await;
+        self.store
+            .get_blob(&meta.workspace_id, &meta.id, hash)?
+            .ok_or_else(|| anyhow!("no such blob: {hash}"))
+    }
+
     /// Snapshot plus whatever the client missed, in one answer.
     ///
     /// `reset` tells the client the difference between "here is the gap" and
@@ -359,6 +612,8 @@ impl SessionManager {
         &self,
         session_id: &str,
         since_seq: Option<u64>,
+        layered: bool,
+        expand_last_round: bool,
     ) -> Result<(
         SessionSnapshot,
         Vec<SequencedEvent>,
@@ -372,6 +627,12 @@ impl SessionManager {
         let replay = live.replay.lock().await;
 
         let (events, reset) = match since_seq {
+            Some(0) if layered => {
+                // The layered snapshot already contains the current session
+                // narrative and last round tail. Replaying the historical
+                // tool/reasoning stream here would defeat its byte budget.
+                (Vec::new(), true)
+            }
             None => (Vec::new(), true),
             Some(seq) => {
                 let oldest = replay.front().map(|event| event.seq);
@@ -395,7 +656,9 @@ impl SessionManager {
         };
         drop(replay);
 
-        let snapshot = live.snapshot().await?;
+        let snapshot = self
+            .snapshot_for_open(session_id, layered, expand_last_round)
+            .await?;
         Ok((snapshot, events, reset, receiver))
     }
 
@@ -925,6 +1188,34 @@ impl SessionManager {
     }
 }
 
+fn round_summary(view: &RoundView, items: &[TimelineItem]) -> RoundSummary {
+    let wanted: HashSet<&str> = view.item_ids.iter().map(String::as_str).collect();
+    let user_item_id = items.iter().find_map(|item| match item {
+        TimelineItem::UserMessage { id, .. } if wanted.contains(id.as_str()) => Some(id.clone()),
+        _ => None,
+    });
+    RoundSummary {
+        round_id: view.round_id.clone(),
+        user_item_id,
+        started_at_ms: view.started_at_ms,
+        ended_at_ms: view.ended_at_ms,
+        outcome: view.outcome,
+        trunk_count: view.trunks.len() as u32,
+    }
+}
+
+fn parse_trunk_cursor(cursor: Option<&str>, len: usize) -> Result<usize> {
+    let Some(cursor) = cursor else {
+        return Ok(len);
+    };
+    let value = cursor
+        .strip_prefix("before:")
+        .ok_or_else(|| anyhow!("invalid trunk cursor"))?
+        .parse::<usize>()
+        .map_err(|_| anyhow!("invalid trunk cursor"))?;
+    Ok(value.min(len))
+}
+
 impl Live {
     fn new(meta: SessionMeta) -> Self {
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
@@ -956,6 +1247,8 @@ impl Live {
             items: self.items.lock().await.clone(),
             seq: self.seq.load(Ordering::SeqCst),
             pending_permissions: self.pending_permissions.lock().await.clone(),
+            rounds: None,
+            expanded_round: None,
         })
     }
 
@@ -1033,23 +1326,32 @@ impl Live {
         }
     }
 
-    /// Looks up a monologue item's *current* text in the live item store —
-    /// not whatever it held the moment it first arrived, which for a
-    /// streamed `AssistantMessage` is typically still empty (deltas fill it
-    /// in afterward). By the time a trunk boundary is known — a later item
-    /// started, meaning the adapter moved on, or the round itself settled —
-    /// the monologue that opened the trunk has necessarily finished
-    /// streaming, so this always sees its final text.
-    async fn resolve_monologue_text(&self, item_id: Option<&str>) -> Option<String> {
-        let id = item_id?;
+    async fn resolve_trunk_texts(&self, closed: &rounds::ClosedTrunk) -> HashMap<String, String> {
+        let mut wanted = HashSet::new();
+        if let Some(id) = &closed.first_monologue_item_id {
+            wanted.insert(id.as_str());
+        }
+        for batch in &closed.batches {
+            if let Some(id) = &batch.monologue_item_id {
+                wanted.insert(id.as_str());
+            }
+            if let Some(id) = &batch.first_reasoning_item_id {
+                wanted.insert(id.as_str());
+            }
+        }
         let items = self.items.lock().await;
-        items.iter().find_map(|candidate| match candidate {
-            TimelineItem::AssistantMessage {
-                id: candidate_id,
-                text,
-            } if candidate_id == id => Some(text.clone()),
-            _ => None,
-        })
+        items
+            .iter()
+            .filter_map(|candidate| match candidate {
+                TimelineItem::AssistantMessage { id, text }
+                | TimelineItem::Reasoning { id, text }
+                    if wanted.contains(id.as_str()) =>
+                {
+                    Some((id.clone(), text.clone()))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Resolves a just-closed trunk's overview and appends it to the round's
@@ -1057,12 +1359,10 @@ impl Live {
     /// (needed to resolve the overview) and the `active_round` lock (needed
     /// to append it) are never held at the same time.
     async fn finish_trunk(&self, closed: rounds::ClosedTrunk) {
-        let monologue_text = self
-            .resolve_monologue_text(closed.monologue_item_id.as_deref())
-            .await;
+        let texts = self.resolve_trunk_texts(&closed).await;
         let mut active = self.active_round.lock().await;
         if let Some(round) = active.as_mut() {
-            round.push_resolved_trunk(closed, monologue_text.as_deref());
+            round.push_resolved_trunk(closed, &texts);
         }
     }
 
@@ -1111,10 +1411,8 @@ impl Live {
         // lock at all — only the `items` lock inside `resolve_monologue_text`.
         if let Some(dangling) = superseded.as_mut() {
             if let Some(closed) = dangling.close_current_trunk_pending() {
-                let monologue_text = self
-                    .resolve_monologue_text(closed.monologue_item_id.as_deref())
-                    .await;
-                dangling.push_resolved_trunk(closed, monologue_text.as_deref());
+                let texts = self.resolve_trunk_texts(&closed).await;
+                dangling.push_resolved_trunk(closed, &texts);
             }
         }
         let superseded_items = std::mem::take(&mut *self.round_items.lock().await);
@@ -1267,6 +1565,54 @@ async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &P
     }
 }
 
+enum BlobWrite {
+    Put {
+        item_id: String,
+        kind: BlobKind,
+        value: serde_json::Value,
+    },
+    Flush(oneshot::Sender<()>),
+}
+
+fn flush_reasoning_blobs(
+    sender: &mpsc::UnboundedSender<BlobWrite>,
+    raw: &mut HashMap<String, String>,
+) {
+    for (id, text) in raw.drain() {
+        let value = serde_json::to_value(TimelineItem::Reasoning {
+            id: id.clone(),
+            text,
+        });
+        if let Ok(value) = value {
+            let _ = sender.send(BlobWrite::Put {
+                item_id: id,
+                kind: BlobKind::Reasoning,
+                value,
+            });
+        }
+    }
+}
+
+fn preserve_tool_blob(sender: &mpsc::UnboundedSender<BlobWrite>, item: &TimelineItem) {
+    let TimelineItem::ToolCall { id, .. } = item else {
+        return;
+    };
+    if let Ok(value) = serde_json::to_value(item) {
+        let _ = sender.send(BlobWrite::Put {
+            item_id: id.clone(),
+            kind: BlobKind::ToolCall,
+            value,
+        });
+    }
+}
+
+async fn flush_blob_writer(sender: &mpsc::UnboundedSender<BlobWrite>) {
+    let (done, wait) = oneshot::channel();
+    if sender.send(BlobWrite::Flush(done)).is_ok() {
+        let _ = wait.await;
+    }
+}
+
 /// Folds adapter events into session state, then republishes them.
 ///
 /// Everything passes through `overview` first: the daemon's answer to "what
@@ -1280,22 +1626,58 @@ async fn pump_events(
     store: Store,
     replay_window: usize,
 ) {
-    // Thinking streams one delta per token. Keep only the overview already
-    // shown; even this transient pump state must never accumulate the raw
-    // reasoning block. Item id → overview last sent (at most 24 characters).
+    let (workspace_id, session_id) = {
+        let meta = live.meta.lock().await;
+        (meta.workspace_id.clone(), meta.id.clone())
+    };
+    let (blob_sender, mut blob_receiver) = mpsc::unbounded_channel::<BlobWrite>();
+    let blob_store = store.clone();
+    let blob_workspace_id = workspace_id.clone();
+    let blob_session_id = session_id.clone();
+    let blob_writer = tokio::task::spawn_blocking(move || {
+        while let Some(write) = blob_receiver.blocking_recv() {
+            match write {
+                BlobWrite::Put {
+                    item_id,
+                    kind,
+                    value,
+                } => {
+                    if let Err(error) = blob_store.put_blob(
+                        &blob_workspace_id,
+                        &blob_session_id,
+                        &item_id,
+                        kind,
+                        value,
+                    ) {
+                        tracing::warn!("could not preserve blob {item_id}: {error}");
+                    }
+                }
+                BlobWrite::Flush(done) => {
+                    let _ = done.send(());
+                }
+            }
+        }
+    });
+    // The compact overview and source-preserved content have different
+    // lifetimes. Only the former enters the timeline; the latter is flushed to
+    // the content-addressed blob layer when the reasoning block moves on.
     let mut thinking: HashMap<String, String> = HashMap::new();
+    let mut raw_thinking: HashMap<String, String> = HashMap::new();
+    let mut raw_tools: HashMap<String, TimelineItem> = HashMap::new();
     let mut turns: HashMap<String, (i64, HashSet<String>)> = HashMap::new();
+    let mut channel_closed = false;
     loop {
         let mut event = match receiver.recv().await {
             Ok(event) => event,
             Err(broadcast::error::RecvError::Closed) => {
+                flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
                 // No `TurnFailed`, no `TurnCanceled` — the adapter's own sender
                 // just vanished (a crashed process is the ordinary cause). The
                 // round the proposal calls out this exact gap for (§3.2
                 // direction one, "adapter 事件通道关闭、子进程退出"): without
                 // this, it stays open forever and whatever it already
                 // produced never reaches disk.
-                finalize_after_channel_closed(&live, &store).await;
+                channel_closed = true;
                 break;
             }
             Err(broadcast::error::RecvError::Lagged(missed)) => {
@@ -1319,6 +1701,75 @@ async fn pump_events(
                 .entry(turn_id.clone())
                 .or_insert_with(|| (now_ms(), HashSet::new()));
             collect_tool_ids(item, &mut entry.1);
+        }
+
+        let updates_reasoning = match &event {
+            SessionEvent::Item {
+                item: TimelineItem::Reasoning { id, text },
+                ..
+            } => {
+                raw_thinking.insert(id.clone(), text.clone());
+                true
+            }
+            SessionEvent::ItemDelta {
+                item_id,
+                delta: ItemDelta::Text { delta },
+                ..
+            } if raw_thinking.contains_key(item_id) => {
+                raw_thinking
+                    .get_mut(item_id)
+                    .expect("checked against the same map")
+                    .push_str(delta);
+                true
+            }
+            _ => false,
+        };
+        if !updates_reasoning {
+            flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
+        }
+        match &event {
+            SessionEvent::Item {
+                item: item @ TimelineItem::ToolCall { id, .. },
+                ..
+            } => {
+                raw_tools.insert(id.clone(), item.clone());
+                preserve_tool_blob(&blob_sender, item);
+            }
+            SessionEvent::ItemDelta {
+                item_id,
+                delta: ItemDelta::ToolStatus { status, detail },
+                ..
+            } => {
+                if let Some(item) = raw_tools.get_mut(item_id) {
+                    if let TimelineItem::ToolCall {
+                        status: raw_status,
+                        detail: raw_detail,
+                        ..
+                    } = item
+                    {
+                        *raw_status = *status;
+                        if let Some(detail) = detail {
+                            *raw_detail = detail.clone();
+                        }
+                    }
+                    preserve_tool_blob(&blob_sender, item);
+                }
+                if matches!(
+                    status,
+                    ToolStatus::Ok | ToolStatus::Error | ToolStatus::Canceled
+                ) {
+                    raw_tools.remove(item_id);
+                }
+            }
+            _ => {}
+        }
+        if matches!(
+            event,
+            SessionEvent::TurnCompleted { .. }
+                | SessionEvent::TurnFailed { .. }
+                | SessionEvent::TurnCanceled { .. }
+        ) {
+            flush_blob_writer(&blob_sender).await;
         }
 
         let event = match event {
@@ -1446,6 +1897,13 @@ async fn pump_events(
             thinking.clear();
             flush_turn(&live, &store).await;
         }
+    }
+    flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
+    flush_blob_writer(&blob_sender).await;
+    drop(blob_sender);
+    let _ = blob_writer.await;
+    if channel_closed {
+        finalize_after_channel_closed(&live, &store).await;
     }
 }
 
@@ -2300,6 +2758,8 @@ mod tests {
         Vec<TimelineItem>,
         tokio::task::JoinHandle<()>,
         broadcast::Sender<SessionEvent>,
+        Store,
+        tempfile::TempDir,
     ) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
@@ -2326,9 +2786,9 @@ mod tests {
         }
         // The flush rides on the settle event, which was just observed — but
         // only observed on its way out, so give the pump its turn.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
         let on_disk = store.load_items("w1", "s1").unwrap();
-        (wire, on_disk, pump, agent_events)
+        (wire, on_disk, pump, agent_events, store, dir)
     }
 
     /// A thinking block streams one delta per token; what reaches the wire is
@@ -2364,7 +2824,7 @@ mod tests {
             fork_checkpoint: None,
         });
 
-        let (wire, on_disk, pump, agent_events) = pumped(script).await;
+        let (wire, on_disk, pump, agent_events, _store, _dir) = pumped(script).await;
         drop(agent_events);
         pump.await.unwrap();
 
@@ -2421,7 +2881,7 @@ mod tests {
     #[tokio::test]
     async fn a_tool_calls_payload_stays_behind_the_access_layer() {
         let output = "a line of build output\n".repeat(500);
-        let (wire, on_disk, pump, agent_events) = pumped(vec![
+        let (wire, on_disk, pump, agent_events, store, _dir) = pumped(vec![
             SessionEvent::TurnStarted {
                 turn_id: "t".into(),
                 started_at_ms: 1,
@@ -2496,6 +2956,20 @@ mod tests {
         assert_eq!(stats.fork_checkpoint.as_deref(), Some("agent-turn-7"));
         let size = serde_json::to_string(&on_disk).unwrap().len();
         assert!(size < 1_000, "the log kept the payload ({size} bytes)");
+        let blob_ref = store
+            .load_blob_refs("w1", "s1")
+            .unwrap()
+            .remove("c")
+            .expect("the compact item points at source-preserved content")
+            .1;
+        let blob = store
+            .get_blob("w1", "s1", &blob_ref.hash)
+            .unwrap()
+            .expect("the content-addressed blob is retrievable");
+        assert!(
+            blob.value.to_string().len() > 10_000,
+            "the source output was not replaced by its overview"
+        );
     }
 
     // -- ActiveRound: round vs. turn (docs/agent-analysis-substrate-proposal.md §3.2) --
@@ -2896,30 +3370,23 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
         let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
         assert_eq!(rounds.len(), 1, "one settled round must be ledgered");
         let trunks = &rounds[0].trunk_summaries;
         assert_eq!(
             trunks.len(),
-            2,
-            "the second monologue must close the first trunk and open a second"
+            1,
+            "monologues divide visible batches; the trunk remains bounded by its 64-blob cap"
         );
         assert_eq!(trunks[0].index, 0);
         assert_eq!(trunks[0].first_item_id, "a1");
-        assert_eq!(
-            trunks[0].item_count, 2,
-            "the opening monologue is not counted"
-        );
-        assert_eq!(trunks[0].overview, "reading the config first");
-        assert_eq!(trunks[1].index, 1);
-        assert_eq!(trunks[1].first_item_id, "a2");
-        assert_eq!(
-            trunks[1].item_count, 0,
-            "settling the round must close the still-open second trunk, even with no work in it"
-        );
-        assert_eq!(trunks[1].overview, "now applying the change");
+        assert_eq!(trunks[0].blob_count, 2);
+        assert_eq!(trunks[0].title, "reading the config first");
+        assert_eq!(trunks[0].batches.len(), 2);
+        assert_eq!(trunks[0].batches[0].blob_count, 2);
+        assert_eq!(trunks[0].batches[1].blob_count, 0);
     }
 
     /// A round that never narrates still gets paginated: the 32-item cap is
@@ -2942,13 +3409,16 @@ mod tests {
                 started_at_ms: 1,
             })
             .unwrap();
-        for i in 0..40u32 {
+        for i in 0..72u32 {
             events
                 .send(SessionEvent::Item {
                     turn_id: turn_id.clone(),
                     item: tool_call(&format!("t{i}"), "grep"),
                 })
                 .unwrap();
+            if i % 16 == 15 {
+                tokio::task::yield_now().await;
+            }
         }
         events
             .send(SessionEvent::TurnCompleted {
@@ -2957,18 +3427,143 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
         let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
         let trunks = &rounds[0].trunk_summaries;
         assert_eq!(
             trunks.len(),
             2,
-            "40 tool calls split into a full 32-item trunk and an 8-item tail"
+            "72 tool calls split into a full 64-blob trunk and an 8-blob tail: {trunks:?}"
         );
-        assert_eq!(trunks[0].item_count, 32);
-        assert_eq!(trunks[0].overview, "运行了 32 次工具（grep）");
-        assert_eq!(trunks[1].item_count, 8);
+        assert_eq!(trunks[0].blob_count, 64);
+        assert_eq!(trunks[0].batches.len(), 4);
+        assert_eq!(trunks[1].blob_count, 8);
+        assert_eq!(trunks[1].batches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn layered_open_omits_historical_work_and_prefetches_only_the_last_trunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+        let turn_id = sessions
+            .send("s1", "inspect".into(), vec![], &providers, None)
+            .await
+            .unwrap();
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: item("a1", "先读取配置。然后修改"),
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: TimelineItem::ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    status: ToolStatus::Ok,
+                    detail: ToolCallDetail::Read {
+                        path: "config.json".into(),
+                        content: "raw source content".repeat(100),
+                        truncated: false,
+                    },
+                },
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id,
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (snapshot, replayed, reset, _) =
+            sessions.subscribe("s1", Some(0), true, true).await.unwrap();
+        assert!(reset);
+        assert!(
+            replayed.is_empty(),
+            "layered open must not replay work history"
+        );
+        assert!(snapshot.items.iter().all(|item| !matches!(
+            item,
+            TimelineItem::ToolCall { .. } | TimelineItem::Reasoning { .. }
+        )));
+        let rounds = snapshot.rounds.expect("session layer includes rounds");
+        assert_eq!(rounds.len(), 1);
+        let expanded = snapshot
+            .expanded_round
+            .expect("the requested last round is prefetched");
+        assert_eq!(expanded.trunks.len(), 1);
+        assert_eq!(expanded.trunks[0].batches.len(), 1);
+        let trunk = expanded
+            .expanded_trunk
+            .expect("last trunk details are present");
+        assert_eq!(trunk.batches[0].blobs.len(), 1);
+        let reference = trunk.batches[0].blobs[0]
+            .blob
+            .clone()
+            .expect("the compact blob row addresses source content");
+        let payload = sessions.blob("s1", &reference.hash).await.unwrap();
+        assert!(payload.value.to_string().contains("raw source content"));
+    }
+
+    #[tokio::test]
+    async fn trunk_index_pages_backward_without_repeating_the_round_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, _events, _) = wired(dir.path()).await;
+        let trunks = (0..25)
+            .map(|index| TrunkSummary {
+                index,
+                first_item_id: format!("i{index}"),
+                blob_count: 64,
+                title: format!("阶段 {index}"),
+                batches: vec![],
+            })
+            .collect();
+        sessions
+            .store
+            .append_round(
+                "w1",
+                "s1",
+                &RoundRecord {
+                    schema_version: rounds::SCHEMA_VERSION,
+                    round_id: "r-many".into(),
+                    started_at_ms: 1,
+                    ended_at_ms: 2,
+                    outcome: RoundOutcome::Completed,
+                    adapter_turn_ids: vec!["t1".into()],
+                    item_ids: vec![],
+                    blocked_ms: 0,
+                    synthesized: false,
+                    trunk_summaries: trunks,
+                },
+            )
+            .unwrap();
+
+        let recent = sessions
+            .round_layer("s1", "r-many", None, Some(20))
+            .await
+            .unwrap();
+        assert_eq!(recent.trunks.first().unwrap().index, 5);
+        assert_eq!(recent.trunks.last().unwrap().index, 24);
+        assert_eq!(recent.next_cursor.as_deref(), Some("before:5"));
+        let older = sessions
+            .round_layer("s1", "r-many", recent.next_cursor.as_deref(), Some(20))
+            .await
+            .unwrap();
+        assert_eq!(older.trunks.len(), 5);
+        assert_eq!(older.trunks.first().unwrap().index, 0);
+        assert!(older.next_cursor.is_none());
     }
 
     /// The proposal's central claim: an approval mid-turn is not a new round,
