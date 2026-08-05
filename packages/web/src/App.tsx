@@ -137,6 +137,18 @@ export function App({
     host.window?.setBackground(theme === "dark");
   }, [host, theme]);
 
+  // Tabs stay warm while they are open, so the device limit is the memory and
+  // connection budget. Keep that budget in one place and react when a window
+  // crosses the phone/desktop breakpoint.
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(min-width: 768px)");
+    const syncLimit = () => useWorkbench.getState().setTabLimit(media.matches ? 16 : 6);
+    syncLimit();
+    media.addEventListener?.("change", syncLimit);
+    return () => media.removeEventListener?.("change", syncLimit);
+  }, []);
+
   useEffect(() => {
     if (!pairing) return;
     const timer = setInterval(
