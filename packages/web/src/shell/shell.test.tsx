@@ -112,6 +112,18 @@ describe("the left edge", () => {
     expect(within(empty).getByText("还没有会话")).toBeInTheDocument();
   });
 
+  it("opens a roomy recent-session list with each conversation's workspace", async () => {
+    sidebar();
+
+    await userEvent.click(screen.getByRole("button", { name: /最近会话/ }));
+
+    const dialog = screen.getByRole("dialog", { name: "最近会话" });
+    expect(within(dialog).getByText("修复移动端横向拖动")).toBeInTheDocument();
+    expect(within(dialog).getByText(/paseo ·/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: /relay 重连/ }));
+    expect(useWorkbench.getState().selectSession).toHaveBeenCalledWith("s3");
+  });
+
   it("counts what is running, and only where something is", () => {
     const projects = projectRows(sidebar());
 

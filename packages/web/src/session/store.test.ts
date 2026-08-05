@@ -57,6 +57,53 @@ beforeEach(() => {
     activeTabId: null,
     notice: null,
     timeline: useWorkbench.getState().timeline,
+    sessionTimelines: {},
+    subscribedSessionIds: [],
+    tabLimit: 16,
+  });
+});
+
+describe("warm chat tabs", () => {
+  it("keeps an opened session subscribed and reactivates it without another snapshot", async () => {
+    const other = { ...SESSION, id: "s2" };
+    let subscriptions = 0;
+    const client = {
+      subscribe: async (sessionId: string) => {
+        subscriptions += 1;
+        return {
+          snapshot: { seq: 0, items: [], summary: sessionId === "s2" ? other : SESSION },
+          replayed: [],
+          reset: false,
+        };
+      },
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({ client, sessions: [SESSION, other] });
+
+    await useWorkbench.getState().selectSession("s1");
+    await useWorkbench.getState().selectSession("s2");
+    await useWorkbench.getState().selectSession("s1");
+
+    expect(subscriptions).toBe(2);
+    expect(useWorkbench.getState().tabs.map((tab) => tab.id)).toEqual(["chat:s1", "chat:s2"]);
+  });
+
+  it("evicts the least recently used inactive completed tab before a running tab", () => {
+    const running = { ...SESSION, id: "s2", status: "running" as const };
+    const active = { ...SESSION, id: "s3" };
+    useWorkbench.setState({
+      sessions: [SESSION, running, active],
+      activeTabId: "chat:s3",
+      tabs: [
+        { id: "chat:s1", kind: "chat", title: "old", sessionId: "s1", lastActivatedAt: 1 },
+        { id: "chat:s2", kind: "chat", title: "running", sessionId: "s2", lastActivatedAt: 2 },
+        { id: "chat:s3", kind: "chat", title: "active", sessionId: "s3", lastActivatedAt: 3 },
+      ],
+    });
+
+    useWorkbench.getState().setTabLimit(2);
+
+    expect(useWorkbench.getState().tabs.map((tab) => tab.id)).toEqual(["chat:s2", "chat:s3"]);
   });
 });
 

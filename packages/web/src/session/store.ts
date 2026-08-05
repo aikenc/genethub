@@ -45,6 +45,8 @@ export interface WorkbenchTab {
   kind: TabKind;
   title: string;
   sessionId?: string;
+  /** Used to evict the least recently used inactive tab when the strip is full. */
+  lastActivatedAt?: number;
 }
 
 export type RightPanel = "changes" | "files" | null;
@@ -107,6 +109,16 @@ interface WorkbenchState {
   activeTabId: string | null;
   rightPanel: RightPanel;
   timeline: TimelineState;
+  /**
+   * Warm snapshots for every chat tab still in the strip. Switching back to a
+   * warm tab must not throw its rendered history away and ask the daemon to
+   * replay it again.
+   */
+  sessionTimelines: Record<string, TimelineState>;
+  /** Sessions whose live event stream we intentionally keep while their tab is open. */
+  subscribedSessionIds: string[];
+  /** Six tabs fit a phone; a desktop can keep sixteen useful work surfaces. */
+  tabLimit: number;
   notice: string | null;
   hub: HubStatus | null;
   /**
@@ -210,6 +222,7 @@ interface WorkbenchState {
   openTab(kind: TabKind, title?: string): void;
   activateTab(tabId: string): void;
   closeTab(tabId: string): void;
+  setTabLimit(limit: number): void;
   setRightPanel(panel: RightPanel): void;
   send(text: string, attachments?: Attachment[]): Promise<void>;
   /** Creates an independent Agent context through one completed turn. */
@@ -246,6 +259,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   activeTabId: null,
   rightPanel: null,
   timeline: emptyTimeline(),
+  sessionTimelines: {},
+  subscribedSessionIds: [],
+  tabLimit: 16,
   notice: null,
   hub: null,
   claim: null,
@@ -342,9 +358,19 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const state = get();
     const target = workspaceId ?? currentWorkspace(state);
     if (!target) return;
-    // Nothing is listening to the old conversation's events once it is off
-    // screen, and the daemon should not go on sending them.
-    if (state.activeSessionId) void state.client?.unsubscribe(state.activeSessionId);
+    const opened = state.tabs.some((tab) => tab.id === DRAFT_TAB)
+      ? state.tabs
+      : [
+          ...state.tabs,
+          {
+            id: DRAFT_TAB,
+            kind: "chat" as const,
+            title: "新会话",
+            lastActivatedAt: Date.now(),
+          },
+        ];
+    const limited = limitTabs(opened, DRAFT_TAB, state.tabLimit, state.sessions);
+    const evictedSessionIds = tabSessionIds(limited.evicted);
     set({
       draft: {
         workspaceId: target,
@@ -364,29 +390,33 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       activeWorkspaceId: target,
       activeSessionId: null,
       timeline: emptyTimeline(),
-      tabs: state.tabs.some((tab) => tab.id === DRAFT_TAB)
-        ? state.tabs
-        : [...state.tabs, { id: DRAFT_TAB, kind: "chat" as const, title: "新会话" }],
+      tabs: limited.tabs,
+      sessionTimelines: omitMany(state.sessionTimelines, evictedSessionIds),
+      subscribedSessionIds: state.subscribedSessionIds.filter(
+        (id) => !evictedSessionIds.includes(id),
+      ),
       activeTabId: DRAFT_TAB,
     });
+    discardSubscriptions(state.client, limited.evicted);
   },
 
   async selectSession(sessionId) {
     const client = require_(get().client);
-    const previous = get().activeSessionId;
-    if (previous && previous !== sessionId) await client.unsubscribe(previous);
-
     const summary = get().sessions.find((entry) => entry.id === sessionId);
     const tabId = `chat:${sessionId}`;
+    let evicted: WorkbenchTab[] = [];
+    let warm = false;
     set((state) => {
       // The unstarted conversation gives way to a real one, whether because it
       // just became this session or because the user went elsewhere. Keeping
       // its tab would leave a second "新会话" strip that opens onto nothing.
       const kept = state.tabs.filter((tab) => tab.id !== DRAFT_TAB);
       const existing = kept.find((tab) => tab.id === tabId);
-      const tabs = existing
+      const opened = existing
         ? kept.map((tab) =>
-            tab.id === tabId ? { ...tab, title: summary?.title ?? tab.title } : tab,
+            tab.id === tabId
+              ? { ...tab, title: summary?.title ?? tab.title, lastActivatedAt: Date.now() }
+              : tab,
           )
         : [
             ...kept,
@@ -395,8 +425,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
               kind: "chat" as const,
               title: summary?.title ?? "新会话",
               sessionId,
+              lastActivatedAt: Date.now(),
             },
           ];
+      const limited = limitTabs(opened, tabId, state.tabLimit, state.sessions);
+      evicted = limited.evicted;
+      warm = state.subscribedSessionIds.includes(sessionId);
       return {
         activeSessionId: sessionId,
         draft: null,
@@ -406,11 +440,21 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         // terminal and the diff all read `activeWorkspaceId`. Without this they
         // would go on showing the project the user just navigated away from.
         activeWorkspaceId: summary?.workspaceId ?? state.activeWorkspaceId,
-        timeline: emptyTimeline(),
-        tabs,
+        timeline: state.sessionTimelines[sessionId] ?? emptyTimeline(),
+        tabs: limited.tabs,
+        sessionTimelines: omitMany(state.sessionTimelines, tabSessionIds(limited.evicted)),
+        subscribedSessionIds: state.subscribedSessionIds.filter(
+          (id) => !tabSessionIds(limited.evicted).includes(id),
+        ),
         activeTabId: tabId,
       };
     });
+
+    discardSubscriptions(client, evicted);
+    // A tab stays warm until it is explicitly closed or LRU-evicted. Its
+    // current snapshot and event subscription are already live, so selecting
+    // it is a synchronous state change rather than a network round trip.
+    if (warm) return;
 
     const { snapshot, replayed } = await client.subscribe(sessionId, {
       onEvent: (event) => {
@@ -418,19 +462,30 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           applyTitle(sessionId, event.event.title, set);
         }
         applySessionStatus(sessionId, event.event, set);
-        if (get().activeSessionId !== sessionId) return;
-        set((state) => ({ timeline: applySequenced(state.timeline, event) }));
+        set((state) => {
+          const timeline = applySequenced(
+            state.sessionTimelines[sessionId] ?? emptyTimeline(),
+            event,
+          );
+          return {
+            sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
+            ...(state.activeSessionId === sessionId ? { timeline } : {}),
+          };
+        });
       },
       onResync: (resnapshot, events, reset) => {
-        if (get().activeSessionId !== sessionId) return;
         const base = reset
           ? fromSnapshot(resnapshot as SessionSnapshot)
-          : get().timeline;
+          : get().sessionTimelines[sessionId] ?? emptyTimeline();
         for (const event of events) {
           if (event.event.type === "titleChanged") applyTitle(sessionId, event.event.title, set);
           applySessionStatus(sessionId, event.event, set);
         }
-        set({ timeline: events.reduce(applySequenced, base) });
+        const timeline = events.reduce(applySequenced, base);
+        set((state) => ({
+          sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
+          ...(state.activeSessionId === sessionId ? { timeline } : {}),
+        }));
       },
     });
 
@@ -438,8 +493,14 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // A slower subscription must not repaint whichever session the user opened
     // next. This is easy to hit when switching pages over a relay: both replies
     // are valid, but only the currently selected session owns the timeline.
-    if (get().activeSessionId !== sessionId) return;
-    set({ timeline: replayed.reduce(applySequenced, base) });
+    const timeline = replayed.reduce(applySequenced, base);
+    set((state) => ({
+      subscribedSessionIds: state.subscribedSessionIds.includes(sessionId)
+        ? state.subscribedSessionIds
+        : [...state.subscribedSessionIds, sessionId],
+      sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
+      ...(state.activeSessionId === sessionId ? { timeline } : {}),
+    }));
   },
 
   openTab(kind, title) {
@@ -454,10 +515,29 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     };
     set((state) => {
       if (state.tabs.some((tab) => tab.id === id)) {
-        return { activeTabId: id };
+        return {
+          activeTabId: id,
+          tabs: state.tabs.map((tab) =>
+            tab.id === id ? { ...tab, lastActivatedAt: Date.now() } : tab,
+          ),
+        };
       }
+      const limited = limitTabs(
+        [
+          ...state.tabs,
+          { id, kind, title: title ?? defaults[kind] ?? kind, lastActivatedAt: Date.now() },
+        ],
+        id,
+        state.tabLimit,
+        state.sessions,
+      );
+      discardSubscriptions(state.client, limited.evicted);
       return {
-        tabs: [...state.tabs, { id, kind, title: title ?? defaults[kind] ?? kind }],
+        tabs: limited.tabs,
+        sessionTimelines: omitMany(state.sessionTimelines, tabSessionIds(limited.evicted)),
+        subscribedSessionIds: state.subscribedSessionIds.filter(
+          (sessionId) => !tabSessionIds(limited.evicted).includes(sessionId),
+        ),
         activeTabId: id,
       };
     });
@@ -466,7 +546,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   activateTab(tabId) {
     const tab = get().tabs.find((entry) => entry.id === tabId);
     if (!tab) return;
-    set({ activeTabId: tabId });
+    set((state) => ({
+      activeTabId: tabId,
+      tabs: state.tabs.map((entry) =>
+        entry.id === tabId ? { ...entry, lastActivatedAt: Date.now() } : entry,
+      ),
+    }));
     if (tab.kind === "chat" && tab.sessionId && tab.sessionId !== get().activeSessionId) {
       void get().selectSession(tab.sessionId);
     }
@@ -480,11 +565,34 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const fallback = next[Math.max(0, index - 1)] ?? next[0] ?? null;
     set({
       tabs: next,
+      sessionTimelines: omitMany(get().sessionTimelines, tabSessionIds([tabs[index]!])),
+      subscribedSessionIds: get().subscribedSessionIds.filter(
+        (sessionId) => !tabSessionIds([tabs[index]!]).includes(sessionId),
+      ),
       activeTabId: activeTabId === tabId ? (fallback?.id ?? null) : activeTabId,
     });
+    discardSubscriptions(get().client, [tabs[index]!]);
     if (fallback?.kind === "chat" && fallback.sessionId) {
       void get().selectSession(fallback.sessionId);
     }
+  },
+
+  setTabLimit(limit) {
+    const bounded = Math.max(1, Math.floor(limit));
+    let evicted: WorkbenchTab[] = [];
+    set((state) => {
+      const limited = limitTabs(state.tabs, state.activeTabId, bounded, state.sessions);
+      evicted = limited.evicted;
+      return {
+        tabLimit: bounded,
+        tabs: limited.tabs,
+        sessionTimelines: omitMany(state.sessionTimelines, tabSessionIds(limited.evicted)),
+        subscribedSessionIds: state.subscribedSessionIds.filter(
+          (sessionId) => !tabSessionIds(limited.evicted).includes(sessionId),
+        ),
+      };
+    });
+    discardSubscriptions(get().client, evicted);
   },
 
   setRightPanel(panel) {
@@ -578,9 +686,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set((state) => ({
       sessions: state.sessions.filter((entry) => entry.id !== sessionId),
       tabs: state.tabs.filter((tab) => tab.id !== tabId),
+      sessionTimelines: omit(state.sessionTimelines, sessionId),
+      subscribedSessionIds: state.subscribedSessionIds.filter((id) => id !== sessionId),
       activeTabId: state.activeTabId === tabId ? null : state.activeTabId,
       ...(wasOpen ? { activeSessionId: null, timeline: emptyTimeline() } : {}),
     }));
+    void get().client?.unsubscribe(sessionId);
     // Deleting what you were reading leaves a blank pane otherwise. `land`
     // picks the next conversation, or opens an empty one.
     if (wasOpen) await land(get);
@@ -1018,6 +1129,57 @@ function applySessionStatus(
 function currentWorkspace(state: WorkbenchState): string | null {
   const session = state.sessions.find((entry) => entry.id === state.activeSessionId);
   return session?.workspaceId ?? state.activeWorkspaceId ?? state.workspaces[0]?.id ?? null;
+}
+
+/** The inactive tab that has been ignored longest is the least surprising one to close. */
+function limitTabs(
+  tabs: WorkbenchTab[],
+  activeTabId: string | null,
+  limit: number,
+  sessions: SessionSummary[],
+): { tabs: WorkbenchTab[]; evicted: WorkbenchTab[] } {
+  const kept = [...tabs];
+  const evicted: WorkbenchTab[] = [];
+  while (kept.length > limit) {
+    const candidates = kept.filter((tab) => tab.id !== activeTabId);
+    if (candidates.length === 0) break;
+    // Preserve a running conversation whenever another inactive tab can make
+    // room. A completed, least-recently-used chat is closed first.
+    const victim = [...candidates].sort((left, right) => {
+      const leftRunning = sessionIsRunning(left, sessions);
+      const rightRunning = sessionIsRunning(right, sessions);
+      if (leftRunning !== rightRunning) return leftRunning ? 1 : -1;
+      return (left.lastActivatedAt ?? 0) - (right.lastActivatedAt ?? 0);
+    })[0]!;
+    kept.splice(kept.indexOf(victim), 1);
+    evicted.push(victim);
+  }
+  return { tabs: kept, evicted };
+}
+
+function sessionIsRunning(tab: WorkbenchTab, sessions: SessionSummary[]): boolean {
+  const status = tab.sessionId
+    ? sessions.find((session) => session.id === tab.sessionId)?.status
+    : null;
+  return status === "running" || status === "waiting";
+}
+
+function tabSessionIds(tabs: WorkbenchTab[]): string[] {
+  return tabs.flatMap((tab) => (tab.sessionId ? [tab.sessionId] : []));
+}
+
+function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
+  const { [key]: _discarded, ...rest } = record;
+  return rest;
+}
+
+function omitMany<T>(record: Record<string, T>, keys: string[]): Record<string, T> {
+  return keys.reduce((remaining, key) => omit(remaining, key), record);
+}
+
+/** An evicted tab must not keep a daemon stream or a snapshot alive invisibly. */
+function discardSubscriptions(client: Client | null, tabs: WorkbenchTab[]): void {
+  for (const sessionId of tabSessionIds(tabs)) void client?.unsubscribe(sessionId);
 }
 
 /** Replaces the node at `path` with a freshly loaded one, in place. */

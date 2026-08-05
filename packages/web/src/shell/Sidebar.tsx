@@ -63,6 +63,7 @@ export function Sidebar({
   const [grouping, setGrouping] = useState<Grouping>(() => recall(GROUPING_KEY, "project"));
   const [collapsed, setCollapsed] = useState<string[]>(() => recall(COLLAPSED_KEY, []));
   const [query, setQuery] = useState("");
+  const [recentOpen, setRecentOpen] = useState(false);
   const [readAt, setReadAt] = useState<Record<string, number>>(() => recall(READ_KEY, {}));
   const readStateInitialized = useRef(recall(READ_INITIALIZED_KEY, false));
 
@@ -190,6 +191,16 @@ export function Sidebar({
             新建会话
           </button>
           {sessions.length > 0 ? (
+            <button
+              type="button"
+              className="flex min-h-11 w-full items-center justify-between rounded-xl px-3 text-sm text-muted hover:bg-sidebar-hover hover:text-fg md:min-h-0 md:rounded-md md:py-1.5 md:text-xs"
+              onClick={() => setRecentOpen(true)}
+            >
+              <span>最近会话</span>
+              <span className="text-xs text-faint">最近 30 条 ›</span>
+            </button>
+          ) : null}
+          {sessions.length > 0 ? (
             <input
               type="search"
               aria-label="搜索会话"
@@ -298,8 +309,109 @@ export function Sidebar({
           </button>
         </div>
       </aside>
+
+      {recentOpen ? (
+        <RecentSessionsDialog
+          sessions={sessions}
+          workspaces={workspaces}
+          activeSessionId={activeSessionId}
+          onClose={() => setRecentOpen(false)}
+          onPick={(sessionId) => {
+            setRecentOpen(false);
+            go(sessionId);
+          }}
+        />
+      ) : null}
     </>
   );
+}
+
+/** A roomy cross-workspace view, separate from the navigation tree on the left. */
+function RecentSessionsDialog({
+  sessions,
+  workspaces,
+  activeSessionId,
+  onClose,
+  onPick,
+}: {
+  sessions: SessionSummary[];
+  workspaces: WorkspaceInfo[];
+  activeSessionId: string | null;
+  onClose(): void;
+  onPick(sessionId: string): void;
+}) {
+  const recent = [...sessions]
+    .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
+    .slice(0, 30);
+  const workspaceName = (workspaceId: string) =>
+    workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? "未知工作区";
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" role="presentation">
+      <button
+        type="button"
+        aria-label="关闭最近会话"
+        className="absolute inset-0 cursor-default"
+        onClick={onClose}
+      />
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="recent-sessions-title"
+        className="relative flex max-h-[min(42rem,calc(100vh-2rem))] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-line-strong bg-surface shadow-[0_24px_80px_rgb(0_0_0_/0.45)]"
+      >
+        <header className="flex items-center justify-between border-b border-line px-5 py-4">
+          <div>
+            <h2 id="recent-sessions-title" className="text-base font-medium text-fg">
+              最近会话
+            </h2>
+            <p className="mt-0.5 text-xs text-faint">按最后更新时间显示最近 30 条，包含所属工作区。</p>
+          </div>
+          <button
+            type="button"
+            aria-label="关闭最近会话"
+            className="flex h-10 w-10 items-center justify-center rounded-lg text-lg text-faint hover:bg-raised hover:text-fg"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </header>
+        <ul className="min-h-0 divide-y divide-line overflow-y-auto px-2 py-2">
+          {recent.map((session) => (
+            <li key={session.id}>
+              <button
+                type="button"
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left hover:bg-raised ${
+                  session.id === activeSessionId ? "bg-raised" : ""
+                }`}
+                onClick={() => onPick(session.id)}
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm text-fg">{title(session)}</span>
+                  <span className="mt-1 block truncate text-xs text-faint">
+                    {workspaceName(session.workspaceId)} · {recentTime(session.updatedAtMs)}
+                  </span>
+                </span>
+                <span className="shrink-0 text-xs text-muted">{sessionStatus(session.status)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
+    </div>
+  );
+}
+
+function recentTime(updatedAtMs: number): string {
+  const elapsed = Math.max(0, Date.now() - updatedAtMs);
+  if (elapsed < 60_000) return "刚刚";
+  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} 分钟前`;
+  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} 小时前`;
+  return `${Math.floor(elapsed / 86_400_000)} 天前`;
+}
+
+function sessionStatus(status: SessionSummary["status"]): string {
+  return status === "running" ? "运行中" : status === "waiting" ? "等待中" : status === "failed" ? "失败" : "已完成";
 }
 
 function Entry({
