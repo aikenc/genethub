@@ -5,6 +5,7 @@ import type { Endpoint, Host, Target } from "../host";
 import { useWorkbench } from "../session/store";
 import { OpenProject } from "../workspace/OpenProject";
 import type { ExtraTab } from "./tabs";
+import { SessionStatusIcon } from "./SessionStatusIcon";
 import { TargetSwitcher } from "./TargetSwitcher";
 
 /**
@@ -386,6 +387,7 @@ function RecentSessionsDialog({
                 }`}
                 onClick={() => onPick(session.id)}
               >
+                <SessionStatusIcon status={session.status} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm text-fg">{title(session)}</span>
                   <span className="mt-1 block truncate text-xs text-faint">
@@ -936,26 +938,7 @@ function StatusDot({ connection }: { connection: string }) {
 }
 
 function SessionStateIcon({ session }: { session: ListedSession }) {
-  const state =
-    session.status === "failed"
-      ? { icon: "⚠", label: "运行异常", tone: "text-danger" }
-      : session.status === "waiting"
-        ? { icon: "✋", label: "等待交互", tone: "text-accent" }
-        : session.status === "running"
-          ? { icon: "↻", label: "运行中", tone: "text-ok animate-pulse" }
-          : session.unread
-            ? { icon: "●", label: "已完成未阅读", tone: "text-accent" }
-            : { icon: "✓", label: "已完成已阅读", tone: "text-faint" };
-  return (
-    <span
-      className={`w-4 shrink-0 text-center text-[11px] leading-none ${state.tone}`}
-      role="img"
-      aria-label={state.label}
-      title={state.label}
-    >
-      {state.icon}
-    </span>
-  );
+  return <SessionStatusIcon status={session.status} unread={session.unread} />;
 }
 
 /** The daemon names a session from its first message; until then this stands in. */

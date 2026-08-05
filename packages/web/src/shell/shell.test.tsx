@@ -7,6 +7,7 @@ import type { Endpoint, Host, WindowControls } from "../host";
 import { useWorkbench } from "../session/store";
 import { useTheme } from "../theme/store";
 import { Sidebar } from "./Sidebar";
+import { TabBar } from "./TabBar";
 import { TitleBar } from "./TitleBar";
 
 /**
@@ -120,6 +121,7 @@ describe("the left edge", () => {
     const dialog = screen.getByRole("dialog", { name: "最近会话" });
     expect(within(dialog).getByText("修复移动端横向拖动")).toBeInTheDocument();
     expect(within(dialog).getByText(/paseo ·/)).toBeInTheDocument();
+    expect(within(dialog).getByRole("img", { name: "运行中" })).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole("button", { name: /relay 重连/ }));
     expect(useWorkbench.getState().selectSession).toHaveBeenCalledWith("s3");
   });
@@ -213,6 +215,27 @@ describe("the left edge", () => {
     await userEvent.click(screen.getByRole("button", { name: "新建会话" }));
 
     expect(useWorkbench.getState().newSession).toHaveBeenCalledWith("w1", null);
+  });
+});
+
+describe("chat tab state", () => {
+  it("shows the same status marker that is used by the session lists", () => {
+    useWorkbench.setState({
+      tabs: [
+        { id: "chat:s1", kind: "chat", title: "执行中的会话", sessionId: "s1" },
+        { id: "chat:s2", kind: "chat", title: "失败的会话", sessionId: "s2" },
+      ],
+      activeTabId: "chat:s1",
+      sessions: [
+        { ...session("s1", "w1", "执行中的会话"), status: "running" },
+        { ...session("s2", "w1", "失败的会话"), status: "failed" },
+      ],
+    });
+
+    render(<TabBar />);
+
+    expect(screen.getByRole("img", { name: "运行中" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "运行异常" })).toBeInTheDocument();
   });
 });
 

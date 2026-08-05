@@ -1,4 +1,5 @@
 import { useWorkbench } from "../session/store";
+import { SessionStatusIcon } from "./SessionStatusIcon";
 
 /**
  * Closable panes across the top of the workspace.
@@ -7,7 +8,7 @@ import { useWorkbench } from "../session/store";
  * not close the chat tab, and closing a tab removes it from the strip.
  */
 export function TabBar() {
-  const { tabs, activeTabId, activateTab, closeTab, rightPanel, setRightPanel, workspaceName } =
+  const { tabs, sessions, activeTabId, activateTab, closeTab, rightPanel, setRightPanel, workspaceName } =
     useTabBar();
 
   return (
@@ -23,6 +24,9 @@ export function TabBar() {
       <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto overscroll-x-contain">
         {tabs.map((tab) => {
           const active = tab.id === activeTabId;
+          const status = tab.sessionId
+            ? sessions.find((session) => session.id === tab.sessionId)?.status
+            : undefined;
           return (
             <div
               key={tab.id}
@@ -30,6 +34,7 @@ export function TabBar() {
                 active ? "bg-bg text-fg" : "text-muted hover:bg-raised hover:text-fg"
               }`}
             >
+              {tab.kind === "chat" ? <SessionStatusIcon status={status} /> : null}
               <button
                 type="button"
                 className="min-w-0 flex-1 truncate py-2 text-left"
@@ -101,6 +106,7 @@ function PanelToggle({
 function useTabBar() {
   const tabs = useWorkbench((state) => state.tabs);
   const activeTabId = useWorkbench((state) => state.activeTabId);
+  const sessions = useWorkbench((state) => state.sessions);
   const activateTab = useWorkbench((state) => state.activateTab);
   const closeTab = useWorkbench((state) => state.closeTab);
   const rightPanel = useWorkbench((state) => state.rightPanel);
@@ -111,6 +117,7 @@ function useTabBar() {
     workspaces.find((entry) => entry.id === activeWorkspaceId)?.name ?? workspaces[0]?.name;
   return {
     tabs,
+    sessions,
     activeTabId,
     activateTab,
     closeTab,
