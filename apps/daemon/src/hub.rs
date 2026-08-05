@@ -255,7 +255,21 @@ impl Client {
             return Err(anyhow!("{label} cannot contain credentials"));
         }
         if target.origin() != base.origin() {
-            return Err(anyhow!("{label} must stay on the configured Hub origin"));
+            // `base` already passed `validate_control_url` above, so a `http`
+            // scheme here means it is a literal loopback address, not an
+            // ordinary origin. A self-hosted daemon deliberately dials
+            // Control over such an internal route while browsers are handed
+            // the same deployment's public https origin
+            // (`dev-workspace-design.md` — the two are split on purpose, not
+            // a spoofed reply). Trusting the operator's own loopback
+            // configuration and re-validating `target` on its own preserves
+            // the actual protection this check exists for — no
+            // `file:`/`javascript:`/credentialed/cross-scheme smuggling —
+            // without demanding the two origins be identical.
+            if base.scheme() != "http" {
+                return Err(anyhow!("{label} must stay on the configured Hub origin"));
+            }
+            validate_control_url(&target)?;
         }
         Ok(())
     }
@@ -801,6 +815,26 @@ mod tests {
         assert!(local
             .validate_browser_link("http://127.0.0.1:8787/link/once", "local URL")
             .is_ok());
+        // A dev/self-hosted daemon dialing Control over an internal loopback
+        // route legitimately gets back a claim link on the deployment's
+        // public https origin instead — the split is intentional
+        // (`dev-workspace-design.md`), not a spoofed reply, so it must still
+        // be accepted as long as the link itself is a safe https URL.
+        assert!(local
+            .validate_browser_link(
+                "https://myteam.devcloud.woa.com/relay-dev-chat/link/once",
+                "trial claim URL"
+            )
+            .is_ok());
+        // The relaxation is specific to a `base` that is itself a literal
+        // loopback address; it must not let a loopback-looking `target`
+        // smuggle past a scheme this check still has to reject.
+        assert!(local
+            .validate_browser_link("file:///tmp/payload", "unsafe target")
+            .is_err());
+        assert!(local
+            .validate_browser_link("http://192.168.1.2/link/once", "non-loopback http target")
+            .is_err());
         assert!(local
             .validate_browser_link("http://localhost:8787/link/once", "local URL")
             .is_err());
