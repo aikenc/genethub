@@ -117,7 +117,7 @@ describe("what the user sees in a session", () => {
       type: "toolCall",
       id,
       name: "grep",
-      status: "ok",
+      status: id === "c1" ? "error" : "ok",
       detail: { kind: "search", query: "TODO", matches: [] },
     });
     let state = emptyTimeline();
@@ -145,8 +145,23 @@ describe("what the user sees in a session", () => {
     expect(screen.getAllByTestId("tool-call")).toHaveLength(5);
   });
 
-  it("keeps the still-running batch open while a finished one stays folded", () => {
-    let state = emptyTimeline();
+  it("moves the automatic opening with the live tail and closes everything on completion", () => {
+    const readCall = (id: string): TimelineItem => ({
+      type: "toolCall",
+      id,
+      name: "read_file",
+      status: "ok",
+      detail: { kind: "read", path: `${id}.txt`, content: "", truncated: false },
+    });
+    const editCall = (id: string): TimelineItem => ({
+      type: "toolCall",
+      id,
+      name: "edit",
+      status: "ok",
+      detail: { kind: "edit", path: `${id}.txt`, diff: "" },
+    });
+
+    let state = apply(emptyTimeline(), { type: "turnStarted", turnId: "t1", startedAtMs: 1 });
     state = apply(state, {
       type: "item",
       turnId: "t1",
@@ -157,46 +172,72 @@ describe("what the user sees in a session", () => {
       },
     });
     for (const id of ["c1", "c2", "c3"]) {
-      state = apply(state, {
-        type: "item",
-        turnId: "t1",
-        item: {
-          type: "toolCall",
-          id,
-          name: "read_file",
-          status: "ok",
-          detail: { kind: "read", path: `${id}.txt`, content: "", truncated: false },
-        },
-      });
+      state = apply(state, { type: "item", turnId: "t1", item: readCall(id) });
     }
+
+    const view = render(<TimelineView state={state} />);
+    expect(
+      within(screen.getByTestId("work-group")).getByRole("button", { name: "收起" }),
+    ).toBeInTheDocument();
+
     state = apply(state, {
       type: "item",
       turnId: "t1",
       item: { type: "assistantMessage", id: "a2", text: "现在开始修改" },
     });
-    state = apply(state, { type: "turnStarted", turnId: "t1", startedAtMs: 1 });
     for (const id of ["c4", "c5"]) {
+      state = apply(state, { type: "item", turnId: "t1", item: editCall(id) });
+    }
+
+    view.rerender(<TimelineView state={state} />);
+    let groups = screen.getAllByTestId("work-group");
+    expect(groups).toHaveLength(2);
+    // The first batch was open when it was the live tail. It must close now,
+    // rather than preserving the initial `defaultOpen` forever.
+    expect(within(groups[0]!).getByRole("button", { name: "展开 3 项" })).toBeInTheDocument();
+    expect(within(groups[1]!).getByRole("button", { name: "收起" })).toBeInTheDocument();
+    expect(within(groups[1]!).getAllByTestId("tool-call")).toHaveLength(2);
+
+    state = apply(state, {
+      type: "turnCompleted",
+      turnId: "t1",
+      usage: {
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        costUsd: undefined,
+      },
+    });
+    view.rerender(<TimelineView state={state} />);
+    groups = screen.getAllByTestId("work-group");
+    expect(within(groups[0]!).getByRole("button", { name: "展开 3 项" })).toBeInTheDocument();
+    expect(within(groups[1]!).getByRole("button", { name: "展开 2 项" })).toBeInTheDocument();
+    expect(screen.queryAllByTestId("tool-call")).toHaveLength(0);
+  });
+
+  it("does not overwrite a user's explicit group choice on rerender", async () => {
+    let state = emptyTimeline();
+    for (const id of ["c1", "c2"]) {
       state = apply(state, {
         type: "item",
         turnId: "t1",
         item: {
           type: "toolCall",
           id,
-          name: "edit",
+          name: "grep",
           status: "ok",
-          detail: { kind: "edit", path: `${id}.txt`, diff: "" },
+          detail: { kind: "search", query: "TODO", matches: [] },
         },
       });
     }
 
-    render(<TimelineView state={state} />);
-    const groups = screen.getAllByTestId("work-group");
-    expect(groups).toHaveLength(2);
-    // The finished batch (before the second monologue) stays collapsed.
-    expect(within(groups[0]!).getByRole("button", { name: "展开 3 项" })).toBeInTheDocument();
-    // The batch still running when the turn has not completed is open already.
-    expect(within(groups[1]!).getByRole("button", { name: "收起" })).toBeInTheDocument();
-    expect(within(groups[1]!).getAllByTestId("tool-call")).toHaveLength(2);
+    const view = render(<TimelineView state={state} />);
+    await userEvent.click(screen.getByRole("button", { name: "展开 2 项" }));
+    expect(screen.getByRole("button", { name: "收起" })).toBeInTheDocument();
+
+    view.rerender(<TimelineView state={{ ...state }} />);
+    expect(screen.getByRole("button", { name: "收起" })).toBeInTheDocument();
   });
 
   it("keeps a successful shell call compact until its details are requested", async () => {

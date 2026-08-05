@@ -269,12 +269,13 @@ function summarizeWork(items: TimelineItem[]): string {
 }
 
 function WorkGroup({ items, defaultOpen }: { items: TimelineItem[]; defaultOpen: boolean }) {
-  const [open, setOpen] = useState(defaultOpen);
+  // `defaultOpen` changes as the live tail advances. Keeping its initial value
+  // in state made every group that had once been the tail stay open forever.
+  // A null override follows the live default; clicking detaches this group from
+  // that default so ordinary rerenders do not undo the user's explicit choice.
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = manualOpen ?? defaultOpen;
   const hasError = items.some((item) => item.type === "toolCall" && item.status === "error");
-
-  useEffect(() => {
-    if (hasError) setOpen(true);
-  }, [hasError]);
 
   return (
     <div
@@ -292,7 +293,7 @@ function WorkGroup({ items, defaultOpen }: { items: TimelineItem[]; defaultOpen:
           type="button"
           className="shrink-0 text-accent"
           aria-expanded={open}
-          onClick={() => setOpen((value) => !value)}
+          onClick={() => setManualOpen(!open)}
         >
           {open ? "收起" : `展开 ${items.length} 项`}
         </button>
