@@ -2,7 +2,7 @@
 
 在自己的机器上跑 coding agent，从任何设备安全地用它。
 
-装一个桌面端，你的电脑就成了一台可以远程使用的开发机：在电脑前用它，出门用手机接着用，中途换设备不丢上下文。代码、密钥和执行全部留在你自己的机器上。
+在 Windows 或 macOS 装桌面端，或者在 Linux 装 daemon/CLI，你的电脑就成了一台可以远程使用的开发机：在电脑前用它，出门用手机接着用，中途换设备不丢上下文。代码、密钥和执行全部留在你自己的机器上。Linux 不提供桌面壳，工作台直接在浏览器里打开。
 
 ---
 
@@ -15,20 +15,20 @@
 | **relay**（Node） | 你人在外面时的汇合点。它只搬字节，不解析、不落库，可以自己部署 |
 | **workbench**（前端） | 一份代码跑在浏览器、桌面和手机上 |
 
-不需要 relay 也能用：在电脑前是本机直连，同一个 Wi-Fi 下是局域网直连。
+不需要 relay 也能用：在电脑前由桌面端或 CLI 通过 loopback 直连；跨设备统一走 relay，不在局域网暴露明文的高权限 WebSocket。
 
 ## 装上就用
 
 **Linux 与任何没有图形界面的机器**（服务器、VM、只能 SSH 上去的盒子）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/aikenc/genethub/main/scripts/install.sh | sh
-genet daemon run   # daemon + 内置 agent，不需要 Node；启动后打印连接地址与 token（genet 同时也是 CLI）
+curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL https://raw.githubusercontent.com/aikenc/genethub/main/scripts/install.sh | sh
+genet daemon run   # daemon + 内置 agent，不需要 Node；启动后打印一次性连接地址（genet 同时也是 CLI）
 ```
 
 预编译包是 **musl 静态链接**的，不依赖宿主机 glibc 版本。把它打印的地址在浏览器里打开就是完整工作台——和桌面端里的是同一份代码。
 
-**Windows**：从[发布页](https://github.com/aikenc/genethub/releases/latest)下安装包，托盘常驻，
+**Windows**：从[发布页](https://github.com/aikenc/genethub/releases/latest)手动下载安装包并核对 `SHA256SUMS`，托盘常驻，
 关掉窗口机器照样可达。
 
 macOS 这一版没有发布产物（等签名与公证），从源码构建可用。
@@ -38,10 +38,10 @@ macOS 这一版没有发布产物（等签名与公证），从源码构建可�
 ```bash
 cargo build --release -p genet-cli -p genet-agent       # CLI/守护进程（同一二进制）与内置 agent
 cd packages/web && npm install && npm run build        # 工作台
-cd apps/desktop && ./scripts/bundle.mjs                 # 桌面安装包
+cd apps/desktop && ./scripts/bundle.mjs                 # Windows/macOS 桌面安装包
 ```
 
-自建 relay 见 [self-hosting.md](./docs/self-hosting.md)。发布产物由 `.github/workflows/release.yml` 在打 tag 时构建：每个平台各出一个安装包，另出一份 `genet-<os>-<arch>.tar.gz` 供上面那条命令使用，附 `SHA256SUMS`（`scripts/install.sh` 校验不过就拒绝安装）。
+自建 relay 见 [self-hosting.md](./docs/self-hosting.md)。发布产物由 `.github/workflows/release.yml` 在打 tag 时构建：当前发布 Windows 安装包，以及各 CLI 目标的 `genet-<os>-<arch>.tar.gz`，并附 `SHA256SUMS`（`scripts/install.sh` 校验不过就拒绝首次安装）。摘要与产物同源，不能替代独立签名；在签名根落地前，daemon、桌面壳和 `genet update` 的自动下载/执行入口均失败关闭，更新需从官方发布页手动完成。macOS 桌面端源码可构建，正式安装包等待签名与公证；Linux 只发布 daemon/CLI，不发布桌面安装包。
 
 **发一个版本就是打一个 tag**，仓库里没有要跟着改的版本号：`git tag v0.1.18 && git push --tags`。产品版本号只存在于 tag 上，流水线构建前用 `scripts/version.mjs` 把它写进 Cargo 和安装包配置，构建完再拿真产物核对一遍（发布产物里 `genet --version` 必须等于 tag）。所以从源码构建出来的那份自称 `0.0.0`（二进制叫 `genet-dev`，树默认走 dev 轨），界面上显示"开发版"，也不会被催升级——它确实不是任何一个发布版本。
 
@@ -75,7 +75,7 @@ cd apps/desktop && ./scripts/bundle.mjs                 # 桌面安装包
 | 前端 | 一份产物跑四个宿主，宿主差异收敛在 `packages/web/src/host/` |
 | 转发 | relay 独立成服务，不解析 payload、不落库、可自建 |
 | 身份 | 本仓不需要账号：准入由每台机器自己判，配对时发一份设备凭证。relay 只按 id 撮合两条连接 |
-| 加密现状 | 传输层加密；端到端加密尚未实现，见 [security-model.md](./docs/security-model.md) |
+| 加密现状 | 转发通道完成 v2 双向 PSK 证明后，业务帧使用 AES-256-GCM + 独立 HMAC；Relay 只见路由元数据与密文。托管 Control 会生成通道密钥，尚不具备公钥握手、前向保密或“整个平台零知识”，见 [security-model.md](./docs/security-model.md) |
 | 安装包 | 下载 ≤ 80MB，安装后 ≤ 200MB，PC 端不依赖 Node 运行时 |
 
 ## 代码
@@ -85,7 +85,7 @@ cd apps/desktop && ./scripts/bundle.mjs                 # 桌面安装包
 | `apps/daemon` | 会话内核 + adapter 层 |
 | `apps/agent` | 内置 agent |
 | `apps/relay` | 转发层 |
-| `apps/desktop` | Tauri 壳，桌面与移动端共用 |
+| `apps/desktop` | 仅 Windows/macOS 的 Tauri 桌面壳；复用 Web 工作台 |
 | `packages/web` | 工作台前端 |
 | `packages/proto` | 协议定义，生成 TS 与 Rust 类型 |
 | `testing/` | 跨部件旅程测试 |

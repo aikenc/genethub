@@ -1,8 +1,7 @@
-import { useState } from "react";
-
-import { PRODUCT } from "../channel";
 import type { Host } from "../host";
 import { useWorkbench } from "../session/store";
+
+const OFFICIAL_RELEASES = "https://github.com/aikenc/genethub/releases";
 
 /**
  * The corner of the screen where a finished download says so.
@@ -18,9 +17,7 @@ import { useWorkbench } from "../session/store";
  * same machine show the same box, and closing one does not lose the other's.
  */
 export function UpdateToast({ host }: { host: Host }) {
-  const { download, dismissUpdate, downloadUpdate } = useWorkbench();
-  const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const { download, dismissUpdate } = useWorkbench();
 
   if (download.state === "idle") return null;
 
@@ -42,67 +39,28 @@ export function UpdateToast({ host }: { host: Host }) {
           <p className="mt-1 break-words text-muted">{download.message}</p>
           <Actions>
             <Secondary onClick={() => void dismissUpdate()}>关闭</Secondary>
-            <Primary
-              busy={busy}
-              testId="retry-update"
-              onClick={async () => {
-                setBusy(true);
-                setProblem(null);
-                try {
-                  await downloadUpdate();
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              重试
-            </Primary>
           </Actions>
         </>
       ) : null}
 
       {download.state === "ready" ? (
         <>
-          <p className="font-medium">新版本 {download.version} 已下载</p>
+          <p className="font-medium">旧版留下了 {download.version} 的下载记录</p>
           <p className="mt-1 text-muted">
-            {host.installUpdate
-              ? `安装会关掉 ${PRODUCT}，正在跑的会话会被打断；装完它自己会重新打开。`
-              : `安装包在那台电脑上，去电脑上打开 ${PRODUCT} 完成安装。`}
+            自动安装已禁用，不会执行这个文件。请从官方发布页重新手动下载，并通过独立可信渠道核对
+            SHA256SUMS。
           </p>
-          {host.installUpdate ? null : (
-            <p className="mt-1 break-all text-faint">{download.path}</p>
-          )}
-          {problem ? (
-            <p className="mt-1 text-danger" role="alert">
-              {problem}
-            </p>
-          ) : null}
+          <p className="mt-1 break-all text-faint">{download.path}</p>
           <Actions>
-            <Secondary onClick={() => void dismissUpdate()}>稍后</Secondary>
-            {host.installUpdate ? (
-              <Primary
-                busy={busy}
-                testId="install-update"
-                onClick={async () => {
-                  setBusy(true);
-                  setProblem(null);
-                  try {
-                    // Left on screen rather than dismissed: on the shell that
-                    // can install, this window is about to close itself anyway,
-                    // and on the one that cannot, a box that vanished the
-                    // instant they clicked would leave "did that work?" with
-                    // nowhere to look.
-                    await host.installUpdate?.(download.path);
-                  } catch (failed) {
-                    setProblem(failed instanceof Error ? failed.message : String(failed));
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                立即安装
-              </Primary>
-            ) : null}
+            <Secondary onClick={() => void dismissUpdate()}>关闭</Secondary>
+            <button
+              type="button"
+              data-testid="manual-update-link"
+              className="rounded bg-accent px-3 py-1 text-white"
+              onClick={() => host.openExternal(OFFICIAL_RELEASES)}
+            >
+              官方发布页
+            </button>
           </Actions>
         </>
       ) : null}
@@ -171,30 +129,6 @@ function Secondary({ children, onClick }: { children: React.ReactNode; onClick()
       type="button"
       data-testid="dismiss-update"
       className="rounded border border-line px-2 py-1 hover:border-accent"
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Primary({
-  children,
-  busy,
-  testId,
-  onClick,
-}: {
-  children: React.ReactNode;
-  busy: boolean;
-  testId: string;
-  onClick(): void;
-}) {
-  return (
-    <button
-      type="button"
-      data-testid={testId}
-      className="rounded bg-accent px-3 py-1 text-white disabled:opacity-40"
-      disabled={busy}
       onClick={onClick}
     >
       {children}

@@ -8,7 +8,8 @@
 //! stay put (`.github/workflows/release.yml`).
 //!
 //! It lives in the daemon rather than in the desktop shell for two reasons: the
-//! shell exists on Windows only, and Linux reaches the same workbench in a
+//! shell exists on Windows and macOS only (the official macOS artifact still
+//! depends on signing/notarization), while Linux reaches the same workbench in a
 //! browser; and this way the outbound call needs no exception beyond what a
 //! released shell already opens for Hub WSS (`scripts/channel.mjs` stamps
 //! `https: wss:` into the shipping CSP — the tree's loopback-only CSP is the
@@ -20,8 +21,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use futures_util::StreamExt;
 use genehub_proto::{ServerFrame, UpdateDownload, UpdateStatus};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 use crate::state::Shared;
@@ -38,6 +41,7 @@ pub use crate::channel::DEFAULT_MANIFEST_URL;
 /// while the person who clicked is still looking at it. A timeout rather than a
 /// retry, for the same reason.
 const TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// Shaped like a Tauri updater manifest, because that is the shape the release
 /// already publishes and one file is enough for both readers. Unknown fields are
@@ -60,6 +64,58 @@ struct Manifest {
 struct Platform {
     #[serde(default)]
     url: Option<String>,
+    /// Digest and exact length of the asset named by `url`.
+    ///
+    /// Optional while reading so an old/self-hosted manifest produces a clear
+    /// fail-closed download error rather than making update checks unreadable.
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadIntegrity<'a> {
+    sha256: &'a str,
+    size: u64,
+}
+
+/// Removes an incomplete installer on every error and cancellation path.
+///
+/// Keeping this as a synchronous `Drop` guard is intentional: futures can be
+/// aborted between any two awaits, where an async cleanup block would never
+/// run. The file is closed by field drop before ordinary function returns; on
+/// Windows an in-flight cancellation may defer deletion until the handle is
+/// released, but it still never gets renamed into the executable target.
+struct PartialDownloadCleanup(Option<PathBuf>);
+
+impl PartialDownloadCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for PartialDownloadCleanup {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+// Kept for the integrity-checked updater boundary even while automatic
+// installation remains disabled and no production caller consumes it yet.
+#[allow(dead_code)]
+pub struct DownloadCandidate {
+    pub version: String,
+    pub url: String,
+    pub(crate) sha256: String,
+    pub(crate) size: u64,
 }
 
 /// Asks, and turns whatever comes back into something a screen can show.
@@ -95,8 +151,10 @@ pub async fn check(manifest_url: &str, current: &str) -> UpdateStatus {
 }
 
 async fn fetch(url: &str) -> Result<Manifest> {
+    validate_manifest_url(url)?;
     let response = reqwest::Client::builder()
         .timeout(TIMEOUT)
+        .redirect(update_redirect_policy(true))
         .build()?
         .get(url)
         // Named, because a request with no user agent is one some hosts refuse,
@@ -119,27 +177,117 @@ async fn fetch(url: &str) -> Result<Manifest> {
             response.status()
         ));
     }
-    response
-        .json()
-        .await
-        .context("reading what the newest version is")
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_MANIFEST_BYTES as u64)
+    {
+        bail!("the update manifest is larger than the safety limit");
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading what the newest version is")?;
+        if body.len().saturating_add(chunk.len()) > MAX_MANIFEST_BYTES {
+            bail!("the update manifest is larger than the safety limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).context("reading what the newest version is")
+}
+
+fn validate_manifest_url(value: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(value).context("reading the update manifest address")?;
+    if !allowed_update_url(&parsed, true) {
+        bail!("the update manifest must use https (plain http is loopback-only)");
+    }
+    Ok(())
+}
+
+fn allowed_update_url(url: &reqwest::Url, allow_loopback_http: bool) -> bool {
+    if url.scheme() == "https" {
+        return true;
+    }
+    allow_loopback_http
+        && url.scheme() == "http"
+        && url
+            .host_str()
+            .and_then(parse_url_ip_literal)
+            .is_some_and(|address| address.is_loopback())
+}
+
+fn parse_url_ip_literal(host: &str) -> Option<std::net::IpAddr> {
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse()
+        .ok()
+}
+
+/// Applies the same transport rule after every redirect. Checking only the
+/// first URL would let an HTTPS endpoint downgrade the manifest to plaintext,
+/// at which point an on-path attacker could replace both the digest and asset.
+fn update_redirect_policy(allow_loopback_http: bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() < 5 && allowed_update_url(attempt.url(), allow_loopback_http) {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
 }
 
 fn status(current: &str, manifest: &Manifest) -> UpdateStatus {
-    let download_url = manifest
-        .platforms
-        .get(&platform_key())
-        .and_then(|platform| platform.url.clone());
     UpdateStatus {
         current: current.to_string(),
         latest: Some(manifest.version.clone()),
         newer: is_newer(current, &manifest.version),
-        // The page is for reading; the installer is for the download button.
-        // Falling back either way means "有新版本" is never a dead end.
-        url: manifest.page.clone().or_else(|| download_url.clone()),
-        download_url,
-        problem: None,
+        // Discovery may still be useful to diagnostics, but an unsigned
+        // manifest never gets to put an executable URL into an API response.
+        url: manifest.page.clone(),
+        download_url: None,
+        problem: Some("自动更新尚未启用：请从官方发布页手动下载，并核对 SHA256SUMS".to_string()),
     }
+}
+
+/// Fetches the manifest again at the mutation boundary and requires download
+/// integrity metadata. The UI's earlier check is informational and may be
+/// stale; the bytes which become executable must be tied to the fresh answer.
+pub async fn download_candidate(manifest_url: &str, current: &str) -> Result<DownloadCandidate> {
+    let manifest = fetch(manifest_url).await?;
+    if !is_newer(current, &manifest.version) {
+        bail!("已经是最新的了");
+    }
+    let platform = manifest
+        .platforms
+        .get(&platform_key())
+        .ok_or_else(|| anyhow!("这个平台没有可下载的安装包"))?;
+    let url = platform
+        .url
+        .clone()
+        .ok_or_else(|| anyhow!("这个平台没有可下载的安装包"))?;
+    let (sha256, size) = integrity(platform)?;
+    // Validate the scheme and final path before starting background work.
+    let _ = target_path(Path::new("."), &url)?;
+    Ok(DownloadCandidate {
+        version: manifest.version,
+        url,
+        sha256,
+        size,
+    })
+}
+
+fn integrity(platform: &Platform) -> Result<(String, u64)> {
+    let sha256 = platform
+        .sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| anyhow!("更新清单没有有效的 SHA-256，拒绝下载可执行文件"))?
+        .to_ascii_lowercase();
+    let size = platform
+        .size
+        .filter(|size| *size > 0 && *size <= MOST_BYTES)
+        .ok_or_else(|| anyhow!("更新清单没有有效的安装包长度，拒绝下载可执行文件"))?;
+    Ok((sha256, size))
 }
 
 /// How an updater manifest names this machine, so one file can serve every
@@ -260,7 +408,14 @@ impl Downloader {
     /// Idempotent on purpose. Two windows are two buttons, and the second press
     /// should join the first download rather than start a rival one writing to
     /// the same file.
-    pub fn start(&self, state: &Shared, version: &str, url: &str) -> Result<UpdateDownload> {
+    pub fn start(
+        &self,
+        state: &Shared,
+        version: &str,
+        url: &str,
+        sha256: &str,
+        size: u64,
+    ) -> Result<UpdateDownload> {
         let mut current = self.state.lock().expect("download state");
         match &*current {
             UpdateDownload::Fetching { .. } => return Ok(current.clone()),
@@ -287,8 +442,9 @@ impl Downloader {
             let state = state.clone();
             let version = version.to_string();
             let url = url.to_string();
+            let sha256 = sha256.to_string();
             async move {
-                let outcome = fetch_installer(&state, &version, &url, &target).await;
+                let outcome = fetch_installer(&state, &version, &url, &target, &sha256, size).await;
                 let settled = match outcome {
                     Ok(()) => UpdateDownload::Ready {
                         version,
@@ -336,7 +492,14 @@ fn target_path(dir: &Path, url: &str) -> Result<PathBuf> {
     Ok(dir.join(name))
 }
 
-async fn fetch_installer(state: &Shared, version: &str, url: &str, target: &Path) -> Result<()> {
+async fn fetch_installer(
+    state: &Shared,
+    version: &str,
+    url: &str,
+    target: &Path,
+    expected_sha256: &str,
+    expected_size: u64,
+) -> Result<()> {
     let dir = target.parent().expect("the target has a directory");
     tokio::fs::create_dir_all(dir)
         .await
@@ -344,6 +507,7 @@ async fn fetch_installer(state: &Shared, version: &str, url: &str, target: &Path
 
     let mut response = reqwest::Client::builder()
         .timeout(DOWNLOAD_TIMEOUT)
+        .redirect(update_redirect_policy(false))
         .build()?
         .get(url)
         .header(
@@ -364,22 +528,28 @@ async fn fetch_installer(state: &Shared, version: &str, url: &str, target: &Path
     if total.is_some_and(|bytes| bytes > MOST_BYTES) {
         bail!("下载失败：安装包大得不像话");
     }
+    if total.is_some_and(|bytes| bytes != expected_size) {
+        bail!("下载失败：服务器报告的安装包长度与更新清单不一致");
+    }
 
     // Written to a sibling and renamed at the end, so an interrupted download
     // never looks like a finished installer to the next click.
     let partial = with_suffix(target, ".part");
+    let mut partial_cleanup = PartialDownloadCleanup::new(partial.clone());
     let mut file = tokio::fs::File::create(&partial)
         .await
         .with_context(|| format!("写入 {}", partial.display()))?;
     let mut received = 0u64;
+    let mut digest = Sha256::new();
     let mut announced = Instant::now();
 
     while let Some(chunk) = response.chunk().await.context("下载安装包")? {
         received += chunk.len() as u64;
-        if received > MOST_BYTES {
+        if received > MOST_BYTES || received > expected_size {
             let _ = tokio::fs::remove_file(&partial).await;
-            bail!("下载失败：安装包大得不像话");
+            bail!("下载失败：安装包超过更新清单声明的长度");
         }
+        digest.update(&chunk);
         file.write_all(&chunk).await.context("写入安装包")?;
         if announced.elapsed() >= PROGRESS_EVERY {
             announced = Instant::now();
@@ -397,6 +567,12 @@ async fn fetch_installer(state: &Shared, version: &str, url: &str, target: &Path
         let _ = tokio::fs::remove_file(&partial).await;
         bail!("下载失败：文件是空的");
     }
+    let actual_sha256 = format!("{:x}", digest.finalize());
+    if let Err(error) = verify_integrity(received, &actual_sha256, expected_size, expected_sha256) {
+        drop(file);
+        let _ = tokio::fs::remove_file(&partial).await;
+        return Err(error);
+    }
     // Flushed before the rename, or the name appears over a file the OS has not
     // finished writing — and what runs then is half an installer.
     file.flush().await.context("写入安装包")?;
@@ -405,7 +581,32 @@ async fn fetch_installer(state: &Shared, version: &str, url: &str, target: &Path
     tokio::fs::rename(&partial, target)
         .await
         .with_context(|| format!("重命名为 {}", target.display()))?;
+    partial_cleanup.disarm();
+    // The desktop verifies again immediately before executing. Download-time
+    // verification alone would leave a replace-after-check window between
+    // `Ready` and the user's click.
+    let integrity = integrity_path(target);
+    crate::config::save_private(
+        &integrity,
+        serde_json::to_string_pretty(&DownloadIntegrity {
+            sha256: expected_sha256,
+            size: expected_size,
+        })?
+        .as_bytes(),
+    )?;
     tracing::info!("downloaded the installer to {}", target.display());
+    Ok(())
+}
+
+fn verify_integrity(
+    received: u64,
+    actual_sha256: &str,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<()> {
+    if received != expected_size || actual_sha256 != expected_sha256 {
+        bail!("下载失败：安装包的长度或 SHA-256 与更新清单不一致");
+    }
     Ok(())
 }
 
@@ -415,6 +616,10 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
+fn integrity_path(path: &Path) -> PathBuf {
+    with_suffix(path, ".integrity.json")
+}
+
 fn publish(state: &Shared, download: UpdateDownload) {
     state.push(ServerFrame::UpdateDownloadChanged { download });
 }
@@ -422,6 +627,27 @@ fn publish(state: &Shared, download: UpdateDownload) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn serve_http_once(response: Vec<u8>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            socket.write_all(&response).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        format!("http://{address}/artifact")
+    }
+
+    async fn test_state(root: &Path) -> Shared {
+        crate::AppState::build(crate::config::Paths::new(root))
+            .await
+            .unwrap()
+            .0
+    }
 
     fn manifest(version: &str) -> Manifest {
         Manifest {
@@ -431,6 +657,8 @@ mod tests {
                 platform_key(),
                 Platform {
                     url: Some("https://example.test/setup.exe".to_string()),
+                    sha256: Some("a".repeat(64)),
+                    size: Some(123),
                 },
             )]),
         }
@@ -474,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_release_carries_somewhere_to_go() {
+    fn unsigned_discovery_never_returns_an_executable_url() {
         let status = status("0.1.17", &manifest("0.1.18"));
         assert!(status.newer);
         assert_eq!(status.latest.as_deref(), Some("0.1.18"));
@@ -482,29 +710,20 @@ mod tests {
             status.url.as_deref(),
             Some("https://example.test/releases/tag/v9")
         );
-        // The installer is its own field: the download button must not open a
-        // browser page just because the notes live there.
-        assert_eq!(
-            status.download_url.as_deref(),
-            Some("https://example.test/setup.exe")
-        );
-        assert!(status.problem.is_none());
+        assert!(status.download_url.is_none());
+        assert!(status.problem.as_deref().unwrap().contains("SHA256SUMS"));
     }
 
-    /// With no page in the file, the platform's own installer is the answer —
-    /// otherwise the workbench would report a new version and no way to it.
+    /// With no independently trusted page, an installer URL from the unsigned
+    /// manifest is still not an acceptable fallback.
     #[test]
-    fn without_a_page_the_installer_for_this_platform_is_used() {
+    fn without_a_page_an_unsigned_installer_is_not_exposed() {
         let mut manifest = manifest("0.1.18");
         manifest.page = None;
-        assert_eq!(
-            status("0.1.17", &manifest).url.as_deref(),
-            Some("https://example.test/setup.exe")
-        );
-        assert_eq!(
-            status("0.1.17", &manifest).download_url.as_deref(),
-            Some("https://example.test/setup.exe")
-        );
+        let status = status("0.1.17", &manifest);
+        assert!(status.url.is_none());
+        assert!(status.download_url.is_none());
+        assert!(status.problem.is_some());
     }
 
     /// The manifest is the release's, not ours: it will grow fields, and a daemon
@@ -554,6 +773,164 @@ mod tests {
         assert!(target_path(dir, "https://example.test/..").is_err());
     }
 
+    #[test]
+    fn update_manifests_require_tls_except_on_exact_ip_loopback() {
+        validate_manifest_url("https://releases.example/latest.json").unwrap();
+        validate_manifest_url("http://127.0.0.1:8080/latest.json").unwrap();
+        validate_manifest_url("http://[::1]:8080/latest.json").unwrap();
+        for refused in [
+            "http://releases.example/latest.json",
+            "http://192.168.1.20/latest.json",
+            "http://localhost:8080/latest.json",
+            "file:///tmp/latest.json",
+        ] {
+            assert!(
+                validate_manifest_url(refused).is_err(),
+                "{refused} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn update_redirects_cannot_downgrade_transport_security() {
+        for accepted in [
+            "https://objects.example/setup.exe",
+            "https://releases.example/latest.json",
+        ] {
+            assert!(allowed_update_url(
+                &reqwest::Url::parse(accepted).unwrap(),
+                false
+            ));
+        }
+        assert!(!allowed_update_url(
+            &reqwest::Url::parse("http://objects.example/setup.exe").unwrap(),
+            false
+        ));
+        assert!(allowed_update_url(
+            &reqwest::Url::parse("http://127.0.0.1:8080/latest.json").unwrap(),
+            true
+        ));
+        assert!(!allowed_update_url(
+            &reqwest::Url::parse("http://127.0.0.1:8080/setup.exe").unwrap(),
+            false
+        ));
+    }
+
+    #[test]
+    fn a_download_candidate_requires_a_strong_digest_and_exact_length() {
+        let mut manifest = manifest("0.1.18");
+        let platform = manifest.platforms.get_mut(&platform_key()).unwrap();
+        platform.sha256 = None;
+        assert!(integrity(platform)
+            .unwrap_err()
+            .to_string()
+            .contains("SHA-256"));
+        platform.sha256 = Some("not-a-digest".into());
+        assert!(integrity(platform).is_err());
+        platform.sha256 = Some("A".repeat(64));
+        platform.size = Some(0);
+        assert!(integrity(platform)
+            .unwrap_err()
+            .to_string()
+            .contains("长度"));
+        platform.size = Some(123);
+        assert_eq!(integrity(platform).unwrap(), ("a".repeat(64), 123));
+    }
+
+    #[test]
+    fn downloaded_bytes_must_match_both_manifest_length_and_digest() {
+        let digest = "a".repeat(64);
+        verify_integrity(123, &digest, 123, &digest).unwrap();
+        assert!(verify_integrity(122, &digest, 123, &digest).is_err());
+        assert!(verify_integrity(123, &"b".repeat(64), 123, &digest).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_streamed_installer_is_published_only_after_exact_integrity_match() {
+        let body = b"verified installer bytes";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(body.iter().copied())
+        .collect();
+        let url = serve_http_once(response).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let target = dir.path().join("updates/setup.exe");
+        let digest = format!("{:x}", Sha256::digest(body));
+
+        fetch_installer(&state, "1.2.3", &url, &target, &digest, body.len() as u64)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), body);
+        assert!(!with_suffix(&target, ".part").exists());
+        let integrity: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(integrity_path(&target)).unwrap()).unwrap();
+        assert_eq!(integrity["sha256"], digest);
+        assert_eq!(integrity["size"], body.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn a_truncated_http_body_fails_and_removes_the_partial_file() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nshort".to_vec();
+        let url = serve_http_once(response).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let target = dir.path().join("updates/setup.exe");
+
+        assert!(
+            fetch_installer(&state, "1.2.3", &url, &target, &"0".repeat(64), 20,)
+                .await
+                .is_err()
+        );
+        assert!(!target.exists());
+        assert!(!with_suffix(&target, ".part").exists());
+    }
+
+    #[tokio::test]
+    async fn a_wrong_stream_digest_fails_and_removes_the_partial_file() {
+        let body = b"wrong bytes";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(body.iter().copied())
+        .collect();
+        let url = serve_http_once(response).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let target = dir.path().join("updates/setup.exe");
+
+        assert!(fetch_installer(
+            &state,
+            "1.2.3",
+            &url,
+            &target,
+            &"0".repeat(64),
+            body.len() as u64,
+        )
+        .await
+        .is_err());
+        assert!(!target.exists());
+        assert!(!with_suffix(&target, ".part").exists());
+    }
+
+    #[tokio::test]
+    async fn a_manifest_redirect_to_insecure_remote_http_is_not_followed() {
+        let response = b"HTTP/1.1 302 Found\r\nLocation: http://192.0.2.1/evil.json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_vec();
+        let url = serve_http_once(response).await;
+        let error = fetch(&url).await.unwrap_err();
+        assert!(format!("{error:#}").contains("302"));
+    }
+
     /// The rename at the end is what makes a finished download tell itself
     /// apart from an interrupted one, so the two names must differ.
     #[test]
@@ -562,6 +939,10 @@ mod tests {
         assert_eq!(
             with_suffix(target, ".part"),
             Path::new("/data/updates/GeneHub-setup.exe.part")
+        );
+        assert_eq!(
+            integrity_path(target),
+            Path::new("/data/updates/GeneHub-setup.exe.integrity.json")
         );
     }
 

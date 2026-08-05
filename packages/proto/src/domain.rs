@@ -252,11 +252,17 @@ pub struct HelloResult {
     pub fingerprint: String,
     pub transport: TransportKind,
     pub machine_name: String,
-    /// The machine's half of the mutual proof, present when the client
-    /// authenticated with a device credential. A client that asked for one and
-    /// did not get it is talking to something that is not its machine.
+    /// The machine's half of mutual authentication. For remote channels this
+    /// proves the device/capability secret and is paired with `server_nonce`;
+    /// for loopback it is a domain-separated, one-use listener proof delivered
+    /// to the client out-of-band and has no `server_nonce`.
     #[ts(optional)]
     pub proof: Option<String>,
+    /// The daemon's fresh half of the channel transcript. Present whenever
+    /// `proof` is present and required to derive this connection's key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub server_nonce: Option<String>,
 }
 
 /// Whether a newer build has been published, and where a person gets it.
@@ -430,7 +436,7 @@ pub struct LogEntry {
 #[serde(tag = "state", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum HubStatus {
-    /// No Hub. Everything still works on this machine and over the LAN.
+    /// No Hub. Everything still works on this machine over loopback.
     Unpaired,
     /// A code is on screen, waiting for someone to approve it in a browser.
     #[serde(rename_all = "camelCase")]
@@ -508,6 +514,10 @@ pub struct HubMachine {
 pub struct HubTicket {
     pub url: String,
     pub expires_at: String,
+    /// Opaque name Relay carries to the target daemon in OPEN.
+    pub channel_capability: String,
+    /// Per-connection E2E secret. Never placed in a URL or Relay API.
+    pub channel_secret: String,
     /// The target machine's key fingerprint, learned from the Hub rather than
     /// from the connection — which is what makes comparing the two worth
     /// anything.
@@ -550,8 +560,8 @@ pub struct DeviceInvite {
     /// Absent when remote access is off, and then there is nowhere to send
     /// anyone: this machine does not know its own address on the network, so an
     /// invite without this cannot be turned into a link. The workbench asks for
-    /// a relay first for that reason. Pairing over a LAN alone would need the
-    /// address to come from somewhere else, and nothing supplies it today.
+    /// a relay first for that reason; privileged LAN transport is deliberately
+    /// unsupported.
     #[ts(optional)]
     pub rendezvous_url: Option<String>,
     pub expires_at: String,
@@ -563,6 +573,9 @@ pub struct DeviceInvite {
 #[ts(export, export_to = "index.ts")]
 pub struct DeviceCredential {
     pub device_id: String,
+    /// Stable machine identity. Device ids name one browser authorization and
+    /// must never be reused as a routing target.
+    pub machine_id: String,
     /// Shared with this machine only. Never sent again after this reply: later
     /// connections prove knowledge of it instead (`security-model.md` §4.2).
     pub secret: String,
@@ -594,6 +607,27 @@ pub struct DeviceAuth {
     pub device_id: String,
     /// Fresh per connection. A nonce is never accepted twice, so intercepting
     /// one proof buys nothing.
+    pub nonce: String,
+    pub proof: String,
+}
+
+/// Proof for a Control-issued per-channel secret.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ChannelAuth {
+    /// Opaque, one-use name carried in OPEN. It is context, not a credential.
+    pub capability_id: String,
+    pub nonce: String,
+    pub proof: String,
+}
+
+/// Proof of the PSK carried in the fragment half of a pairing link.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct InviteAuth {
+    pub invite_id: String,
     pub nonce: String,
     pub proof: String,
 }

@@ -6,7 +6,8 @@
 # installer for someone's platform yet. The Linux tarball is musl-static, so an
 # older glibc on the box is not a reason for the binary to refuse to start.
 #
-#   curl -fsSL https://raw.githubusercontent.com/aikenc/genethub/main/scripts/install.sh | sh
+#   curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL \
+#     https://raw.githubusercontent.com/aikenc/genethub/main/scripts/install.sh | sh
 #
 # A deployment that offers a friendlier address serves this same file from it.
 #
@@ -56,8 +57,8 @@ case "$channel" in
     # meant to test. Refuse, unless a download base is named on purpose (the
     # way a CI rehearsal's artifacts get installed for a smoke test).
     [ -n "${GENEHUB_DEV_DOWNLOAD_BASE:-}" ] || die "this install.sh comes from the source tree (channel: dev) and has nothing to install.
-  official:  curl -fsSL https://relay.genethub.com/install.sh | sh
-  beta:      curl -fsSL https://relay-beta.genethub.com/install.sh | sh
+  official:  curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL https://relay.genethub.com/install.sh | sh
+  beta:      curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL https://relay-beta.genethub.com/install.sh | sh
   or set GENEHUB_DEV_DOWNLOAD_BASE to a directory of artifacts on purpose"
     base="$GENEHUB_DEV_DOWNLOAD_BASE"
     bin_dir="${GENEHUB_DEV_BIN_DIR:-$HOME/.local/bin}"
@@ -65,6 +66,24 @@ case "$channel" in
     cli_binary=genet-dev
     agent_binary=genet-agent-dev
     ;;
+esac
+
+# Downloads are executable code. Do not let an environment override turn the
+# explicit installer into an HTTP, local-file or credential-bearing fetch. A
+# query or fragment is unnecessary for the fixed release layout and makes URL
+# review/logging ambiguous, so those are rejected too.
+case "$base" in
+  https://*) ;;
+  *) die "download base must use https://" ;;
+esac
+case "$base" in
+  *\?* | *\#*) die "download base must not contain a query or fragment" ;;
+esac
+authority="${base#https://}"
+authority="${authority%%/*}"
+[ -n "$authority" ] || die "download base has no host"
+case "$authority" in
+  *@*) die "download base must not contain credentials" ;;
 esac
 
 case "$(uname -s)" in
@@ -90,9 +109,13 @@ fi
 asset="$tarball_prefix-$os-$arch.tar.gz"
 
 if command -v curl >/dev/null 2>&1; then
-  fetch() { curl -fsSL "$1" -o "$2"; }
+  fetch() {
+    curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL "$1" -o "$2"
+  }
 elif command -v wget >/dev/null 2>&1; then
-  fetch() { wget -qO "$2" "$1"; }
+  fetch() {
+    wget --https-only --max-redirect=5 -qO "$2" "$1"
+  }
 else
   die "need curl or wget"
 fi
@@ -141,11 +164,9 @@ say "Installed:"
 say "  $bin_dir/$cli_binary"
 say "  $bin_dir/$agent_binary"
 
-# `genet update` sets this after launching the copy of this script embedded in
-# its own binary. Run the command from the install destination: the updater
-# process is still the old executable, while this path now names the new one.
-# Restart also starts a daemon that was not running, so a successful CLI update
-# always leaves the machine reachable again.
+# Explicit first-install automation may opt into starting/restarting the daemon
+# after files have landed. The CLI self-update command is deliberately disabled
+# until releases have an independent signing root.
 if [ "${GENEHUB_RESTART_DAEMON:-}" = 1 ]; then
   say ""
   say "==> restarting daemon with the new binary"
@@ -166,5 +187,4 @@ say "Start the daemon, then connect this machine to the hub:"
 say "  $cli_binary daemon start"
 say "  $cli_binary hub login --wait"
 say ""
-say "'$cli_binary daemon endpoint' prints the address and token to connect a"
-say "workbench to."
+say "'$cli_binary daemon endpoint' prints a one-use local connection address."

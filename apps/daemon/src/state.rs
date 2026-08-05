@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use genehub_proto::{ProviderInfo, ServerFrame, Settings};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 use crate::adapter::registry::Registry;
 use crate::adapter::ProviderMap;
@@ -21,12 +21,16 @@ pub struct AppState {
     pub paths: Paths,
     pub config: Arc<RwLock<Config>>,
     pub machine: MachineState,
+    /// Serializes every read-modify-write of the durable machine identity.
+    /// Link and rendezvous settings share one file and must never overwrite
+    /// each other's fields from independently loaded snapshots.
+    machine_state_write: Mutex<()>,
     pub registry: Arc<Registry>,
     pub sessions: SessionManager,
     pub workspaces: Workspaces,
     pub terminals: Arc<Terminals>,
     pub version: String,
-    /// Token loopback and LAN clients must present.
+    /// Owner-only token used to mint loopback control proofs.
     pub token: String,
     /// Who may reach this machine from outside. The judge of that question is
     /// this list, not a relay and not a control plane.
@@ -96,9 +100,11 @@ async fn config_lan(config: &Arc<RwLock<Config>>) -> bool {
 }
 
 impl AppState {
-    pub async fn build(paths: Paths) -> Result<(Shared, mpsc::UnboundedReceiver<PtyMessage>)> {
+    pub async fn build(paths: Paths) -> Result<(Shared, mpsc::Receiver<PtyMessage>)> {
         paths.ensure()?;
-        let config = Config::load(&paths.config_file())?;
+        let mut config = Config::load(&paths.config_file())?;
+        config.ensure_workspace_catalog_generation(&paths.config_file())?;
+        config.refresh_workspace_catalog_facts(&paths.config_file())?;
         let machine = MachineState::load_or_create(&paths.state_file())?;
         let devices = Devices::load(paths.devices_file());
 
@@ -125,6 +131,7 @@ impl AppState {
             paths,
             config,
             machine,
+            machine_state_write: Mutex::new(()),
             registry,
             sessions,
             workspaces,
@@ -142,6 +149,18 @@ impl AppState {
         Ok((state, pty_rx))
     }
 
+    pub(crate) async fn mutate_machine_state<T>(
+        &self,
+        mutate: impl FnOnce(&mut MachineState) -> Result<T>,
+    ) -> Result<T> {
+        let _guard = self.machine_state_write.lock().await;
+        let path = self.paths.state_file();
+        let mut machine = MachineState::load(&path)?;
+        let result = mutate(&mut machine)?;
+        machine.save(&path)?;
+        Ok(result)
+    }
+
     /// Providers as everything downstream should see them: address filled in,
     /// models known.
     ///
@@ -157,7 +176,20 @@ impl AppState {
             .into_iter()
             .map(|(id, config)| {
                 let resolved = crate::provider::resolve(&id, &config);
-                let models = if config.models.is_empty() {
+                let credential_problem =
+                    if config.api_key.as_deref().is_some_and(|key| !key.is_empty()) {
+                        resolved
+                            .base_url
+                            .as_deref()
+                            .and_then(|url| crate::provider::validate_credential_url(url).err())
+                            .map(|error| format!("{error:#}"))
+                    } else {
+                        None
+                    };
+                let credential_valid = credential_problem.is_none();
+                let models = if credential_problem.is_some() {
+                    Vec::new()
+                } else if config.models.is_empty() {
                     discovered
                         .get(&id)
                         .map(|found| found.models.clone())
@@ -165,7 +197,9 @@ impl AppState {
                 } else {
                     config.models.clone()
                 };
-                let problem = if config.models.is_empty() {
+                let problem = if credential_problem.is_some() {
+                    credential_problem
+                } else if config.models.is_empty() {
                     discovered.get(&id).and_then(|found| found.problem.clone())
                 } else {
                     None
@@ -173,7 +207,7 @@ impl AppState {
                 (
                     id,
                     ProviderConfig {
-                        base_url: resolved.base_url,
+                        base_url: credential_valid.then_some(resolved.base_url).flatten(),
                         label: Some(resolved.label),
                         dialect: Some(resolved.dialect.as_str().to_string()),
                         models,
@@ -293,11 +327,12 @@ impl AppState {
     ) -> Result<Settings> {
         {
             let mut config = self.config.write().await;
-            let entry = config
+            let mut entry = config
                 .agents
                 .providers
-                .entry(provider_id.to_string())
-                .or_default();
+                .get(provider_id)
+                .cloned()
+                .unwrap_or_default();
             if let Some(key) = api_key {
                 entry.api_key = (!key.is_empty()).then_some(key);
             }
@@ -313,6 +348,15 @@ impl AppState {
             if let Some(models) = models {
                 entry.models = models.into_iter().filter(|m| !m.is_empty()).collect();
             }
+            if entry.api_key.as_deref().is_some_and(|key| !key.is_empty()) {
+                if let Some(url) = crate::provider::resolve(provider_id, &entry).base_url {
+                    crate::provider::validate_credential_url(&url)?;
+                }
+            }
+            config
+                .agents
+                .providers
+                .insert(provider_id.to_string(), entry);
             config.save(&self.paths.config_file())?;
         }
         crate::config::restrict_to_owner(&self.paths.config_file())?;
@@ -353,8 +397,7 @@ impl AppState {
             "fingerprint": self.machine.fingerprint(),
             "pid": std::process::id(),
         });
-        std::fs::write(&path, serde_json::to_string_pretty(&body)?)?;
-        crate::config::restrict_to_owner(&path)?;
+        crate::config::save_private(&path, serde_json::to_string_pretty(&body)?.as_bytes())?;
         Ok(path)
     }
 
@@ -368,5 +411,97 @@ impl AppState {
         if let Some(fanout) = self.fanout.get() {
             let _ = fanout.send(frame);
         }
+    }
+}
+
+#[cfg(test)]
+mod machine_state_tests {
+    use super::*;
+    use crate::config::{Enrollment, Rendezvous};
+
+    #[tokio::test]
+    async fn independent_machine_state_updates_merge_instead_of_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        let state_path = paths.state_file();
+        let (state, _) = AppState::build(paths).await.unwrap();
+        let enrollment = Enrollment {
+            hub_url: "https://hub.example".into(),
+            machine_id: "mch_test".into(),
+            uplink_url: "wss://relay.example/forward/daemon".into(),
+            fabric_url: Some("wss://relay.example/fabric/v2".into()),
+            daemon_id: "dmn_test".into(),
+            secret: "secret".into(),
+            workspace_catalog_generation: Some("wcg_test".into()),
+        };
+        let rendezvous = Rendezvous {
+            relay_url: "https://self-hosted.example".into(),
+            join_token: Some("join".into()),
+        };
+
+        let (hub, remote) = tokio::join!(
+            state.mutate_machine_state(|machine| {
+                machine.enrollment = Some(enrollment);
+                Ok(())
+            }),
+            state.mutate_machine_state(|machine| {
+                machine.rendezvous = Some(rendezvous);
+                Ok(())
+            }),
+        );
+        hub.unwrap();
+        remote.unwrap();
+        let persisted = MachineState::load(&state_path).unwrap();
+        assert!(persisted.enrollment.is_some());
+        assert!(persisted.rendezvous.is_some());
+    }
+
+    #[tokio::test]
+    async fn storing_a_provider_cannot_send_its_key_over_non_loopback_http() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _) = AppState::build(Paths::new(dir.path())).await.unwrap();
+
+        let result = state
+            .set_provider(
+                "private",
+                Some("sk-secret".into()),
+                Some("http://192.168.1.20:8080/v1".into()),
+                None,
+                None,
+                Some(vec!["model".into()]),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(!state
+            .config
+            .read()
+            .await
+            .agents
+            .providers
+            .contains_key("private"));
+    }
+
+    #[tokio::test]
+    async fn an_unsafe_provider_from_legacy_config_never_reaches_an_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        paths.ensure().unwrap();
+        let mut config = Config::default();
+        config.agents.providers.insert(
+            "private".into(),
+            ProviderConfig {
+                api_key: Some("sk-secret".into()),
+                base_url: Some("http://192.168.1.20:8080/v1".into()),
+                models: vec!["model".into()],
+                ..Default::default()
+            },
+        );
+        config.save(&paths.config_file()).unwrap();
+        let (state, _) = AppState::build(paths).await.unwrap();
+
+        let provider = state.providers().await.remove("private").unwrap();
+        assert!(provider.base_url.is_none());
+        assert!(provider.models.is_empty());
+        assert!(provider.problem.as_deref().unwrap().contains("https"));
     }
 }

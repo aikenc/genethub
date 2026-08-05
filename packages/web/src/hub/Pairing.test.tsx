@@ -127,7 +127,7 @@ describe("connecting a machine to a Hub", () => {
         onUnpair={async () => {}}
       />,
     );
-    expect(screen.getByText(/本机和局域网仍然可用/)).toBeInTheDocument();
+    expect(screen.getByText(/同机 loopback 仍可用；跨设备需要 Relay/)).toBeInTheDocument();
   });
 
   it("keeps a failure on screen with the reason, rather than reverting silently", () => {

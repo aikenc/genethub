@@ -13,7 +13,7 @@
 | **自成闭环** | 不依赖任何外部服务 | 只部署 relay + 静态工作台，就能远程用自己的电脑 | ✅ |
 | **M2** | 能带走 · 能多选 | 手机 App、设备管理、分屏 | 计划 |
 | **M3** | 能协作 | 正式账号、多人共用一台机器、会话 fork / rewind | 计划 |
-| **M4** | 能不信任中转 | 端到端加密：relay 只见密文 | 计划 |
+| **M4** | 能不信任整个平台 | 独立公钥握手、前向保密、可验证客户端；Control 也不知道会话密钥 | 计划 |
 
 ---
 
@@ -44,7 +44,7 @@
 - Codex 的 skills 菜单、子 agent 内部步骤：原生 `app-server` 适配器已经落地（`adapter::codex`），`thread/resume` 和贴图也已接上；这两项是它明确还没接的部分，理由见 [third-party-agents.md](./third-party-agents.md) §4 末尾；对应能力位不申报，界面上因此没有对应控件，而不是点了不生效
 - Codex 接 DeepSeek：不是我们的待办，是 Codex（只认 Responses API）与 DeepSeek（只有 Chat Completions）两个上游之间的协议缺口，见 [third-party-agents.md](./third-party-agents.md) §4；换成原生 `app-server` 传输不会让这个缺口消失
 - 应用内自动更新（手动重装）
-- 端到端加密（M4；当前为传输层加密，见 [security-model.md](./security-model.md) §1.1）
+- 平台级零知识与前向保密（M4；当前转发业务帧已对 Relay 加密，但托管 Control 生成对称会话 secret，见 [security-model.md](./security-model.md) §1.1）
 - 前端长尾能力：语音、定时任务、分屏、fork / rewind 等，清单见 [web-workbench.md](./web-workbench.md) §4
 - Agent 的 subagents / MCP / 真压缩（见 [builtin-agent.md](./builtin-agent.md) §8）；`genet` 自身的图片输入也在此列——贴图现在能发给 claude / acp / opencode（它们各自把图片转给自己的模型），但 `genet` 的 provider 层（Anthropic / OpenAI / DeepSeek 请求构造）还不接受图片内容块
 - 会话中途动态切换 agent：`claude`、`opencode` 各自维护一份进程私有的会话状态（CLI 自己的 `--resume` id、HTTP session），把 `TimelineItem` 转存到另一个 agent 不等于真的迁移了上下文，效果只会更糟；有对话内容后前端直接锁定 agent 选择器（`ComposerControls.tsx`），而不是假装能无缝换
@@ -61,9 +61,10 @@
 - [x] 新装的机器打开就是一个能说话的会话：默认工作目录由 daemon 备好，只剩密钥需要问
 - [x] 重新连上落回最近动过的那个会话，而不是一块空白加一个按钮
 - [x] daemon 被杀后自动回来，端口变化推给前端；上一个外壳留下的 daemon 被接管而不是抢锁失败
-- [x] Linux 包可安装、出现在应用列表，包内 daemon 能起来（`apps/desktop/scripts/bundle.mjs` 自动校验）
+- [x] Linux daemon/CLI 包可由 `scripts/install.sh` 安装并完成首启自检；Linux 不提供桌面应用，工作台从浏览器打开
 - [x] 无图形界面的机器也能装：`scripts/install.sh` 只装 daemon + 内置 agent，校验 `SHA256SUMS`，装不成不留半截二进制（`testing/tests/install.rs`）
-- [x] 打 tag 就有安装包：`.github/workflows/release.yml` 四个平台各出一个，附校验和
+- [x] 打 tag 生成 Windows 桌面安装包与各 CLI 目标 tarball，附长度和 SHA-256；Linux 不生成桌面包
+- [ ] macOS 完成签名与公证后加入正式桌面安装包发布；源码构建与 macOS CI 门禁已经保留
 - [ ] Windows / macOS 的安装包**装完之后**过一遍主旅程：发布流水线只验到"这个平台上 daemon 能起来、工作目录被建出来"，装包与首启仍要手动过（[testing.md](./testing.md) §7）
 
 **抽象是否成立**
@@ -81,7 +82,7 @@
 - [x] 解除配对后机器从列表消失，本地不再保留登记信息
 - [x] relay 不解析任何 payload（依赖方向 + 数据路径检查进 CI）
 - [x] 契约摘要两侧一致，改动无法单边发布
-- [x] 首次连接显示公钥指纹，与桌面端一致（不一致时明确告警）
+- [ ] canonical daemon 公钥身份、协议签名验证、首次 pin 与变化阻断告警（当前 fingerprint 只是 machine id + secret 的展示摘要）
 
 **工程**
 
@@ -139,7 +140,7 @@
 
 ## M4 — 能不信任中转
 
-端到端加密：daemon 与客户端基于公钥直接协商会话密钥，relay 只见密文。
+当前 v2 已让 Relay 只见初始证明与业务密文；M4 继续把托管 Control 和前端从密钥信任路径移出：daemon 与可验证客户端基于公钥直接协商临时会话密钥，并提供前向保密。
 
 需要一并解决的：
 

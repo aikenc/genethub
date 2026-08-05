@@ -7,7 +7,7 @@ import { FilesPanel } from "./files/FilesPanel";
 import { detectHost, type Endpoint, type Host } from "./host";
 import type { Target } from "./host";
 import { LogsPanel } from "./logs/LogsPanel";
-import { Client } from "./protocol/client";
+import { Client, type ProtocolDial } from "./protocol/client";
 import { SettingsPanel } from "./settings/SettingsPanel";
 import { Composer } from "./session/Composer";
 import { PermissionCard } from "./session/Permission";
@@ -31,8 +31,17 @@ import { OpenProject } from "./workspace/OpenProject";
  * open another one every time anything changed, which React rightly treats as
  * a runaway loop and answers by rendering nothing at all.
  */
-const openConnection = (endpoint: Endpoint, redial: () => Promise<string>) =>
-  new Client({ url: endpoint.url, redial, credential: endpoint.credential });
+const openConnection = (
+  endpoint: Endpoint,
+  redial: () => Promise<string | ProtocolDial>,
+) =>
+  new Client({
+    url: endpoint.url,
+    redial,
+    credential: endpoint.credential,
+    channelCredential: endpoint.channelCredential,
+    localServerProof: endpoint.localServerProof,
+  });
 
 /**
  * The workbench shell: left session tree, closable tabs, chat in the middle,
@@ -54,7 +63,10 @@ export function App({
    * connection that used it — so a client that kept redialling the first one
    * would give up for good at the first dropped socket.
    */
-  connect?: (endpoint: Endpoint, redial: () => Promise<string>) => Client;
+  connect?: (
+    endpoint: Endpoint,
+    redial: () => Promise<string | ProtocolDial>,
+  ) => Client;
   /**
    * Pages contributed by whoever embedded this package. Passing none is the
    * plain workbench, which is exactly what a self-hosted deployment wants.
@@ -228,8 +240,8 @@ export function App({
       // and a client that reuses the first one gives up for good on the first
       // dropped socket.
       target !== null && host.openTarget
-        ? (await host.openTarget(target)).url
-        : ((await host.endpoint())?.url ?? endpoint.url),
+        ? dialOf(await host.openTarget(target))
+        : dialOf((await host.endpoint()) ?? endpoint),
     );
     client.connect();
     void useWorkbench.getState().attach(client);
@@ -519,6 +531,18 @@ export function App({
   );
 }
 
+function dialOf(endpoint: Endpoint): ProtocolDial {
+  return {
+    url: endpoint.url,
+    ...(endpoint.channelCredential
+      ? { channelCredential: endpoint.channelCredential }
+      : {}),
+    ...(endpoint.localServerProof
+      ? { localServerProof: endpoint.localServerProof }
+      : {}),
+  };
+}
+
 /**
  * What a new install shows instead of a workbench with everything greyed out.
  */
@@ -630,7 +654,7 @@ function ConnectionBadge({
       ? endpoint.via === "loopback"
         ? "本机"
         : endpoint.via === "lan"
-          ? "局域网"
+          ? "已停用的局域网连接"
           : "中转"
       : state === "reconnecting"
         ? "重连中"

@@ -128,7 +128,7 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 | 撤销设备 | 撤销后该设备立即失效 |
 | 机器被撤销 | daemon 不再重连；本地不残留登记信息 |
 | 手机浏览器接入 | 窄屏布局可用，能发消息、能看工具详情 |
-| 公钥指纹核对 | 首次连接显示指纹，与桌面端一致；指纹变化时告警 |
+| 当前设备标识摘要 | 展示值稳定且不被误称为已验证公钥；canonical 公钥 pin 与变化告警落地后另增安全验收 |
 
 ### 4.2 会话与 agent
 
@@ -179,7 +179,7 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 | 重启恢复 | **真的重启 daemon 进程**后，项目 id 与历史都在，且下一轮把重启前的对话交给了模型 |
 | 从列表回到旧会话 | 关掉再从会话列表找回来，看到历史并能继续聊 |
 | 机器离线 | 前端显示离线并给出可操作提示 |
-| 三条通道 | 本地回环 / 局域网 / 转发层各自可用，且降级顺序正确 |
+| 两条通道 | 同机 loopback 与跨设备 Relay 各自可用；同 Wi-Fi 也不尝试局域网直连或 P2P fallback |
 | 控制面短暂不可用 | 已建立的转发连接不受影响；新连接被拒绝而不是放行 |
 | 撤销送达 | 机主撤销机器后，relay 通过订阅流收到并断开在线连接 |
 | 契约漂移 | 两侧 wire 摘要不一致时构建失败 |
@@ -195,7 +195,7 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 
 | 旅程 | 要验证的事 |
 |------|------------|
-| 接管遗留 daemon | 上一个外壳崩溃后留下的 daemon，被新外壳直接接管，端口与 token 一致 |
+| 接管遗留 daemon | 上一个外壳崩溃后留下的 daemon，被新外壳在验证 pid、机器身份与 HMAC 后直接接管；长期密钥不跨 IPC |
 | 看门狗 | daemon 被硬杀后自动重启，新端口通过事件推给前端 |
 | 主动退出不算崩溃 | 用户从托盘退出后，看门狗不把它再拉起来 |
 | 干净关停 | 停机后 `endpoint.json` 与锁文件都不残留——残留即意味着它是被杀的，agent 没人收 |
@@ -245,15 +245,17 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 
 | 平台 | 做法 |
 |------|------|
-| Linux | 干净容器里安装分发包，脚本驱动首启与自检（`apps/desktop/scripts/bundle.mjs` 里做，构建即校验） |
-| 无图形界面的机器 | `scripts/install.sh` 装 daemon + 内置 agent，用例见 §8.1「安装脚本」 |
-| Windows / macOS | 发布流水线（`.github/workflows/release.yml`）在各自的 runner 上构建安装包，并冒烟"daemon 在这个平台起得来、工作目录建出来了"。**装包之后**的首启仍要每次发版手动过一遍主旅程——runner 上没有能点托盘的人 |
+| Linux（有无图形界面都一样） | `scripts/install.sh` 只装 daemon/CLI + 内置 agent，工作台用浏览器打开；不构建、不测试 Linux 桌面壳。用例见 §8.1「安装脚本」 |
+| Windows | 发布流水线（`.github/workflows/release.yml`）构建安装包；桌面 CI 在 Windows runner 上执行壳层 library、wiring 与 lint 门禁 |
+| macOS | 桌面 CI 在 macOS runner 上执行壳层 library、wiring、真实 daemon supervision 与 lint 门禁；正式安装包等待签名、公证完成后再发布 |
+
+Windows/macOS **装包之后**的首启仍要每次发版手动过一遍主旅程——runner 上没有能点托盘的人。Linux 的安装门禁只覆盖 daemon/CLI，不能拿 Linux WebView 编译代替两个桌面目标的验证。
 
 自检项：可执行权限、内置 agent 二进制可用、数据目录创建、**默认工作目录被建出来**（见 [daemon.md](./daemon.md) §4.2；这条决定了新装用户第一屏是聊天还是文件选择器）、单实例锁、卸载残留清理，以及**安装目录内不存在 `node` / `node.exe` / `node_modules`**（PC 端零 Node 运行时，见 [desktop-client.md](./desktop-client.md) §4.1）。
 
 跑测试时用 `$GENEHUB_WORKSPACE_DIR` 把默认工作目录指到临时目录：任何一次测试运行都不该在跑它的人的 home 里留下文件夹。
 
-外部 agent（OpenCode 等）由**测试环境预装**，不随分发包安装——这正是要验证的行为之一：装了就出现在选择器里，没装就不出现，且不影响其他 agent。CI 里装法是 `npm install --prefix ~/.opencode opencode-ai` 后把它的 `.bin` 加进 PATH；本地没装时相关用例跳过并打印原因，其余照跑。
+外部 agent（OpenCode 等）由**测试环境预装**，不随分发包安装——这正是要验证的行为之一：装了就出现在选择器里，没装就不出现，且不影响其他 agent。CI 用 `.github/agent-clis/package-lock.json` 固定测试过的 CLI 与 tarball 完整性，再通过 `npm ci --prefix .github/agent-clis` 安装；这些依赖不进入任何产品包。本地没装时相关用例跳过并打印原因，其余照跑。
 
 **成本控制**（仅 J-real）：flash 档模型、提示词短、设 `max_tokens` 上限；记录每轮 token 消耗，异常增长要查。
 
@@ -282,7 +284,8 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 | 专项测试（OpenCode） | `testing/tests/opencode.rs` | **真实 OpenCode 进程**接同一个模型后端，事件归一化后进同一条时间线 | PATH 上有 `opencode`，否则跳过并打印原因 |
 | 专项测试（Claude Code） | `testing/tests/claude.rs` | **真实 `claude` 进程**（原生 `stream-json`，非 ACP wrapper）接 DeepSeek 的 Anthropic 兼容端点：基本对话、默认 bypass 放行、显式低权限模式下产生可持久化暂停点、daemon 中断请求真的打断生成 | `JOURNEY_LLM=real` + PATH 上有 `claude`，否则跳过并打印原因；只在真实模式跑（mock 不实现 Anthropic 协议） |
 | 专项测试（Cursor） | `testing/tests/cursor.rs` | **真实 `cursor-agent` 进程**（ACP over stdio）跑主旅程：探测的二进制真能起、ACP 握手真有应答、一个回合经归一化事件层进同一条时间线 | `JOURNEY_LLM=real` + PATH 上有登录过的 `cursor-agent`，否则跳过并打印原因；mock 模式不跑（它没有可指向 mock 的后端配置，同 Codex 的处境） |
-| 安装脚本 | `testing/tests/install.rs` | **真的跑 `scripts/install.sh`**：真 curl、真 tar、真 sha256sum、真目录。装完的二进制可执行且真能跑；校验和对不上、或者发布里没有 `SHA256SUMS`，都拒绝安装而不是留下半截文件 | 无（Linux arm64 上跳过并打印原因） |
+| 安装脚本 | `testing/tests/install.rs` | **端到端跑 `scripts/install.sh`**：真 tar、真 sha256sum、真目录；curl shim 强制核对 HTTPS/重定向约束且只映射到本地假发布目录。装完的二进制可执行且真能跑；非 HTTPS 基址、校验和不符或缺少 `SHA256SUMS` 都拒绝 | 无（Linux arm64 上跳过并打印原因） |
+| 发布供应链 | `testing/tests/supply_chain.rs` | release workflow 的第三方 Action 全部固定完整 commit SHA；checkout 不保留凭据；只有 publish job 有 `contents: write`；发布注释不把同源摘要冒充签名 | 无 |
 | 设备准入 | `testing/tests/devices.rs` | **真实 daemon + 进程内汇合 relay**：新设备经 relay 配对、换到凭证后重连、陌生人被拒、邀请码只能用一次、握手不能重放、撤销当场断连、重启后仍然可达且仍然认得旧设备 | 无 |
 | relay | `apps/relay && npm test` | 帧转发、契约、边界检查、wire 摘要 | 无 |
 | 工作台 | `packages/web && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |

@@ -26,6 +26,12 @@ export interface PairedMachine {
 
 type Storage = Pick<globalThis.Storage, "getItem" | "setItem">;
 
+// Browsers can expose localStorage and still reject a later read/write (private
+// mode, quota policy, embedded webviews). Keep the just-issued credential in
+// this tab in that case; consuming a one-shot invite and then forgetting its
+// result makes the machine impossible to reconnect to without pairing again.
+let volatileMachines: PairedMachine[] | null = null;
+
 function store(): Storage | null {
   try {
     return globalThis.localStorage ?? null;
@@ -37,11 +43,12 @@ function store(): Storage | null {
 }
 
 export function listMachines(storage: Storage | null = store()): PairedMachine[] {
-  const raw = storage?.getItem(KEY);
-  if (!raw) return [];
+  if (volatileMachines) return volatileMachines.slice();
   try {
+    const raw = storage?.getItem(KEY);
+    if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as PairedMachine[]) : [];
+    return Array.isArray(parsed) ? parsed.filter(isPairedMachine) : [];
   } catch {
     return [];
   }
@@ -53,7 +60,15 @@ export function rememberMachine(
   storage: Storage | null = store(),
 ): PairedMachine[] {
   const next = [...listMachines(storage).filter((m) => m.machineId !== machine.machineId), machine];
-  storage?.setItem(KEY, JSON.stringify(next));
+  volatileMachines = next;
+  try {
+    if (storage) {
+      storage.setItem(KEY, JSON.stringify(next));
+      volatileMachines = null;
+    }
+  } catch {
+    // The in-memory copy remains usable for this tab.
+  }
   return next;
 }
 
@@ -62,7 +77,15 @@ export function forgetMachine(
   storage: Storage | null = store(),
 ): PairedMachine[] {
   const next = listMachines(storage).filter((machine) => machine.machineId !== machineId);
-  storage?.setItem(KEY, JSON.stringify(next));
+  volatileMachines = next;
+  try {
+    if (storage) {
+      storage.setItem(KEY, JSON.stringify(next));
+      volatileMachines = null;
+    }
+  } catch {
+    // Preserve the deletion in this tab even if persistent storage is blocked.
+  }
   return next;
 }
 
@@ -91,4 +114,18 @@ export function readPairingLink(hash: string): { code: string; endpoint: string 
   const code = fragment.get("claim");
   const endpoint = fragment.get("endpoint");
   return code && endpoint ? { code, endpoint } : null;
+}
+
+function isPairedMachine(value: unknown): value is PairedMachine {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Partial<Record<keyof PairedMachine, unknown>>;
+  return (
+    typeof candidate.machineId === "string" &&
+    typeof candidate.name === "string" &&
+    typeof candidate.fingerprint === "string" &&
+    typeof candidate.endpoint === "string" &&
+    typeof candidate.deviceId === "string" &&
+    typeof candidate.secret === "string" &&
+    typeof candidate.pairedAt === "string"
+  );
 }

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src");
+const REMOTE_AUTHORITY = /(?:remote-authority|remote-fabric-authority)\.ts$/;
 
 function filesUnder(dir: string): string[] {
   const out: string[] = [];
@@ -21,6 +22,12 @@ function importsOf(file: string): string[] {
   return [...source.matchAll(/from\s+"([^"]+)"/g)].map((match) => match[1]!);
 }
 
+function codeOf(file: string): string {
+  return readFileSync(file, "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+}
+
 /** Resolves a relative import to a path under `src`, or null if it is a package. */
 function resolveLocal(file: string, specifier: string): string | null {
   if (!specifier.startsWith(".")) return null;
@@ -28,9 +35,10 @@ function resolveLocal(file: string, specifier: string): string | null {
 }
 
 /**
- * The relay's claim is that it cannot read what it carries and cannot decide
- * who may connect. Both are only worth something if something fails when they
- * stop being true (`docs/architecture.md` §6.5).
+ * The relay's current claim is that its forwarding code does not parse
+ * application payloads and cannot decide product authorization. TLS still
+ * terminates here, so cryptographic content secrecy requires future E2EE.
+ * Both enforceable boundaries need a test (`docs/architecture.md` §6.5).
  */
 describe("what the relay is allowed to know", () => {
   it("keeps the forwarding layer to contract and shared", () => {
@@ -82,6 +90,33 @@ describe("what the relay is allowed to know", () => {
     }
   });
 
+  it("keeps the Fabric authority equally small and network-safe", () => {
+    const source = readFileSync(path.join(SRC, "contract/fabric.ts"), "utf8");
+    const body = source.slice(source.indexOf("interface FabricAuthority"));
+    const calls = [...body.matchAll(/^ {2}(\w+)\([^)]*\):\s*([^;]+);/gm)].filter(
+      ([, name]) => name !== "onFabricRevoked",
+    );
+    assert.deepEqual(
+      calls.map(([, name]) => name),
+      ["authorizeEndpoint", "authorizeRoute", "reportEndpointPresence"],
+      "the Fabric relay may only admit endpoints/routes and report opaque presence",
+    );
+    for (const [, name, returns] of calls) {
+      assert.match(returns!.trim(), /^Promise</, `${name} must remain a network call`);
+    }
+  });
+
+  it("keeps Fabric contracts free of product and identity vocabulary", () => {
+    const contract = ["fabric.ts", "fabric-wire.ts"]
+      .map((name) => codeOf(path.join(SRC, "contract", name)))
+      .join("\n");
+    assert.doesNotMatch(
+      contract,
+      /\b(?:user|account|machine|nodeId|workspace|session|agent|command|argv|path)\b/i,
+      "opaque endpoint and route handles are the relay's entire routing vocabulary",
+    );
+  });
+
   it("has no database, and no way to grow one by accident", () => {
     const manifest = JSON.parse(
       readFileSync(path.join(SRC, "../package.json"), "utf8"),
@@ -104,15 +139,28 @@ describe("what the relay is allowed to know", () => {
     const dataPath = filesUnder(path.join(SRC, "forward")).filter(
       // The authority client speaks JSON to the control plane, which is a
       // different conversation entirely: it never sees a payload.
-      (file) => !file.endsWith("remote-authority.ts"),
+      (file) => !REMOTE_AUTHORITY.test(file),
     );
     for (const file of dataPath) {
       const source = readFileSync(file, "utf8");
       assert.doesNotMatch(
         source,
-        /JSON\.parse|JSON\.stringify/,
+        /JSON\.parse|JSON\.stringify|parseEnvelope|decodeEnvelope|genehub[_-]proto/i,
         `${path.relative(SRC, file)} must not interpret what it carries`,
       );
     }
+  });
+
+  it("limits JSON to remote authority traffic, never the Fabric DATA path", () => {
+    const forward = filesUnder(path.join(SRC, "forward"));
+    const jsonUsers = forward
+      .filter((file) => /JSON\.parse|JSON\.stringify/.test(readFileSync(file, "utf8")))
+      .map((file) => path.relative(SRC, file));
+
+    assert.ok(jsonUsers.length > 0, "the authority HTTP/SSE adapter is expected to speak JSON");
+    assert.ok(
+      jsonUsers.every((file) => REMOTE_AUTHORITY.test(file)),
+      `only remote authority adapters may use JSON, saw ${jsonUsers.join(", ")}`,
+    );
   });
 });

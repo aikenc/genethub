@@ -7,6 +7,7 @@ import { App } from "../App";
 import { rememberMachine } from "../devices/machines";
 import { browserHost, desktopHost, type Endpoint, type Host } from "../host";
 import { socketQueue } from "../protocol/fake-socket";
+import type { ProtocolDial } from "../protocol/client";
 import { useWorkbench } from "../session/store";
 
 /**
@@ -36,7 +37,9 @@ const paired = (machineId: string, name: string, endpoint = REMOTE) =>
  * the endpoint, and the redial that asks for a fresh ticket — is inspectable.
  */
 const connectSpy = () =>
-  vi.fn((_endpoint: Endpoint, _redial: () => Promise<string>) => stubClient());
+  vi.fn((_endpoint: Endpoint, _redial: () => Promise<string | ProtocolDial>) =>
+    stubClient(),
+  );
 
 /** Enough of a client for the store to attach to without throwing in an effect. */
 function stubClient() {
@@ -72,7 +75,7 @@ describe("what a shell says it can drive", () => {
         core: {
           invoke: vi.fn(async () => ({
             port: 42123,
-            token: "tok",
+            url: "ws://127.0.0.1:42123/ws?challenge=fresh&pid=42&expiresAt=1&proof=proof",
             machineId: "m_here",
             fingerprint: "AB-CD",
           })),
@@ -84,7 +87,12 @@ describe("what a shell says it can drive", () => {
 
     expect(await desktopHost().targets!()).toEqual([
       { id: "local", label: "这台电脑", kind: "local", online: true },
-      { id: "m_far", label: "工作机", kind: "remote", fingerprint: "AAAA-BBBB" },
+      {
+        id: "m_far",
+        label: "工作机",
+        kind: "remote",
+        fingerprint: "AAAA-BBBB",
+      },
     ]);
   });
 
@@ -116,7 +124,9 @@ describe("what a shell says it can drive", () => {
   });
 
   it("says so rather than connecting nowhere when the machine was forgotten", async () => {
-    await expect(browserHost({ hash: "" }).openTarget!("m_gone")).rejects.toThrow(/名册/);
+    await expect(
+      browserHost({ hash: "" }).openTarget!("m_gone"),
+    ).rejects.toThrow(/名册/);
   });
 });
 
@@ -136,7 +146,7 @@ describe("the machines the account knows about", () => {
         core: {
           invoke: vi.fn(async () => ({
             port: 42123,
-            token: "tok",
+            url: "ws://127.0.0.1:42123/ws?challenge=fresh&pid=42&expiresAt=1&proof=proof",
             machineId: "m_here",
             fingerprint: "AB-CD",
           })),
@@ -177,8 +187,18 @@ describe("the machines the account knows about", () => {
       data: [
         // The Hub knows about this machine too. It is already the first row,
         // and a second one would reach the daemon underfoot through a relay.
-        { id: "mch_here", name: "这台电脑", online: true, fingerprint: "AB-CD" },
-        { id: "mch_far", name: "公司台式机", online: false, fingerprint: "EF-GH" },
+        {
+          id: "mch_here",
+          name: "这台电脑",
+          online: true,
+          fingerprint: "AB-CD",
+        },
+        {
+          id: "mch_far",
+          name: "公司台式机",
+          online: false,
+          fingerprint: "EF-GH",
+        },
       ],
     });
 
@@ -205,10 +225,20 @@ describe("the machines the account knows about", () => {
       // Same computer, different id space: the Hub's ids and the ones a local
       // pairing recorded have nothing to do with each other, so the key that
       // works is the machine's own key.
-      data: [{ id: "mch_far", name: "工作机（账号）", online: true, fingerprint: "AAAA-BBBB" }],
+      data: [
+        {
+          id: "mch_far",
+          name: "工作机（账号）",
+          online: true,
+          fingerprint: "AAAA-BBBB",
+        },
+      ],
     });
 
-    expect((await listed).map((target) => target.label)).toEqual(["这台电脑", "工作机"]);
+    expect((await listed).map((target) => target.label)).toEqual([
+      "这台电脑",
+      "工作机",
+    ]);
   });
 
   it("still shows this computer when the Hub cannot be reached", async () => {
@@ -241,12 +271,25 @@ describe("the machines the account knows about", () => {
     await vi.waitFor(() => socket.lastOf("hub.connect"));
     socket.reply(socket.lastOf("hub.connect").id, {
       type: "hubTicket",
-      data: { url: REMOTE, expiresAt: "2099-01-01T00:00:00Z", fingerprint: "EF-GH" },
+      data: {
+        url: REMOTE,
+        expiresAt: "2099-01-01T00:00:00Z",
+        fingerprint: "EF-GH",
+        channelCapability: "cap_test",
+        channelSecret: "secret_test",
+      },
     });
     await vi.waitFor(() => socket.lastOf("hub.machines"));
     socket.reply(socket.lastOf("hub.machines").id, {
       type: "hubMachines",
-      data: [{ id: "mch_far", name: "公司台式机", online: true, fingerprint: "EF-GH" }],
+      data: [
+        {
+          id: "mch_far",
+          name: "公司台式机",
+          online: true,
+          fingerprint: "EF-GH",
+        },
+      ],
     });
 
     expect(await opening).toEqual({
@@ -254,10 +297,13 @@ describe("the machines the account knows about", () => {
       via: "relay",
       label: "公司台式机",
       fingerprint: "EF-GH",
+      channelCredential: { capabilityId: "cap_test", secret: "secret_test" },
     });
     // Dialled the machine underfoot, not the one being switched to: the far end
     // is exactly what may be unreachable when a reconnect needs a fresh ticket.
-    expect(queue.urls.every((url) => url.includes("127.0.0.1:42123"))).toBe(true);
+    expect(queue.urls.every((url) => url.includes("127.0.0.1:42123"))).toBe(
+      true,
+    );
   });
 });
 
@@ -267,7 +313,11 @@ describe("switching from the sidebar", () => {
     via: "loopback",
     label: "这台电脑",
   };
-  const remoteEndpoint: Endpoint = { url: REMOTE, via: "relay", label: "工作机" };
+  const remoteEndpoint: Endpoint = {
+    url: REMOTE,
+    via: "relay",
+    label: "工作机",
+  };
 
   const host = (overrides: Partial<Host> = {}): Host => ({
     kind: "desktop",
@@ -286,7 +336,9 @@ describe("switching from the sidebar", () => {
     render(<App host={host()} connect={() => stubClient()} />);
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /这台电脑/ })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: /这台电脑/ }),
+      ).toBeInTheDocument(),
     );
   });
 
@@ -296,7 +348,9 @@ describe("switching from the sidebar", () => {
 
     await waitFor(() => expect(connect).toHaveBeenCalled());
     await userEvent.click(screen.getByRole("button", { name: /这台电脑/ }));
-    await userEvent.click(await screen.findByRole("option", { name: /工作机/ }));
+    await userEvent.click(
+      await screen.findByRole("option", { name: /工作机/ }),
+    );
 
     await waitFor(() =>
       expect(connect.mock.calls.at(-1)?.[0]).toMatchObject({ url: REMOTE }),
@@ -320,7 +374,9 @@ describe("switching from the sidebar", () => {
 
     await waitFor(() => expect(connect).toHaveBeenCalled());
     await userEvent.click(screen.getByRole("button", { name: /这台电脑/ }));
-    await userEvent.click(await screen.findByRole("option", { name: /工作机/ }));
+    await userEvent.click(
+      await screen.findByRole("option", { name: /工作机/ }),
+    );
     await waitFor(() =>
       expect(connect.mock.calls.at(-1)?.[0]).toMatchObject({ url: REMOTE }),
     );
@@ -340,11 +396,13 @@ describe("switching from the sidebar", () => {
 
     await waitFor(() => expect(connect).toHaveBeenCalled());
     await userEvent.click(screen.getByRole("button", { name: /这台电脑/ }));
-    await userEvent.click(await screen.findByRole("option", { name: /工作机/ }));
+    await userEvent.click(
+      await screen.findByRole("option", { name: /工作机/ }),
+    );
     await waitFor(() => expect(openTarget).toHaveBeenCalledTimes(1));
 
     const redial = connect.mock.calls.at(-1)![1];
-    expect(await redial()).toBe(REMOTE);
+    expect(await redial()).toEqual({ url: REMOTE });
     expect(openTarget).toHaveBeenCalledTimes(2);
   });
 
@@ -361,7 +419,11 @@ describe("switching from the sidebar", () => {
       />,
     );
 
-    await waitFor(() => expect(screen.getByText("新建会话")).toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: /这台电脑/ })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByText("新建会话")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: /这台电脑/ }),
+    ).not.toBeInTheDocument();
   });
 });

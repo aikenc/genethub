@@ -4,22 +4,22 @@
 
 | 你想做的事 | 需要跑什么 |
 |-----------|-----------|
-| 在自己电脑前用 | 装个桌面端就完了 |
-| 同一个 Wi-Fi 下用手机连电脑 | 同上，走局域网直连 |
+| 在 Windows/macOS 电脑前用 | 装桌面端；Linux 使用 CLI/daemon + 浏览器工作台 |
+| 同一个 Wi-Fi 下用手机连电脑 | 同上；另一设备仍走你自建的 WSS relay，不开放明文 LAN bearer |
 | 人在外面连家里的电脑 | 一个 relay，加一份静态工作台。**没有数据库，没有账号系统** |
 
 只有第三种情况才有本文。
 
-那台"自己的电脑"如果根本没有图形界面（服务器、VM），装法是：
+Linux 不提供桌面壳；无论有没有图形界面，都安装 CLI/daemon（服务器、VM 同样适用）：
 
 ```bash
-curl -fsSL https://genehub.dev/install.sh | sh   # daemon + 内置 agent，不需要 Node
+curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL https://genehub.dev/install.sh | sh
 genet daemon run
 ```
 
-脚本会校验 `SHA256SUMS`，对不上就拒绝安装，不会给你留一个半截的二进制。发布的 Linux 二进制是 musl 静态链接的，不要求宿主机有多新的 glibc。装完的 daemon 和桌面端里那个是同一个，下面的配对步骤完全一样。
+脚本会校验 `SHA256SUMS`，对不上就拒绝安装，不会给你留一个半截的二进制。发布的 Linux 二进制是 musl 静态链接的，不要求宿主机有多新的 glibc。装完的 daemon 和 Windows/macOS 桌面端里那个是同一个，下面的配对步骤完全一样。
 
-之后升级不需要图形界面：运行 `genet update`。CLI 使用随当前版本内置、且已经固定频道的安装脚本，校验新包旁边的 `SHA256SUMS`，替换完成后自动用新二进制执行 `daemon restart`。更新成功返回时 daemon 已重新监听；正在执行的会话会因重启中断，所以应在合适的时间手动触发。
+当前不提供自动升级：`genet update` 会明确返回 `unsupported`，daemon 和桌面壳也不会下载或执行安装包。原因是发布包旁边的 `SHA256SUMS` 只能发现损坏；在发布主机或流水线被攻破时，它不能认证同处发布的二进制。请从官方发布页手动下载，并通过独立可信渠道核对校验值；待项目引入独立签名根后再开放自动升级。
 
 ---
 
@@ -48,6 +48,7 @@ npm install && npm run build
 RELAY_MODE=rendezvous \
 RELAY_PORT=8080 \
 RELAY_HOST=0.0.0.0 \
+RELAY_JOIN_TOKEN="$(openssl rand -hex 32)" \
 npm start
 ```
 
@@ -56,10 +57,12 @@ npm start
 | `RELAY_MODE` | `control` | `rendezvous` 是自建模式；`control` 是问控制面的模式 |
 | `RELAY_PORT` | 8787 | 监听端口 |
 | `RELAY_HOST` | 127.0.0.1 | 对外提供服务时设成 `0.0.0.0` |
-| `RELAY_JOIN_TOKEN` | loopback 上不需要 | 机器挂上来时要出示。**绑非 loopback 地址时必须显式配置**，不配就拒绝启动——没有它,任何人都能在你的 relay 上占一个槽位 |
+| `RELAY_JOIN_TOKEN` | 字面 loopback IP 上不需要 | 机器挂上来时要出示。**绑非 loopback 地址时必须配置 32–256 个 base64url/hex 随机字符**（如 `openssl rand -hex 32`）；`localhost` 也不享受例外，避免名称解析把监听带到非 loopback；缺失或弱 token 会拒绝启动 |
 | `RELAY_MAX_DAEMONS` | 5000 | 在线机器上限 |
+| `RELAY_MAX_LEGACY_GENERATION_FENCES` | 100000 | Legacy 机器 admission 代际防重放记录上限；达到上限后只拒绝此前未见过的新机器，已有机器仍可用更高代际重连；记录不会因断线或 Control 抖动被清掉 |
 | `RELAY_MAX_CLIENTS_PER_MACHINE` | 8 | 单机客户端上限 |
 | `RELAY_MAX_BUFFERED_BYTES` | 8 MiB | 单连接缓冲上限，超了就断这一个慢读者 |
+| `RELAY_MAX_OUTBOUND_QUEUED_BYTES` | 64 MiB | 全 Relay（Legacy + Fabric）等待发送回调的总预算；超限只断触发方 |
 | `RELAY_MAX_FRAME_BYTES` | 4 MiB | 单帧上限 |
 | `RELAY_HEARTBEAT` | 30s | 心跳间隔 |
 
@@ -115,8 +118,8 @@ cd packages/web && npm install && npm run build   # 产物在 dist/
 配对了 Hub 之后还多一份来源：Hub 那边记着的机器名单。App 不自己去问，它问脚下这个 daemon（`hub.machines`），由 daemon 拿上行凭证去问 Hub；切过去时票据也是 daemon 铸的（`hub.connect`）。你自己的 Hub 只要实现这两个端点就同样能用：
 
 ```
-GET  /api/machines/{daemonId}/directory   Authorization: Bearer <上行凭证>
-POST /api/machines/{daemonId}/tickets     Authorization: Bearer <上行凭证>
+GET  /api/machines/{daemonId}/directory   Authorization: Bearer <长期 enrollment secret>
+POST /api/machines/{daemonId}/tickets     Authorization: Bearer <长期 enrollment secret>
 ```
 
 没有 Hub 的机器答一个空列表，切换器里就只有本地那些，一切照常。
@@ -146,7 +149,7 @@ POST /api/machines/{daemonId}/tickets     Authorization: Bearer <上行凭证>
 ## 6. 你的 relay 能看到什么
 
 - **能看到**：谁连了谁、什么时候、多少字节、连接持续多久。
-- **看不到**：它不解析 payload，也不落库。
-- **技术上能不能看到**：能。当前是传输层加密，relay 处理的是 TLS 解密后的应用层字节。端到端加密还没做（[security-model.md](./security-model.md) §1.1）。
+- **能看到**：IP、连接时序、帧长度、rendezvous/channel id，以及初始 invite id、nonce、proof。
+- **看不到**：通过双向证明后的业务内容。它们使用配对 PSK 派生的方向密钥，以 AES-256-GCM + HMAC 和严格序号封装；relay 不持有 PSK，也不解析、不落库。
 
-有一个地方要特别说明：配对时新签发的那份设备凭证会经过 relay。自建场景下 relay 是你自己的，所以这不构成问题；这也正是"自己跑一个 relay"有意义的原因——在 E2EE 落地之前，把这一跳放在自己手里，是唯一能从技术上而不是承诺上解决问题的办法。
+配对时设备名和新签发的长期凭证也只在 proof 通过后以加密帧返回，不再以明文经过 relay。当前协议仍是对称 PSK，没有公钥握手与前向保密；自建静态工作台与 relay 都由你控制，不涉及托管 Control 生成会话 secret 的额外信任边界。

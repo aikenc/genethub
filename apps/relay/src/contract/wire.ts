@@ -24,10 +24,12 @@ export interface AuthorizeDaemonRequest {
   ticket: string;
 }
 
-/** 200 with a body, or 204 for "no". Never an error for a bad ticket. */
+/** 200 grant; 204 definitive refusal. Non-2xx is an operational/contract error. */
 export interface AuthorizeDaemonResponse {
   machineId: string;
   daemonId: string;
+  connectionGeneration: number;
+  presenceLeaseSeconds: number;
 }
 
 /** `POST /internal/inspect-client` and `POST /internal/authorize-client` */
@@ -39,11 +41,16 @@ export interface AuthorizeClientRequest {
 export interface AuthorizeClientResponse {
   machineId: string;
   clientId: string;
+  channelCapability: string;
 }
 
-/** `POST /internal/presence` — 204, no body. */
+/**
+ * `POST /internal/presence` — 204 when this generation was applied; 409 when
+ * Control has already fenced it out. Both responses have no body.
+ */
 export interface PresenceRequest {
   machineId: string;
+  connectionGeneration: number;
   state: "online" | "offline";
 }
 
@@ -55,10 +62,18 @@ export interface PresenceRequest {
  * NAT, which is what makes "host your own" something a person can actually do
  * at home rather than only in a datacentre.
  */
-export interface RevocationEvent {
-  machineId: string;
-  reason: string;
-}
+export type RevocationEvent =
+  | {
+      /** Optional only so a new relay can consume events from an older Hub. */
+      target?: "machine";
+      machineId: string;
+      reason: string;
+    }
+  | {
+      target: "client";
+      clientId: string;
+      reason: string;
+    };
 
 /**
  * Sent first on every subscribe, listing machines revoked recently enough that
@@ -68,4 +83,10 @@ export interface RevocationEvent {
  */
 export interface RevocationSync {
   machineIds: string[];
+  /** Missing when a new relay briefly overlaps an older Hub during rollout. */
+  clientIds?: string[];
 }
+
+/** Initial catch-up may be split into bounded pages; ready only follows complete. */
+export type RevocationSyncPage = RevocationSync;
+export type RevocationSyncComplete = Record<string, never>;

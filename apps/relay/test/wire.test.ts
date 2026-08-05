@@ -19,7 +19,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
  * Comments are stripped before hashing, so prose can be improved on one side
  * without dragging the other through a release.
  */
-const AGREED_DIGEST = "3d4e09df0fac4eaf03050204ac57a746d777a43b3d5c61af47c03598e02f7432";
+const AGREED_DIGEST = "c692f5cc5e05a4ef81475a2d58cde0127f742843b892f94abfcfe8f160110345";
 
 /** Comments and blank lines out; what is left is what travels. */
 export function normalize(source: string): string {

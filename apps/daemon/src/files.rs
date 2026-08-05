@@ -1,14 +1,19 @@
 //! Directory listing and file read/write, scoped to a workspace.
 
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+#[cfg(not(unix))]
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use genehub_proto::{FileContent, FileNode};
 
 /// Beyond this a file is served truncated: the editor cannot usefully show
 /// more, and shipping it wastes the link.
 const MAX_READ_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ENTRIES_PER_DIR: usize = 2000;
+const MAX_TREE_NODES: usize = 10_000;
 
 /// Builds a tree rooted at `path`, descending `depth` levels.
 ///
@@ -16,21 +21,42 @@ const MAX_ENTRIES_PER_DIR: usize = 2000;
 /// `target` with a hundred thousand files, and a client asking for "the tree"
 /// should not be able to stall the daemon.
 pub fn tree(root: &Path, path: &Path, depth: u32) -> Result<FileNode> {
-    let relative = path
-        .strip_prefix(root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
-    let name = path
+    let directory = workspace_dir(root)?;
+    let relative = workspace_relative(root, path)?;
+    let mut remaining = MAX_TREE_NODES;
+    tree_in(&directory, &relative, depth, &mut remaining)
+}
+
+fn tree_in(
+    directory: &Dir,
+    relative: &Path,
+    depth: u32,
+    remaining: &mut usize,
+) -> Result<FileNode> {
+    if *remaining == 0 {
+        anyhow::bail!("file tree exceeded the node safety limit");
+    }
+    *remaining -= 1;
+    let display_path = relative.to_string_lossy().replace('\\', "/");
+    // `strip_prefix(root)` represents the root itself as an empty path, while
+    // capability-relative filesystem APIs spell that directory `.`.
+    let capability_path = if relative.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        relative
+    };
+    let name = relative
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| ".".to_string());
 
-    let metadata =
-        std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
+    let metadata = directory
+        .metadata(capability_path)
+        .with_context(|| format!("reading {}", relative.display()))?;
     if !metadata.is_dir() {
         return Ok(FileNode {
             name,
-            path: relative,
+            path: display_path,
             is_dir: false,
             size: Some(metadata.len()),
             children: None,
@@ -43,18 +69,22 @@ pub fn tree(root: &Path, path: &Path, depth: u32) -> Result<FileNode> {
         None
     } else {
         let mut entries: Vec<FileNode> = Vec::new();
-        let mut listing: Vec<_> = std::fs::read_dir(path)
-            .with_context(|| format!("listing {}", path.display()))?
+        let mut listing: Vec<_> = directory
+            .read_dir(capability_path)
+            .with_context(|| format!("listing {}", relative.display()))?
             .flatten()
             .collect();
         listing.sort_by_key(|entry| entry.file_name());
 
         for entry in listing.into_iter().take(MAX_ENTRIES_PER_DIR) {
-            let entry_path = entry.path();
+            if *remaining == 0 {
+                break;
+            }
+            let entry_path = relative.join(entry.file_name());
             if is_noise(&entry_path) {
                 continue;
             }
-            match tree(root, &entry_path, depth.saturating_sub(1)) {
+            match tree_in(directory, &entry_path, depth.saturating_sub(1), remaining) {
                 Ok(node) => entries.push(node),
                 // A file that vanished or cannot be stat'd should not fail the
                 // whole listing.
@@ -68,7 +98,7 @@ pub fn tree(root: &Path, path: &Path, depth: u32) -> Result<FileNode> {
 
     Ok(FileNode {
         name,
-        path: relative,
+        path: display_path,
         is_dir: true,
         size: None,
         children,
@@ -84,28 +114,38 @@ fn is_noise(path: &Path) -> bool {
 }
 
 pub fn read(root: &Path, path: &Path) -> Result<FileContent> {
-    let relative = path
-        .strip_prefix(root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| path.display().to_string());
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let directory = workspace_dir(root)?;
+    let relative = workspace_relative(root, path)?;
+    let file = directory
+        .open(&relative)
+        .with_context(|| format!("reading {}", relative.display()))?;
+    let size = file.metadata()?.len();
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(size)
+            .unwrap_or(MAX_READ_BYTES + 1)
+            .min(MAX_READ_BYTES + 1),
+    );
+    file.into_std()
+        .take((MAX_READ_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    let relative = relative.to_string_lossy().replace('\\', "/");
 
     if looks_binary(&bytes) {
         return Ok(FileContent {
             path: relative,
-            content: format!("Binary file, {} bytes", bytes.len()),
+            content: format!("Binary file, {size} bytes"),
             truncated: false,
             is_text: false,
         });
     }
 
-    let truncated = bytes.len() > MAX_READ_BYTES;
+    let truncated = size > MAX_READ_BYTES as u64 || bytes.len() > MAX_READ_BYTES;
     let slice = if truncated {
         // Cut on a character boundary so the result is still valid UTF-8.
         // A continuation byte is 0b10xxxxxx; back up until the cut lands on the
         // start of a character.
-        let mut end = MAX_READ_BYTES;
-        while end > 0 && (bytes[end] & 0b1100_0000) == 0b1000_0000 {
+        let mut end = bytes.len().min(MAX_READ_BYTES);
+        while end > 0 && end < bytes.len() && (bytes[end] & 0b1100_0000) == 0b1000_0000 {
             end -= 1;
         }
         &bytes[..end]
@@ -121,11 +161,65 @@ pub fn read(root: &Path, path: &Path) -> Result<FileContent> {
     })
 }
 
-pub fn write(path: &Path, content: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+pub fn write(root: &Path, path: &Path, content: &str) -> Result<()> {
+    let directory = workspace_dir(root)?;
+    let relative = workspace_relative(root, path)?;
+    if let Some(parent) = relative.parent() {
+        directory.create_dir_all(parent)?;
     }
-    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))
+    directory
+        .write(&relative, content)
+        .with_context(|| format!("writing {}", relative.display()))
+}
+
+/// Opens the registered workspace as a directory capability.
+///
+/// All later lookups are relative to the opened handle. `cap-std` resolves
+/// every component without ever leaving that handle, including when another
+/// process swaps a checked parent directory for a symlink between lookup and
+/// open. A workspace root which is itself currently a symlink is rejected: a
+/// saved root cannot silently be retargeted after registration.
+fn workspace_dir(root: &Path) -> Result<Dir> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(root)
+            .with_context(|| format!("opening workspace root {}", root.display()))?;
+        Ok(Dir::from_std_file(file))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let metadata = std::fs::symlink_metadata(root)
+            .with_context(|| format!("reading workspace root {}", root.display()))?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("workspace root is a symbolic link");
+        }
+        Dir::open_ambient_dir(root, ambient_authority())
+            .with_context(|| format!("opening workspace root {}", root.display()))
+    }
+}
+
+fn workspace_relative(root: &Path, path: &Path) -> Result<PathBuf> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| anyhow::anyhow!("path escapes the workspace"))?
+        .to_path_buf();
+    for component in relative.components() {
+        if matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        ) {
+            anyhow::bail!("path escapes the workspace");
+        }
+    }
+    Ok(relative)
 }
 
 /// A NUL byte in the first block is the same heuristic git uses.
@@ -230,7 +324,70 @@ mod tests {
     fn writing_creates_missing_parent_directories() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a/b/c.txt");
-        write(&path, "hi").unwrap();
+        write(dir.path(), &path, "hi").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hi");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cannot_turn_a_workspace_read_into_an_arbitrary_file_read() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "host secret").unwrap();
+        symlink(outside.path(), workspace.path().join("escape")).unwrap();
+
+        let escaped = workspace.path().join("escape/secret.txt");
+        assert!(read(workspace.path(), &escaped).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cannot_turn_a_workspace_write_into_host_file_overwrite() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("authorized_keys");
+        std::fs::write(&victim, "original").unwrap();
+        symlink(outside.path(), workspace.path().join("escape")).unwrap();
+
+        let escaped = workspace.path().join("escape/authorized_keys");
+        assert!(write(workspace.path(), &escaped, "attacker key").is_err());
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_does_not_follow_a_directory_symlink_outside_the_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "host secret").unwrap();
+        symlink(outside.path(), workspace.path().join("escape")).unwrap();
+
+        let node = tree(workspace.path(), workspace.path(), 2).unwrap();
+        assert!(node
+            .children
+            .unwrap()
+            .into_iter()
+            .all(|child| child.name != "escape"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registered_workspace_root_cannot_be_retargeted_with_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let container = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = container.path().join("workspace");
+        symlink(outside.path(), &root).unwrap();
+
+        let error = write(&root, &root.join("authorized_keys"), "attacker key").unwrap_err();
+        assert!(error.to_string().contains("workspace root"));
+        assert!(!outside.path().join("authorized_keys").exists());
     }
 }

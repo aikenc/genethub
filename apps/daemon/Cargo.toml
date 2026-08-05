@@ -13,8 +13,12 @@ description = "GeneHub daemon: session kernel, agent adapters and client transpo
 genehub-proto = { path = "../../packages/proto" }
 
 anyhow.workspace = true
+aes-gcm.workspace = true
+base64.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+fs2.workspace = true
+hmac.workspace = true
 ignore.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -25,13 +29,24 @@ uuid.workspace = true
 
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
+cap-std = "4.0.2"
 dirs = "6"
+libc = "0.2"
 portable-pty = "0.9"
 sha2 = "0.10"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"

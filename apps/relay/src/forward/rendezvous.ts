@@ -1,6 +1,7 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 import type { ChannelAuthority, ClientGrant, DaemonGrant } from "../contract/index.js";
+import { isLiteralLoopbackHost } from "../shared/config.js";
 import { log } from "../shared/log.js";
 
 /**
@@ -21,27 +22,42 @@ import { log } from "../shared/log.js";
  * slot some machine is already holding.
  */
 export class RendezvousAuthority implements ChannelAuthority {
+  /**
+   * One process-wide monotonic source is enough: Forwarder fences per machine,
+   * while using a global counter avoids a second unbounded per-slot map in the
+   * deliberately stateless self-hosted authority.
+   */
+  private connectionGeneration = 0;
+
   constructor(private readonly joinToken: string | null) {}
 
   async authorizeDaemon(ticket: string): Promise<DaemonGrant | null> {
     const [presented, id] = split(ticket);
     if (!id) return null;
     if (this.joinToken && !sameSecret(presented, this.joinToken)) return null;
-    return { machineId: id, daemonId: id };
+    if (this.connectionGeneration >= Number.MAX_SAFE_INTEGER) return null;
+    this.connectionGeneration += 1;
+    return {
+      machineId: id,
+      daemonId: id,
+      connectionGeneration: this.connectionGeneration,
+      presenceLeaseSeconds: 60,
+    };
   }
 
   async inspectClient(ticket: string): Promise<ClientGrant | null> {
     if (!ticket) return null;
-    // Peek only: a stable placeholder clientId so the forwarder can check the
-    // uplink map without inventing a fresh id it will throw away.
-    return { machineId: ticket, clientId: "inspect" };
+    // There is no account session in rendezvous mode. The slot is the only
+    // stable opaque identity available, and must agree with authorizeClient so
+    // the forwarder cannot switch subjects between peek and spend.
+    return { machineId: ticket, clientId: ticket, channelCapability: "rendezvous" };
   }
 
   async authorizeClient(ticket: string): Promise<ClientGrant | null> {
     if (!ticket) return null;
     // A client that names a slot nobody holds is turned away by the forwarder
     // itself, which is the only "does this machine exist" check there is.
-    return { machineId: ticket, clientId: randomBytes(8).toString("hex") };
+    return { machineId: ticket, clientId: ticket, channelCapability: "rendezvous" };
   }
 
   async reportPresence(): Promise<void> {}
@@ -81,12 +97,24 @@ function split(ticket: string): [string | null, string | null] {
  * On loopback there is nothing to protect: only this machine can reach it.
  */
 export function resolveJoinToken(configured: string | null, host: string): string | null {
-  if (configured) return configured;
-  const loopback = host === "127.0.0.1" || host === "::1" || host === "localhost";
+  const loopback = isLiteralLoopbackHost(host);
+  if (configured) {
+    if (
+      !loopback &&
+      (!/^[A-Za-z0-9_-]{32,256}$/.test(configured) ||
+        Buffer.byteLength(configured, "utf8") < 32)
+    ) {
+      throw new Error(
+        "relay: RELAY_JOIN_TOKEN on a non-loopback listener must be 32-256 " +
+          "base64url/hex characters generated from a cryptographic random source",
+      );
+    }
+    return configured;
+  }
   if (loopback) return null;
   throw new Error(
     `relay: refusing to listen on ${host} with no RELAY_JOIN_TOKEN — any machine ` +
-      `could then hold a slot on it. Set one (e.g. RELAY_JOIN_TOKEN=$(openssl rand -hex 24)) ` +
+      `could then hold a slot on it. Set one (e.g. RELAY_JOIN_TOKEN=$(openssl rand -hex 32)) ` +
       `and give the same value to your machines, or bind 127.0.0.1 for local use.`,
   );
 }

@@ -4,26 +4,67 @@
 //! budget, and every machine that has a checkout already has the CLI.
 
 use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{GitChange, GitChangeKind, GitStatus};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_STDOUT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_STDERR_BYTES: usize = 64 * 1024;
+
 async fn git(root: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    let mut child = Command::new("git")
         .args(args)
         .current_dir(root)
-        .output()
-        .await
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
         .context("running git; is it installed?")?;
-    if !output.status.success() {
+    let stdout = child.stdout.take().context("capturing git stdout")?;
+    let stderr = child.stderr.take().context("capturing git stderr")?;
+    let collected = tokio::time::timeout(GIT_TIMEOUT, async move {
+        tokio::try_join!(
+            read_bounded(stdout, MAX_STDOUT_BYTES, "git output"),
+            read_bounded(stderr, MAX_STDERR_BYTES, "git error output"),
+            async { child.wait().await.context("waiting for git") },
+        )
+    })
+    .await
+    .map_err(|_| anyhow!("git {} timed out", args.join(" ")))??;
+    let (stdout, stderr, status) = collected;
+    if !status.success() {
         return Err(anyhow!(
             "git {} failed: {}",
             args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(String::from_utf8_lossy(&stdout).to_string())
+}
+
+async fn read_bounded(
+    mut input: impl AsyncRead + Unpin,
+    limit: usize,
+    label: &'static str,
+) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = input.read(&mut buffer).await?;
+        if count == 0 {
+            return Ok(output);
+        }
+        if output.len().saturating_add(count) > limit {
+            return Err(anyhow!("{label} exceeded the {limit}-byte safety limit"));
+        }
+        output.extend_from_slice(&buffer[..count]);
+    }
 }
 
 pub async fn status(root: &Path) -> Result<GitStatus> {
@@ -250,5 +291,19 @@ mod tests {
         let diff = diff(dir.path(), None).await.unwrap();
         assert!(diff.contains("-one"));
         assert!(diff.contains("+two"));
+    }
+
+    #[tokio::test]
+    async fn child_output_is_bounded_before_it_can_exhaust_daemon_memory() {
+        let data = vec![b'x'; 1025];
+        assert!(read_bounded(data.as_slice(), 1024, "test output")
+            .await
+            .is_err());
+        assert_eq!(
+            read_bounded(b"small".as_slice(), 1024, "test output")
+                .await
+                .unwrap(),
+            b"small"
+        );
     }
 }

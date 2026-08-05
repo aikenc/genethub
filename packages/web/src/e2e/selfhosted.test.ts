@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,13 +16,22 @@ import {
   emptyTimeline,
 } from "../session/timeline";
 import { startMockModel, type MockModel } from "./mock-model";
+import { builtBinary, daemonEnvironment, missingArtifacts } from "./artifacts";
 
 const REPO = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../..",
 );
-const DAEMON = path.join(REPO, "target/debug/genet");
-const AGENT = path.join(REPO, "target/debug/genet-agent");
+const DAEMON = builtBinary(
+  REPO,
+  ["genet-dev", "genet-beta", "genet-alpha", "genet"],
+  process.env.GENET_E2E_DAEMON,
+);
+const AGENT = builtBinary(
+  REPO,
+  ["genet-agent-dev", "genet-agent-beta", "genet-agent-alpha", "genet-agent"],
+  process.env.GENET_E2E_AGENT,
+);
 const RELAY = path.join(REPO, "apps/relay/dist/main.js");
 const JOIN_TOKEN = "e2e-join-token";
 const REPLY = "已经看过了，这个仓库编译得过。";
@@ -41,7 +50,7 @@ const socketFactory = (url: string) =>
  * fail to add up to a usable product.
  */
 describe.skipIf(
-  !existsSync(DAEMON) || !existsSync(AGENT) || !existsSync(RELAY),
+  missingArtifacts({ daemon: DAEMON, agent: AGENT, relay: RELAY }),
 )("reaching a machine with nothing but open-source pieces", () => {
   let relay: ChildProcess;
   let relayOrigin: string;
@@ -65,7 +74,7 @@ describe.skipIf(
     daemon = local.process;
 
     owner = new Client({
-      url: `ws://127.0.0.1:${local.port}/ws?token=${local.token}`,
+      url: local.url,
       socketFactory,
       clientName: "owner",
     });
@@ -94,8 +103,11 @@ describe.skipIf(
     daemon?.kill("SIGKILL");
     relay?.kill("SIGKILL");
     await model?.close();
-    rmSync(dataDir, { recursive: true, force: true });
-    rmSync(homeDir, { recursive: true, force: true });
+    // beforeAll can fail before the temporary roots are allocated (for
+    // example when the real Relay cannot start). Teardown must preserve that
+    // first actionable error instead of masking it with rmSync(undefined).
+    if (dataDir) rmSync(dataDir, { recursive: true, force: true });
+    if (homeDir) rmSync(homeDir, { recursive: true, force: true });
   });
 
   /** Everything a new browser does on its own: claim an invite, then connect. */
@@ -337,17 +349,19 @@ async function startRelay(
 function startDaemon(
   dataDir: string,
   defaultWorkspace: string,
-): Promise<{ process: ChildProcess; port: number; token: string }> {
+): Promise<{ process: ChildProcess; url: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(DAEMON, ["daemon", "run"], {
       env: {
         ...process.env,
-        GENEHUB_DATA_DIR: dataDir,
-        GENEHUB_WORKSPACE_DIR: defaultWorkspace,
-        GENEHUB_LOG: "warn",
         // Installed side by side in production; in a test the agent is wherever
         // cargo put it.
-        GENET_AGENT_COMMAND: AGENT,
+        ...daemonEnvironment(DAEMON, {
+          dataDir,
+          workspaceDir: defaultWorkspace,
+          log: "warn",
+          agent: AGENT,
+        }),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -362,12 +376,11 @@ function startDaemon(
       for (const line of chunk.toString().split("\n").filter(Boolean)) {
         const frame = JSON.parse(line) as {
           event: string;
-          port: number;
-          token: string;
+          url: string;
         };
         if (frame.event !== "listening") continue;
         clearTimeout(timer);
-        resolve({ process: child, port: frame.port, token: frame.token });
+        resolve({ process: child, url: frame.url });
       }
     });
   });

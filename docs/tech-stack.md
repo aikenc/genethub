@@ -12,7 +12,7 @@ packages/proto        ← 会话协议唯一定义处，生成 TS 类型与 Rust
 packages/web          ← 工作台（浏览器 / 桌面 / 手机同一份产物）
 apps/daemon           ← Rust：会话内核 + agent adapter 层 + 三种接入通道
 apps/agent            ← Rust：内置 agent（adapter 的一个后端）
-apps/desktop          ← Tauri 2 壳 + sidecar（daemon），桌面与移动端共用
+apps/desktop          ← Windows/macOS Tauri 2 壳 + sidecar（daemon）
 apps/relay            ← Node：转发层，可独立部署
 testing/              ← 跨部件旅程测试
 ```
@@ -20,7 +20,7 @@ testing/              ← 跨部件旅程测试
 | 组件 | 技术 | 理由 |
 |------|------|------|
 | **桌面** | [Tauri 2](https://tauri.app/) | **UI 仍是 H5**，但走系统 WebView：拿到 Electron 的开发体验，不用背 Chromium + Node 的体积。壳本身几 MB，预算留给 sidecar |
-| **手机** | Tauri Mobile | 同一份 Web 产物打进 iOS / Android，与桌面共用壳代码，不再多养一个框架 |
+| **手机** | 浏览器工作台 | 同一份 Web 产物直接使用，不在当前范围内维护 iOS / Android 原生壳 |
 | **浏览器** | 同一 `packages/web` 直出 | 链接打开即用 |
 | **daemon** | Rust | 单文件二进制，无运行时依赖 |
 | **内置 agent** | Rust | 与 daemon 同栈；协议自实现 |
@@ -36,7 +36,7 @@ testing/              ← 跨部件旅程测试
 ## 2. 桌面端内部结构
 
 ```
-安装包（NSIS/WiX · dmg · AppImage）
+安装包（Windows NSIS · macOS dmg；Linux 不生成桌面包）
 ├── Tauri WebView → 工作台
 ├── sidecar: genet daemon run（CLI 与 daemon 同一二进制；关窗后仍运行）
 ├── genet-agent（由 daemon 的 genet adapter 按需拉起）
@@ -54,7 +54,7 @@ testing/              ← 跨部件旅程测试
 |------|------|
 | daemon 内核 ↔ 具体 agent | 只经 adapter trait；内核不出现任何 agent 名字的分支 |
 | daemon ↔ 前端 | 只走归一化会话协议；agent 的线格式不外泄 |
-| relay ↔ 控制面 | 四个 HTTP 端点，定义在 `apps/relay/src/contract/wire.ts` |
+| relay ↔ 控制面 | 版本化 HTTP 契约，定义在 `apps/relay/src/contract/wire.ts` 与 `fabric-wire.ts` |
 | 桌面壳 ↔ daemon | 进程分离，本地 WS 通信，不做进程内链接 |
 | 前端 ↔ 宿主 | 只经 `packages/web/src/host/`，业务组件不出现 `if (isTauri)` |
 | 协议定义 | 只在 `packages/proto`，前后端都从这里生成 |
@@ -63,15 +63,14 @@ testing/              ← 跨部件旅程测试
 
 ---
 
-## 4. 三条连接路径
+## 4. 两条连接路径
 
 | 路径 | 何时用 | 代价 |
 |------|--------|------|
 | `127.0.0.1` | 桌面壳内，最常见 | 无 |
-| 局域网直连 | 同一个 Wi-Fi 的手机或另一台电脑 | 需要知道内网地址 |
-| 经 relay | 人在外面 | 多一跳；需要一个控制面来签发票据 |
+| 经 relay | 任何跨设备访问，包括同一个 Wi-Fi | 多一跳；托管模式需要控制面签发票据 |
 
-客户端按这个顺序尝试，对用户不可见。前两条不需要任何服务端，这也是"不联网也能用"成立的原因。
+同机桌面壳只连接 loopback；跨设备统一连接 relay。当前没有 WebRTC、P2P、局域网地址探测或 direct fallback。断网时仍可在运行 daemon 的同一台电脑上使用桌面端。
 
 ---
 
@@ -80,7 +79,7 @@ testing/              ← 跨部件旅程测试
 | 形态 | 需要跑什么 |
 |------|-----------|
 | 只在自己电脑上用 | 桌面端。没有服务端 |
-| 家里几台机器互访 | 桌面端 + 局域网直连 |
+| 家里几台机器互访 | 桌面端 + relay（即使在同一局域网） |
 | 在外面访问家里 | 加一个 relay + 一个控制面，见 [self-hosting.md](./self-hosting.md) |
 
 **托管工作台静态文件的机器上不跑 daemon**，理由见 [security-model.md](./security-model.md) §6。

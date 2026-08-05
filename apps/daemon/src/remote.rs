@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Weak};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use genehub_proto::{RemoteAccess, ServerFrame};
 use tokio::sync::{broadcast, Mutex};
 
@@ -21,7 +21,6 @@ use crate::transport::uplink::{Admission, Uplink};
 
 pub struct Remote {
     attached: Mutex<Option<Attached>>,
-    paths: Paths,
     pty: broadcast::Sender<ServerFrame>,
     /// Weak for the same reason the Hub link's is: the state owns this.
     state: Weak<AppState>,
@@ -35,10 +34,9 @@ struct Attached {
 pub type SharedRemote = Arc<Remote>;
 
 impl Remote {
-    pub fn new(paths: Paths, pty: broadcast::Sender<ServerFrame>) -> SharedRemote {
+    pub fn new(_paths: Paths, pty: broadcast::Sender<ServerFrame>) -> SharedRemote {
         Arc::new(Remote {
             attached: Mutex::new(None),
-            paths,
             pty,
             state: Weak::new(),
         })
@@ -86,6 +84,16 @@ impl Remote {
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("the daemon is shutting down"))?;
         let relay_url = relay_url.trim().trim_end_matches('/').to_string();
+        let join_token = join_token
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty());
+        if join_token.as_deref().is_some_and(|token| {
+            token.len() > 512 || !token.bytes().all(|byte| byte.is_ascii_graphic())
+        }) {
+            return Err(anyhow!(
+                "the relay join token must be at most 512 visible ASCII characters"
+            ));
+        }
         // Fail before persisting: a stored address nobody can build a URL from
         // would come back every restart and fail again just as quietly.
         let id = rendezvous_id(&state.machine.machine_id, &state.machine.secret);
@@ -106,7 +114,7 @@ impl Remote {
         });
         drop(attached);
 
-        self.persist(Some(config))?;
+        self.persist(Some(config)).await?;
         Ok(self.status().await)
     }
 
@@ -116,7 +124,7 @@ impl Remote {
         if let Some(previous) = self.attached.lock().await.take() {
             previous.uplink.stop();
         }
-        self.persist(None)?;
+        self.persist(None).await?;
         Ok(self.status().await)
     }
 
@@ -127,11 +135,15 @@ impl Remote {
         }
     }
 
-    fn persist(&self, config: Option<Rendezvous>) -> Result<()> {
-        let path = self.paths.state_file();
-        let mut machine = MachineState::load_or_create(&path)?;
-        machine.rendezvous = config;
-        machine.save(&path)
+    async fn persist(&self, config: Option<Rendezvous>) -> Result<()> {
+        self.state
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("the daemon is shutting down"))?
+            .mutate_machine_state(|machine| {
+                machine.rendezvous = config;
+                Ok(())
+            })
+            .await
     }
 }
 
@@ -178,14 +190,49 @@ fn websocket_base(relay_url: &str) -> Result<String> {
     if trimmed.is_empty() {
         return Err(anyhow!("a relay address is required"));
     }
-    let converted = match trimmed.split_once("://") {
-        Some(("http", rest)) => format!("ws://{rest}"),
-        Some(("https", rest)) => format!("wss://{rest}"),
-        Some(("ws" | "wss", _)) => trimmed.to_string(),
-        Some((scheme, _)) => return Err(anyhow!("{scheme} is not an address this can dial")),
-        None => format!("wss://{trimmed}"),
+    let address = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("wss://{trimmed}")
     };
-    Ok(converted)
+    let mut parsed = reqwest::Url::parse(&address).context("reading the relay address")?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(anyhow!(
+            "the relay address cannot contain credentials, a query, or a fragment"
+        ));
+    }
+    let loopback = parsed
+        .host_str()
+        .and_then(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|address| address.is_loopback());
+    let secure = match parsed.scheme() {
+        "https" => {
+            parsed.set_scheme("wss").expect("wss is a valid URL scheme");
+            true
+        }
+        "wss" => true,
+        "http" => {
+            parsed.set_scheme("ws").expect("ws is a valid URL scheme");
+            false
+        }
+        "ws" => false,
+        scheme => return Err(anyhow!("{scheme} is not an address this can dial")),
+    };
+    if !secure && !loopback {
+        return Err(anyhow!(
+            "plaintext relay WebSockets are allowed only on 127.0.0.1 or [::1]; use https:// or wss://"
+        ));
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
 }
 
 #[cfg(test)]
@@ -201,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn http_and_https_are_accepted_and_converted() {
+    fn loopback_http_and_public_https_are_accepted_and_converted() {
         assert_eq!(
             daemon_url("http://127.0.0.1:8787").unwrap(),
             "ws://127.0.0.1:8787/forward/daemon"
@@ -211,9 +258,67 @@ mod tests {
             "wss://relay.example.com/forward/daemon"
         );
         assert_eq!(
-            daemon_url("http://myteam.devcloud.woa.com/relay-dev-0").unwrap(),
-            "ws://myteam.devcloud.woa.com/relay-dev-0/forward/daemon"
+            daemon_url("http://[::1]:8787").unwrap(),
+            "ws://[::1]:8787/forward/daemon"
         );
+        assert_eq!(
+            daemon_url("http://127.42.0.9:8787").unwrap(),
+            "ws://127.42.0.9:8787/forward/daemon"
+        );
+    }
+
+    #[test]
+    fn plaintext_non_loopback_relay_addresses_fail_closed() {
+        for address in [
+            "http://myteam.devcloud.woa.com/relay-dev-0",
+            "ws://relay.example.com",
+            "http://10.0.0.2:8787",
+            "http://172.16.1.2:8787",
+            "http://192.168.1.20:8787",
+            "http://localhost:8787",
+            // A DNS name which currently resolves to loopback is not a stable
+            // trust decision: its answer can be rebound after validation.
+            "http://loopback.attacker.test:8787",
+        ] {
+            assert!(daemon_url(address).is_err(), "{address} was accepted");
+        }
+    }
+
+    #[test]
+    fn relay_origins_cannot_smuggle_credentials_or_url_suffixes() {
+        for address in [
+            "wss://user:secret@relay.example.com",
+            "wss://relay.example.com?token=secret",
+            "wss://relay.example.com/#credential",
+        ] {
+            assert!(daemon_url(address).is_err(), "{address} was accepted");
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_join_tokens_are_refused_before_they_enter_the_reconnect_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::config::Paths::new(dir.path());
+        let state_path = paths.state_file();
+        let (state, _pty_rx) = crate::AppState::build(paths).await.unwrap();
+        let (pty, _) = broadcast::channel(1);
+        let mut remote = Remote::new(crate::config::Paths::new(dir.path()), pty);
+        remote.attach(&state).await;
+
+        for token in [
+            "line\nbreak".to_string(),
+            "x".repeat(513),
+            "秘密".to_string(),
+        ] {
+            assert!(remote
+                .set("http://127.0.0.1:8787", Some(token))
+                .await
+                .is_err());
+        }
+        assert!(MachineState::load(&state_path)
+            .unwrap()
+            .rendezvous
+            .is_none());
     }
 
     #[test]

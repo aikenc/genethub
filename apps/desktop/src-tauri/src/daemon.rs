@@ -25,9 +25,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+const MAX_LOOPBACK_HTTP_RESPONSE_BYTES: usize = 64 * 1024;
+
 /// What the daemon prints once it is listening. The port is chosen by the OS,
 /// so reading it back is the only way to know where to connect.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Endpoint {
     pub port: u16,
@@ -37,9 +39,54 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    pub fn websocket_url(&self) -> String {
-        format!("ws://127.0.0.1:{}/ws?token={}", self.port, self.token)
+    fn admission(&self, pid: u32) -> DialEndpoint {
+        let challenge = health_challenge(&self.token);
+        let expires_at = unix_seconds().saturating_add(15);
+        let proof = websocket_proof(
+            &self.token,
+            &challenge,
+            pid,
+            &self.machine_id,
+            &self.fingerprint,
+            expires_at,
+        );
+        DialEndpoint {
+            port: self.port,
+            url: format!(
+                "ws://127.0.0.1:{}/ws?challenge={challenge}&pid={pid}&expiresAt={expires_at}&proof={proof}",
+                self.port
+            ),
+            machine_id: self.machine_id.clone(),
+            fingerprint: self.fingerprint.clone(),
+            pid,
+            challenge: challenge.clone(),
+            expires_at,
+            server_proof: websocket_server_proof(
+                &self.token,
+                &challenge,
+                pid,
+                &self.machine_id,
+                &self.fingerprint,
+                expires_at,
+            ),
+        }
     }
+}
+
+/// What may cross the Tauri IPC boundary. The long-lived endpoint token never
+/// does; every call mints a fresh, one-use WS admission instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DialEndpoint {
+    pub port: u16,
+    pub url: String,
+    pub machine_id: String,
+    pub fingerprint: String,
+    pub pid: u32,
+    pub challenge: String,
+    pub expires_at: u64,
+    /// Domain-separated listener proof delivered through Tauri IPC, never URL.
+    pub server_proof: String,
 }
 
 /// The same thing as `Endpoint`, plus the pid, as written to `endpoint.json`.
@@ -51,6 +98,15 @@ struct Published {
     machine_id: String,
     fingerprint: String,
     pid: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Health {
+    pid: u32,
+    machine_id: String,
+    fingerprint: String,
+    proof: String,
 }
 
 /// How the daemon we are talking to came to exist. Only `stop` cares.
@@ -95,6 +151,18 @@ impl Daemon {
 
     pub fn endpoint(&self) -> Option<Endpoint> {
         self.endpoint.lock().expect("endpoint lock").clone()
+    }
+
+    pub fn dial_endpoint(&self) -> Option<DialEndpoint> {
+        let pid = self
+            .child
+            .lock()
+            .expect("daemon lock")
+            .as_ref()
+            .map(std::process::Child::id)
+            .or_else(|| *self.adopted_pid.lock().expect("pid lock"))?;
+        let endpoint = self.endpoint()?;
+        health(&endpoint, pid).then(|| endpoint.admission(pid))
     }
 
     /// Why there is no daemon, in words a user can pass on.
@@ -175,18 +243,28 @@ impl Daemon {
         let stdout = child.stdout.take().ok_or("daemon 没有输出")?;
 
         // Read on a thread so a daemon that never prints cannot hang startup.
+        // The listening line deliberately has no bearer; after it arrives the
+        // shell reads the owner-only endpoint file and verifies its identity.
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Some(endpoint) = parse_endpoint(&line) {
-                    let _ = tx.send(endpoint);
+                if is_listening(&line) {
+                    let _ = tx.send(());
                     return;
                 }
             }
         });
 
         match rx.recv_timeout(Duration::from_secs(20)) {
-            Ok(endpoint) => {
+            Ok(()) => {
+                let (endpoint, published_pid) = self
+                    .published()
+                    .ok_or_else(|| "daemon 发布的私有 endpoint 无法验证".to_string())?;
+                if published_pid != child.id() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("daemon 发布了另一个进程的 endpoint".to_string());
+                }
                 *self.child.lock().expect("daemon lock") = Some(child);
                 *self.adopted_pid.lock().expect("pid lock") = None;
                 *self.origin.lock().expect("origin lock") = Some(Origin::Spawned);
@@ -219,7 +297,21 @@ impl Daemon {
     fn log(&self) -> Option<std::fs::File> {
         let dir = self.data_dir.join("logs");
         let _ = std::fs::create_dir_all(&dir);
-        std::fs::File::create(dir.join("startup.log")).ok()
+        let path = dir.join("startup.log");
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok()?;
+        }
+        Some(file)
     }
 
     /// The last thing the daemon said before it gave up, if it said anything.
@@ -233,7 +325,10 @@ impl Daemon {
             .filter_map(|path| std::fs::read_to_string(path).ok())
             .collect::<Vec<_>>()
             .join("\n");
-        let tail: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+        let tail: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
         let tail = tail[tail.len().saturating_sub(3)..].join("; ");
         (!tail.is_empty()).then_some(tail)
     }
@@ -245,18 +340,13 @@ impl Daemon {
     fn published(&self) -> Option<(Endpoint, u32)> {
         let raw = std::fs::read_to_string(self.data_dir.join("endpoint.json")).ok()?;
         let found: Published = serde_json::from_str(&raw).ok()?;
-        if !pid_alive(found.pid) || !health(found.port) {
-            return None;
-        }
-        Some((
-            Endpoint {
-                port: found.port,
-                token: found.token,
-                machine_id: found.machine_id,
-                fingerprint: found.fingerprint,
-            },
-            found.pid,
-        ))
+        let endpoint = Endpoint {
+            port: found.port,
+            token: found.token,
+            machine_id: found.machine_id,
+            fingerprint: found.fingerprint,
+        };
+        (pid_alive(found.pid) && health(&endpoint, found.pid)).then_some((endpoint, found.pid))
     }
 
     /// Whether the daemon we think we have is actually there.
@@ -287,8 +377,16 @@ impl Daemon {
     }
 
     fn responding(&self) -> bool {
+        let pid = self
+            .child
+            .lock()
+            .expect("daemon lock")
+            .as_ref()
+            .map(std::process::Child::id)
+            .or_else(|| *self.adopted_pid.lock().expect("pid lock"));
         self.endpoint()
-            .is_some_and(|endpoint| health(endpoint.port))
+            .zip(pid)
+            .is_some_and(|(endpoint, pid)| health(&endpoint, pid))
     }
 
     fn forget(&self) {
@@ -300,8 +398,8 @@ impl Daemon {
 
     /// Brings the daemon back after a crash, returning the new endpoint.
     ///
-    /// The port and token both change, so whoever calls this has to tell the
-    /// workbench: its old connection will never come back.
+    /// The port and private key both change, so whoever calls this has to tell
+    /// the workbench to request a new one-use admission.
     pub fn restart(&self) -> Result<Endpoint, String> {
         self.stop();
         self.start()
@@ -326,15 +424,25 @@ impl Daemon {
             return;
         }
 
-        if let Some(endpoint) = endpoint.as_ref() {
-            ask_to_stop(endpoint);
+        let expected_pid = child.as_ref().map(std::process::Child::id).or(adopted);
+        if let (Some(endpoint), Some(pid)) = (endpoint.as_ref(), expected_pid) {
+            // Do not send the private bearer to whatever happened to inherit a
+            // stale loopback port. The listener first proves it already knows
+            // that bearer, bound to this pid and machine identity.
+            if !health(endpoint, pid) {
+                if child.is_none() {
+                    return;
+                }
+            } else {
+                ask_to_stop(endpoint, pid);
+            }
         }
 
         for _ in 0..40 {
             let gone = match (child.as_mut(), adopted) {
                 (Some(child), _) => matches!(child.try_wait(), Ok(Some(_))),
-                (None, Some(pid)) => !pid_alive(pid),
-                (None, None) => endpoint.as_ref().is_none_or(|e| !health(e.port)),
+                (None, Some(pid)) => endpoint.as_ref().is_none_or(|e| !health(e, pid)),
+                (None, None) => true,
             };
             if gone {
                 return;
@@ -346,8 +454,13 @@ impl Daemon {
         if let Some(mut child) = child {
             let _ = child.kill();
             let _ = child.wait();
-        } else if let Some(pid) = adopted {
-            terminate(pid);
+        } else if let (Some(pid), Some(endpoint)) = (adopted, endpoint.as_ref()) {
+            // Re-check immediately before the destructive fallback. If the
+            // daemon exited and the pid was reused during the grace period,
+            // the new process cannot answer this bearer-bound challenge.
+            if health(endpoint, pid) {
+                terminate(pid);
+            }
         }
     }
 
@@ -402,10 +515,19 @@ pub enum Watch {
 ///
 /// Hand-rolled rather than pulling in an HTTP client: one request, to loopback,
 /// whose only interesting answer is "it arrived".
-fn ask_to_stop(endpoint: &Endpoint) {
+fn ask_to_stop(endpoint: &Endpoint, pid: u32) {
+    let challenge = health_challenge(&endpoint.token);
+    let expires_at = unix_seconds().saturating_add(15);
+    let proof = shutdown_proof(
+        &endpoint.token,
+        &challenge,
+        pid,
+        &endpoint.machine_id,
+        &endpoint.fingerprint,
+        expires_at,
+    );
     let request = format!(
-        "POST /shutdown?token={} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        endpoint.token
+        "POST /shutdown?challenge={challenge}&pid={pid}&expiresAt={expires_at}&proof={proof} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
     let Ok(mut stream) = TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", endpoint.port).parse().unwrap(),
@@ -416,13 +538,13 @@ fn ask_to_stop(endpoint: &Endpoint) {
     let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = stream.write_all(request.as_bytes());
-    let mut sink = Vec::new();
-    let _ = stream.read_to_end(&mut sink);
+    let _ = read_loopback_response(&mut stream);
 }
 
-/// Whether something is answering `/health` on this port.
-fn health(port: u16) -> bool {
-    let Ok(address) = format!("127.0.0.1:{port}").parse() else {
+/// Whether the exact private endpoint owns this listener.
+fn health(endpoint: &Endpoint, pid: u32) -> bool {
+    let challenge = health_challenge(&endpoint.token);
+    let Ok(address) = format!("127.0.0.1:{}", endpoint.port).parse() else {
         return false;
     };
     let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
@@ -430,17 +552,231 @@ fn health(port: u16) -> bool {
     };
     let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
     let _ = stream.set_read_timeout(Some(Duration::from_millis(1000)));
-    if stream
-        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
+    let request = format!(
+        "GET /health?challenge={challenge} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
+    let Ok(answer) = read_loopback_response(&mut stream) else {
+        return false;
+    };
+    let Some(body) = http_ok_body(&answer) else {
+        return false;
+    };
+    let Ok(found) = serde_json::from_slice::<Health>(body) else {
+        return false;
+    };
+    let expected = health_proof(
+        &endpoint.token,
+        &challenge,
+        pid,
+        &endpoint.machine_id,
+        &endpoint.fingerprint,
+    );
+    found.pid == pid
+        && found.machine_id == endpoint.machine_id
+        && found.fingerprint == endpoint.fingerprint
+        && constant_time_eq(&expected, &found.proof)
+}
+
+/// Reads a complete supervision response without trusting a loopback process
+/// to respect either Content-Length or the connection deadline. A different
+/// same-user process can own the stale port, so timeout alone is not a memory
+/// bound: a fast writer can send far more than expected before it expires.
+fn read_loopback_response(reader: &mut impl Read) -> std::io::Result<Vec<u8>> {
     let mut answer = Vec::new();
-    if stream.read_to_end(&mut answer).is_err() && answer.is_empty() {
-        return false;
+    reader
+        .take((MAX_LOOPBACK_HTTP_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut answer)?;
+    if answer.len() > MAX_LOOPBACK_HTTP_RESPONSE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "loopback supervision response exceeds 64 KiB",
+        ));
     }
-    answer.starts_with(b"HTTP/1.1 200")
+    Ok(answer)
+}
+
+fn health_challenge(token: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(token.as_bytes())
+        .expect("HMAC accepts every bearer length");
+    mac.update(b"genehub-loopback-challenge-v1");
+    mac.update(&std::process::id().to_be_bytes());
+    mac.update(&nanos.to_be_bytes());
+    mac.update(&sequence.to_be_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn health_proof(
+    token: &str,
+    challenge: &str,
+    pid: u32,
+    machine_id: &str,
+    fingerprint: &str,
+) -> String {
+    control_proof(token, b"health", challenge, pid, machine_id, fingerprint)
+}
+
+fn shutdown_proof(
+    token: &str,
+    challenge: &str,
+    pid: u32,
+    machine_id: &str,
+    fingerprint: &str,
+    expires_at: u64,
+) -> String {
+    expiring_control_proof(
+        token,
+        b"shutdown",
+        challenge,
+        pid,
+        machine_id,
+        fingerprint,
+        expires_at,
+    )
+}
+
+fn websocket_proof(
+    token: &str,
+    challenge: &str,
+    pid: u32,
+    machine_id: &str,
+    fingerprint: &str,
+    expires_at: u64,
+) -> String {
+    expiring_control_proof(
+        token,
+        b"websocket",
+        challenge,
+        pid,
+        machine_id,
+        fingerprint,
+        expires_at,
+    )
+}
+
+fn websocket_server_proof(
+    token: &str,
+    challenge: &str,
+    pid: u32,
+    machine_id: &str,
+    fingerprint: &str,
+    expires_at: u64,
+) -> String {
+    expiring_control_proof(
+        token,
+        b"websocket-server",
+        challenge,
+        pid,
+        machine_id,
+        fingerprint,
+        expires_at,
+    )
+}
+
+fn expiring_control_proof(
+    token: &str,
+    action: &[u8],
+    challenge: &str,
+    pid: u32,
+    machine_id: &str,
+    fingerprint: &str,
+    expires_at: u64,
+) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(token.as_bytes())
+        .expect("HMAC accepts every bearer length");
+    for field in [
+        b"genehub-loopback-control-v1".as_slice(),
+        action,
+        challenge.as_bytes(),
+        &pid.to_be_bytes(),
+        machine_id.as_bytes(),
+        fingerprint.as_bytes(),
+        &expires_at.to_be_bytes(),
+    ] {
+        mac.update(&(field.len() as u64).to_be_bytes());
+        mac.update(field);
+    }
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn control_proof(
+    token: &str,
+    action: &[u8],
+    challenge: &str,
+    pid: u32,
+    machine_id: &str,
+    fingerprint: &str,
+) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(token.as_bytes())
+        .expect("HMAC accepts every bearer length");
+    for field in [
+        b"genehub-loopback-control-v1".as_slice(),
+        action,
+        challenge.as_bytes(),
+        &pid.to_be_bytes(),
+        machine_id.as_bytes(),
+        fingerprint.as_bytes(),
+    ] {
+        mac.update(&(field.len() as u64).to_be_bytes());
+        mac.update(field);
+    }
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn constant_time_eq(expected: &str, presented: &str) -> bool {
+    expected.len() == presented.len()
+        && expected
+            .bytes()
+            .zip(presented.bytes())
+            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+            == 0
+}
+
+fn http_ok_body(answer: &[u8]) -> Option<&[u8]> {
+    if !answer.starts_with(b"HTTP/1.1 200") {
+        return None;
+    }
+    answer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|at| &answer[at + 4..])
 }
 
 #[cfg(unix)]
@@ -479,35 +815,103 @@ fn terminate(pid: u32) {
         .status();
 }
 
-fn parse_endpoint(line: &str) -> Option<Endpoint> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    if value.get("event")?.as_str()? != "listening" {
-        return None;
-    }
-    serde_json::from_value(value).ok()
+fn is_listening(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| value.get("event").cloned())
+        .and_then(|event| event.as_str().map(str::to_owned))
+        .as_deref()
+        == Some("listening")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn endpoint(port: u16) -> Endpoint {
+        Endpoint {
+            port,
+            token: "private-token".into(),
+            machine_id: "machine-expected".into(),
+            fingerprint: "fingerprint-expected".into(),
+        }
+    }
+
+    fn serve_fake_health(body: &'static str) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = socket.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).unwrap();
+        });
+        (port, task)
+    }
+
     #[test]
-    fn the_listening_line_carries_everything_needed_to_connect() {
-        let endpoint = parse_endpoint(
-            r#"{"event":"listening","port":42123,"token":"abc","machineId":"m_1","fingerprint":"AB-CD"}"#,
-        )
-        .expect("a listening line should parse");
-        assert_eq!(endpoint.port, 42123);
-        assert_eq!(
-            endpoint.websocket_url(),
-            "ws://127.0.0.1:42123/ws?token=abc"
-        );
+    fn the_listening_line_is_only_a_readiness_signal() {
+        assert!(is_listening(
+            r#"{"event":"listening","port":42123,"url":"ws://127.0.0.1:42123/ws?proof=one-use","machineId":"m_1","fingerprint":"AB-CD"}"#,
+        ));
     }
 
     #[test]
     fn other_output_is_ignored_rather_than_mistaken_for_an_endpoint() {
-        assert!(parse_endpoint("starting up").is_none());
-        assert!(parse_endpoint(r#"{"event":"something-else","port":1}"#).is_none());
+        assert!(!is_listening("starting up"));
+        assert!(!is_listening(r#"{"event":"something-else","port":1}"#));
+    }
+
+    #[test]
+    fn a_desktop_admission_never_exposes_the_private_token() {
+        let endpoint = endpoint(42123);
+        let dial = endpoint.admission(99);
+        assert_eq!(dial.port, 42123);
+        assert!(dial.url.contains("/ws?challenge="));
+        assert!(dial.url.contains("&pid=99&expiresAt="));
+        assert!(dial.url.contains("&proof="));
+        assert!(!dial.url.contains(&endpoint.token));
+        assert!(!dial.url.contains("token="));
+        assert!(!dial.url.contains(&dial.server_proof));
+        assert_eq!(dial.pid, 99);
+        assert_eq!(dial.machine_id, "machine-expected");
+        assert_eq!(dial.fingerprint, "fingerprint-expected");
+        assert!(dial.expires_at > unix_seconds());
+        assert_eq!(dial.challenge.len(), 64);
+        assert_eq!(dial.server_proof.len(), 64);
+        let ipc = serde_json::to_string(&dial).unwrap();
+        assert!(!ipc.contains(&endpoint.token));
+        assert!(!ipc.contains("\"token\""));
+    }
+
+    #[test]
+    fn websocket_proof_matches_the_daemon_contract() {
+        assert_eq!(
+            websocket_proof(
+                "token-1",
+                "challenge-1",
+                42,
+                "machine-1",
+                "fingerprint-1",
+                1_234_567_890,
+            ),
+            "cb10c4c41a54062a453ddd359fd970815064e19ac5a5e2c511103a924129c3c7"
+        );
+        assert_eq!(
+            websocket_server_proof(
+                "token-1",
+                "challenge-1",
+                42,
+                "machine-1",
+                "fingerprint-1",
+                1_234_567_890,
+            ),
+            "6b02a83a6c67e128a762565b92b7184874e9eb806269581b35c8c05f13e3e5c2",
+        );
     }
 
     #[test]
@@ -529,6 +933,86 @@ mod tests {
         let free = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = free.local_addr().unwrap().port();
         drop(free);
-        assert!(!health(port));
+        assert!(!health(&endpoint(port), std::process::id()));
+    }
+
+    #[test]
+    fn an_unrelated_200_listener_is_not_adopted_even_if_the_stale_pid_is_live() {
+        let (port, server) = serve_fake_health(
+            r#"{"pid":1,"machineId":"wrong","fingerprint":"wrong","proof":"wrong"}"#,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("endpoint.json"),
+            serde_json::json!({
+                "port": port,
+                "token": "private-token",
+                "machineId": "machine-expected",
+                "fingerprint": "fingerprint-expected",
+                "pid": std::process::id(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let daemon = Daemon::new(PathBuf::from("/nonexistent"), dir.path().to_path_buf());
+        assert!(daemon.published().is_none());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn stop_never_terminates_a_reused_adopted_pid_without_endpoint_proof() {
+        let (port, server) = serve_fake_health(
+            r#"{"pid":1,"machineId":"wrong","fingerprint":"wrong","proof":"wrong"}"#,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = Daemon::new(PathBuf::from("/nonexistent"), dir.path().to_path_buf());
+        *daemon.endpoint.lock().unwrap() = Some(endpoint(port));
+        // If stop trusted liveness alone, this would terminate the test runner
+        // itself (and on Windows taskkill its whole process tree).
+        *daemon.adopted_pid.lock().unwrap() = Some(std::process::id());
+        daemon.stop();
+        server.join().unwrap();
+        assert!(!daemon.is_running());
+    }
+
+    #[test]
+    fn shutdown_never_sends_the_private_endpoint_bearer() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let count = socket.read(&mut request).unwrap();
+            seen.send(String::from_utf8_lossy(&request[..count]).to_string())
+                .unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 8\r\nConnection: close\r\n\r\nstopping",
+                )
+                .unwrap();
+        });
+        let endpoint = endpoint(port);
+        ask_to_stop(&endpoint, std::process::id());
+        let request = received.recv().unwrap();
+        assert!(request.starts_with("POST /shutdown?challenge="));
+        assert!(request.contains("&expiresAt="));
+        assert!(request.contains("&proof="));
+        assert!(!request.contains(&endpoint.token));
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn loopback_supervision_responses_have_a_hard_memory_limit() {
+        let mut exact = std::io::Cursor::new(vec![b'x'; MAX_LOOPBACK_HTTP_RESPONSE_BYTES]);
+        assert_eq!(
+            read_loopback_response(&mut exact).unwrap().len(),
+            MAX_LOOPBACK_HTTP_RESPONSE_BYTES
+        );
+
+        let mut oversized = std::io::Cursor::new(vec![b'x'; MAX_LOOPBACK_HTTP_RESPONSE_BYTES + 1]);
+        let error = read_loopback_response(&mut oversized).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 }

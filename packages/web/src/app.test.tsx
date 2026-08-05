@@ -18,7 +18,8 @@ import { useWorkbench } from "./session/store";
  * because no test ever used the defaults.
  */
 
-const ENDPOINT = "ws://127.0.0.1:59999/ws?token=t";
+const ENDPOINT =
+  "ws://127.0.0.1:59999/ws?challenge=fresh&pid=42&expiresAt=1&proof=proof";
 
 let sockets = 0;
 
@@ -66,13 +67,19 @@ describe("the app as the browser loads it", () => {
     expect(await screen.findByRole("status")).toBeInTheDocument();
     // Two of them, and only ever one on screen: the phone's header carries its
     // own, because the sidebar it would otherwise live in is a drawer.
-    expect(screen.getAllByRole("button", { name: "新建会话" })).not.toHaveLength(0);
+    expect(
+      screen.getAllByRole("button", { name: "新建会话" }),
+    ).not.toHaveLength(0);
     expect(screen.getByRole("button", { name: "Changes" })).toBeInTheDocument();
 
     screen.getByRole("button", { name: "工作区工具" }).click();
     const tools = screen.getByRole("complementary", { name: "工作区工具" });
-    expect(within(tools).getByRole("button", { name: "文件" })).toBeInTheDocument();
-    expect(within(tools).getByRole("button", { name: "反馈问题" })).toBeInTheDocument();
+    expect(
+      within(tools).getByRole("button", { name: "文件" }),
+    ).toBeInTheDocument();
+    expect(
+      within(tools).getByRole("button", { name: "反馈问题" }),
+    ).toBeInTheDocument();
   });
 
   it("hands the empty case to whoever embedded it, when they have something to offer", async () => {
@@ -100,7 +107,10 @@ describe("the app as the browser loads it", () => {
     // forgot — which is exactly what a packaged build did.
     const retry = vi.fn(async () => {});
     const openLogs = vi.fn();
-    const problem = vi.fn(async () => "daemon 启动超时（C:\\Program Files\\GeneHub\\bin\\genet-daemon.exe）");
+    const problem = vi.fn(
+      async () =>
+        "daemon 启动超时（C:\\Program Files\\GeneHub\\bin\\genet-daemon.exe）",
+    );
     render(
       <App
         host={{
@@ -141,7 +151,11 @@ describe("the app as the browser loads it", () => {
     let ask = () => {};
     const host = {
       kind: "browser" as const,
-      endpoint: async () => ({ url: ENDPOINT, via: "lan" as const, label: "测试机" }),
+      endpoint: async () => ({
+        url: ENDPOINT,
+        via: "lan" as const,
+        label: "测试机",
+      }),
       notify: () => {},
       openExternal: () => {},
       onClaimRequested: (listener: () => void) => {
@@ -158,7 +172,9 @@ describe("the app as the browser loads it", () => {
     // did nothing at all.
     expect(claimLink).toHaveBeenCalled();
     await waitFor(() =>
-      expect(useWorkbench.getState().tabs.some((tab) => tab.kind === "settings")).toBe(true),
+      expect(
+        useWorkbench.getState().tabs.some((tab) => tab.kind === "settings"),
+      ).toBe(true),
     );
   });
 
@@ -174,7 +190,11 @@ describe("the app as the browser loads it", () => {
     let ask = () => {};
     const host = {
       kind: "browser" as const,
-      endpoint: async () => ({ url: ENDPOINT, via: "lan" as const, label: "测试机" }),
+      endpoint: async () => ({
+        url: ENDPOINT,
+        via: "lan" as const,
+        label: "测试机",
+      }),
       notify: () => {},
       openExternal: () => {},
       onClaimRequested: (listener: () => void) => {
@@ -187,7 +207,9 @@ describe("the app as the browser loads it", () => {
     await screen.findByRole("status");
     ask();
 
-    expect(await screen.findByText("这台机器还没有连到 Hub")).toBeInTheDocument();
+    expect(
+      await screen.findByText("这台机器还没有连到 Hub"),
+    ).toBeInTheDocument();
   });
 
   it("says the device was revoked rather than sending someone to check ports", async () => {
@@ -197,16 +219,26 @@ describe("the app as the browser loads it", () => {
     // misleading here, because the port is plainly fine.
     const queue = socketQueue();
     render(
-      <App connect={(endpoint) => new Client({ url: endpoint.url, socketFactory: queue.factory })} />,
+      <App
+        connect={(endpoint) =>
+          new Client({ url: endpoint.url, socketFactory: queue.factory })
+        }
+      />,
     );
 
     await waitFor(() => expect(queue.sockets.length).toBe(1));
     const socket = queue.latest();
     socket.open();
     await waitFor(() => socket.lastOf("hello"));
-    socket.fail(socket.lastOf("hello").id, "unauthorized", "这个设备已经不在这台机器的授权列表里");
+    socket.fail(
+      socket.lastOf("hello").id,
+      "unauthorized",
+      "这个设备已经不在这台机器的授权列表里",
+    );
 
-    expect(await screen.findByText("这个设备已经不在这台机器的授权列表里")).toBeInTheDocument();
+    expect(
+      await screen.findByText("这个设备已经不在这台机器的授权列表里"),
+    ).toBeInTheDocument();
     expect(screen.getByText(/重新配对/)).toBeInTheDocument();
     expect(screen.queryByText(/确认地址里的端口/)).not.toBeInTheDocument();
   });

@@ -92,8 +92,19 @@ describe("the rendezvous mode", () => {
    */
   it("will not listen where others can reach it without a token", () => {
     assert.equal(resolveJoinToken(null, "127.0.0.1"), null);
-    assert.equal(resolveJoinToken("configured", "0.0.0.0"), "configured");
+    assert.equal(resolveJoinToken(null, "127.42.0.9"), null);
+    assert.equal(resolveJoinToken(null, "::1"), null);
+    const strong = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    assert.equal(resolveJoinToken(strong, "0.0.0.0"), strong);
     assert.throws(() => resolveJoinToken(null, "0.0.0.0"), /RELAY_JOIN_TOKEN/);
+    assert.throws(() => resolveJoinToken(null, "localhost"), /RELAY_JOIN_TOKEN/);
+    assert.throws(() => resolveJoinToken(null, "192.168.1.2"), /RELAY_JOIN_TOKEN/);
+    for (const weak of ["a", "configured", "a".repeat(31), "x".repeat(32) + "."]) {
+      assert.throws(() => resolveJoinToken(weak, "0.0.0.0"), /32-256/);
+    }
+    // Loopback does not become remotely reachable merely because a developer
+    // retained an old short token in local configuration.
+    assert.equal(resolveJoinToken("dev", "127.0.0.1"), "dev");
   });
 
   /** A wrong token must not be distinguishable by how long the refusal took. */
@@ -106,6 +117,14 @@ describe("the rendezvous mode", () => {
     assert.deepEqual(await authority.authorizeDaemon("let-me-in.slot-1"), {
       machineId: "slot-1",
       daemonId: "slot-1",
+      connectionGeneration: 1,
+      presenceLeaseSeconds: 60,
+    });
+    assert.deepEqual(await authority.authorizeDaemon("let-me-in.slot-1"), {
+      machineId: "slot-1",
+      daemonId: "slot-1",
+      connectionGeneration: 2,
+      presenceLeaseSeconds: 60,
     });
   });
 });

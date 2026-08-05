@@ -20,6 +20,8 @@ const OFFERED = [
   { id: "anthropic", label: "Anthropic" },
 ];
 
+const OFFICIAL_RELEASES = "https://github.com/aikenc/genethub/releases";
+
 /**
  * Keys, agents and remote access.
  *
@@ -247,6 +249,18 @@ function Version({
         <code className="select-all break-all font-mono text-faint" data-testid="page-build">
           页面 {BUILD}
         </code>
+        <p className="text-muted" data-testid="manual-update-note">
+          应用内自动下载和安装暂未启用。请从官方发布页手动下载，并通过独立可信渠道核对
+          SHA256SUMS；同站点提供的校验值只能发现下载损坏。
+          <button
+            type="button"
+            data-testid="manual-update-link"
+            className="ml-1 underline decoration-dotted hover:text-accent"
+            onClick={() => host.openExternal(OFFICIAL_RELEASES)}
+          >
+            打开官方发布页
+          </button>
+        </p>
         {/* Not for a build from source: a developer running a fresh shell against
             an installed daemon is not a broken upgrade, and saying so would be
             crying wolf at the one person who can tell the difference. */}
@@ -260,8 +274,8 @@ function Version({
             客户端 App 和远程 daemon 分别更新，版本可以不同。
           </p>
         ) : null}
-        {appUpdate && (!localBundle || appUpdate.newer) ? <AppAnswer status={appUpdate} host={host} /> : null}
-        <Answer status={update} host={host} subject={localBundle ? "整机" : "daemon"} />
+        {appUpdate && (!localBundle || appUpdate.newer) ? <AppAnswer status={appUpdate} /> : null}
+        <Answer status={update} subject={localBundle ? "整机" : "daemon"} />
       </div>
     </section>
   );
@@ -274,11 +288,7 @@ function Version({
  * nothing looks broken, and a check that reached nothing must never be allowed to
  * read as "you are up to date".
  */
-function Answer({ status, host, subject }: { status: UpdateStatus | null; host: Host; subject: "整机" | "daemon" }) {
-  const { download, downloadUpdate } = useWorkbench();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
+function Answer({ status, subject }: { status: UpdateStatus | null; subject: "整机" | "daemon" }) {
   if (!status) return null;
   if (status.problem) {
     return (
@@ -298,73 +308,14 @@ function Answer({ status, host, subject }: { status: UpdateStatus | null; host: 
     return <p className="text-muted">{subject} 已经是最新的了。</p>;
   }
 
-  const installer = status.downloadUrl;
-  const notes = status.url && status.url !== installer ? status.url : null;
-  // Already fetching, or already fetched. The corner of the screen is saying so
-  // and pressing again would only ask the machine a question it has answered.
-  const started = download.state !== "idle";
-
-  async function fetchIt() {
-    setBusy(true);
-    setError(null);
-    try {
-      await downloadUpdate();
-    } catch (failed) {
-      setError(failed instanceof Error ? failed.message : String(failed));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
-    <div className="flex flex-col gap-1">
-      <p className="flex flex-wrap items-center gap-2">
-        <span>
-          {subject} 有新版本 {status.latest}。
-        </span>
-        {installer ? (
-          <button
-            type="button"
-            data-testid="download-update"
-            className="underline decoration-dotted hover:text-accent disabled:opacity-40"
-            disabled={busy || started}
-            onClick={() => void fetchIt()}
-          >
-            {started ? "已在下载，见右下角" : busy ? "开始下载…" : "下载"}
-          </button>
-        ) : null}
-        {notes ? (
-          <button
-            type="button"
-            data-testid="open-release"
-            className="underline decoration-dotted hover:text-accent"
-            onClick={() => host.openExternal(notes)}
-          >
-            查看说明
-          </button>
-        ) : !installer && status.url ? (
-          // No installer named for this platform: the page is the only door left.
-          <button
-            type="button"
-            data-testid="open-release"
-            className="underline decoration-dotted hover:text-accent"
-            onClick={() => host.openExternal(status.url!)}
-          >
-            打开下载页
-          </button>
-        ) : null}
-        <span className="text-faint">装的时候这台机器上正在跑的会话会被打断，选个合适的时候。</span>
-      </p>
-      {error ? (
-        <p role="alert" className="text-danger">
-          {error}
-        </p>
-      ) : null}
-    </div>
+    <p className="text-muted">
+      {subject} 有新版本 {status.latest}。自动下载未启用，请使用上方官方发布页手动更新。
+    </p>
   );
 }
 
-function AppAnswer({ status, host }: { status: UpdateStatus; host: Host }) {
+function AppAnswer({ status }: { status: UpdateStatus }) {
   if (status.problem) {
     return (
       <p role="alert" className="text-danger">
@@ -378,30 +329,9 @@ function AppAnswer({ status, host }: { status: UpdateStatus; host: Host }) {
   if (!status.newer) {
     return <p className="text-muted">客户端 App 已经是最新的了。</p>;
   }
-  const installer = status.downloadUrl;
-  const notes = status.url && status.url !== installer ? status.url : null;
   return (
-    <p className="flex flex-wrap items-center gap-2">
-      <span>客户端 App 有新版本 {status.latest}。</span>
-      {installer ? (
-        <button
-          type="button"
-          data-testid="download-app-update"
-          className="underline decoration-dotted hover:text-accent"
-          onClick={() => host.openExternal(installer)}
-        >
-          下载到这台电脑
-        </button>
-      ) : null}
-      {notes ? (
-        <button
-          type="button"
-          className="underline decoration-dotted hover:text-accent"
-          onClick={() => host.openExternal(notes)}
-        >
-          查看说明
-        </button>
-      ) : null}
+    <p className="text-muted">
+      客户端 App 有新版本 {status.latest}。自动下载未启用，请使用上方官方发布页手动更新。
     </p>
   );
 }

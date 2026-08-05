@@ -369,19 +369,13 @@ ENV_WORKSPACE_DIR=${value("env_workspace_dir", channel)}
 # The daemon's override for where the agent binary lives — the journey
 # harness sets this under its stamped name to point at the cargo target dir.
 ENV_AGENT_COMMAND=${value("env_agent_command", channel)}
-# Where a deb puts the app and what it calls the menu entry. Same string as
-# tauri productName / data_dir_name — never the display product, which carries
-# a space on beta/alpha/dev and would land the installer under a path that
-# breaks unquoted shells.
-LIB_DIR_NAME=${value("data_dir_name", channel)}
-DESKTOP_FILE=${value("data_dir_name", channel)}.desktop
 `;
 
 function stamp(channel) {
   const product = value("product", channel);
-  // Install / Start-menu / deb path. Tauri derives those from productName, so
-  // this must stay free of spaces even though the window title keeps the
-  // friendlier display name in \`product\`.
+  // Install / Start-menu / application-bundle path. Tauri derives those from
+  // productName, so this must stay free of spaces even though the window title
+  // keeps the friendlier display name in \`product\`.
   const pathName = value("data_dir_name", channel);
   const identifier = value("identifier", channel);
   const cliBinary = value("cli_binary", channel);

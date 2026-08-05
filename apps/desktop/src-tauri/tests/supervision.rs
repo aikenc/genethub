@@ -6,28 +6,41 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use genethub_desktop_lib::daemon::{Daemon, Origin, Watch};
 
-fn daemon_binary() -> Option<PathBuf> {
+fn daemon_binary() -> PathBuf {
     // The desktop crate is outside the workspace, so the daemon lands in the
     // workspace's own target directory rather than this crate's.
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     // The stamp decides what the binary is called (`genet` in a release,
     // `genet-dev` in the tree) — read it from the daemon's channel constants
     // rather than pinning one channel's name here.
-    let channel = std::fs::read_to_string(repo.join("apps/daemon/src/channel.rs")).ok()?;
+    let channel = std::fs::read_to_string(repo.join("apps/daemon/src/channel.rs"))
+        .expect("the daemon channel constants must be readable");
     let name = channel
         .lines()
-        .find_map(|line| line.strip_prefix("pub const CLI_BINARY: &str = "))?
+        .find_map(|line| line.strip_prefix("pub const CLI_BINARY: &str = "))
+        .expect("CLI_BINARY must be declared in the daemon channel constants")
         .trim()
         .trim_matches(|c| c == '"' || c == ';');
-    let candidate = repo.join(format!("target/debug/{name}"));
-    candidate.exists().then_some(candidate)
+    let candidate = repo.join(format!(
+        "target/debug/{name}{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    assert!(
+        candidate.is_file(),
+        "{} is missing; run cargo build -p genet-cli before the supervision tests",
+        candidate.display()
+    );
+    candidate
 }
 
 /// Polls until `look` finds something, or gives up.
+#[cfg(unix)]
 fn wait_for<T>(limit: Duration, mut look: impl FnMut() -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + limit;
     while Instant::now() < deadline {
@@ -101,10 +114,7 @@ fn contain_the_default_workspace() {
 
 macro_rules! with_daemon {
     ($binary:ident) => {
-        let Some($binary) = daemon_binary() else {
-            eprintln!("skipping: run cargo build -p genet-cli first");
-            return;
-        };
+        let $binary = daemon_binary();
         contain_the_default_workspace();
     };
 }
@@ -119,8 +129,13 @@ fn starting_waits_until_the_daemon_says_where_it_is_listening() {
     assert!(endpoint.port > 0);
     assert!(
         !endpoint.token.is_empty(),
-        "clients need the token to connect"
+        "the shell needs the private key to mint one-use admissions"
     );
+    let dial = daemon
+        .dial_endpoint()
+        .expect("the running daemon should mint an admission");
+    assert!(!dial.url.contains(&endpoint.token));
+    assert!(!dial.url.contains("token="));
     assert!(daemon.is_running());
 
     // The port is live, not just printed.
@@ -151,7 +166,7 @@ fn a_second_start_returns_the_running_daemon_instead_of_spawning_another() {
 }
 
 #[test]
-fn stopping_leaves_nothing_behind_that_would_block_the_next_start() {
+fn stopping_releases_the_kernel_lock_and_allows_the_next_start() {
     with_daemon!(binary);
     let dir = tempfile::tempdir().unwrap();
     let daemon = Daemon::new(binary.clone(), dir.path().to_path_buf());
@@ -159,17 +174,24 @@ fn stopping_leaves_nothing_behind_that_would_block_the_next_start() {
     let first = daemon.start().expect("first start");
     daemon.stop();
 
-    // Those files are removed by the daemon on its way out, so their absence is
+    // The endpoint is removed by the daemon on its way out, so its absence is
     // proof it was asked to stop and did, rather than being killed mid-session
     // with agents still running.
     assert!(
         !dir.path().join("endpoint.json").exists(),
         "a killed daemon would have left this behind"
     );
-    assert!(!dir.path().join("daemon.lock").exists());
+    // The lock pathname deliberately keeps one stable inode for the lifetime
+    // of the data directory. Removing it after unlock would let racing starts
+    // lock different inodes and both become the daemon.
+    assert!(
+        dir.path().join("daemon.lock").is_file(),
+        "the stable lock inode must survive shutdown"
+    );
 
     // The daemon refuses to start twice on one data directory, so a restart
-    // succeeding is proof the lock and the endpoint file were cleaned up.
+    // succeeding is proof the kernel lock was released even though its stable
+    // pathname remains.
     let restarted = Daemon::new(binary, dir.path().to_path_buf());
     let second = restarted.start().expect("a restart should not be blocked");
     assert_ne!(second.port, 0);
@@ -212,6 +234,7 @@ fn a_daemon_left_over_from_a_crashed_shell_is_adopted_rather_than_duplicated() {
 }
 
 /// A daemon killed outright, the way a crash or an OOM would do it.
+#[cfg(unix)]
 #[test]
 fn the_watchdog_brings_the_daemon_back_and_says_where_it_went() {
     with_daemon!(binary);
@@ -268,10 +291,7 @@ fn stopping_on_purpose_is_not_treated_as_a_crash() {
 #[test]
 fn a_binary_that_is_not_there_fails_with_something_a_user_can_act_on() {
     let dir = tempfile::tempdir().unwrap();
-    let daemon = Daemon::new(
-        PathBuf::from("/nonexistent/genet"),
-        dir.path().into(),
-    );
+    let daemon = Daemon::new(PathBuf::from("/nonexistent/genet"), dir.path().into());
     let error = daemon.start().expect_err("this cannot succeed");
     assert!(error.contains("daemon"), "unhelpful message: {error}");
     assert!(!daemon.is_running());

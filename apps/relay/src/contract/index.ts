@@ -24,6 +24,10 @@ export interface DaemonGrant {
   machineId: string;
   /** Opaque to the forwarder; handed back on presence reports. */
   daemonId: string;
+  /** Control-issued fence; stale offline reports cannot clear a replacement. */
+  connectionGeneration: number;
+  /** Control's presence lease; Relay refreshes well before this expires. */
+  presenceLeaseSeconds: number;
 }
 
 /** A client may attach to a machine's channel. */
@@ -31,17 +35,36 @@ export interface ClientGrant {
   machineId: string;
   /** Identifies the attaching device, for presence and revocation. */
   clientId: string;
+  /** Opaque capability passed to the daemon; never itself a credential. */
+  channelCapability: string;
 }
 
 export type PresenceState = "online" | "offline";
+export type LegacyPresenceResult =
+  | "connected"
+  | "renewed"
+  | "disconnected"
+  | "ignored";
 
-export interface Revocation {
-  machineId: string;
-  reason: string;
-}
+/** A live legacy socket which must lose its authority immediately. */
+export type Revocation =
+  | {
+      target: "machine";
+      machineId: string;
+      reason: string;
+    }
+  | {
+      target: "client";
+      /** The device-session id returned in `ClientGrant`. */
+      clientId: string;
+      reason: string;
+    };
 
 export interface ChannelAuthority {
-  /** Machine registering its outbound connection. Null means "not allowed". */
+  /**
+   * Machine registering with a short-lived, one-use admission. Null means a
+   * definitive refusal; transient authority failures reject the Promise.
+   */
   authorizeDaemon(ticket: string): Promise<DaemonGrant | null>;
 
   /**
@@ -57,8 +80,12 @@ export interface ChannelAuthority {
   authorizeClient(ticket: string): Promise<ClientGrant | null>;
 
   /** Tells the control plane whether a machine currently has an uplink. */
-  reportPresence(machineId: string, state: PresenceState): Promise<void>;
+  reportPresence(
+    machineId: string,
+    connectionGeneration: number,
+    state: PresenceState,
+  ): Promise<void | LegacyPresenceResult>;
 
-  /** Control plane pushes "cut this machine loose" to the forwarder. */
+  /** Control plane pushes machine- and client-scoped socket revocations. */
   onRevoked(handler: (revocation: Revocation) => void): void;
 }

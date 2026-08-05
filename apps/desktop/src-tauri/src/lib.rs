@@ -2,12 +2,12 @@ mod channel;
 pub mod daemon;
 mod tray;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tauri::{Emitter, Manager, WindowEvent};
 
-use daemon::{Daemon, Endpoint};
+use daemon::{Daemon, DialEndpoint};
 
 pub struct AppState {
     pub daemon: Arc<Daemon>,
@@ -19,8 +19,8 @@ pub struct AppState {
 /// straight from the process we started, which is why the desktop needs no
 /// pairing before it can be used at all.
 #[tauri::command]
-fn daemon_endpoint(state: tauri::State<'_, AppState>) -> Option<Endpoint> {
-    state.daemon.endpoint()
+fn daemon_endpoint(state: tauri::State<'_, AppState>) -> Option<DialEndpoint> {
+    state.daemon.dial_endpoint()
 }
 
 #[tauri::command]
@@ -39,24 +39,25 @@ fn daemon_problem(state: tauri::State<'_, AppState>) -> Option<String> {
 
 /// Restarts the daemon after a crash, without making the user reinstall.
 #[tauri::command]
-fn restart_daemon(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<Endpoint, String> {
-    let restarted = state.daemon.restart();
+fn restart_daemon(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let restarted = state.daemon.restart().map(|_| ());
     announce(&app, &restarted);
     restarted
 }
 
 /// Tells the workbench where the daemon is now, and the tray how it is doing.
 ///
-/// A restart means a new port and a new token, so a client that is not told
-/// simply retries an address that will never answer again.
-fn announce(app: &tauri::AppHandle, endpoint: &Result<Endpoint, String>) {
+/// A restart means a new port and every reconnect needs a fresh admission, so
+/// a client that is not told simply retries an address that will never answer.
+fn announce(app: &tauri::AppHandle, endpoint: &Result<(), String>) {
     match endpoint {
-        Ok(endpoint) => {
+        Ok(()) => {
             tray::set_status(app, "本机状态：运行中");
-            let _ = app.emit("genehub://daemon", endpoint.clone());
+            // This event is only an invalidation signal. The workbench calls
+            // `daemon_endpoint` afterwards, which mints a fresh one-use URL;
+            // putting an admission in the event would create an unused second
+            // credential and tempt consumers to reuse it on reconnect.
+            let _ = app.emit("genehub://daemon", ());
         }
         Err(error) => {
             tray::set_status(app, "本机状态：已停止");
@@ -72,119 +73,54 @@ fn announce(app: &tauri::AppHandle, endpoint: &Result<Endpoint, String>) {
 #[tauri::command]
 fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    let parsed = external_web_url(&url)?;
     app.opener()
-        .open_url(url, None::<&str>)
+        .open_url(parsed.as_str(), None::<&str>)
         .map_err(|error| error.to_string())
 }
 
-/// Runs an installer the daemon already downloaded.
-///
-/// This is the whole of "立即安装" from the shell's side. The fetching is the
-/// daemon's — it is the half that exists on every platform, and the half a
-/// phone can watch — and the shell's only contribution is that it can start a
-/// process, which a web page cannot.
-///
-/// Nothing here replaces our own files. That is the installer's job.
-///
-/// The path is checked against the one directory the daemon writes installers
-/// into, because it arrives over a connection this window does not own: a
-/// relayed client is a stranger until proven otherwise, and "run this file"
-/// is the one message we must never take at face value.
+/// The workbench can ask the operating system to open a web page, not an
+/// arbitrary OS protocol handler. Model-authored content and Hub replies both
+/// cross this boundary, so `file:`, custom schemes and public plaintext HTTP
+/// must fail before they reach ShellExecute/open(1).
+fn external_web_url(url: &str) -> Result<tauri::Url, String> {
+    if url.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+        return Err("refusing a web address containing control characters".to_string());
+    }
+    let parsed = tauri::Url::parse(url).map_err(|error| error.to_string())?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("refusing a web address containing credentials".to_string());
+    }
+    let literal_loopback = parsed
+        .host_str()
+        .and_then(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|address| address.is_loopback());
+    match parsed.scheme() {
+        "https" => Ok(parsed),
+        "http" if literal_loopback => Ok(parsed),
+        "http" => {
+            Err("refusing plaintext HTTP outside a literal loopback address; use HTTPS".to_string())
+        }
+        scheme => Err(format!(
+            "refusing to open {scheme}: only HTTPS and literal-loopback HTTP are allowed"
+        )),
+    }
+}
+
+const AUTOMATIC_UPDATE_DISABLED: &str =
+    "自动安装尚未启用：请从官方发布页手动下载，并核对 SHA256SUMS";
+
+/// Never executes an update until releases have an independently pinned
+/// signing root. A digest delivered beside a binary is corruption detection,
+/// not proof that the publisher intended those bytes.
 #[tauri::command]
-fn install_update(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    let dir = updates_dir(&app)?;
-    let file = std::fs::canonicalize(&path).map_err(|_| format!("找不到安装包 {path}"))?;
-    // Canonicalised on both sides, or a path that reaches the same file by a
-    // different spelling — a symlink, an 8.3 name on Windows — compares unequal
-    // while pointing exactly where the check was meant to stop it.
-    let dir = std::fs::canonicalize(&dir).map_err(|error| error.to_string())?;
-    if file.parent() != Some(dir.as_path()) {
-        return Err(format!(
-            "这个安装包不在 {} 的更新目录里，没有运行",
-            channel::PRODUCT
-        ));
-    }
-    if !file.is_file() {
-        return Err(format!("{} 不是一个文件", file.display()));
-    }
-
-    tracing_line(&format!("running the installer at {}", file.display()));
-    run_installer(&app, &file)?;
-    if cfg!(windows) {
-        stand_down(&app);
-    }
-    Ok(())
-}
-
-/// Starts the installer, on Windows with the flags that make it an *upgrade*.
-///
-/// The same three Tauri's own updater passes, and each one is here because of
-/// something the plain double-click does:
-///
-/// - `/UPDATE` — install over the top. Without it the NSIS template finds the
-///   previous version in the registry and offers only 「先卸载再安装」: it runs
-///   the old uninstaller first, turning one operation into two that can fail
-///   apart, on a machine that is then left with neither version. Nothing about
-///   our upgrade needs it — same installer, same directory, and every file it
-///   would remove is one the new version is about to write.
-/// - `/P` — passive. A progress bar and no wizard, because there is nothing
-///   left to ask: the only question was answered by pressing 立即安装.
-/// - `/R` — start the app again afterwards, which the template honours in
-///   passive and silent mode only. `/ARGS` with nothing after it says there are
-///   no arguments to carry over, which is what an app started from a shortcut
-///   has.
-///
-/// Everywhere else the download is a package rather than a program — a `.dmg`
-/// is mounted, a `.deb` goes to whatever installs packages — and both talk to
-/// the user themselves, so the file is simply opened.
-///
-/// `cfg!` rather than `#[cfg(windows)]`, here and below, because CI builds this
-/// crate on Linux only: code behind an attribute nobody compiles is code whose
-/// first compiler is the release that ships it.
-fn run_installer(app: &tauri::AppHandle, file: &Path) -> Result<(), String> {
-    if !cfg!(windows) {
-        use tauri_plugin_opener::OpenerExt;
-        return app
-            .opener()
-            .open_path(file.to_string_lossy().to_string(), None::<&str>)
-            .map_err(|error| error.to_string());
-    }
-
-    std::process::Command::new(file)
-        .args(["/UPDATE", "/P", "/R", "/ARGS"])
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("安装包没能启动：{error}"))
-}
-
-/// Gets both halves out of the installer's way, and lets it bring us back.
-///
-/// The daemon goes first and goes politely, so an agent mid-turn is asked to
-/// stop rather than cut off by `taskkill`. Then this process ends itself.
-///
-/// Leaving rather than waiting to be killed is the part that matters. The
-/// installer we just started is a *child* of this process, and the hook that
-/// clears the way for an upgrade kills what it finds by image name — asking for
-/// the process tree there would take the installer down with the app, half way
-/// through replacing it. `installer.nsh` no longer asks for the tree, and this
-/// makes the question moot: by the time the hook runs there is nothing of ours
-/// left to find. `/R` brings the new build up once the files are in place.
-fn stand_down(app: &tauri::AppHandle) {
-    if let Some(state) = app.try_state::<AppState>() {
-        state.daemon.stop();
-    }
-    app.exit(0);
-}
-
-/// The only directory this shell will run an executable out of.
-///
-/// The same one the daemon writes to (`Paths::updates_dir`), which holds
-/// because the shell is what tells the daemon where its data lives.
-fn updates_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
-        .map(|dir| dir.join(channel::DATA_DIR_NAME).join("updates"))
-        .map_err(|error| error.to_string())
+fn install_update(_app: tauri::AppHandle, _path: String) -> Result<(), String> {
+    Err(AUTOMATIC_UPDATE_DISABLED.to_string())
 }
 
 /// The buttons our own title bar draws.
@@ -286,13 +222,7 @@ pub fn logs_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> PathBuf {
 /// the next time this window opens.
 #[tauri::command]
 fn open_window(app: tauri::AppHandle, url: String) -> Result<(), String> {
-    let parsed = tauri::Url::parse(&url).map_err(|error| error.to_string())?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(format!(
-            "refusing to open {}: not a web address",
-            parsed.scheme()
-        ));
-    }
+    let parsed = external_web_url(&url)?;
 
     // Reused rather than stacked: pressing the button twice should bring the
     // window forward, not leave a pile of half-finished logins behind.
@@ -329,20 +259,6 @@ fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AppManifest {
-    version: String,
-    page: Option<String>,
-    #[serde(default)]
-    platforms: std::collections::HashMap<String, AppPlatform>,
-}
-
-#[derive(serde::Deserialize)]
-struct AppPlatform {
-    url: Option<String>,
-}
-
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppUpdateStatus {
@@ -354,113 +270,20 @@ struct AppUpdateStatus {
     problem: Option<String>,
 }
 
-/// Checks this desktop App, not whichever daemon the workbench is controlling.
-/// A remote Linux daemon has a different version and no Windows installer, so
-/// routing this through `update.check` hid stale client Apps.
+/// Automatic discovery is disabled together with automatic installation.
+/// Returning a fixed human-facing page keeps the UI useful without accepting
+/// an executable URL from a manifest, machine or Relay message.
 #[tauri::command]
-async fn app_update_status(app: tauri::AppHandle, manifest_url: String) -> AppUpdateStatus {
+async fn app_update_status(app: tauri::AppHandle, _manifest_url: String) -> AppUpdateStatus {
     let current = app.package_info().version.to_string();
-    if manifest_url.is_empty() {
-        return empty_app_status(current);
-    }
-    if !manifest_url.starts_with("https://github.com/aikenc/genethub/releases/") {
-        return AppUpdateStatus {
-            current,
-            latest: None,
-            newer: false,
-            url: None,
-            download_url: None,
-            problem: Some("客户端 App 的更新地址不是 GeneHub 发布地址".to_string()),
-        };
-    }
-    match fetch_app_manifest(&manifest_url).await {
-        Ok(manifest) => app_status(&current, manifest),
-        Err(problem) => AppUpdateStatus {
-            current,
-            latest: None,
-            newer: false,
-            url: None,
-            download_url: None,
-            problem: Some(problem),
-        },
-    }
-}
-
-fn empty_app_status(current: String) -> AppUpdateStatus {
     AppUpdateStatus {
         current,
         latest: None,
         newer: false,
-        url: None,
+        url: Some("https://github.com/aikenc/genethub/releases".to_string()),
         download_url: None,
-        problem: None,
+        problem: Some(AUTOMATIC_UPDATE_DISABLED.to_string()),
     }
-}
-
-async fn fetch_app_manifest(url: &str) -> Result<AppManifest, String> {
-    let response = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|error| error.to_string())?
-        .get(url)
-        .header(reqwest::header::USER_AGENT, channel::CLI_BINARY)
-        .send()
-        .await
-        .map_err(|error| format!("检查客户端 App 更新失败：{error}"))?;
-    if !response.status().is_success() {
-        return Err(format!("发布服务器返回 {}", response.status()));
-    }
-    response
-        .json()
-        .await
-        .map_err(|error| format!("更新清单无法读取：{error}"))
-}
-
-fn app_status(current: &str, manifest: AppManifest) -> AppUpdateStatus {
-    let download_url = manifest
-        .platforms
-        .get("windows-x86_64")
-        .and_then(|platform| platform.url.clone());
-    AppUpdateStatus {
-        current: current.to_string(),
-        latest: Some(manifest.version.clone()),
-        newer: is_newer(current, &manifest.version),
-        url: manifest.page.or_else(|| download_url.clone()),
-        download_url,
-        problem: None,
-    }
-}
-
-fn is_newer(current: &str, latest: &str) -> bool {
-    if current == "0.0.0" {
-        return false;
-    }
-    let parts = |version: &str| {
-        version
-            .trim_start_matches('v')
-            .split('.')
-            .map(|piece| {
-                piece
-                    .chars()
-                    .take_while(|character| character.is_ascii_digit())
-                    .collect::<String>()
-                    .parse::<u64>()
-                    .unwrap_or(0)
-            })
-            .collect::<Vec<_>>()
-    };
-    let mine = parts(current);
-    let theirs = parts(latest);
-    let width = mine.len().max(theirs.len());
-    (0..width)
-        .map(|index| {
-            (
-                mine.get(index).unwrap_or(&0),
-                theirs.get(index).unwrap_or(&0),
-            )
-        })
-        .find(|(mine, theirs)| mine != theirs)
-        .is_some_and(|(mine, theirs)| theirs > mine)
 }
 
 #[tauri::command]
@@ -572,7 +395,8 @@ pub fn run() {
                 daemon: Arc::clone(&daemon),
             });
 
-            announce(handle, &started);
+            let announced = started.as_ref().map(|_| ()).map_err(Clone::clone);
+            announce(handle, &announced);
 
             let watcher = handle.clone();
             daemon.watch(move |change| match change {
@@ -580,7 +404,7 @@ pub fn run() {
                     tray::set_status(&watcher, "本机状态：正在恢复…");
                     tracing_line("daemon 不再响应，正在重启");
                 }
-                daemon::Watch::Restarted(endpoint) => announce(&watcher, &Ok(endpoint)),
+                daemon::Watch::Restarted(_) => announce(&watcher, &Ok(())),
                 daemon::Watch::Failed(error) => announce(&watcher, &Err(error)),
             });
             Ok(())
@@ -654,44 +478,33 @@ fn tracing_line(message: &str) {
 }
 
 #[cfg(test)]
-mod update_tests {
-    use super::*;
+mod tests {
+    use super::external_web_url;
 
-    fn manifest(version: &str) -> AppManifest {
-        AppManifest {
-            version: version.to_string(),
-            page: Some("https://example.test/releases/v8".to_string()),
-            platforms: std::collections::HashMap::from([
-                (
-                    "linux-x86_64".to_string(),
-                    AppPlatform {
-                        url: Some("https://example.test/genet.tar.gz".to_string()),
-                    },
-                ),
-                (
-                    "windows-x86_64".to_string(),
-                    AppPlatform {
-                        url: Some("https://example.test/GeneHub-setup.exe".to_string()),
-                    },
-                ),
-            ]),
+    #[test]
+    fn the_shell_opens_only_encrypted_or_literal_loopback_web_addresses() {
+        for accepted in [
+            "https://hub.example.com/link/once?next=%2Faccount#done",
+            "http://127.0.0.1:8787/link/once",
+            "http://127.42.0.9:8787/link/once",
+            "http://[::1]:8787/link/once",
+        ] {
+            assert!(external_web_url(accepted).is_ok(), "{accepted}");
         }
-    }
 
-    #[test]
-    fn app_check_uses_the_windows_asset_and_its_own_version() {
-        let status = app_status("0.4.0-beta.7", manifest("0.4.0-beta.8"));
-        assert!(status.newer);
-        assert_eq!(status.current, "0.4.0-beta.7");
-        assert_eq!(status.latest.as_deref(), Some("0.4.0-beta.8"));
-        assert_eq!(
-            status.download_url.as_deref(),
-            Some("https://example.test/GeneHub-setup.exe")
-        );
-    }
-
-    #[test]
-    fn source_builds_are_not_told_to_replace_themselves() {
-        assert!(!app_status("0.0.0", manifest("9.0.0")).newer);
+        for rejected in [
+            "file:///tmp/payload",
+            "smb://files.example/payload",
+            "data:text/html,payload",
+            "javascript:alert(1)",
+            "ms-settings:privacy",
+            "http://hub.example.com/link/once",
+            "http://192.168.1.8/link/once",
+            "http://localhost:8787/link/once",
+            "https://user:password@hub.example.com/link/once",
+            "https://hub.example.com/link/once\r\nfile:///tmp/payload",
+        ] {
+            assert!(external_web_url(rejected).is_err(), "{rejected}");
+        }
     }
 }

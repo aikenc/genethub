@@ -97,6 +97,29 @@ fn every_command_the_workbench_calls_exists_here() {
     }
 }
 
+/// The page reaches opener/dialog/notification only through the narrow Rust
+/// commands above. Granting each plugin's default frontend capability as well
+/// would let a compromised renderer bypass URL validation and invoke arbitrary
+/// operating-system protocol handlers directly.
+#[test]
+fn privileged_plugins_are_not_exposed_directly_to_the_renderer() {
+    let raw =
+        std::fs::read_to_string(repo().join("apps/desktop/src-tauri/capabilities/default.json"))
+            .expect("read desktop capabilities");
+    let capability: serde_json::Value =
+        serde_json::from_str(&raw).expect("parse desktop capabilities");
+    let permissions = capability["permissions"]
+        .as_array()
+        .expect("desktop permissions are an array");
+
+    for forbidden in ["opener:default", "dialog:default", "notification:default"] {
+        assert!(
+            !permissions.iter().any(|value| value == forbidden),
+            "{forbidden} lets renderer JavaScript bypass the shell's validated command"
+        );
+    }
+}
+
 /// Turning the decorations off takes away the only way the OS gives anyone to
 /// move, maximise or close the window — so the page has to put all three back,
 /// and the shell has to permit the drag. Any one of the three missing is a
@@ -235,33 +258,23 @@ fn the_installer_stops_the_supervisor_before_the_thing_it_supervises() {
     );
 }
 
-/// An upgrade is one operation, and the NSIS template's default is two.
-///
-/// Left alone, the template finds the previous version in the registry and
-/// offers only 「先卸载再安装」: it runs the old uninstaller, then installs. Two
-/// steps that can fail apart, on a machine that ends up with neither version if
-/// the second one does. `/UPDATE` is the template's own way to say "over the
-/// top", and `/P` with `/R` is what turns the rest into a progress bar that
-/// puts the app back — the same three flags Tauri's updater passes.
+/// A path received from the workbench or Relay must never become a child
+/// process before releases have an independent signing root.
 #[test]
-fn an_upgrade_installs_over_the_top_instead_of_uninstalling_first() {
+fn automatic_update_commands_fail_closed_without_network_or_execution() {
     let shell = read(repo().join("apps/desktop/src-tauri/src/lib.rs"));
-    for flag in ["\"/UPDATE\"", "\"/P\"", "\"/R\""] {
-        assert!(
-            shell.contains(flag),
-            "the installer is started without {flag}, so Windows will ask the \
-             user to uninstall the running version first — and an update that \
-             needs a wizard walked through is one that stops half way"
-        );
-    }
+    assert!(shell.contains("fn install_update(_app"));
+    assert!(shell.contains("Err(AUTOMATIC_UPDATE_DISABLED.to_string())"));
+    assert!(!shell.contains("std::process::Command::new(file)"));
+    assert!(!shell.contains("fetch_app_manifest"));
+    assert!(shell.contains("download_url: None"));
 }
 
 /// The failure this whole arrangement is shaped around.
 ///
-/// `install_update` starts the installer, which makes it a child of this app,
-/// and the hook below kills the app so its files can be replaced. Ask for the
-/// process tree there and the kill reaches the installer that is running the
-/// hook: the update dies mid-flight, having already stopped everything.
+/// A manually launched installer still stops the app before replacing files.
+/// Keeping the app kill non-recursive avoids terminating unrelated child tools
+/// that may have been launched from the workbench.
 #[test]
 fn the_hook_does_not_kill_the_installer_that_is_running_it() {
     let script = installer_hook();
@@ -283,13 +296,6 @@ fn the_hook_does_not_kill_the_installer_that_is_running_it() {
         script.contains("/F /T /PID"),
         "the daemon is stopped without its children, so an agent it started \
          will still be holding a file the installer wants to write"
-    );
-
-    let shell = read(repo().join("apps/desktop/src-tauri/src/lib.rs"));
-    assert!(
-        shell.contains("app.exit(0)"),
-        "the shell waits to be killed by the installer instead of leaving on \
-         its own, which is the race this hook can no longer settle"
     );
 }
 
@@ -375,6 +381,35 @@ fn the_bundle_carries_the_daemon_and_the_agent() {
     }
 }
 
+#[test]
+fn desktop_bundling_is_explicitly_limited_to_windows_and_macos() {
+    let config = config();
+    assert_eq!(
+        config["bundle"]["targets"],
+        serde_json::json!(["nsis", "dmg"]),
+        "Linux ships daemon/CLI binaries, not a Tauri desktop package"
+    );
+
+    let script = read(repo().join("apps/desktop/scripts/bundle.mjs"));
+    assert!(script.contains(r#"{ win32: "nsis", darwin: "dmg" }"#));
+    assert!(
+        script.contains("if (!platformBundle)")
+            && script.contains("support only Windows and macOS"),
+        "the bundle entry point must fail before building on unsupported hosts"
+    );
+    let executable = script
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    for removed in ["dpkg-deb", "appimage", r#"linux: "deb""#] {
+        assert!(
+            !executable.contains(removed),
+            "unsupported Linux desktop packaging leaked back in through {removed}"
+        );
+    }
+}
 
 /// The product's version is the git tag, and nothing in the tree may claim to be
 /// a release.
@@ -395,7 +430,10 @@ fn nothing_in_the_tree_claims_to_be_a_release() {
     let script = std::fs::read_to_string(&stamper).expect("read the stamping script");
 
     let carriers = [
-        ("Cargo.toml", declared_version(&read(repo().join("Cargo.toml")))),
+        (
+            "Cargo.toml",
+            declared_version(&read(repo().join("Cargo.toml"))),
+        ),
         (
             "apps/desktop/src-tauri/Cargo.toml",
             declared_version(&read(repo().join("apps/desktop/src-tauri/Cargo.toml"))),
@@ -438,8 +476,14 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
     // each of them — a constants file nothing regenerates is one a release
     // build compiles straight past.
     let modules = [
-        ("apps/daemon/src/channel.rs", "pub const CHANNEL: &str = \"dev\";"),
-        ("apps/agent/src/channel.rs", "pub const CHANNEL: &str = \"dev\";"),
+        (
+            "apps/daemon/src/channel.rs",
+            "pub const CHANNEL: &str = \"dev\";",
+        ),
+        (
+            "apps/agent/src/channel.rs",
+            "pub const CHANNEL: &str = \"dev\";",
+        ),
         (
             "apps/desktop/src-tauri/src/channel.rs",
             "pub const CHANNEL: &str = \"dev\";",
@@ -464,7 +508,7 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
     }
 
     let config = config();
-    // productName is the install-directory name (NSIS / deb), not the display
+    // productName is the install-directory / application-bundle name, not the display
     // brand — those carry a space on beta/alpha/dev and would break unquoted
     // shells. It must match DATA_DIR_NAME and never contain whitespace.
     let data_dir = read(repo().join("apps/desktop/src-tauri/src/channel.rs"))
@@ -537,7 +581,12 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
     // carry its suffix is one whose installer kills another line's processes.
     for (key, dev, beta, alpha) in [
         ("cli_binary", "genet-dev", "genet-beta", "genet-alpha"),
-        ("agent_binary", "genet-agent-dev", "genet-agent-beta", "genet-agent-alpha"),
+        (
+            "agent_binary",
+            "genet-agent-dev",
+            "genet-agent-beta",
+            "genet-agent-alpha",
+        ),
         (
             "desktop_binary",
             "genethub-desktop-dev",
@@ -579,8 +628,7 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
     );
     for channel in ["official", "beta", "alpha"] {
         assert!(
-            connect_src.contains(&format!("{channel}:"))
-                && connect_src.contains("https: wss:"),
+            connect_src.contains(&format!("{channel}:")) && connect_src.contains("https: wss:"),
             "the {channel} column of connect_src must allow https/wss — \
              without them the desktop cannot open a remote workbench"
         );

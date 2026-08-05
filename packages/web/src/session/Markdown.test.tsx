@@ -58,6 +58,16 @@ describe("an agent's reply", () => {
     expect(screen.getByText(/正常文字/)).toBeInTheDocument();
   });
 
+  it("does not let model-authored images make automatic network requests", () => {
+    const { container } = render(
+      <Markdown text="![tracking pixel](http://127.0.0.1:8787/private-action)" />,
+    );
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText("图片已阻止：tracking pixel")).toBeInTheDocument();
+    expect(container.innerHTML).not.toContain("127.0.0.1");
+  });
+
   it("puts a code block behind a copy button rather than in the prose", async () => {
     const write = vi.fn(async () => {});
     // Only the clipboard: replacing the whole of `navigator` would drop every

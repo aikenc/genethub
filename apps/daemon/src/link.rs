@@ -11,10 +11,10 @@ use anyhow::Result;
 use genehub_proto::{HubMachine, HubStatus, HubTicket, ServerFrame};
 use tokio::sync::{broadcast, Mutex};
 
-use crate::config::{Enrollment, MachineState, Paths};
+use crate::config::{Enrollment, Paths};
 use crate::hub;
 use crate::state::AppState;
-use crate::transport::uplink::{Admission, Uplink};
+use crate::transport::uplink::Uplink;
 
 enum Stage {
     Unpaired,
@@ -27,6 +27,7 @@ enum Stage {
     Paired {
         enrollment: Enrollment,
         uplink: Uplink,
+        catalog_sync: CatalogSync,
     },
     /// Kept until the next attempt, so the reason stays on screen rather than
     /// reverting to "unpaired" as if nothing had happened.
@@ -36,9 +37,18 @@ enum Stage {
     },
 }
 
+struct CatalogSync {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CatalogSync {
+    fn stop(&self) {
+        self.task.abort();
+    }
+}
+
 pub struct Link {
     stage: Mutex<Stage>,
-    paths: Paths,
     /// Terminal output has to reach relayed clients too, so the uplink needs
     /// the same fanout the local listener uses.
     pty: broadcast::Sender<ServerFrame>,
@@ -50,10 +60,9 @@ pub struct Link {
 pub type SharedLink = Arc<Link>;
 
 impl Link {
-    pub fn new(paths: Paths, pty: broadcast::Sender<ServerFrame>) -> SharedLink {
+    pub fn new(_paths: Paths, pty: broadcast::Sender<ServerFrame>) -> SharedLink {
         Arc::new(Link {
             stage: Mutex::new(Stage::Unpaired),
-            paths,
             pty,
             state: Weak::new(),
         })
@@ -69,7 +78,12 @@ impl Link {
 
         if let Some(enrollment) = state.machine.enrollment.clone() {
             let uplink = dial(state, &link.pty, &enrollment);
-            *link.stage.lock().await = Stage::Paired { enrollment, uplink };
+            let catalog_sync = start_catalog_sync(state, &enrollment);
+            *link.stage.lock().await = Stage::Paired {
+                enrollment,
+                uplink,
+                catalog_sync,
+            };
         }
     }
 
@@ -77,7 +91,9 @@ impl Link {
         match &*self.stage.lock().await {
             Stage::Unpaired => HubStatus::Unpaired,
             Stage::Pairing { hub_url, code, .. } => pairing_status(hub_url, code),
-            Stage::Paired { enrollment, uplink } => HubStatus::Paired {
+            Stage::Paired {
+                enrollment, uplink, ..
+            } => HubStatus::Paired {
                 hub_url: enrollment.hub_url.clone(),
                 machine_id: enrollment.machine_id.clone(),
                 online: uplink.is_online(),
@@ -237,10 +253,12 @@ impl Link {
             )
             .await?;
 
-        let path = self.paths.state_file();
-        let mut machine = MachineState::load_or_create(&path)?;
-        machine.enrollment = Some(enrollment.clone());
-        machine.save(&path)?;
+        state
+            .mutate_machine_state(|machine| {
+                machine.enrollment = Some(enrollment.clone());
+                Ok(())
+            })
+            .await?;
         Ok(enrollment)
     }
 
@@ -252,6 +270,7 @@ impl Link {
                     tracing::info!("paired with {}", enrollment.hub_url);
                     *stage = Stage::Paired {
                         uplink: dial(&state, &self.pty, &enrollment),
+                        catalog_sync: start_catalog_sync(&state, &enrollment),
                         enrollment,
                     };
                 }
@@ -280,15 +299,20 @@ impl Link {
     pub async fn unpair(&self) -> Result<()> {
         let previous = std::mem::replace(&mut *self.stage.lock().await, Stage::Unpaired);
         match previous {
-            Stage::Paired { enrollment, uplink } => {
+            Stage::Paired {
+                enrollment,
+                uplink,
+                catalog_sync,
+            } => {
                 uplink.stop();
+                catalog_sync.stop();
                 if let Err(error) = hub::Client::new(&enrollment.hub_url)
                     .unenroll(&enrollment)
                     .await
                 {
                     tracing::warn!("the Hub was not told about the unpair: {error:#}");
                 }
-                self.forget()?;
+                self.forget().await?;
             }
             Stage::Pairing { task, .. } => task.abort(),
             _ => {}
@@ -299,17 +323,26 @@ impl Link {
     /// Drops the outbound connection without forgetting the enrollment.
     pub async fn stop(&self) {
         match &*self.stage.lock().await {
-            Stage::Paired { uplink, .. } => uplink.stop(),
+            Stage::Paired {
+                uplink,
+                catalog_sync,
+                ..
+            } => {
+                uplink.stop();
+                catalog_sync.stop();
+            }
             Stage::Pairing { task, .. } => task.abort(),
             _ => {}
         }
     }
 
-    fn forget(&self) -> Result<()> {
-        let path = self.paths.state_file();
-        let mut machine = MachineState::load_or_create(&path)?;
-        machine.enrollment = None;
-        machine.save(&path)
+    async fn forget(&self) -> Result<()> {
+        self.state()?
+            .mutate_machine_state(|machine| {
+                machine.enrollment = None;
+                Ok(())
+            })
+            .await
     }
 
     fn state(&self) -> Result<Arc<AppState>> {
@@ -317,6 +350,129 @@ impl Link {
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("the daemon is shutting down"))
     }
+}
+
+/// Keeps Hub discovery current without giving every workspace mutation a
+/// network dependency. Only a changed revision is uploaded; failures retry and
+/// never prevent the local daemon from serving the workspace.
+fn start_catalog_sync(state: &Arc<AppState>, enrollment: &Enrollment) -> CatalogSync {
+    let weak_state = Arc::downgrade(state);
+    let enrollment = enrollment.clone();
+    let task = tokio::spawn(async move {
+        let client = hub::Client::new(&enrollment.hub_url);
+        let mut published: Option<(String, u64)> = None;
+        let mut acknowledged_generation = enrollment.workspace_catalog_generation.clone();
+        let mut retry_seconds = 5u64;
+        loop {
+            let Some(state) = weak_state.upgrade() else {
+                return;
+            };
+            let catalog = state.workspaces.catalog().await;
+            let version = (catalog.generation.clone(), catalog.revision);
+            let changed = published.as_ref() != Some(&version);
+            drop(state);
+
+            let delay = if changed {
+                match sync_catalog_version(
+                    &client,
+                    &weak_state,
+                    &enrollment,
+                    &catalog,
+                    &mut acknowledged_generation,
+                    &mut published,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        retry_seconds = 5;
+                        std::time::Duration::from_secs(30)
+                    }
+                    Err(error) => {
+                        if weak_state.upgrade().is_none() {
+                            return;
+                        }
+                        tracing::warn!(
+                            %error,
+                            "workspace catalogue was not published and durably acknowledged"
+                        );
+                        let delay = std::time::Duration::from_secs(retry_seconds);
+                        retry_seconds = (retry_seconds * 2).min(300);
+                        delay
+                    }
+                }
+            } else {
+                std::time::Duration::from_secs(30)
+            };
+            tokio::time::sleep(delay).await;
+        }
+    });
+    CatalogSync { task }
+}
+
+/// Uploads one catalogue version and advances both local cursors only after
+/// the Hub acknowledgement is durable.
+///
+/// A successful PUT followed by a failed `state.json` save is deliberately an
+/// error. Keeping both cursors unchanged makes the outer loop replay the same
+/// generation. Hub catalogue PUTs are idempotent for that case, so the replay
+/// also recovers after a process restart whose durable cursor is still old.
+async fn sync_catalog_version(
+    client: &hub::Client,
+    weak_state: &Weak<AppState>,
+    enrollment: &Enrollment,
+    catalog: &crate::workspace::WorkspaceCatalog,
+    acknowledged_generation: &mut Option<String>,
+    published: &mut Option<(String, u64)>,
+) -> Result<()> {
+    let replaces_generation = acknowledged_generation
+        .as_deref()
+        .filter(|generation| *generation != catalog.generation);
+    client
+        .sync_workspace_catalog(enrollment, catalog, replaces_generation)
+        .await?;
+
+    if acknowledged_generation.as_deref() != Some(&catalog.generation) {
+        let state = weak_state
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("the daemon is shutting down"))?;
+        remember_catalog_generation(&state, enrollment, &catalog.generation).await?;
+    }
+
+    *acknowledged_generation = Some(catalog.generation.clone());
+    *published = Some((catalog.generation.clone(), catalog.revision));
+    Ok(())
+}
+
+/// Persists the catalogue CAS cursor without letting a stale background task
+/// overwrite a newer enrollment created while its HTTP request was in flight.
+async fn remember_catalog_generation(
+    state: &AppState,
+    expected: &Enrollment,
+    generation: &str,
+) -> Result<()> {
+    state
+        .mutate_machine_state(|machine| set_catalog_generation(machine, expected, generation))
+        .await
+}
+
+fn set_catalog_generation(
+    machine: &mut crate::config::MachineState,
+    expected: &Enrollment,
+    generation: &str,
+) -> Result<()> {
+    let enrollment = machine
+        .enrollment
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("the Hub enrollment was removed"))?;
+    if enrollment.hub_url != expected.hub_url
+        || enrollment.machine_id != expected.machine_id
+        || enrollment.daemon_id != expected.daemon_id
+        || enrollment.secret != expected.secret
+    {
+        anyhow::bail!("the Hub enrollment changed while publishing the catalogue");
+    }
+    enrollment.workspace_catalog_generation = Some(generation.to_string());
+    Ok(())
 }
 
 fn pairing_status(hub_url: &str, code: &hub::PairingCode) -> HubStatus {
@@ -334,14 +490,47 @@ fn dial(
     pty: &broadcast::Sender<ServerFrame>,
     enrollment: &Enrollment,
 ) -> Uplink {
-    Uplink::start(
+    let client = Arc::new(hub::Client::new(&enrollment.hub_url));
+    let enrollment_for_admission = Arc::new(enrollment.clone());
+    let channel_client = client.clone();
+    let enrollment_for_channel = enrollment_for_admission.clone();
+    let lease_client = channel_client.clone();
+    let enrollment_for_lease = enrollment_for_channel.clone();
+    Uplink::start_refreshing_hosted(
         state.clone(),
         pty.clone(),
         enrollment.uplink_url.clone(),
-        enrollment.ticket(),
-        // The Hub only opens a channel for a client it already authorized, so
-        // this path does not ask for a device credential on top.
-        Admission::Vouched,
+        move || {
+            let client = client.clone();
+            let enrollment = enrollment_for_admission.clone();
+            async move {
+                Ok(client
+                    .uplink_admission(&enrollment)
+                    .await?
+                    .map(|admission| admission.ticket))
+            }
+        },
+        move |capability| {
+            let client = channel_client.clone();
+            let enrollment = enrollment_for_channel.clone();
+            async move {
+                Ok(client
+                    .channel_admission(&enrollment, &capability)
+                    .await?
+                    .map(
+                        |admission| crate::transport::uplink::HostedChannelAdmission {
+                            secret: admission.secret,
+                            lease_id: admission.lease_id,
+                            expires_at: admission.expires_at,
+                        },
+                    ))
+            }
+        },
+        move |lease_id| {
+            let client = lease_client.clone();
+            let enrollment = enrollment_for_lease.clone();
+            async move { client.renew_channel_lease(&enrollment, &lease_id).await }
+        },
     )
 }
 
@@ -365,6 +554,19 @@ fn hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MachineState;
+
+    fn enrollment(generation: Option<&str>) -> Enrollment {
+        Enrollment {
+            hub_url: "https://hub.example/subpath".into(),
+            machine_id: "machine-row".into(),
+            uplink_url: "wss://relay.example/forward/daemon".into(),
+            fabric_url: Some("wss://relay.example/fabric/v2".into()),
+            daemon_id: "daemon-stable".into(),
+            secret: "node-secret".into(),
+            workspace_catalog_generation: generation.map(str::to_string),
+        }
+    }
 
     fn link() -> SharedLink {
         let dir = tempfile::tempdir().unwrap();
@@ -392,6 +594,156 @@ mod tests {
         link().unpair().await.unwrap();
     }
 
+    #[test]
+    fn catalog_acknowledgement_survives_config_recreation_without_crossing_enrollments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let expected = enrollment(Some("wcg_old"));
+        MachineState {
+            machine_id: "local-machine".into(),
+            secret: "local-secret".into(),
+            enrollment: Some(expected.clone()),
+            rendezvous: None,
+        }
+        .save(&path)
+        .unwrap();
+
+        let mut state = MachineState::load(&path).unwrap();
+        set_catalog_generation(&mut state, &expected, "wcg_new").unwrap();
+        state.save(&path).unwrap();
+        let persisted = MachineState::load_or_create(&path).unwrap();
+        assert_eq!(
+            persisted
+                .enrollment
+                .as_ref()
+                .and_then(|value| value.workspace_catalog_generation.as_deref()),
+            Some("wcg_new")
+        );
+
+        let stale = enrollment(Some("wcg_old"));
+        let mut replacement = enrollment(Some("wcg_other"));
+        replacement.secret = "rotated-secret".into();
+        let mut state = persisted;
+        state.enrollment = Some(replacement);
+        state.save(&path).unwrap();
+        let mut state = MachineState::load(&path).unwrap();
+        assert!(set_catalog_generation(&mut state, &stale, "wcg_stale").is_err());
+        assert_eq!(
+            MachineState::load_or_create(&path)
+                .unwrap()
+                .enrollment
+                .unwrap()
+                .workspace_catalog_generation
+                .as_deref(),
+            Some("wcg_other"),
+            "a stale publisher must not overwrite a rotated enrollment"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_upload_retries_until_its_acknowledgement_is_durable() {
+        let (hub_url, mut requests) = fake_catalog_hub(3).await;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().to_path_buf());
+        let state_path = paths.state_file();
+        let mut expected = enrollment(Some("wcg_previous"));
+        expected.hub_url = hub_url.clone();
+        MachineState {
+            machine_id: "local-machine".into(),
+            secret: "local-secret".into(),
+            enrollment: Some(expected.clone()),
+            rendezvous: None,
+        }
+        .save(&state_path)
+        .unwrap();
+        let (state, _) = AppState::build(paths.clone()).await.unwrap();
+        let weak_state = Arc::downgrade(&state);
+        let client = hub::Client::new(&hub_url);
+        let catalog = state.workspaces.catalog().await;
+        let version = (catalog.generation.clone(), catalog.revision);
+        let mut acknowledged_generation = Some("wcg_previous".to_string());
+        let mut published = None;
+
+        crate::config::fail_next_private_save(&state_path);
+        sync_catalog_version(
+            &client,
+            &weak_state,
+            &expected,
+            &catalog,
+            &mut acknowledged_generation,
+            &mut published,
+        )
+        .await
+        .expect_err("the successful PUT must not hide a failed cursor save");
+
+        assert_eq!(acknowledged_generation.as_deref(), Some("wcg_previous"));
+        assert_eq!(published, None);
+        assert_eq!(
+            MachineState::load(&state_path)
+                .unwrap()
+                .enrollment
+                .unwrap()
+                .workspace_catalog_generation
+                .as_deref(),
+            Some("wcg_previous")
+        );
+        let first = requests.recv().await.unwrap();
+        assert_eq!(first["generation"], catalog.generation);
+        assert_eq!(first["replacesGeneration"], "wcg_previous");
+
+        // The outer sync loop sees `published == None` and retries. The fake
+        // Hub has already advanced to the incoming generation, just like the
+        // real idempotent endpoint, and accepts this replay instead of wedging
+        // the daemon behind a permanent generation-conflict response.
+        sync_catalog_version(
+            &client,
+            &weak_state,
+            &expected,
+            &catalog,
+            &mut acknowledged_generation,
+            &mut published,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            acknowledged_generation.as_deref(),
+            Some(&*catalog.generation)
+        );
+        assert_eq!(published.as_ref(), Some(&version));
+        assert_eq!(
+            MachineState::load(&state_path)
+                .unwrap()
+                .enrollment
+                .unwrap()
+                .workspace_catalog_generation
+                .as_deref(),
+            Some(&*catalog.generation)
+        );
+        let replay = requests.recv().await.unwrap();
+        assert_eq!(replay["generation"], catalog.generation);
+        assert_eq!(replay["replacesGeneration"], "wcg_previous");
+
+        // A restarted publisher takes its CAS cursor from state.json. It may
+        // harmlessly republish the current snapshot, but no longer claims to
+        // replace the old generation.
+        let restarted = MachineState::load(&state_path).unwrap().enrollment.unwrap();
+        let mut restarted_acknowledgement = restarted.workspace_catalog_generation.clone();
+        let mut restarted_published = None;
+        sync_catalog_version(
+            &client,
+            &weak_state,
+            &restarted,
+            &catalog,
+            &mut restarted_acknowledgement,
+            &mut restarted_published,
+        )
+        .await
+        .unwrap();
+        let after_restart = requests.recv().await.unwrap();
+        assert_eq!(after_restart["generation"], catalog.generation);
+        assert!(after_restart.get("replacesGeneration").is_none());
+    }
+
     #[tokio::test]
     async fn a_trial_comes_back_with_the_only_ways_into_the_identity() {
         let hub = fake_hub().await;
@@ -406,7 +758,7 @@ mod tests {
         // `Link` has no daemon behind it. That is the property worth pinning:
         // the way back in must survive a failed enrollment, or someone ends up
         // with an identity they cannot reach and a machine that is not in it.
-        assert_eq!(trial.claim_url, "http://hub.test/link/abc");
+        assert_eq!(trial.claim_url, format!("{hub}/link/abc"));
         assert_eq!(trial.recovery_key.as_deref(), Some("rk-1"));
 
         // And nobody is left staring at a code to type: a trial was approved by
@@ -432,33 +784,108 @@ mod tests {
     /// Hand-rolled rather than mocked: what is being checked is that the daemon
     /// reads a real HTTP reply the way the control plane writes one.
     async fn fake_hub() -> String {
-        serve(|path| match path {
-            "/api/device-authorizations" => Some(
-                r#"{"deviceCode":"dc","userCode":"AAAA-BBBB","verificationUri":"http://hub.test/activate","verificationUriComplete":"http://hub.test/activate?code=AAAA-BBBB","expiresAt":"2030-01-01T00:00:00Z","interval":5}"#,
-            ),
-            "/api/trial" => Some(
-                r#"{"claimUrl":"http://hub.test/link/abc","recoveryKey":"rk-1","expiresAt":"2030-01-01T00:00:00Z"}"#,
-            ),
+        serve(|path, origin| match path {
+            "/api/device-authorizations" => Some(format!(
+                r#"{{"deviceCode":"dc","userCode":"AAAA-BBBB","verificationUri":"{origin}/activate","verificationUriComplete":"{origin}/activate?code=AAAA-BBBB","expiresAt":"2030-01-01T00:00:00Z","interval":5}}"#,
+            )),
+            "/api/trial" => Some(format!(
+                r#"{{"claimUrl":"{origin}/link/abc","recoveryKey":"rk-1","expiresAt":"2030-01-01T00:00:00Z"}}"#,
+            )),
             _ => None,
         })
         .await
     }
 
     async fn fake_hub_refusing_trials() -> String {
-        serve(|path| match path {
-            "/api/device-authorizations" => Some(
-                r#"{"deviceCode":"dc","userCode":"AAAA-BBBB","verificationUri":"http://hub.test/activate","verificationUriComplete":"http://hub.test/activate?code=AAAA-BBBB","expiresAt":"2030-01-01T00:00:00Z","interval":5}"#,
-            ),
+        serve(|path, origin| match path {
+            "/api/device-authorizations" => Some(format!(
+                r#"{{"deviceCode":"dc","userCode":"AAAA-BBBB","verificationUri":"{origin}/activate","verificationUriComplete":"{origin}/activate?code=AAAA-BBBB","expiresAt":"2030-01-01T00:00:00Z","interval":5}}"#,
+            )),
             _ => None,
         })
         .await
     }
 
-    async fn serve(answer: fn(&str) -> Option<&'static str>) -> String {
+    /// A strict but idempotent catalogue endpoint: replacing a different
+    /// generation needs the current cursor, while replaying the already
+    /// applied generation succeeds regardless of an old replacement cursor.
+    async fn fake_catalog_hub(
+        request_count: usize,
+    ) -> (
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    ) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (requests_tx, requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut current_generation = "wcg_previous".to_string();
+            for _ in 0..request_count {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = vec![0u8; 4096];
+                let mut used = 0usize;
+                let (header_end, content_length) = loop {
+                    if used == buffer.len() {
+                        buffer.resize(buffer.len() * 2, 0);
+                    }
+                    let read = socket.read(&mut buffer[used..]).await.unwrap();
+                    assert!(read > 0, "catalogue request ended before its body");
+                    used += read;
+                    let request = String::from_utf8_lossy(&buffer[..used]);
+                    let Some(end) = request.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let length = request[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if used >= end + 4 + length {
+                        break (end, length);
+                    }
+                };
+                let body = &buffer[header_end + 4..header_end + 4 + content_length];
+                let json: serde_json::Value = serde_json::from_slice(body).unwrap();
+                let incoming = json["generation"].as_str().unwrap();
+                let replacement = json
+                    .get("replacesGeneration")
+                    .and_then(serde_json::Value::as_str);
+                let accepted = incoming == current_generation
+                    || replacement == Some(current_generation.as_str());
+                if accepted {
+                    current_generation = incoming.to_string();
+                }
+                requests_tx.send(json).unwrap();
+                let status = if accepted {
+                    "204 No Content"
+                } else {
+                    "409 Conflict"
+                };
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        (origin, requests_rx)
+    }
+
+    async fn serve(answer: fn(&str, &str) -> Option<String>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let served_origin = origin.clone();
         tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
@@ -472,7 +899,7 @@ mod tests {
                     .nth(1)
                     .unwrap_or_default()
                     .to_string();
-                let response = match answer(&path) {
+                let response = match answer(&path, &served_origin) {
                     Some(body) => format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                         body.len()

@@ -149,7 +149,7 @@ function ThisMachine({
           {attached
             ? remote?.online
               ? "远程可达：其他设备现在能找到这台机器。"
-              : "已设置中转，但当前连不上。本机和局域网仍然可用。"
+              : "已设置中转，但当前连不上。同机 loopback 仍可用；跨设备需要 Relay。"
             : "填一个中转地址，其他设备就能从外网连过来。不填也不影响本机使用。"}
         </p>
         <div className="flex flex-col gap-2 sm:flex-row">

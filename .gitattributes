@@ -1,0 +1,4 @@
+# ts-rs emits multiline TypeScript declarations with a space before each
+# generated newline. Keep Git's other whitespace checks enabled for this file,
+# but do not report the generator's stable formatting as a hand-written error.
+/packages/proto/bindings/index.ts whitespace=-trailing-space

@@ -11,8 +11,18 @@ import type { HubMachine } from "@genehub/proto";
 import type { UpdateStatus } from "@genehub/proto";
 
 import { MANIFEST_URL } from "../channel";
-import { findMachine, listMachines, type PairedMachine, readPairingLink, rememberMachine } from "../devices/machines";
-import { Client, type WebSocketLike } from "../protocol/client";
+import {
+  findMachine,
+  listMachines,
+  type PairedMachine,
+  readPairingLink,
+  rememberMachine,
+} from "../devices/machines";
+import {
+  Client,
+  type LocalServerProof,
+  type WebSocketLike,
+} from "../protocol/client";
 
 /**
  * A machine this client can control.
@@ -58,6 +68,10 @@ export interface Endpoint {
    * through a rendezvous relay will not talk without it.
    */
   credential?: { deviceId: string; secret: string };
+  /** Fresh hosted-channel secret paired with this one-use Relay URL. */
+  channelCredential?: { capabilityId: string; secret: string };
+  /** Out-of-band proof that a loopback listener owns the daemon endpoint. */
+  localServerProof?: LocalServerProof;
 }
 
 export interface Notification {
@@ -252,7 +266,9 @@ export function detectHost(): Host {
  * that minted the ticket. The fragment rather than the query string on purpose:
  * it is not sent to the server, so the ticket stays out of access logs.
  */
-export function browserHost(location: Pick<Location, "hash"> = window.location): Host {
+export function browserHost(
+  location: Pick<Location, "hash"> = window.location,
+): Host {
   return {
     kind: "browser",
     async endpoint() {
@@ -273,7 +289,8 @@ export function browserHost(location: Pick<Location, "hash"> = window.location):
     },
     async openTarget(id) {
       const machine = listMachines().find((entry) => entry.machineId === id);
-      if (!machine) throw new Error("这台机器不在本地名册里，可能已经被忘掉了。");
+      if (!machine)
+        throw new Error("这台机器不在本地名册里，可能已经被忘掉了。");
       // The address bar follows the switch, so a reload stays on the machine
       // the user is looking at rather than jumping back to the one they
       // arrived on.
@@ -286,7 +303,8 @@ export function browserHost(location: Pick<Location, "hash"> = window.location):
         new Notification(title, body === undefined ? undefined : { body });
         return;
       }
-      if (Notification.permission !== "denied") void Notification.requestPermission();
+      if (Notification.permission !== "denied")
+        void Notification.requestPermission();
     },
     openExternal(url) {
       window.open(url, "_blank", "noopener,noreferrer");
@@ -298,26 +316,39 @@ export function browserHost(location: Pick<Location, "hash"> = window.location):
       rememberMachine(machine);
       // Drops the one-time code from the address bar so a reload does not try
       // to spend it twice, and so it stays out of the browser's history.
-      window.location.hash = `endpoint=${encodeURIComponent(machine.endpoint)}`;
+      const clean = `${window.location.pathname}${window.location.search}#endpoint=${encodeURIComponent(machine.endpoint)}`;
+      window.history.replaceState(window.history.state, "", clean);
     },
   };
 }
 
 /**
  * The desktop shell already has the daemon running as a sidecar, so it knows
- * the loopback port and token and hands them over rather than making the user
- * pair with their own machine.
+ * the loopback port and asks the shell for a fresh one-use admission rather
+ * than making the user pair with their own machine.
  */
-export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Host {
+export function desktopHost(
+  socketFactory?: (url: string) => WebSocketLike,
+): Host {
   const tauri = window.__TAURI__!;
   const local = async (): Promise<Endpoint | null> => {
-    const found = await tauri.core.invoke<DaemonEndpoint | null>("daemon_endpoint");
+    const found = await tauri.core.invoke<DaemonEndpoint | null>(
+      "daemon_endpoint",
+    );
     if (!found) return null;
     return {
-      url: `ws://127.0.0.1:${found.port}/ws?token=${found.token}`,
+      url: found.url,
       via: "loopback",
       label: "这台电脑",
       fingerprint: found.fingerprint,
+      localServerProof: {
+        proof: found.serverProof,
+        challenge: found.challenge,
+        pid: found.pid,
+        machineId: found.machineId,
+        fingerprint: found.fingerprint,
+        expiresAt: found.expiresAt,
+      },
     };
   };
   return {
@@ -334,13 +365,18 @@ export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Hos
         kind: "remote" as const,
         fingerprint: machine.fingerprint,
       }));
-      const known = [here?.fingerprint, ...paired.map((target) => target.fingerprint)];
+      const known = [
+        here?.fingerprint,
+        ...paired.map((target) => target.fingerprint),
+      ];
 
       // Everything the Hub knows about, on top. Silently absent when it cannot
       // be asked: the local rows are the ones that still work with the network
       // down, and burying them under an error about an account server is the
       // wrong trade at the moment somebody is trying to open their own laptop.
-      const account = here ? await hubMachines(here.url, socketFactory).catch(() => []) : [];
+      const account = here
+        ? await hubMachines(here.url, socketFactory).catch(() => [])
+        : [];
       return [
         {
           id: LOCAL_TARGET,
@@ -379,7 +415,10 @@ export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Hos
       // working after the connection to the *other* machine drops — the one
       // moment a client that asked the far end would have nobody to ask.
       const here = await local();
-      if (!here) throw new Error("这台电脑上的后台进程没有在运行，没法替你去连别的机器。");
+      if (!here)
+        throw new Error(
+          "这台电脑上的后台进程没有在运行，没法替你去连别的机器。",
+        );
       // One short-lived connection for both asks: a separate hub.machines dial
       // used to open a second handshake just to read a label, and would fail
       // the whole switch if the daemon hiccupped between the two.
@@ -391,13 +430,19 @@ export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Hos
             payload: { machineId: id },
           });
           if (ticket?.type !== "hubTicket") return null;
-          const machines = await client.call({ type: "hub.machines" }).catch(() => null);
+          const machines = await client
+            .call({ type: "hub.machines" })
+            .catch(() => null);
           const account = machines?.type === "hubMachines" ? machines.data : [];
           return {
             url: ticket.data.url,
             via: "relay" as const,
             label: account.find((entry) => entry.id === id)?.name ?? "远程机器",
             fingerprint: ticket.data.fingerprint,
+            channelCredential: {
+              capabilityId: ticket.data.channelCapability,
+              secret: ticket.data.channelSecret,
+            },
           };
         },
         socketFactory,
@@ -444,7 +489,9 @@ export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Hos
       return tauri.core.invoke<string>("app_version");
     },
     async checkAppUpdate() {
-      return tauri.core.invoke<UpdateStatus>("app_update_status", { manifestUrl: MANIFEST_URL });
+      return tauri.core.invoke<UpdateStatus>("app_update_status", {
+        manifestUrl: MANIFEST_URL,
+      });
     },
     onEndpointChange(listener) {
       return subscribe(tauri, "genehub://daemon", listener);
@@ -479,8 +526,15 @@ export function desktopHost(socketFactory?: (url: string) => WebSocketLike): Hos
  * (`genethub-cloud/desktop/README.md`). An empty list is the honest answer for
  * a machine that was never paired with a Hub.
  */
-async function hubMachines(url: string, socketFactory?: (url: string) => WebSocketLike): Promise<HubMachine[]> {
-  const reply = await onDaemon(url, (client) => client.call({ type: "hub.machines" }), socketFactory);
+async function hubMachines(
+  url: string,
+  socketFactory?: (url: string) => WebSocketLike,
+): Promise<HubMachine[]> {
+  const reply = await onDaemon(
+    url,
+    (client) => client.call({ type: "hub.machines" }),
+    socketFactory,
+  );
   return reply?.type === "hubMachines" ? reply.data : [];
 }
 
@@ -547,12 +601,18 @@ function reach(paired: PairedMachine | null, url: string): Endpoint {
     via: url.includes("/forward/client") ? "relay" : "lan",
     label: paired?.name ?? new URL(url).host,
     fingerprint: paired?.fingerprint,
-    credential: paired ? { deviceId: paired.deviceId, secret: paired.secret } : undefined,
+    credential: paired
+      ? { deviceId: paired.deviceId, secret: paired.secret }
+      : undefined,
   };
 }
 
 /** Tauri hands back the unsubscribe asynchronously; React wants it now. */
-function subscribe(tauri: TauriGlobal, name: string, listener: () => void): () => void {
+function subscribe(
+  tauri: TauriGlobal,
+  name: string,
+  listener: () => void,
+): () => void {
   let stop: (() => void) | undefined;
   let cancelled = false;
   void tauri.event?.listen(name, listener).then((unlisten) => {
@@ -565,10 +625,14 @@ function subscribe(tauri: TauriGlobal, name: string, listener: () => void): () =
   };
 }
 
-/** What the shell reads off the daemon's own startup output. */
+/** The shell mints this from its private endpoint on every reconnect. */
 interface DaemonEndpoint {
   port: number;
-  token: string;
+  url: string;
   machineId: string;
   fingerprint: string;
+  pid: number;
+  challenge: string;
+  expiresAt: number;
+  serverProof: string;
 }

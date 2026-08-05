@@ -15,6 +15,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
+
 /// Rotate at four megabytes, keep one old file.
 ///
 /// Enough that a long day of a chatty agent still holds this morning; small
@@ -37,11 +40,7 @@ impl LogFile {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .ok();
+        let file = open_private_append(&path).ok();
         LogFile {
             path,
             file: Arc::new(Mutex::new(file)),
@@ -52,15 +51,43 @@ impl LogFile {
         &self.path
     }
 
-    fn rotate(&self, file: &mut Option<std::fs::File>) {
+    fn rotate(&self, file: &mut Option<std::fs::File>) -> std::io::Result<()> {
+        // Close before replacement so Windows does not depend on the sharing
+        // flags used when this handle was opened.
+        *file = None;
         let previous = self.path.with_extension("log.1");
-        let _ = std::fs::rename(&self.path, previous);
-        *file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .ok();
+        match std::fs::symlink_metadata(&self.path) {
+            Ok(_) => {
+                crate::config::replace_private(&self.path, &previous).map_err(|error| {
+                    std::io::Error::other(format!("rotating private log: {error:#}"))
+                })?;
+                crate::config::restrict_to_owner(&previous).map_err(|error| {
+                    std::io::Error::other(format!("restricting rotated log: {error:#}"))
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        *file = Some(open_private_append(&self.path)?);
+        Ok(())
     }
+}
+
+fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    // Correct legacy files too: creation mode does not change an existing
+    // world-readable log left by an older build or permissive umask.
+    crate::config::restrict_to_owner(path).map_err(|error| {
+        std::io::Error::other(format!("restricting log permissions: {error:#}"))
+    })?;
+    Ok(file)
 }
 
 impl Write for LogFile {
@@ -68,7 +95,7 @@ impl Write for LogFile {
         let mut held = self.file.lock().expect("the log is never poisoned");
         if let Some(file) = held.as_mut() {
             if file.metadata().map(|meta| meta.len()).unwrap_or(0) > MAX_BYTES {
-                self.rotate(&mut held);
+                self.rotate(&mut held)?;
             }
         }
         match held.as_mut() {
@@ -95,10 +122,13 @@ impl Write for LogFile {
 /// daemon said before it could log anything), so this lists what is there rather
 /// than only what we wrote.
 pub fn list(dir: &Path) -> Vec<(String, u64)> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(directory) = Dir::open_ambient_dir(dir, ambient_authority()) else {
         return Vec::new();
     };
-    let mut found: Vec<(String, u64, std::time::SystemTime)> = entries
+    let Ok(entries) = directory.read_dir(".") else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, u64, cap_std::time::SystemTime)> = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let meta = entry.metadata().ok()?;
@@ -109,7 +139,8 @@ pub fn list(dir: &Path) -> Vec<(String, u64)> {
             Some((
                 name,
                 meta.len(),
-                meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                meta.modified()
+                    .unwrap_or(cap_std::time::SystemClock::UNIX_EPOCH),
             ))
         })
         .collect();
@@ -131,14 +162,18 @@ pub fn tail(dir: &Path, name: &str, bytes: usize) -> anyhow::Result<String> {
     if name.is_empty() || Path::new(name).components().count() != 1 {
         anyhow::bail!("{name} 不是一个日志文件名");
     }
-    let path = dir.join(name);
-    let mut file = std::fs::File::open(&path)
-        .map_err(|error| anyhow::anyhow!("打不开 {}：{error}", path.display()))?;
+    let directory = Dir::open_ambient_dir(dir, ambient_authority())?;
+    // Capability-relative open keeps a log-directory symlink from becoming a
+    // read of an arbitrary host file, without a check/open race.
+    let mut file = directory
+        .open(name)
+        .map(cap_std::fs::File::into_std)
+        .map_err(|error| anyhow::anyhow!("打不开 {name}：{error}"))?;
     let size = file.metadata()?.len();
     let from = size.saturating_sub(bytes as u64);
     file.seek(SeekFrom::Start(from))?;
     let mut raw = Vec::new();
-    file.read_to_end(&mut raw)?;
+    file.take(bytes as u64).read_to_end(&mut raw)?;
     let text = String::from_utf8_lossy(&raw).to_string();
     if from == 0 {
         return Ok(text);
@@ -176,6 +211,44 @@ mod tests {
     }
 
     #[test]
+    fn rotating_twice_replaces_the_previous_log_and_stays_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.log");
+        let mut log = LogFile::open(path.clone());
+        log.write_all(b"first generation\n").unwrap();
+        log.flush().unwrap();
+        {
+            let mut held = log.file.lock().unwrap();
+            log.rotate(&mut held).unwrap();
+        }
+
+        log.write_all(b"second generation\n").unwrap();
+        log.flush().unwrap();
+        {
+            let mut held = log.file.lock().unwrap();
+            log.rotate(&mut held).unwrap();
+        }
+
+        let previous = path.with_extension("log.1");
+        assert_eq!(
+            std::fs::read_to_string(previous).unwrap(),
+            "second generation\n"
+        );
+        assert_eq!(path.metadata().unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostic_logs_are_owner_only_because_agent_output_can_contain_secrets() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.log");
+        let _log = LogFile::open(path.clone());
+        assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
     fn the_tail_is_the_end_of_the_file_and_starts_at_a_line() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("daemon.log"), "first\nsecond\nthird\n").unwrap();
@@ -202,6 +275,20 @@ mod tests {
                 "{attempt} was accepted"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_log_symlink_cannot_read_a_file_outside_the_log_directory() {
+        use std::os::unix::fs::symlink;
+
+        let logs = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "host secret").unwrap();
+        symlink(&secret, logs.path().join("daemon.log")).unwrap();
+
+        assert!(tail(logs.path(), "daemon.log", 1024).is_err());
     }
 
     #[test]

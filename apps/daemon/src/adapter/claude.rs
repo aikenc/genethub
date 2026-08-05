@@ -141,7 +141,7 @@ pub struct ClaudeAdapter {
 }
 
 impl ClaudeAdapter {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn with_program(program: PathBuf) -> Self {
         ClaudeAdapter {
             program: Some(program),

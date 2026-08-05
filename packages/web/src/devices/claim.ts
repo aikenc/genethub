@@ -1,7 +1,14 @@
 import type { ServerFrame } from "@genehub/proto";
 
 import type { WebSocketLike } from "../protocol/client";
-import { proof, randomNonce } from "./proof";
+import {
+  channelClientProof,
+  channelServerProof,
+  deriveChannelSessionKey,
+  openChannelFrame,
+  randomNonce,
+  sealChannelFrame,
+} from "./proof";
 import type { PairedMachine } from "./machines";
 
 /**
@@ -17,37 +24,97 @@ export async function claimMachine(
   code: string,
   deviceName: string,
   openSocket: (url: string) => WebSocketLike = (url) => new WebSocket(url) as WebSocketLike,
+  deadlines: { connectTimeoutMs?: number; responseTimeoutMs?: number } = {},
 ): Promise<PairedMachine> {
+  if (!/^inv_[0-9a-f]{32}\.[0-9a-f]{64}$/.test(code)) {
+    throw new Error("配对链接不完整");
+  }
+  const split = code.indexOf(".");
+  const inviteId = code.slice(0, split);
+  const secret = code.slice(split + 1);
+  const context = `invite:${inviteId}`;
   const nonce = randomNonce();
-  const request = {
-    id: "claim",
-    type: "device.claim",
+  const hello = {
+    id: "claim-hello",
+    type: "hello",
     payload: {
-      code,
-      deviceName,
-      nonce,
-      proof: await proof("client", nonce, code),
+      clientName: "genehub-client",
+      protocolVersion: 2,
+      invite: {
+        inviteId,
+        nonce,
+        proof: await channelClientProof(secret, context, nonce),
+      },
     },
   };
 
   const socket = openSocket(endpoint);
   try {
-    const frame = await exchange(socket, JSON.stringify(request));
-    if (frame.type !== "result") throw new Error("配对时收到了预料之外的回复");
+    await opened(socket, deadlines.connectTimeoutMs ?? 10_000);
+    socket.send(JSON.stringify(hello));
+    const helloFrame = await nextFrame(
+      socket,
+      deadlines.responseTimeoutMs ?? 10_000,
+      "配对通道没有及时返回认证回复",
+    );
+    if (
+      helloFrame.type !== "result" ||
+      helloFrame.id !== hello.id ||
+      !helloFrame.ok ||
+      helloFrame.payload?.type !== "hello" ||
+      !helloFrame.payload.data.serverNonce
+    ) {
+      throw new Error("配对通道认证失败");
+    }
+    const helloReply = helloFrame.payload.data;
+    const serverNonce = helloReply.serverNonce!;
+    const expected = await channelServerProof(
+      secret,
+      context,
+      nonce,
+      serverNonce,
+    );
+    if (helloReply.proof !== expected) throw new Error("对面不是这台机器，配对已中止");
+    const key = await deriveChannelSessionKey(secret, context, nonce, serverNonce);
+    const inner = JSON.stringify({
+      id: "claim",
+      type: "device.claim",
+      payload: { code: inviteId, deviceName, nonce: "", proof: "" },
+    });
+    const sealed = await sealChannelFrame(key, "client-to-daemon", 1, inner);
+    socket.send(
+      JSON.stringify({
+        id: "claim",
+        type: "authenticated",
+        payload: { sequence: 1, body: sealed.body, mac: sealed.mac },
+      }),
+    );
+    const wire = await nextFrame(
+      socket,
+      deadlines.responseTimeoutMs ?? 10_000,
+      "配对通道没有及时返回配对结果",
+    );
+    if (wire.type !== "authenticated" || wire.sequence !== 1) {
+      throw new Error("配对响应没有通过通道认证");
+    }
+    const plaintext = await openChannelFrame(
+      key,
+      "daemon-to-client",
+      1,
+      wire.body,
+      wire.mac,
+    );
+    const frame = JSON.parse(plaintext) as ServerFrame;
+    if (frame.type !== "result" || frame.id !== "claim") {
+      throw new Error("配对时收到了预料之外的回复");
+    }
     if (!frame.ok || frame.payload?.type !== "claimed") {
       throw new Error(frame.error?.message ?? "配对失败");
     }
 
     const claimed = frame.payload.data;
-    // The machine has to prove it knows the invite too. Without this, whoever
-    // reached the rendezvous slot first could collect invites by pretending to
-    // be the machine (`docs/security-model.md` §4.2).
-    if (claimed.proof !== (await proof("server", nonce, code))) {
-      throw new Error("对面不是这台机器，配对已中止");
-    }
-
     return {
-      machineId: claimed.deviceId,
+      machineId: claimed.machineId,
       name: claimed.machineName,
       fingerprint: claimed.fingerprint,
       endpoint,
@@ -60,18 +127,59 @@ export async function claimMachine(
   }
 }
 
-/** Sends once the socket is open and resolves with the first frame back. */
-function exchange(socket: WebSocketLike, request: string): Promise<ServerFrame> {
+function opened(socket: WebSocketLike, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    const fail = () => reject(new Error("连不上这台机器，链接可能已经过期"));
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("连接这台机器超时，链接可能已经过期"));
+    }, timeoutMs);
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error("连不上这台机器，链接可能已经过期"));
+    };
     socket.onerror = fail;
     socket.onclose = fail;
-    socket.onopen = () => socket.send(request);
+    socket.onopen = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+  });
+}
+
+function nextFrame(
+  socket: WebSocketLike,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<ServerFrame> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (settle: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      settle();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(timeoutMessage))),
+      timeoutMs,
+    );
+    socket.onerror = () => finish(() => reject(new Error("配对通道中断")));
+    socket.onclose = () => finish(() => reject(new Error("配对通道已关闭")));
     socket.onmessage = (event) => {
       try {
-        resolve(JSON.parse(String(event.data)) as ServerFrame);
+        if (typeof event.data !== "string" || event.data.length > 4 * 1024 * 1024) {
+          throw new Error("oversized pairing frame");
+        }
+        const frame = JSON.parse(event.data) as ServerFrame;
+        finish(() => resolve(frame));
       } catch {
-        reject(new Error("配对时收到了无法解析的回复"));
+        finish(() => reject(new Error("配对时收到了无法解析的回复")));
       }
     };
   });
