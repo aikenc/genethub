@@ -62,28 +62,45 @@ export function TimelineView({ state }: { state: TimelineState }) {
         setPinned(distance < 40);
       }}
     >
-      {turns.map((turn, index) => (
-        <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
-          {turn.items.map((item) => (
-            <Item key={item.id} item={item} />
-          ))}
-          {turn.stats ? (
-            <TurnFooter
-              stats={turn.stats}
-              text={assistantText(turn.items)}
-              canFork={canFork && Boolean(turn.stats.forkCheckpoint)}
-              onFork={() => void forkSession(turn.stats!.turnId)}
-            />
-          ) : index === turns.length - 1 && state.activeTurn ? (
-            <TurnFooter
-              liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
-              liveTools={countTools(turn.items)}
-              text={assistantText(turn.items)}
-              canFork={false}
-            />
-          ) : null}
-        </section>
-      ))}
+      {turns.map((turn, index) => {
+        const blocks = groupIntoBlocks(turn.items);
+        // Only the tail of the turn currently being written should default
+        // open — a long-running task's earlier tool-call batches fold away
+        // as the agent moves on, instead of every batch staying expanded
+        // and turning the screen into a wall of cards (the original
+        // complaint this grouping exists to fix).
+        const isLiveTurn = !turn.stats && index === turns.length - 1 && Boolean(state.activeTurn);
+        return (
+          <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
+            {blocks.map((block, blockIndex) =>
+              block.kind === "work" ? (
+                <WorkGroup
+                  key={block.items[0]!.id}
+                  items={block.items}
+                  defaultOpen={isLiveTurn && blockIndex === blocks.length - 1}
+                />
+              ) : (
+                <Item key={block.item.id} item={block.item} />
+              ),
+            )}
+            {turn.stats ? (
+              <TurnFooter
+                stats={turn.stats}
+                text={assistantText(turn.items)}
+                canFork={canFork && Boolean(turn.stats.forkCheckpoint)}
+                onFork={() => void forkSession(turn.stats!.turnId)}
+              />
+            ) : index === turns.length - 1 && state.activeTurn ? (
+              <TurnFooter
+                liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
+                liveTools={countTools(turn.items)}
+                text={assistantText(turn.items)}
+                canFork={false}
+              />
+            ) : null}
+          </section>
+        );
+      })}
 
       {state.lastError ? (
         <div
@@ -194,6 +211,101 @@ function turnBlocks(items: TimelineItem[]): TurnBlock[] {
   }
   if (current.length > 0 || turns.length === 0) turns.push({ items: current, stats: null });
   return turns;
+}
+
+/**
+ * Groups consecutive `toolCall`/`reasoning` items into a single collapsible
+ * unit — the same boundary a long-running round hits on the daemon side
+ * (`apps/daemon/src/session/rounds.rs`'s `TrunkBuilder`, `TRUNK_MAX_ITEMS`),
+ * mirrored here purely for display: nothing about this changes what the
+ * wire sends, it only changes how many cards `TimelineView` puts on screen
+ * at once. A run of length 1 is left ungrouped — wrapping a single tool
+ * call in a "group of one" toggle would be a regression for the common
+ * case this exists to leave alone.
+ */
+type RenderBlock = { kind: "single"; item: TimelineItem } | { kind: "work"; items: TimelineItem[] };
+
+const WORK_GROUP_MAX_ITEMS = 32;
+
+function groupIntoBlocks(items: TimelineItem[]): RenderBlock[] {
+  const blocks: RenderBlock[] = [];
+  let bucket: TimelineItem[] = [];
+
+  const flush = () => {
+    if (bucket.length === 0) return;
+    if (bucket.length === 1) {
+      blocks.push({ kind: "single", item: bucket[0]! });
+    } else {
+      blocks.push({ kind: "work", items: bucket });
+    }
+    bucket = [];
+  };
+
+  for (const item of items) {
+    if (item.type === "reasoning" || item.type === "toolCall") {
+      bucket.push(item);
+      if (bucket.length >= WORK_GROUP_MAX_ITEMS) flush();
+    } else {
+      flush();
+      blocks.push({ kind: "single", item });
+    }
+  }
+  flush();
+  return blocks;
+}
+
+/** A deterministic one-line summary for a collapsed group's header — never
+ * a guess dressed up as agent prose, same rule the daemon's own fallback
+ * overview follows for the persisted trunk ledger. */
+function summarizeWork(items: TimelineItem[]): string {
+  const toolNames: string[] = [];
+  let reasoningCount = 0;
+  for (const item of items) {
+    if (item.type === "toolCall" && !toolNames.includes(item.name)) toolNames.push(item.name);
+    if (item.type === "reasoning") reasoningCount += 1;
+  }
+  if (toolNames.length === 0) return `进行了 ${reasoningCount} 次思考`;
+  return `运行了 ${items.length} 次工具（${toolNames.join(", ")}）`;
+}
+
+function WorkGroup({ items, defaultOpen }: { items: TimelineItem[]; defaultOpen: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const hasError = items.some((item) => item.type === "toolCall" && item.status === "error");
+
+  useEffect(() => {
+    if (hasError) setOpen(true);
+  }, [hasError]);
+
+  return (
+    <div
+      className={`min-w-0 max-w-full overflow-hidden rounded-lg border bg-surface ${
+        hasError ? "border-danger/50" : "border-line"
+      }`}
+      data-testid="work-group"
+    >
+      <header className="flex min-w-0 items-center gap-2 px-3 py-2 text-xs">
+        <span className="shrink-0 text-base" role="img" aria-label="批量操作">
+          📦
+        </span>
+        <span className="min-w-0 flex-1 truncate text-muted">{summarizeWork(items)}</span>
+        <button
+          type="button"
+          className="shrink-0 text-accent"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? "收起" : `展开 ${items.length} 项`}
+        </button>
+      </header>
+      {open ? (
+        <div className="space-y-2 border-t border-line px-3 py-2">
+          {items.map((item) => (
+            <Item key={item.id} item={item} />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function assistantText(items: TimelineItem[]): string {

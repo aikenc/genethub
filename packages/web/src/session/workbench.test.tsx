@@ -88,6 +88,117 @@ describe("what the user sees in a session", () => {
     expect(screen.getByText("先看看目录结构")).toBeInTheDocument();
   });
 
+  it("leaves a lone tool call ungrouped, same as before this grouping existed", () => {
+    const state = apply(emptyTimeline(), {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "read_file",
+        status: "ok",
+        detail: { kind: "read", path: "a.txt", content: "hi", truncated: false },
+      },
+    });
+
+    render(<TimelineView state={state} />);
+    expect(screen.getByTestId("tool-call")).toBeInTheDocument();
+    expect(screen.queryByTestId("work-group")).not.toBeInTheDocument();
+  });
+
+  /**
+   * The original complaint: an agent's tool calls and thinking used to land
+   * on screen one card each, so a long-running task turned into a wall of
+   * collapsed cards the user had to scroll past to find the current state.
+   * A run of several in a row now folds into one group instead.
+   */
+  it("folds a long run of tool calls into one collapsed group", async () => {
+    const tool = (id: string): TimelineItem => ({
+      type: "toolCall",
+      id,
+      name: "grep",
+      status: "ok",
+      detail: { kind: "search", query: "TODO", matches: [] },
+    });
+    let state = emptyTimeline();
+    for (const id of ["c1", "c2", "c3", "c4", "c5"]) {
+      state = apply(state, { type: "item", turnId: "t1", item: tool(id) });
+    }
+    state = apply(state, {
+      type: "turnCompleted",
+      turnId: "t1",
+      usage: {
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        costUsd: undefined,
+      },
+    });
+
+    render(<TimelineView state={state} />);
+    expect(screen.queryAllByTestId("tool-call")).toHaveLength(0);
+    const group = screen.getByTestId("work-group");
+    expect(group).toHaveTextContent("运行了 5 次工具（grep）");
+
+    await userEvent.click(within(group).getByRole("button", { name: "展开 5 项" }));
+    expect(screen.getAllByTestId("tool-call")).toHaveLength(5);
+  });
+
+  it("keeps the still-running batch open while a finished one stays folded", () => {
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "assistantMessage",
+        id: "a1",
+        text: "先看看已有文件",
+      },
+    });
+    for (const id of ["c1", "c2", "c3"]) {
+      state = apply(state, {
+        type: "item",
+        turnId: "t1",
+        item: {
+          type: "toolCall",
+          id,
+          name: "read_file",
+          status: "ok",
+          detail: { kind: "read", path: `${id}.txt`, content: "", truncated: false },
+        },
+      });
+    }
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "assistantMessage", id: "a2", text: "现在开始修改" },
+    });
+    state = apply(state, { type: "turnStarted", turnId: "t1", startedAtMs: 1 });
+    for (const id of ["c4", "c5"]) {
+      state = apply(state, {
+        type: "item",
+        turnId: "t1",
+        item: {
+          type: "toolCall",
+          id,
+          name: "edit",
+          status: "ok",
+          detail: { kind: "edit", path: `${id}.txt`, diff: "" },
+        },
+      });
+    }
+
+    render(<TimelineView state={state} />);
+    const groups = screen.getAllByTestId("work-group");
+    expect(groups).toHaveLength(2);
+    // The finished batch (before the second monologue) stays collapsed.
+    expect(within(groups[0]!).getByRole("button", { name: "展开 3 项" })).toBeInTheDocument();
+    // The batch still running when the turn has not completed is open already.
+    expect(within(groups[1]!).getByRole("button", { name: "收起" })).toBeInTheDocument();
+    expect(within(groups[1]!).getAllByTestId("tool-call")).toHaveLength(2);
+  });
+
   it("keeps a successful shell call compact until its details are requested", async () => {
     render(
       <ToolCallView
