@@ -1,31 +1,24 @@
 import type { ToolCallDetail, ToolKind, ToolStatus } from "@genehub/proto";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 export function ToolCallView({
   name,
-  status,
   detail,
 }: {
   name: string;
   status: ToolStatus;
   detail: ToolCallDetail;
 }) {
-  const [open, setOpen] = useState(status === "error");
+  const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   // The daemon is authoritative, but keep the same bound when this newer web
   // app reconnects to an older daemon or renders a legacy in-memory fixture.
   const output = boundedOutput(toolOutput(detail));
   const summary = oneLine(summarize(detail), 64);
 
-  useEffect(() => {
-    if (status === "error") setOpen(true);
-  }, [status]);
-
   return (
     <div
-      className={`min-w-0 max-w-full overflow-hidden rounded-lg border bg-surface ${
-        status === "error" ? "border-danger/50" : "border-line"
-      }`}
+      className="min-w-0 max-w-full overflow-hidden rounded-lg border border-line bg-surface"
       data-testid="tool-call"
     >
       <header className="flex min-w-0 items-center gap-2 px-3 py-2 text-xs">
@@ -34,11 +27,6 @@ export function ToolCallView({
         </span>
         <span className="shrink-0 font-mono text-fg">{name}</span>
         <span className="min-w-0 flex-1 truncate text-muted">{summary}</span>
-        {status === "error" ? (
-          <strong className="shrink-0 text-sm text-danger" aria-label="失败" title="失败">
-            !
-          </strong>
-        ) : null}
         <button
           type="button"
           className="shrink-0 text-accent"

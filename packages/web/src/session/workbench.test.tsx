@@ -140,6 +140,7 @@ describe("what the user sees in a session", () => {
     expect(screen.queryAllByTestId("tool-call")).toHaveLength(0);
     const group = screen.getByTestId("work-group");
     expect(group).toHaveTextContent("运行了 5 次工具（grep）");
+    expect(group).not.toHaveClass("border-danger/50");
 
     await userEvent.click(within(group).getByRole("button", { name: "展开 5 项" }));
     expect(screen.getAllByTestId("tool-call")).toHaveLength(5);
@@ -313,7 +314,7 @@ describe("what the user sees in a session", () => {
     expect(screen.getByTestId("tool-call")).toHaveTextContent("+new");
   });
 
-  it("shows a tool it has never heard of instead of dropping it", async () => {
+  it("keeps an unfamiliar failed tool quiet until its output is requested", async () => {
     render(
       <ToolCallView
         name="teleport"
@@ -323,7 +324,12 @@ describe("what the user sees in a session", () => {
     );
 
     expect(screen.getByText("teleport")).toBeInTheDocument();
-    expect(screen.getByLabelText("失败")).toHaveTextContent("!");
+    expect(screen.queryByLabelText("失败")).not.toBeInTheDocument();
+    expect(screen.getByTestId("tool-call")).not.toHaveClass("border-danger/50");
+    expect(screen.getByRole("button", { name: "查看输出" })).toBeInTheDocument();
+    expect(screen.getByTestId("tool-call")).not.toHaveTextContent("已省略");
+
+    await userEvent.click(screen.getByRole("button", { name: "查看输出" }));
     expect(screen.getByTestId("tool-call")).toHaveTextContent("已省略");
   });
 

@@ -275,13 +275,10 @@ function WorkGroup({ items, defaultOpen }: { items: TimelineItem[]; defaultOpen:
   // that default so ordinary rerenders do not undo the user's explicit choice.
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
   const open = manualOpen ?? defaultOpen;
-  const hasError = items.some((item) => item.type === "toolCall" && item.status === "error");
 
   return (
     <div
-      className={`min-w-0 max-w-full overflow-hidden rounded-lg border bg-surface ${
-        hasError ? "border-danger/50" : "border-line"
-      }`}
+      className="min-w-0 max-w-full overflow-hidden rounded-lg border border-line bg-surface"
       data-testid="work-group"
     >
       <header className="flex min-w-0 items-center gap-2 px-3 py-2 text-xs">
