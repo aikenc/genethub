@@ -1,3 +1,6 @@
+import { useState } from "react";
+
+import { PreviewModal } from "./PreviewModal";
 import { formatBytes, ResourceBody, useResourcePreview } from "./ResourcePreview";
 
 /**
@@ -5,11 +8,15 @@ import { formatBytes, ResourceBody, useResourcePreview } from "./ResourcePreview
  *
  * A tool call already says "wrote out/chart.png" in its collapsed overview;
  * this is the difference between reading that sentence and actually seeing
- * the chart, without leaving the conversation for the files panel.
+ * the chart, without leaving the conversation for the files panel. The
+ * inline body is deliberately modest (a chat column is narrow); "在浮窗中
+ * 查看" reuses the same already-fetched bytes in `PreviewModal`, which is
+ * the one place a single HTML document actually renders as markup.
  */
 export function ArtifactCard({ path }: { path: string }) {
   const name = path.split("/").pop() || path;
   const { phase, stat, loadAnyway } = useResourcePreview(path);
+  const [expanded, setExpanded] = useState(false);
 
   return (
     <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-line bg-surface">
@@ -24,7 +31,11 @@ export function ArtifactCard({ path }: { path: string }) {
           {name}
         </span>
         <span className="shrink-0 text-accent">
-          {phase.step === "idle" ? "预览" : phase.step === "stating" || phase.step === "loading" ? "加载中…" : null}
+          {phase.step === "idle"
+            ? "预览"
+            : phase.step === "stating" || phase.step === "loading"
+              ? "加载中…"
+              : null}
         </span>
       </button>
       {phase.step === "statError" || phase.step === "loadError" ? (
@@ -43,7 +54,17 @@ export function ArtifactCard({ path }: { path: string }) {
       {phase.step === "loaded" ? (
         <div className="border-t border-line px-3 py-2">
           <ResourceBody content={phase.content} />
+          <button
+            type="button"
+            className="mt-1.5 text-xs text-accent"
+            onClick={() => setExpanded(true)}
+          >
+            在浮窗中查看 ⤢
+          </button>
         </div>
+      ) : null}
+      {expanded && phase.step === "loaded" ? (
+        <PreviewModal path={path} content={phase.content} onClose={() => setExpanded(false)} />
       ) : null}
     </div>
   );

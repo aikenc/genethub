@@ -118,7 +118,7 @@ function NonTextPreview({ path }: { path: string }) {
       ) : null}
       {phase.step === "loaded" ? (
         <div className="text-left">
-          <ResourceBody content={phase.content} />
+          <ResourceBody content={phase.content} expanded />
         </div>
       ) : null}
     </div>

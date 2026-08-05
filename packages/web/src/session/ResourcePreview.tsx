@@ -2,6 +2,7 @@ import type { ResourceContent, ResourceMeta } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 
 import { Markdown } from "./Markdown";
+import { SanitizedHtml } from "./SanitizedHtml";
 import { useWorkbench } from "./store";
 
 /** Below this, an image is fetched and shown the moment its card opens. */
@@ -90,22 +91,55 @@ function autoLoads(meta: ResourceMeta): boolean {
   return false;
 }
 
-/** Renders whatever bytes a `resource.read` came back with. */
-export function ResourceBody({ content }: { content: ResourceContent }) {
+/**
+ * Renders whatever bytes a `resource.read` came back with.
+ *
+ * `expanded` is the difference between a card inline in a narrow chat column
+ * and the floating window (`PreviewModal.tsx`) it opens into: an image gets
+ * more room, and a single HTML document — never rendered cramped inside the
+ * conversation flow — only turns into markup once there is a dedicated
+ * surface for it to sit on.
+ */
+export function ResourceBody({
+  content,
+  expanded = false,
+}: {
+  content: ResourceContent;
+  expanded?: boolean;
+}) {
   if (content.mime.startsWith("image/")) {
     return (
       <img
         src={`data:${content.mime};base64,${content.dataBase64}`}
         alt={content.path}
-        className="max-h-96 max-w-full rounded object-contain"
+        className={
+          expanded
+            ? "max-h-[75vh] max-w-full rounded object-contain"
+            : "max-h-96 max-w-full rounded object-contain"
+        }
       />
     );
+  }
+  if (content.mime === "text/html") {
+    if (!expanded) {
+      return (
+        <p className="text-xs text-muted">
+          HTML 文档 · {formatBytes(content.size)}
+          {content.truncated ? "（已截断）" : ""}
+        </p>
+      );
+    }
+    return <SanitizedHtml html={decodeBase64Utf8(content.dataBase64)} />;
   }
   if (content.mime.startsWith("text/") || content.mime === "application/json") {
     const text = decodeBase64Utf8(content.dataBase64);
     if (content.mime === "text/markdown") return <Markdown text={text} />;
     return (
-      <pre className="max-h-96 max-w-full overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-fg">
+      <pre
+        className={`max-w-full overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-fg ${
+          expanded ? "max-h-[70vh]" : "max-h-96"
+        }`}
+      >
         {text}
       </pre>
     );
