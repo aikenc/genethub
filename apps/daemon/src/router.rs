@@ -335,6 +335,7 @@ pub async fn handle(
             session_id,
             text,
             attachments,
+            continues_round,
         } => {
             if text.trim().is_empty() && attachments.is_empty() {
                 return Handled::err(ErrorCode::BadRequest, "there is nothing to send");
@@ -342,7 +343,7 @@ pub async fn handle(
             let providers = state.providers().await;
             match state
                 .sessions
-                .send(&session_id, text, attachments, &providers)
+                .send(&session_id, text, attachments, &providers, continues_round)
                 .await
             {
                 Ok(_) => Handled::ok(Reply::Ack),

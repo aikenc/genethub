@@ -88,6 +88,29 @@ impl Journey {
     pub fn logs_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }
+
+    /// The round ledger for a session, read straight off disk as JSON values
+    /// rather than through the wire protocol — there is no query API for it
+    /// yet (`docs/agent-analysis-substrate-proposal.md` §8 steps 7-9), so
+    /// this is how a journey checks `session.rounds.jsonl` landed correctly.
+    /// An empty vector both when the file is missing and when it is empty,
+    /// since a journey asserting "nothing ledgered yet" should not have to
+    /// care which.
+    pub fn round_records(&self, session_id: &str) -> Vec<serde_json::Value> {
+        let path = self
+            .data_dir
+            .join("sessions")
+            .join(&self.workspace.id)
+            .join(format!("{session_id}.rounds.jsonl"));
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
 }
 
 impl Journey {
@@ -255,11 +278,24 @@ impl Journey {
     }
 
     pub async fn send(&self, session_id: &str, text: &str) -> Result<()> {
+        self.send_continuing(session_id, text, None).await
+    }
+
+    /// Same as `send`, with an explicit `continuesRound` — for journeys that
+    /// exercise the "interrupted, then the client says whether this is the
+    /// same request" path (`docs/agent-analysis-substrate-proposal.md` §3.2).
+    pub async fn send_continuing(
+        &self,
+        session_id: &str,
+        text: &str,
+        continues_round: Option<&str>,
+    ) -> Result<()> {
         self.client
             .call(Request::SessionSend {
                 session_id: session_id.to_string(),
                 text: text.to_string(),
                 attachments: vec![],
+                continues_round: continues_round.map(str::to_string),
             })
             .await?;
         Ok(())

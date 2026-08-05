@@ -1598,6 +1598,202 @@ async fn interrupting_a_running_turn_ends_it_as_canceled() {
     journey.finish().await;
 }
 
+/// `continuesRound` travels the whole wire path — JSON, the router's
+/// destructure, `SessionManager::send` — even though no client can yet learn
+/// a real round id from the daemon (that lands with the round query API,
+/// `docs/agent-analysis-substrate-proposal.md` §8). An id naming nothing the
+/// daemon recognizes must be accepted exactly like no id at all, not
+/// rejected: "no such round" is a normal answer to "this is a new one",
+/// never a protocol error.
+#[tokio::test]
+async fn continues_round_is_accepted_over_the_wire_and_ignored_when_unrecognized() {
+    let journey = Journey::start().await.expect("journey starts");
+    if journey.mode.is_mock() {
+        journey.mock().reply(Turn::text("ok")).await;
+    }
+    let session = journey.session("genet").await.expect("session opens");
+
+    journey
+        .send_continuing(&session, "hello", Some("r_does_not_exist"))
+        .await
+        .expect("an unrecognized continuesRound must not be rejected");
+
+    let events = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(events.completed(), "saw {:?}", events.failure());
+
+    journey.finish().await;
+}
+
+/// After a stop, the session must keep working whether or not the client's
+/// next message claims to continue the interrupted round — the daemon
+/// decides what to do with the claim internally (fold in or supersede), but
+/// either way the user's next message must go through normally.
+#[tokio::test]
+async fn a_message_naming_continues_round_after_an_interrupt_still_runs_normally() {
+    let journey = Journey::start().await.expect("journey starts");
+    if journey.mode.is_mock() {
+        journey
+            .mock()
+            .reply_slowly(
+                Turn::text("This is a long answer that arrives one piece at a time."),
+                Duration::from_millis(400),
+            )
+            .await;
+    }
+    let session = journey.session("genet").await.expect("session opens");
+    journey
+        .send(
+            &session,
+            "Count from 1 to 500, one number per line, with a short comment on each.",
+        )
+        .await
+        .expect("accepted");
+    journey
+        .client
+        .wait_for_turn_to_start()
+        .await
+        .expect("the turn starts");
+    journey
+        .client
+        .call(Request::SessionInterrupt {
+            session_id: session.clone(),
+        })
+        .await
+        .expect("interrupt accepted");
+    let first = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(first.canceled(), "saw {:?}", first.last());
+
+    if journey.mode.is_mock() {
+        journey
+            .mock()
+            .reply(Turn::text("Picking up from there."))
+            .await;
+    }
+    // The client cannot yet learn the real round id from the daemon (§8), so
+    // this is necessarily a guess — and the daemon must treat an unrecognized
+    // one exactly like no signal at all, per §3.2, rather than erroring or
+    // wedging the session.
+    journey
+        .send_continuing(&session, "keep going", Some("r_whatever_the_ui_remembered"))
+        .await
+        .expect("accepted");
+    let second = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(second.completed(), "saw {:?}", second.failure());
+
+    journey.finish().await;
+}
+
+/// The round ledger (`docs/agent-analysis-substrate-proposal.md` §8 step 2)
+/// exercised through the real wire protocol end to end, not just the
+/// in-process unit tests in `apps/daemon/src/session/manager.rs`: a real
+/// daemon, a real workspace, a real (mock) turn, then the file it wrote.
+#[tokio::test]
+async fn a_completed_round_is_recorded_in_the_round_ledger_on_disk() {
+    let journey = Journey::start().await.expect("journey starts");
+    if journey.mode.is_mock() {
+        journey.mock().reply(Turn::text("ok")).await;
+    }
+    let session = journey.session("genet").await.expect("session opens");
+    assert!(
+        journey.round_records(&session).is_empty(),
+        "nothing has settled yet"
+    );
+
+    journey.send(&session, "hello").await.expect("accepted");
+    let events = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(events.completed(), "saw {:?}", events.failure());
+
+    let rounds = journey.round_records(&session);
+    assert_eq!(
+        rounds.len(),
+        1,
+        "the completed round must be ledgered exactly once"
+    );
+    assert_eq!(rounds[0]["outcome"], json!("completed"));
+    assert_eq!(rounds[0]["synthesized"], json!(false));
+    assert!(!rounds[0]["adapterTurnIds"]
+        .as_array()
+        .expect("an array of turn ids")
+        .is_empty());
+    assert!(
+        !rounds[0]["itemIds"]
+            .as_array()
+            .expect("an array of item ids")
+            .is_empty(),
+        "the round must reference at least the user's message"
+    );
+
+    journey.finish().await;
+}
+
+/// The other half of §3.2's four decision-table cases (the two auto-stitched
+/// ones are covered against a fake adapter in `manager.rs`; this is the one
+/// that needs a real turn boundary): an interrupt with no `continuesRound`
+/// on the next message must ledger the abandoned round as `superseded`,
+/// not silently drop it.
+#[tokio::test]
+async fn an_interrupted_round_left_dangling_is_ledgered_as_superseded_once_a_new_one_starts() {
+    let journey = Journey::start().await.expect("journey starts");
+    if journey.mode.is_mock() {
+        journey
+            .mock()
+            .reply_slowly(
+                Turn::text("A slow reply, so the interrupt lands mid-turn."),
+                Duration::from_millis(400),
+            )
+            .await;
+    }
+    let session = journey.session("genet").await.expect("session opens");
+    journey
+        .send(&session, "count to 500")
+        .await
+        .expect("accepted");
+    journey
+        .client
+        .wait_for_turn_to_start()
+        .await
+        .expect("the turn starts");
+    journey
+        .client
+        .call(Request::SessionInterrupt {
+            session_id: session.clone(),
+        })
+        .await
+        .expect("interrupt accepted");
+    let first = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(first.canceled(), "saw {:?}", first.last());
+    assert!(
+        journey.round_records(&session).is_empty(),
+        "a merely interrupted round is left dangling, not ledgered yet"
+    );
+
+    if journey.mode.is_mock() {
+        journey
+            .mock()
+            .reply(Turn::text("Unrelated new task."))
+            .await;
+    }
+    // No `continuesRound`: a plain new message, so the dangling round must be
+    // cut loose rather than guessed at (§3.2 direction zero).
+    journey
+        .send(&session, "something else entirely")
+        .await
+        .expect("accepted");
+    let second = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(second.completed(), "saw {:?}", second.failure());
+
+    let rounds = journey.round_records(&session);
+    assert_eq!(
+        rounds.len(),
+        2,
+        "the superseded round and the completed one that replaced it both ledger"
+    );
+    assert_eq!(rounds[0]["outcome"], json!("superseded"));
+    assert_eq!(rounds[1]["outcome"], json!("completed"));
+
+    journey.finish().await;
+}
+
 /// Losing the connection while the agent is mid-answer.
 ///
 /// The existing replay cases all reconnect after the turn ended, which is the
@@ -1816,6 +2012,7 @@ async fn an_empty_prompt_is_refused_before_it_reaches_the_model() {
             session_id: session,
             text: "   ".into(),
             attachments: vec![],
+            continues_round: None,
         })
         .await;
     assert!(error.contains("BadRequest"), "got: {error}");

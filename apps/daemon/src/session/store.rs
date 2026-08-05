@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use genehub_proto::{PermissionRequest, SessionStatus, SessionSummary, TimelineItem};
 use serde::{Deserialize, Serialize};
 
+use super::rounds::{self, RoundRecord};
 use crate::adapter::PersistHandle;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +82,11 @@ impl Store {
 
     fn timeline_path(&self, workspace_id: &str, session_id: &str) -> PathBuf {
         self.dir(workspace_id).join(format!("{session_id}.jsonl"))
+    }
+
+    fn rounds_path(&self, workspace_id: &str, session_id: &str) -> PathBuf {
+        self.dir(workspace_id)
+            .join(format!("{session_id}.rounds.jsonl"))
     }
 
     fn meta_path(&self, workspace_id: &str, session_id: &str) -> PathBuf {
@@ -173,6 +179,98 @@ impl Store {
         Ok(items)
     }
 
+    /// Appends one settled round. Never rewrites an earlier line, for the same
+    /// crash-safety reason as `append_items`: a half-written line is losable,
+    /// what came before it is not.
+    pub fn append_round(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        record: &RoundRecord,
+    ) -> Result<()> {
+        let dir = self.dir(workspace_id);
+        fs::create_dir_all(&dir)?;
+        let path = self.rounds_path(workspace_id, session_id);
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        crate::config::restrict_to_owner(&path)?;
+        writeln!(file, "{}", serde_json::to_string(record)?)?;
+        file.flush()?;
+        Ok(())
+    }
+
+    /// Reads the round ledger back, skipping lines that do not parse — a
+    /// half-written record from a power cut, or a future schema version this
+    /// build does not know — the same tolerance `load_items` has for the
+    /// timeline (§8 step 2: "崩溃留下的半行如何丢弃、旧版本 schema 如何读").
+    pub fn load_rounds(&self, workspace_id: &str, session_id: &str) -> Result<Vec<RoundRecord>> {
+        let path = self.rounds_path(workspace_id, session_id);
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
+        };
+        let mut records = Vec::new();
+        for (index, line) in BufReader::new(file).lines().enumerate() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<RoundRecord>(&line) {
+                Ok(record) => records.push(record),
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping unreadable round ledger line {} of {}: {error}",
+                        index + 1,
+                        path.display()
+                    );
+                }
+            }
+        }
+        Ok(records)
+    }
+
+    /// Backfills the round ledger for a session that predates it, exactly
+    /// once: a no-op as soon as the ledger file exists on disk, even if that
+    /// file ends up holding zero records — the file's presence is the whole
+    /// guard, not its content, so a session with no completed turn yet is
+    /// never mistaken for one still needing migration.
+    ///
+    /// Called from `SessionManager::live` with the same items already loaded
+    /// for the overview-condense migration, so this never re-reads the
+    /// timeline on its own.
+    pub fn ensure_rounds_migrated(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        legacy_items: &[TimelineItem],
+    ) -> Result<()> {
+        let path = self.rounds_path(workspace_id, session_id);
+        if path.exists() {
+            return Ok(());
+        }
+        let records = rounds::migrate_legacy(legacy_items);
+        self.write_rounds(workspace_id, session_id, &records)
+    }
+
+    /// Bulk (over)write used only by the one-time legacy migration above.
+    /// Every other writer appends one record at a time as a round settles
+    /// (`append_round`) — this is not a general-purpose rewrite path.
+    fn write_rounds(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        records: &[RoundRecord],
+    ) -> Result<()> {
+        let dir = self.dir(workspace_id);
+        fs::create_dir_all(&dir)?;
+        let path = self.rounds_path(workspace_id, session_id);
+        let mut body = Vec::new();
+        for record in records {
+            writeln!(body, "{}", serde_json::to_string(record)?)?;
+        }
+        crate::config::save_private(&path, &body)
+    }
+
     /// Every session on disk, newest first.
     pub fn list_meta(&self) -> Result<Vec<SessionMeta>> {
         let mut out = Vec::new();
@@ -212,6 +310,7 @@ impl Store {
     /// session that never got as far as being written.
     pub fn delete(&self, workspace_id: &str, session_id: &str) -> Result<()> {
         let _ = fs::remove_file(self.timeline_path(workspace_id, session_id));
+        let _ = fs::remove_file(self.rounds_path(workspace_id, session_id));
         let _ = fs::remove_file(self.meta_path(workspace_id, session_id));
         let _ = fs::remove_dir_all(self.scratch_dir(workspace_id, session_id));
         Ok(())
@@ -415,6 +514,131 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
         assert!(store.load_items("w1", "never").unwrap().is_empty());
+    }
+
+    fn round(round_id: &str) -> RoundRecord {
+        RoundRecord {
+            schema_version: rounds::SCHEMA_VERSION,
+            round_id: round_id.into(),
+            started_at_ms: 1,
+            ended_at_ms: 2,
+            outcome: rounds::RoundOutcome::Completed,
+            adapter_turn_ids: vec!["t1".into()],
+            item_ids: vec!["u1".into()],
+            blocked_ms: 0,
+            synthesized: false,
+        }
+    }
+
+    #[test]
+    fn rounds_round_trip_through_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        store.append_round("w1", "s1", &round("r1")).unwrap();
+        store.append_round("w1", "s1", &round("r2")).unwrap();
+
+        let loaded = store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].round_id, "r1");
+        assert_eq!(loaded[1].round_id, "r2");
+    }
+
+    #[test]
+    fn a_session_with_no_ledger_yet_loads_as_an_empty_round_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        assert!(store.load_rounds("w1", "never").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_corrupt_round_line_does_not_take_the_ledger_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        store.append_round("w1", "s1", &round("r1")).unwrap();
+        let path = dir.path().join("w1").join("s1.rounds.jsonl");
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{{\"roundId\":\"broke").unwrap();
+        drop(file);
+
+        let loaded = store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].round_id, "r1");
+    }
+
+    #[test]
+    fn deleting_a_session_takes_its_round_ledger_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        store.append_round("w1", "s1", &round("r1")).unwrap();
+        store.delete("w1", "s1").unwrap();
+        assert!(store.load_rounds("w1", "s1").unwrap().is_empty());
+        assert!(!dir.path().join("w1").join("s1.rounds.jsonl").exists());
+    }
+
+    #[test]
+    fn migrating_an_old_session_writes_the_ledger_file_even_with_zero_rounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        // No `TurnSummary` in this history at all — a session that never
+        // completed a turn before this upgrade shipped.
+        store
+            .ensure_rounds_migrated(
+                "w1",
+                "s1",
+                &[TimelineItem::UserMessage {
+                    id: "u1".into(),
+                    text: "hi".into(),
+                    attachments: vec![],
+                }],
+            )
+            .unwrap();
+
+        assert!(store.load_rounds("w1", "s1").unwrap().is_empty());
+        assert!(
+            dir.path().join("w1").join("s1.rounds.jsonl").exists(),
+            "the ledger file itself must exist so a second call knows migration already ran"
+        );
+    }
+
+    #[test]
+    fn migration_never_runs_twice_even_if_the_ledger_would_otherwise_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let legacy_items = |turn_id: &str| {
+            vec![
+                TimelineItem::UserMessage {
+                    id: "u1".into(),
+                    text: "hi".into(),
+                    attachments: vec![],
+                },
+                TimelineItem::TurnSummary {
+                    id: format!("turn-summary-{turn_id}"),
+                    stats: genehub_proto::TurnStats {
+                        turn_id: turn_id.into(),
+                        outcome: genehub_proto::TurnOutcome::Completed,
+                        started_at_ms: 1,
+                        finished_at_ms: 2,
+                        duration_ms: 1,
+                        usage: genehub_proto::Usage::default(),
+                        tool_calls: 0,
+                        fork_checkpoint: None,
+                    },
+                },
+            ]
+        };
+
+        store
+            .ensure_rounds_migrated("w1", "s1", &legacy_items("t1"))
+            .unwrap();
+        // A second call with different history (as if the in-memory replay
+        // diverged) must not touch the file the first call already wrote.
+        store
+            .ensure_rounds_migrated("w1", "s1", &legacy_items("t2"))
+            .unwrap();
+
+        let loaded = store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].round_id, "legacy_r_t1");
     }
 
     #[test]

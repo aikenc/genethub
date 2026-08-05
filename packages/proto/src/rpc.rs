@@ -103,6 +103,15 @@ pub enum Request {
         text: String,
         #[serde(default)]
         attachments: Vec<Attachment>,
+        /// Claims this message as a continuation of a round left open by an
+        /// interrupt, rather than a new one. Only interrupts need this: the
+        /// daemon auto-stitches approval and guidance continuations on its
+        /// own, because those are unambiguous (`docs/architecture.md`'s
+        /// analysis substrate proposal §3.2). Absent, unknown, or naming a
+        /// round that already ended, this is treated as a new round — a
+        /// wrong stitch is a worse failure than an extra round.
+        #[serde(default)]
+        continues_round: Option<String>,
     },
     #[serde(rename = "session.fork", rename_all = "camelCase")]
     SessionFork { session_id: String, turn_id: String },

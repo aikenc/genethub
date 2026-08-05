@@ -175,6 +175,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           sessionId: session.data.id,
           text: "看看 notes.md",
           attachments: [],
+          continuesRound: null,
         },
       });
 
@@ -221,6 +222,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           sessionId: session.data.id,
           text: "写个 result.txt",
           attachments: [],
+          continuesRound: null,
         },
       });
 
@@ -287,6 +289,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
               sessionId: session.data.id,
               text: "说点什么",
               attachments: [],
+              continuesRound: null,
             },
           });
           // The mock answers every unscripted turn the same way, including the

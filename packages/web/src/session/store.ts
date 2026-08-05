@@ -610,7 +610,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     await asked(set, () =>
       require_(get().client).call({
         type: "session.send",
-        payload: { sessionId, text, attachments },
+        // Continuing a round after an interrupt is not wired into the UI
+        // yet — every message from here is a fresh round until it is
+        // (docs/agent-analysis-substrate-proposal.md §3.2).
+        payload: { sessionId, text, attachments, continuesRound: null },
       }),
     );
   },

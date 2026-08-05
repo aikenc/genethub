@@ -18,6 +18,7 @@ use genehub_proto::{
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use super::overview;
+use super::rounds::{self, RoundOutcome, RoundRecord};
 use super::store::{now_ms, title_from, SessionMeta, Store};
 use crate::adapter::registry::Registry;
 use crate::adapter::{AgentSession, PromptInput, ProviderMap, SessionConfig};
@@ -38,7 +39,51 @@ struct Live {
     pending_permissions: Mutex<Vec<PermissionRequest>>,
     /// Item ids settled during the current turn, flushed to disk when it ends.
     turn_items: Mutex<Vec<String>>,
+    /// Item ids accumulated across the *whole* round, spanning however many
+    /// adapter turns get folded into it. Unlike `turn_items`, this is not
+    /// cleared by `flush_turn` — only by the round settling — because a
+    /// round-ledger entry has to reference everything the round produced,
+    /// not just the last adapter turn that happened to end it.
+    round_items: Mutex<Vec<String>>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Daemon-owned round bookkeeping — one user request, possibly several
+    /// adapter turns (`docs/agent-analysis-substrate-proposal.md` §3.2).
+    /// `None` before the first `session.send` on this session. Kept around
+    /// (not cleared) once a round settles, so the last one stays inspectable
+    /// in memory until the next round replaces it; the durable copy lives in
+    /// the round ledger (`session/rounds.rs`, §8 step 2).
+    active_round: Mutex<Option<ActiveRound>>,
+}
+
+/// One user request's lifecycle, possibly spanning several adapter turns.
+///
+/// `round_id` is minted by the daemon before the first adapter turn starts
+/// and never changes across an auto-stitched interruption (approval,
+/// guidance) or an explicitly continued one (`continuesRound`). Adapter turn
+/// ids are upstream labels only — see §3.2's "今天的 turn 不等于 round".
+///
+/// Deliberately narrower than the proposal's full shape: `contended` and
+/// `workspaceStart` need the workspace-observation step (§8 step 5) to mean
+/// anything, and adding fields nobody populates yet would be exactly the
+/// "看起来完整却是假的" mistake the proposal itself warns against (rule D).
+#[derive(Debug, Clone)]
+struct ActiveRound {
+    round_id: String,
+    /// One entry per adapter turn folded into this round, in the order they
+    /// started. Never empty once the round exists.
+    adapter_turn_ids: Vec<String>,
+    /// Not read outside tests yet — becomes the round's `startedAt` once
+    /// `RoundStats` (§8 step 6) exists to report it.
+    #[allow(dead_code)]
+    started_at_ms: i64,
+    /// Set while paused for an approval/guidance answer; folded into
+    /// `blocked_ms` and cleared the moment the round resumes or ends.
+    blocked_since_ms: Option<i64>,
+    /// Total time this round spent waiting on a human, across every pause —
+    /// not counted as the agent's own working time.
+    blocked_ms: i64,
+    /// `None` while the round is still open (running or blocked on a human).
+    outcome: Option<RoundOutcome>,
 }
 
 pub struct SessionManager {
@@ -201,6 +246,18 @@ impl SessionManager {
             self.store
                 .replace_items(&meta.workspace_id, &meta.id, &items)?;
         }
+        // One-time backfill for a session that predates the round ledger
+        // (§8 step 2). A no-op as soon as `<session>.rounds.jsonl` exists,
+        // so this never re-runs once it has — see `ensure_rounds_migrated`.
+        if let Err(error) = self
+            .store
+            .ensure_rounds_migrated(&meta.workspace_id, &meta.id, &items)
+        {
+            tracing::warn!(
+                "could not migrate the round ledger for {}: {error}",
+                meta.id
+            );
+        }
         let live = Arc::new(Live::new(meta));
         *live.items.lock().await = items;
         self.sessions
@@ -310,6 +367,7 @@ impl SessionManager {
         text: String,
         attachments: Vec<Attachment>,
         providers: &ProviderMap,
+        continues_round: Option<String>,
     ) -> Result<String> {
         let live = self.live(session_id).await?;
         {
@@ -323,7 +381,14 @@ impl SessionManager {
             *status = SessionStatus::Running;
         }
         let started = self
-            .start_turn(&live, session_id, text, attachments, providers)
+            .start_turn(
+                &live,
+                session_id,
+                text,
+                attachments,
+                providers,
+                continues_round,
+            )
             .await;
         if started.is_err() {
             // Nothing is running after all, and a session stuck on Running would
@@ -340,6 +405,7 @@ impl SessionManager {
         text: String,
         attachments: Vec<Attachment>,
         providers: &ProviderMap,
+        continues_round: Option<String>,
     ) -> Result<String> {
         self.ensure_started(live, providers).await?;
 
@@ -388,6 +454,21 @@ impl SessionManager {
             .send(PromptInput { text, attachments })
             .await
             .context("handing the prompt to the agent")?;
+        // Only recorded once the handover actually succeeded: a failed send
+        // must not leave a round with zero adapter turns behind (`send`
+        // resets status to Idle on this same error, as if it never happened).
+        if let Some((superseded, item_ids)) = live
+            .begin_round(continues_round.as_deref(), &turn_id, item.id())
+            .await
+        {
+            tracing::info!(
+                "round {} superseded by a new message ({} adapter turn(s), {}ms blocked)",
+                superseded.round_id,
+                superseded.adapter_turn_ids.len(),
+                superseded.blocked_ms
+            );
+            persist_round(live, &self.store, superseded, item_ids).await;
+        }
 
         // The user message belongs to the turn it started.
         live.publish(SessionEvent::Item {
@@ -662,9 +743,23 @@ impl SessionManager {
                     })
                     .await
             };
-            if let Err(error) = sent {
-                *live.status.lock().await = SessionStatus::Waiting;
-                return Err(error).context("continuing after the user response");
+            match sent {
+                Ok(turn_id) => {
+                    // This is the daemon deciding to resume, not the client
+                    // asking to — the round the interaction interrupted
+                    // continues, no `continuesRound` involved (§3.2).
+                    live.continue_round(&turn_id).await;
+                }
+                Err(error) => {
+                    *live.status.lock().await = SessionStatus::Waiting;
+                    return Err(error).context("continuing after the user response");
+                }
+            }
+        } else {
+            // Denied or canceled: no more agent work is coming for this
+            // request, so the round it belonged to is done, not dangling.
+            if let Some((round, item_ids)) = live.settle_round(RoundOutcome::Canceled).await {
+                persist_round(&live, &self.store, round, item_ids).await;
             }
         }
 
@@ -804,7 +899,9 @@ impl Live {
             agent: Mutex::new(None),
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             turn_items: Mutex::new(Vec::new()),
+            round_items: Mutex::new(Vec::new()),
             pump: Mutex::new(None),
+            active_round: Mutex::new(None),
         }
     }
 
@@ -840,6 +937,123 @@ impl Live {
         let mut replay = self.replay.lock().await;
         while replay.len() > window {
             replay.pop_front();
+        }
+    }
+
+    /// Opens or continues a round for a fresh `session.send`.
+    ///
+    /// Only the "interrupted, then a new message arrives" case reaches this
+    /// decision at all — approval and guidance continuations never go
+    /// through `send`, they go through `continue_round` below, because the
+    /// daemon can already tell those are the same request. Here it cannot:
+    /// `continues_round` is the client's explicit word for "this is the same
+    /// request", and its absence — or a mismatch — means cut a new round
+    /// rather than guess a stitch that cannot be undone later (§3.2).
+    ///
+    /// Adds an item id to the open round's ledger-bound set, if not already
+    /// present. Shared by `apply` (as items settle) and `begin_round` (for
+    /// the user message that starts every `session.send`, which is written
+    /// directly to disk before the agent runs and so never passes through
+    /// `apply`).
+    async fn record_round_item(&self, item_id: &str) {
+        let mut round_items = self.round_items.lock().await;
+        if !round_items.iter().any(|id| id == item_id) {
+            round_items.push(item_id.to_string());
+        }
+    }
+
+    /// Returns the round that was cut short together with the item ids it
+    /// had accumulated, if any — `None` both when the round continues and
+    /// when there was nothing open to cut short (an already-settled round is
+    /// just replaced, not "superseded": nothing was taken from it). The
+    /// caller persists this pair to the round ledger (`session/rounds.rs`).
+    async fn begin_round(
+        &self,
+        continues_round: Option<&str>,
+        turn_id: &str,
+        user_item_id: &str,
+    ) -> Option<(ActiveRound, Vec<String>)> {
+        let mut active = self.active_round.lock().await;
+        if let Some(current) = active.as_mut() {
+            if current.outcome.is_none() && continues_round == Some(current.round_id.as_str()) {
+                if !current.adapter_turn_ids.iter().any(|id| id == turn_id) {
+                    current.adapter_turn_ids.push(turn_id.to_string());
+                }
+                drop(active);
+                self.record_round_item(user_item_id).await;
+                return None;
+            }
+        }
+        let superseded = match active.take() {
+            Some(mut dangling) if dangling.outcome.is_none() => {
+                dangling.outcome = Some(RoundOutcome::Superseded);
+                Some(dangling)
+            }
+            _ => None,
+        };
+        *active = Some(ActiveRound {
+            round_id: format!("r_{}", uuid::Uuid::new_v4().simple()),
+            adapter_turn_ids: vec![turn_id.to_string()],
+            started_at_ms: now_ms(),
+            blocked_since_ms: None,
+            blocked_ms: 0,
+            outcome: None,
+        });
+        drop(active);
+        let superseded_items = std::mem::take(&mut *self.round_items.lock().await);
+        self.record_round_item(user_item_id).await;
+        superseded.map(|round| (round, superseded_items))
+    }
+
+    /// Folds a daemon-initiated continuation (approval granted, guidance
+    /// answered) onto the round that was already open when the interaction
+    /// started — never mints a new round, since the daemon itself decided to
+    /// resume rather than being told to by the client.
+    async fn continue_round(&self, turn_id: &str) {
+        let mut active = self.active_round.lock().await;
+        if let Some(round) = active.as_mut() {
+            if round.outcome.is_none() {
+                if let Some(since) = round.blocked_since_ms.take() {
+                    round.blocked_ms += (now_ms() - since).max(0);
+                }
+                if !round.adapter_turn_ids.iter().any(|id| id == turn_id) {
+                    round.adapter_turn_ids.push(turn_id.to_string());
+                }
+            }
+        }
+    }
+
+    /// Marks the open round as waiting on a human. A no-op if it is already
+    /// marked — two permission requests in a row must not double-count the
+    /// gap between the first answer and the second question.
+    async fn round_blocked(&self) {
+        let mut active = self.active_round.lock().await;
+        if let Some(round) = active.as_mut() {
+            if round.outcome.is_none() && round.blocked_since_ms.is_none() {
+                round.blocked_since_ms = Some(now_ms());
+            }
+        }
+    }
+
+    /// Ends the open round, if there is one, returning it together with the
+    /// item ids it accumulated so the caller can append a `RoundRecord`
+    /// (`session/rounds.rs`). `None` when there was nothing open to settle —
+    /// this is also how a caller like the channel-closed fallback tells
+    /// "there was a dangling round to clean up" from "there was nothing to do".
+    async fn settle_round(&self, outcome: RoundOutcome) -> Option<(ActiveRound, Vec<String>)> {
+        let mut active = self.active_round.lock().await;
+        match active.as_mut() {
+            Some(round) if round.outcome.is_none() => {
+                if let Some(since) = round.blocked_since_ms.take() {
+                    round.blocked_ms += (now_ms() - since).max(0);
+                }
+                round.outcome = Some(outcome);
+                let settled = round.clone();
+                drop(active);
+                let item_ids = std::mem::take(&mut *self.round_items.lock().await);
+                Some((settled, item_ids))
+            }
+            _ => None,
         }
     }
 
@@ -904,6 +1118,7 @@ fn continuation_for(
 }
 
 async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &PermissionRequest) {
+    live.round_blocked().await;
     let agent = live.agent.lock().await.take();
     let persist = agent.as_ref().and_then(|agent| agent.persistence());
     {
@@ -952,7 +1167,16 @@ async fn pump_events(
     loop {
         let mut event = match receiver.recv().await {
             Ok(event) => event,
-            Err(broadcast::error::RecvError::Closed) => break,
+            Err(broadcast::error::RecvError::Closed) => {
+                // No `TurnFailed`, no `TurnCanceled` — the adapter's own sender
+                // just vanished (a crashed process is the ordinary cause). The
+                // round the proposal calls out this exact gap for (§3.2
+                // direction one, "adapter 事件通道关闭、子进程退出"): without
+                // this, it stays open forever and whatever it already
+                // produced never reaches disk.
+                finalize_after_channel_closed(&live, &store).await;
+                break;
+            }
             Err(broadcast::error::RecvError::Lagged(missed)) => {
                 tracing::warn!("dropped {missed} agent events: the pump fell behind");
                 continue;
@@ -1075,6 +1299,24 @@ async fn pump_events(
                 | SessionEvent::TurnFailed { .. }
                 | SessionEvent::TurnCanceled { .. }
         );
+        // `TurnCanceled` deliberately does not settle the round here: the one
+        // triggered by a permission request already `break`s above before
+        // reaching this line, and every other `TurnCanceled` is a plain
+        // interrupt, which leaves the round dangling on purpose until the
+        // next `send` decides whether to continue or supersede it (§3.2).
+        match &event {
+            SessionEvent::TurnCompleted { .. } => {
+                if let Some((round, item_ids)) = live.settle_round(RoundOutcome::Completed).await {
+                    persist_round(&live, &store, round, item_ids).await;
+                }
+            }
+            SessionEvent::TurnFailed { .. } => {
+                if let Some((round, item_ids)) = live.settle_round(RoundOutcome::Failed).await {
+                    persist_round(&live, &store, round, item_ids).await;
+                }
+            }
+            _ => {}
+        }
 
         live.publish(event).await;
         live.trim_replay(replay_window).await;
@@ -1150,6 +1392,8 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             if !turn_items.iter().any(|id| id == item.id()) {
                 turn_items.push(item.id().to_string());
             }
+            drop(turn_items);
+            live.record_round_item(item.id()).await;
         }
         SessionEvent::ItemDelta { item_id, delta, .. } => {
             let mut items = live.items.lock().await;
@@ -1244,6 +1488,63 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
         // is already updated by the time it is published. Listed anyway so
         // this match stays exhaustive if that ever changes.
         SessionEvent::TitleChanged { .. } => {}
+    }
+}
+
+/// Covers the one case `TurnCompleted`/`TurnFailed`/`TurnCanceled` do not:
+/// the adapter's event channel closing with no terminal event at all.
+///
+/// A no-op unless there was an open round — ordinary shutdown (`Live::
+/// shutdown`) aborts the pump task outright rather than letting `recv` see
+/// `Closed`, and a round that already settled has nothing left to clean up.
+async fn finalize_after_channel_closed(live: &Arc<Live>, store: &Store) {
+    let Some((round, item_ids)) = live.settle_round(RoundOutcome::Failed).await else {
+        return;
+    };
+    persist_round(live, store, round, item_ids).await;
+    // Whatever this turn had produced so far would otherwise never reach
+    // disk: `flush_turn` only ever ran from inside this same loop, on a
+    // terminal event that, this time, never arrived.
+    flush_turn(live, store).await;
+    let pending = !live.pending_permissions.lock().await.is_empty();
+    *live.status.lock().await = if pending {
+        SessionStatus::Waiting
+    } else {
+        SessionStatus::Failed
+    };
+}
+
+/// Appends a settled round to `<session>/session.rounds.jsonl`
+/// (`session/rounds.rs`, §8 step 2).
+///
+/// Failure is logged, not propagated: a missing ledger entry degrades a
+/// later cross-session query to "this round is invisible to it", not data
+/// loss — the round's own items already reached `session.jsonl` via
+/// `flush_turn`, this is only the referencing record.
+async fn persist_round(live: &Arc<Live>, store: &Store, round: ActiveRound, item_ids: Vec<String>) {
+    let Some(outcome) = round.outcome else {
+        // Should not happen: every caller only reaches here after setting an
+        // outcome. Guarded anyway rather than unwrapped, because a ledger
+        // write is not worth a panic over.
+        return;
+    };
+    let (workspace_id, session_id) = {
+        let meta = live.meta.lock().await;
+        (meta.workspace_id.clone(), meta.id.clone())
+    };
+    let record = RoundRecord {
+        schema_version: rounds::SCHEMA_VERSION,
+        round_id: round.round_id,
+        started_at_ms: round.started_at_ms,
+        ended_at_ms: now_ms(),
+        outcome,
+        adapter_turn_ids: round.adapter_turn_ids,
+        item_ids,
+        blocked_ms: round.blocked_ms,
+        synthesized: false,
+    };
+    if let Err(error) = store.append_round(&workspace_id, &session_id, &record) {
+        tracing::error!("could not persist a round ledger entry for {session_id}: {error}");
     }
 }
 
@@ -2067,5 +2368,777 @@ mod tests {
         assert_eq!(stats.fork_checkpoint.as_deref(), Some("agent-turn-7"));
         let size = serde_json::to_string(&on_disk).unwrap().len();
         assert!(size < 1_000, "the log kept the payload ({size} bytes)");
+    }
+
+    // -- ActiveRound: round vs. turn (docs/agent-analysis-substrate-proposal.md §3.2) --
+    //
+    // The pure decision logic (`begin_round`, `continue_round`, `settle_round`)
+    // is tested directly against a bare `Live`, the same way `apply` is above.
+    // A handful of tests then drive the whole thing through `SessionManager`
+    // with a scriptable fake in place of a real adapter — the registry only
+    // ever gets asked for a real process when `live.agent` is empty, so a
+    // fake dropped in ahead of time keeps `send` and `respond_permission`
+    // running their real logic without spawning anything.
+
+    #[tokio::test]
+    async fn a_round_opens_on_the_first_adapter_turn() {
+        let live = Arc::new(Live::new(meta()));
+        let superseded = live.begin_round(None, "t0", "u0").await;
+        assert!(superseded.is_none(), "nothing was open to cut short");
+
+        let round = live
+            .active_round
+            .lock()
+            .await
+            .clone()
+            .expect("a round was opened");
+        assert_eq!(round.adapter_turn_ids, vec!["t0".to_string()]);
+        assert!(round.outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_send_without_continues_round_supersedes_the_dangling_round_it_replaces() {
+        let live = Arc::new(Live::new(meta()));
+        live.begin_round(None, "t0", "u0").await;
+        let first_round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .round_id
+            .clone();
+
+        let (superseded, item_ids) = live
+            .begin_round(None, "t1", "u1")
+            .await
+            .expect("the dangling round was cut short");
+        assert_eq!(superseded.round_id, first_round_id);
+        assert_eq!(superseded.outcome, Some(RoundOutcome::Superseded));
+        assert_eq!(superseded.adapter_turn_ids, vec!["t0".to_string()]);
+        assert_eq!(
+            item_ids,
+            vec!["u0".to_string()],
+            "the superseded round keeps the item it had accumulated"
+        );
+
+        let current = live.active_round.lock().await.clone().unwrap();
+        assert_ne!(
+            current.round_id, first_round_id,
+            "a fresh round must replace the superseded one"
+        );
+        assert_eq!(current.adapter_turn_ids, vec!["t1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_send_with_a_matching_continues_round_folds_into_the_same_round() {
+        let live = Arc::new(Live::new(meta()));
+        live.begin_round(None, "t0", "u0").await;
+        let round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .round_id
+            .clone();
+
+        let superseded = live.begin_round(Some(&round_id), "t1", "u1").await;
+        assert!(
+            superseded.is_none(),
+            "a matching continuesRound must not cut the round short"
+        );
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_eq!(round.round_id, round_id, "the round id must not change");
+        assert_eq!(
+            round.adapter_turn_ids,
+            vec!["t0".to_string(), "t1".to_string()],
+            "the new adapter turn must fold into the same round"
+        );
+        assert_eq!(
+            *live.round_items.lock().await,
+            vec!["u0".to_string(), "u1".to_string()],
+            "both turns' user messages belong to the one round"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_continues_round_naming_an_unknown_round_starts_a_fresh_one() {
+        let live = Arc::new(Live::new(meta()));
+        live.begin_round(None, "t0", "u0").await;
+        let real_round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .round_id
+            .clone();
+
+        let (superseded, item_ids) = live
+            .begin_round(Some("r_does_not_exist"), "t1", "u1")
+            .await
+            .expect("the real dangling round is still cut short");
+        assert_eq!(superseded.round_id, real_round_id);
+        assert_eq!(item_ids, vec!["u0".to_string()]);
+
+        let current = live.active_round.lock().await.clone().unwrap();
+        assert_ne!(
+            current.round_id, real_round_id,
+            "an unrecognized continuesRound must not be trusted"
+        );
+        assert_eq!(current.adapter_turn_ids, vec!["t1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_settled_round_is_replaced_quietly_not_marked_superseded_again() {
+        let live = Arc::new(Live::new(meta()));
+        live.begin_round(None, "t0", "u0").await;
+        let round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .round_id
+            .clone();
+        assert!(live.settle_round(RoundOutcome::Completed).await.is_some());
+
+        // A stale continuesRound for a round that already finished on its own
+        // must not reopen it, and must not be reported as "cut short" —
+        // nothing was taken from it, it had already ended.
+        let superseded = live.begin_round(Some(&round_id), "t1", "u1").await;
+        assert!(superseded.is_none());
+
+        let current = live.active_round.lock().await.clone().unwrap();
+        assert_ne!(current.round_id, round_id);
+        assert!(current.outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn settle_round_is_idempotent() {
+        let live = Arc::new(Live::new(meta()));
+        live.begin_round(None, "t0", "u0").await;
+
+        let (_, item_ids) = live
+            .settle_round(RoundOutcome::Completed)
+            .await
+            .expect("the round was open");
+        assert_eq!(item_ids, vec!["u0".to_string()]);
+        assert!(
+            live.settle_round(RoundOutcome::Failed).await.is_none(),
+            "a round cannot be settled twice"
+        );
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_eq!(
+            round.outcome,
+            Some(RoundOutcome::Completed),
+            "the first outcome wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_time_is_folded_in_when_the_round_resumes_or_ends() {
+        let live = Arc::new(Live::new(meta()));
+        live.begin_round(None, "t0", "u0").await;
+        live.round_blocked().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        live.continue_round("t1").await;
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert!(round.blocked_since_ms.is_none(), "the pause is over");
+        assert!(
+            round.blocked_ms >= 15,
+            "the wait should be counted, got {}ms",
+            round.blocked_ms
+        );
+        assert_eq!(
+            round.adapter_turn_ids,
+            vec!["t0".to_string(), "t1".to_string()]
+        );
+
+        live.round_blocked().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        live.settle_round(RoundOutcome::Canceled).await;
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert!(
+            round.blocked_ms >= 30,
+            "a second pause must add to the running total, got {}ms",
+            round.blocked_ms
+        );
+    }
+
+    /// A fake `AgentSession` a test drives by hand: `send` mints an
+    /// incrementing turn id and returns immediately; the test pushes
+    /// whatever events that turn should produce onto the same channel the
+    /// running pump reads from — exactly what a real adapter does, minus the
+    /// process. The counter is shared (not per-instance) so a test that
+    /// re-attaches a fresh fake after a simulated restart still gets turn
+    /// ids that do not collide with the ones before it.
+    struct FakeSession {
+        events: broadcast::Sender<SessionEvent>,
+        next_turn: Arc<AtomicU64>,
+    }
+
+    impl FakeSession {
+        fn sharing(events: broadcast::Sender<SessionEvent>, next_turn: Arc<AtomicU64>) -> Self {
+            FakeSession { events, next_turn }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentSession for FakeSession {
+        fn events(&self) -> broadcast::Receiver<SessionEvent> {
+            self.events.subscribe()
+        }
+
+        async fn send(&self, _input: PromptInput) -> Result<String> {
+            let id = self.next_turn.fetch_add(1, Ordering::SeqCst);
+            Ok(format!("t{id}"))
+        }
+
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_model(&self, _model_id: &str) -> Result<()> {
+            anyhow::bail!("not used")
+        }
+
+        async fn set_mode(&self, _mode_id: &str) -> Result<()> {
+            anyhow::bail!("not used")
+        }
+
+        async fn respond_permission(
+            &self,
+            _request_id: &str,
+            _outcome: PermissionOutcome,
+        ) -> Result<()> {
+            anyhow::bail!("a stopped process is never answered in place")
+        }
+    }
+
+    /// Wires a session the way `ensure_started` would, but with a
+    /// `FakeSession` in place of a real adapter and its pump already
+    /// running — so `SessionManager::send` and `respond_permission` run
+    /// their real logic end to end, only the process at the bottom is fake.
+    async fn wired(
+        root: &std::path::Path,
+    ) -> (
+        SessionManager,
+        broadcast::Sender<SessionEvent>,
+        Arc<AtomicU64>,
+    ) {
+        let sessions = manager(root);
+        sessions.store.save_meta(&meta()).unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        let (events, _) = broadcast::channel(64);
+        let turn_ids = Arc::new(AtomicU64::new(0));
+        *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
+            events.clone(),
+            turn_ids.clone(),
+        )));
+        let pump = tokio::spawn(pump_events(
+            live.clone(),
+            events.subscribe(),
+            sessions.store.clone(),
+            64,
+        ));
+        *live.pump.lock().await = Some(pump);
+        (sessions, events, turn_ids)
+    }
+
+    #[tokio::test]
+    async fn a_round_completes_with_a_single_adapter_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let turn_id = sessions
+            .send("s1", "hello".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: turn_id.clone(),
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let live = sessions.live("s1").await.unwrap();
+        let round = live
+            .active_round
+            .lock()
+            .await
+            .clone()
+            .expect("a round was opened");
+        assert_eq!(round.adapter_turn_ids, vec![turn_id.clone()]);
+        assert_eq!(round.outcome, Some(RoundOutcome::Completed));
+
+        let on_disk = sessions.store.load_items("w1", "s1").unwrap();
+        let user_item_id = on_disk
+            .iter()
+            .find_map(|item| match item {
+                TimelineItem::UserMessage { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .expect("the prompt was written to disk");
+
+        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(rounds.len(), 1, "one settled round must be ledgered");
+        assert_eq!(rounds[0].round_id, round.round_id);
+        assert_eq!(rounds[0].outcome, RoundOutcome::Completed);
+        assert_eq!(rounds[0].adapter_turn_ids, vec![turn_id]);
+        assert!(rounds[0].item_ids.contains(&user_item_id));
+        assert!(!rounds[0].synthesized, "a live round is never synthesized");
+    }
+
+    /// The proposal's central claim: an approval mid-turn is not a new round,
+    /// even though it is two adapter turns, two `TurnSummary`s and — before
+    /// this — two independent stories about what happened.
+    #[tokio::test]
+    async fn approving_a_permission_stitches_the_same_round_across_two_adapter_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, turn_ids) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let first_turn = sessions
+            .send("s1", "do the thing".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: first_turn.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+
+        let request = interaction(PermissionRequestKind::Permission);
+        events
+            .send(SessionEvent::PermissionRequested {
+                request: request.clone(),
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let live = sessions.live("s1").await.unwrap();
+        let round_id_before = {
+            let round = live.active_round.lock().await;
+            let round = round.as_ref().expect("a round is open, just blocked");
+            assert_eq!(round.adapter_turn_ids, vec![first_turn.clone()]);
+            assert!(round.outcome.is_none(), "blocked is not settled");
+            round.round_id.clone()
+        };
+
+        // The real pump broke its loop for the interaction, same as
+        // `stop_agent_for_interaction` does against a real adapter. A fresh
+        // fake stands in for whatever `ensure_started_in_mode` would really
+        // start on approval, sharing the turn-id counter so the ids stay
+        // distinct across the "restart".
+        *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
+            events.clone(),
+            turn_ids.clone(),
+        )));
+        let pump = tokio::spawn(pump_events(
+            live.clone(),
+            events.subscribe(),
+            sessions.store.clone(),
+            64,
+        ));
+        *live.pump.lock().await = Some(pump);
+
+        sessions
+            .respond_permission(
+                "s1",
+                &request.id,
+                PermissionOutcome::Selected {
+                    option_id: "yes".into(),
+                },
+                &providers,
+            )
+            .await
+            .expect("an allow option resumes");
+
+        let second_turn = {
+            let round = live.active_round.lock().await;
+            let round = round.as_ref().unwrap();
+            assert_eq!(
+                round.round_id, round_id_before,
+                "an approval must not cut a new round"
+            );
+            assert_eq!(
+                round.adapter_turn_ids.len(),
+                2,
+                "the resumed turn must fold into the same round"
+            );
+            assert!(round.blocked_since_ms.is_none(), "resumed, so unblocked");
+            round.adapter_turn_ids[1].clone()
+        };
+        assert_ne!(second_turn, first_turn);
+
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: second_turn.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: second_turn,
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_eq!(round.round_id, round_id_before);
+        assert_eq!(round.outcome, Some(RoundOutcome::Completed));
+        assert!(
+            round.blocked_ms >= 0,
+            "the wait for the approval was tracked"
+        );
+
+        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(
+            rounds.len(),
+            1,
+            "two adapter turns stitched into one round must ledger as one record, not two"
+        );
+        assert_eq!(rounds[0].round_id, round_id_before);
+        assert_eq!(rounds[0].adapter_turn_ids.len(), 2);
+        assert_eq!(rounds[0].outcome, RoundOutcome::Completed);
+    }
+
+    #[tokio::test]
+    async fn denying_a_permission_settles_the_round_without_a_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let turn_id = sessions
+            .send("s1", "do the thing".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id,
+                started_at_ms: 1,
+            })
+            .unwrap();
+        let request = interaction(PermissionRequestKind::Permission);
+        events
+            .send(SessionEvent::PermissionRequested {
+                request: request.clone(),
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let live = sessions.live("s1").await.unwrap();
+        sessions
+            .respond_permission(
+                "s1",
+                &request.id,
+                PermissionOutcome::Selected {
+                    option_id: "no".into(),
+                },
+                &providers,
+            )
+            .await
+            .expect("a reject resolves without resuming");
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_eq!(
+            round.outcome,
+            Some(RoundOutcome::Canceled),
+            "no continuation means the round is done, not dangling"
+        );
+
+        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].outcome, RoundOutcome::Canceled);
+    }
+
+    /// The one case the daemon truly cannot decide on its own: the user
+    /// pressed stop, then said something else. `continuesRound` is the
+    /// client's explicit word for "same request".
+    #[tokio::test]
+    async fn an_interrupted_round_is_continued_when_the_next_send_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let first_turn = sessions
+            .send("s1", "count to 500".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: first_turn.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::TurnCanceled {
+                turn_id: first_turn.clone(),
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let live = sessions.live("s1").await.unwrap();
+        assert_eq!(
+            *live.status.lock().await,
+            genehub_proto::SessionStatus::Idle,
+            "interrupted, so usable again"
+        );
+        let dangling_round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .expect("the round from the interrupted turn is left dangling")
+            .round_id
+            .clone();
+
+        let second_turn = sessions
+            .send(
+                "s1",
+                "continue".into(),
+                vec![],
+                &providers,
+                Some(dangling_round_id.clone()),
+            )
+            .await
+            .expect("accepted");
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_eq!(
+            round.round_id, dangling_round_id,
+            "the same round continues"
+        );
+        assert_eq!(round.adapter_turn_ids, vec![first_turn, second_turn]);
+
+        assert!(
+            sessions.store.load_rounds("w1", "s1").unwrap().is_empty(),
+            "a round that is still open must not appear in the ledger yet"
+        );
+    }
+
+    /// Without that signal, the daemon must not guess: the dangling round is
+    /// cut loose and a new one starts, even though nothing else about this
+    /// message looks any different from a real continuation.
+    #[tokio::test]
+    async fn an_interrupted_round_is_superseded_by_a_plain_new_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let first_turn = sessions
+            .send("s1", "count to 500".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: first_turn.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::TurnCanceled {
+                turn_id: first_turn,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let live = sessions.live("s1").await.unwrap();
+        let dangling_round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .round_id
+            .clone();
+
+        let second_turn = sessions
+            .send("s1", "what's the weather".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_ne!(
+            round.round_id, dangling_round_id,
+            "no continuesRound means a fresh round, not a guess"
+        );
+        assert_eq!(round.adapter_turn_ids, vec![second_turn]);
+
+        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(
+            rounds.len(),
+            1,
+            "the superseded round must be ledgered even though it never got a terminal adapter event"
+        );
+        assert_eq!(rounds[0].round_id, dangling_round_id);
+        assert_eq!(rounds[0].outcome, RoundOutcome::Superseded);
+    }
+
+    /// The fallback `TurnCompleted`/`TurnFailed`/`TurnCanceled` do not cover:
+    /// the adapter's process disappears without saying anything at all. This
+    /// is also, on purpose, a round that produced exactly one item before
+    /// the crash — the "space round"-adjacent case §3.2 calls out as the one
+    /// most likely to be silently dropped.
+    #[tokio::test]
+    async fn a_channel_that_closes_mid_turn_settles_the_dangling_round_and_flushes_what_it_produced(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+        let live = sessions.live("s1").await.unwrap();
+
+        let turn_id = sessions
+            .send("s1", "hello".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::Item {
+                turn_id,
+                item: item("a", "partial answer"),
+            })
+            .unwrap();
+
+        // The adapter's sender vanishes without a terminal event: a crashed
+        // process, not a graceful stop. Both clones have to go — the test's
+        // and the fake session's — for the channel to actually close.
+        live.agent.lock().await.take();
+        drop(events);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let round = live
+            .active_round
+            .lock()
+            .await
+            .clone()
+            .expect("the round from `send` is still there");
+        assert_eq!(round.outcome, Some(RoundOutcome::Failed));
+        assert_eq!(
+            *live.status.lock().await,
+            genehub_proto::SessionStatus::Failed,
+            "a session must not stay stuck on Running with no process left"
+        );
+
+        let on_disk = sessions.store.load_items("w1", "s1").unwrap();
+        assert!(
+            on_disk.iter().any(|stored| stored.id() == "a"),
+            "the item produced before the crash must still reach disk"
+        );
+
+        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(
+            rounds.len(),
+            1,
+            "the empty-looking round must still be ledgered"
+        );
+        assert_eq!(rounds[0].outcome, RoundOutcome::Failed);
+        assert!(
+            rounds[0].item_ids.contains(&"a".to_string()),
+            "the round ledger must reference what the crash did manage to produce"
+        );
+    }
+
+    /// A session written before the round ledger existed gets one backfilled
+    /// on first open, and never again (§8 step 2's "旧会话按缺 blob 层降级为
+    /// 只读投影视图" analogue for the ledger: migrate once, then leave it be).
+    #[tokio::test]
+    async fn an_old_session_gets_its_round_ledger_backfilled_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        sessions
+            .store
+            .append_items(
+                "w1",
+                "s1",
+                &[
+                    TimelineItem::UserMessage {
+                        id: "u1".into(),
+                        text: "hi".into(),
+                        attachments: vec![],
+                    },
+                    TimelineItem::TurnSummary {
+                        id: "turn-summary-t1".into(),
+                        stats: TurnStats {
+                            turn_id: "t1".into(),
+                            outcome: TurnOutcome::Completed,
+                            started_at_ms: 1,
+                            finished_at_ms: 2,
+                            duration_ms: 1,
+                            usage: Usage::default(),
+                            tool_calls: 0,
+                            fork_checkpoint: None,
+                        },
+                    },
+                ],
+            )
+            .unwrap();
+        assert!(sessions.store.load_rounds("w1", "s1").unwrap().is_empty());
+
+        sessions.live("s1").await.unwrap();
+        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(
+            rounds.len(),
+            1,
+            "the historical turn is backfilled as one synthesized round"
+        );
+        assert!(rounds[0].synthesized);
+        assert_eq!(rounds[0].round_id, "legacy_r_t1");
+        assert_eq!(rounds[0].outcome, RoundOutcome::Completed);
+
+        // Append a real round directly, as if it had settled after the
+        // migration ran, then force a cold reload (as a daemon restart
+        // would) to prove the second `live()` call does not re-migrate and
+        // clobber it.
+        sessions
+            .store
+            .append_round(
+                "w1",
+                "s1",
+                &RoundRecord {
+                    schema_version: rounds::SCHEMA_VERSION,
+                    round_id: "r_after_migration".into(),
+                    started_at_ms: 10,
+                    ended_at_ms: 11,
+                    outcome: RoundOutcome::Completed,
+                    adapter_turn_ids: vec!["t2".into()],
+                    item_ids: vec![],
+                    blocked_ms: 0,
+                    synthesized: false,
+                },
+            )
+            .unwrap();
+        sessions.sessions.write().await.clear();
+        sessions.live("s1").await.unwrap();
+
+        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(
+            rounds.len(),
+            2,
+            "the round appended after migration must survive a second load untouched"
+        );
+        assert_eq!(rounds[0].round_id, "legacy_r_t1");
+        assert_eq!(rounds[1].round_id, "r_after_migration");
     }
 }
