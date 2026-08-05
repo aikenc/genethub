@@ -1723,6 +1723,27 @@ async fn a_completed_round_is_recorded_in_the_round_ledger_on_disk() {
         "the round must reference at least the user's message"
     );
 
+    // §3.2 direction three / §8 step 3: settling a round must close whatever
+    // trunk was still open, so a short round that never crossed a boundary
+    // still reports the one trunk it produced — not zero, and not the
+    // schema-migration default an old ledger line would show.
+    let trunks = rounds[0]["trunkSummaries"]
+        .as_array()
+        .expect("trunkSummaries is always an array, even for a single-trunk round");
+    assert_eq!(
+        trunks.len(),
+        1,
+        "one short reply with no interruption produces exactly one trunk"
+    );
+    assert_eq!(trunks[0]["index"], json!(0));
+    assert!(
+        !trunks[0]["overview"]
+            .as_str()
+            .expect("a trunk overview is always a string")
+            .is_empty(),
+        "a trunk that opened with a monologue must not report a blank overview"
+    );
+
     journey.finish().await;
 }
 

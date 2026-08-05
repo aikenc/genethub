@@ -527,6 +527,7 @@ mod tests {
             item_ids: vec!["u1".into()],
             blocked_ms: 0,
             synthesized: false,
+            trunk_summaries: vec![],
         }
     }
 
@@ -541,6 +542,47 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].round_id, "r1");
         assert_eq!(loaded[1].round_id, "r2");
+    }
+
+    #[test]
+    fn trunk_summaries_round_trip_through_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let mut with_trunks = round("r1");
+        with_trunks.trunk_summaries = vec![rounds::TrunkSummary {
+            index: 0,
+            first_item_id: "a1".into(),
+            item_count: 3,
+            overview: "reading the config first".into(),
+        }];
+        store.append_round("w1", "s1", &with_trunks).unwrap();
+
+        let loaded = store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(loaded[0].trunk_summaries, with_trunks.trunk_summaries);
+    }
+
+    #[test]
+    fn a_round_line_written_before_trunks_existed_still_loads_with_an_empty_trunk_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let path = dir.path().join("w1");
+        std::fs::create_dir_all(&path).unwrap();
+        // A hand-written line with no `trunkSummaries` key at all, as an
+        // on-disk ledger from before this field shipped would have.
+        std::fs::write(
+            path.join("s1.rounds.jsonl"),
+            "{\"schemaVersion\":1,\"roundId\":\"r1\",\"startedAtMs\":1,\"endedAtMs\":2,\
+             \"outcome\":\"completed\",\"adapterTurnIds\":[\"t1\"],\"itemIds\":[\"u1\"],\
+             \"blockedMs\":0}\n",
+        )
+        .unwrap();
+
+        let loaded = store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(
+            loaded[0].trunk_summaries.is_empty(),
+            "a pre-trunk record has nothing honest to backfill this field with"
+        );
     }
 
     #[test]

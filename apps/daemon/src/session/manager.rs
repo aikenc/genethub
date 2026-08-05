@@ -18,7 +18,7 @@ use genehub_proto::{
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use super::overview;
-use super::rounds::{self, RoundOutcome, RoundRecord};
+use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{now_ms, title_from, SessionMeta, Store};
 use crate::adapter::registry::Registry;
 use crate::adapter::{AgentSession, PromptInput, ProviderMap, SessionConfig};
@@ -84,6 +84,50 @@ struct ActiveRound {
     blocked_ms: i64,
     /// `None` while the round is still open (running or blocked on a human).
     outcome: Option<RoundOutcome>,
+    /// This round's still-open trunk — a bounded slice of its tool-call-
+    /// and-thinking stream (`docs/agent-analysis-substrate-proposal.md`
+    /// §3.2 direction three, §8 step 3). Exists because a round can run
+    /// long enough that "every item carries an overview" alone re-blows the
+    /// byte budget the round layer itself exists to avoid.
+    current_trunk: TrunkBuilder,
+    /// Trunks already closed, in order. Becomes `RoundRecord::trunk_summaries`
+    /// once the round settles (`close_current_trunk` folds in whatever was
+    /// still open, so nothing since the last boundary is lost).
+    closed_trunks: Vec<TrunkSummary>,
+}
+
+impl ActiveRound {
+    /// Feeds one item into this round's trunk pagination, if the item is one
+    /// of the three kinds trunks track (`TrunkItem`). A no-op for every
+    /// other `TimelineItem` variant — user messages, permission requests,
+    /// plans, turn summaries, … never affect trunk boundaries. Returns a
+    /// just-closed trunk unresolved: its overview needs a live look at the
+    /// item store, which only `Live` has (`resolve_monologue_text`).
+    fn record_trunk_item(&mut self, item: &TimelineItem) -> Option<rounds::ClosedTrunk> {
+        let trunk_item = match item {
+            TimelineItem::AssistantMessage { .. } => TrunkItem::Monologue,
+            TimelineItem::Reasoning { .. } => TrunkItem::Reasoning,
+            TimelineItem::ToolCall { name, .. } => TrunkItem::ToolCall(name.as_str()),
+            _ => return None,
+        };
+        self.current_trunk.push(item.id(), trunk_item)
+    }
+
+    /// Closes whatever trunk is still being built, if any, so a round that
+    /// settles mid-trunk still reports it — unresolved, same as
+    /// `record_trunk_item`. Idempotent: closing an already-empty builder
+    /// returns `None`.
+    fn close_current_trunk_pending(&mut self) -> Option<rounds::ClosedTrunk> {
+        self.current_trunk.close()
+    }
+
+    /// Resolves a closed trunk into its final `TrunkSummary` — assigning it
+    /// the next index — and appends it to this round's trunk list.
+    fn push_resolved_trunk(&mut self, closed: rounds::ClosedTrunk, monologue_text: Option<&str>) {
+        let index = self.closed_trunks.len() as u32;
+        self.closed_trunks
+            .push(closed.into_summary(index, monologue_text));
+    }
 }
 
 pub struct SessionManager {
@@ -950,15 +994,75 @@ impl Live {
     /// request", and its absence — or a mismatch — means cut a new round
     /// rather than guess a stitch that cannot be undone later (§3.2).
     ///
-    /// Adds an item id to the open round's ledger-bound set, if not already
-    /// present. Shared by `apply` (as items settle) and `begin_round` (for
-    /// the user message that starts every `session.send`, which is written
-    /// directly to disk before the agent runs and so never passes through
-    /// `apply`).
-    async fn record_round_item(&self, item_id: &str) {
+    /// Adds a user-message id to the open round's ledger-bound set, if not
+    /// already present. Used only by `begin_round`, for the message that
+    /// starts every `session.send` — it is written directly to disk before
+    /// the agent runs and so never passes through `apply`. A user message
+    /// never participates in trunk boundaries (§3.2 direction three), so
+    /// this never touches trunk bookkeeping.
+    async fn record_round_item_id(&self, item_id: &str) {
         let mut round_items = self.round_items.lock().await;
         if !round_items.iter().any(|id| id == item_id) {
             round_items.push(item_id.to_string());
+        }
+    }
+
+    /// Adds an item to the open round's ledger-bound set and feeds it into
+    /// the round's trunk pagination (`ActiveRound::record_trunk_item`, §3.2
+    /// direction three). Idempotent: an item id already recorded for this
+    /// round is not counted twice, even if the adapter re-sends a full
+    /// `Item` event for it — this is also what keeps trunk boundaries from
+    /// double-counting a re-sent item.
+    async fn record_round_item(&self, item: &TimelineItem) {
+        {
+            let mut round_items = self.round_items.lock().await;
+            if round_items.iter().any(|id| id == item.id()) {
+                return;
+            }
+            round_items.push(item.id().to_string());
+        }
+        let closed = {
+            let mut active = self.active_round.lock().await;
+            match active.as_mut() {
+                Some(round) if round.outcome.is_none() => round.record_trunk_item(item),
+                _ => None,
+            }
+        };
+        if let Some(closed) = closed {
+            self.finish_trunk(closed).await;
+        }
+    }
+
+    /// Looks up a monologue item's *current* text in the live item store —
+    /// not whatever it held the moment it first arrived, which for a
+    /// streamed `AssistantMessage` is typically still empty (deltas fill it
+    /// in afterward). By the time a trunk boundary is known — a later item
+    /// started, meaning the adapter moved on, or the round itself settled —
+    /// the monologue that opened the trunk has necessarily finished
+    /// streaming, so this always sees its final text.
+    async fn resolve_monologue_text(&self, item_id: Option<&str>) -> Option<String> {
+        let id = item_id?;
+        let items = self.items.lock().await;
+        items.iter().find_map(|candidate| match candidate {
+            TimelineItem::AssistantMessage {
+                id: candidate_id,
+                text,
+            } if candidate_id == id => Some(text.clone()),
+            _ => None,
+        })
+    }
+
+    /// Resolves a just-closed trunk's overview and appends it to the round's
+    /// trunk list — split from `record_round_item` so the `items` lock
+    /// (needed to resolve the overview) and the `active_round` lock (needed
+    /// to append it) are never held at the same time.
+    async fn finish_trunk(&self, closed: rounds::ClosedTrunk) {
+        let monologue_text = self
+            .resolve_monologue_text(closed.monologue_item_id.as_deref())
+            .await;
+        let mut active = self.active_round.lock().await;
+        if let Some(round) = active.as_mut() {
+            round.push_resolved_trunk(closed, monologue_text.as_deref());
         }
     }
 
@@ -980,11 +1084,11 @@ impl Live {
                     current.adapter_turn_ids.push(turn_id.to_string());
                 }
                 drop(active);
-                self.record_round_item(user_item_id).await;
+                self.record_round_item_id(user_item_id).await;
                 return None;
             }
         }
-        let superseded = match active.take() {
+        let mut superseded = match active.take() {
             Some(mut dangling) if dangling.outcome.is_none() => {
                 dangling.outcome = Some(RoundOutcome::Superseded);
                 Some(dangling)
@@ -998,10 +1102,23 @@ impl Live {
             blocked_since_ms: None,
             blocked_ms: 0,
             outcome: None,
+            current_trunk: TrunkBuilder::default(),
+            closed_trunks: Vec::new(),
         });
         drop(active);
+        // `dangling` is already detached from the shared state above, so
+        // resolving and appending its last trunk needs no `active_round`
+        // lock at all — only the `items` lock inside `resolve_monologue_text`.
+        if let Some(dangling) = superseded.as_mut() {
+            if let Some(closed) = dangling.close_current_trunk_pending() {
+                let monologue_text = self
+                    .resolve_monologue_text(closed.monologue_item_id.as_deref())
+                    .await;
+                dangling.push_resolved_trunk(closed, monologue_text.as_deref());
+            }
+        }
         let superseded_items = std::mem::take(&mut *self.round_items.lock().await);
-        self.record_round_item(user_item_id).await;
+        self.record_round_item_id(user_item_id).await;
         superseded.map(|round| (round, superseded_items))
     }
 
@@ -1041,20 +1158,24 @@ impl Live {
     /// this is also how a caller like the channel-closed fallback tells
     /// "there was a dangling round to clean up" from "there was nothing to do".
     async fn settle_round(&self, outcome: RoundOutcome) -> Option<(ActiveRound, Vec<String>)> {
-        let mut active = self.active_round.lock().await;
-        match active.as_mut() {
-            Some(round) if round.outcome.is_none() => {
-                if let Some(since) = round.blocked_since_ms.take() {
-                    round.blocked_ms += (now_ms() - since).max(0);
-                }
-                round.outcome = Some(outcome);
-                let settled = round.clone();
-                drop(active);
-                let item_ids = std::mem::take(&mut *self.round_items.lock().await);
-                Some((settled, item_ids))
+        let pending_trunk = {
+            let mut active = self.active_round.lock().await;
+            let round = active.as_mut()?;
+            if round.outcome.is_some() {
+                return None;
             }
-            _ => None,
+            if let Some(since) = round.blocked_since_ms.take() {
+                round.blocked_ms += (now_ms() - since).max(0);
+            }
+            round.outcome = Some(outcome);
+            round.close_current_trunk_pending()
+        };
+        if let Some(closed) = pending_trunk {
+            self.finish_trunk(closed).await;
         }
+        let settled = self.active_round.lock().await.clone()?;
+        let item_ids = std::mem::take(&mut *self.round_items.lock().await);
+        Some((settled, item_ids))
     }
 
     async fn shutdown(&self) {
@@ -1388,12 +1509,18 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
                 Some(existing) => *existing = item.clone(),
                 None => items.push(item.clone()),
             }
+            // Dropped explicitly, not just left to fall out of scope at the
+            // end of this match arm: `record_round_item` can re-lock
+            // `live.items` itself (`resolve_monologue_text`), and
+            // `tokio::sync::Mutex` is not reentrant — holding this guard
+            // across that call would deadlock the pump task.
+            drop(items);
             let mut turn_items = live.turn_items.lock().await;
             if !turn_items.iter().any(|id| id == item.id()) {
                 turn_items.push(item.id().to_string());
             }
             drop(turn_items);
-            live.record_round_item(item.id()).await;
+            live.record_round_item(item).await;
         }
         SessionEvent::ItemDelta { item_id, delta, .. } => {
             let mut items = live.items.lock().await;
@@ -1542,6 +1669,7 @@ async fn persist_round(live: &Arc<Live>, store: &Store, round: ActiveRound, item
         item_ids,
         blocked_ms: round.blocked_ms,
         synthesized: false,
+        trunk_summaries: round.closed_trunks,
     };
     if let Err(error) = store.append_round(&workspace_id, &session_id, &record) {
         tracing::error!("could not persist a round ledger entry for {session_id}: {error}");
@@ -2707,6 +2835,142 @@ mod tests {
         assert!(!rounds[0].synthesized, "a live round is never synthesized");
     }
 
+    fn tool_call(id: &str, name: &str) -> TimelineItem {
+        TimelineItem::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            status: ToolStatus::Ok,
+            detail: ToolCallDetail::Shell {
+                command: name.into(),
+                output: String::new(),
+                exit_code: Some(0),
+            },
+        }
+    }
+
+    /// End-to-end proof that trunk pagination (§3.2 direction three, §8 step
+    /// 3) actually reaches the ledger: a monologue that arrives after some
+    /// tool calls closes a trunk, and the round settling closes whatever
+    /// trunk was still open — nothing accumulated since the last boundary is
+    /// silently dropped.
+    #[tokio::test]
+    async fn a_monologue_boundary_mid_round_produces_two_ledgered_trunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let turn_id = sessions
+            .send("s1", "do a bunch of stuff".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        for event in [
+            SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: item("a1", "reading the config first"),
+            },
+            SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: tool_call("t1", "read_file"),
+            },
+            SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: tool_call("t2", "read_file"),
+            },
+            SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: item("a2", "now applying the change"),
+            },
+        ] {
+            events.send(event).unwrap();
+        }
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: turn_id.clone(),
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(rounds.len(), 1, "one settled round must be ledgered");
+        let trunks = &rounds[0].trunk_summaries;
+        assert_eq!(
+            trunks.len(),
+            2,
+            "the second monologue must close the first trunk and open a second"
+        );
+        assert_eq!(trunks[0].index, 0);
+        assert_eq!(trunks[0].first_item_id, "a1");
+        assert_eq!(
+            trunks[0].item_count, 2,
+            "the opening monologue is not counted"
+        );
+        assert_eq!(trunks[0].overview, "reading the config first");
+        assert_eq!(trunks[1].index, 1);
+        assert_eq!(trunks[1].first_item_id, "a2");
+        assert_eq!(
+            trunks[1].item_count, 0,
+            "settling the round must close the still-open second trunk, even with no work in it"
+        );
+        assert_eq!(trunks[1].overview, "now applying the change");
+    }
+
+    /// A round that never narrates still gets paginated: the 32-item cap is
+    /// what protects the byte budget when an agent (like `genet`, which the
+    /// proposal notes is prompted to "be concise") produces long runs of
+    /// tool calls with no monologue in between.
+    #[tokio::test]
+    async fn a_round_with_no_monologue_at_all_still_paginates_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let turn_id = sessions
+            .send("s1", "run a lot of tools".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        for i in 0..40u32 {
+            events
+                .send(SessionEvent::Item {
+                    turn_id: turn_id.clone(),
+                    item: tool_call(&format!("t{i}"), "grep"),
+                })
+                .unwrap();
+        }
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: turn_id.clone(),
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        let trunks = &rounds[0].trunk_summaries;
+        assert_eq!(
+            trunks.len(),
+            2,
+            "40 tool calls split into a full 32-item trunk and an 8-item tail"
+        );
+        assert_eq!(trunks[0].item_count, 32);
+        assert_eq!(trunks[0].overview, "运行了 32 次工具（grep）");
+        assert_eq!(trunks[1].item_count, 8);
+    }
+
     /// The proposal's central claim: an approval mid-turn is not a new round,
     /// even though it is two adapter turns, two `TurnSummary`s and — before
     /// this — two independent stories about what happened.
@@ -3126,6 +3390,7 @@ mod tests {
                     item_ids: vec![],
                     blocked_ms: 0,
                     synthesized: false,
+                    trunk_summaries: vec![],
                 },
             )
             .unwrap();
