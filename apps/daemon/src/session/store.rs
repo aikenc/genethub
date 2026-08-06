@@ -970,6 +970,83 @@ mod tests {
     }
 
     #[test]
+    fn schema_two_batches_upgrade_once_to_join_leading_reasoning_to_its_monologue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let root = dir.path().join("w1");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("s1.rounds.jsonl"),
+            "{\"schemaVersion\":2,\"roundId\":\"r1\",\"startedAtMs\":1,\"endedAtMs\":2,\
+             \"outcome\":\"completed\",\"adapterTurnIds\":[\"t1\"],\
+             \"itemIds\":[\"u1\",\"r1\",\"a1\",\"c1\",\"a2\",\"turn-summary-t1\"],\
+             \"blockedMs\":0,\"trunkSummaries\":[]}\n",
+        )
+        .unwrap();
+        let items = vec![
+            TimelineItem::UserMessage {
+                id: "u1".into(),
+                text: "do it".into(),
+                attachments: vec![],
+            },
+            TimelineItem::Reasoning {
+                id: "r1".into(),
+                text: "先判断入口".into(),
+            },
+            TimelineItem::AssistantMessage {
+                id: "a1".into(),
+                text: "开始核对网络边界".into(),
+            },
+            TimelineItem::ToolCall {
+                id: "c1".into(),
+                name: "read".into(),
+                status: ToolStatus::Ok,
+                detail: genehub_proto::ToolCallDetail::Read {
+                    path: "a.txt".into(),
+                    content: "source".into(),
+                    truncated: false,
+                },
+            },
+            TimelineItem::AssistantMessage {
+                id: "a2".into(),
+                text: "完成核对".into(),
+            },
+            TimelineItem::TurnSummary {
+                id: "turn-summary-t1".into(),
+                stats: genehub_proto::TurnStats {
+                    turn_id: "t1".into(),
+                    outcome: genehub_proto::TurnOutcome::Completed,
+                    started_at_ms: 1,
+                    finished_at_ms: 2,
+                    duration_ms: 1,
+                    usage: genehub_proto::Usage::default(),
+                    tool_calls: 1,
+                    fork_checkpoint: None,
+                },
+            },
+        ];
+
+        store.ensure_rounds_migrated("w1", "s1", &items).unwrap();
+        let upgraded = store.load_rounds("w1", "s1").unwrap();
+        assert_eq!(upgraded[0].schema_version, rounds::SCHEMA_VERSION);
+        assert_eq!(upgraded[0].trunk_summaries[0].batches.len(), 2);
+        assert_eq!(
+            upgraded[0].trunk_summaries[0].batches[0].first_item_id,
+            "r1"
+        );
+        assert_eq!(
+            upgraded[0].trunk_summaries[0].batches[0].text,
+            "开始核对网络边界"
+        );
+
+        store.ensure_rounds_migrated("w1", "s1", &[]).unwrap();
+        assert_eq!(
+            store.load_rounds("w1", "s1").unwrap()[0].trunk_summaries,
+            upgraded[0].trunk_summaries
+        );
+    }
+
+    #[test]
     fn blobs_are_content_addressed_batched_and_retrievable() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());

@@ -16,7 +16,7 @@ use super::overview;
 /// reader could misread rather than merely ignore. A reader that meets a
 /// version it does not know must fall back to a read-only, ledger-less view
 /// of the session rather than guess at the new fields' meaning.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,7 +169,10 @@ pub struct TrunkBuilder {
 impl TrunkBuilder {
     pub fn push(&mut self, item_id: &str, item: TrunkItem<'_>) -> Option<ClosedTrunk> {
         let mut closed_trunk = None;
-        if matches!(item, TrunkItem::Monologue) && self.current_batch.blob_count > 0 {
+        if matches!(item, TrunkItem::Monologue)
+            && self.current_batch.monologue_item_id.is_some()
+            && self.current_batch.blob_count > 0
+        {
             self.close_batch();
             if self.blob_count >= TRUNK_MAX_BLOBS {
                 closed_trunk = self.close_finished();
@@ -465,6 +468,31 @@ mod tests {
         assert_eq!(summary.batches[0].blob_count, 2);
         assert_eq!(summary.batches[0].text, "先读取配置。再检查环境");
         assert_eq!(summary.batches[1].text, "开始修改");
+    }
+
+    #[test]
+    fn leading_reasoning_joins_the_monologue_and_work_that_follow() {
+        let mut builder = TrunkBuilder::default();
+        builder.push("r1", TrunkItem::Reasoning);
+        builder.push("a1", TrunkItem::Monologue);
+        builder.push("t1", TrunkItem::ToolCall("read"));
+        builder.push("t2", TrunkItem::ToolCall("search"));
+        builder.push("a2", TrunkItem::Monologue);
+        let summary = builder.close().unwrap().into_summary(
+            0,
+            &texts(&[
+                ("r1", "先判断入口"),
+                ("a1", "开始核对网络边界"),
+                ("a2", "已经完成核对"),
+            ]),
+        );
+
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches[0].first_item_id, "r1");
+        assert_eq!(summary.batches[0].blob_count, 3);
+        assert_eq!(summary.batches[0].text, "开始核对网络边界");
+        assert_eq!(summary.batches[1].first_item_id, "a2");
+        assert_eq!(summary.batches[1].blob_count, 0);
     }
 
     #[test]

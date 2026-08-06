@@ -178,6 +178,130 @@ describe("what the user sees in a session", () => {
     expect(screen.getByText("正在加载…")).toBeInTheDocument();
   });
 
+  it("renders reasoning as text, tools as YAML, and edits as a diff", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    const batch = {
+      index: 0,
+      firstItemId: "think1",
+      blobCount: 3,
+      text: "检查网络边界",
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "think1",
+      blobCount: 3,
+      title: "检查网络边界。",
+      batches: [batch],
+    };
+    const reasoningHash = "aa".repeat(32);
+    const toolHash = "bb".repeat(32);
+    const editHash = "cc".repeat(32);
+    const expandedTrunk: RoundTrunk = {
+      summary,
+      batches: [
+        {
+          summary: batch,
+          monologue: "检查网络边界。",
+          blobs: [
+            {
+              itemId: "think1",
+              kind: "reasoning",
+              overview: "分析入口",
+              blob: { hash: reasoningHash, bytes: 64 },
+            },
+            {
+              itemId: "tool1",
+              kind: "toolCall",
+              overview: "执行测试",
+              blob: { hash: toolHash, bytes: 128 },
+            },
+            {
+              itemId: "edit1",
+              kind: "toolCall",
+              overview: "修改入口",
+              blob: { hash: editHash, bytes: 128 },
+            },
+          ],
+        },
+      ],
+    };
+    useWorkbench.setState({
+      rounds: [round],
+      roundLayers: {
+        r1: { round, trunks: [summary], expandedTrunk },
+      },
+      roundTrunks: { "r1:0": expandedTrunk },
+      blobs: {
+        [reasoningHash]: {
+          hash: reasoningHash,
+          value: { type: "reasoning", id: "think1", text: "逐项确认入口与信任边界。" },
+        },
+        [toolHash]: {
+          hash: toolHash,
+          value: {
+            type: "toolCall",
+            id: "tool1",
+            name: "shell",
+            status: "ok",
+            detail: { kind: "shell", command: "npm test", output: "all passed", exitCode: 0 },
+          },
+        },
+        [editHash]: {
+          hash: editHash,
+          value: {
+            type: "toolCall",
+            id: "edit1",
+            name: "edit",
+            status: "ok",
+            detail: {
+              kind: "edit",
+              path: "src/main.ts",
+              diff: "@@ -1 +1 @@\n-old\n+new",
+            },
+          },
+        },
+      },
+    });
+    const state = apply(emptyTimeline(), {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "检查项目", attachments: [] },
+    });
+
+    render(<TimelineView state={state} />);
+    await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
+    const rows = screen.getAllByTestId("blob-row");
+
+    await userEvent.click(within(rows[0]!).getByRole("button"));
+    expect(within(rows[0]!).getByTestId("reasoning-text")).toHaveTextContent(
+      "逐项确认入口与信任边界。",
+    );
+    expect(rows[0]!).not.toHaveTextContent('"type"');
+
+    await userEvent.click(within(rows[1]!).getByRole("button"));
+    expect(rows[1]!).toHaveTextContent("yaml");
+    expect(rows[1]!).toHaveTextContent("type: toolCall");
+    expect(rows[1]!).toHaveTextContent("command: npm test");
+    expect(rows[1]!).not.toHaveTextContent('"command"');
+
+    await userEvent.click(within(rows[2]!).getByRole("button"));
+    expect(within(rows[2]!).getByTestId("blob-diff")).toContainElement(
+      within(rows[2]!).getByText("-old"),
+    );
+    expect(within(rows[2]!).getByTestId("blob-diff")).toContainElement(
+      within(rows[2]!).getByText("+new"),
+    );
+    expect(rows[2]!).toHaveTextContent("src/main.ts");
+    expect(rows[2]!).not.toHaveTextContent("kind: edit");
+  });
+
   it("calls only the live tail progress and completed trunks process", () => {
     const round = {
       roundId: "r1",

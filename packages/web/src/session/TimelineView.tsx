@@ -7,6 +7,7 @@ import type {
   TurnStats,
 } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
+import { stringify as toYaml } from "yaml";
 
 import { Markdown } from "./Markdown";
 
@@ -445,7 +446,7 @@ function BlobRow({ blob }: { blob: BlobOverview }) {
   const loadBlob = useWorkbench((state) => state.loadBlob);
   const [open, setOpen] = useState(false);
   return (
-    <div className="rounded-md bg-bg">
+    <div className="rounded-md bg-bg" data-testid="blob-row">
       <button
         type="button"
         className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs"
@@ -462,10 +463,93 @@ function BlobRow({ blob }: { blob: BlobOverview }) {
         {blob.blob ? <span className="text-accent">{open ? "收起" : "详情"}</span> : null}
       </button>
       {open ? (
-        <pre className="max-h-96 overflow-auto whitespace-pre-wrap border-t border-line p-2 text-xs">
-          {payload ? JSON.stringify(payload.value, null, 2) : "正在加载…"}
-        </pre>
+        <div className="max-h-96 overflow-auto border-t border-line p-2 text-xs">
+          {payload ? <BlobPayloadView blob={blob} value={payload.value} /> : "正在加载…"}
+        </div>
       ) : null}
+    </div>
+  );
+}
+
+function BlobPayloadView({ blob, value }: { blob: BlobOverview; value: unknown }) {
+  if (blob.kind === "reasoning") {
+    const text = reasoningText(value);
+    return text ? (
+      <div className="whitespace-pre-wrap text-sm leading-relaxed" data-testid="reasoning-text">
+        {text}
+      </div>
+    ) : (
+      <Markdown text={yamlMarkdown(value)} />
+    );
+  }
+
+  const edit = editPayload(value);
+  if (edit) {
+    return (
+      <div className="space-y-2">
+        <p className="font-mono text-xs text-muted">{edit.path}</p>
+        <Diff text={edit.diff} />
+      </div>
+    );
+  }
+
+  return <Markdown text={yamlMarkdown(value)} />;
+}
+
+function reasoningText(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  const record = jsonObject(value);
+  return typeof record?.text === "string" ? record.text : undefined;
+}
+
+function editPayload(value: unknown): { path: string; diff: string } | undefined {
+  const item = jsonObject(value);
+  const detail = jsonObject(item?.detail);
+  if (detail?.kind !== "edit" || typeof detail.diff !== "string") return undefined;
+  return {
+    path: typeof detail.path === "string" ? detail.path : "",
+    diff: detail.diff,
+  };
+}
+
+function jsonObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function yamlMarkdown(value: unknown): string {
+  const yaml = toYaml(value, { lineWidth: 0 }).trimEnd();
+  const longestFence = Math.max(
+    0,
+    ...Array.from(yaml.matchAll(/`+/gu), (match) => match[0].length),
+  );
+  const fence = "`".repeat(Math.max(3, longestFence + 1));
+  return `${fence}yaml\n${yaml}\n${fence}`;
+}
+
+function Diff({ text }: { text: string }) {
+  return (
+    <div
+      className="whitespace-pre-wrap break-all font-mono text-xs leading-relaxed"
+      data-testid="blob-diff"
+    >
+      {text.split("\n").map((line, index) => (
+        <div
+          key={index}
+          className={
+            line.startsWith("+") && !line.startsWith("+++")
+              ? "text-ok"
+              : line.startsWith("-") && !line.startsWith("---")
+                ? "text-danger"
+                : line.startsWith("@@")
+                  ? "text-accent"
+                  : "text-muted"
+          }
+        >
+          {line || " "}
+        </div>
+      ))}
     </div>
   );
 }
