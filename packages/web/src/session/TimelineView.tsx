@@ -272,12 +272,21 @@ function contextualizeTurns(
     );
     if (startedRounds.length > 0) currentRound = startedRounds[startedRounds.length - 1];
     const roundFinal = currentRound ? finals.get(currentRound.roundId) : undefined;
+    // The turn summary and the round layer arrive over different paths. A fast
+    // completion can therefore leave this turn completed while the last round
+    // layer still says `running` (or its refresh can be lost during a reconnect).
+    // Never let that projection lag hide an answer we already have: the turn's
+    // own completed summary is authoritative for its final assistant message.
+    const completedTurnFinal =
+      currentRound && turn.stats?.outcome === "completed"
+        ? lastAssistantMessage(turn.items)
+        : undefined;
     return {
       turn,
       startedRounds,
       round: currentRound,
       finalAssistant:
-        roundFinal && itemIds.has(roundFinal.id) ? roundFinal : undefined,
+        roundFinal && itemIds.has(roundFinal.id) ? roundFinal : completedTurnFinal,
       roundFinalText: roundFinal?.text,
     };
   });
@@ -590,6 +599,16 @@ function finalAssistantMessage(
     }
   });
   return finalIndex > lastWorkIndex ? final : undefined;
+}
+
+function lastAssistantMessage(
+  items: TimelineItem[],
+): Extract<TimelineItem, { type: "assistantMessage" }> | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.type === "assistantMessage" && item.text.length > 0) return item;
+  }
+  return undefined;
 }
 
 function countTools(items: TimelineItem[]): number {

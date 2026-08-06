@@ -572,6 +572,74 @@ describe("what the user sees in a session", () => {
     expect(screen.getAllByText("最终结论：需要修复授权边界。")).toHaveLength(1);
   });
 
+  it("keeps a completed answer visible while its round projection still says running", () => {
+    const staleRound = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "给出结论", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "assistantMessage", id: "a1", text: "这是已经持久化的最终结论。" },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "turnSummary",
+        id: "turn-summary-t1",
+        stats: {
+          turnId: "t1",
+          outcome: "completed",
+          startedAtMs: 1,
+          finishedAtMs: 2,
+          durationMs: 1,
+          usage: {
+            inputTokens: 10,
+            outputTokens: 20,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+          toolCalls: 0,
+        },
+      },
+    });
+    state = showRounds(state, {
+      rounds: [staleRound],
+      roundLayers: {
+        r1: {
+          round: staleRound,
+          trunks: [
+            {
+              index: 0,
+              firstItemId: "a1",
+              blobCount: 0,
+              title: "仍在刷新",
+              batches: [],
+            },
+          ],
+        },
+      },
+    });
+
+    render(<TimelineView state={state} />);
+
+    expect(screen.getByTestId("assistant-message")).toHaveTextContent(
+      "这是已经持久化的最终结论。",
+    );
+    expect(screen.getByText(/20 输出 tokens/)).toBeInTheDocument();
+  });
+
   it("keeps a successful shell call compact until its details are requested", async () => {
     render(
       <ToolCallView
