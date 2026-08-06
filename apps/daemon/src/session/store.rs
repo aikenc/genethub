@@ -15,7 +15,6 @@
 //! session proportional to what was actually said rather than to the number of
 //! tokens streamed (`docs/daemon.md` §4).
 
-use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -130,16 +129,6 @@ struct BlobRecord {
     id: String,
     value: Value,
 }
-
-/// Content already written during this process's lifetime, so the same file
-/// read twice in one run is stored once.
-///
-/// Deliberately not persisted: rebuilding it on open would mean reading every
-/// blob id back, which is the O(N) open this layout exists to remove. Dedup is
-/// an optimisation, not a correctness property — a duplicate payload after a
-/// restart costs disk and nothing else, because each reference is complete on
-/// its own (`docs/session-storage.md` §3.3).
-pub type BlobDedup = HashMap<String, BlobRef>;
 
 #[derive(Clone)]
 pub struct Store {
@@ -546,13 +535,13 @@ impl Store {
     ///
     /// The returned `at` is what makes reads a seek instead of a scan; nothing
     /// else indexes blobs, so the row that keeps this reference is the index.
-    pub fn put_blob(
-        &self,
-        workspace_id: &str,
-        session_id: &str,
-        value: Value,
-        seen: &mut BlobDedup,
-    ) -> Result<BlobRef> {
+    ///
+    /// Content addressing here buys immutability and a stable name, not
+    /// deduplication: every payload embeds the id of the item it belongs to, so
+    /// two different items never hash alike and there is nothing to fold
+    /// together. An append that repeats content costs disk and nothing else,
+    /// because each reference is complete on its own.
+    pub fn put_blob(&self, workspace_id: &str, session_id: &str, value: Value) -> Result<BlobRef> {
         let encoded = serde_json::to_vec(&value)?;
         let digest = Sha256::digest(&encoded);
         let id: String = digest
@@ -562,10 +551,7 @@ impl Store {
             .chars()
             .take(BLOB_ID_CHARS)
             .collect();
-        if let Some(existing) = seen.get(&id) {
-            return Ok(existing.clone());
-        }
-        let bucket = &id[..2];
+        let bucket = id[..2].to_string();
         let dir = self.blob_dir(workspace_id, session_id);
         fs::create_dir_all(&dir)?;
         let path = dir.join(format!("b-{bucket}.jsonl"));
@@ -579,13 +565,11 @@ impl Store {
         file.write_all(&line)?;
         file.write_all(b"\n")?;
         file.flush()?;
-        let blob = BlobRef {
-            id: id.clone(),
+        Ok(BlobRef {
+            id,
             bytes: encoded.len() as u64,
             at: format!("{bucket}:{offset}:{}", line.len()),
-        };
-        seen.insert(id, blob.clone());
-        Ok(blob)
+        })
     }
 
     /// Resolves a reference: one seek, one bounded read, one parse.
@@ -698,7 +682,6 @@ impl Store {
         }
 
         let items = load_legacy_items(&legacy_timeline)?;
-        let mut seen = BlobDedup::new();
         let mut rows: Vec<ChatRow> = Vec::new();
         for legacy in rounds::migrate_legacy(&items) {
             let ord = legacy.record.ord;
@@ -717,7 +700,6 @@ impl Store {
                             workspace_id,
                             session_id,
                             serde_json::to_value(source)?,
-                            &mut seen,
                         )?);
                     }
                 }

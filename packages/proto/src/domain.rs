@@ -179,9 +179,12 @@ pub struct SessionSnapshot {
     pub rounds: Option<Vec<RoundSummary>>,
     /// The last round's recent trunk index and last trunk details, prefetched
     /// in the same response for the unread/mobile-first-screen path.
+    // Boxed, which the wire never sees: most snapshots carry no expanded round,
+    // and inline it would make every reply — and so every frame on the uplink —
+    // pay for the widest one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub expanded_round: Option<RoundLayer>,
+    #[ts(optional, type = "RoundLayer")]
+    pub expanded_round: Option<Box<RoundLayer>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -383,8 +383,9 @@ impl SessionManager {
         snapshot.rounds = Some(views.iter().map(round_summary).collect());
         if expand_last_round {
             if let Some(last) = views.last() {
-                snapshot.expanded_round =
-                    Some(self.build_round_layer(&live, last, None, 20, true).await?);
+                snapshot.expanded_round = Some(Box::new(
+                    self.build_round_layer(&live, last, None, 20, true).await?,
+                ));
             }
         }
         Ok(snapshot)
@@ -1683,22 +1684,17 @@ async fn pump_events(
     let blob_workspace_id = workspace_id.clone();
     let blob_session_id = session_id.clone();
     let blob_live = live.clone();
-    // Blocking, because it is doing file IO, and single-tasked, because that
-    // is what lets the dedup table be a plain map rather than shared state.
-    // The references it produces go back onto `Live` for the trunk writer to
-    // pick up; a `Flush` is awaited before any turn ends, so a work row is
-    // never written before its payload's address is known.
+    // Blocking, because it is doing file IO, and single-tasked, so appends to
+    // one bucket stay ordered and the offset each reference carries is the one
+    // the bytes actually landed at. The references it produces go back onto
+    // `Live` for the trunk writer to pick up; a `Flush` is awaited before any
+    // turn ends, so a work row is never written before its payload's address
+    // is known.
     let blob_writer = tokio::task::spawn_blocking(move || {
-        let mut seen = store::BlobDedup::new();
         while let Some(write) = blob_receiver.blocking_recv() {
             match write {
                 BlobWrite::Put { item_id, value } => {
-                    match blob_store.put_blob(
-                        &blob_workspace_id,
-                        &blob_session_id,
-                        value,
-                        &mut seen,
-                    ) {
+                    match blob_store.put_blob(&blob_workspace_id, &blob_session_id, value) {
                         Ok(blob) => {
                             blob_live.blob_refs.blocking_lock().insert(item_id, blob);
                         }
@@ -3331,6 +3327,25 @@ mod tests {
         (sessions, events, turn_ids)
     }
 
+    /// Waits for the event pump to reach a state, rather than guessing how
+    /// long it takes to get there.
+    ///
+    /// The pump is its own task, so a test that just sent an event has to wait
+    /// for it. A fixed sleep is a guess that holds when the test runs alone and
+    /// breaks when the whole suite competes for the machine — which is how this
+    /// helper came to exist. The ceiling is generous because it only has to
+    /// catch a pump that will never arrive, not a slow one.
+    async fn eventually(expected: &str, mut reached: impl AsyncFnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !reached().await {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the event pump never {expected}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     #[tokio::test]
     async fn a_round_completes_with_a_single_adapter_turn() {
         let dir = tempfile::tempdir().unwrap();
@@ -3354,9 +3369,16 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
         let live = sessions.live("s1").await.unwrap();
+        eventually("settled the round", async || {
+            live.active_round
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|round| round.outcome.is_some())
+        })
+        .await;
+
         let round = live
             .active_round
             .lock()
@@ -3688,9 +3710,12 @@ mod tests {
                 request: request.clone(),
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
         let live = sessions.live("s1").await.unwrap();
+        eventually("recorded the permission request", async || {
+            !live.pending_permissions.lock().await.is_empty()
+        })
+        .await;
+
         let round_id_before = {
             let round = live.active_round.lock().await;
             let round = round.as_ref().expect("a round is open, just blocked");
@@ -3758,7 +3783,14 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        eventually("settled the resumed round", async || {
+            live.active_round
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|round| round.outcome.is_some())
+        })
+        .await;
 
         let round = live.active_round.lock().await.clone().unwrap();
         assert_eq!(round.round_id, round_id_before);
@@ -3801,9 +3833,12 @@ mod tests {
                 request: request.clone(),
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
         let live = sessions.live("s1").await.unwrap();
+        eventually("recorded the permission request", async || {
+            !live.pending_permissions.lock().await.is_empty()
+        })
+        .await;
+
         sessions
             .respond_permission(
                 "s1",
@@ -3852,9 +3887,12 @@ mod tests {
                 turn_id: first_turn.clone(),
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
         let live = sessions.live("s1").await.unwrap();
+        eventually("released the interrupted turn", async || {
+            *live.status.lock().await == genehub_proto::SessionStatus::Idle
+        })
+        .await;
+
         assert_eq!(
             *live.status.lock().await,
             genehub_proto::SessionStatus::Idle,
@@ -3924,9 +3962,12 @@ mod tests {
                 turn_id: first_turn,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
         let live = sessions.live("s1").await.unwrap();
+        eventually("released the interrupted turn", async || {
+            *live.status.lock().await == genehub_proto::SessionStatus::Idle
+        })
+        .await;
+
         let dangling_round_id = live
             .active_round
             .lock()
@@ -3993,7 +4034,14 @@ mod tests {
         // and the fake session's — for the channel to actually close.
         live.agent.lock().await.take();
         drop(events);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        eventually("noticed the adapter was gone", async || {
+            live.active_round
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|round| round.outcome.is_some())
+        })
+        .await;
 
         let round = live
             .active_round
