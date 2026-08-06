@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Endpoint, Host, Target } from "../host";
 import { useWorkbench } from "../session/store";
 import { OpenProject } from "../workspace/OpenProject";
-import type { ExtraTab } from "./tabs";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 import { TargetSwitcher } from "./TargetSwitcher";
 
@@ -22,14 +21,13 @@ import { TargetSwitcher } from "./TargetSwitcher";
  * used to be a 16rem-tall strip that pushed the chat down, which gave the list
  * four visible rows and the chat the rest of a screen it no longer fitted.
  *
- * Settings lives at the bottom as chrome, not as a fifth "mode" competing with
- * the chat.
+ * Desktop workbench tools live in the right drawer, leaving this column for
+ * project and conversation navigation.
  */
 export function Sidebar({
   host,
   open,
   hidden = false,
-  extraTabs = [],
   endpoint = null,
   onPickTarget,
   onNavigate,
@@ -39,7 +37,6 @@ export function Sidebar({
   open: boolean;
   /** Someone on a desktop asking for the room back (the 视图 menu). */
   hidden?: boolean;
-  extraTabs?: ExtraTab[];
   /** Which machine everything below is coming from. */
   endpoint?: Endpoint | null;
   onPickTarget?(target: Target, endpoint: Endpoint): void;
@@ -56,7 +53,6 @@ export function Sidebar({
     newSession,
     renameSession,
     deleteSession,
-    openTab,
     connection,
     refreshSessions,
   } = useWorkbench();
@@ -282,32 +278,10 @@ export function Sidebar({
         </div>
 
         <div
-          className="hidden items-center gap-1 border-t border-line px-2 py-2 md:flex"
+          className="hidden items-center border-t border-line px-3 py-2 md:flex"
           style={{ paddingBottom: "max(0.5rem, env(safe-area-inset-bottom))" }}
         >
           <StatusDot connection={connection} />
-          <Entry label="文件" onClick={() => openTab("files")} onNavigate={onNavigate} />
-          <Entry label="终端" onClick={() => openTab("terminal")} onNavigate={onNavigate} />
-          <Entry label="设备" onClick={() => openTab("devices")} onNavigate={onNavigate} />
-          {extraTabs.map((tab) => (
-            <Entry
-              key={tab.id}
-              label={tab.label}
-              onClick={() => openTab(`extra:${tab.id}`, tab.label)}
-              onNavigate={onNavigate}
-            />
-          ))}
-          <button
-            type="button"
-            aria-label="设置"
-            className="ml-auto flex h-11 w-11 items-center justify-center rounded-lg text-base text-muted hover:bg-sidebar-hover hover:text-fg md:h-auto md:w-auto md:px-2 md:py-1 md:text-xs"
-            onClick={() => {
-              openTab("settings");
-              onNavigate();
-            }}
-          >
-            ⚙
-          </button>
         </div>
       </aside>
 
@@ -414,29 +388,6 @@ function recentTime(updatedAtMs: number): string {
 
 function sessionStatus(status: SessionSummary["status"]): string {
   return status === "running" ? "运行中" : status === "waiting" ? "等待中" : status === "failed" ? "失败" : "已完成";
-}
-
-function Entry({
-  label,
-  onClick,
-  onNavigate,
-}: {
-  label: string;
-  onClick(): void;
-  onNavigate(): void;
-}) {
-  return (
-    <button
-      type="button"
-      className="flex min-h-11 items-center rounded-lg px-3 text-sm text-muted hover:bg-sidebar-hover hover:text-fg md:min-h-0 md:rounded md:px-2 md:py-1 md:text-xs"
-      onClick={() => {
-        onClick();
-        onNavigate();
-      }}
-    >
-      {label}
-    </button>
-  );
 }
 
 /** What every list of conversations needs to be able to do to one. */

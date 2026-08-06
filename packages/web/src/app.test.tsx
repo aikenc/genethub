@@ -70,7 +70,7 @@ describe("the app as the browser loads it", () => {
     expect(
       screen.getAllByRole("button", { name: "新建会话" }),
     ).not.toHaveLength(0);
-    expect(screen.getByRole("button", { name: "Changes" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开右侧工作区工具" })).toBeInTheDocument();
 
     screen.getByRole("button", { name: "工作区工具" }).click();
     const tools = screen.getByRole("complementary", { name: "工作区工具" });
@@ -80,6 +80,14 @@ describe("the app as the browser loads it", () => {
     expect(
       within(tools).getByRole("button", { name: "反馈问题" }),
     ).toBeInTheDocument();
+
+    screen.getByRole("button", { name: "打开右侧工作区工具" }).click();
+    const desktopTools = screen.getByRole("complementary", { name: "右侧工作区工具" });
+    expect(within(desktopTools).getByRole("button", { name: "Changes" })).toBeInTheDocument();
+    expect(within(desktopTools).getByRole("button", { name: "文件" })).toBeInTheDocument();
+    expect(within(desktopTools).getByRole("button", { name: "设置" })).toBeInTheDocument();
+    within(desktopTools).getByRole("button", { name: "Changes" }).click();
+    expect(useWorkbench.getState().rightPanel).toBe("changes");
   });
 
   it("hands the empty case to whoever embedded it, when they have something to offer", async () => {
