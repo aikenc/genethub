@@ -14,7 +14,7 @@ use crate::devices::Devices;
 use crate::link::SharedLink;
 use crate::pty::{PtyMessage, Terminals};
 use crate::remote::SharedRemote;
-use crate::session::{SessionManager, Store};
+use crate::session::{SessionManager, Store, WorkspaceHomes};
 use crate::workspace::Workspaces;
 
 pub struct AppState {
@@ -109,11 +109,14 @@ impl AppState {
         let devices = Devices::load(paths.devices_file());
 
         let registry = Arc::new(Registry::new(&config.agents.custom));
-        let store = Store::new(paths.sessions_dir());
+        // Sessions are stored inside their workspace, so the store reaches disk
+        // only through what the workspace registry has published.
+        let homes = WorkspaceHomes::default();
+        let store = Store::new(homes.clone());
         let sessions = SessionManager::new(store, registry.clone(), config.replay_window);
 
         let config = Arc::new(RwLock::new(config));
-        let workspaces = Workspaces::new(config.clone(), paths.config_file());
+        let workspaces = Workspaces::new(config.clone(), paths.config_file(), homes);
         workspaces.load().await;
         if let Some(root) = paths.default_workspace.clone() {
             // A home directory that cannot be written to is unusual but not

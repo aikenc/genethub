@@ -399,6 +399,9 @@ fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Session(_) => "session",
         Reply::Sessions(_) => "sessions",
         Reply::Snapshot(_) => "session snapshot",
+        Reply::RoundLayer(_) => "round layer",
+        Reply::RoundTrunk(_) => "round trunk",
+        Reply::Blob(_) => "blob",
         Reply::Workspace(_) => "workspace",
         Reply::Workspaces(_) => "workspaces",
         Reply::Directory(_) => "directory",
@@ -607,6 +610,7 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
             archived: false,
+            unsupported: None,
         };
         assert_eq!(
             sessions(Reply::Sessions(vec![summary.clone()])).unwrap(),

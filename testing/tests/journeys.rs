@@ -1231,6 +1231,64 @@ async fn a_commands_output_stays_behind_the_access_layer() {
         other => panic!("unexpected {other:?}"),
     }
 
+    let snapshot = match journey
+        .client
+        .call(Request::Subscribe {
+            session_id: session.clone(),
+            since_seq: Some(0),
+            expand_last_round: true,
+        })
+        .await
+        .expect("layered session opens")
+    {
+        Reply::Subscribed {
+            snapshot,
+            replayed,
+            reset,
+        } => {
+            assert!(reset);
+            assert!(
+                replayed.is_empty(),
+                "historical tool output is not replayed beside the layered snapshot"
+            );
+            snapshot
+        }
+        other => panic!("unexpected {other:?}"),
+    };
+    assert!(snapshot.items.iter().all(|item| !matches!(
+        item,
+        TimelineItem::ToolCall { .. } | TimelineItem::Reasoning { .. }
+    )));
+    let expanded = snapshot
+        .expanded_round
+        .expect("the unread last round is prefetched");
+    let blob_ref = expanded
+        .expanded_trunk
+        .expect("the last trunk is prefetched")
+        .batches
+        .into_iter()
+        .flat_map(|batch| batch.blobs)
+        .find(|blob| blob.kind == genehub_proto::BlobKind::ToolCall)
+        .and_then(|blob| blob.blob)
+        .expect("the tool overview addresses its source blob");
+    let payload = match journey
+        .client
+        .call(Request::BlobGet {
+            session_id: session.clone(),
+            blob: blob_ref,
+        })
+        .await
+        .expect("source blob is fetched on demand")
+    {
+        Reply::Blob(payload) => payload,
+        other => panic!("unexpected {other:?}"),
+    };
+    let source_bytes = payload.value.to_string().len();
+    assert!(
+        source_bytes > 1_000,
+        "the on-demand blob retains substantially more than the overview ({source_bytes} bytes)"
+    );
+
     journey.finish().await;
 }
 
@@ -1259,10 +1317,14 @@ async fn reconnecting_replays_the_gap_without_losing_or_repeating_events() {
         .expect("second connection");
     reconnected.hello("journey-2").await.expect("handshake");
 
+    // Resuming from a real position, the way a client that saw the first
+    // event and then dropped does. `sinceSeq: 0` is the "I have nothing"
+    // signal a fresh open sends, and is answered with a snapshot instead.
     let (snapshot, replayed, reset) = match reconnected
         .call(Request::Subscribe {
             session_id: session.clone(),
-            since_seq: Some(0),
+            since_seq: Some(1),
+            expand_last_round: false,
         })
         .await
         .unwrap()
@@ -1318,6 +1380,7 @@ async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
         .call(Request::Subscribe {
             session_id: session,
             since_seq: Some(0),
+            expand_last_round: false,
         })
         .await
         .unwrap()
@@ -1404,6 +1467,7 @@ async fn history_survives_a_daemon_restart_and_the_conversation_continues() {
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
+            expand_last_round: false,
         })
         .await
         .expect("resubscribed");
@@ -1498,6 +1562,7 @@ async fn a_session_found_in_the_list_can_be_reopened_and_continued() {
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
+            expand_last_round: false,
         })
         .await
         .unwrap()
@@ -1598,6 +1663,236 @@ async fn interrupting_a_running_turn_ends_it_as_canceled() {
     journey.finish().await;
 }
 
+/// `continuesRound` travels the whole wire path — JSON, the router's
+/// destructure, `SessionManager::send` — even though no client can yet learn
+/// a real round id from the daemon (that lands with the round query API,
+/// `docs/agent-analysis-substrate-proposal.md` §8). An id naming nothing the
+/// daemon recognizes must be accepted exactly like no id at all, not
+/// rejected: "no such round" is a normal answer to "this is a new one",
+/// never a protocol error.
+#[tokio::test]
+async fn continues_round_is_accepted_over_the_wire_and_ignored_when_unrecognized() {
+    let journey = Journey::start().await.expect("journey starts");
+    if journey.mode.is_mock() {
+        journey.mock().reply(Turn::text("ok")).await;
+    }
+    let session = journey.session("genet").await.expect("session opens");
+
+    journey
+        .send_continuing(&session, "hello", Some("r_does_not_exist"))
+        .await
+        .expect("an unrecognized continuesRound must not be rejected");
+
+    let events = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(events.completed(), "saw {:?}", events.failure());
+
+    journey.finish().await;
+}
+
+/// After a stop, the session must keep working whether or not the client's
+/// next message claims to continue the interrupted round — the daemon
+/// decides what to do with the claim internally (fold in or supersede), but
+/// either way the user's next message must go through normally.
+#[tokio::test]
+async fn a_message_naming_continues_round_after_an_interrupt_still_runs_normally() {
+    let journey = Journey::start().await.expect("journey starts");
+    if journey.mode.is_mock() {
+        journey
+            .mock()
+            .reply_slowly(
+                Turn::text("This is a long answer that arrives one piece at a time."),
+                Duration::from_millis(400),
+            )
+            .await;
+    }
+    let session = journey.session("genet").await.expect("session opens");
+    journey
+        .send(
+            &session,
+            "Count from 1 to 500, one number per line, with a short comment on each.",
+        )
+        .await
+        .expect("accepted");
+    journey
+        .client
+        .wait_for_turn_to_start()
+        .await
+        .expect("the turn starts");
+    journey
+        .client
+        .call(Request::SessionInterrupt {
+            session_id: session.clone(),
+        })
+        .await
+        .expect("interrupt accepted");
+    let first = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(first.canceled(), "saw {:?}", first.last());
+
+    if journey.mode.is_mock() {
+        journey
+            .mock()
+            .reply(Turn::text("Picking up from there."))
+            .await;
+    }
+    // The client cannot yet learn the real round id from the daemon (§8), so
+    // this is necessarily a guess — and the daemon must treat an unrecognized
+    // one exactly like no signal at all, per §3.2, rather than erroring or
+    // wedging the session.
+    journey
+        .send_continuing(&session, "keep going", Some("r_whatever_the_ui_remembered"))
+        .await
+        .expect("accepted");
+    let second = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(second.completed(), "saw {:?}", second.failure());
+
+    journey.finish().await;
+}
+
+/// The round ledger (`docs/agent-analysis-substrate-proposal.md` §8 step 2)
+/// exercised through the real wire protocol end to end, not just the
+/// in-process unit tests in `apps/daemon/src/session/manager.rs`: a real
+/// daemon, a real workspace, a real (mock) turn, then the file it wrote.
+#[tokio::test]
+async fn a_completed_round_is_recorded_in_the_round_ledger_on_disk() {
+    let journey = Journey::start().await.expect("journey starts");
+    if journey.mode.is_mock() {
+        journey.mock().reply(Turn::text("ok")).await;
+    }
+    let session = journey.session("genet").await.expect("session opens");
+    assert!(
+        journey.round_records(&session).is_empty(),
+        "no request has been made yet"
+    );
+
+    journey.send(&session, "hello").await.expect("accepted");
+    let events = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(events.completed(), "saw {:?}", events.failure());
+
+    let rounds = journey.round_records(&session);
+    assert_eq!(
+        rounds.len(),
+        1,
+        "the completed round must be ledgered exactly once"
+    );
+    assert_eq!(rounds[0]["outcome"], json!("completed"));
+    assert_eq!(rounds[0]["synthesized"], json!(false));
+    assert!(!rounds[0]["adapterTurnIds"]
+        .as_array()
+        .expect("an array of turn ids")
+        .is_empty());
+    assert!(
+        rounds[0]["userItemId"].is_string(),
+        "the round must name the message that opened it"
+    );
+    assert_eq!(
+        rounds[0]["trunkCount"],
+        json!(1),
+        "the record counts trunks; the summaries themselves live in the round's own index"
+    );
+
+    // §3.2 direction three / §8 step 3: settling a round must close whatever
+    // trunk was still open, so a short round that never crossed a boundary
+    // still reports the one trunk it produced.
+    let trunks = journey.trunk_summaries(&session, 0);
+    assert_eq!(
+        trunks.len(),
+        1,
+        "one short reply with no interruption produces exactly one trunk"
+    );
+    assert_eq!(trunks[0]["index"], json!(0));
+    assert!(
+        !trunks[0]["title"]
+            .as_str()
+            .expect("a trunk title is always a string")
+            .is_empty(),
+        "a trunk that opened with a monologue must not report a blank title"
+    );
+    assert!(
+        !trunks[0]["batches"]
+            .as_array()
+            .expect("a trunk always carries its bounded batch index")
+            .is_empty(),
+        "a short trunk still has one visible batch"
+    );
+
+    journey.finish().await;
+}
+
+/// The other half of §3.2's four decision-table cases (the two auto-stitched
+/// ones are covered against a fake adapter in `manager.rs`; this is the one
+/// that needs a real turn boundary): an interrupt with no `continuesRound`
+/// on the next message must ledger the abandoned round as `superseded`,
+/// not silently drop it.
+#[tokio::test]
+async fn an_interrupted_round_left_dangling_is_ledgered_as_superseded_once_a_new_one_starts() {
+    let journey = Journey::start().await.expect("journey starts");
+    if journey.mode.is_mock() {
+        journey
+            .mock()
+            .reply_slowly(
+                Turn::text("A slow reply, so the interrupt lands mid-turn."),
+                Duration::from_millis(400),
+            )
+            .await;
+    }
+    let session = journey.session("genet").await.expect("session opens");
+    journey
+        .send(&session, "count to 500")
+        .await
+        .expect("accepted");
+    journey
+        .client
+        .wait_for_turn_to_start()
+        .await
+        .expect("the turn starts");
+    journey
+        .client
+        .call(Request::SessionInterrupt {
+            session_id: session.clone(),
+        })
+        .await
+        .expect("interrupt accepted");
+    let first = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(first.canceled(), "saw {:?}", first.last());
+    let dangling = journey.round_records(&session);
+    assert_eq!(
+        dangling.len(),
+        1,
+        "the round is on disk from the moment it opens"
+    );
+    assert_eq!(
+        dangling[0]["outcome"],
+        json!(null),
+        "a merely interrupted round is left dangling, with no outcome yet"
+    );
+
+    if journey.mode.is_mock() {
+        journey
+            .mock()
+            .reply(Turn::text("Unrelated new task."))
+            .await;
+    }
+    // No `continuesRound`: a plain new message, so the dangling round must be
+    // cut loose rather than guessed at (§3.2 direction zero).
+    journey
+        .send(&session, "something else entirely")
+        .await
+        .expect("accepted");
+    let second = journey.client.drain_turn().await.expect("the turn settles");
+    assert!(second.completed(), "saw {:?}", second.failure());
+
+    let rounds = journey.round_records(&session);
+    assert_eq!(
+        rounds.len(),
+        2,
+        "the superseded round and the completed one that replaced it both ledger"
+    );
+    assert_eq!(rounds[0]["outcome"], json!("superseded"));
+    assert_eq!(rounds[1]["outcome"], json!("completed"));
+
+    journey.finish().await;
+}
+
 /// Losing the connection while the agent is mid-answer.
 ///
 /// The existing replay cases all reconnect after the turn ended, which is the
@@ -1628,6 +1923,7 @@ async fn a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns() 
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
+            expand_last_round: false,
         })
         .await
         .expect("subscribed");
@@ -1656,6 +1952,7 @@ async fn a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns() 
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: Some(seen_up_to),
+            expand_last_round: false,
         })
         .await
         .unwrap()
@@ -1706,6 +2003,7 @@ async fn a_second_client_sees_the_same_session_as_the_first() {
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
+            expand_last_round: false,
         })
         .await
         .expect("subscribed");
@@ -1816,6 +2114,7 @@ async fn an_empty_prompt_is_refused_before_it_reaches_the_model() {
             session_id: session,
             text: "   ".into(),
             attachments: vec![],
+            continues_round: None,
         })
         .await;
     assert!(error.contains("BadRequest"), "got: {error}");

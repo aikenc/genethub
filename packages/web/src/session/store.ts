@@ -11,6 +11,8 @@ import type {
   LogTail,
   RemoteAccess,
   PermissionOutcome,
+  BlobRef,
+  SequencedEvent,
   SessionSnapshot,
   SessionSummary,
   Settings,
@@ -215,6 +217,10 @@ interface WorkbenchState {
    */
   newSession(workspaceId?: string | null, agentId?: string | null): void;
   selectSession(sessionId: string): Promise<void>;
+  loadRound(roundId: string): Promise<void>;
+  loadOlderTrunks(roundId: string): Promise<void>;
+  loadTrunk(roundId: string, trunkIndex: number): Promise<void>;
+  loadBlob(blob: BlobRef): Promise<void>;
   /** Gives a session the name the user typed, on the machine and here. */
   renameSession(sessionId: string, title: string): Promise<void>;
   /** Erases a session. There is no undo; the caller does the asking. */
@@ -244,6 +250,142 @@ interface WorkbenchState {
   revokeDevice(deviceId: string): Promise<void>;
   attachRelay(relayUrl: string, joinToken: string): Promise<void>;
   detachRelay(): Promise<void>;
+}
+
+/**
+ * One session's view, whether it is on screen or warm in a background tab.
+ *
+ * Round and blob state lives inside `TimelineState` rather than beside it, so
+ * a warm tab keeps its expanded rounds along with its messages. Held apart,
+ * switching back to a warm tab would show the previous session's rounds until
+ * a refresh that a warm tab deliberately never makes.
+ */
+function timelineOf(state: WorkbenchState, sessionId: string): TimelineState {
+  return state.sessionTimelines[sessionId] ?? emptyTimeline();
+}
+
+function patchTimeline(
+  sessionId: string,
+  set: (updater: (state: WorkbenchState) => Partial<WorkbenchState>) => void,
+  patch: (timeline: TimelineState) => Partial<TimelineState>,
+): void {
+  set((state) => {
+    const current = timelineOf(state, sessionId);
+    const timeline = { ...current, ...patch(current) };
+    return {
+      sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
+      ...(state.activeSessionId === sessionId ? { timeline } : {}),
+    };
+  });
+}
+
+/**
+ * Whether an event can have changed how the daemon grouped work into trunks.
+ *
+ * That grouping is the daemon's alone, so it cannot be derived from the event.
+ * But most events cannot have moved it, and asking after every one would put a
+ * request behind every token.
+ */
+function changesTheRoundLayer(event: SequencedEvent): boolean {
+  switch (event.event.type) {
+    case "turnCompleted":
+    case "turnFailed":
+    case "turnCanceled":
+      return true;
+    case "item":
+      return (
+        event.event.item.type === "userMessage" ||
+        event.event.item.type === "assistantMessage" ||
+        event.event.item.type === "reasoning" ||
+        event.event.item.type === "toolCall"
+      );
+    default:
+      return false;
+  }
+}
+
+function shouldExpandLastRound(summary: SessionSummary | undefined): boolean {
+  if (!summary || summary.status === "running" || summary.status === "waiting") return true;
+  try {
+    const readAt = Number(localStorage.getItem(`genehub:session-read:${summary.id}`) ?? "0");
+    return !Number.isFinite(readAt) || readAt < summary.updatedAtMs;
+  } catch {
+    return true;
+  }
+}
+
+function markSessionRead(summary: SessionSummary): void {
+  try {
+    localStorage.setItem(`genehub:session-read:${summary.id}`, String(summary.updatedAtMs));
+  } catch {
+    // Storage can be disabled; the safe fallback is to prefetch next time.
+  }
+}
+
+/** The reconnect sentence this store put on screen, while it is still true. */
+let reconnectNotice: string | null = null;
+
+let roundReads: Promise<unknown> = Promise.resolve();
+
+/**
+ * Runs round-layer reads one after another.
+ *
+ * Opening a session mounts one progress panel per round, and each asks for the
+ * layer it does not have — so a long conversation fired a request per round in
+ * a single tick. That buys nothing: a daemon answers one request per connection
+ * at a time, so the replies arrive in the same order either way. What it costs
+ * is the inbound queue on the far side, which is short by design and takes the
+ * whole connection down with it when it fills.
+ */
+function oneAtATime<T>(work: () => Promise<T>): Promise<T> {
+  const next = roundReads.then(work, work);
+  roundReads = next.catch(() => undefined);
+  return next;
+}
+
+let roundRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let roundRefreshInFlight: Promise<void> | null = null;
+let roundRefreshAgain = false;
+
+async function refreshRound(get: () => WorkbenchState): Promise<void> {
+  await get().loadRound("latest");
+  const round = Object.values(get().timeline.roundLayers)
+    .reverse()
+    .find((layer) => layer.round.outcome === "running")?.round;
+  if (!round) return;
+  const last = get().timeline.roundLayers[round.roundId]?.trunks.at(-1);
+  if (last) await get().loadTrunk(round.roundId, last.index);
+}
+
+/**
+ * Asks the daemon for the round layer again, at most one round trip at a time.
+ *
+ * The timer alone was not enough. A daemon serves one request per connection at
+ * a time, so under a fast agent each 250ms window started another two requests
+ * on top of ones still unanswered, and the queue on the far side reached the
+ * depth at which it drops the connection — the very moment the person most
+ * wants to be watching. Only the fact that another refresh is owed is kept, not
+ * how many: the layer is a current value, and one later read tells us all that
+ * any number of skipped reads would have.
+ */
+function scheduleRoundRefresh(get: () => WorkbenchState): void {
+  if (roundRefreshInFlight) {
+    roundRefreshAgain = true;
+    return;
+  }
+  if (roundRefreshTimer) clearTimeout(roundRefreshTimer);
+  roundRefreshTimer = setTimeout(() => {
+    roundRefreshTimer = null;
+    const refresh = refreshRound(get)
+      .catch(() => undefined)
+      .finally(() => {
+        roundRefreshInFlight = null;
+        if (!roundRefreshAgain) return;
+        roundRefreshAgain = false;
+        scheduleRoundRefresh(get);
+      });
+    roundRefreshInFlight = refresh;
+  }, 250);
 }
 
 export const useWorkbench = create<WorkbenchState>((set, get) => ({
@@ -287,6 +429,25 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       // device, protocol mismatch — and none of those are fixed by waiting. Say
       // it, instead of leaving a spinner and a guess about ports.
       if (connection === "closed" && client.failure) set({ notice: client.failure.message });
+      // A reconnect on its own is routine and worth no words. One the far side
+      // explained is not: that sentence is the only account anyone will ever
+      // get of why the work in flight was lost.
+      if (connection === "reconnecting") {
+        const closed = client.lastCloseReason;
+        if (closed?.reason) {
+          reconnectNotice = `连接被断开（${closed.code ?? "?"} ${closed.reason}），正在重连`;
+          set({ notice: reconnectNotice });
+        }
+      }
+      // Once the socket is back, a banner still saying "正在重连" is no longer
+      // a report of anything — it is the reason someone writes in to say the
+      // app is stuck reconnecting when it reconnected a minute ago. Only this
+      // line's own sentence is withdrawn; anything said since stands.
+      if (connection === "ready" && reconnectNotice) {
+        const stale = reconnectNotice;
+        reconnectNotice = null;
+        set((state) => (state.notice === stale ? { notice: null } : {}));
+      }
     });
     client.onNotice((_level, message) => set({ notice: message }));
     client.onUpdateDownload((download) => set({ download }));
@@ -456,8 +617,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // it is a synchronous state change rather than a network round trip.
     if (warm) return;
 
-    const { snapshot, replayed } = await client.subscribe(sessionId, {
-      onEvent: (event) => {
+    const { snapshot, replayed } = await client.subscribe(
+      sessionId,
+      {
+        onEvent: (event) => {
         if (event.event.type === "titleChanged") {
           applyTitle(sessionId, event.event.title, set);
         }
@@ -472,8 +635,14 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
             ...(state.activeSessionId === sessionId ? { timeline } : {}),
           };
         });
-      },
-      onResync: (resnapshot, events, reset) => {
+          // The round layer is not derivable from the event stream: only the
+          // daemon knows how work was grouped into trunks. Refresh it for the
+          // session on screen, which is the only one rendering rounds.
+          if (get().activeSessionId === sessionId && changesTheRoundLayer(event)) {
+            scheduleRoundRefresh(get);
+          }
+        },
+        onResync: (resnapshot, events, reset) => {
         const base = reset
           ? fromSnapshot(resnapshot as SessionSnapshot)
           : get().sessionTimelines[sessionId] ?? emptyTimeline();
@@ -486,13 +655,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
           ...(state.activeSessionId === sessionId ? { timeline } : {}),
         }));
+        },
       },
-    });
+      { expandLastRound: shouldExpandLastRound(summary) },
+    );
 
-    const base = fromSnapshot(snapshot as SessionSnapshot);
+    const typedSnapshot = snapshot as SessionSnapshot;
+    const base = fromSnapshot(typedSnapshot);
     // A slower subscription must not repaint whichever session the user opened
     // next. This is easy to hit when switching pages over a relay: both replies
     // are valid, but only the currently selected session owns the timeline.
+    markSessionRead(typedSnapshot.summary);
     const timeline = replayed.reduce(applySequenced, base);
     set((state) => ({
       subscribedSessionIds: state.subscribedSessionIds.includes(sessionId)
@@ -500,6 +673,84 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         : [...state.subscribedSessionIds, sessionId],
       sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
       ...(state.activeSessionId === sessionId ? { timeline } : {}),
+    }));
+  },
+
+  async loadRound(roundId) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    return oneAtATime(async () => {
+      const reply = await require_(get().client).call({
+        type: "round.trunk.list",
+        payload: { sessionId, roundId, cursor: null, limit: 20 },
+      });
+      if (reply?.type !== "roundLayer") return;
+      const layer = reply.data;
+      patchTimeline(sessionId, set, (timeline) => ({
+        rounds: [
+          ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),
+          layer.round,
+        ],
+        roundLayers: { ...timeline.roundLayers, [layer.round.roundId]: layer },
+      }));
+    });
+  },
+
+  async loadOlderTrunks(roundId) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const cursor = timelineOf(get(), sessionId).roundLayers[roundId]?.nextCursor;
+    if (!cursor) return;
+    const reply = await require_(get().client).call({
+      type: "round.trunk.list",
+      payload: { sessionId, roundId, cursor, limit: 20 },
+    });
+    if (reply?.type !== "roundLayer") return;
+    const older = reply.data;
+    patchTimeline(sessionId, set, (timeline) => {
+      const existing = timeline.roundLayers[roundId];
+      if (!existing) return {};
+      return {
+        roundLayers: {
+          ...timeline.roundLayers,
+          [roundId]: {
+            ...existing,
+            trunks: [...older.trunks, ...existing.trunks],
+            nextCursor: older.nextCursor,
+          },
+        },
+      };
+    });
+  },
+
+  async loadTrunk(roundId, trunkIndex) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const reply = await require_(get().client).call({
+      type: "round.trunk.get",
+      payload: { sessionId, roundId, trunkIndex },
+    });
+    if (reply?.type !== "roundTrunk") return;
+    const trunk = reply.data;
+    patchTimeline(sessionId, set, (timeline) => ({
+      roundTrunks: { ...timeline.roundTrunks, [`${roundId}:${trunkIndex}`]: trunk },
+    }));
+  },
+
+  async loadBlob(blob) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    if (timelineOf(get(), sessionId).blobs[blob.id]) return;
+    // The whole reference goes back, not just the id: the locator inside it is
+    // what lets the daemon seek straight to the payload.
+    const reply = await require_(get().client).call({
+      type: "blob.get",
+      payload: { sessionId, blob },
+    });
+    if (reply?.type !== "blob") return;
+    const payload = reply.data;
+    patchTimeline(sessionId, set, (timeline) => ({
+      blobs: { ...timeline.blobs, [blob.id]: payload },
     }));
   },
 
@@ -610,7 +861,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     await asked(set, () =>
       require_(get().client).call({
         type: "session.send",
-        payload: { sessionId, text, attachments },
+        // Continuing a round after an interrupt is not wired into the UI
+        // yet — every message from here is a fresh round until it is
+        // (docs/agent-analysis-substrate-proposal.md §3.2).
+        payload: { sessionId, text, attachments, continuesRound: null },
       }),
     );
   },

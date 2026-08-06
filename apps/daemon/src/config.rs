@@ -71,10 +71,6 @@ impl Paths {
         self.root.join("devices.json")
     }
 
-    pub fn sessions_dir(&self) -> PathBuf {
-        self.root.join("sessions")
-    }
-
     /// One directory for everything anyone would ask for when something is
     /// wrong: the daemon's log, and whatever the desktop shell writes.
     ///
@@ -106,11 +102,8 @@ impl Paths {
         // a first-start window in which another local account can traverse the
         // newly created directories.
         restrict_dir_to_owner(&self.root)?;
-        ensure_real_directory(&self.sessions_dir())?;
-        restrict_dir_to_owner(&self.sessions_dir())?;
         ensure_real_directory(&self.logs_dir())?;
         restrict_dir_to_owner(&self.logs_dir())?;
-        restrict_existing_sensitive_tree(&self.sessions_dir())?;
         restrict_existing_sensitive_tree(&self.logs_dir())?;
         // Protect existing sensitive children too. Tightening a Windows parent
         // DACL does not retroactively rewrite ACLs inherited in older releases.
@@ -599,14 +592,14 @@ pub fn restrict_to_owner(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn restrict_dir_to_owner(path: &Path) -> Result<()> {
+pub(crate) fn restrict_dir_to_owner(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
 #[cfg(windows)]
-fn restrict_dir_to_owner(path: &Path) -> Result<()> {
+pub(crate) fn restrict_dir_to_owner(path: &Path) -> Result<()> {
     windows_acl::restrict_to_current_user(path, true)
 }
 
@@ -657,7 +650,7 @@ pub fn restrict_to_owner(_path: &Path) -> Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn restrict_dir_to_owner(_path: &Path) -> Result<()> {
+pub(crate) fn restrict_dir_to_owner(_path: &Path) -> Result<()> {
     anyhow::bail!("owner-only directory permissions are unsupported on this platform")
 }
 
@@ -1001,10 +994,10 @@ mod tests {
             0o755
         );
 
-        let root_with_linked_sessions = outer.path().join("data-with-linked-sessions");
-        fs::create_dir(&root_with_linked_sessions).unwrap();
-        symlink(&victim_dir, root_with_linked_sessions.join("sessions")).unwrap();
-        assert!(Paths::new(&root_with_linked_sessions).ensure().is_err());
+        let root_with_linked_logs = outer.path().join("data-with-linked-logs");
+        fs::create_dir(&root_with_linked_logs).unwrap();
+        symlink(&victim_dir, root_with_linked_logs.join("logs")).unwrap();
+        assert!(Paths::new(&root_with_linked_logs).ensure().is_err());
         assert_eq!(
             victim_dir.metadata().unwrap().permissions().mode() & 0o777,
             0o755
@@ -1062,22 +1055,20 @@ mod tests {
     fn windows_data_root_and_secret_files_have_protected_owner_only_dacls() {
         let parent = tempfile::tempdir().unwrap();
         let paths = Paths::new(parent.path().join("data"));
-        let nested = paths.sessions_dir().join("workspace");
-        let old_session = nested.join("old.jsonl");
+        let nested = paths.logs_dir().join("archive");
+        let old_rotation = nested.join("daemon.log.1");
         let old_log = paths.logs_dir().join("old.log");
         fs::create_dir_all(&nested).unwrap();
-        fs::create_dir_all(paths.logs_dir()).unwrap();
-        fs::write(&old_session, b"legacy session").unwrap();
+        fs::write(&old_rotation, b"legacy log").unwrap();
         fs::write(&old_log, b"legacy log").unwrap();
         windows_acl::make_unprotected_for_test(&nested).unwrap();
-        windows_acl::make_unprotected_for_test(&old_session).unwrap();
+        windows_acl::make_unprotected_for_test(&old_rotation).unwrap();
         windows_acl::make_unprotected_for_test(&old_log).unwrap();
         paths.ensure().unwrap();
         windows_acl::verify_owner_only(&paths.root, true).unwrap();
-        windows_acl::verify_owner_only(&paths.sessions_dir(), true).unwrap();
         windows_acl::verify_owner_only(&paths.logs_dir(), true).unwrap();
         windows_acl::verify_owner_only(&nested, true).unwrap();
-        windows_acl::verify_owner_only(&old_session, false).unwrap();
+        windows_acl::verify_owner_only(&old_rotation, false).unwrap();
         windows_acl::verify_owner_only(&old_log, false).unwrap();
 
         let mut config = Config::default();
@@ -1169,7 +1160,7 @@ mod tests {
         let paths = Paths::new(&root);
         paths.ensure().unwrap();
 
-        for path in [&root, &paths.sessions_dir(), &paths.logs_dir()] {
+        for path in [&root, &paths.logs_dir()] {
             assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o700);
         }
     }

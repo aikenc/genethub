@@ -129,15 +129,49 @@ export class ProtocolError_ extends Error {
   }
 }
 
+/** What a WebSocket said on its way out, when it said anything. */
+export interface CloseReason {
+  code?: number;
+  reason?: string;
+}
+
+/**
+ * Renders a close for a person: `1013 too slow` when both halves are there,
+ * either half alone otherwise, and nothing at all when the socket simply
+ * vanished — which is itself the answer, and better than inventing one.
+ */
+/** The close event as the DOM delivers it, without trusting its shape. */
+function asCloseReason(event: unknown): CloseReason | undefined {
+  if (typeof event !== "object" || event === null) return undefined;
+  const { code, reason } = event as { code?: unknown; reason?: unknown };
+  return {
+    ...(typeof code === "number" ? { code } : {}),
+    ...(typeof reason === "string" ? { reason: reason.slice(0, 200) } : {}),
+  };
+}
+
+function describeClose(close?: CloseReason): string {
+  const code = typeof close?.code === "number" ? String(close.code) : "";
+  const reason = close?.reason?.trim() ?? "";
+  const detail = [code, reason].filter(Boolean).join(" ");
+  return detail ? `（${detail}）` : "";
+}
+
 /**
  * The request reached a socket, but that connection disappeared before a
  * result arrived. Retrying automatically would be unsafe for commands: the
  * daemon may already have applied the operation.
+ *
+ * Whatever the close frame said is repeated verbatim. A user who reports "it
+ * just disconnected" cannot be helped; one who reports `1013 too slow` names
+ * the budget that cut them off.
  */
 export class ConnectionOutcomeUnknownError extends Error {
-  constructor() {
+  constructor(public readonly close?: CloseReason) {
     super(
-      "the connection was lost after the request was sent; its outcome is unknown",
+      `the connection was lost after the request was sent${describeClose(
+        close,
+      )}; its outcome is unknown`,
     );
     this.name = "ConnectionOutcomeUnknownError";
   }
@@ -233,6 +267,7 @@ interface Subscription {
   resync: Promise<void> | null;
   /** An event/desync arrived while the current repair was in flight. */
   needsResync: boolean;
+  expandLastRound: boolean;
 }
 
 /**
@@ -256,6 +291,8 @@ export class Client {
   private receiveChain: Promise<void> = Promise.resolve();
   private receiveBacklogFrames = 0;
   private receiveBacklogBytes = 0;
+  /** What the last socket said on its way out, for whoever asks why. */
+  private lastClose: CloseReason | undefined;
   private keyReady: Promise<void> = Promise.resolve();
   private releaseKeyReady: (() => void) | null = null;
   private expectedHello: { id: string; epoch: symbol } | null = null;
@@ -295,6 +332,16 @@ export class Client {
 
   get connectionState(): ConnectionState {
     return this.state;
+  }
+
+  /**
+   * What ended the last socket, when it said anything.
+   *
+   * A reconnect on its own explains nothing, and the far side is the only one
+   * that knows whether this was a network blip or a budget being enforced.
+   */
+  get lastCloseReason(): CloseReason | undefined {
+    return this.lastClose;
   }
 
   onStateChange(listener: (state: ConnectionState) => void): () => void {
@@ -467,7 +514,11 @@ export class Client {
         this.receiveBacklogBytes + rawBytes >
           (this.options.maxReceiveBacklogBytes ?? 8 * 1024 * 1024)
       ) {
-        this.authenticationFailed(socket, epoch);
+        this.authenticationFailed(
+          socket,
+          epoch,
+          "事件到达速度超出本页面的解密能力，连接已关闭",
+        );
         return;
       }
       this.receiveBacklogFrames += 1;
@@ -481,7 +532,7 @@ export class Client {
           this.receiveBacklogBytes -= rawBytes;
         });
     };
-    socket.onclose = () => this.dropped(socket);
+    socket.onclose = (event) => this.dropped(socket, asCloseReason(event));
     socket.onerror = () => socket.close();
   }
 
@@ -585,6 +636,7 @@ export class Client {
   async subscribe(
     sessionId: string,
     handlers: Pick<Subscription, "onEvent" | "onResync">,
+    options: { expandLastRound?: boolean } = {},
   ): Promise<{
     snapshot: unknown;
     replayed: SequencedEvent[];
@@ -595,12 +647,17 @@ export class Client {
       ...handlers,
       resync: null,
       needsResync: false,
+      expandLastRound: options.expandLastRound ?? true,
     };
     this.subscriptions.set(sessionId, subscription);
 
     const reply = await this.call({
       type: "subscribe",
-      payload: { sessionId, sinceSeq: 0 },
+      payload: {
+        sessionId,
+        sinceSeq: 0,
+        expandLastRound: subscription.expandLastRound,
+      },
     });
     if (reply?.type !== "subscribed") {
       this.subscriptions.delete(sessionId);
@@ -856,7 +913,11 @@ export class Client {
         subscription.needsResync = false;
         const reply = await this.call({
           type: "subscribe",
-          payload: { sessionId, sinceSeq: subscription.seq },
+          payload: {
+            sessionId,
+            sinceSeq: subscription.seq,
+                expandLastRound: subscription.expandLastRound,
+          },
         }).catch(() => undefined);
         if (reply?.type !== "subscribed") return;
 
@@ -1022,8 +1083,9 @@ export class Client {
     this.dropped(socket);
   }
 
-  private dropped(socket?: WebSocketLike): void {
+  private dropped(socket?: WebSocketLike, close?: CloseReason): void {
     if (this.stopped || (socket && this.socket !== socket)) return;
+    this.lastClose = close;
     this.clearConnectTimer();
     const epoch = this.socketEpoch;
     this.setState("reconnecting");
@@ -1045,7 +1107,7 @@ export class Client {
         pending.reject(
           pending.kind === "handshake"
             ? new Error("the connection was lost during Hello")
-            : new ConnectionOutcomeUnknownError(),
+            : new ConnectionOutcomeUnknownError(close),
         );
       }
     }
@@ -1254,9 +1316,18 @@ export class Client {
     }
   }
 
+  /**
+   * Fails the connection closed, recording why.
+   *
+   * Most callers here really are reporting an unverifiable frame, but not all:
+   * a receive backlog that outgrows its budget is congestion, not forgery, and
+   * a connection that reports the wrong one sends whoever debugs it looking for
+   * an attacker that was never there.
+   */
   private authenticationFailed(
     socket?: WebSocketLike | null,
     epoch?: symbol | null,
+    why = "通道消息无法验证，连接已安全关闭",
   ): void {
     if (
       this.stopped ||
@@ -1264,10 +1335,7 @@ export class Client {
       (epoch !== undefined && epoch !== null && this.socketEpoch !== epoch)
     )
       return;
-    this.failure = {
-      code: "unauthorized",
-      message: "通道消息无法验证，连接已安全关闭",
-    };
+    this.failure = { code: "unauthorized", message: why };
     this.close();
   }
 }

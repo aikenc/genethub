@@ -442,6 +442,18 @@ describe("the daemon connection", () => {
     client.close();
   });
 
+  it("repeats whatever the close frame said, since nothing else records it", async () => {
+    const { client, socket } = await connected();
+
+    const uncertain = client.call({ type: "agent.list" });
+    // Exactly what Relay sends when a client falls behind its send budget.
+    socket.close({ code: 1013, reason: "too slow" });
+
+    await expect(uncertain).rejects.toThrow("1013 too slow");
+    expect(client.lastCloseReason).toEqual({ code: 1013, reason: "too slow" });
+    client.close();
+  });
+
   it("fail-closes when authenticated receive work exceeds its frame budget", async () => {
     const capabilityId = "capability_backlog";
     const secret = "3".repeat(64);
@@ -778,7 +790,7 @@ describe("the daemon connection", () => {
     await settle();
 
     const resubscribe = second.lastOf("subscribe");
-    expect(resubscribe.payload).toEqual({ sessionId: "s1", sinceSeq: 2 });
+    expect(resubscribe.payload).toMatchObject({ sessionId: "s1", sinceSeq: 2 });
 
     second.reply(resubscribe.id, {
       type: "subscribed",
@@ -825,7 +837,7 @@ describe("the daemon connection", () => {
     await settle();
 
     const asked = socket.lastOf("subscribe");
-    expect(asked.payload).toEqual({ sessionId: "s1", sinceSeq: 1 });
+    expect(asked.payload).toMatchObject({ sessionId: "s1", sinceSeq: 1 });
 
     socket.reply(asked.id, {
       type: "subscribed",
@@ -868,7 +880,7 @@ describe("the daemon connection", () => {
     expect(
       socket.sent.filter((frame) => frame.type === "subscribe").length,
     ).toBe(before + 1);
-    expect(firstRepair.payload).toEqual({ sessionId: "s1", sinceSeq: 1 });
+    expect(firstRepair.payload).toMatchObject({ sessionId: "s1", sinceSeq: 1 });
     expect(seen).toEqual([1]);
 
     socket.reply(firstRepair.id, {
@@ -882,7 +894,7 @@ describe("the daemon connection", () => {
     await settle();
     const secondRepair = socket.lastOf("subscribe");
     expect(secondRepair.id).not.toBe(firstRepair.id);
-    expect(secondRepair.payload).toEqual({ sessionId: "s1", sinceSeq: 2 });
+    expect(secondRepair.payload).toMatchObject({ sessionId: "s1", sinceSeq: 2 });
     socket.reply(secondRepair.id, {
       type: "subscribed",
       data: {

@@ -28,6 +28,7 @@
 |------|------|
 | 流式对话 | 增量打字机效果、markdown 渲染（GFM：列表/表格/删除线）、代码块带语言标签和复制按钮 |
 | 推理块 | `Reasoning` 折叠展示，默认收起；daemon 只下发 Agent overview 或前 24 个 Unicode 字符 |
+| 过程展开 | 正在跑的那一轮，它最后一个 trunk 和其中最后一个 batch 默认展开——看 Agent 干活是这一轮存在的理由，要点一下才能看见等于没有。tail 往前走时旧的自动收起，已结束的轮次全部收起；用户手动点过的那一块脱离这个默认，不会在下一次刷新时被合上 |
 | 工具调用渲染 | session 只下发语义类型与裁剪后的 `overview / input / output`：标题最多 64 字符，input 一行最多 64，output 只留前二后二行且每行最多 64；列表用 Emoji 区分命令、读写、搜索、网络、计划、子 Agent、MCP 等类型，失败只加 `!`，展开只显示并可复制输出，不提供原始 payload |
 | Turn 页脚 | 重点显示 GitHub 风格相对完成时间、耗时和输出 token；点击 token 才展开 cached input / input / output / tools，另提供复制回答和能力感知的真实 Fork |
 | Diff 视图 | `edit` 的行级 diff 着色，支持展开全文 |

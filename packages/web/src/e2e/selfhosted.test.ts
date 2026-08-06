@@ -211,7 +211,12 @@ describe.skipIf(
 
     await guest.call({
       type: "session.send",
-      payload: { sessionId, text: "这个仓库能编译吗？", attachments: [] },
+      payload: {
+        sessionId,
+        text: "这个仓库能编译吗？",
+        attachments: [],
+        continuesRound: null,
+      },
     });
     await waitFor(
       () => timeline.status === "idle" && timeline.items.length > 1,

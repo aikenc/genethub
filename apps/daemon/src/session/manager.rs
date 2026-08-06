@@ -11,26 +11,44 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    Attachment, Catalog, ItemDelta, PermissionOptionKind, PermissionOutcome, PermissionRequest,
-    PermissionRequestKind, SequencedEvent, SessionEvent, SessionSnapshot, SessionStatus,
-    SessionSummary, TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
+    Attachment, BlobPayload, BlobRef, Catalog, ItemDelta, PermissionOptionKind, PermissionOutcome,
+    PermissionRequest, PermissionRequestKind, RoundLayer, RoundLayerOutcome, RoundSummary,
+    RoundTrunk, SequencedEvent, SessionEvent, SessionSnapshot, SessionStatus, SessionSummary,
+    TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
 };
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
 use super::overview;
-use super::store::{now_ms, title_from, SessionMeta, Store};
+use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
+use super::store::{self, now_ms, title_from, SessionMeta, Store, SESSION_FORMAT};
 use crate::adapter::registry::Registry;
-use crate::adapter::{AgentSession, PromptInput, ProviderMap, SessionConfig};
+use crate::adapter::{AgentSession, PersistHandle, PromptInput, ProviderMap, SessionConfig};
 
 const BROADCAST_CAPACITY: usize = 1024;
 
 /// One live session.
 struct Live {
+    /// Where this session's own directory is. Held here so the trunk writer
+    /// can run from inside the event pump, which is the only place that knows
+    /// when a trunk closed.
+    store: Store,
     meta: Mutex<SessionMeta>,
     status: Mutex<SessionStatus>,
-    /// Ordered timeline. Small enough that a linear id lookup is cheaper than
-    /// maintaining a second index.
+    /// The session narrative, plus the work items of the trunk currently being
+    /// built. Bounded on both counts: narrative grows with what was said, and
+    /// a trunk never exceeds `TRUNK_MAX_BLOBS`. Work items are dropped as soon
+    /// as their trunk is written, which is what keeps a round that runs for a
+    /// day from keeping a day of tool output resident
+    /// (`docs/session-storage.md` §4).
     items: Mutex<Vec<TimelineItem>>,
+    /// Every round of this session, folded, as read from `chat.jsonl` and
+    /// extended as rounds settle. One small record each, never the round's
+    /// contents.
+    rounds: Mutex<Vec<RoundRecord>>,
+    /// Where each work item of the open trunk landed in the blob layer. Filled
+    /// by the blob writer, consumed when the trunk is written, then dropped
+    /// with the trunk's items.
+    blob_refs: Mutex<HashMap<String, BlobRef>>,
     seq: AtomicU64,
     replay: Mutex<VecDeque<SequencedEvent>>,
     events: broadcast::Sender<SequencedEvent>,
@@ -38,7 +56,102 @@ struct Live {
     pending_permissions: Mutex<Vec<PermissionRequest>>,
     /// Item ids settled during the current turn, flushed to disk when it ends.
     turn_items: Mutex<Vec<String>>,
+    /// Work item ids belonging to the trunk currently open, in order. Cleared
+    /// when that trunk is written out, so this never grows past a trunk's cap
+    /// however many adapter turns the round spans.
+    open_trunk_items: Mutex<Vec<String>>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Daemon-owned round bookkeeping — one user request, possibly several
+    /// adapter turns (`docs/agent-analysis-substrate-proposal.md` §3.2).
+    /// `None` before the first `session.send` on this session. Kept around
+    /// (not cleared) once a round settles, so the last one stays inspectable
+    /// in memory until the next round replaces it; the durable copy lives in
+    /// the round ledger (`session/rounds.rs`, §8 step 2).
+    active_round: Mutex<Option<ActiveRound>>,
+}
+
+/// One user request's lifecycle, possibly spanning several adapter turns.
+///
+/// `round_id` is minted by the daemon before the first adapter turn starts
+/// and never changes across an auto-stitched interruption (approval,
+/// guidance) or an explicitly continued one (`continuesRound`). Adapter turn
+/// ids are upstream labels only — see §3.2's "今天的 turn 不等于 round".
+///
+/// Deliberately narrower than the proposal's full shape: `contended` and
+/// `workspaceStart` need the workspace-observation step (§8 step 5) to mean
+/// anything, and adding fields nobody populates yet would be exactly the
+/// "看起来完整却是假的" mistake the proposal itself warns against (rule D).
+#[derive(Debug, Clone)]
+struct ActiveRound {
+    round_id: String,
+    /// Position in the session, and the round's directory name on disk.
+    ord: u32,
+    /// The user message that opened this round.
+    user_item_id: Option<String>,
+    /// One entry per adapter turn folded into this round, in the order they
+    /// started. Never empty once the round exists.
+    adapter_turn_ids: Vec<String>,
+    /// Not read outside tests yet — becomes the round's `startedAt` once
+    /// `RoundStats` (§8 step 6) exists to report it.
+    #[allow(dead_code)]
+    started_at_ms: i64,
+    /// Set while paused for an approval/guidance answer; folded into
+    /// `blocked_ms` and cleared the moment the round resumes or ends.
+    blocked_since_ms: Option<i64>,
+    /// Total time this round spent waiting on a human, across every pause —
+    /// not counted as the agent's own working time.
+    blocked_ms: i64,
+    /// `None` while the round is still open (running or blocked on a human).
+    outcome: Option<RoundOutcome>,
+    /// This round's still-open trunk — a bounded slice of its tool-call-
+    /// and-thinking stream (`docs/agent-analysis-substrate-proposal.md`
+    /// §3.2 direction three, §8 step 3). Exists because a round can run
+    /// long enough that "every item carries an overview" alone re-blows the
+    /// byte budget the round layer itself exists to avoid.
+    current_trunk: TrunkBuilder,
+    /// Trunks already closed, in order. Becomes `RoundRecord::trunk_summaries`
+    /// once the round settles (`close_current_trunk` folds in whatever was
+    /// still open, so nothing since the last boundary is lost).
+    closed_trunks: Vec<TrunkSummary>,
+}
+
+/// One round resolved far enough to answer session-layer questions, without
+/// having touched that round's storage. `trunks` is filled only for the round
+/// a caller actually asked to expand.
+#[derive(Debug, Clone)]
+struct RoundView {
+    round_id: String,
+    ord: u32,
+    user_item_id: Option<String>,
+    started_at_ms: i64,
+    ended_at_ms: i64,
+    outcome: RoundLayerOutcome,
+    trunk_count: u32,
+}
+
+impl ActiveRound {
+    /// Feeds one item into this round's trunk pagination, if the item is one
+    /// of the three kinds trunks track (`TrunkItem`). A no-op for every
+    /// other `TimelineItem` variant — user messages, permission requests,
+    /// plans, turn summaries, … never affect trunk boundaries. Returns a
+    /// just-closed trunk unresolved: its overview needs a live look at the
+    /// item store, which only `Live` has (`resolve_monologue_text`).
+    fn record_trunk_item(&mut self, item: &TimelineItem) -> Option<rounds::ClosedTrunk> {
+        let trunk_item = match item {
+            TimelineItem::AssistantMessage { .. } => TrunkItem::Monologue,
+            TimelineItem::Reasoning { .. } => TrunkItem::Reasoning,
+            TimelineItem::ToolCall { name, .. } => TrunkItem::ToolCall(name.as_str()),
+            _ => return None,
+        };
+        self.current_trunk.push(item.id(), trunk_item)
+    }
+
+    /// Closes whatever trunk is still being built, if any, so a round that
+    /// settles mid-trunk still reports it. Idempotent: closing an
+    /// already-empty builder returns `None`.
+    fn close_current_trunk_pending(&mut self) -> Option<rounds::ClosedTrunk> {
+        self.current_trunk.close()
+    }
 }
 
 pub struct SessionManager {
@@ -75,6 +188,7 @@ impl SessionManager {
             effort_id: None,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
+            format: SESSION_FORMAT,
             agent_id: agent_id.to_string(),
             title,
             cwd,
@@ -88,10 +202,10 @@ impl SessionManager {
         };
         self.store.save_meta(&meta)?;
         let summary = meta.summary(SessionStatus::Idle);
-        self.sessions
-            .write()
-            .await
-            .insert(meta.id.clone(), Arc::new(Live::new(meta)));
+        self.sessions.write().await.insert(
+            meta.id.clone(),
+            Arc::new(Live::new(meta, self.store.clone())),
+        );
         Ok(summary)
     }
 
@@ -156,6 +270,7 @@ impl SessionManager {
         let meta = SessionMeta {
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: source_meta.workspace_id,
+            format: SESSION_FORMAT,
             agent_id: source_meta.agent_id,
             title,
             cwd: source_meta.cwd,
@@ -169,10 +284,12 @@ impl SessionManager {
             pending_permission: None,
         };
         self.store.save_meta(&meta)?;
+        // The fork inherits the conversation, not the source's round layer:
+        // its rounds happened in another session and stay addressable there.
         self.store
-            .append_items(&meta.workspace_id, &meta.id, &items)?;
+            .append_chat_items(&meta.workspace_id, &meta.id, &items)?;
         let summary = meta.summary(SessionStatus::Idle);
-        let forked = Arc::new(Live::new(meta));
+        let forked = Arc::new(Live::new(meta, self.store.clone()));
         *forked.items.lock().await = items;
         self.sessions
             .write()
@@ -193,16 +310,20 @@ impl SessionManager {
             .into_iter()
             .find(|meta| meta.id == session_id)
             .ok_or_else(|| anyhow!("no such session: {session_id}"))?;
-        // Old session logs may predate the overview-only boundary. Never let
-        // their historical tool payloads or reasoning leak back to a client.
-        let loaded = self.store.load_items(&meta.workspace_id, &meta.id)?;
-        let items: Vec<TimelineItem> = loaded.iter().map(overview::condense_item).collect();
-        if items != loaded {
-            self.store
-                .replace_items(&meta.workspace_id, &meta.id, &items)?;
+        // Reading a layout this build predates would not give a partial view,
+        // it would give a wrong one, and any reply written back would corrupt
+        // the session for the build that can read it.
+        if !meta.openable() {
+            return Err(anyhow!(
+                "session {session_id} was written in format {} by a newer version of GeneHub; \
+                 this one reads up to format {SESSION_FORMAT}",
+                meta.format
+            ));
         }
-        let live = Arc::new(Live::new(meta));
-        *live.items.lock().await = items;
+        let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
+        let live = Arc::new(Live::new(meta, self.store.clone()));
+        *live.items.lock().await = chat.items;
+        *live.rounds.lock().await = chat.rounds;
         self.sessions
             .write()
             .await
@@ -249,6 +370,217 @@ impl SessionManager {
         live.snapshot().await
     }
 
+    async fn snapshot_for_open(
+        &self,
+        session_id: &str,
+        expand_last_round: bool,
+    ) -> Result<SessionSnapshot> {
+        let live = self.live(session_id).await?;
+        let mut snapshot = live.snapshot().await?;
+        // The open trunk's work items live alongside the narrative in memory
+        // so the round layer can serve them without a read; they are addressed
+        // through that layer, never replayed here.
+        snapshot.items.retain(|item| !store::is_work_item(item));
+        let views = self.round_views(&live).await;
+        snapshot.rounds = Some(views.iter().map(round_summary).collect());
+        if expand_last_round {
+            if let Some(last) = views.last() {
+                snapshot.expanded_round = Some(Box::new(
+                    self.build_round_layer(&live, last, None, 20, true).await?,
+                ));
+            }
+        }
+        Ok(snapshot)
+    }
+
+    /// Every round of the session, folded, straight from what `chat.jsonl`
+    /// already put in memory. Touches no round directory: a session with four
+    /// rounds and a session with four hundred cost the same here.
+    async fn round_views(&self, live: &Arc<Live>) -> Vec<RoundView> {
+        let active = live.active_round.lock().await.clone();
+        let open = active
+            .as_ref()
+            .filter(|round| round.outcome.is_none())
+            .map(|round| round.round_id.clone());
+        let mut views: Vec<RoundView> = live
+            .rounds
+            .lock()
+            .await
+            .iter()
+            .map(|record| RoundView {
+                round_id: record.round_id.clone(),
+                ord: record.ord,
+                user_item_id: record.user_item_id.clone(),
+                started_at_ms: record.started_at_ms,
+                ended_at_ms: record.ended_at_ms,
+                outcome: match record.outcome {
+                    Some(RoundOutcome::Completed) => RoundLayerOutcome::Completed,
+                    Some(RoundOutcome::Canceled) => RoundLayerOutcome::Canceled,
+                    Some(RoundOutcome::Superseded) => RoundLayerOutcome::Superseded,
+                    Some(RoundOutcome::Failed) => RoundLayerOutcome::Failed,
+                    // Open on disk, and nobody is running it: the daemon went
+                    // away mid-request. Saying "running" would promise output
+                    // that is never coming.
+                    None if open.as_deref() == Some(record.round_id.as_str()) => {
+                        RoundLayerOutcome::Running
+                    }
+                    None => RoundLayerOutcome::Failed,
+                },
+                trunk_count: record.trunk_count,
+            })
+            .collect();
+        if let Some(round) = active.filter(|round| round.outcome.is_none()) {
+            let open_trunks = round.closed_trunks.len() as u32
+                + u32::from(!live.open_trunk_items.lock().await.is_empty());
+            match views
+                .iter_mut()
+                .find(|view| view.round_id == round.round_id)
+            {
+                Some(view) => {
+                    view.outcome = RoundLayerOutcome::Running;
+                    view.trunk_count = open_trunks;
+                }
+                None => views.push(RoundView {
+                    round_id: round.round_id.clone(),
+                    ord: round.ord,
+                    user_item_id: round.user_item_id.clone(),
+                    started_at_ms: round.started_at_ms,
+                    ended_at_ms: 0,
+                    outcome: RoundLayerOutcome::Running,
+                    trunk_count: open_trunks,
+                }),
+            }
+        }
+        views.sort_by_key(|view| view.ord);
+        views
+    }
+
+    /// The trunk index for one round: closed trunks from its own index file,
+    /// plus the trunk still being built, which only memory knows about.
+    async fn trunk_index(&self, live: &Arc<Live>, view: &RoundView) -> Result<Vec<TrunkSummary>> {
+        let meta = live.meta.lock().await.clone();
+        let mut summaries = self
+            .store
+            .load_trunk_index(&meta.workspace_id, &meta.id, view.ord)?;
+        if let Some(open) = self.open_trunk(live, view).await {
+            match summaries
+                .iter_mut()
+                .find(|summary| summary.index == open.summary.index)
+            {
+                Some(existing) => *existing = open.summary,
+                None => summaries.push(open.summary),
+            }
+        }
+        Ok(summaries)
+    }
+
+    /// The trunk currently being built for this round, if this round is the
+    /// open one and it has anything in it yet.
+    async fn open_trunk(&self, live: &Arc<Live>, view: &RoundView) -> Option<RoundTrunk> {
+        let index = {
+            let active = live.active_round.lock().await;
+            let round = active.as_ref()?;
+            if round.outcome.is_some() || round.round_id != view.round_id {
+                return None;
+            }
+            round.closed_trunks.len() as u32
+        };
+        live.build_open_trunk(index).await
+    }
+
+    async fn build_round_layer(
+        &self,
+        live: &Arc<Live>,
+        view: &RoundView,
+        cursor: Option<&str>,
+        limit: u32,
+        expand_last_trunk: bool,
+    ) -> Result<RoundLayer> {
+        let index = self.trunk_index(live, view).await?;
+        let end = parse_trunk_cursor(cursor, index.len())?;
+        let limit = limit.clamp(1, 100) as usize;
+        let start = end.saturating_sub(limit);
+        let trunks = index[start..end].to_vec();
+        let expanded_trunk = match expand_last_trunk.then(|| trunks.last()).flatten() {
+            Some(summary) => Some(self.build_round_trunk(live, view, summary).await?),
+            None => None,
+        };
+        let mut round = round_summary(view);
+        round.trunk_count = index.len() as u32;
+        Ok(RoundLayer {
+            round,
+            trunks,
+            next_cursor: (start > 0).then(|| format!("before:{start}")),
+            expanded_trunk,
+        })
+    }
+
+    /// One trunk's contents: a single small file, or memory when it is the
+    /// trunk still being written.
+    async fn build_round_trunk(
+        &self,
+        live: &Arc<Live>,
+        view: &RoundView,
+        summary: &TrunkSummary,
+    ) -> Result<RoundTrunk> {
+        if let Some(open) = self.open_trunk(live, view).await {
+            if open.summary.index == summary.index {
+                return Ok(open);
+            }
+        }
+        let meta = live.meta.lock().await.clone();
+        self.store
+            .load_trunk(&meta.workspace_id, &meta.id, view.ord, summary)
+    }
+
+    pub async fn round_layer(
+        &self,
+        session_id: &str,
+        round_id: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<RoundLayer> {
+        let live = self.live(session_id).await?;
+        let views = self.round_views(&live).await;
+        let view = if round_id == "latest" {
+            views.last()
+        } else {
+            views.iter().find(|view| view.round_id == round_id)
+        }
+        .ok_or_else(|| anyhow!("no such round: {round_id}"))?;
+        self.build_round_layer(&live, view, cursor, limit.unwrap_or(20), false)
+            .await
+    }
+
+    pub async fn round_trunk(
+        &self,
+        session_id: &str,
+        round_id: &str,
+        trunk_index: u32,
+    ) -> Result<RoundTrunk> {
+        let live = self.live(session_id).await?;
+        let views = self.round_views(&live).await;
+        let view = views
+            .iter()
+            .find(|view| view.round_id == round_id)
+            .ok_or_else(|| anyhow!("no such round: {round_id}"))?;
+        let summary = self
+            .trunk_index(&live, view)
+            .await?
+            .into_iter()
+            .find(|summary| summary.index == trunk_index)
+            .ok_or_else(|| anyhow!("no such trunk: {trunk_index}"))?;
+        self.build_round_trunk(&live, view, &summary).await
+    }
+
+    pub async fn blob(&self, session_id: &str, blob: &BlobRef) -> Result<BlobPayload> {
+        let live = self.live(session_id).await?;
+        let meta = live.meta.lock().await;
+        self.store
+            .get_blob(&meta.workspace_id, &meta.id, blob)?
+            .ok_or_else(|| anyhow!("no such blob: {}", blob.id))
+    }
+
     /// Snapshot plus whatever the client missed, in one answer.
     ///
     /// `reset` tells the client the difference between "here is the gap" and
@@ -258,6 +590,7 @@ impl SessionManager {
         &self,
         session_id: &str,
         since_seq: Option<u64>,
+        expand_last_round: bool,
     ) -> Result<(
         SessionSnapshot,
         Vec<SequencedEvent>,
@@ -271,6 +604,12 @@ impl SessionManager {
         let replay = live.replay.lock().await;
 
         let (events, reset) = match since_seq {
+            Some(0) => {
+                // The snapshot already carries the session narrative and the
+                // last round's tail. Replaying the historical tool and
+                // reasoning stream here would defeat its byte budget.
+                (Vec::new(), true)
+            }
             None => (Vec::new(), true),
             Some(seq) => {
                 let oldest = replay.front().map(|event| event.seq);
@@ -294,7 +633,9 @@ impl SessionManager {
         };
         drop(replay);
 
-        let snapshot = live.snapshot().await?;
+        let snapshot = self
+            .snapshot_for_open(session_id, expand_last_round)
+            .await?;
         Ok((snapshot, events, reset, receiver))
     }
 
@@ -310,6 +651,7 @@ impl SessionManager {
         text: String,
         attachments: Vec<Attachment>,
         providers: &ProviderMap,
+        continues_round: Option<String>,
     ) -> Result<String> {
         let live = self.live(session_id).await?;
         {
@@ -323,7 +665,14 @@ impl SessionManager {
             *status = SessionStatus::Running;
         }
         let started = self
-            .start_turn(&live, session_id, text, attachments, providers)
+            .start_turn(
+                &live,
+                session_id,
+                text,
+                attachments,
+                providers,
+                continues_round,
+            )
             .await;
         if started.is_err() {
             // Nothing is running after all, and a session stuck on Running would
@@ -340,6 +689,7 @@ impl SessionManager {
         text: String,
         attachments: Vec<Attachment>,
         providers: &ProviderMap,
+        continues_round: Option<String>,
     ) -> Result<String> {
         self.ensure_started(live, providers).await?;
 
@@ -362,7 +712,7 @@ impl SessionManager {
             (meta.workspace_id.clone(), meta.title.is_none())
         };
         self.store
-            .append_items(&workspace_id, session_id, std::slice::from_ref(&item))?;
+            .append_chat_items(&workspace_id, session_id, std::slice::from_ref(&item))?;
 
         if needs_title {
             if let Some(title) = title_from(&text) {
@@ -388,6 +738,21 @@ impl SessionManager {
             .send(PromptInput { text, attachments })
             .await
             .context("handing the prompt to the agent")?;
+        // Only recorded once the handover actually succeeded: a failed send
+        // must not leave a round with zero adapter turns behind (`send`
+        // resets status to Idle on this same error, as if it never happened).
+        if let Some(superseded) = live
+            .begin_round(continues_round.as_deref(), &turn_id, item.id())
+            .await
+        {
+            tracing::info!(
+                "round {} superseded by a new message ({} adapter turn(s), {}ms blocked)",
+                superseded.round_id,
+                superseded.adapter_turn_ids.len(),
+                superseded.blocked_ms
+            );
+            persist_round(live, superseded).await;
+        }
 
         // The user message belongs to the turn it started.
         live.publish(SessionEvent::Item {
@@ -447,28 +812,74 @@ impl SessionManager {
             return Ok(());
         }
 
-        let scratch = self.store.scratch_dir(&meta.workspace_id, &meta.id);
-        std::fs::create_dir_all(&scratch)?;
+        let scratch = self.store.make_scratch_dir(&meta.workspace_id, &meta.id)?;
+        let config = |resume: Option<PersistHandle>| SessionConfig {
+            session_id: meta.id.clone(),
+            cwd: meta.cwd.clone(),
+            model_id: meta.model_id.clone(),
+            mode_id: mode_override.clone().or_else(|| meta.mode_id.clone()),
+            effort_id: meta.effort_id.clone(),
+            scratch_dir: scratch.clone(),
+            providers: providers.clone(),
+            resume,
+        };
 
-        let session = adapter
-            .start(SessionConfig {
-                session_id: meta.id.clone(),
-                cwd: meta.cwd.clone(),
-                model_id: meta.model_id.clone(),
-                mode_id: mode_override.or_else(|| meta.mode_id.clone()),
-                effort_id: meta.effort_id.clone(),
-                scratch_dir: scratch,
-                providers: providers.clone(),
-                resume: meta.persist.clone(),
-            })
-            .await
-            .with_context(|| format!("starting the {} agent", meta.agent_id))?;
+        // A resume handle points at state the session directory does not own —
+        // the agent CLI's own thread store, under the user's home. That store
+        // can be pruned by the CLI, wiped by the user, or simply absent on the
+        // machine the project was copied to. Refusing to start would strand the
+        // conversation for good, so a fresh thread is started instead and the
+        // timeline says plainly that the agent no longer remembers what is
+        // above — which is the one thing the user must not have to guess.
+        let mut abandoned_handle = false;
+        let session = match adapter.start(config(meta.persist.clone())).await {
+            Ok(session) => session,
+            Err(error) if meta.persist.is_some() => {
+                abandoned_handle = true;
+                tracing::warn!(
+                    agent = %meta.agent_id,
+                    session = %meta.id,
+                    %error,
+                    "could not resume the agent's thread, starting a fresh one"
+                );
+                let session = adapter
+                    .start(config(None))
+                    .await
+                    .with_context(|| format!("starting the {} agent", meta.agent_id))?;
+                let notice = SessionEvent::Item {
+                    // Belongs to the session, not to a turn: nothing has been
+                    // sent yet when the agent is started.
+                    turn_id: String::new(),
+                    item: TimelineItem::Error {
+                        id: format!("resume-lost-{}", now_ms()),
+                        message: format!(
+                            "{} 找不到这个会话之前的线程了，已新开一个继续。上面的内容它不再记得，需要的话请重新说明。",
+                            adapter.label()
+                        ),
+                    },
+                };
+                apply(live, &notice).await;
+                live.publish(notice).await;
+                session
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("starting the {} agent", meta.agent_id))
+            }
+        };
 
         let receiver = session.events();
-        if let Some(handle) = session.persistence() {
+        // Written back when the agent produced a handle, and cleared when this
+        // start had to abandon one that no longer resolves — otherwise every
+        // later start would pay for the same discovery. Not touched otherwise:
+        // several agents only learn their thread id after the first turn, and
+        // a `None` there means "not yet", not "gone".
+        let handle = session.persistence();
+        if handle.is_some() || abandoned_handle {
             let mut meta = live.meta.lock().await;
-            meta.persist = Some(handle);
-            self.store.save_meta(&meta)?;
+            if meta.persist != handle {
+                meta.persist = handle;
+                self.store.save_meta(&meta)?;
+            }
         }
         *live.agent.lock().await = Some(session);
 
@@ -662,9 +1073,23 @@ impl SessionManager {
                     })
                     .await
             };
-            if let Err(error) = sent {
-                *live.status.lock().await = SessionStatus::Waiting;
-                return Err(error).context("continuing after the user response");
+            match sent {
+                Ok(turn_id) => {
+                    // This is the daemon deciding to resume, not the client
+                    // asking to — the round the interaction interrupted
+                    // continues, no `continuesRound` involved (§3.2).
+                    live.continue_round(&turn_id).await;
+                }
+                Err(error) => {
+                    *live.status.lock().await = SessionStatus::Waiting;
+                    return Err(error).context("continuing after the user response");
+                }
+            }
+        } else {
+            // Denied or canceled: no more agent work is coming for this
+            // request, so the round it belonged to is done, not dangling.
+            if let Some(round) = live.settle_round(RoundOutcome::Canceled).await {
+                persist_round(&live, round).await;
             }
         }
 
@@ -786,11 +1211,35 @@ impl SessionManager {
     }
 }
 
+fn round_summary(view: &RoundView) -> RoundSummary {
+    RoundSummary {
+        round_id: view.round_id.clone(),
+        user_item_id: view.user_item_id.clone(),
+        started_at_ms: view.started_at_ms,
+        ended_at_ms: view.ended_at_ms,
+        outcome: view.outcome,
+        trunk_count: view.trunk_count,
+    }
+}
+
+fn parse_trunk_cursor(cursor: Option<&str>, len: usize) -> Result<usize> {
+    let Some(cursor) = cursor else {
+        return Ok(len);
+    };
+    let value = cursor
+        .strip_prefix("before:")
+        .ok_or_else(|| anyhow!("invalid trunk cursor"))?
+        .parse::<usize>()
+        .map_err(|_| anyhow!("invalid trunk cursor"))?;
+    Ok(value.min(len))
+}
+
 impl Live {
-    fn new(meta: SessionMeta) -> Self {
+    fn new(meta: SessionMeta, store: Store) -> Self {
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let pending = meta.pending_permission.clone();
         Live {
+            store,
             meta: Mutex::new(meta),
             status: Mutex::new(if pending.is_some() {
                 SessionStatus::Waiting
@@ -798,13 +1247,17 @@ impl Live {
                 SessionStatus::Idle
             }),
             items: Mutex::new(Vec::new()),
+            rounds: Mutex::new(Vec::new()),
+            blob_refs: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
             replay: Mutex::new(VecDeque::new()),
             events,
             agent: Mutex::new(None),
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             turn_items: Mutex::new(Vec::new()),
+            open_trunk_items: Mutex::new(Vec::new()),
             pump: Mutex::new(None),
+            active_round: Mutex::new(None),
         }
     }
 
@@ -815,6 +1268,8 @@ impl Live {
             items: self.items.lock().await.clone(),
             seq: self.seq.load(Ordering::SeqCst),
             pending_permissions: self.pending_permissions.lock().await.clone(),
+            rounds: None,
+            expanded_round: None,
         })
     }
 
@@ -841,6 +1296,287 @@ impl Live {
         while replay.len() > window {
             replay.pop_front();
         }
+    }
+
+    /// Opens or continues a round for a fresh `session.send`.
+    ///
+    /// Only the "interrupted, then a new message arrives" case reaches this
+    /// decision at all — approval and guidance continuations never go
+    /// through `send`, they go through `continue_round` below, because the
+    /// daemon can already tell those are the same request. Here it cannot:
+    /// `continues_round` is the client's explicit word for "this is the same
+    /// request", and its absence — or a mismatch — means cut a new round
+    /// rather than guess a stitch that cannot be undone later (§3.2).
+    ///
+    /// Adds an item to the open trunk and feeds it into the round's trunk
+    /// pagination (`ActiveRound::record_trunk_item`, §3.2 direction three).
+    /// Idempotent: an item id already recorded is not counted twice, even if
+    /// the adapter re-sends a full `Item` event for it — this is also what
+    /// keeps trunk boundaries from double-counting a re-sent item.
+    async fn record_round_item(&self, item: &TimelineItem) {
+        {
+            let mut open = self.open_trunk_items.lock().await;
+            if open.iter().any(|id| id == item.id()) {
+                return;
+            }
+            open.push(item.id().to_string());
+        }
+        let closed = {
+            let mut active = self.active_round.lock().await;
+            match active.as_mut() {
+                Some(round) if round.outcome.is_none() => round.record_trunk_item(item),
+                _ => None,
+            }
+        };
+        if closed.is_some() {
+            self.finish_trunk().await;
+        }
+    }
+
+    /// The trunk being built right now, assembled from the items still in
+    /// memory. `None` when nothing has been recorded into it yet.
+    async fn build_open_trunk(&self, index: u32) -> Option<RoundTrunk> {
+        let ids = self.open_trunk_items.lock().await.clone();
+        if ids.is_empty() {
+            return None;
+        }
+        let items = {
+            let items = self.items.lock().await;
+            let by_id: HashMap<&str, &TimelineItem> =
+                items.iter().map(|item| (item.id(), item)).collect();
+            ids.iter()
+                .filter_map(|id| by_id.get(id.as_str()).map(|item| (*item).clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut trunk = rounds::trunks_from_items(&items).into_iter().next()?;
+        trunk.summary.index = index;
+        let refs = self.blob_refs.lock().await;
+        for batch in &mut trunk.batches {
+            for blob in &mut batch.blobs {
+                blob.blob = refs.get(&blob.item_id).cloned();
+            }
+        }
+        Some(trunk)
+    }
+
+    /// Writes the trunk that just closed and lets go of it.
+    ///
+    /// This is where a long round stops costing memory: once a trunk is on
+    /// disk it is addressable by path, so its work items and their blob
+    /// references are dropped. What stays behind is one summary line per
+    /// closed trunk, which is what the round layer pages over.
+    async fn finish_trunk(&self) {
+        let (ord, index) = {
+            let active = self.active_round.lock().await;
+            let Some(round) = active.as_ref() else { return };
+            (round.ord, round.closed_trunks.len() as u32)
+        };
+        let Some(trunk) = self.build_open_trunk(index).await else {
+            return;
+        };
+        let meta = self.meta.lock().await.clone();
+        if let Err(error) = self
+            .store
+            .write_trunk(&meta.workspace_id, &meta.id, ord, &trunk)
+        {
+            // Keeping the items in memory would not save them — the next
+            // trunk close would drop them anyway — and refusing to advance
+            // would wedge the round. The trunk is lost; the round is not.
+            tracing::error!("could not write trunk {index} of {}: {error}", meta.id);
+        }
+        if let Some(round) = self.active_round.lock().await.as_mut() {
+            round.closed_trunks.push(trunk.summary);
+        }
+        let ids: Vec<String> = std::mem::take(&mut *self.open_trunk_items.lock().await);
+        let mut refs = self.blob_refs.lock().await;
+        for id in &ids {
+            refs.remove(id);
+        }
+        drop(refs);
+        self.items
+            .lock()
+            .await
+            .retain(|item| !(store::is_work_item(item) && ids.iter().any(|id| id == item.id())));
+    }
+
+    /// Rewrites the open trunk so a crash cannot cost more than the turn in
+    /// progress — the same durability boundary the flat log had.
+    async fn persist_open_trunk(&self) {
+        let (ord, index) = {
+            let active = self.active_round.lock().await;
+            let Some(round) = active.as_ref() else { return };
+            (round.ord, round.closed_trunks.len() as u32)
+        };
+        let Some(trunk) = self.build_open_trunk(index).await else {
+            return;
+        };
+        let meta = self.meta.lock().await.clone();
+        if let Err(error) = self
+            .store
+            .write_trunk(&meta.workspace_id, &meta.id, ord, &trunk)
+        {
+            tracing::warn!("could not persist the open trunk of {}: {error}", meta.id);
+        }
+    }
+
+    /// Returns the round that was cut short, if any — `None` both when the
+    /// round continues and when there was nothing open to cut short (an
+    /// already-settled round is just replaced, not "superseded": nothing was
+    /// taken from it). The caller records the returned round's final state.
+    async fn begin_round(
+        &self,
+        continues_round: Option<&str>,
+        turn_id: &str,
+        user_item_id: &str,
+    ) -> Option<ActiveRound> {
+        {
+            let mut active = self.active_round.lock().await;
+            if let Some(current) = active.as_mut() {
+                if current.outcome.is_none() && continues_round == Some(current.round_id.as_str()) {
+                    if !current.adapter_turn_ids.iter().any(|id| id == turn_id) {
+                        current.adapter_turn_ids.push(turn_id.to_string());
+                    }
+                    return None;
+                }
+            }
+        }
+        // The dangling round's last trunk is written while that round is still
+        // the active one, so it lands in its own directory rather than in the
+        // one about to be created.
+        let has_open_trunk = {
+            let mut active = self.active_round.lock().await;
+            match active.as_mut() {
+                Some(round) if round.outcome.is_none() => {
+                    round.outcome = Some(RoundOutcome::Superseded);
+                    round.close_current_trunk_pending().is_some()
+                }
+                _ => false,
+            }
+        };
+        if has_open_trunk {
+            self.finish_trunk().await;
+        }
+        self.open_trunk_items.lock().await.clear();
+        self.blob_refs.lock().await.clear();
+
+        let superseded = self
+            .active_round
+            .lock()
+            .await
+            .take()
+            .filter(|round| round.outcome == Some(RoundOutcome::Superseded));
+        let round = ActiveRound {
+            round_id: format!("r_{}", uuid::Uuid::new_v4().simple()),
+            ord: self.rounds.lock().await.len() as u32,
+            user_item_id: Some(user_item_id.to_string()),
+            adapter_turn_ids: vec![turn_id.to_string()],
+            started_at_ms: now_ms(),
+            blocked_since_ms: None,
+            blocked_ms: 0,
+            outcome: None,
+            current_trunk: TrunkBuilder::default(),
+            closed_trunks: Vec::new(),
+        };
+        // Recorded before the agent runs, so a daemon that dies mid-request
+        // still leaves proof the request happened.
+        self.record_round(&round).await;
+        *self.active_round.lock().await = Some(round);
+        superseded
+    }
+
+    /// Writes a round's current state to `chat.jsonl` and to the in-memory
+    /// list the session layer answers from. Last write per round wins in both.
+    async fn record_round(&self, round: &ActiveRound) {
+        let record = RoundRecord {
+            schema_version: rounds::SCHEMA_VERSION,
+            round_id: round.round_id.clone(),
+            ord: round.ord,
+            user_item_id: round.user_item_id.clone(),
+            started_at_ms: round.started_at_ms,
+            ended_at_ms: if round.outcome.is_some() { now_ms() } else { 0 },
+            outcome: round.outcome,
+            adapter_turn_ids: round.adapter_turn_ids.clone(),
+            blocked_ms: round.blocked_ms,
+            synthesized: false,
+            trunk_count: round.closed_trunks.len() as u32,
+        };
+        {
+            let mut rounds = self.rounds.lock().await;
+            match rounds
+                .iter_mut()
+                .find(|existing| existing.round_id == record.round_id)
+            {
+                Some(existing) => *existing = record.clone(),
+                None => rounds.push(record.clone()),
+            }
+        }
+        let meta = self.meta.lock().await.clone();
+        if let Err(error) = self
+            .store
+            .append_round(&meta.workspace_id, &meta.id, &record)
+        {
+            tracing::error!(
+                "could not record round {} of {}: {error}",
+                record.ord,
+                meta.id
+            );
+        }
+    }
+
+    /// Folds a daemon-initiated continuation (approval granted, guidance
+    /// answered) onto the round that was already open when the interaction
+    /// started — never mints a new round, since the daemon itself decided to
+    /// resume rather than being told to by the client.
+    async fn continue_round(&self, turn_id: &str) {
+        let mut active = self.active_round.lock().await;
+        if let Some(round) = active.as_mut() {
+            if round.outcome.is_none() {
+                if let Some(since) = round.blocked_since_ms.take() {
+                    round.blocked_ms += (now_ms() - since).max(0);
+                }
+                if !round.adapter_turn_ids.iter().any(|id| id == turn_id) {
+                    round.adapter_turn_ids.push(turn_id.to_string());
+                }
+            }
+        }
+    }
+
+    /// Marks the open round as waiting on a human. A no-op if it is already
+    /// marked — two permission requests in a row must not double-count the
+    /// gap between the first answer and the second question.
+    async fn round_blocked(&self) {
+        let mut active = self.active_round.lock().await;
+        if let Some(round) = active.as_mut() {
+            if round.outcome.is_none() && round.blocked_since_ms.is_none() {
+                round.blocked_since_ms = Some(now_ms());
+            }
+        }
+    }
+
+    /// Ends the open round, if there is one, returning it together with the
+    /// item ids it accumulated so the caller can append a `RoundRecord`
+    /// (`session/rounds.rs`). `None` when there was nothing open to settle —
+    /// this is also how a caller like the channel-closed fallback tells
+    /// "there was a dangling round to clean up" from "there was nothing to do".
+    async fn settle_round(&self, outcome: RoundOutcome) -> Option<ActiveRound> {
+        let has_open_trunk = {
+            let mut active = self.active_round.lock().await;
+            let round = active.as_mut()?;
+            if round.outcome.is_some() {
+                return None;
+            }
+            if let Some(since) = round.blocked_since_ms.take() {
+                round.blocked_ms += (now_ms() - since).max(0);
+            }
+            round.outcome = Some(outcome);
+            round.close_current_trunk_pending().is_some()
+        };
+        if has_open_trunk {
+            self.finish_trunk().await;
+        }
+        self.open_trunk_items.lock().await.clear();
+        self.blob_refs.lock().await.clear();
+        self.active_round.lock().await.clone()
     }
 
     async fn shutdown(&self) {
@@ -904,6 +1640,7 @@ fn continuation_for(
 }
 
 async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &PermissionRequest) {
+    live.round_blocked().await;
     let agent = live.agent.lock().await.take();
     let persist = agent.as_ref().and_then(|agent| agent.persistence());
     {
@@ -931,6 +1668,48 @@ async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &P
     }
 }
 
+enum BlobWrite {
+    Put {
+        item_id: String,
+        value: serde_json::Value,
+    },
+    Flush(oneshot::Sender<()>),
+}
+
+fn flush_reasoning_blobs(
+    sender: &mpsc::UnboundedSender<BlobWrite>,
+    raw: &mut HashMap<String, String>,
+) {
+    for (id, text) in raw.drain() {
+        let value = serde_json::to_value(TimelineItem::Reasoning {
+            id: id.clone(),
+            text,
+        });
+        if let Ok(value) = value {
+            let _ = sender.send(BlobWrite::Put { item_id: id, value });
+        }
+    }
+}
+
+fn preserve_tool_blob(sender: &mpsc::UnboundedSender<BlobWrite>, item: &TimelineItem) {
+    let TimelineItem::ToolCall { id, .. } = item else {
+        return;
+    };
+    if let Ok(value) = serde_json::to_value(item) {
+        let _ = sender.send(BlobWrite::Put {
+            item_id: id.clone(),
+            value,
+        });
+    }
+}
+
+async fn flush_blob_writer(sender: &mpsc::UnboundedSender<BlobWrite>) {
+    let (done, wait) = oneshot::channel();
+    if sender.send(BlobWrite::Flush(done)).is_ok() {
+        let _ = wait.await;
+    }
+}
+
 /// Folds adapter events into session state, then republishes them.
 ///
 /// Everything passes through `overview` first: the daemon's answer to "what
@@ -944,15 +1723,62 @@ async fn pump_events(
     store: Store,
     replay_window: usize,
 ) {
-    // Thinking streams one delta per token. Keep only the overview already
-    // shown; even this transient pump state must never accumulate the raw
-    // reasoning block. Item id → overview last sent (at most 24 characters).
+    let (workspace_id, session_id) = {
+        let meta = live.meta.lock().await;
+        (meta.workspace_id.clone(), meta.id.clone())
+    };
+    let (blob_sender, mut blob_receiver) = mpsc::unbounded_channel::<BlobWrite>();
+    let blob_store = store.clone();
+    let blob_workspace_id = workspace_id.clone();
+    let blob_session_id = session_id.clone();
+    let blob_live = live.clone();
+    // Blocking, because it is doing file IO, and single-tasked, so appends to
+    // one bucket stay ordered and the offset each reference carries is the one
+    // the bytes actually landed at. The references it produces go back onto
+    // `Live` for the trunk writer to pick up; a `Flush` is awaited before any
+    // turn ends, so a work row is never written before its payload's address
+    // is known.
+    let blob_writer = tokio::task::spawn_blocking(move || {
+        while let Some(write) = blob_receiver.blocking_recv() {
+            match write {
+                BlobWrite::Put { item_id, value } => {
+                    match blob_store.put_blob(&blob_workspace_id, &blob_session_id, value) {
+                        Ok(blob) => {
+                            blob_live.blob_refs.blocking_lock().insert(item_id, blob);
+                        }
+                        Err(error) => {
+                            tracing::warn!("could not preserve blob {item_id}: {error}")
+                        }
+                    }
+                }
+                BlobWrite::Flush(done) => {
+                    let _ = done.send(());
+                }
+            }
+        }
+    });
+    // The compact overview and source-preserved content have different
+    // lifetimes. Only the former enters the timeline; the latter is flushed to
+    // the content-addressed blob layer when the reasoning block moves on.
     let mut thinking: HashMap<String, String> = HashMap::new();
+    let mut raw_thinking: HashMap<String, String> = HashMap::new();
+    let mut raw_tools: HashMap<String, TimelineItem> = HashMap::new();
     let mut turns: HashMap<String, (i64, HashSet<String>)> = HashMap::new();
+    let mut channel_closed = false;
     loop {
         let mut event = match receiver.recv().await {
             Ok(event) => event,
-            Err(broadcast::error::RecvError::Closed) => break,
+            Err(broadcast::error::RecvError::Closed) => {
+                flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
+                // No `TurnFailed`, no `TurnCanceled` — the adapter's own sender
+                // just vanished (a crashed process is the ordinary cause). The
+                // round the proposal calls out this exact gap for (§3.2
+                // direction one, "adapter 事件通道关闭、子进程退出"): without
+                // this, it stays open forever and whatever it already
+                // produced never reaches disk.
+                channel_closed = true;
+                break;
+            }
             Err(broadcast::error::RecvError::Lagged(missed)) => {
                 tracing::warn!("dropped {missed} agent events: the pump fell behind");
                 continue;
@@ -974,6 +1800,75 @@ async fn pump_events(
                 .entry(turn_id.clone())
                 .or_insert_with(|| (now_ms(), HashSet::new()));
             collect_tool_ids(item, &mut entry.1);
+        }
+
+        let updates_reasoning = match &event {
+            SessionEvent::Item {
+                item: TimelineItem::Reasoning { id, text },
+                ..
+            } => {
+                raw_thinking.insert(id.clone(), text.clone());
+                true
+            }
+            SessionEvent::ItemDelta {
+                item_id,
+                delta: ItemDelta::Text { delta },
+                ..
+            } if raw_thinking.contains_key(item_id) => {
+                raw_thinking
+                    .get_mut(item_id)
+                    .expect("checked against the same map")
+                    .push_str(delta);
+                true
+            }
+            _ => false,
+        };
+        if !updates_reasoning {
+            flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
+        }
+        match &event {
+            SessionEvent::Item {
+                item: item @ TimelineItem::ToolCall { id, .. },
+                ..
+            } => {
+                raw_tools.insert(id.clone(), item.clone());
+                preserve_tool_blob(&blob_sender, item);
+            }
+            SessionEvent::ItemDelta {
+                item_id,
+                delta: ItemDelta::ToolStatus { status, detail },
+                ..
+            } => {
+                if let Some(item) = raw_tools.get_mut(item_id) {
+                    if let TimelineItem::ToolCall {
+                        status: raw_status,
+                        detail: raw_detail,
+                        ..
+                    } = item
+                    {
+                        *raw_status = *status;
+                        if let Some(detail) = detail {
+                            *raw_detail = detail.clone();
+                        }
+                    }
+                    preserve_tool_blob(&blob_sender, item);
+                }
+                if matches!(
+                    status,
+                    ToolStatus::Ok | ToolStatus::Error | ToolStatus::Canceled
+                ) {
+                    raw_tools.remove(item_id);
+                }
+            }
+            _ => {}
+        }
+        if matches!(
+            event,
+            SessionEvent::TurnCompleted { .. }
+                | SessionEvent::TurnFailed { .. }
+                | SessionEvent::TurnCanceled { .. }
+        ) {
+            flush_blob_writer(&blob_sender).await;
         }
 
         let event = match event {
@@ -1075,6 +1970,24 @@ async fn pump_events(
                 | SessionEvent::TurnFailed { .. }
                 | SessionEvent::TurnCanceled { .. }
         );
+        // `TurnCanceled` deliberately does not settle the round here: the one
+        // triggered by a permission request already `break`s above before
+        // reaching this line, and every other `TurnCanceled` is a plain
+        // interrupt, which leaves the round dangling on purpose until the
+        // next `send` decides whether to continue or supersede it (§3.2).
+        match &event {
+            SessionEvent::TurnCompleted { .. } => {
+                if let Some(round) = live.settle_round(RoundOutcome::Completed).await {
+                    persist_round(&live, round).await;
+                }
+            }
+            SessionEvent::TurnFailed { .. } => {
+                if let Some(round) = live.settle_round(RoundOutcome::Failed).await {
+                    persist_round(&live, round).await;
+                }
+            }
+            _ => {}
+        }
 
         live.publish(event).await;
         live.trim_replay(replay_window).await;
@@ -1083,6 +1996,13 @@ async fn pump_events(
             thinking.clear();
             flush_turn(&live, &store).await;
         }
+    }
+    flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
+    flush_blob_writer(&blob_sender).await;
+    drop(blob_sender);
+    let _ = blob_writer.await;
+    if channel_closed {
+        finalize_after_channel_closed(&live, &store).await;
     }
 }
 
@@ -1146,10 +2066,18 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
                 Some(existing) => *existing = item.clone(),
                 None => items.push(item.clone()),
             }
+            // Dropped explicitly, not just left to fall out of scope at the
+            // end of this match arm: `record_round_item` can re-lock
+            // `live.items` itself (`resolve_monologue_text`), and
+            // `tokio::sync::Mutex` is not reentrant — holding this guard
+            // across that call would deadlock the pump task.
+            drop(items);
             let mut turn_items = live.turn_items.lock().await;
             if !turn_items.iter().any(|id| id == item.id()) {
                 turn_items.push(item.id().to_string());
             }
+            drop(turn_items);
+            live.record_round_item(item).await;
         }
         SessionEvent::ItemDelta { item_id, delta, .. } => {
             let mut items = live.items.lock().await;
@@ -1247,7 +2175,46 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
     }
 }
 
-/// Writes the items this turn produced, once, when the turn ends.
+/// Covers the one case `TurnCompleted`/`TurnFailed`/`TurnCanceled` do not:
+/// the adapter's event channel closing with no terminal event at all.
+///
+/// A no-op unless there was an open round — ordinary shutdown (`Live::
+/// shutdown`) aborts the pump task outright rather than letting `recv` see
+/// `Closed`, and a round that already settled has nothing left to clean up.
+async fn finalize_after_channel_closed(live: &Arc<Live>, store: &Store) {
+    let Some(round) = live.settle_round(RoundOutcome::Failed).await else {
+        return;
+    };
+    persist_round(live, round).await;
+    // Whatever this turn had produced so far would otherwise never reach
+    // disk: `flush_turn` only ever ran from inside this same loop, on a
+    // terminal event that, this time, never arrived.
+    flush_turn(live, store).await;
+    let pending = !live.pending_permissions.lock().await.is_empty();
+    *live.status.lock().await = if pending {
+        SessionStatus::Waiting
+    } else {
+        SessionStatus::Failed
+    };
+}
+
+/// Records a round's final state on `chat.jsonl`.
+///
+/// Failure is logged, not propagated: a missing record degrades a later
+/// cross-session query to "this round is invisible to it", not data loss —
+/// the round's narrative and trunks already reached disk.
+async fn persist_round(live: &Arc<Live>, round: ActiveRound) {
+    if round.outcome.is_none() {
+        // Should not happen: every caller only reaches here after setting an
+        // outcome. Guarded anyway rather than unwrapped, because a ledger
+        // write is not worth a panic over.
+        return;
+    }
+    live.record_round(&round).await;
+}
+
+/// Writes what this turn produced, once, when the turn ends: narrative to the
+/// chat layer, work to the open trunk.
 async fn flush_turn(live: &Arc<Live>, store: &Store) {
     let ids: Vec<String> = std::mem::take(&mut *live.turn_items.lock().await);
     if ids.is_empty() {
@@ -1267,7 +2234,8 @@ async fn flush_turn(live: &Arc<Live>, store: &Store) {
         let meta = live.meta.lock().await;
         (meta.workspace_id.clone(), meta.id.clone())
     };
-    if let Err(error) = store.append_items(&workspace_id, &session_id, &settled) {
+    live.persist_open_trunk().await;
+    if let Err(error) = store.append_chat_items(&workspace_id, &session_id, &settled) {
         tracing::error!("could not persist the timeline for {session_id}: {error}");
     }
     let mut meta = live.meta.lock().await;
@@ -1306,6 +2274,7 @@ mod tests {
             effort_id: None,
             id: "s1".into(),
             workspace_id: "w1".into(),
+            format: SESSION_FORMAT,
             agent_id: "genet".into(),
             title: None,
             cwd: PathBuf::from("/tmp"),
@@ -1326,14 +2295,162 @@ mod tests {
         }
     }
 
+    /// A store whose single workspace, `w1`, is a throwaway directory. Sessions
+    /// live inside their workspace, so a test has to say which one that is.
+    fn test_store(workspace_root: &std::path::Path) -> Store {
+        let homes = crate::session::WorkspaceHomes::default();
+        homes.attach("w1", workspace_root);
+        Store::new(homes)
+    }
+
     /// A manager over a throwaway directory. Neither rename nor delete asks the
     /// registry anything, so an empty one is enough to exercise both.
     fn manager(root: &std::path::Path) -> SessionManager {
         SessionManager::new(
-            Store::new(root),
+            test_store(root),
             Arc::new(Registry::new(&std::collections::BTreeMap::new())),
             16,
         )
+    }
+
+    /// An agent whose past threads are gone: it starts fresh, and refuses to
+    /// resume anything. Stands in for a CLI that pruned its own thread store,
+    /// or a project copied to a machine that never had those threads.
+    struct Amnesiac;
+
+    struct Blank(tokio::sync::broadcast::Sender<SessionEvent>);
+
+    #[async_trait::async_trait]
+    impl crate::adapter::AgentAdapter for Amnesiac {
+        fn id(&self) -> &str {
+            "amnesiac"
+        }
+
+        fn label(&self) -> &str {
+            "Amnesiac"
+        }
+
+        fn capabilities(&self) -> genehub_proto::Capabilities {
+            genehub_proto::Capabilities {
+                interrupt: false,
+                set_model: false,
+                set_effort: false,
+                set_mode: false,
+                permissions: false,
+                resume: true,
+                fork: false,
+                attachments: false,
+            }
+        }
+
+        async fn probe(&self) -> genehub_proto::ProbeState {
+            genehub_proto::ProbeState::Ready
+        }
+
+        async fn catalog(&self, _providers: &ProviderMap) -> genehub_proto::Catalog {
+            genehub_proto::Catalog {
+                models: Vec::new(),
+                modes: Vec::new(),
+                commands: Vec::new(),
+                default_model: None,
+                default_mode: None,
+                default_effort: None,
+            }
+        }
+
+        async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
+            if config.resume.is_some() {
+                return Err(anyhow!("no such thread"));
+            }
+            Ok(Box::new(Blank(tokio::sync::broadcast::channel(8).0)))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentSession for Blank {
+        fn events(&self) -> tokio::sync::broadcast::Receiver<SessionEvent> {
+            self.0.subscribe()
+        }
+
+        async fn send(&self, _input: PromptInput) -> Result<String> {
+            Ok("t1".into())
+        }
+
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_model(&self, _model_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_mode(&self, _mode_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn respond_permission(
+            &self,
+            _request_id: &str,
+            _outcome: genehub_proto::PermissionOutcome,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_cannot_resume_starts_over_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(Amnesiac)])),
+            16,
+        );
+        let stale = PersistHandle {
+            agent_id: "amnesiac".into(),
+            value: serde_json::json!({ "threadId": "gone" }),
+        };
+        sessions
+            .store
+            .save_meta(&SessionMeta {
+                agent_id: "amnesiac".into(),
+                persist: Some(stale),
+                ..meta()
+            })
+            .unwrap();
+
+        let live = sessions.live("s1").await.unwrap();
+        sessions
+            .ensure_started(&live, &ProviderMap::new())
+            .await
+            .expect("a conversation whose thread is gone is stranded for good");
+
+        let told = live
+            .items
+            .lock()
+            .await
+            .iter()
+            .any(|item| matches!(item, TimelineItem::Error { message, .. } if message.contains("Amnesiac")));
+        assert!(
+            told,
+            "the agent answers with no memory of the conversation above and nothing says why"
+        );
+        assert_eq!(
+            sessions.store.load_meta("w1", "s1").unwrap().persist,
+            None,
+            "a handle that just failed to resume names a thread that is gone"
+        );
+    }
+
+    /// A `Live` with its own throwaway store. The directory handle comes back
+    /// with it so the caller keeps it alive for the length of the test.
+    fn live_session(meta: SessionMeta) -> (Arc<Live>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let live = Arc::new(Live::new(meta, test_store(dir.path())));
+        (live, dir)
     }
 
     #[tokio::test]
@@ -1400,15 +2517,20 @@ mod tests {
         sessions.store.save_meta(&meta()).unwrap();
         sessions
             .store
-            .append_items("w1", "s1", &[item("a", "hi")])
+            .append_chat_items("w1", "s1", &[item("a", "hi")])
             .unwrap();
-        let scratch = sessions.store.scratch_dir("w1", "s1");
+        let scratch = sessions.store.scratch_dir("w1", "s1").unwrap();
         std::fs::create_dir_all(&scratch).unwrap();
 
         sessions.delete("s1").await.unwrap();
 
         assert!(sessions.store.list_meta().unwrap().is_empty());
-        assert!(sessions.store.load_items("w1", "s1").unwrap().is_empty());
+        assert!(sessions
+            .store
+            .load_chat("w1", "s1")
+            .unwrap()
+            .items
+            .is_empty());
         assert!(
             !scratch.exists(),
             "the agent's own copy of the conversation outlived the delete"
@@ -1431,7 +2553,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_item_is_upserted_rather_than_duplicated() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         apply(
             &live,
             &SessionEvent::Item {
@@ -1456,7 +2578,7 @@ mod tests {
 
     #[tokio::test]
     async fn text_deltas_accumulate_onto_the_open_item() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         apply(
             &live,
             &SessionEvent::Item {
@@ -1483,7 +2605,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_delta_for_an_unknown_item_is_dropped_not_invented() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         apply(
             &live,
             &SessionEvent::ItemDelta {
@@ -1498,7 +2620,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_status_deltas_update_status_and_detail_in_place() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         apply(
             &live,
             &SessionEvent::Item {
@@ -1540,7 +2662,7 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_numbers_are_dense_and_start_at_one() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         for index in 1..=3 {
             let event = live
                 .publish(SessionEvent::TurnStarted {
@@ -1554,7 +2676,7 @@ mod tests {
 
     #[tokio::test]
     async fn pending_permissions_appear_in_the_snapshot_and_clear_on_answer() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         let request = PermissionRequest {
             id: "p1".into(),
             kind: PermissionRequestKind::Permission,
@@ -1592,7 +2714,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_new_interaction_replaces_a_stale_one() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         for id in ["p1", "p2"] {
             apply(
                 &live,
@@ -1701,8 +2823,8 @@ mod tests {
     #[tokio::test]
     async fn an_interaction_is_persisted_before_the_agent_process_is_closed() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path());
-        let live = Arc::new(Live::new(meta()));
+        let store = test_store(dir.path());
+        let (live, _store_dir) = live_session(meta());
         let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (events, _) = broadcast::channel(1);
@@ -1768,7 +2890,8 @@ mod tests {
     async fn a_persisted_interaction_rehydrates_as_waiting_without_an_agent() {
         let mut stored = meta();
         stored.pending_permission = Some(interaction(PermissionRequestKind::Permission));
-        let live = Live::new(stored);
+        let (live, _store_dir) = live_session(stored);
+        let live = &*live;
         let snapshot = live.snapshot().await.unwrap();
         assert_eq!(snapshot.summary.status, SessionStatus::Waiting);
         assert_eq!(snapshot.pending_permissions.len(), 1);
@@ -1777,7 +2900,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_turn_stays_visible_as_failed_but_remains_retryable() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         apply(
             &live,
             &SessionEvent::TurnFailed {
@@ -1795,8 +2918,8 @@ mod tests {
     #[tokio::test]
     async fn only_settled_non_prompt_items_are_written_at_the_end_of_a_turn() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path());
-        let live = Arc::new(Live::new(meta()));
+        let store = test_store(dir.path());
+        let (live, _store_dir) = live_session(meta());
 
         for event in [
             SessionEvent::Item {
@@ -1816,14 +2939,14 @@ mod tests {
         }
         flush_turn(&live, &store).await;
 
-        let written = store.load_items("w1", "s1").unwrap();
+        let written = store.load_chat("w1", "s1").unwrap().items;
         assert_eq!(written.len(), 1, "the prompt was persisted on arrival");
         assert_eq!(written[0].id(), "a");
     }
 
     #[tokio::test]
     async fn the_replay_buffer_is_bounded() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         for _ in 0..10 {
             live.publish(SessionEvent::TurnStarted {
                 turn_id: "t".into(),
@@ -1845,7 +2968,7 @@ mod tests {
 
     #[tokio::test]
     async fn usage_rides_along_on_turn_completion() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         let event = live
             .publish(SessionEvent::TurnCompleted {
                 turn_id: "t".into(),
@@ -1871,10 +2994,15 @@ mod tests {
         Vec<TimelineItem>,
         tokio::task::JoinHandle<()>,
         broadcast::Sender<SessionEvent>,
+        Store,
+        tempfile::TempDir,
     ) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path());
-        let live = Arc::new(Live::new(meta()));
+        let store = test_store(dir.path());
+        let live = Arc::new(Live::new(meta(), store.clone()));
+        // Work only reaches disk through a round's trunk files, and in
+        // production `session.send` always opens one before the agent runs.
+        live.begin_round(None, "t", "u0").await;
         let (agent_events, _) = broadcast::channel(64);
         let mut seen = live.events.subscribe();
         let pump = tokio::spawn(pump_events(
@@ -1897,9 +3025,22 @@ mod tests {
         }
         // The flush rides on the settle event, which was just observed — but
         // only observed on its way out, so give the pump its turn.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let on_disk = store.load_items("w1", "s1").unwrap();
-        (wire, on_disk, pump, agent_events)
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let on_disk = store.load_chat("w1", "s1").unwrap().items;
+        (wire, on_disk, pump, agent_events, store, dir)
+    }
+
+    /// Every work row of a round, in order, as stored. The round layer is the
+    /// only way to work back to a tool call or a thinking block now: the
+    /// narrative log does not carry them.
+    fn stored_blobs(store: &Store, ord: u32) -> Vec<genehub_proto::BlobOverview> {
+        store
+            .load_trunk_index("w1", "s1", ord)
+            .unwrap()
+            .iter()
+            .flat_map(|summary| store.load_trunk("w1", "s1", ord, summary).unwrap().batches)
+            .flat_map(|batch| batch.blobs)
+            .collect()
     }
 
     /// A thinking block streams one delta per token; what reaches the wire is
@@ -1935,7 +3076,7 @@ mod tests {
             fork_checkpoint: None,
         });
 
-        let (wire, on_disk, pump, agent_events) = pumped(script).await;
+        let (wire, on_disk, pump, agent_events, store, _dir) = pumped(script).await;
         drop(agent_events);
         pump.await.unwrap();
 
@@ -1974,16 +3115,19 @@ mod tests {
                 );
             }
         }
-        let persisted = on_disk
-            .iter()
-            .find(|item| item.id() == "r")
-            .expect("the thinking block is in the log");
-        match persisted {
-            TimelineItem::Reasoning { text, .. } => {
-                assert_eq!(text.chars().count(), overview::REASONING_CHARS);
-            }
-            other => panic!("unexpected {other:?}"),
-        }
+        assert!(
+            on_disk.iter().all(|item| item.id() != "r"),
+            "thinking belongs to the round layer, not to the session narrative"
+        );
+        let persisted = stored_blobs(&store, 0)
+            .into_iter()
+            .find(|blob| blob.item_id == "r")
+            .expect("the thinking block is stored as a work row");
+        assert_eq!(persisted.kind, genehub_proto::BlobKind::Reasoning);
+        assert_eq!(
+            persisted.overview.chars().count(),
+            overview::REASONING_CHARS
+        );
     }
 
     /// A shell command's output is the heaviest ordinary payload there is.
@@ -1992,7 +3136,7 @@ mod tests {
     #[tokio::test]
     async fn a_tool_calls_payload_stays_behind_the_access_layer() {
         let output = "a line of build output\n".repeat(500);
-        let (wire, on_disk, pump, agent_events) = pumped(vec![
+        let (wire, on_disk, pump, agent_events, store, _dir) = pumped(vec![
             SessionEvent::TurnStarted {
                 turn_id: "t".into(),
                 started_at_ms: 1,
@@ -2067,5 +3211,1221 @@ mod tests {
         assert_eq!(stats.fork_checkpoint.as_deref(), Some("agent-turn-7"));
         let size = serde_json::to_string(&on_disk).unwrap().len();
         assert!(size < 1_000, "the log kept the payload ({size} bytes)");
+        // The work row itself is the index: it carries the locator, and no
+        // separate blob index is consulted to get from item to payload.
+        let blob_ref = stored_blobs(&store, 0)
+            .into_iter()
+            .find(|blob| blob.item_id == "c")
+            .and_then(|blob| blob.blob)
+            .expect("the compact row points at source-preserved content");
+        let blob = store
+            .get_blob("w1", "s1", &blob_ref)
+            .unwrap()
+            .expect("the content-addressed blob is retrievable");
+        assert!(
+            blob.value.to_string().len() > 10_000,
+            "the source output was not replaced by its overview"
+        );
+    }
+
+    // -- ActiveRound: round vs. turn (docs/agent-analysis-substrate-proposal.md §3.2) --
+    //
+    // The pure decision logic (`begin_round`, `continue_round`, `settle_round`)
+    // is tested directly against a bare `Live`, the same way `apply` is above.
+    // A handful of tests then drive the whole thing through `SessionManager`
+    // with a scriptable fake in place of a real adapter — the registry only
+    // ever gets asked for a real process when `live.agent` is empty, so a
+    // fake dropped in ahead of time keeps `send` and `respond_permission`
+    // running their real logic without spawning anything.
+
+    #[tokio::test]
+    async fn a_round_opens_on_the_first_adapter_turn() {
+        let (live, _store_dir) = live_session(meta());
+        let superseded = live.begin_round(None, "t0", "u0").await;
+        assert!(superseded.is_none(), "nothing was open to cut short");
+
+        let round = live
+            .active_round
+            .lock()
+            .await
+            .clone()
+            .expect("a round was opened");
+        assert_eq!(round.adapter_turn_ids, vec!["t0".to_string()]);
+        assert!(round.outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_send_without_continues_round_supersedes_the_dangling_round_it_replaces() {
+        let (live, _store_dir) = live_session(meta());
+        live.begin_round(None, "t0", "u0").await;
+        let first_round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .round_id
+            .clone();
+
+        let superseded = live
+            .begin_round(None, "t1", "u1")
+            .await
+            .expect("the dangling round was cut short");
+        assert_eq!(superseded.round_id, first_round_id);
+        assert_eq!(superseded.outcome, Some(RoundOutcome::Superseded));
+        assert_eq!(superseded.adapter_turn_ids, vec!["t0".to_string()]);
+        assert_eq!(
+            superseded.user_item_id.as_deref(),
+            Some("u0"),
+            "the superseded round keeps the message that opened it"
+        );
+
+        let current = live.active_round.lock().await.clone().unwrap();
+        assert_ne!(
+            current.round_id, first_round_id,
+            "a fresh round must replace the superseded one"
+        );
+        assert_eq!(current.adapter_turn_ids, vec!["t1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_send_with_a_matching_continues_round_folds_into_the_same_round() {
+        let (live, _store_dir) = live_session(meta());
+        live.begin_round(None, "t0", "u0").await;
+        let round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .round_id
+            .clone();
+
+        let superseded = live.begin_round(Some(&round_id), "t1", "u1").await;
+        assert!(
+            superseded.is_none(),
+            "a matching continuesRound must not cut the round short"
+        );
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_eq!(round.round_id, round_id, "the round id must not change");
+        assert_eq!(
+            round.adapter_turn_ids,
+            vec!["t0".to_string(), "t1".to_string()],
+            "the new adapter turn must fold into the same round"
+        );
+        assert_eq!(
+            round.user_item_id.as_deref(),
+            Some("u0"),
+            "the round is still the one the first message opened"
+        );
+        assert!(
+            live.open_trunk_items.lock().await.is_empty(),
+            "a user message is narrative, not work: it never enters a trunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_continues_round_naming_an_unknown_round_starts_a_fresh_one() {
+        let (live, _store_dir) = live_session(meta());
+        live.begin_round(None, "t0", "u0").await;
+        let real_round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .round_id
+            .clone();
+
+        let superseded = live
+            .begin_round(Some("r_does_not_exist"), "t1", "u1")
+            .await
+            .expect("the real dangling round is still cut short");
+        assert_eq!(superseded.round_id, real_round_id);
+        assert_eq!(superseded.user_item_id.as_deref(), Some("u0"));
+
+        let current = live.active_round.lock().await.clone().unwrap();
+        assert_ne!(
+            current.round_id, real_round_id,
+            "an unrecognized continuesRound must not be trusted"
+        );
+        assert_eq!(current.adapter_turn_ids, vec!["t1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_settled_round_is_replaced_quietly_not_marked_superseded_again() {
+        let (live, _store_dir) = live_session(meta());
+        live.begin_round(None, "t0", "u0").await;
+        let round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .round_id
+            .clone();
+        assert!(live.settle_round(RoundOutcome::Completed).await.is_some());
+
+        // A stale continuesRound for a round that already finished on its own
+        // must not reopen it, and must not be reported as "cut short" —
+        // nothing was taken from it, it had already ended.
+        let superseded = live.begin_round(Some(&round_id), "t1", "u1").await;
+        assert!(superseded.is_none());
+
+        let current = live.active_round.lock().await.clone().unwrap();
+        assert_ne!(current.round_id, round_id);
+        assert!(current.outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn settle_round_is_idempotent() {
+        let (live, _store_dir) = live_session(meta());
+        live.begin_round(None, "t0", "u0").await;
+
+        let settled = live
+            .settle_round(RoundOutcome::Completed)
+            .await
+            .expect("the round was open");
+        assert_eq!(settled.user_item_id.as_deref(), Some("u0"));
+        assert!(
+            live.settle_round(RoundOutcome::Failed).await.is_none(),
+            "a round cannot be settled twice"
+        );
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_eq!(
+            round.outcome,
+            Some(RoundOutcome::Completed),
+            "the first outcome wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_time_is_folded_in_when_the_round_resumes_or_ends() {
+        let (live, _store_dir) = live_session(meta());
+        live.begin_round(None, "t0", "u0").await;
+        live.round_blocked().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        live.continue_round("t1").await;
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert!(round.blocked_since_ms.is_none(), "the pause is over");
+        assert!(
+            round.blocked_ms >= 15,
+            "the wait should be counted, got {}ms",
+            round.blocked_ms
+        );
+        assert_eq!(
+            round.adapter_turn_ids,
+            vec!["t0".to_string(), "t1".to_string()]
+        );
+
+        live.round_blocked().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        live.settle_round(RoundOutcome::Canceled).await;
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert!(
+            round.blocked_ms >= 30,
+            "a second pause must add to the running total, got {}ms",
+            round.blocked_ms
+        );
+    }
+
+    /// A fake `AgentSession` a test drives by hand: `send` mints an
+    /// incrementing turn id and returns immediately; the test pushes
+    /// whatever events that turn should produce onto the same channel the
+    /// running pump reads from — exactly what a real adapter does, minus the
+    /// process. The counter is shared (not per-instance) so a test that
+    /// re-attaches a fresh fake after a simulated restart still gets turn
+    /// ids that do not collide with the ones before it.
+    struct FakeSession {
+        events: broadcast::Sender<SessionEvent>,
+        next_turn: Arc<AtomicU64>,
+    }
+
+    impl FakeSession {
+        fn sharing(events: broadcast::Sender<SessionEvent>, next_turn: Arc<AtomicU64>) -> Self {
+            FakeSession { events, next_turn }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentSession for FakeSession {
+        fn events(&self) -> broadcast::Receiver<SessionEvent> {
+            self.events.subscribe()
+        }
+
+        async fn send(&self, _input: PromptInput) -> Result<String> {
+            let id = self.next_turn.fetch_add(1, Ordering::SeqCst);
+            Ok(format!("t{id}"))
+        }
+
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_model(&self, _model_id: &str) -> Result<()> {
+            anyhow::bail!("not used")
+        }
+
+        async fn set_mode(&self, _mode_id: &str) -> Result<()> {
+            anyhow::bail!("not used")
+        }
+
+        async fn respond_permission(
+            &self,
+            _request_id: &str,
+            _outcome: PermissionOutcome,
+        ) -> Result<()> {
+            anyhow::bail!("a stopped process is never answered in place")
+        }
+    }
+
+    /// Wires a session the way `ensure_started` would, but with a
+    /// `FakeSession` in place of a real adapter and its pump already
+    /// running — so `SessionManager::send` and `respond_permission` run
+    /// their real logic end to end, only the process at the bottom is fake.
+    async fn wired(
+        root: &std::path::Path,
+    ) -> (
+        SessionManager,
+        broadcast::Sender<SessionEvent>,
+        Arc<AtomicU64>,
+    ) {
+        let sessions = manager(root);
+        sessions.store.save_meta(&meta()).unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        let (events, _) = broadcast::channel(64);
+        let turn_ids = Arc::new(AtomicU64::new(0));
+        *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
+            events.clone(),
+            turn_ids.clone(),
+        )));
+        let pump = tokio::spawn(pump_events(
+            live.clone(),
+            events.subscribe(),
+            sessions.store.clone(),
+            64,
+        ));
+        *live.pump.lock().await = Some(pump);
+        (sessions, events, turn_ids)
+    }
+
+    /// Waits for the event pump to reach a state, rather than guessing how
+    /// long it takes to get there.
+    ///
+    /// The pump is its own task, so a test that just sent an event has to wait
+    /// for it. A fixed sleep is a guess that holds when the test runs alone and
+    /// breaks when the whole suite competes for the machine — which is how this
+    /// helper came to exist. The ceiling is generous because it only has to
+    /// catch a pump that will never arrive, not a slow one.
+    async fn eventually(expected: &str, mut reached: impl AsyncFnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !reached().await {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the event pump never {expected}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_round_completes_with_a_single_adapter_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let turn_id = sessions
+            .send("s1", "hello".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: turn_id.clone(),
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        eventually("settled the round", async || {
+            live.active_round
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|round| round.outcome.is_some())
+        })
+        .await;
+
+        let round = live
+            .active_round
+            .lock()
+            .await
+            .clone()
+            .expect("a round was opened");
+        assert_eq!(round.adapter_turn_ids, vec![turn_id.clone()]);
+        assert_eq!(round.outcome, Some(RoundOutcome::Completed));
+
+        let on_disk = sessions.store.load_chat("w1", "s1").unwrap().items;
+        let user_item_id = on_disk
+            .iter()
+            .find_map(|item| match item {
+                TimelineItem::UserMessage { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .expect("the prompt was written to disk");
+
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
+        assert_eq!(rounds.len(), 1, "one settled round must be ledgered");
+        assert_eq!(rounds[0].round_id, round.round_id);
+        assert_eq!(rounds[0].outcome, Some(RoundOutcome::Completed));
+        assert_eq!(rounds[0].adapter_turn_ids, vec![turn_id]);
+        assert_eq!(rounds[0].user_item_id.as_ref(), Some(&user_item_id));
+        assert!(!rounds[0].synthesized, "a live round is never synthesized");
+    }
+
+    fn tool_call(id: &str, name: &str) -> TimelineItem {
+        TimelineItem::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            status: ToolStatus::Ok,
+            detail: ToolCallDetail::Shell {
+                command: name.into(),
+                output: String::new(),
+                exit_code: Some(0),
+            },
+        }
+    }
+
+    /// End-to-end proof that trunk pagination (§3.2 direction three, §8 step
+    /// 3) actually reaches the ledger: a monologue that arrives after some
+    /// tool calls closes a trunk, and the round settling closes whatever
+    /// trunk was still open — nothing accumulated since the last boundary is
+    /// silently dropped.
+    #[tokio::test]
+    async fn a_monologue_boundary_mid_round_produces_two_ledgered_trunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let turn_id = sessions
+            .send("s1", "do a bunch of stuff".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        for event in [
+            SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: item("a1", "reading the config first"),
+            },
+            SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: tool_call("t1", "read_file"),
+            },
+            SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: tool_call("t2", "read_file"),
+            },
+            SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: item("a2", "now applying the change"),
+            },
+        ] {
+            events.send(event).unwrap();
+        }
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: turn_id.clone(),
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
+        assert_eq!(rounds.len(), 1, "one settled round must be ledgered");
+        let trunks = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
+        assert_eq!(rounds[0].trunk_count, 1);
+        assert_eq!(
+            trunks.len(),
+            1,
+            "monologues divide visible batches; the trunk remains bounded by its blob cap"
+        );
+        assert_eq!(trunks[0].index, 0);
+        assert_eq!(trunks[0].first_item_id, "a1");
+        assert_eq!(trunks[0].blob_count, 2);
+        assert_eq!(trunks[0].title, "reading the config first");
+        assert_eq!(trunks[0].batches.len(), 2);
+        assert_eq!(trunks[0].batches[0].blob_count, 2);
+        assert_eq!(trunks[0].batches[1].blob_count, 0);
+    }
+
+    /// A round that never narrates still gets paginated: the 32-item cap is
+    /// what protects the byte budget when an agent (like `genet`, which the
+    /// proposal notes is prompted to "be concise") produces long runs of
+    /// tool calls with no monologue in between.
+    #[tokio::test]
+    async fn a_round_with_no_monologue_at_all_still_paginates_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let turn_id = sessions
+            .send("s1", "run a lot of tools".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        for i in 0..116u32 {
+            events
+                .send(SessionEvent::Item {
+                    turn_id: turn_id.clone(),
+                    item: tool_call(&format!("t{i}"), "grep"),
+                })
+                .unwrap();
+            if i % 16 == 15 {
+                tokio::task::yield_now().await;
+            }
+        }
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: turn_id.clone(),
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
+        let trunks = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
+        assert_eq!(rounds[0].trunk_count, 2);
+        assert_eq!(
+            trunks.len(),
+            2,
+            "116 tool calls split into a full 100-blob trunk and a 16-blob tail: {trunks:?}"
+        );
+        assert_eq!(trunks[0].blob_count, 100);
+        assert_eq!(trunks[0].batches.len(), 7);
+        assert_eq!(trunks[1].blob_count, 16);
+        assert_eq!(trunks[1].batches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn layered_open_omits_historical_work_and_prefetches_only_the_last_trunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+        let turn_id = sessions
+            .send("s1", "inspect".into(), vec![], &providers, None)
+            .await
+            .unwrap();
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: item("a1", "先读取配置。然后修改"),
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::Item {
+                turn_id: turn_id.clone(),
+                item: TimelineItem::ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    status: ToolStatus::Ok,
+                    detail: ToolCallDetail::Read {
+                        path: "config.json".into(),
+                        content: "raw source content".repeat(100),
+                        truncated: false,
+                    },
+                },
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id,
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (snapshot, replayed, reset, _) = sessions.subscribe("s1", Some(0), true).await.unwrap();
+        assert!(reset);
+        assert!(
+            replayed.is_empty(),
+            "layered open must not replay work history"
+        );
+        assert!(snapshot.items.iter().all(|item| !matches!(
+            item,
+            TimelineItem::ToolCall { .. } | TimelineItem::Reasoning { .. }
+        )));
+        let rounds = snapshot.rounds.expect("session layer includes rounds");
+        assert_eq!(rounds.len(), 1);
+        let expanded = snapshot
+            .expanded_round
+            .expect("the requested last round is prefetched");
+        assert_eq!(expanded.trunks.len(), 1);
+        assert_eq!(expanded.trunks[0].batches.len(), 1);
+        let trunk = expanded
+            .expanded_trunk
+            .expect("last trunk details are present");
+        assert_eq!(trunk.batches[0].blobs.len(), 1);
+        assert_eq!(
+            trunk.batches[0].monologue.as_deref(),
+            Some("先读取配置。然后修改"),
+            "process narration belongs to the expanded batch rather than being reconstructed by the client"
+        );
+        let reference = trunk.batches[0].blobs[0]
+            .blob
+            .clone()
+            .expect("the compact blob row addresses source content");
+        let payload = sessions.blob("s1", &reference).await.unwrap();
+        assert!(payload.value.to_string().contains("raw source content"));
+    }
+
+    #[tokio::test]
+    async fn trunk_index_pages_backward_without_repeating_the_round_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, _events, _) = wired(dir.path()).await;
+        sessions
+            .store
+            .append_round(
+                "w1",
+                "s1",
+                &RoundRecord {
+                    schema_version: rounds::SCHEMA_VERSION,
+                    round_id: "r-many".into(),
+                    ord: 0,
+                    user_item_id: None,
+                    started_at_ms: 1,
+                    ended_at_ms: 2,
+                    outcome: Some(RoundOutcome::Completed),
+                    adapter_turn_ids: vec!["t1".into()],
+                    blocked_ms: 0,
+                    synthesized: false,
+                    trunk_count: 25,
+                },
+            )
+            .unwrap();
+        for index in 0..25 {
+            sessions
+                .store
+                .write_trunk(
+                    "w1",
+                    "s1",
+                    0,
+                    &RoundTrunk {
+                        summary: TrunkSummary {
+                            index,
+                            first_item_id: format!("i{index}"),
+                            blob_count: 100,
+                            title: format!("阶段 {index}"),
+                            batches: vec![],
+                        },
+                        batches: vec![],
+                    },
+                )
+                .unwrap();
+        }
+
+        // A cold open, so the session layer reads the record just written
+        // rather than the empty one it has in memory.
+        sessions.sessions.write().await.clear();
+        let recent = sessions
+            .round_layer("s1", "r-many", None, Some(20))
+            .await
+            .unwrap();
+        assert_eq!(recent.trunks.first().unwrap().index, 5);
+        assert_eq!(recent.trunks.last().unwrap().index, 24);
+        assert_eq!(recent.next_cursor.as_deref(), Some("before:5"));
+        let older = sessions
+            .round_layer("s1", "r-many", recent.next_cursor.as_deref(), Some(20))
+            .await
+            .unwrap();
+        assert_eq!(older.trunks.len(), 5);
+        assert_eq!(older.trunks.first().unwrap().index, 0);
+        assert!(older.next_cursor.is_none());
+    }
+
+    /// The proposal's central claim: an approval mid-turn is not a new round,
+    /// even though it is two adapter turns, two `TurnSummary`s and — before
+    /// this — two independent stories about what happened.
+    #[tokio::test]
+    async fn approving_a_permission_stitches_the_same_round_across_two_adapter_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, turn_ids) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let first_turn = sessions
+            .send("s1", "do the thing".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: first_turn.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+
+        let request = interaction(PermissionRequestKind::Permission);
+        events
+            .send(SessionEvent::PermissionRequested {
+                request: request.clone(),
+            })
+            .unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        eventually("recorded the permission request", async || {
+            !live.pending_permissions.lock().await.is_empty()
+        })
+        .await;
+
+        let round_id_before = {
+            let round = live.active_round.lock().await;
+            let round = round.as_ref().expect("a round is open, just blocked");
+            assert_eq!(round.adapter_turn_ids, vec![first_turn.clone()]);
+            assert!(round.outcome.is_none(), "blocked is not settled");
+            round.round_id.clone()
+        };
+
+        // The real pump broke its loop for the interaction, same as
+        // `stop_agent_for_interaction` does against a real adapter. A fresh
+        // fake stands in for whatever `ensure_started_in_mode` would really
+        // start on approval, sharing the turn-id counter so the ids stay
+        // distinct across the "restart".
+        *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
+            events.clone(),
+            turn_ids.clone(),
+        )));
+        let pump = tokio::spawn(pump_events(
+            live.clone(),
+            events.subscribe(),
+            sessions.store.clone(),
+            64,
+        ));
+        *live.pump.lock().await = Some(pump);
+
+        sessions
+            .respond_permission(
+                "s1",
+                &request.id,
+                PermissionOutcome::Selected {
+                    option_id: "yes".into(),
+                },
+                &providers,
+            )
+            .await
+            .expect("an allow option resumes");
+
+        let second_turn = {
+            let round = live.active_round.lock().await;
+            let round = round.as_ref().unwrap();
+            assert_eq!(
+                round.round_id, round_id_before,
+                "an approval must not cut a new round"
+            );
+            assert_eq!(
+                round.adapter_turn_ids.len(),
+                2,
+                "the resumed turn must fold into the same round"
+            );
+            assert!(round.blocked_since_ms.is_none(), "resumed, so unblocked");
+            round.adapter_turn_ids[1].clone()
+        };
+        assert_ne!(second_turn, first_turn);
+
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: second_turn.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: second_turn,
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+        eventually("settled the resumed round", async || {
+            live.active_round
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|round| round.outcome.is_some())
+        })
+        .await;
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_eq!(round.round_id, round_id_before);
+        assert_eq!(round.outcome, Some(RoundOutcome::Completed));
+        assert!(
+            round.blocked_ms >= 0,
+            "the wait for the approval was tracked"
+        );
+
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
+        assert_eq!(
+            rounds.len(),
+            1,
+            "two adapter turns stitched into one round must ledger as one record, not two"
+        );
+        assert_eq!(rounds[0].round_id, round_id_before);
+        assert_eq!(rounds[0].adapter_turn_ids.len(), 2);
+        assert_eq!(rounds[0].outcome, Some(RoundOutcome::Completed));
+    }
+
+    #[tokio::test]
+    async fn denying_a_permission_settles_the_round_without_a_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let turn_id = sessions
+            .send("s1", "do the thing".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id,
+                started_at_ms: 1,
+            })
+            .unwrap();
+        let request = interaction(PermissionRequestKind::Permission);
+        events
+            .send(SessionEvent::PermissionRequested {
+                request: request.clone(),
+            })
+            .unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        eventually("recorded the permission request", async || {
+            !live.pending_permissions.lock().await.is_empty()
+        })
+        .await;
+
+        sessions
+            .respond_permission(
+                "s1",
+                &request.id,
+                PermissionOutcome::Selected {
+                    option_id: "no".into(),
+                },
+                &providers,
+            )
+            .await
+            .expect("a reject resolves without resuming");
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_eq!(
+            round.outcome,
+            Some(RoundOutcome::Canceled),
+            "no continuation means the round is done, not dangling"
+        );
+
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].outcome, Some(RoundOutcome::Canceled));
+    }
+
+    /// The one case the daemon truly cannot decide on its own: the user
+    /// pressed stop, then said something else. `continuesRound` is the
+    /// client's explicit word for "same request".
+    #[tokio::test]
+    async fn an_interrupted_round_is_continued_when_the_next_send_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let first_turn = sessions
+            .send("s1", "count to 500".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: first_turn.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::TurnCanceled {
+                turn_id: first_turn.clone(),
+            })
+            .unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        eventually("released the interrupted turn", async || {
+            *live.status.lock().await == genehub_proto::SessionStatus::Idle
+        })
+        .await;
+
+        assert_eq!(
+            *live.status.lock().await,
+            genehub_proto::SessionStatus::Idle,
+            "interrupted, so usable again"
+        );
+        let dangling_round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .expect("the round from the interrupted turn is left dangling")
+            .round_id
+            .clone();
+
+        let second_turn = sessions
+            .send(
+                "s1",
+                "continue".into(),
+                vec![],
+                &providers,
+                Some(dangling_round_id.clone()),
+            )
+            .await
+            .expect("accepted");
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_eq!(
+            round.round_id, dangling_round_id,
+            "the same round continues"
+        );
+        assert_eq!(round.adapter_turn_ids, vec![first_turn, second_turn]);
+
+        let recorded = sessions.store.load_chat("w1", "s1").unwrap().rounds;
+        assert_eq!(
+            recorded.len(),
+            1,
+            "a continued round stays one record, not one per adapter turn"
+        );
+        assert_eq!(recorded[0].round_id, dangling_round_id);
+        assert_eq!(
+            recorded[0].outcome, None,
+            "the round is on disk from the moment it opens, and still open"
+        );
+    }
+
+    /// Without that signal, the daemon must not guess: the dangling round is
+    /// cut loose and a new one starts, even though nothing else about this
+    /// message looks any different from a real continuation.
+    #[tokio::test]
+    async fn an_interrupted_round_is_superseded_by_a_plain_new_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let first_turn = sessions
+            .send("s1", "count to 500".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: first_turn.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        events
+            .send(SessionEvent::TurnCanceled {
+                turn_id: first_turn,
+            })
+            .unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        eventually("released the interrupted turn", async || {
+            *live.status.lock().await == genehub_proto::SessionStatus::Idle
+        })
+        .await;
+
+        let dangling_round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .round_id
+            .clone();
+
+        let second_turn = sessions
+            .send("s1", "what's the weather".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_ne!(
+            round.round_id, dangling_round_id,
+            "no continuesRound means a fresh round, not a guess"
+        );
+        assert_eq!(round.adapter_turn_ids, vec![second_turn]);
+
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
+        assert_eq!(
+            rounds.len(),
+            2,
+            "the superseded round and the one that replaced it are both on disk"
+        );
+        assert_eq!(rounds[0].round_id, dangling_round_id);
+        assert_eq!(
+            rounds[0].outcome,
+            Some(RoundOutcome::Superseded),
+            "the superseded round must be recorded even though it never got a terminal adapter event"
+        );
+        assert_eq!(rounds[1].round_id, round.round_id);
+        assert_eq!(rounds[1].outcome, None, "the replacement is still running");
+    }
+
+    /// The fallback `TurnCompleted`/`TurnFailed`/`TurnCanceled` do not cover:
+    /// the adapter's process disappears without saying anything at all. This
+    /// is also, on purpose, a round that produced exactly one item before
+    /// the crash — the "space round"-adjacent case §3.2 calls out as the one
+    /// most likely to be silently dropped.
+    #[tokio::test]
+    async fn a_channel_that_closes_mid_turn_settles_the_dangling_round_and_flushes_what_it_produced(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+        let live = sessions.live("s1").await.unwrap();
+
+        let turn_id = sessions
+            .send("s1", "hello".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::Item {
+                turn_id,
+                item: item("a", "partial answer"),
+            })
+            .unwrap();
+
+        // The adapter's sender vanishes without a terminal event: a crashed
+        // process, not a graceful stop. Both clones have to go — the test's
+        // and the fake session's — for the channel to actually close.
+        live.agent.lock().await.take();
+        drop(events);
+        eventually("noticed the adapter was gone", async || {
+            live.active_round
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|round| round.outcome.is_some())
+        })
+        .await;
+
+        let round = live
+            .active_round
+            .lock()
+            .await
+            .clone()
+            .expect("the round from `send` is still there");
+        assert_eq!(round.outcome, Some(RoundOutcome::Failed));
+        assert_eq!(
+            *live.status.lock().await,
+            genehub_proto::SessionStatus::Failed,
+            "a session must not stay stuck on Running with no process left"
+        );
+
+        let on_disk = sessions.store.load_chat("w1", "s1").unwrap().items;
+        assert!(
+            on_disk.iter().any(|stored| stored.id() == "a"),
+            "the item produced before the crash must still reach disk"
+        );
+
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
+        assert_eq!(
+            rounds.len(),
+            1,
+            "the empty-looking round must still be ledgered"
+        );
+        assert_eq!(rounds[0].outcome, Some(RoundOutcome::Failed));
+        assert!(
+            rounds[0].user_item_id.is_some(),
+            "the round must still name the request it was answering"
+        );
+    }
+
+    /// Sessions belong to the code they are about, so they are written inside
+    /// the workspace rather than in the daemon's data directory — and the
+    /// directory they land in keeps itself out of the project's own history.
+    #[tokio::test]
+    async fn a_session_is_written_inside_its_workspace_without_showing_up_in_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = manager(workspace.path());
+
+        sessions.store.save_meta(&meta()).unwrap();
+        sessions
+            .store
+            .append_chat_items("w1", "s1", &[item("a", "hi")])
+            .unwrap();
+
+        let home = workspace.path().join(".genethub");
+        let session = home.join("sessions").join("s1");
+        assert!(
+            session.join("chat.jsonl").exists(),
+            "the conversation is kept with the project it is about"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join(".gitignore")).unwrap(),
+            "*\n",
+            "a user's own `git status` must not fill up with session files"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Every level, not just the outermost: this lives in the user's own
+            // folder, whose permissions are theirs to loosen.
+            for directory in [&home, &home.join("sessions"), &session] {
+                assert_eq!(
+                    directory.metadata().unwrap().permissions().mode() & 0o777,
+                    0o700,
+                    "{} is readable by other local accounts",
+                    directory.display()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn another_build_of_genehub_finds_the_sessions_in_a_shared_project() {
+        let workspace = tempfile::tempdir().unwrap();
+        let beta = manager(workspace.path());
+        beta.store.save_meta(&meta()).unwrap();
+        beta.store
+            .append_chat_items("w1", "s1", &[item("a", "hi")])
+            .unwrap();
+
+        let written = std::fs::read_to_string(
+            workspace
+                .path()
+                .join(".genethub/sessions/s1")
+                .join("meta.json"),
+        )
+        .unwrap();
+        assert!(
+            !written.contains("workspaceId"),
+            "an id minted by this installation means nothing to the next one: {written}"
+        );
+        assert!(
+            written.contains(&format!("\"format\": {SESSION_FORMAT}")),
+            "nothing says what shape this was written in: {written}"
+        );
+
+        // The other build knows the same folder under an id of its own: the id
+        // is minted per installation, the folder is the durable fact.
+        let release = SessionManager::new(
+            {
+                let homes = crate::session::WorkspaceHomes::default();
+                homes.attach("w_other", workspace.path());
+                Store::new(homes)
+            },
+            Arc::new(Registry::new(&std::collections::BTreeMap::new())),
+            16,
+        );
+
+        let listed = release.list(Some("w_other"), false).await.unwrap();
+        assert_eq!(
+            listed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["s1"],
+            "a conversation stored in the project was invisible to the other build"
+        );
+        assert_eq!(
+            release.snapshot("s1").await.unwrap().items.len(),
+            1,
+            "the other build listed the conversation but could not read it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_from_a_newer_build_is_listed_but_refused() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = manager(workspace.path());
+        sessions.store.save_meta(&meta()).unwrap();
+
+        let meta_path = workspace
+            .path()
+            .join(".genethub/sessions/s1")
+            .join("meta.json");
+        let written = SESSION_FORMAT + 1;
+        std::fs::write(
+            &meta_path,
+            format!(r#"{{"format":{written},"title":"来自未来","whatIsThis":[1,2]}}"#),
+        )
+        .unwrap();
+
+        let listed = sessions.list(None, false).await.unwrap();
+        let [session] = listed.as_slice() else {
+            panic!("a conversation in the user's own folder vanished from the list: {listed:?}");
+        };
+        assert_eq!(session.title.as_deref(), Some("来自未来"));
+        assert_eq!(
+            session.unsupported,
+            Some(genehub_proto::UnsupportedFormat {
+                written,
+                supported: SESSION_FORMAT,
+            }),
+            "the row gives the user no way to tell why it will not open"
+        );
+
+        let refused = sessions.snapshot("s1").await.unwrap_err().to_string();
+        assert!(
+            refused.contains(&written.to_string()),
+            "reading a layout this build predates would show the wrong thing: {refused}"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_one_build_at_a_time_writes_a_project() {
+        let workspace = tempfile::tempdir().unwrap();
+        let holder = manager(workspace.path());
+        holder.store.save_meta(&meta()).unwrap();
+
+        let other = manager(workspace.path());
+        let refused = other.store.save_meta(&meta()).unwrap_err().to_string();
+        assert!(
+            refused.contains(crate::channel::PRODUCT),
+            "the second build must name who is holding the project: {refused}"
+        );
+        assert_eq!(
+            other.list(None, false).await.unwrap().len(),
+            1,
+            "losing the write lock must not hide the conversations"
+        );
+
+        drop(holder);
+        // Claiming is retried on every write, so writing resumes on its own
+        // rather than at the next restart. Given a moment, because a child
+        // process spawned anywhere in this test binary briefly inherits the
+        // descriptor the departing build was holding.
+        let mut resumed = other.store.save_meta(&meta());
+        for _ in 0..40 {
+            if resumed.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            resumed = other.store.save_meta(&meta());
+        }
+        resumed.expect("the second build had to be restarted to write again");
     }
 }

@@ -57,7 +57,9 @@ fn one_line(text: &str, max: usize) -> String {
     clip(&text.split_whitespace().collect::<Vec<_>>().join(" "), max)
 }
 
-fn clip(text: &str, max: usize) -> String {
+/// `pub(crate)`: also used by `session::rounds`'s trunk overview synthesis,
+/// which wants the same character-counted clipping as everything else here.
+pub(crate) fn clip(text: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }

@@ -679,11 +679,19 @@ async fn run_with_policy(
                         .try_send(session::InboundFrame::metered(text, permit))
                         .is_ok();
                     if !delivered {
+                        // Say the depth, not just that a depth exists. The one
+                        // question anyone asks on seeing this is whether the
+                        // client was unreasonable or the bound was too low, and
+                        // the number is the whole of the answer.
+                        let reason = format!(
+                            "channel receive queue exceeded: more than {} requests unanswered",
+                            session::SESSION_QUEUE_CAPACITY
+                        );
                         close_local_channel(
                             &mut channels,
                             &sink,
                             &channel,
-                            b"channel receive queue exceeded",
+                            reason.as_bytes(),
                             policy.write_timeout,
                         )
                         .await?;
@@ -710,6 +718,11 @@ async fn run_with_policy(
             // future feature; either way, dropping it beats guessing.
             KIND_BINARY => {}
             KIND_CLOSE => {
+                tracing::info!(
+                    channel,
+                    reason = %String::from_utf8_lossy(payload),
+                    "the Hub closed a client channel"
+                );
                 channels.remove(&channel);
                 if let Some(pending) = pending_channels.remove(&channel) {
                     pending.task.abort();
@@ -873,12 +886,22 @@ async fn send_with_deadline(sink: &Sink, message: Message, deadline: Duration) -
     .context("writing to the Hub uplink")
 }
 
+/// Ends one browser's channel, and says why in the log.
+///
+/// The reason travels to Relay but no further: the browser is told its socket
+/// closed and nothing else, so its request fails with an unknown outcome. This
+/// side is the only place the cause is ever written down.
 async fn send_channel_close(
     sink: &Sink,
     channel: &str,
-    reason: &'static [u8],
+    reason: &[u8],
     write_timeout: Duration,
 ) -> Result<()> {
+    tracing::info!(
+        channel,
+        reason = %String::from_utf8_lossy(reason),
+        "closing a client channel"
+    );
     send_with_deadline(
         sink,
         Message::Binary(encode(KIND_CLOSE, channel, reason)),
@@ -901,7 +924,7 @@ async fn close_local_channel(
     channels: &mut HashMap<String, Channel>,
     sink: &Sink,
     channel: &str,
-    reason: &'static [u8],
+    reason: &[u8],
     write_timeout: Duration,
 ) -> Result<()> {
     channels.remove(channel);
@@ -1314,9 +1337,9 @@ mod tests {
             }
         }
 
-        // The router is waiting for the HTTP response above. Four frames fill
-        // its bounded queue; the next one must fail this channel closed rather
-        // than stalling every channel on the shared uplink.
+        // The router is waiting for the HTTP response above. Enough frames to
+        // fill its bounded queue; the next one must fail this channel closed
+        // rather than stalling every channel on the shared uplink.
         for sequence in 2..=(session::SESSION_QUEUE_CAPACITY as u64 + 2) {
             let id = format!("queued-{sequence}");
             let queued = authenticated_envelope(&id, Request::ConnectionIdentity, &key, sequence);
@@ -1326,7 +1349,15 @@ mod tests {
         let (kind, channel, reason) = next_mux(&mut socket).await;
         assert_eq!(kind, KIND_CLOSE);
         assert_eq!(channel, busy_channel);
-        assert_eq!(reason, b"channel receive queue exceeded");
+        // Whoever reads this in a log needs the depth that was reached, not
+        // only that some depth exists.
+        assert_eq!(
+            String::from_utf8_lossy(&reason),
+            format!(
+                "channel receive queue exceeded: more than {} requests unanswered",
+                session::SESSION_QUEUE_CAPACITY
+            ),
+        );
 
         open_hosted_channel(
             &mut socket,

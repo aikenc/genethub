@@ -9,6 +9,7 @@ use genehub_proto::{DirectoryEntry, DirectoryListing, WorkspaceInfo};
 use tokio::sync::RwLock;
 
 use crate::config::{Config, WorkspaceEntry};
+use crate::session::WorkspaceHomes;
 
 const MAX_DIRECTORY_ENTRIES: usize = 2000;
 
@@ -34,6 +35,10 @@ pub struct Workspaces {
     entries: RwLock<HashMap<String, WorkspaceEntry>>,
     config_path: PathBuf,
     config: Arc<RwLock<Config>>,
+    /// Sessions live inside their workspace, so the session store cannot find
+    /// anything until it is told where each workspace is. Registration happens
+    /// wherever an entry does, so the two can never disagree.
+    homes: WorkspaceHomes,
 }
 
 pub fn list_directory(requested: Option<&Path>) -> Result<DirectoryListing> {
@@ -72,17 +77,19 @@ pub fn list_directory(requested: Option<&Path>) -> Result<DirectoryListing> {
 }
 
 impl Workspaces {
-    pub fn new(config: Arc<RwLock<Config>>, config_path: PathBuf) -> Self {
+    pub fn new(config: Arc<RwLock<Config>>, config_path: PathBuf, homes: WorkspaceHomes) -> Self {
         Workspaces {
             entries: RwLock::new(HashMap::new()),
             config_path,
             config,
+            homes,
         }
     }
 
     pub async fn load(&self) {
         let mut entries = self.entries.write().await;
         for entry in &self.config.read().await.workspaces {
+            self.homes.attach(&entry.id, &entry.root);
             entries.insert(entry.id.clone(), entry.clone());
         }
     }
@@ -188,6 +195,7 @@ impl Workspaces {
         // the background Hub sync could upload a revision that restart loses.
         next.save(&self.config_path)?;
         *config = next;
+        self.homes.attach(&entry.id, &entry.root);
         entries.insert(entry.id.clone(), entry.clone());
 
         Ok(describe(&entry))
@@ -269,7 +277,7 @@ mod tests {
 
     async fn workspaces(dir: &Path) -> Workspaces {
         let config = Arc::new(RwLock::new(Config::default()));
-        Workspaces::new(config, dir.join("config.json"))
+        Workspaces::new(config, dir.join("config.json"), WorkspaceHomes::default())
     }
 
     #[tokio::test]
@@ -308,7 +316,7 @@ mod tests {
         let config = Arc::new(RwLock::new(Config::default()));
         let config_path = dir.path().join("config.json");
         crate::config::fail_next_private_save(&config_path);
-        let spaces = Workspaces::new(config.clone(), config_path);
+        let spaces = Workspaces::new(config.clone(), config_path, WorkspaceHomes::default());
 
         assert!(spaces.open(&project, None).await.is_err());
         assert!(spaces.list().await.is_empty());
@@ -323,7 +331,11 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         let config = Arc::new(RwLock::new(Config::default()));
         let config_path = dir.path().join("config.json");
-        let spaces = Workspaces::new(config.clone(), config_path.clone());
+        let spaces = Workspaces::new(
+            config.clone(),
+            config_path.clone(),
+            WorkspaceHomes::default(),
+        );
         let opened = spaces.open(&project, None).await.unwrap();
         crate::config::fail_next_private_save(&config_path);
 
@@ -429,7 +441,11 @@ mod tests {
         let project = dir.path().join("project");
         std::fs::create_dir(&project).unwrap();
         let config = Arc::new(RwLock::new(Config::default()));
-        let spaces = Workspaces::new(config.clone(), dir.path().join("config.json"));
+        let spaces = Workspaces::new(
+            config.clone(),
+            dir.path().join("config.json"),
+            WorkspaceHomes::default(),
+        );
         let opened = spaces.open(&project, None).await.unwrap();
 
         let renamed = spaces.rename(&opened.id, "  我的项目  ").await.unwrap();
@@ -462,7 +478,11 @@ mod tests {
             workspace_catalog_generation: "wcg_test".into(),
             ..Config::default()
         }));
-        let spaces = Workspaces::new(config, dir.path().join("config.json"));
+        let spaces = Workspaces::new(
+            config,
+            dir.path().join("config.json"),
+            WorkspaceHomes::default(),
+        );
         spaces.open(&second, Some("Second".into())).await.unwrap();
         spaces.open(&first, Some("First".into())).await.unwrap();
 
@@ -494,7 +514,11 @@ mod tests {
             }],
             ..Config::default()
         }));
-        let spaces = Workspaces::new(config, dir.path().join("config.json"));
+        let spaces = Workspaces::new(
+            config,
+            dir.path().join("config.json"),
+            WorkspaceHomes::default(),
+        );
         spaces.load().await;
 
         let catalog = spaces.catalog().await;

@@ -14,6 +14,38 @@ export type Attachment = { name: string, mime: string, path?: string,
  */
 dataBase64?: string, };
 
+export type BlobKind = "reasoning" | "toolCall";
+
+/**
+ * One compact row in a batch. Full source content is fetched by `blob.get`.
+ */
+export type BlobOverview = { itemId: string, kind: BlobKind, overview: string, blob?: BlobRef, };
+
+export type BlobPayload = { id: string, value: JsonValue, };
+
+/**
+ * A complete address for one stored blob: what it is, and where it sits.
+ *
+ * The locator travels with the reference on purpose (`docs/session-storage.md`
+ * §3.3). A content id alone only narrows the search to one bucket file, which
+ * is what made the old reader scan and deserialize a whole bucket per read;
+ * carrying the byte range instead makes the row that holds the reference its
+ * own index, so no separate blob index has to be built, loaded or kept honest.
+ */
+export type BlobRef = { 
+/**
+ * First 24 hex characters of the payload's SHA-256. 96 bits: collision
+ * odds stay negligible at any session size, and every trunk row carries
+ * one, so the 40 characters saved are not decorative.
+ */
+id: string, bytes: number, 
+/**
+ * `<bucket>:<offset>:<length>`. Opaque to clients — they hand it back
+ * unchanged and the daemon resolves it against this session's own blob
+ * files, verifying the id it finds there before answering.
+ */
+at: string, };
+
 /**
  * What an agent can do, declared up front.
  *
@@ -69,7 +101,22 @@ channel: ChannelAuth | null,
 /**
  * Temporary proof for encrypted first-device bootstrap.
  */
-invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
+/**
+ * Prefetches the last round's trunk index and final trunk details in
+ * the subscription response.
+ */
+expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+/**
+ * Claims this message as a continuation of a round left open by an
+ * interrupt, rather than a new one. Only interrupts need this: the
+ * daemon auto-stitches approval and guidance continuations on its
+ * own, because those are unambiguous (`docs/architecture.md`'s
+ * analysis substrate proposal §3.2). Absent, unknown, or naming a
+ * round that already ended, this is treated as a new round — a
+ * wrong stitch is a worse failure than an extra round.
+ */
+continuesRound: string | null, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -417,7 +464,7 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "fileContent", "data": FileContent } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "fileContent", "data": FileContent } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
 
 export type Request = { "type": "hello", "payload": { clientName: string, protocolVersion: number, 
 /**
@@ -435,7 +482,22 @@ channel: ChannelAuth | null,
 /**
  * Temporary proof for encrypted first-device bootstrap.
  */
-invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
+/**
+ * Prefetches the last round's trunk index and final trunk details in
+ * the subscription response.
+ */
+expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+/**
+ * Claims this message as a continuation of a round left open by an
+ * interrupt, rather than a new one. Only interrupts need this: the
+ * daemon auto-stitches approval and guidance continuations on its
+ * own, because those are unambiguous (`docs/architecture.md`'s
+ * analysis substrate proposal §3.2). Absent, unknown, or naming a
+ * round that already ended, this is treated as a new round — a
+ * wrong stitch is a worse failure than an extra round.
+ */
+continuesRound: string | null, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -462,6 +524,40 @@ name: string | null, } } | { "type": "update.check" } | { "type": "update.downlo
  * Empty means "everything currently changed".
  */
 paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } };
+
+export type RoundBatch = { summary: RoundBatchSummary, 
+/**
+ * Full process narration for this batch. It belongs to the expanded trunk,
+ * not to the session narrative. A compact prefix remains in `summary.text`.
+ */
+monologue?: string, blobs: Array<BlobOverview>, };
+
+/**
+ * A semantic group inside a trunk: one monologue and the work following it,
+ * bounded to sixteen blobs even when an agent never narrates.
+ */
+export type RoundBatchSummary = { index: number, firstItemId: string, blobCount: number, text: string, };
+
+/**
+ * A page of visible trunks in one round. `nextCursor` asks for the preceding
+ * page; cursors are opaque to clients.
+ */
+export type RoundLayer = { round: RoundSummary, trunks: Array<RoundTrunkSummary>, nextCursor?: string, expandedTrunk?: RoundTrunk, };
+
+export type RoundLayerOutcome = "completed" | "failed" | "canceled" | "superseded" | "running";
+
+/**
+ * Compact session-layer description of one user request.
+ */
+export type RoundSummary = { roundId: string, userItemId?: string, startedAtMs: number, endedAtMs: number, outcome: RoundLayerOutcome, trunkCount: number, };
+
+export type RoundTrunk = { summary: RoundTrunkSummary, batches: Array<RoundBatch>, };
+
+/**
+ * A visible, bounded section of a round. Trunks are carried by the round
+ * protocol layer; they are not a fourth storage/addressing layer.
+ */
+export type RoundTrunkSummary = { index: number, firstItemId: string, blobCount: number, title: string, batches: Array<RoundBatchSummary>, };
 
 export type SearchMatch = { path: string, line?: number, preview: string, };
 
@@ -493,7 +589,18 @@ export type SessionSnapshot = { summary: SessionSummary, items: Array<TimelineIt
  * Sequence number this snapshot is current as of. Events with a lower or
  * equal seq have already been folded in.
  */
-seq: number, pendingPermissions: Array<PermissionRequest>, };
+seq: number, pendingPermissions: Array<PermissionRequest>, 
+/**
+ * One entry per user request. `items` carries only the session narrative;
+ * tool calls and reasoning are addressed through the round layer instead
+ * of being replayed wholesale (`docs/session-storage.md`).
+ */
+rounds?: Array<RoundSummary>, 
+/**
+ * The last round's recent trunk index and last trunk details, prefetched
+ * in the same response for the unread/mobile-first-screen path.
+ */
+expandedRound?: RoundLayer, };
 
 export type SessionStatus = "idle" | "running" | "waiting" | "readOnly" | "failed" | "closed";
 
@@ -503,7 +610,13 @@ export type SessionSummary = { id: string, workspaceId: string, agentId: string,
  * from the first thing they said. Clients supply their own placeholder;
  * the daemon has no business picking a word in the user's language.
  */
-title?: string, status: SessionStatus, modelId?: string, modeId?: string, effortId?: string, createdAtMs: number, updatedAtMs: number, archived: boolean, };
+title?: string, status: SessionStatus, modelId?: string, modeId?: string, effortId?: string, createdAtMs: number, updatedAtMs: number, archived: boolean, 
+/**
+ * Set when this session cannot be opened here. It is still listed: the
+ * conversation is in the user's own project folder, and an unexplained
+ * absence is worse than a row that says why it is out of reach.
+ */
+unsupported?: UnsupportedFormat, };
 
 /**
  * The machine-level settings a client may see and change.
@@ -570,6 +683,14 @@ export type TurnStats = { turnId: string, outcome: TurnOutcome, startedAtMs: num
  * Opaque Agent checkpoint used only when that Agent supports true forks.
  */
 forkCheckpoint?: string, };
+
+/**
+ * A session written by a newer build than this one.
+ *
+ * Both numbers travel so a client can tell the user which side is behind
+ * without knowing anything about storage layouts itself.
+ */
+export type UnsupportedFormat = { written: number, supported: number, };
 
 /**
  * How far the machine has got fetching the installer it was asked to fetch.

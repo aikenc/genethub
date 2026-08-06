@@ -157,6 +157,24 @@ pub struct SessionSummary {
     #[ts(type = "number")]
     pub updated_at_ms: i64,
     pub archived: bool,
+    /// Set when this session cannot be opened here. It is still listed: the
+    /// conversation is in the user's own project folder, and an unexplained
+    /// absence is worse than a row that says why it is out of reach.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported: Option<UnsupportedFormat>,
+}
+
+/// A session written by a newer build than this one.
+///
+/// Both numbers travel so a client can tell the user which side is behind
+/// without knowing anything about storage layouts itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct UnsupportedFormat {
+    pub written: u32,
+    pub supported: u32,
 }
 
 /// Everything a client needs to render a session from scratch.
@@ -171,6 +189,165 @@ pub struct SessionSnapshot {
     #[ts(type = "number")]
     pub seq: u64,
     pub pending_permissions: Vec<crate::event::PermissionRequest>,
+    /// One entry per user request. `items` carries only the session narrative;
+    /// tool calls and reasoning are addressed through the round layer instead
+    /// of being replayed wholesale (`docs/session-storage.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub rounds: Option<Vec<RoundSummary>>,
+    /// The last round's recent trunk index and last trunk details, prefetched
+    /// in the same response for the unread/mobile-first-screen path.
+    // Boxed, which the wire never sees: most snapshots carry no expanded round,
+    // and inline it would make every reply — and so every frame on the uplink —
+    // pay for the widest one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "RoundLayer")]
+    pub expanded_round: Option<Box<RoundLayer>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum RoundLayerOutcome {
+    Completed,
+    Failed,
+    Canceled,
+    Superseded,
+    Running,
+}
+
+/// Compact session-layer description of one user request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RoundSummary {
+    pub round_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub user_item_id: Option<String>,
+    #[ts(type = "number")]
+    pub started_at_ms: i64,
+    #[ts(type = "number")]
+    pub ended_at_ms: i64,
+    pub outcome: RoundLayerOutcome,
+    pub trunk_count: u32,
+}
+
+/// A semantic group inside a trunk: one monologue and the work following it,
+/// bounded to sixteen blobs even when an agent never narrates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RoundBatchSummary {
+    pub index: u32,
+    pub first_item_id: String,
+    pub blob_count: u32,
+    pub text: String,
+}
+
+/// A visible, bounded section of a round. Trunks are carried by the round
+/// protocol layer; they are not a fourth storage/addressing layer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RoundTrunkSummary {
+    pub index: u32,
+    pub first_item_id: String,
+    #[serde(alias = "itemCount")]
+    pub blob_count: u32,
+    #[serde(alias = "overview")]
+    pub title: String,
+    #[serde(default)]
+    pub batches: Vec<RoundBatchSummary>,
+}
+
+/// A complete address for one stored blob: what it is, and where it sits.
+///
+/// The locator travels with the reference on purpose (`docs/session-storage.md`
+/// §3.3). A content id alone only narrows the search to one bucket file, which
+/// is what made the old reader scan and deserialize a whole bucket per read;
+/// carrying the byte range instead makes the row that holds the reference its
+/// own index, so no separate blob index has to be built, loaded or kept honest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct BlobRef {
+    /// First 24 hex characters of the payload's SHA-256. 96 bits: collision
+    /// odds stay negligible at any session size, and every trunk row carries
+    /// one, so the 40 characters saved are not decorative.
+    pub id: String,
+    #[ts(type = "number")]
+    pub bytes: u64,
+    /// `<bucket>:<offset>:<length>`. Opaque to clients — they hand it back
+    /// unchanged and the daemon resolves it against this session's own blob
+    /// files, verifying the id it finds there before answering.
+    pub at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum BlobKind {
+    Reasoning,
+    ToolCall,
+}
+
+/// One compact row in a batch. Full source content is fetched by `blob.get`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct BlobOverview {
+    pub item_id: String,
+    pub kind: BlobKind,
+    pub overview: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub blob: Option<BlobRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RoundBatch {
+    pub summary: RoundBatchSummary,
+    /// Full process narration for this batch. It belongs to the expanded trunk,
+    /// not to the session narrative. A compact prefix remains in `summary.text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub monologue: Option<String>,
+    pub blobs: Vec<BlobOverview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RoundTrunk {
+    pub summary: RoundTrunkSummary,
+    pub batches: Vec<RoundBatch>,
+}
+
+/// A page of visible trunks in one round. `nextCursor` asks for the preceding
+/// page; cursors are opaque to clients.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RoundLayer {
+    pub round: RoundSummary,
+    pub trunks: Vec<RoundTrunkSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expanded_trunk: Option<RoundTrunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct BlobPayload {
+    pub id: String,
+    pub value: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

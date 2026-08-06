@@ -1,5 +1,13 @@
-import type { TimelineItem, TurnStats } from "@genehub/proto";
+import type {
+  BlobOverview,
+  RoundBatch,
+  RoundSummary,
+  RoundTrunkSummary,
+  TimelineItem,
+  TurnStats,
+} from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
+import { stringify as toYaml } from "yaml";
 
 import { Markdown } from "./Markdown";
 
@@ -37,6 +45,7 @@ export function TimelineView({ state }: { state: TimelineState }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
   const forkSession = useWorkbench((workbench) => workbench.forkSession);
+  const rounds = useWorkbench((workbench) => workbench.timeline.rounds);
   const activeSessionId = useWorkbench((workbench) => workbench.activeSessionId);
   const canFork = useWorkbench((workbench) => {
     const session = workbench.sessions.find((entry) => entry.id === activeSessionId);
@@ -44,12 +53,13 @@ export function TimelineView({ state }: { state: TimelineState }) {
     return agent?.capabilities.fork ?? false;
   });
   const turns = turnBlocks(state.items);
+  const contextualTurns = contextualizeTurns(turns, rounds, state.items);
 
   // Stay at the bottom while new content arrives, unless the user scrolled up
   // to read something — then leave them where they are.
   useEffect(() => {
     if (pinned) bottom.current?.scrollIntoView({ block: "end" });
-  }, [state.items, pinned]);
+  }, [state.items, rounds, pinned]);
 
   return (
     <div
@@ -62,28 +72,58 @@ export function TimelineView({ state }: { state: TimelineState }) {
         setPinned(distance < 40);
       }}
     >
-      {turns.map((turn, index) => (
-        <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
-          {turn.items.map((item) => (
-            <Item key={item.id} item={item} />
-          ))}
-          {turn.stats ? (
-            <TurnFooter
-              stats={turn.stats}
-              text={assistantText(turn.items)}
-              canFork={canFork && Boolean(turn.stats.forkCheckpoint)}
-              onFork={() => void forkSession(turn.stats!.turnId)}
-            />
-          ) : index === turns.length - 1 && state.activeTurn ? (
-            <TurnFooter
-              liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
-              liveTools={countTools(turn.items)}
-              text={assistantText(turn.items)}
-              canFork={false}
-            />
-          ) : null}
-        </section>
-      ))}
+      {contextualTurns.map(
+        ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
+          const hasRound = Boolean(round);
+          const narrative =
+            rounds.length === 0
+              ? turn.items
+              : turn.items.filter(
+                  (item) =>
+                    item.type !== "reasoning" &&
+                    item.type !== "toolCall" &&
+                    (!hasRound || item.type !== "assistantMessage"),
+                );
+          return (
+            <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
+              {narrative.map((item) => <Item key={item.id} item={item} />)}
+              {startedRounds.map((startedRound) => (
+                <RoundProgress
+                  key={startedRound.roundId}
+                  round={startedRound}
+                  finalSummaryText={roundFinalText}
+                />
+              ))}
+              {finalAssistant ? <Item item={finalAssistant} /> : null}
+              {turn.stats ? (
+                <TurnFooter
+                  stats={turn.stats}
+                  text={hasRound ? (finalAssistant?.text ?? "") : assistantText(turn.items)}
+                  canFork={canFork && Boolean(turn.stats.forkCheckpoint)}
+                  onFork={() => void forkSession(turn.stats!.turnId)}
+                />
+              ) : index === turns.length - 1 && state.activeTurn ? (
+                <TurnFooter
+                  liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
+                  liveTools={countTools(turn.items)}
+                  text={hasRound ? "" : assistantText(turn.items)}
+                  canFork={false}
+                />
+              ) : null}
+            </section>
+          );
+        },
+      )}
+
+      {rounds
+        .filter(
+          (round) =>
+            !round.userItemId ||
+            !state.items.some(
+              (item) => item.type === "userMessage" && item.id === round.userItemId,
+            ),
+        )
+        .map((round) => <RoundProgress key={round.roundId} round={round} />)}
 
       {state.lastError ? (
         <div
@@ -196,6 +236,336 @@ function turnBlocks(items: TimelineItem[]): TurnBlock[] {
   return turns;
 }
 
+interface ContextualTurn {
+  turn: TurnBlock;
+  startedRounds: RoundSummary[];
+  round?: RoundSummary;
+  finalAssistant?: Extract<TimelineItem, { type: "assistantMessage" }>;
+  roundFinalText?: string;
+}
+
+function contextualizeTurns(
+  turns: TurnBlock[],
+  rounds: RoundSummary[],
+  items: TimelineItem[],
+): ContextualTurn[] {
+  const positions = new Map(items.map((item, index) => [item.id, index]));
+  const positionedRounds = rounds
+    .flatMap((round) => {
+      const position = round.userItemId ? positions.get(round.userItemId) : undefined;
+      return position === undefined ? [] : [{ round, position }];
+    })
+    .sort((left, right) => left.position - right.position);
+  const finals = new Map<string, Extract<TimelineItem, { type: "assistantMessage" }>>();
+  positionedRounds.forEach(({ round, position }, index) => {
+    if (round.outcome === "running") return;
+    const end = positionedRounds[index + 1]?.position ?? items.length;
+    const final = finalAssistantMessage(items.slice(position, end));
+    if (final) finals.set(round.roundId, final);
+  });
+
+  let currentRound: RoundSummary | undefined;
+  return turns.map((turn) => {
+    const itemIds = new Set(turn.items.map((item) => item.id));
+    const startedRounds = rounds.filter(
+      (round) => round.userItemId && itemIds.has(round.userItemId),
+    );
+    if (startedRounds.length > 0) currentRound = startedRounds[startedRounds.length - 1];
+    const roundFinal = currentRound ? finals.get(currentRound.roundId) : undefined;
+    return {
+      turn,
+      startedRounds,
+      round: currentRound,
+      finalAssistant:
+        roundFinal && itemIds.has(roundFinal.id) ? roundFinal : undefined,
+      roundFinalText: roundFinal?.text,
+    };
+  });
+}
+
+function RoundProgress({
+  round,
+  finalSummaryText,
+}: {
+  round: RoundSummary;
+  finalSummaryText?: string;
+}) {
+  const layer = useWorkbench((state) => state.timeline.roundLayers[round.roundId]);
+  const loadRound = useWorkbench((state) => state.loadRound);
+  const loadOlder = useWorkbench((state) => state.loadOlderTrunks);
+
+  useEffect(() => {
+    if (!layer) void loadRound(round.roundId);
+  }, [layer, loadRound, round.roundId]);
+
+  if (!layer) return null;
+
+  const trunks = layer.trunks.filter(
+    (trunk) =>
+      !(
+        finalSummaryText &&
+        trunk.batches.length > 0 &&
+        trunk.batches.every((batch) => isFinalSummaryBatch(batch, finalSummaryText))
+      ),
+  );
+
+  return (
+    <div className="space-y-2" data-testid="round-progress">
+      {layer.nextCursor ? (
+        <button
+          type="button"
+          className="w-full rounded-lg px-2 py-1 text-xs text-accent hover:bg-surface"
+          onClick={() => void loadOlder(round.roundId)}
+        >
+          加载更早过程
+        </button>
+      ) : null}
+      {trunks.map((trunk, index) => (
+        <TrunkCard
+          key={trunk.index}
+          round={round}
+          summary={trunk}
+          finalSummaryText={finalSummaryText}
+          active={round.outcome === "running" && index === trunks.length - 1}
+        />
+      ))}
+    </div>
+  );
+}
+
+function TrunkCard({
+  round,
+  summary,
+  finalSummaryText,
+  active,
+}: {
+  round: RoundSummary;
+  summary: RoundTrunkSummary;
+  finalSummaryText?: string;
+  active: boolean;
+}) {
+  const detail = useWorkbench(
+    (state) => state.timeline.roundTrunks[`${round.roundId}:${summary.index}`],
+  );
+  const loadTrunk = useWorkbench((state) => state.loadTrunk);
+  // Which trunk is the live tail changes as the round advances, so the default
+  // has to be read on every render rather than captured once. A null override
+  // follows that default; clicking detaches this trunk from it, so the work the
+  // user opened to read does not collapse under them when the tail moves on.
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = manualOpen ?? active;
+
+  useEffect(() => {
+    if (open && !detail) void loadTrunk(round.roundId, summary.index);
+  }, [detail, loadTrunk, open, round.roundId, summary.index]);
+
+  const batches = detail?.batches.filter(
+    (batch) => !finalSummaryText || !isFinalSummaryBatch(batch.summary, finalSummaryText),
+  );
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-line bg-bg" data-testid="round-trunk">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+        aria-expanded={open}
+        onClick={() => setManualOpen(!open)}
+      >
+        <span className="min-w-0 flex-1 truncate text-sm">
+          {active ? "进展" : "过程"}：{normalizeProgressTitle(summary.title)}
+        </span>
+        <span className="text-xs text-muted">{summary.blobCount} 项</span>
+      </button>
+      {open ? (
+        <div className="space-y-2 border-t border-line p-2">
+          {!detail ? <p className="px-2 py-1 text-xs text-muted">正在加载…</p> : null}
+          {batches?.length === 1 ? (
+            <BatchContent batch={batches[0]!} />
+          ) : (
+            batches?.map((batch, index) => (
+              <BatchCard
+                key={batch.summary.index}
+                batch={batch}
+                active={active && index === batches.length - 1}
+              />
+            ))
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function BatchCard({ batch, active }: { batch: RoundBatch; active: boolean }) {
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = manualOpen ?? active;
+  return (
+    <div className="overflow-hidden rounded-lg bg-surface" data-testid="round-batch">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+        aria-expanded={open}
+        onClick={() => setManualOpen(!open)}
+      >
+        {open ? (
+          <span className="ml-auto text-xs text-accent">收起</span>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-xs">{batch.summary.text}</span>
+        )}
+      </button>
+      {open ? <BatchContent batch={batch} bordered /> : null}
+    </div>
+  );
+}
+
+function BatchContent({ batch, bordered = false }: { batch: RoundBatch; bordered?: boolean }) {
+  return (
+    <div className={`space-y-1 px-2 py-2 ${bordered ? "border-t border-line" : ""}`}>
+      {batch.monologue ? (
+        <div className="px-1 py-1 text-sm" data-testid="batch-monologue">
+          <Markdown text={batch.monologue} />
+        </div>
+      ) : null}
+      {batch.blobs.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
+    </div>
+  );
+}
+
+function normalizeProgressTitle(title: string): string {
+  const normalized = title
+    .trim()
+    .replace(/^我(?:会|将|要|准备)?(?:先|再|继续|开始)?\s*/, "")
+    .replace(/^接下来(?:我)?(?:会|将|要)?\s*/, "")
+    .replace(/^现在(?:我)?(?:会|将|要)?\s*/, "");
+  return normalized || title.trim();
+}
+
+function isFinalSummaryBatch(
+  batch: RoundBatch["summary"],
+  finalSummaryText: string,
+): boolean {
+  if (batch.blobCount !== 0) return false;
+  const compact = batch.text.trim();
+  if (!compact) return false;
+  const prefix = compact.endsWith("…") ? compact.slice(0, -1) : compact;
+  return finalSummaryText.trimStart().startsWith(prefix);
+}
+
+function BlobRow({ blob }: { blob: BlobOverview }) {
+  const payload = useWorkbench((state) =>
+    blob.blob ? state.timeline.blobs[blob.blob.id] : undefined,
+  );
+  const loadBlob = useWorkbench((state) => state.loadBlob);
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-md bg-bg" data-testid="blob-row">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs"
+        aria-expanded={open}
+        disabled={!blob.blob}
+        onClick={() => {
+          const next = !open;
+          setOpen(next);
+          if (next && blob.blob && !payload) void loadBlob(blob.blob);
+        }}
+      >
+        <span className="text-muted">{blob.kind === "reasoning" ? "思考" : "工具"}</span>
+        <span className="min-w-0 flex-1 truncate">{blob.overview}</span>
+        {blob.blob ? <span className="text-accent">{open ? "收起" : "详情"}</span> : null}
+      </button>
+      {open ? (
+        <div className="max-h-96 overflow-auto border-t border-line p-2 text-xs">
+          {payload ? <BlobPayloadView blob={blob} value={payload.value} /> : "正在加载…"}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function BlobPayloadView({ blob, value }: { blob: BlobOverview; value: unknown }) {
+  if (blob.kind === "reasoning") {
+    const text = reasoningText(value);
+    return text ? (
+      <div className="whitespace-pre-wrap text-sm leading-relaxed" data-testid="reasoning-text">
+        {text}
+      </div>
+    ) : (
+      <Markdown text={yamlMarkdown(value)} />
+    );
+  }
+
+  const edit = editPayload(value);
+  if (edit) {
+    return (
+      <div className="space-y-2">
+        <p className="font-mono text-xs text-muted">{edit.path}</p>
+        <Diff text={edit.diff} />
+      </div>
+    );
+  }
+
+  return <Markdown text={yamlMarkdown(value)} />;
+}
+
+function reasoningText(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  const record = jsonObject(value);
+  return typeof record?.text === "string" ? record.text : undefined;
+}
+
+function editPayload(value: unknown): { path: string; diff: string } | undefined {
+  const item = jsonObject(value);
+  const detail = jsonObject(item?.detail);
+  if (detail?.kind !== "edit" || typeof detail.diff !== "string") return undefined;
+  return {
+    path: typeof detail.path === "string" ? detail.path : "",
+    diff: detail.diff,
+  };
+}
+
+function jsonObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function yamlMarkdown(value: unknown): string {
+  const yaml = toYaml(value, { lineWidth: 0 }).trimEnd();
+  const longestFence = Math.max(
+    0,
+    ...Array.from(yaml.matchAll(/`+/gu), (match) => match[0].length),
+  );
+  const fence = "`".repeat(Math.max(3, longestFence + 1));
+  return `${fence}yaml\n${yaml}\n${fence}`;
+}
+
+function Diff({ text }: { text: string }) {
+  return (
+    <div
+      className="whitespace-pre-wrap break-all font-mono text-xs leading-relaxed"
+      data-testid="blob-diff"
+    >
+      {text.split("\n").map((line, index) => (
+        <div
+          key={index}
+          className={
+            line.startsWith("+") && !line.startsWith("+++")
+              ? "text-ok"
+              : line.startsWith("-") && !line.startsWith("---")
+                ? "text-danger"
+                : line.startsWith("@@")
+                  ? "text-accent"
+                  : "text-muted"
+          }
+        >
+          {line || " "}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function assistantText(items: TimelineItem[]): string {
   return items
     .filter((item): item is Extract<TimelineItem, { type: "assistantMessage" }> =>
@@ -203,6 +573,23 @@ function assistantText(items: TimelineItem[]): string {
     )
     .map((item) => item.text)
     .join("\n\n");
+}
+
+function finalAssistantMessage(
+  items: TimelineItem[],
+): Extract<TimelineItem, { type: "assistantMessage" }> | undefined {
+  let final: Extract<TimelineItem, { type: "assistantMessage" }> | undefined;
+  let finalIndex = -1;
+  let lastWorkIndex = -1;
+  items.forEach((item, index) => {
+    if (item.type === "assistantMessage") {
+      final = item;
+      finalIndex = index;
+    } else if (item.type === "reasoning" || item.type === "toolCall") {
+      lastWorkIndex = index;
+    }
+  });
+  return finalIndex > lastWorkIndex ? final : undefined;
 }
 
 function countTools(items: TimelineItem[]): number {

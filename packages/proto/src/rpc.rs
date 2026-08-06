@@ -64,6 +64,10 @@ pub enum Request {
         #[serde(default)]
         #[ts(type = "number")]
         since_seq: Option<u64>,
+        /// Prefetches the last round's trunk index and final trunk details in
+        /// the subscription response.
+        #[serde(default)]
+        expand_last_round: bool,
     },
     #[serde(rename = "unsubscribe", rename_all = "camelCase")]
     Unsubscribe { session_id: String },
@@ -97,12 +101,41 @@ pub enum Request {
     },
     #[serde(rename = "session.get", rename_all = "camelCase")]
     SessionGet { session_id: String },
+    #[serde(rename = "round.trunk.list", rename_all = "camelCase")]
+    RoundTrunkList {
+        session_id: String,
+        round_id: String,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    #[serde(rename = "round.trunk.get", rename_all = "camelCase")]
+    RoundTrunkGet {
+        session_id: String,
+        round_id: String,
+        trunk_index: u32,
+    },
+    /// Fetches one blob's full payload. The client hands back the whole
+    /// `BlobRef` it was given rather than just an id, because the locator is
+    /// what makes this a seek instead of a scan (`docs/session-storage.md`).
+    #[serde(rename = "blob.get", rename_all = "camelCase")]
+    BlobGet { session_id: String, blob: BlobRef },
     #[serde(rename = "session.send", rename_all = "camelCase")]
     SessionSend {
         session_id: String,
         text: String,
         #[serde(default)]
         attachments: Vec<Attachment>,
+        /// Claims this message as a continuation of a round left open by an
+        /// interrupt, rather than a new one. Only interrupts need this: the
+        /// daemon auto-stitches approval and guidance continuations on its
+        /// own, because those are unambiguous (`docs/architecture.md`'s
+        /// analysis substrate proposal §3.2). Absent, unknown, or naming a
+        /// round that already ended, this is treated as a new round — a
+        /// wrong stitch is a worse failure than an extra round.
+        #[serde(default)]
+        continues_round: Option<String>,
     },
     #[serde(rename = "session.fork", rename_all = "camelCase")]
     SessionFork { session_id: String, turn_id: String },
@@ -402,6 +435,9 @@ pub enum Reply {
     Session(SessionSummary),
     Sessions(Vec<SessionSummary>),
     Snapshot(SessionSnapshot),
+    RoundLayer(RoundLayer),
+    RoundTrunk(RoundTrunk),
+    Blob(BlobPayload),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),
     Directory(DirectoryListing),
