@@ -55,8 +55,18 @@ const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
   ...overrides,
 });
 
+/** Real actions, so a test that stubs one hands it back. */
+const { retryPending, editPending } = useWorkbench.getState();
+
 afterEach(() => {
-  useWorkbench.setState({ timeline: emptyTimeline() });
+  useWorkbench.setState({
+    timeline: emptyTimeline(),
+    sessions: [],
+    activeSessionId: null,
+    agents: [],
+    retryPending,
+    editPending,
+  });
 });
 
 /** Puts one session's round layer on screen, the way a snapshot would. */
@@ -83,6 +93,67 @@ describe("what the user sees in a session", () => {
 
     render(<TimelineView state={state} />);
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("正在读取");
+  });
+
+  /**
+   * The bubble is the answer to "did it send?", and it has to be there before
+   * the daemon can answer that. The named wait behind it is the answer to the
+   * next question, which only a slow agent start ever raises.
+   */
+  it("shows an unconfirmed message straight away and names a slow agent start", async () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          id: "s1",
+          workspaceId: "w1",
+          agentId: "cursor",
+          title: undefined,
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          archived: false,
+          status: "idle",
+        },
+      ],
+      activeSessionId: "s1",
+      agents: [agent({ id: "cursor", label: "Cursor", builtin: false })],
+    });
+    const state: TimelineState = {
+      ...emptyTimeline(),
+      pending: { text: "重构存储层", attachments: [], sentAtMs: Date.now(), error: null },
+    };
+
+    render(<TimelineView state={state} />);
+    expect(screen.getByTestId("pending-message")).toHaveTextContent("重构存储层");
+    expect(screen.queryByText("正在启动 Cursor…")).not.toBeInTheDocument();
+
+    await waitFor(() => expect(screen.getByText("正在启动 Cursor…")).toBeInTheDocument());
+  });
+
+  it("leaves a failed message on screen with a way to send or edit it again", async () => {
+    const retryPending = vi.fn(async () => {});
+    const editPending = vi.fn();
+    useWorkbench.setState({ retryPending, editPending });
+    const state: TimelineState = {
+      ...emptyTimeline(),
+      pending: {
+        text: "启动 Cursor 试试",
+        attachments: [],
+        sentAtMs: Date.now(),
+        error: "cursor-agent is not installed",
+      },
+    };
+
+    render(<TimelineView state={state} />);
+    const bubble = screen.getByTestId("pending-message");
+    expect(bubble).toHaveTextContent("启动 Cursor 试试");
+    expect(bubble).toHaveTextContent("发送失败：cursor-agent is not installed");
+    // A failed send is not a wait, so it never claims to be starting anything.
+    expect(screen.queryByText(/正在启动/)).not.toBeInTheDocument();
+
+    await userEvent.click(within(bubble).getByRole("button", { name: "重试" }));
+    expect(retryPending).toHaveBeenCalled();
+    await userEvent.click(within(bubble).getByRole("button", { name: "编辑" }));
+    expect(editPending).toHaveBeenCalled();
   });
 
   it("keeps thinking out of the way until it is asked for", async () => {
@@ -679,7 +750,7 @@ describe("what the user sees in a session", () => {
 
 function composerProps(overrides: Partial<ComponentProps<typeof Composer>> = {}) {
   return {
-    running: false,
+    phase: "idle" as const,
     agents: [agent()],
     agentId: "genet",
     modelId: null,
@@ -845,12 +916,86 @@ describe("the controls offered to the user", () => {
 
   it("turns send into stop while a turn is running", async () => {
     const onInterrupt = vi.fn();
-    render(<Composer {...composerProps({ running: true, onInterrupt })} />);
+    render(<Composer {...composerProps({ phase: "running", onInterrupt })} />);
 
     expect(screen.queryByLabelText("停止")).toBeInTheDocument();
     expect(screen.queryByLabelText("发送")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("发送中")).not.toBeInTheDocument();
     await userEvent.click(screen.getByLabelText("停止"));
     expect(onInterrupt).toHaveBeenCalled();
+  });
+
+  /**
+   * The wait between pressing send and a turn actually starting. There is no
+   * turn to stop yet and sending again only earns the daemon's refusal, so the
+   * control is a spinner nobody can press — and the keyboard has to be shut out
+   * too, because the textarea's Enter never went through the button.
+   */
+  it("shows a non-interactive spinner while a sent message is unconfirmed", async () => {
+    const onSend = vi.fn();
+    const onInterrupt = vi.fn();
+    render(
+      <Composer
+        {...composerProps({ phase: "sending", onSend, onInterrupt, attachmentsSupported: true })}
+      />,
+    );
+
+    const spinner = screen.getByLabelText("发送中");
+    expect(screen.queryByLabelText("发送")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("停止")).not.toBeInTheDocument();
+    expect(spinner).toHaveAttribute("aria-disabled", "true");
+    expect(spinner).toHaveAttribute("aria-busy", "true");
+    expect(spinner.querySelector(".animate-spin")).not.toBeNull();
+
+    await userEvent.click(spinner);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(onInterrupt).not.toHaveBeenCalled();
+
+    await userEvent.type(screen.getByLabelText("任务描述"), "再补一句{Enter}");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /添加文件/ })).toBeDisabled();
+  });
+
+  it("keeps the geometry of the row stable across all three phases", () => {
+    const sizes = (["idle", "sending", "running"] as const).map((phase) => {
+      const view = render(<Composer {...composerProps({ phase })} />);
+      const label = phase === "idle" ? "发送" : phase === "sending" ? "发送中" : "停止";
+      const control = screen.getByLabelText(label);
+      const classes = ["h-[45px]", "w-[45px]", "md:h-[30px]", "md:w-[30px]"].filter((name) =>
+        control.classList.contains(name),
+      );
+      view.unmount();
+      return classes.length;
+    });
+    expect(sizes).toEqual([4, 4, 4]);
+  });
+
+  it("takes a failed message back into the field, attachments and all", async () => {
+    const onRestoreDraft = vi.fn();
+    const onSend = vi.fn();
+    render(
+      <Composer
+        {...composerProps({
+          onSend,
+          onRestoreDraft,
+          attachmentsSupported: true,
+          restoreDraft: {
+            text: "刚才没发出去的话",
+            attachments: [{ name: "shot.png", mime: "image/png", dataBase64: "AAA" }],
+          },
+        })}
+      />,
+    );
+
+    await waitFor(() => expect(onRestoreDraft).toHaveBeenCalled());
+    expect(screen.getByLabelText("任务描述")).toHaveValue("刚才没发出去的话");
+    expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText("发送"));
+    expect(onSend).toHaveBeenCalledWith(
+      "刚才没发出去的话",
+      expect.arrayContaining([expect.objectContaining({ name: "shot.png" })]),
+    );
   });
 
   it("expands from one idle line when focused and collapses again on blur", async () => {

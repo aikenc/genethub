@@ -25,7 +25,7 @@ function composer(overrides: Partial<Parameters<typeof Composer>[0]> = {}) {
   const onSend = vi.fn();
   render(
     <Composer
-      running={false}
+      phase="idle"
       agents={[]}
       agentId="claude"
       modelId={null}

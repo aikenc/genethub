@@ -24,8 +24,15 @@ import { create } from "zustand";
 
 import type { Host } from "../host";
 import type { Client, ConnectionState } from "../protocol/client";
+import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
-import { applySequenced, emptyTimeline, fromSnapshot, type TimelineState } from "./timeline";
+import {
+  applySequenced,
+  emptyTimeline,
+  fromSnapshot,
+  type PendingMessage,
+  type TimelineState,
+} from "./timeline";
 
 /**
  * A closable work surface, not a global mode switch.
@@ -122,6 +129,14 @@ interface WorkbenchState {
   /** Six tabs fit a phone; a desktop can keep sixteen useful work surfaces. */
   tabLimit: number;
   notice: string | null;
+  /**
+   * Content on its way back to the composer, put there by `editPending`.
+   *
+   * The draft itself belongs to the composer, so a failed message can only be
+   * returned for editing through a channel like this one; whoever picks it up
+   * clears it with `restoredDraft`.
+   */
+  restoreDraft: { text: string; attachments: Attachment[] } | null;
   hub: HubStatus | null;
   /**
    * The last way into this machine's identity the Hub handed out.
@@ -231,6 +246,12 @@ interface WorkbenchState {
   setTabLimit(limit: number): void;
   setRightPanel(panel: RightPanel): void;
   send(text: string, attachments?: Attachment[]): Promise<void>;
+  /** Sends a failed message again, unchanged. */
+  retryPending(): Promise<void>;
+  /** Takes a failed message back into the composer instead of resending it. */
+  editPending(): void;
+  /** Acknowledges that the composer has taken `restoreDraft` back. */
+  restoredDraft(): void;
   /** Creates an independent Agent context through one completed turn. */
   forkSession(turnId: string): Promise<void>;
   interrupt(): Promise<void>;
@@ -405,6 +426,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   subscribedSessionIds: [],
   tabLimit: 16,
   notice: null,
+  restoreDraft: null,
   hub: null,
   claim: null,
   devices: [],
@@ -644,7 +666,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         },
         onResync: (resnapshot, events, reset) => {
         const base = reset
-          ? fromSnapshot(resnapshot as SessionSnapshot)
+          ? fromSnapshot(resnapshot as SessionSnapshot, timelineOf(get(), sessionId).pending)
           : get().sessionTimelines[sessionId] ?? emptyTimeline();
         for (const event of events) {
           if (event.event.type === "titleChanged") applyTitle(sessionId, event.event.title, set);
@@ -661,7 +683,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     );
 
     const typedSnapshot = snapshot as SessionSnapshot;
-    const base = fromSnapshot(typedSnapshot);
+    const base = fromSnapshot(typedSnapshot, timelineOf(get(), sessionId).pending);
     // A slower subscription must not repaint whichever session the user opened
     // next. This is easy to hit when switching pages over a relay: both replies
     // are valid, but only the currently selected session owns the timeline.
@@ -854,19 +876,90 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // The previous complaint goes away as the next attempt starts, so a stale
     // line does not get read as a description of what just happened.
     set({ notice: null });
+    const active = get().activeSessionId;
+    // Only one message may be in flight. The daemon enforces this too, but its
+    // refusal arrives as a red line about a turn already running — which is a
+    // report of our own double send, not news the reader can act on.
+    //
+    // A failed message is not in flight: it is waiting for a decision, and
+    // typing a new one is a decision. It gives up its place here rather than
+    // silently swallowing the next thing the user says.
+    const inFlight = active ? timelineOf(get(), active).pending : null;
+    if (inFlight && !inFlight.error) return;
+
+    // On screen before anything leaves this machine, and before the round trips
+    // in `start`. Everything below can take seconds.
+    const pending: PendingMessage = {
+      text,
+      attachments,
+      sentAtMs: Date.now(),
+      error: null,
+    };
+    if (active) patchTimeline(active, set, () => ({ pending }));
+
     // This is where a draft becomes a conversation: the machine hears about it
     // at the first message, not when the button was pressed.
-    const sessionId = await start(get, set);
-    if (!sessionId) return;
-    await asked(set, () =>
-      require_(get().client).call({
+    const sessionId = await start(get, set, pending);
+    if (!sessionId) {
+      // `asked` has already said why, if anything was asked at all. With a
+      // session there is a bubble to mark; a conversation that could not even be
+      // created has nowhere to put one, so the text goes back to the composer
+      // rather than nowhere — it only exists here.
+      if (active) failPending(active, set, get().notice ?? "无法开始会话");
+      else set({ restoreDraft: { text, attachments } });
+      return;
+    }
+
+    try {
+      await require_(get().client).call({
         type: "session.send",
         // Continuing a round after an interrupt is not wired into the UI
         // yet — every message from here is a fresh round until it is
         // (docs/agent-analysis-substrate-proposal.md §3.2).
         payload: { sessionId, text, attachments, continuesRound: null },
-      }),
-    );
+      });
+      // The daemon publishes the user message before it answers this call, and
+      // replies and events share one socket in arrival order, so the real item
+      // is already here. This is the second of the two ways the placeholder
+      // goes away, and it costs nothing to keep both (`timeline.apply` has the
+      // other): a reply that never comes must not leave a bubble behind.
+      patchTimeline(sessionId, set, () => ({ pending: null }));
+    } catch (error) {
+      // A lost connection is not a failed send. The prompt may well have been
+      // taken — `ConnectionOutcomeUnknownError` exists to say exactly that —
+      // and calling it a failure would put a second bubble next to the real one
+      // as soon as the replay lands. Leave it pending; the resync decides.
+      if (error instanceof ConnectionOutcomeUnknownError) return;
+      const message = error instanceof Error ? error.message : String(error);
+      failPending(sessionId, set, message);
+      set({ notice: message });
+    }
+  },
+
+  async retryPending() {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const pending = timelineOf(get(), sessionId).pending;
+    if (!pending?.error) return;
+    // Cleared first, or `send` would take this for a message already in flight.
+    patchTimeline(sessionId, set, () => ({ pending: null }));
+    await get().send(pending.text, pending.attachments);
+  },
+
+  editPending() {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const pending = timelineOf(get(), sessionId).pending;
+    if (!pending?.error) return;
+    patchTimeline(sessionId, set, () => ({ pending: null }));
+    set({
+      notice: null,
+      restoreDraft: { text: pending.text, attachments: pending.attachments },
+    });
+  },
+
+  restoredDraft() {
+    set({ restoreDraft: null });
   },
 
   async forkSession(turnId) {
@@ -1267,6 +1360,8 @@ async function land(get: () => WorkbenchState): Promise<void> {
 async function start(
   get: () => WorkbenchState,
   set: Setter,
+  /** Carried into the new session's timeline, which does not exist until here. */
+  pending: PendingMessage | null = null,
 ): Promise<string | null> {
   const state = get();
   if (state.activeSessionId) return state.activeSessionId;
@@ -1296,10 +1391,20 @@ async function start(
   set((current) => ({ sessions: [reply.data, ...current.sessions] }));
   // Clears the draft and turns its tab into this session's.
   await get().selectSession(reply.data.id);
+  // Before `setEffort`, which is another round trip: the first message of a new
+  // conversation should not be the one message that waits longest to appear.
+  if (pending) patchTimeline(reply.data.id, set, () => ({ pending }));
   // `session.create` has no field for it, so the one choice that cannot ride
   // along is made immediately afterwards instead of being lost.
   if (draft.effortId) await get().setEffort(draft.effortId);
   return reply.data.id;
+}
+
+/** Marks a message as definitely not sent, keeping its text where it can be reused. */
+function failPending(sessionId: string, set: Setter, message: string): void {
+  patchTimeline(sessionId, set, (timeline) =>
+    timeline.pending ? { pending: { ...timeline.pending, error: message } } : {},
+  );
 }
 
 /** Records a choice made before there was a session to make it on. */
