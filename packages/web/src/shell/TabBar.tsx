@@ -7,9 +7,8 @@ import { SessionStatusIcon } from "./SessionStatusIcon";
  * These are work surfaces, not a site nav: opening Changes on the right does
  * not close the chat tab, and closing a tab removes it from the strip.
  */
-export function TabBar() {
-  const { tabs, sessions, activeTabId, activateTab, closeTab, rightPanel, setRightPanel, workspaceName } =
-    useTabBar();
+export function TabBar({ onOpenTools = () => {} }: { onOpenTools?(): void }) {
+  const { tabs, sessions, activeTabId, activateTab, closeTab, workspaceName } = useTabBar();
 
   return (
     <div
@@ -62,44 +61,19 @@ export function TabBar() {
         ) : null}
       </div>
 
-      {/* Both open a panel that is docked to the right of the chat, and that
-          panel is desktop-only — on a phone these were two buttons that did
-          nothing at all. */}
+      {/* Keep secondary tools out of the composer corner. The drawer also
+          houses product-specific actions such as feedback. */}
       <div className="hidden shrink-0 items-center gap-1 border-l border-line px-2 md:flex">
-        <PanelToggle
-          label="Changes"
-          active={rightPanel === "changes"}
-          onClick={() => setRightPanel(rightPanel === "changes" ? null : "changes")}
-        />
-        <PanelToggle
-          label="Files"
-          active={rightPanel === "files"}
-          onClick={() => setRightPanel(rightPanel === "files" ? null : "files")}
-        />
+        <button
+          type="button"
+          aria-label="打开右侧工作区工具"
+          className="rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-fg"
+          onClick={onOpenTools}
+        >
+          工具
+        </button>
       </div>
     </div>
-  );
-}
-
-function PanelToggle({
-  label,
-  active,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  onClick(): void;
-}) {
-  return (
-    <button
-      type="button"
-      className={`rounded px-2 py-1 text-xs ${
-        active ? "bg-raised text-fg" : "text-muted hover:bg-raised hover:text-fg"
-      }`}
-      onClick={onClick}
-    >
-      {label}
-    </button>
   );
 }
 
@@ -109,8 +83,6 @@ function useTabBar() {
   const sessions = useWorkbench((state) => state.sessions);
   const activateTab = useWorkbench((state) => state.activateTab);
   const closeTab = useWorkbench((state) => state.closeTab);
-  const rightPanel = useWorkbench((state) => state.rightPanel);
-  const setRightPanel = useWorkbench((state) => state.setRightPanel);
   const workspaces = useWorkbench((state) => state.workspaces);
   const activeWorkspaceId = useWorkbench((state) => state.activeWorkspaceId);
   const workspaceName =
@@ -121,8 +93,6 @@ function useTabBar() {
     activeTabId,
     activateTab,
     closeTab,
-    rightPanel,
-    setRightPanel,
     workspaceName,
   };
 }

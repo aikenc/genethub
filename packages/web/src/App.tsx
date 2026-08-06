@@ -14,6 +14,7 @@ import { PermissionCard } from "./session/Permission";
 import { TimelineView } from "./session/TimelineView";
 import { defaultAgent, useWorkbench } from "./session/store";
 import { Sidebar } from "./shell/Sidebar";
+import { DesktopToolsDrawer } from "./shell/DesktopToolsDrawer";
 import { MobileToolsDrawer } from "./shell/MobileToolsDrawer";
 import { TabBar } from "./shell/TabBar";
 import type { ExtraTab } from "./shell/tabs";
@@ -55,6 +56,7 @@ export function App({
   claim = claimMachine,
   welcome,
   mobileTools,
+  desktopTools,
 }: {
   host?: Host;
   /**
@@ -82,6 +84,8 @@ export function App({
   welcome?: () => React.ReactNode;
   /** Product-specific actions shown with the workbench tools on phones. */
   mobileTools?: React.ReactNode;
+  /** Product-specific actions shown with the workbench tools on desktop. */
+  desktopTools?: React.ReactNode;
 }) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">(
     "loading",
@@ -319,7 +323,6 @@ export function App({
           host={host}
           open={sessionsOpen}
           hidden={sidebarHidden}
-          extraTabs={extraTabs}
           endpoint={endpoint}
           onPickTarget={pickTarget}
           onNavigate={() => setSessionsOpen(false)}
@@ -332,6 +335,14 @@ export function App({
         >
           {mobileTools}
         </MobileToolsDrawer>
+
+        <DesktopToolsDrawer
+          open={toolsOpen}
+          extraTabs={extraTabs}
+          onNavigate={() => setToolsOpen(false)}
+        >
+          {desktopTools}
+        </DesktopToolsDrawer>
 
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/* The phone's only permanent chrome. Three things, each a full
@@ -382,7 +393,7 @@ export function App({
             </button>
           </header>
 
-          <TabBar />
+          <TabBar onOpenTools={() => setToolsOpen(true)} />
 
           {workbench.notice ? (
             <p
