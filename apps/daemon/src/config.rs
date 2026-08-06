@@ -1055,22 +1055,20 @@ mod tests {
     fn windows_data_root_and_secret_files_have_protected_owner_only_dacls() {
         let parent = tempfile::tempdir().unwrap();
         let paths = Paths::new(parent.path().join("data"));
-        let nested = paths.sessions_dir().join("workspace");
-        let old_session = nested.join("old.jsonl");
+        let nested = paths.logs_dir().join("archive");
+        let old_rotation = nested.join("daemon.log.1");
         let old_log = paths.logs_dir().join("old.log");
         fs::create_dir_all(&nested).unwrap();
-        fs::create_dir_all(paths.logs_dir()).unwrap();
-        fs::write(&old_session, b"legacy session").unwrap();
+        fs::write(&old_rotation, b"legacy log").unwrap();
         fs::write(&old_log, b"legacy log").unwrap();
         windows_acl::make_unprotected_for_test(&nested).unwrap();
-        windows_acl::make_unprotected_for_test(&old_session).unwrap();
+        windows_acl::make_unprotected_for_test(&old_rotation).unwrap();
         windows_acl::make_unprotected_for_test(&old_log).unwrap();
         paths.ensure().unwrap();
         windows_acl::verify_owner_only(&paths.root, true).unwrap();
-        windows_acl::verify_owner_only(&paths.sessions_dir(), true).unwrap();
         windows_acl::verify_owner_only(&paths.logs_dir(), true).unwrap();
         windows_acl::verify_owner_only(&nested, true).unwrap();
-        windows_acl::verify_owner_only(&old_session, false).unwrap();
+        windows_acl::verify_owner_only(&old_rotation, false).unwrap();
         windows_acl::verify_owner_only(&old_log, false).unwrap();
 
         let mut config = Config::default();
