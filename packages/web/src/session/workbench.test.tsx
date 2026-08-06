@@ -1055,6 +1055,7 @@ describe("the controls offered to the user", () => {
           kind: "permission",
           title: "允许运行 rm -rf build？",
           detail: "rm -rf build",
+          questions: [],
           options: [
             { id: "allow", label: "允许一次", kind: "allowOnce" },
             { id: "deny", label: "拒绝", kind: "reject" },
@@ -1076,6 +1077,7 @@ describe("the controls offered to the user", () => {
           id: "q1",
           kind: "question",
           title: "选择发布环境",
+          questions: [],
           options: [{ id: "beta", label: "Beta", kind: "allowOnce" }],
         }}
         onAnswer={vi.fn()}
@@ -1084,6 +1086,86 @@ describe("the controls offered to the user", () => {
 
     expect(screen.getByLabelText("Agent 提问")).toBeInTheDocument();
     expect(screen.getByText("任务已暂停；回答后会从原会话继续。")).toBeInTheDocument();
+  });
+
+  it("labels plan approval as a stopped plan decision", () => {
+    render(
+      <PermissionCard
+        request={{
+          id: "plan-1",
+          kind: "planApproval",
+          title: "实现计划",
+          detail: "先持久化，再恢复。",
+          options: [
+            { id: "accept", label: "批准并继续", kind: "allowOnce" },
+            { id: "reject", label: "拒绝计划", kind: "reject" },
+          ],
+        }}
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("Agent 计划确认")).toBeInTheDocument();
+    expect(screen.getByText("任务已暂停；确认计划后会从原会话继续。")).toBeInTheDocument();
+  });
+
+  it("keeps multi-question answers together in one durable interaction", async () => {
+    const onAnswer = vi.fn();
+    render(
+      <PermissionCard
+        request={{
+          id: "q-many",
+          kind: "question",
+          title: "发布选择",
+          options: [],
+          questions: [
+            {
+              id: "environment",
+              prompt: "发布到哪里？",
+              allowMultiple: false,
+              allowFreeform: true,
+              options: [
+                { id: "beta", label: "Beta" },
+                { id: "official", label: "Official" },
+              ],
+            },
+            {
+              id: "checks",
+              prompt: "执行哪些检查？",
+              allowMultiple: true,
+              allowFreeform: false,
+              options: [
+                { id: "smoke", label: "冒烟" },
+                { id: "regression", label: "回归" },
+              ],
+            },
+          ],
+        }}
+        onAnswer={onAnswer}
+      />,
+    );
+
+    await userEvent.click(screen.getByLabelText("Official"));
+    await userEvent.click(screen.getByLabelText("冒烟"));
+    await userEvent.click(screen.getByLabelText("回归"));
+    await userEvent.type(screen.getByPlaceholderText("其他答案或补充说明"), "保留回滚开关");
+    await userEvent.click(screen.getByRole("button", { name: "提交答案" }));
+
+    expect(onAnswer).toHaveBeenCalledWith({
+      outcome: "answered",
+      answers: [
+        {
+          questionId: "environment",
+          selectedOptionIds: ["official"],
+          freeformText: "保留回滚开关",
+        },
+        {
+          questionId: "checks",
+          selectedOptionIds: ["smoke", "regression"],
+          freeformText: undefined,
+        },
+      ],
+    });
   });
 });
 

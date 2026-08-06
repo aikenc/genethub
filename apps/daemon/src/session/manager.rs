@@ -1004,6 +1004,11 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
+        if !live.pending_permissions.lock().await.is_empty() {
+            return Err(anyhow!(
+                "answer or cancel the pending Agent interaction before changing mode"
+            ));
+        }
         match live.agent.lock().await.as_ref() {
             Some(agent) => agent.set_mode(mode_id).await?,
             None => {
@@ -1607,36 +1612,126 @@ fn continuation_for(
     request: &PermissionRequest,
     outcome: &PermissionOutcome,
 ) -> Result<Option<Continuation>> {
+    match request.kind {
+        PermissionRequestKind::Permission => {
+            let Some(option) = selected_option(request, outcome)? else {
+                return Ok(None);
+            };
+            if option.kind == PermissionOptionKind::Reject {
+                return Ok(None);
+            }
+            Ok(Some(Continuation {
+                elevated: true,
+                prompt: format!(
+                    "The user approved the interrupted permission request: {}. Resume the original \
+                     task from the current conversation state and do not repeat completed work.",
+                    option.label
+                ),
+            }))
+        }
+        PermissionRequestKind::PlanApproval => {
+            let Some(option) = selected_option(request, outcome)? else {
+                return Ok(None);
+            };
+            if option.kind == PermissionOptionKind::Reject {
+                return Ok(None);
+            }
+            Ok(Some(Continuation {
+                elevated: false,
+                prompt: format!(
+                    "The user approved the interrupted plan '{}'. Continue implementing that plan \
+                     from the current conversation state and do not repeat completed work.",
+                    request.title
+                ),
+            }))
+        }
+        PermissionRequestKind::Question => {
+            let answer = question_answer(request, outcome)?;
+            let Some(answer) = answer else {
+                return Ok(None);
+            };
+            Ok(Some(Continuation {
+                elevated: false,
+                prompt: format!(
+                    "The user answered the interrupted questions:\n{answer}\nResume the original \
+                     task from the current conversation state and do not repeat completed work."
+                ),
+            }))
+        }
+    }
+}
+
+fn selected_option<'a>(
+    request: &'a PermissionRequest,
+    outcome: &PermissionOutcome,
+) -> Result<Option<&'a genehub_proto::PermissionOption>> {
     let PermissionOutcome::Selected { option_id } = outcome else {
         return Ok(None);
     };
-    let option = request
+    request
         .options
         .iter()
         .find(|option| option.id == *option_id)
-        .ok_or_else(|| anyhow!("'{option_id}' is not an option for this interaction"))?;
+        .map(Some)
+        .ok_or_else(|| anyhow!("'{option_id}' is not an option for this interaction"))
+}
 
-    match request.kind {
-        PermissionRequestKind::Permission if option.kind == PermissionOptionKind::Reject => {
-            Ok(None)
-        }
-        PermissionRequestKind::Permission => Ok(Some(Continuation {
-            elevated: true,
-            prompt: format!(
-                "The user approved the interrupted permission request: {}. Resume the original \
-                 task from the current conversation state and do not repeat completed work.",
-                option.label
-            ),
-        })),
-        PermissionRequestKind::Question => Ok(Some(Continuation {
-            elevated: false,
-            prompt: format!(
-                "The user answered the interrupted question '{}': {}. Resume the original task \
-                 from the current conversation state and do not repeat completed work.",
-                request.title, option.label
-            ),
-        })),
+fn question_answer(
+    request: &PermissionRequest,
+    outcome: &PermissionOutcome,
+) -> Result<Option<String>> {
+    if let Some(option) = selected_option(request, outcome)? {
+        return Ok(Some(format!("- {}: {}", request.title, option.label)));
     }
+    let PermissionOutcome::Answered { answers } = outcome else {
+        return Ok(None);
+    };
+    let mut lines = Vec::new();
+    for question in request.questions.as_deref().unwrap_or_default() {
+        let answer = answers
+            .iter()
+            .find(|answer| answer.question_id == question.id)
+            .ok_or_else(|| anyhow!("question '{}' was not answered", question.id))?;
+        if !question.allow_multiple && answer.selected_option_ids.len() > 1 {
+            return Err(anyhow!(
+                "question '{}' accepts only one option",
+                question.id
+            ));
+        }
+        let mut values = Vec::new();
+        for option_id in &answer.selected_option_ids {
+            let option = question
+                .options
+                .iter()
+                .find(|option| option.id == *option_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "'{option_id}' is not an option for question '{}'",
+                        question.id
+                    )
+                })?;
+            values.push(option.label.clone());
+        }
+        let freeform = answer
+            .freeform_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        if freeform.is_some() && !question.allow_freeform {
+            return Err(anyhow!(
+                "question '{}' does not accept a free-form answer",
+                question.id
+            ));
+        }
+        if let Some(text) = freeform {
+            values.push(text.to_string());
+        }
+        if values.is_empty() {
+            return Err(anyhow!("question '{}' has no answer", question.id));
+        }
+        lines.push(format!("- {}: {}", question.prompt, values.join(", ")));
+    }
+    Ok((!lines.is_empty()).then(|| lines.join("\n")))
 }
 
 async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &PermissionRequest) {
@@ -2684,6 +2779,7 @@ mod tests {
             detail: None,
             tool_call_id: None,
             options: vec![],
+            questions: None,
         };
         apply(
             &live,
@@ -2726,6 +2822,7 @@ mod tests {
                         detail: None,
                         tool_call_id: None,
                         options: vec![],
+                        questions: None,
                     },
                 },
             )
@@ -2766,6 +2863,7 @@ mod tests {
                     kind: PermissionOptionKind::Reject,
                 },
             ],
+            questions: None,
         }
     }
 
@@ -2884,6 +2982,138 @@ mod tests {
         .expect("a question answer resumes");
         assert!(!continuation.elevated);
         assert!(continuation.prompt.contains("No"));
+    }
+
+    #[test]
+    fn structured_answers_all_survive_the_stop_and_resume_boundary() {
+        let mut request = interaction(PermissionRequestKind::Question);
+        request.questions = Some(vec![
+            genehub_proto::InteractionQuestion {
+                id: "environment".into(),
+                prompt: "Where should this ship?".into(),
+                allow_multiple: false,
+                allow_freeform: false,
+                options: vec![genehub_proto::InteractionOption {
+                    id: "beta".into(),
+                    label: "Beta".into(),
+                }],
+            },
+            genehub_proto::InteractionQuestion {
+                id: "note".into(),
+                prompt: "Anything else?".into(),
+                allow_multiple: false,
+                allow_freeform: true,
+                options: vec![],
+            },
+        ]);
+        let continuation = continuation_for(
+            &request,
+            &PermissionOutcome::Answered {
+                answers: vec![
+                    genehub_proto::InteractionAnswer {
+                        question_id: "environment".into(),
+                        selected_option_ids: vec!["beta".into()],
+                        freeform_text: None,
+                    },
+                    genehub_proto::InteractionAnswer {
+                        question_id: "note".into(),
+                        selected_option_ids: vec![],
+                        freeform_text: Some("Keep the rollback switch".into()),
+                    },
+                ],
+            },
+        )
+        .unwrap()
+        .expect("complete answers resume");
+        assert!(!continuation.elevated);
+        assert!(continuation
+            .prompt
+            .contains("Where should this ship?: Beta"));
+        assert!(continuation.prompt.contains("Keep the rollback switch"));
+    }
+
+    #[test]
+    fn structured_answers_are_validated_at_the_daemon_boundary() {
+        let mut request = interaction(PermissionRequestKind::Question);
+        request.questions = Some(vec![genehub_proto::InteractionQuestion {
+            id: "environment".into(),
+            prompt: "Where should this ship?".into(),
+            allow_multiple: false,
+            allow_freeform: false,
+            options: vec![
+                genehub_proto::InteractionOption {
+                    id: "beta".into(),
+                    label: "Beta".into(),
+                },
+                genehub_proto::InteractionOption {
+                    id: "official".into(),
+                    label: "Official".into(),
+                },
+            ],
+        }]);
+        let outcome = |selected_option_ids, freeform_text| PermissionOutcome::Answered {
+            answers: vec![genehub_proto::InteractionAnswer {
+                question_id: "environment".into(),
+                selected_option_ids,
+                freeform_text,
+            }],
+        };
+
+        assert!(continuation_for(
+            &request,
+            &outcome(vec!["beta".into(), "official".into()], None),
+        )
+        .err()
+        .expect("multiple choices must be rejected")
+        .to_string()
+        .contains("only one option"));
+        assert!(
+            continuation_for(&request, &outcome(vec![], Some("somewhere else".into())),)
+                .err()
+                .expect("free-form input must be rejected")
+                .to_string()
+                .contains("does not accept a free-form answer")
+        );
+    }
+
+    #[test]
+    fn a_plan_only_resumes_after_explicit_approval() {
+        let request = interaction(PermissionRequestKind::PlanApproval);
+        assert!(continuation_for(
+            &request,
+            &PermissionOutcome::Selected {
+                option_id: "no".into(),
+            },
+        )
+        .unwrap()
+        .is_none());
+        let approved = continuation_for(
+            &request,
+            &PermissionOutcome::Selected {
+                option_id: "yes".into(),
+            },
+        )
+        .unwrap()
+        .expect("approval resumes");
+        assert!(!approved.elevated);
+        assert!(approved.prompt.contains("Continue?"));
+    }
+
+    #[tokio::test]
+    async fn mode_changes_cannot_bypass_a_waiting_interaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, _, _) = wired(dir.path()).await;
+        let live = sessions.live("s1").await.unwrap();
+        live.pending_permissions
+            .lock()
+            .await
+            .push(interaction(PermissionRequestKind::Question));
+
+        let error = sessions
+            .set_mode("s1", "agent", &ProviderMap::new())
+            .await
+            .expect_err("the question must be resolved first");
+        assert!(error.to_string().contains("pending Agent interaction"));
     }
 
     #[tokio::test]

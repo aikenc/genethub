@@ -14,9 +14,10 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind,
-    PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent,
-    TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    Capabilities, Catalog, InteractionOption, InteractionQuestion, ItemDelta, ModeInfo, ModelInfo,
+    PermissionOption, PermissionOptionKind, PermissionOutcome, PermissionRequest,
+    PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, ToolCallDetail, ToolStatus,
+    TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -192,7 +193,7 @@ impl AgentAdapter for AcpAdapter {
             mode_config_id: Mutex::new(hello.mode_config_id),
         };
 
-        tokio::spawn(read_loop(stdout, events, pending, turn));
+        tokio::spawn(read_loop(stdout, stdin, events, pending, turn));
 
         session.initialize(&config).await?;
         Ok(Box::new(session))
@@ -863,6 +864,7 @@ where
 
 async fn read_loop(
     stdout: tokio::process::ChildStdout,
+    stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,
     turn: Arc<Mutex<TurnState>>,
@@ -907,9 +909,45 @@ async fn read_loop(
             translate_permission(id, &params, &events);
             continue;
         }
+        if method == "cursor/ask_question" {
+            let Some(id) = frame.get("id") else {
+                tracing::warn!("Cursor question request had no id");
+                continue;
+            };
+            if !translate_cursor_question(id, &params, &events) {
+                let response =
+                    rpc_error(id, -32602, "Cursor question request has no valid questions");
+                let mut input = stdin.lock().await;
+                if let Err(error) = write_json_line(&mut input, &response).await {
+                    tracing::warn!("could not reject malformed Cursor question: {error}");
+                }
+            }
+            continue;
+        }
+        if method == "cursor/create_plan" {
+            let Some(id) = frame.get("id") else {
+                tracing::warn!("Cursor plan request had no id");
+                continue;
+            };
+            translate_cursor_plan(id, &params, &events);
+            continue;
+        }
         let mut state = turn.lock().await;
         if method == "session/update" {
             translate_update(&params, &mut state, &events);
+            continue;
+        }
+        drop(state);
+
+        // A request is not a notification: silently swallowing an extension
+        // leaves the Agent waiting forever. Cursor deliberately falls back to
+        // standard ACP permission requests when an extension gets -32601.
+        if let Some(id) = frame.get("id") {
+            let response = unsupported_request(id, method);
+            let mut input = stdin.lock().await;
+            if let Err(error) = write_json_line(&mut input, &response).await {
+                tracing::warn!("could not reject unsupported ACP request {method}: {error}");
+            }
         }
     }
 }
@@ -1026,8 +1064,139 @@ fn translate_permission(id: i64, params: &Value, events: &broadcast::Sender<Sess
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
             options,
+            questions: None,
         },
     });
+}
+
+fn request_id(id: &Value) -> String {
+    id.as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn cursor_questions(params: &Value) -> Option<Vec<InteractionQuestion>> {
+    let raw = params.get("questions").and_then(Value::as_array)?;
+    let parsed: Vec<InteractionQuestion> = raw
+        .iter()
+        .filter_map(|question| {
+            let id = question.get("id")?.as_str()?.to_string();
+            let prompt = question.get("prompt")?.as_str()?.to_string();
+            let options: Vec<InteractionOption> = question
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(|option| {
+                            Some(InteractionOption {
+                                id: option.get("id")?.as_str()?.to_string(),
+                                label: option.get("label")?.as_str()?.to_string(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(InteractionQuestion {
+                id,
+                prompt,
+                allow_multiple: question
+                    .get("allowMultiple")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                // Cursor's own UI always adds an "Other" text choice.
+                allow_freeform: true,
+                options,
+            })
+        })
+        .collect();
+    (!parsed.is_empty() && parsed.len() == raw.len()).then_some(parsed)
+}
+
+fn translate_cursor_question(
+    id: &Value,
+    params: &Value,
+    events: &broadcast::Sender<SessionEvent>,
+) -> bool {
+    let Some(questions) = cursor_questions(params) else {
+        return false;
+    };
+    let _ = events.send(SessionEvent::PermissionRequested {
+        request: PermissionRequest {
+            id: request_id(id),
+            kind: PermissionRequestKind::Question,
+            title: params
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Clarifying questions")
+                .to_string(),
+            detail: None,
+            tool_call_id: params
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            options: Vec::new(),
+            questions: Some(questions),
+        },
+    });
+    true
+}
+
+fn translate_cursor_plan(id: &Value, params: &Value, events: &broadcast::Sender<SessionEvent>) {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Implementation plan");
+    let overview = params
+        .get("overview")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let plan = params
+        .get("plan")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let detail = [overview, plan]
+        .into_iter()
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let _ = events.send(SessionEvent::PermissionRequested {
+        request: PermissionRequest {
+            id: request_id(id),
+            kind: PermissionRequestKind::PlanApproval,
+            title: name.to_string(),
+            detail: (!detail.is_empty()).then_some(detail),
+            tool_call_id: params
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            options: vec![
+                PermissionOption {
+                    id: "accept".into(),
+                    label: "Approve and continue".into(),
+                    kind: PermissionOptionKind::AllowOnce,
+                },
+                PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject plan".into(),
+                    kind: PermissionOptionKind::Reject,
+                },
+            ],
+            questions: None,
+        },
+    });
+}
+
+fn unsupported_request(id: &Value, method: &str) -> Value {
+    rpc_error(id, -32601, &format!("method not supported: {method}"))
+}
+
+fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message },
+    })
 }
 
 fn translate_update(
@@ -1436,6 +1605,103 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn cursor_questions_keep_every_prompt_and_answer_shape() {
+        let (tx, mut rx) = broadcast::channel(8);
+        assert!(translate_cursor_question(
+            &json!("ask-1"),
+            &json!({
+                "toolCallId": "tool-1",
+                "title": "Choose the rollout",
+                "questions": [
+                    {
+                        "id": "environment",
+                        "prompt": "Where should this ship?",
+                        "options": [
+                            {"id": "beta", "label": "Beta"},
+                            {"id": "official", "label": "Official"}
+                        ],
+                        "allowMultiple": false
+                    },
+                    {
+                        "id": "checks",
+                        "prompt": "Which checks are required?",
+                        "options": [{"id": "smoke", "label": "Smoke test"}],
+                        "allowMultiple": true
+                    }
+                ]
+            }),
+            &tx,
+        ));
+        match &drain(&mut rx)[0] {
+            SessionEvent::PermissionRequested { request } => {
+                assert_eq!(request.id, "ask-1");
+                assert_eq!(request.kind, PermissionRequestKind::Question);
+                assert_eq!(request.tool_call_id.as_deref(), Some("tool-1"));
+                let questions = request.questions.as_ref().expect("structured questions");
+                assert_eq!(questions.len(), 2);
+                assert_eq!(questions[0].options[1].label, "Official");
+                assert!(questions[1].allow_multiple);
+                assert!(questions.iter().all(|question| question.allow_freeform));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cursor_plans_become_explicit_stopped_approvals() {
+        let (tx, mut rx) = broadcast::channel(8);
+        translate_cursor_plan(
+            &json!(17),
+            &json!({
+                "toolCallId": "plan-tool",
+                "name": "Durable interactions",
+                "overview": "Stop before asking.",
+                "plan": "Persist, render, then resume."
+            }),
+            &tx,
+        );
+        match &drain(&mut rx)[0] {
+            SessionEvent::PermissionRequested { request } => {
+                assert_eq!(request.id, "17");
+                assert_eq!(request.kind, PermissionRequestKind::PlanApproval);
+                assert_eq!(request.tool_call_id.as_deref(), Some("plan-tool"));
+                assert!(request.detail.as_deref().unwrap().contains("Persist"));
+                assert_eq!(request.options[0].id, "accept");
+                assert_eq!(request.options[1].kind, PermissionOptionKind::Reject);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_acp_requests_fail_visibly_instead_of_hanging() {
+        let response = unsupported_request(&json!("extension-1"), "vendor/unknown");
+        assert_eq!(response["id"], json!("extension-1"));
+        assert_eq!(response["error"]["code"], json!(-32601));
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("vendor/unknown"));
+    }
+
+    #[test]
+    fn malformed_cursor_questions_do_not_create_unanswerable_waits() {
+        let (tx, mut rx) = broadcast::channel(8);
+        assert!(!translate_cursor_question(
+            &json!("bad-question"),
+            &json!({"questions": [{"id": "missing-prompt"}]}),
+            &tx,
+        ));
+        assert!(rx.try_recv().is_err());
+        let response = rpc_error(
+            &json!("bad-question"),
+            -32602,
+            "Cursor question request has no valid questions",
+        );
+        assert_eq!(response["error"]["code"], json!(-32602));
     }
 
     #[test]

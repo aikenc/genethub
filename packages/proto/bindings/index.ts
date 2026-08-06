@@ -343,6 +343,12 @@ channelSecret: string,
  */
 fingerprint: string, };
 
+export type InteractionAnswer = { questionId: string, selectedOptionIds: Array<string>, freeformText?: string, };
+
+export type InteractionOption = { id: string, label: string, };
+
+export type InteractionQuestion = { id: string, prompt: string, allowMultiple: boolean, allowFreeform: boolean, options: Array<InteractionOption>, };
+
 /**
  * Proof of the PSK carried in the fragment half of a pairing link.
  */
@@ -393,7 +399,7 @@ export type PermissionOption = { id: string, label: string, kind: PermissionOpti
 
 export type PermissionOptionKind = "allowOnce" | "allowAlways" | "reject";
 
-export type PermissionOutcome = { "outcome": "selected", optionId: string, } | { "outcome": "timedOut", appliedDefault: string, } | { "outcome": "canceled" };
+export type PermissionOutcome = { "outcome": "selected", optionId: string, } | { "outcome": "answered", answers: Array<InteractionAnswer>, } | { "outcome": "timedOut", appliedDefault: string, } | { "outcome": "canceled" };
 
 export type PermissionRequest = { id: string, 
 /**
@@ -404,9 +410,15 @@ kind: PermissionRequestKind, title: string, detail?: string,
 /**
  * The tool call this approval gates, when it gates one.
  */
-toolCallId?: string, options: Array<PermissionOption>, };
+toolCallId?: string, options: Array<PermissionOption>, 
+/**
+ * Structured questions carried by Agent-native interaction tools. Empty
+ * for the original one-row approval card, so older stored sessions keep
+ * their exact behaviour.
+ */
+questions?: Array<InteractionQuestion>, };
 
-export type PermissionRequestKind = "permission" | "question";
+export type PermissionRequestKind = "permission" | "question" | "planApproval";
 
 export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { "state": "unavailable", reason: string, };
 

@@ -79,10 +79,10 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind,
-    PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent,
-    TimelineItem, TodoEntry, TodoStatus, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode,
-    Usage,
+    Capabilities, Catalog, InteractionOption, InteractionQuestion, ItemDelta, ModeInfo, ModelInfo,
+    PermissionOption, PermissionOptionKind, PermissionOutcome, PermissionRequest,
+    PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, TodoEntry, TodoStatus,
+    ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -637,11 +637,7 @@ enum Ask {
     Decision,
     /// A question: answered with the label of the option that was picked, keyed
     /// by the question's own id.
-    Question {
-        question: String,
-        /// The option ids we offered, paired with the label to send back.
-        options: Vec<(String, String)>,
-    },
+    Questions { questions: Vec<Question> },
 }
 
 #[derive(Copy, Clone)]
@@ -980,20 +976,8 @@ impl AgentSession for CodexSession {
             .remove(request_id)
             .ok_or_else(|| anyhow!("Codex request '{request_id}' is no longer pending"))?;
         let result = match pending.response {
-            Ask::Question { question, options } => {
-                let picked = match &outcome {
-                    PermissionOutcome::Selected { option_id } => options
-                        .iter()
-                        .find(|(id, _)| id == option_id)
-                        .map(|(_, label)| label.clone()),
-                    _ => None,
-                };
-                match picked {
-                    Some(label) => json!({ "answers": { question: { "answers": [label] } } }),
-                    // Dismissed. An empty answer set is the one reply that does
-                    // not put words in the user's mouth.
-                    None => json!({ "answers": {} }),
-                }
+            Ask::Questions { questions } => {
+                json!({ "answers": codex_answers(&questions, &outcome) })
             }
             _ => json!({ "decision": decision(&outcome) }),
         };
@@ -1371,6 +1355,7 @@ async fn translate_ask(asked: Asked<'_>) {
                 detail: reason.clone(),
                 tool_call_id: item_id.clone(),
                 options: allow_or_deny(),
+                questions: None,
             },
         });
     };
@@ -1419,20 +1404,15 @@ async fn translate_ask(asked: Asked<'_>) {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            // One question, with options to choose between, is the shape our
-            // approval flow can carry. Several at once, or one wanting free
-            // text, would need a form we do not have — and half-answering is
-            // worse than saying nobody answered, which is what this does.
-            match questions.first().and_then(question_in) {
-                Some(question) if questions.len() == 1 => {
-                    let options = question.options.clone();
+            let parsed: Vec<Question> = questions.iter().filter_map(question_in).collect();
+            match parsed.len() == questions.len() && !parsed.is_empty() {
+                true => {
                     asks.lock().await.insert(
                         request_id.clone(),
                         PendingAsk {
                             upstream_id: id,
-                            response: Ask::Question {
-                                question: question.id,
-                                options: options.clone(),
+                            response: Ask::Questions {
+                                questions: parsed.clone(),
                             },
                         },
                     );
@@ -1440,21 +1420,15 @@ async fn translate_ask(asked: Asked<'_>) {
                         request: PermissionRequest {
                             id: request_id.clone(),
                             kind: PermissionRequestKind::Question,
-                            title: question.header,
-                            detail: Some(question.question),
+                            title: parsed[0].header.clone(),
+                            detail: None,
                             tool_call_id: item_id.clone(),
-                            options: options
-                                .into_iter()
-                                .map(|(id, label)| PermissionOption {
-                                    id,
-                                    label,
-                                    kind: PermissionOptionKind::AllowOnce,
-                                })
-                                .collect(),
+                            options: Vec::new(),
+                            questions: Some(parsed.iter().map(Question::interaction).collect()),
                         },
                     });
                 }
-                _ => {
+                false => {
                     answer(
                         stdin,
                         json!({ "jsonrpc": "2.0", "id": id, "result": { "answers": {} } }),
@@ -1526,12 +1500,34 @@ async fn resolve_ask(
     }
 }
 
+#[derive(Clone)]
 struct Question {
     id: String,
     header: String,
     question: String,
     /// Option ids we invent (their position), paired with the label to send back.
     options: Vec<(String, String)>,
+}
+
+impl Question {
+    fn interaction(&self) -> InteractionQuestion {
+        InteractionQuestion {
+            id: self.id.clone(),
+            prompt: self.question.clone(),
+            allow_multiple: false,
+            // Codex's request-user-input surface always offers an "Other"
+            // answer in addition to any suggested choices.
+            allow_freeform: true,
+            options: self
+                .options
+                .iter()
+                .map(|(id, label)| InteractionOption {
+                    id: id.clone(),
+                    label: label.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 fn question_in(value: &Value) -> Option<Question> {
@@ -1557,15 +1553,54 @@ fn question_in(value: &Value) -> Option<Question> {
                 .collect()
         })
         .unwrap_or_default();
-    if options.is_empty() {
-        return None;
-    }
     Some(Question {
         id: text("id")?,
         header: text("header")?,
         question: text("question")?,
         options,
     })
+}
+
+fn codex_answers(
+    questions: &[Question],
+    outcome: &PermissionOutcome,
+) -> serde_json::Map<String, Value> {
+    let mut result = serde_json::Map::new();
+    let submitted = match outcome {
+        PermissionOutcome::Answered { answers } => answers.as_slice(),
+        _ => &[],
+    };
+    for question in questions {
+        let Some(answer) = submitted
+            .iter()
+            .find(|answer| answer.question_id == question.id)
+        else {
+            continue;
+        };
+        let mut values: Vec<String> = answer
+            .selected_option_ids
+            .iter()
+            .filter_map(|picked| {
+                question
+                    .options
+                    .iter()
+                    .find(|(id, _)| id == picked)
+                    .map(|(_, label)| label.clone())
+            })
+            .collect();
+        if let Some(text) = answer
+            .freeform_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            values.push(text.to_string());
+        }
+        if !values.is_empty() {
+            result.insert(question.id.clone(), json!({ "answers": values }));
+        }
+    }
+    result
 }
 
 async fn translate(
@@ -3031,9 +3066,29 @@ mod tests {
             ]
         );
 
-        // No options is a free-text answer, which our approval flow has no way
-        // to collect — better to say so here than to render an empty prompt.
-        assert!(question_in(&json!({ "id": "q", "header": "h", "question": "q" })).is_none());
+        let freeform = question_in(&json!({ "id": "q", "header": "h", "question": "q" }))
+            .expect("free-text questions are renderable");
+        assert!(freeform.interaction().allow_freeform);
+
+        let answers = codex_answers(
+            &[question, freeform],
+            &PermissionOutcome::Answered {
+                answers: vec![
+                    genehub_proto::InteractionAnswer {
+                        question_id: "q1".into(),
+                        selected_option_ids: vec!["1".into()],
+                        freeform_text: None,
+                    },
+                    genehub_proto::InteractionAnswer {
+                        question_id: "q".into(),
+                        selected_option_ids: vec![],
+                        freeform_text: Some("Use the existing cluster".into()),
+                    },
+                ],
+            },
+        );
+        assert_eq!(answers["q1"]["answers"], json!(["SQLite"]));
+        assert_eq!(answers["q"]["answers"], json!(["Use the existing cluster"]));
     }
 
     #[test]

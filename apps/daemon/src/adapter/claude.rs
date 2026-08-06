@@ -1736,6 +1736,7 @@ async fn handle_control_request(
                     kind: PermissionOptionKind::Reject,
                 },
             ],
+            questions: None,
         },
     });
 }
