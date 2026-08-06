@@ -422,6 +422,10 @@ function stamp(channel) {
     [/^!define GH_CLI_EXE ".*"$/, `!define GH_CLI_EXE "${cliBinary}.exe"`],
     [/^!define GH_AGENT_EXE ".*"$/, `!define GH_AGENT_EXE "${agentBinary}.exe"`],
     [/^!define GH_DATA_DIR_NAME ".*"$/, `!define GH_DATA_DIR_NAME "${value("data_dir_name", channel)}"`],
+    // The shell-supervised daemon's lock sits one level deeper: the shell's
+    // app-data directory carries the identifier on Windows (Tauri
+    // `app_data_dir`), so the installer needs the bundle id to find it.
+    [/^!define GH_BUNDLE_ID ".*"$/, `!define GH_BUNDLE_ID "${identifier}"`],
   ]);
 
   // install.sh is served to users on its own, so its channel travels inside
