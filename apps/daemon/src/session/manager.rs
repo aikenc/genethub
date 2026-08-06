@@ -4088,8 +4088,9 @@ mod tests {
             .unwrap();
 
         let home = workspace.path().join(".genethub");
+        let session = home.join("sessions").join("s1");
         assert!(
-            home.join("sessions").join("s1").join("chat.jsonl").exists(),
+            session.join("chat.jsonl").exists(),
             "the conversation is kept with the project it is about"
         );
         assert_eq!(
@@ -4097,5 +4098,21 @@ mod tests {
             "*\n",
             "a user's own `git status` must not fill up with session files"
         );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Every level, not just the outermost: this lives in the user's own
+            // folder, whose permissions are theirs to loosen.
+            for directory in [&home, &home.join("sessions"), &session] {
+                assert_eq!(
+                    directory.metadata().unwrap().permissions().mode() & 0o777,
+                    0o700,
+                    "{} is readable by other local accounts",
+                    directory.display()
+                );
+            }
+        }
     }
 }

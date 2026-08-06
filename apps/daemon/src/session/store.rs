@@ -251,18 +251,23 @@ impl Store {
     /// home itself the first time.
     ///
     /// Two things have to be true of that home before any session lands in it.
-    /// It must be owner-only, because conversations were owner-only when they
-    /// lived under the daemon's data directory and moving them into a project
-    /// must not quietly widen who can read them. And it must be invisible to
-    /// the project's own version control, or the first thing a user sees after
-    /// their first message is their own `git status` full of session files.
+    /// Every directory in it must be owner-only, because conversations were
+    /// owner-only when they lived under the daemon's data directory and moving
+    /// them into a project must not quietly widen who can read them — the outer
+    /// directory alone is not enough, since it is the user's own folder and
+    /// they may loosen it. And the home must be invisible to the project's own
+    /// version control, or the first thing a user sees after their first
+    /// message is their own `git status` full of session files.
     fn create_dir_all(&self, workspace_id: &str, dir: &Path) -> Result<()> {
-        let home = self.homes.home_dir(workspace_id)?;
-        let established = home.exists();
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        if !established {
-            crate::config::restrict_dir_to_owner(&home)?;
+        if dir.exists() {
+            return Ok(());
         }
+        let home = self.homes.home_dir(workspace_id)?;
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        for path in dir.ancestors().take_while(|path| path.starts_with(&home)) {
+            crate::config::restrict_dir_to_owner(path)?;
+        }
+        crate::config::restrict_dir_to_owner(&home)?;
         let ignore = home.join(".gitignore");
         if !ignore.exists() {
             fs::write(&ignore, "*\n").with_context(|| format!("writing {}", ignore.display()))?;
