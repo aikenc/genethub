@@ -346,6 +346,37 @@ function markSessionRead(summary: SessionSummary): void {
 /** The reconnect sentence this store put on screen, while it is still true. */
 let reconnectNotice: string | null = null;
 
+/**
+ * The connection-loss sentence put on screen by a request that died with the
+ * socket. It reports a condition, not an event: once the connection is back
+ * and the timeline has resynchronised, the loss it describes no longer
+ * exists, and leaving the banner up only teaches people to ignore banners.
+ */
+let connectionLossNotice: string | null = null;
+
+/**
+ * The message of an error that is a dropped connection speaking, or null for
+ * anything else. `ConnectionOutcomeUnknownError` covers requests in flight;
+ * the Hello path rejects with a plain Error carrying the same prefix.
+ */
+function connectionLossMessage(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  return error instanceof ConnectionOutcomeUnknownError ||
+    message.startsWith("the connection was lost")
+    ? message
+    : null;
+}
+
+/**
+ * Surfaces a failure and remembers it when it is a dropped connection
+ * speaking, so the banner can be withdrawn when the connection returns.
+ */
+function reportError(set: Setter, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  if (connectionLossMessage(error)) connectionLossNotice = message;
+  set({ notice: message });
+}
+
 let roundReads: Promise<unknown> = Promise.resolve();
 
 /**
@@ -444,6 +475,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   download: { state: "idle" },
 
   async attach(client) {
+    reconnectNotice = null;
+    connectionLossNotice = null;
     set({ client, notice: null });
     client.onStateChange((connection) => {
       set({ connection });
@@ -463,33 +496,49 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       }
       // Once the socket is back, a banner still saying "正在重连" is no longer
       // a report of anything — it is the reason someone writes in to say the
-      // app is stuck reconnecting when it reconnected a minute ago. Only this
-      // line's own sentence is withdrawn; anything said since stands.
-      if (connection === "ready" && reconnectNotice) {
-        const stale = reconnectNotice;
-        reconnectNotice = null;
-        set((state) => (state.notice === stale ? { notice: null } : {}));
+      // app is stuck reconnecting when it reconnected a minute ago. The same
+      // goes for a request the drop took down: the timeline has since said
+      // what became of it. Only these lines' own sentences are withdrawn;
+      // anything said since stands.
+      if (connection === "ready") {
+        if (reconnectNotice) {
+          const stale = reconnectNotice;
+          reconnectNotice = null;
+          set((state) => (state.notice === stale ? { notice: null } : {}));
+        }
+        if (connectionLossNotice) {
+          const stale = connectionLossNotice;
+          connectionLossNotice = null;
+          set((state) => (state.notice === stale ? { notice: null } : {}));
+        }
       }
     });
     client.onNotice((_level, message) => set({ notice: message }));
     client.onUpdateDownload((download) => set({ download }));
     try {
+      // Hub status and the download prompt do not read anything the catalog
+      // loads, so they fly alongside it instead of queueing behind two relay
+      // round trips — on a slow link that queueing is most of what switching
+      // to a machine used to cost.
+      const ancillary = (async () => {
+        await get().refreshHub();
+        // Asked on connect, unlike the update check itself. A download that was
+        // running when the window closed is still running, and the prompt to
+        // install it has to come back with the window rather than wait for
+        // someone to go looking in settings for a file they already have.
+        const download = await client.call({ type: "update.downloadState" });
+        if (download?.type === "updateDownload") set({ download: download.data });
+      })().catch((error: unknown) => unattended(client, get, set)(error));
       await refreshCatalog(client, set);
       if (get().client === client) await land(get);
-      await get().refreshHub();
-      // Asked on connect, unlike the update check itself. A download that was
-      // running when the window closed is still running, and the prompt to
-      // install it has to come back with the window rather than wait for
-      // someone to go looking in settings for a file they already have.
-      const download = await client.call({ type: "update.downloadState" });
-      if (download?.type === "updateDownload") set({ download: download.data });
+      await ancillary;
     } catch (error) {
       // A connection can disappear halfway through being asked things: the tab
       // is closing, or the daemon restarted and the shell has already pointed
       // us at its replacement. Neither is worth reporting — but an error on the
       // connection we are still using is, and it used to go nowhere at all.
       if (get().client !== client) return;
-      set({ notice: error instanceof Error ? error.message : String(error) });
+      reportError(set, error);
     }
   },
 
@@ -1568,7 +1617,7 @@ function upsertBy<T>(list: T[], item: T, key: (value: T) => string): T[] {
 function unattended(client: Client, get: () => WorkbenchState, set: Setter) {
   return (error: unknown): undefined => {
     if (get().client !== client) return undefined;
-    set({ notice: error instanceof Error ? error.message : String(error) });
+    reportError(set, error);
     return undefined;
   };
 }
@@ -1586,7 +1635,7 @@ async function asked<T>(set: Setter, run: () => Promise<T>): Promise<T | undefin
   try {
     return await run();
   } catch (error) {
-    set({ notice: error instanceof Error ? error.message : String(error) });
+    reportError(set, error);
     return undefined;
   }
 }
