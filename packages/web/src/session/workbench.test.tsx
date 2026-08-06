@@ -159,17 +159,126 @@ describe("what the user sees in a session", () => {
     );
 
     render(<TimelineView state={state} />);
+    expect(screen.queryByText("查看进展")).not.toBeInTheDocument();
     expect(screen.getByTestId("round-progress")).not.toHaveTextContent("工作过程");
     expect(screen.getByTestId("round-progress")).not.toHaveTextContent("阶段");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("进展：先检查配置。");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("2 项");
-    expect(screen.getByTestId("round-batch")).toHaveTextContent("先检查配置");
+    expect(within(screen.getByTestId("round-trunk")).getByRole("button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.queryByTestId("round-batch")).not.toBeInTheDocument();
+    await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
     expect(screen.getByTestId("batch-monologue")).toHaveTextContent("先检查配置，再逐项核对。");
     expect(screen.getByText("确认结构")).toBeInTheDocument();
     expect(screen.getByText("读取配置")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: /确认结构/ }));
     expect(screen.getByText("正在加载…")).toBeInTheDocument();
+  });
+
+  it("calls only the live tail progress and completed trunks process", () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 2,
+    };
+    const first = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 64,
+      title: "我会先盘点入口。",
+      batches: [],
+    };
+    const second = {
+      index: 1,
+      firstItemId: "a2",
+      blobCount: 3,
+      title: "我会继续核对权限。",
+      batches: [],
+    };
+    useWorkbench.setState({
+      rounds: [round],
+      roundLayers: { r1: { round, trunks: [first, second] } },
+      roundTrunks: {},
+    });
+    const state = apply(emptyTimeline(), {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "审计", attachments: [] },
+    });
+
+    render(<TimelineView state={state} />);
+
+    const trunks = screen.getAllByTestId("round-trunk");
+    expect(trunks[0]!).toHaveTextContent("过程：盘点入口。64 项");
+    expect(trunks[1]!).toHaveTextContent("进展：核对权限。3 项");
+    expect(within(trunks[0]!).getByRole("button")).toHaveAttribute("aria-expanded", "false");
+    expect(within(trunks[1]!).getByRole("button")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("uses compact batch text only while collapsed and full narration after expansion", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const first = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 2,
+      text: "核对入口与权限",
+    };
+    const second = {
+      index: 1,
+      firstItemId: "a2",
+      blobCount: 1,
+      text: "核对部署边界",
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 3,
+      title: "我会先核对入口与权限。",
+      batches: [first, second],
+    };
+    useWorkbench.setState({
+      rounds: [round],
+      roundLayers: { r1: { round, trunks: [summary] } },
+      roundTrunks: {
+        "r1:0": {
+          summary,
+          batches: [
+            { summary: first, monologue: "完整独白：核对入口与权限。", blobs: [] },
+            { summary: second, monologue: "完整独白：核对部署边界。", blobs: [] },
+          ],
+        },
+      },
+    });
+    const state = apply(emptyTimeline(), {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "审计", attachments: [] },
+    });
+
+    render(<TimelineView state={state} />);
+    await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
+
+    const batches = screen.getAllByTestId("round-batch");
+    expect(batches).toHaveLength(2);
+    expect(batches[0]!).toHaveTextContent("核对入口与权限");
+    expect(batches[0]!).not.toHaveTextContent("2 项");
+
+    await userEvent.click(within(batches[0]!).getByRole("button"));
+    expect(within(batches[0]!).getByRole("button")).not.toHaveTextContent("核对入口与权限");
+    expect(batches[0]!).toHaveTextContent("完整独白：核对入口与权限。");
   });
 
   it("keeps historical trunks collapsed and preserves a manual expansion", async () => {
@@ -235,7 +344,7 @@ describe("what the user sees in a session", () => {
       index: 0,
       firstItemId: "a1",
       blobCount: 8,
-      title: "先彻底核对权限链路。",
+      title: "我会先彻底核对权限链路。",
       batches: [processBatch, finalBatch],
     };
     let state = emptyTimeline();
@@ -281,15 +390,15 @@ describe("what the user sees in a session", () => {
     const timeline = screen.getByTestId("timeline");
     expect(screen.getAllByTestId("assistant-message")).toHaveLength(1);
     expect(screen.getByTestId("round-trunk")).toHaveTextContent(
-      "进展：先彻底核对权限链路。8 项",
+      "过程：彻底核对权限链路。8 项",
     );
-    expect(timeline.textContent?.indexOf("进展：先彻底核对权限链路。")).toBeLessThan(
+    expect(timeline.textContent?.indexOf("过程：彻底核对权限链路。")).toBeLessThan(
       timeline.textContent?.indexOf("最终结论：需要修复授权边界。") ?? -1,
     );
     expect(timeline).not.toHaveTextContent("阶段 1");
 
     await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
-    await userEvent.click(within(screen.getByTestId("round-batch")).getByRole("button"));
+    expect(screen.queryByTestId("round-batch")).not.toBeInTheDocument();
     expect(screen.getByTestId("batch-monologue")).toHaveTextContent(
       "先彻底核对权限链路，再给结论。",
     );

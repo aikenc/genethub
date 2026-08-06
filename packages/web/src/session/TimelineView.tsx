@@ -294,21 +294,10 @@ function RoundProgress({
   const loadOlder = useWorkbench((state) => state.loadOlderTrunks);
 
   useEffect(() => {
-    if (round.outcome === "running" && !layer) void loadRound(round.roundId);
-  }, [layer, loadRound, round.outcome, round.roundId]);
+    if (!layer) void loadRound(round.roundId);
+  }, [layer, loadRound, round.roundId]);
 
-  if (!layer) {
-    return (
-      <button
-        type="button"
-        className="text-xs text-accent"
-        data-testid="round-progress-load"
-        onClick={() => void loadRound(round.roundId)}
-      >
-        查看进展
-      </button>
-    );
-  }
+  if (!layer) return null;
 
   const trunks = layer.trunks.filter(
     (trunk) =>
@@ -327,7 +316,7 @@ function RoundProgress({
           className="w-full rounded-lg px-2 py-1 text-xs text-accent hover:bg-surface"
           onClick={() => void loadOlder(round.roundId)}
         >
-          加载更早进展
+          加载更早过程
         </button>
       ) : null}
       {trunks.map((trunk, index) => (
@@ -336,7 +325,7 @@ function RoundProgress({
           round={round}
           summary={trunk}
           finalSummaryText={finalSummaryText}
-          defaultOpen={round.outcome === "running" && index === trunks.length - 1}
+          active={round.outcome === "running" && index === trunks.length - 1}
         />
       ))}
     </div>
@@ -347,19 +336,18 @@ function TrunkCard({
   round,
   summary,
   finalSummaryText,
-  defaultOpen,
+  active,
 }: {
   round: RoundSummary;
   summary: RoundTrunkSummary;
   finalSummaryText?: string;
-  defaultOpen: boolean;
+  active: boolean;
 }) {
   const detail = useWorkbench(
     (state) => state.timeline.roundTrunks[`${round.roundId}:${summary.index}`],
   );
   const loadTrunk = useWorkbench((state) => state.loadTrunk);
-  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
-  const open = manualOpen ?? defaultOpen;
+  const [open, setOpen] = useState(false);
 
   useEffect(() => {
     if (open && !detail) void loadTrunk(round.roundId, summary.index);
@@ -375,56 +363,68 @@ function TrunkCard({
         type="button"
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
         aria-expanded={open}
-        onClick={() => setManualOpen(!open)}
+        onClick={() => setOpen((value) => !value)}
       >
-        <span className="min-w-0 flex-1 truncate text-sm">进展：{summary.title}</span>
+        <span className="min-w-0 flex-1 truncate text-sm">
+          {active ? "进展" : "过程"}：{normalizeProgressTitle(summary.title)}
+        </span>
         <span className="text-xs text-muted">{summary.blobCount} 项</span>
       </button>
       {open ? (
         <div className="space-y-2 border-t border-line p-2">
           {!detail ? <p className="px-2 py-1 text-xs text-muted">正在加载…</p> : null}
-          {batches?.map((batch, index) => (
-            <BatchCard
-              key={batch.summary.index}
-              batch={batch}
-              defaultOpen={
-                round.outcome === "running" &&
-                index === batches.length - 1
-              }
-            />
-          ))}
+          {batches?.length === 1 ? (
+            <BatchContent batch={batches[0]!} />
+          ) : (
+            batches?.map((batch) => <BatchCard key={batch.summary.index} batch={batch} />)
+          )}
         </div>
       ) : null}
     </div>
   );
 }
 
-function BatchCard({ batch, defaultOpen }: { batch: RoundBatch; defaultOpen: boolean }) {
-  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
-  const open = manualOpen ?? defaultOpen;
+function BatchCard({ batch }: { batch: RoundBatch }) {
+  const [open, setOpen] = useState(false);
   return (
     <div className="overflow-hidden rounded-lg bg-surface" data-testid="round-batch">
       <button
         type="button"
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
         aria-expanded={open}
-        onClick={() => setManualOpen(!open)}
+        onClick={() => setOpen((value) => !value)}
       >
-        <span className="min-w-0 flex-1 truncate text-xs">{batch.summary.text}</span>
-        <span className="text-xs text-muted">{batch.summary.blobCount} 项</span>
+        {open ? (
+          <span className="ml-auto text-xs text-accent">收起</span>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-xs">{batch.summary.text}</span>
+        )}
       </button>
-      {open ? (
-        <div className="space-y-1 border-t border-line px-2 py-2">
-          {batch.monologue ? (
-            <div className="px-1 py-1 text-sm" data-testid="batch-monologue">
-              <Markdown text={batch.monologue} />
-            </div>
-          ) : null}
-          {batch.blobs.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
-        </div>
-      ) : null}
+      {open ? <BatchContent batch={batch} bordered /> : null}
     </div>
   );
+}
+
+function BatchContent({ batch, bordered = false }: { batch: RoundBatch; bordered?: boolean }) {
+  return (
+    <div className={`space-y-1 px-2 py-2 ${bordered ? "border-t border-line" : ""}`}>
+      {batch.monologue ? (
+        <div className="px-1 py-1 text-sm" data-testid="batch-monologue">
+          <Markdown text={batch.monologue} />
+        </div>
+      ) : null}
+      {batch.blobs.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
+    </div>
+  );
+}
+
+function normalizeProgressTitle(title: string): string {
+  const normalized = title
+    .trim()
+    .replace(/^我(?:会|将|要|准备)?(?:先|再|继续|开始)?\s*/, "")
+    .replace(/^接下来(?:我)?(?:会|将|要)?\s*/, "")
+    .replace(/^现在(?:我)?(?:会|将|要)?\s*/, "");
+  return normalized || title.trim();
 }
 
 function isFinalSummaryBatch(
