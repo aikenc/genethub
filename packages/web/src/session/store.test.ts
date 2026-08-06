@@ -2,7 +2,9 @@ import type { AgentInfo, SequencedEvent, SessionSummary } from "@genehub/proto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Client } from "../protocol/client";
+import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { defaultAgent, useWorkbench } from "./store";
+import { emptyTimeline } from "./timeline";
 
 /**
  * The daemon pushes `titleChanged` once, the moment a session picks up a
@@ -56,7 +58,10 @@ beforeEach(() => {
     tabs: [],
     activeTabId: null,
     notice: null,
-    timeline: useWorkbench.getState().timeline,
+    restoreDraft: null,
+    // Fresh, not carried over: a test that leaves a message pending must not
+    // hand it to the next one.
+    timeline: emptyTimeline(),
     sessionTimelines: {},
     subscribedSessionIds: [],
     tabLimit: 16,
@@ -137,6 +142,219 @@ describe("a session's title arriving after the first message", () => {
 
     expect(useWorkbench.getState().sessions.find((s) => s.id === "s2")?.title).toBeUndefined();
     expect(useWorkbench.getState().tabs.find((t) => t.sessionId === "s2")?.title).toBe("新会话");
+  });
+});
+
+/**
+ * The daemon does not echo the user's own message until the agent process is up
+ * and the prompt handed over, which is seconds for a cold third-party CLI. Until
+ * this existed, the text left the composer and the conversation stayed empty for
+ * the whole of that wait — the report was "发送后消息不出现，状态也不对".
+ */
+describe("a message that has been sent and not yet confirmed", () => {
+  function deferred<T>() {
+    let settle!: { resolve(value: T): void; reject(error: unknown): void };
+    const promise = new Promise<T>((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    return { promise, ...settle };
+  }
+
+  /**
+   * Lets `send` reach the daemon. The placeholder is written before the first
+   * await, but `session.send` itself goes out one turn of the microtask queue
+   * later — which is the whole point: the bubble does not wait for it.
+   */
+  const handedOver = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  function sendingClient() {
+    let onEvent: ((event: SequencedEvent) => void) | null = null;
+    const calls: { request: { type: string; payload?: { text?: string } }; settle: ReturnType<typeof deferred<unknown>> }[] = [];
+    const client = {
+      subscribe: async (
+        _sessionId: string,
+        handlers: { onEvent: (event: SequencedEvent) => void },
+      ) => {
+        onEvent = handlers.onEvent;
+        return {
+          snapshot: { seq: 0, items: [], summary: SESSION },
+          replayed: [],
+          reset: false,
+        };
+      },
+      unsubscribe: async () => {},
+      call: (request: { type: string; payload?: { text?: string } }) => {
+        const settle = deferred<unknown>();
+        calls.push({ request, settle });
+        return settle.promise;
+      },
+    } as unknown as Client;
+    return {
+      client,
+      calls,
+      sends: () => calls.filter((call) => call.request.type === "session.send"),
+      fire: (event: SequencedEvent) => onEvent?.(event),
+    };
+  }
+
+  it("is on screen before the daemon has answered, and replaced by the echo", async () => {
+    const { client, sends, fire } = sendingClient();
+    useWorkbench.setState({ client });
+    await useWorkbench.getState().selectSession("s1");
+
+    const inFlight = useWorkbench.getState().send("重构存储层");
+    // Synchronously, before anything has left this machine.
+    expect(useWorkbench.getState().timeline.pending?.text).toBe("重构存储层");
+    expect(useWorkbench.getState().timeline.pending?.error).toBeNull();
+    await handedOver();
+
+    // The real item arrives before the reply, which is the order the daemon
+    // publishes in; the placeholder must go now rather than sit beside it.
+    fire({
+      seq: 1,
+      sessionId: "s1",
+      event: {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "重构存储层", attachments: [] },
+      },
+    } as unknown as SequencedEvent);
+    expect(useWorkbench.getState().timeline.pending).toBeNull();
+    expect(useWorkbench.getState().timeline.items).toHaveLength(1);
+
+    sends()[0]!.settle.resolve({ type: "ok" });
+    await inFlight;
+    expect(useWorkbench.getState().timeline.pending).toBeNull();
+  });
+
+  it("clears on the reply too, so a lost event cannot leave a bubble behind", async () => {
+    const { client, sends } = sendingClient();
+    useWorkbench.setState({ client, activeSessionId: "s1" });
+
+    const inFlight = useWorkbench.getState().send("跑一下测试");
+    expect(useWorkbench.getState().timeline.pending).not.toBeNull();
+    await handedOver();
+    sends()[0]!.settle.resolve({ type: "ok" });
+    await inFlight;
+
+    expect(useWorkbench.getState().timeline.pending).toBeNull();
+  });
+
+  it("refuses a second send instead of earning the daemon's refusal", async () => {
+    const { client, sends } = sendingClient();
+    useWorkbench.setState({ client, activeSessionId: "s1" });
+
+    const first = useWorkbench.getState().send("第一条");
+    await useWorkbench.getState().send("第二条");
+    await handedOver();
+
+    expect(sends()).toHaveLength(1);
+    expect(useWorkbench.getState().timeline.pending?.text).toBe("第一条");
+    sends()[0]!.settle.resolve({ type: "ok" });
+    await first;
+  });
+
+  it("keeps a definitely failed message where it can be retried unchanged", async () => {
+    const { client, sends } = sendingClient();
+    useWorkbench.setState({ client, activeSessionId: "s1" });
+
+    const inFlight = useWorkbench.getState().send("启动 Cursor 试试");
+    await handedOver();
+    sends()[0]!.settle.reject(new Error("cursor-agent is not installed"));
+    await inFlight;
+
+    const failed = useWorkbench.getState().timeline.pending;
+    expect(failed?.text).toBe("启动 Cursor 试试");
+    expect(failed?.error).toBe("cursor-agent is not installed");
+    expect(useWorkbench.getState().notice).toBe("cursor-agent is not installed");
+
+    const retried = useWorkbench.getState().retryPending();
+    await handedOver();
+    expect(sends()).toHaveLength(2);
+    expect(sends()[1]!.request.payload?.text).toBe("启动 Cursor 试试");
+    sends()[1]!.settle.resolve({ type: "ok" });
+    await retried;
+  });
+
+  it("does not call a lost connection a failed send", async () => {
+    const { client, sends } = sendingClient();
+    useWorkbench.setState({ client, activeSessionId: "s1" });
+
+    const inFlight = useWorkbench.getState().send("提交一下");
+    await handedOver();
+    sends()[0]!.settle.reject(new ConnectionOutcomeUnknownError());
+    await inFlight;
+
+    // The prompt may well have been taken. Calling this a failure would put a
+    // second bubble next to the real one as soon as the replay lands.
+    const pending = useWorkbench.getState().timeline.pending;
+    expect(pending?.text).toBe("提交一下");
+    expect(pending?.error).toBeNull();
+  });
+
+  it("lets a new message through while a failed one is still on screen", async () => {
+    const { client, sends } = sendingClient();
+    useWorkbench.setState({ client, activeSessionId: "s1" });
+
+    const failed = useWorkbench.getState().send("第一次");
+    await handedOver();
+    sends()[0]!.settle.reject(new Error("nope"));
+    await failed;
+    expect(useWorkbench.getState().timeline.pending?.error).toBe("nope");
+
+    // Typing something else instead of retrying used to be swallowed by the
+    // in-flight guard, which counted a failure as a message still on its way.
+    const second = useWorkbench.getState().send("第二次");
+    await handedOver();
+    expect(sends()).toHaveLength(2);
+    expect(useWorkbench.getState().timeline.pending?.text).toBe("第二次");
+    expect(useWorkbench.getState().timeline.pending?.error).toBeNull();
+    sends()[1]!.settle.resolve({ type: "ok" });
+    await second;
+  });
+
+  it("returns the text to the composer when there was no conversation to send into", async () => {
+    const client = {
+      call: async () => ({ type: "error" }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    // A draft, not a session: `session.create` is what fails here, so there is
+    // no timeline to hold a failed bubble.
+    useWorkbench.setState({
+      client,
+      activeSessionId: null,
+      draft: { workspaceId: "w1", agentId: "genet", modelId: null, modeId: null, effortId: null },
+    });
+
+    await useWorkbench.getState().send("开个新会话说这句");
+
+    expect(useWorkbench.getState().restoreDraft).toEqual({
+      text: "开个新会话说这句",
+      attachments: [],
+    });
+  });
+
+  it("hands a failed message back to the composer when it is to be edited", async () => {
+    const { client, sends } = sendingClient();
+    useWorkbench.setState({ client, activeSessionId: "s1" });
+
+    const inFlight = useWorkbench
+      .getState()
+      .send("改这里", [{ name: "shot.png", mime: "image/png", dataBase64: "AAA" }]);
+    await handedOver();
+    sends()[0]!.settle.reject(new Error("nope"));
+    await inFlight;
+
+    useWorkbench.getState().editPending();
+
+    expect(useWorkbench.getState().timeline.pending).toBeNull();
+    expect(useWorkbench.getState().restoreDraft).toEqual({
+      text: "改这里",
+      attachments: [{ name: "shot.png", mime: "image/png", dataBase64: "AAA" }],
+    });
+
+    useWorkbench.getState().restoredDraft();
+    expect(useWorkbench.getState().restoreDraft).toBeNull();
   });
 });
 

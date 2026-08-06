@@ -1,4 +1,5 @@
 import type {
+  Attachment,
   BlobPayload,
   PermissionRequest,
   RoundLayer,
@@ -13,6 +14,24 @@ import type {
   Usage,
 } from "@genehub/proto";
 
+/**
+ * A message that has left the composer but that the daemon has not echoed yet.
+ *
+ * The daemon does not publish the user's own message until the agent process is
+ * up and the prompt has been handed over (`SessionManager::start_turn`), which
+ * for a cold third-party CLI is seconds — tens of them for a Cursor that has to
+ * spawn, handshake and open a session. Waiting for that echo to draw the bubble
+ * meant the text left the composer and nothing took its place.
+ */
+export interface PendingMessage {
+  text: string;
+  attachments: Attachment[];
+  /** When it left the composer, so a slow agent start can be named. */
+  sentAtMs: number;
+  /** Set only when the send definitely failed, so the text stays recoverable. */
+  error: string | null;
+}
+
 export interface TimelineState {
   items: TimelineItem[];
   status: SessionStatus;
@@ -20,6 +39,8 @@ export interface TimelineState {
   activeTurn: string | null;
   activeTurnStartedAtMs?: number | null;
   pendingPermission: PermissionRequest | null;
+  /** The message this client has sent and not seen come back, if any. */
+  pending: PendingMessage | null;
   lastError: TurnError | null;
   usage: Usage | null;
   modelId: string | null;
@@ -43,6 +64,7 @@ export function emptyTimeline(): TimelineState {
     activeTurn: null,
     activeTurnStartedAtMs: null,
     pendingPermission: null,
+    pending: null,
     lastError: null,
     usage: null,
     modelId: null,
@@ -56,10 +78,19 @@ export function emptyTimeline(): TimelineState {
   };
 }
 
-export function fromSnapshot(snapshot: SessionSnapshot): TimelineState {
+/**
+ * A snapshot replaces the timeline, but it cannot speak for a message this
+ * client is still holding: `pending` is ours, the daemon has never heard of it,
+ * and dropping it on a resync would take the bubble away again mid-wait.
+ */
+export function fromSnapshot(
+  snapshot: SessionSnapshot,
+  pending: PendingMessage | null = null,
+): TimelineState {
   const pendingPermission = snapshot.pendingPermissions?.[0] ?? null;
   return {
     ...emptyTimeline(),
+    pending,
     items: snapshot.items,
     // Old daemon snapshots may still say `running`; the durable interaction is
     // authoritative because there is deliberately no live turn behind it.
@@ -128,7 +159,16 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
       };
 
     case "item":
-      return { ...state, items: upsert(state.items, event.item) };
+      return {
+        ...state,
+        items: upsert(state.items, event.item),
+        // The echo of our own message is what the placeholder was standing in
+        // for. Keeping both would show the message twice. The daemon runs one
+        // turn per session, so a user message arriving while we are waiting on
+        // ours is ours; the reply to `session.send` clears it too, and whichever
+        // arrives first is enough.
+        pending: event.item.type === "userMessage" ? null : state.pending,
+      };
 
     case "itemDelta":
       return { ...state, items: applyDelta(state.items, event) };

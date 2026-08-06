@@ -13,8 +13,17 @@ import { Markdown } from "./Markdown";
 
 import { attachmentPreviewUrl } from "./attachments";
 import { useWorkbench } from "./store";
-import type { TimelineState } from "./timeline";
+import type { PendingMessage, TimelineState } from "./timeline";
 import { ToolCallView } from "./ToolCall";
+
+/**
+ * How long a send may stay silent before the wait is named.
+ *
+ * Under a warm agent the reply beats this and the spinner in the composer is the
+ * whole story. A cold Cursor does not: it has a process to spawn and a handshake
+ * to finish, and "正在启动 Cursor…" is the difference between a wait and a hang.
+ */
+const SLOW_START_MS = 800;
 
 // Named for the file rather than for the thing it draws, because `timeline.ts`
 // next to it holds the state: two modules whose names differ only in casing are
@@ -52,14 +61,20 @@ export function TimelineView({ state }: { state: TimelineState }) {
     const agent = workbench.agents.find((entry) => entry.id === session?.agentId);
     return agent?.capabilities.fork ?? false;
   });
+  const agentLabel = useWorkbench((workbench) => {
+    const session = workbench.sessions.find((entry) => entry.id === activeSessionId);
+    return workbench.agents.find((entry) => entry.id === session?.agentId)?.label ?? null;
+  });
   const turns = turnBlocks(state.items);
   const contextualTurns = contextualizeTurns(turns, rounds, state.items);
 
   // Stay at the bottom while new content arrives, unless the user scrolled up
-  // to read something — then leave them where they are.
+  // to read something — then leave them where they are. A message of one's own
+  // counts as new content: it is the one thing the sender is certainly watching
+  // for.
   useEffect(() => {
     if (pinned) bottom.current?.scrollIntoView({ block: "end" });
-  }, [state.items, rounds, pinned]);
+  }, [state.items, state.pending, rounds, pinned]);
 
   return (
     <div
@@ -125,6 +140,10 @@ export function TimelineView({ state }: { state: TimelineState }) {
         )
         .map((round) => <RoundProgress key={round.roundId} round={round} />)}
 
+      {state.pending ? (
+        <PendingBubble pending={state.pending} agentLabel={agentLabel} />
+      ) : null}
+
       {state.lastError ? (
         <div
           className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-danger"
@@ -136,6 +155,85 @@ export function TimelineView({ state }: { state: TimelineState }) {
       ) : null}
 
       <div ref={bottom} />
+    </div>
+  );
+}
+
+/**
+ * The user's own message, before the daemon has echoed it back.
+ *
+ * Drawn where the real one will be and dimmed, so it reads as this message
+ * rather than as a different kind of thing that will be replaced by one. When it
+ * fails it stays put: the text is here and nowhere else, and a red line at the
+ * top of the window with an empty composer below it is how a message gets lost.
+ */
+function PendingBubble({
+  pending,
+  agentLabel,
+}: {
+  pending: PendingMessage;
+  agentLabel: string | null;
+}) {
+  const retry = useWorkbench((state) => state.retryPending);
+  const edit = useWorkbench((state) => state.editPending);
+  const [slow, setSlow] = useState(() => Date.now() - pending.sentAtMs >= SLOW_START_MS);
+
+  useEffect(() => {
+    if (pending.error) return;
+    const remaining = SLOW_START_MS - (Date.now() - pending.sentAtMs);
+    if (remaining <= 0) {
+      setSlow(true);
+      return;
+    }
+    setSlow(false);
+    const timer = window.setTimeout(() => setSlow(true), remaining);
+    return () => window.clearTimeout(timer);
+  }, [pending.sentAtMs, pending.error]);
+
+  return (
+    <div className="flex flex-col items-end gap-1.5" data-testid="pending-message">
+      {pending.attachments.length > 0 ? (
+        <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
+          {pending.attachments.map((attachment, index) => {
+            const url = attachmentPreviewUrl(attachment);
+            return url ? (
+              <img
+                key={index}
+                src={url}
+                alt={attachment.name}
+                className="h-28 w-28 rounded-xl border border-line object-cover opacity-70"
+              />
+            ) : null;
+          })}
+        </div>
+      ) : null}
+      {pending.text ? (
+        <p
+          className={`max-w-[80%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-white ${
+            pending.error ? "bg-accent/50" : "bg-accent/70"
+          }`}
+        >
+          {pending.text}
+        </p>
+      ) : null}
+      {pending.error ? (
+        <div
+          className="flex max-w-[80%] flex-wrap items-baseline justify-end gap-x-2 text-xs text-danger"
+          role="alert"
+        >
+          <span className="min-w-0">发送失败：{pending.error}</span>
+          <button type="button" className="text-accent" onClick={() => void retry()}>
+            重试
+          </button>
+          <button type="button" className="text-accent" onClick={edit}>
+            编辑
+          </button>
+        </div>
+      ) : slow ? (
+        <p className="text-xs text-muted" role="status">
+          {agentLabel ? `正在启动 ${agentLabel}…` : "正在启动 Agent…"}
+        </p>
+      ) : null}
     </div>
   );
 }
