@@ -21,13 +21,30 @@ export type BlobKind = "reasoning" | "toolCall";
  */
 export type BlobOverview = { itemId: string, kind: BlobKind, overview: string, blob?: BlobRef, };
 
-export type BlobPayload = { hash: string, value: JsonValue, };
+export type BlobPayload = { id: string, value: JsonValue, };
 
+/**
+ * A complete address for one stored blob: what it is, and where it sits.
+ *
+ * The locator travels with the reference on purpose (`docs/session-storage.md`
+ * §3.3). A content id alone only narrows the search to one bucket file, which
+ * is what made the old reader scan and deserialize a whole bucket per read;
+ * carrying the byte range instead makes the row that holds the reference its
+ * own index, so no separate blob index has to be built, loaded or kept honest.
+ */
 export type BlobRef = { 
 /**
- * Lowercase SHA-256 of the canonical JSON blob payload.
+ * First 24 hex characters of the payload's SHA-256. 96 bits: collision
+ * odds stay negligible at any session size, and every trunk row carries
+ * one, so the 40 characters saved are not decorative.
  */
-hash: string, bytes: number, };
+id: string, bytes: number, 
+/**
+ * `<bucket>:<offset>:<length>`. Opaque to clients — they hand it back
+ * unchanged and the daemon resolves it against this session's own blob
+ * files, verifying the id it finds there before answering.
+ */
+at: string, };
 
 /**
  * What an agent can do, declared up front.
@@ -86,15 +103,10 @@ channel: ChannelAuth | null,
  */
 invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
- * Requests the session/round/blob addressing model instead of a full
- * historical timeline. Defaults off for protocol-v2 clients.
- */
-layered: boolean, 
-/**
  * Prefetches the last round's trunk index and final trunk details in
  * the subscription response.
  */
-expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, hash: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
 /**
  * Claims this message as a continuation of a round left open by an
  * interrupt, rather than a new one. Only interrupts need this: the
@@ -472,15 +484,10 @@ channel: ChannelAuth | null,
  */
 invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
- * Requests the session/round/blob addressing model instead of a full
- * historical timeline. Defaults off for protocol-v2 clients.
- */
-layered: boolean, 
-/**
  * Prefetches the last round's trunk index and final trunk details in
  * the subscription response.
  */
-expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, hash: string, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
 /**
  * Claims this message as a continuation of a round left open by an
  * interrupt, rather than a new one. Only interrupts need this: the
@@ -584,9 +591,9 @@ export type SessionSnapshot = { summary: SessionSummary, items: Array<TimelineIt
  */
 seq: number, pendingPermissions: Array<PermissionRequest>, 
 /**
- * Present for a layered session open. `items` then contains only the
- * session narrative; tool calls and reasoning are addressed through the
- * round layer below instead of being replayed wholesale.
+ * One entry per user request. `items` carries only the session narrative;
+ * tool calls and reasoning are addressed through the round layer instead
+ * of being replayed wholesale (`docs/session-storage.md`).
  */
 rounds?: Array<RoundSummary>, 
 /**

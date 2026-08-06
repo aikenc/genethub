@@ -1236,7 +1236,6 @@ async fn a_commands_output_stays_behind_the_access_layer() {
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: Some(0),
-            layered: true,
             expand_last_round: true,
         })
         .await
@@ -1276,7 +1275,7 @@ async fn a_commands_output_stays_behind_the_access_layer() {
         .client
         .call(Request::BlobGet {
             session_id: session.clone(),
-            hash: blob_ref.hash,
+            blob: blob_ref,
         })
         .await
         .expect("source blob is fetched on demand")
@@ -1318,11 +1317,13 @@ async fn reconnecting_replays_the_gap_without_losing_or_repeating_events() {
         .expect("second connection");
     reconnected.hello("journey-2").await.expect("handshake");
 
+    // Resuming from a real position, the way a client that saw the first
+    // event and then dropped does. `sinceSeq: 0` is the "I have nothing"
+    // signal a fresh open sends, and is answered with a snapshot instead.
     let (snapshot, replayed, reset) = match reconnected
         .call(Request::Subscribe {
             session_id: session.clone(),
-            since_seq: Some(0),
-            layered: false,
+            since_seq: Some(1),
             expand_last_round: false,
         })
         .await
@@ -1379,7 +1380,6 @@ async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
         .call(Request::Subscribe {
             session_id: session,
             since_seq: Some(0),
-            layered: false,
             expand_last_round: false,
         })
         .await
@@ -1467,7 +1467,6 @@ async fn history_survives_a_daemon_restart_and_the_conversation_continues() {
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
-            layered: false,
             expand_last_round: false,
         })
         .await
@@ -1563,7 +1562,6 @@ async fn a_session_found_in_the_list_can_be_reopened_and_continued() {
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
-            layered: false,
             expand_last_round: false,
         })
         .await
@@ -1763,7 +1761,7 @@ async fn a_completed_round_is_recorded_in_the_round_ledger_on_disk() {
     let session = journey.session("genet").await.expect("session opens");
     assert!(
         journey.round_records(&session).is_empty(),
-        "nothing has settled yet"
+        "no request has been made yet"
     );
 
     journey.send(&session, "hello").await.expect("accepted");
@@ -1783,20 +1781,19 @@ async fn a_completed_round_is_recorded_in_the_round_ledger_on_disk() {
         .expect("an array of turn ids")
         .is_empty());
     assert!(
-        !rounds[0]["itemIds"]
-            .as_array()
-            .expect("an array of item ids")
-            .is_empty(),
-        "the round must reference at least the user's message"
+        rounds[0]["userItemId"].is_string(),
+        "the round must name the message that opened it"
+    );
+    assert_eq!(
+        rounds[0]["trunkCount"],
+        json!(1),
+        "the record counts trunks; the summaries themselves live in the round's own index"
     );
 
     // §3.2 direction three / §8 step 3: settling a round must close whatever
     // trunk was still open, so a short round that never crossed a boundary
-    // still reports the one trunk it produced — not zero, and not the
-    // schema-migration default an old ledger line would show.
-    let trunks = rounds[0]["trunkSummaries"]
-        .as_array()
-        .expect("trunkSummaries is always an array, even for a single-trunk round");
+    // still reports the one trunk it produced.
+    let trunks = journey.trunk_summaries(&session, 0);
     assert_eq!(
         trunks.len(),
         1,
@@ -1857,9 +1854,16 @@ async fn an_interrupted_round_left_dangling_is_ledgered_as_superseded_once_a_new
         .expect("interrupt accepted");
     let first = journey.client.drain_turn().await.expect("the turn settles");
     assert!(first.canceled(), "saw {:?}", first.last());
-    assert!(
-        journey.round_records(&session).is_empty(),
-        "a merely interrupted round is left dangling, not ledgered yet"
+    let dangling = journey.round_records(&session);
+    assert_eq!(
+        dangling.len(),
+        1,
+        "the round is on disk from the moment it opens"
+    );
+    assert_eq!(
+        dangling[0]["outcome"],
+        json!(null),
+        "a merely interrupted round is left dangling, with no outcome yet"
     );
 
     if journey.mode.is_mock() {
@@ -1919,7 +1923,6 @@ async fn a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns() 
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
-            layered: false,
             expand_last_round: false,
         })
         .await
@@ -1949,7 +1952,6 @@ async fn a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns() 
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: Some(seen_up_to),
-            layered: false,
             expand_last_round: false,
         })
         .await
@@ -2001,7 +2003,6 @@ async fn a_second_client_sees_the_same_session_as_the_first() {
         .call(Request::Subscribe {
             session_id: session.clone(),
             since_seq: None,
-            layered: false,
             expand_last_round: false,
         })
         .await

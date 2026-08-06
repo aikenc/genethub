@@ -89,27 +89,71 @@ impl Journey {
         self.data_dir.join("logs")
     }
 
-    /// The round ledger for a session, read straight off disk as JSON values
-    /// rather than through the wire protocol — there is no query API for it
-    /// yet (`docs/agent-analysis-substrate-proposal.md` §8 steps 7-9), so
-    /// this is how a journey checks `session.rounds.jsonl` landed correctly.
-    /// An empty vector both when the file is missing and when it is empty,
-    /// since a journey asserting "nothing ledgered yet" should not have to
-    /// care which.
-    pub fn round_records(&self, session_id: &str) -> Vec<serde_json::Value> {
-        let path = self
-            .data_dir
+    /// A session's own directory (`docs/session-storage.md` §3).
+    pub fn session_dir(&self, session_id: &str) -> PathBuf {
+        self.data_dir
             .join("sessions")
             .join(&self.workspace.id)
-            .join(format!("{session_id}.rounds.jsonl"));
+            .join(session_id)
+    }
+
+    /// The round rows of a session's chat layer, read straight off disk as
+    /// JSON rather than through the wire protocol — there is no query API for
+    /// them yet (`docs/agent-analysis-substrate-proposal.md` §8 steps 7-9).
+    ///
+    /// Folded the way a reader folds them: a round is written once when it
+    /// opens and again when it settles, and the last write wins. An empty
+    /// vector both when the file is missing and when it is empty, since a
+    /// journey asserting "nothing recorded yet" should not have to care which.
+    pub fn round_records(&self, session_id: &str) -> Vec<serde_json::Value> {
+        let Ok(contents) = std::fs::read_to_string(self.session_dir(session_id).join("chat.jsonl"))
+        else {
+            return Vec::new();
+        };
+        let mut rounds: Vec<serde_json::Value> = Vec::new();
+        for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+            let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if row["t"] != serde_json::json!("round") {
+                continue;
+            }
+            let round = row["round"].clone();
+            match rounds
+                .iter_mut()
+                .find(|existing| existing["roundId"] == round["roundId"])
+            {
+                Some(existing) => *existing = round,
+                None => rounds.push(round),
+            }
+        }
+        rounds
+    }
+
+    /// One round's trunk summaries, from that round's own index file.
+    pub fn trunk_summaries(&self, session_id: &str, ord: u32) -> Vec<serde_json::Value> {
+        let path = self
+            .session_dir(session_id)
+            .join("rounds")
+            .join(format!("r-{ord:03}"))
+            .join("index.jsonl");
         let Ok(contents) = std::fs::read_to_string(path) else {
             return Vec::new();
         };
-        contents
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect()
+        let mut summaries: Vec<serde_json::Value> = Vec::new();
+        for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+            let Ok(summary) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            match summaries
+                .iter_mut()
+                .find(|existing| existing["index"] == summary["index"])
+            {
+                Some(existing) => *existing = summary,
+                None => summaries.push(summary),
+            }
+        }
+        summaries
     }
 }
 
@@ -258,7 +302,6 @@ impl Journey {
                     .call(Request::Subscribe {
                         session_id: summary.id.clone(),
                         since_seq: None,
-                        layered: false,
                         expand_last_round: false,
                     })
                     .await?;

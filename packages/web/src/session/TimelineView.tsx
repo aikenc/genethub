@@ -441,7 +441,7 @@ function isFinalSummaryBatch(
 
 function BlobRow({ blob }: { blob: BlobOverview }) {
   const payload = useWorkbench((state) =>
-    blob.blob ? state.timeline.blobs[blob.blob.hash] : undefined,
+    blob.blob ? state.timeline.blobs[blob.blob.id] : undefined,
   );
   const loadBlob = useWorkbench((state) => state.loadBlob);
   const [open, setOpen] = useState(false);
@@ -455,7 +455,7 @@ function BlobRow({ blob }: { blob: BlobOverview }) {
         onClick={() => {
           const next = !open;
           setOpen(next);
-          if (next && blob.blob && !payload) void loadBlob(blob.blob.hash);
+          if (next && blob.blob && !payload) void loadBlob(blob.blob);
         }}
       >
         <span className="text-muted">{blob.kind === "reasoning" ? "思考" : "工具"}</span>

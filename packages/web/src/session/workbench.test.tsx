@@ -135,13 +135,13 @@ describe("what the user sees in a session", () => {
                 itemId: "think1",
                 kind: "reasoning",
                 overview: "确认结构",
-                blob: { hash: "ab".repeat(32), bytes: 48 },
+                blob: { id: "ab".repeat(12), bytes: 48, at: "ab:0:48" },
               },
               {
                 itemId: "tool1",
                 kind: "toolCall",
                 overview: "读取配置",
-                blob: { hash: "cd".repeat(32), bytes: 96 },
+                blob: { id: "cd".repeat(12), bytes: 96, at: "cd:0:96" },
               },
             ],
           },
@@ -200,9 +200,9 @@ describe("what the user sees in a session", () => {
       title: "检查网络边界。",
       batches: [batch],
     };
-    const reasoningHash = "aa".repeat(32);
-    const toolHash = "bb".repeat(32);
-    const editHash = "cc".repeat(32);
+    const reasoningBlob = { id: "aa".repeat(12), bytes: 64, at: "aa:0:64" };
+    const toolBlob = { id: "bb".repeat(12), bytes: 128, at: "bb:0:128" };
+    const editBlob = { id: "cc".repeat(12), bytes: 128, at: "cc:0:128" };
     const expandedTrunk: RoundTrunk = {
       summary,
       batches: [
@@ -214,66 +214,68 @@ describe("what the user sees in a session", () => {
               itemId: "think1",
               kind: "reasoning",
               overview: "分析入口",
-              blob: { hash: reasoningHash, bytes: 64 },
+              blob: reasoningBlob,
             },
             {
               itemId: "tool1",
               kind: "toolCall",
               overview: "执行测试",
-              blob: { hash: toolHash, bytes: 128 },
+              blob: toolBlob,
             },
             {
               itemId: "edit1",
               kind: "toolCall",
               overview: "修改入口",
-              blob: { hash: editHash, bytes: 128 },
+              blob: editBlob,
             },
           ],
         },
       ],
     };
-    useWorkbench.setState({
-      rounds: [round],
-      roundLayers: {
-        r1: { round, trunks: [summary], expandedTrunk },
-      },
-      roundTrunks: { "r1:0": expandedTrunk },
-      blobs: {
-        [reasoningHash]: {
-          hash: reasoningHash,
-          value: { type: "reasoning", id: "think1", text: "逐项确认入口与信任边界。" },
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "检查项目", attachments: [] },
+      }),
+      {
+        rounds: [round],
+        roundLayers: {
+          r1: { round, trunks: [summary], expandedTrunk },
         },
-        [toolHash]: {
-          hash: toolHash,
-          value: {
-            type: "toolCall",
-            id: "tool1",
-            name: "shell",
-            status: "ok",
-            detail: { kind: "shell", command: "npm test", output: "all passed", exitCode: 0 },
+        roundTrunks: { "r1:0": expandedTrunk },
+        blobs: {
+          [reasoningBlob.id]: {
+            id: reasoningBlob.id,
+            value: { type: "reasoning", id: "think1", text: "逐项确认入口与信任边界。" },
           },
-        },
-        [editHash]: {
-          hash: editHash,
-          value: {
-            type: "toolCall",
-            id: "edit1",
-            name: "edit",
-            status: "ok",
-            detail: {
-              kind: "edit",
-              path: "src/main.ts",
-              diff: "@@ -1 +1 @@\n-old\n+new",
+          [toolBlob.id]: {
+            id: toolBlob.id,
+            value: {
+              type: "toolCall",
+              id: "tool1",
+              name: "shell",
+              status: "ok",
+              detail: { kind: "shell", command: "npm test", output: "all passed", exitCode: 0 },
+            },
+          },
+          [editBlob.id]: {
+            id: editBlob.id,
+            value: {
+              type: "toolCall",
+              id: "edit1",
+              name: "edit",
+              status: "ok",
+              detail: {
+                kind: "edit",
+                path: "src/main.ts",
+                diff: "@@ -1 +1 @@\n-old\n+new",
+              },
             },
           },
         },
       },
-    });
-    const state = apply(emptyTimeline(), {
-      type: "item",
-      turnId: "t1",
-      item: { type: "userMessage", id: "u1", text: "检查项目", attachments: [] },
-    });
+    );
 
     render(<TimelineView state={state} />);
     await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
@@ -325,16 +327,18 @@ describe("what the user sees in a session", () => {
       title: "我会继续核对权限。",
       batches: [],
     };
-    useWorkbench.setState({
-      rounds: [round],
-      roundLayers: { r1: { round, trunks: [first, second] } },
-      roundTrunks: {},
-    });
-    const state = apply(emptyTimeline(), {
-      type: "item",
-      turnId: "t1",
-      item: { type: "userMessage", id: "u1", text: "审计", attachments: [] },
-    });
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "审计", attachments: [] },
+      }),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [first, second] } },
+        roundTrunks: {},
+      },
+    );
 
     render(<TimelineView state={state} />);
 
@@ -373,24 +377,26 @@ describe("what the user sees in a session", () => {
       title: "我会先核对入口与权限。",
       batches: [first, second],
     };
-    useWorkbench.setState({
-      rounds: [round],
-      roundLayers: { r1: { round, trunks: [summary] } },
-      roundTrunks: {
-        "r1:0": {
-          summary,
-          batches: [
-            { summary: first, monologue: "完整独白：核对入口与权限。", blobs: [] },
-            { summary: second, monologue: "完整独白：核对部署边界。", blobs: [] },
-          ],
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "审计", attachments: [] },
+      }),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [summary] } },
+        roundTrunks: {
+          "r1:0": {
+            summary,
+            batches: [
+              { summary: first, monologue: "完整独白：核对入口与权限。", blobs: [] },
+              { summary: second, monologue: "完整独白：核对部署边界。", blobs: [] },
+            ],
+          },
         },
       },
-    });
-    const state = apply(emptyTimeline(), {
-      type: "item",
-      turnId: "t1",
-      item: { type: "userMessage", id: "u1", text: "审计", attachments: [] },
-    });
+    );
 
     render(<TimelineView state={state} />);
     await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));

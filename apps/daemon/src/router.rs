@@ -250,11 +250,10 @@ pub async fn handle(
         Request::Subscribe {
             session_id,
             since_seq,
-            layered,
             expand_last_round,
         } => match state
             .sessions
-            .subscribe(&session_id, since_seq, layered, expand_last_round)
+            .subscribe(&session_id, since_seq, expand_last_round)
             .await
         {
             Ok((snapshot, replayed, reset, receiver)) => Handled {
@@ -364,8 +363,8 @@ pub async fn handle(
             Err(error) => failed(error),
         },
 
-        Request::BlobGet { session_id, hash } => {
-            match state.sessions.blob(&session_id, &hash).await {
+        Request::BlobGet { session_id, blob } => {
+            match state.sessions.blob(&session_id, &blob).await {
                 Ok(blob) => Handled::ok(Reply::Blob(blob)),
                 Err(error) => failed(error),
             }

@@ -64,10 +64,6 @@ pub enum Request {
         #[serde(default)]
         #[ts(type = "number")]
         since_seq: Option<u64>,
-        /// Requests the session/round/blob addressing model instead of a full
-        /// historical timeline. Defaults off for protocol-v2 clients.
-        #[serde(default)]
-        layered: bool,
         /// Prefetches the last round's trunk index and final trunk details in
         /// the subscription response.
         #[serde(default)]
@@ -120,8 +116,11 @@ pub enum Request {
         round_id: String,
         trunk_index: u32,
     },
+    /// Fetches one blob's full payload. The client hands back the whole
+    /// `BlobRef` it was given rather than just an id, because the locator is
+    /// what makes this a seek instead of a scan (`docs/session-storage.md`).
     #[serde(rename = "blob.get", rename_all = "camelCase")]
-    BlobGet { session_id: String, hash: String },
+    BlobGet { session_id: String, blob: BlobRef },
     #[serde(rename = "session.send", rename_all = "camelCase")]
     SessionSend {
         session_id: String,

@@ -11,16 +11,16 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    Attachment, BlobKind, BlobOverview, BlobPayload, Catalog, ItemDelta, PermissionOptionKind,
-    PermissionOutcome, PermissionRequest, PermissionRequestKind, RoundBatch, RoundLayer,
-    RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionEvent, SessionSnapshot,
-    SessionStatus, SessionSummary, TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
+    Attachment, BlobPayload, BlobRef, Catalog, ItemDelta, PermissionOptionKind, PermissionOutcome,
+    PermissionRequest, PermissionRequestKind, RoundLayer, RoundLayerOutcome, RoundSummary,
+    RoundTrunk, SequencedEvent, SessionEvent, SessionSnapshot, SessionStatus, SessionSummary,
+    TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
-use super::store::{now_ms, title_from, SessionMeta, Store};
+use super::store::{self, now_ms, title_from, SessionMeta, Store};
 use crate::adapter::registry::Registry;
 use crate::adapter::{AgentSession, PromptInput, ProviderMap, SessionConfig};
 
@@ -28,11 +28,27 @@ const BROADCAST_CAPACITY: usize = 1024;
 
 /// One live session.
 struct Live {
+    /// Where this session's own directory is. Held here so the trunk writer
+    /// can run from inside the event pump, which is the only place that knows
+    /// when a trunk closed.
+    store: Store,
     meta: Mutex<SessionMeta>,
     status: Mutex<SessionStatus>,
-    /// Ordered timeline. Small enough that a linear id lookup is cheaper than
-    /// maintaining a second index.
+    /// The session narrative, plus the work items of the trunk currently being
+    /// built. Bounded on both counts: narrative grows with what was said, and
+    /// a trunk never exceeds `TRUNK_MAX_BLOBS`. Work items are dropped as soon
+    /// as their trunk is written, which is what keeps a round that runs for a
+    /// day from keeping a day of tool output resident
+    /// (`docs/session-storage.md` §4).
     items: Mutex<Vec<TimelineItem>>,
+    /// Every round of this session, folded, as read from `chat.jsonl` and
+    /// extended as rounds settle. One small record each, never the round's
+    /// contents.
+    rounds: Mutex<Vec<RoundRecord>>,
+    /// Where each work item of the open trunk landed in the blob layer. Filled
+    /// by the blob writer, consumed when the trunk is written, then dropped
+    /// with the trunk's items.
+    blob_refs: Mutex<HashMap<String, BlobRef>>,
     seq: AtomicU64,
     replay: Mutex<VecDeque<SequencedEvent>>,
     events: broadcast::Sender<SequencedEvent>,
@@ -40,12 +56,10 @@ struct Live {
     pending_permissions: Mutex<Vec<PermissionRequest>>,
     /// Item ids settled during the current turn, flushed to disk when it ends.
     turn_items: Mutex<Vec<String>>,
-    /// Item ids accumulated across the *whole* round, spanning however many
-    /// adapter turns get folded into it. Unlike `turn_items`, this is not
-    /// cleared by `flush_turn` — only by the round settling — because a
-    /// round-ledger entry has to reference everything the round produced,
-    /// not just the last adapter turn that happened to end it.
-    round_items: Mutex<Vec<String>>,
+    /// Work item ids belonging to the trunk currently open, in order. Cleared
+    /// when that trunk is written out, so this never grows past a trunk's cap
+    /// however many adapter turns the round spans.
+    open_trunk_items: Mutex<Vec<String>>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Daemon-owned round bookkeeping — one user request, possibly several
     /// adapter turns (`docs/agent-analysis-substrate-proposal.md` §3.2).
@@ -70,6 +84,10 @@ struct Live {
 #[derive(Debug, Clone)]
 struct ActiveRound {
     round_id: String,
+    /// Position in the session, and the round's directory name on disk.
+    ord: u32,
+    /// The user message that opened this round.
+    user_item_id: Option<String>,
     /// One entry per adapter turn folded into this round, in the order they
     /// started. Never empty once the round exists.
     adapter_turn_ids: Vec<String>,
@@ -97,14 +115,18 @@ struct ActiveRound {
     closed_trunks: Vec<TrunkSummary>,
 }
 
+/// One round resolved far enough to answer session-layer questions, without
+/// having touched that round's storage. `trunks` is filled only for the round
+/// a caller actually asked to expand.
 #[derive(Debug, Clone)]
 struct RoundView {
     round_id: String,
+    ord: u32,
+    user_item_id: Option<String>,
     started_at_ms: i64,
     ended_at_ms: i64,
     outcome: RoundLayerOutcome,
-    item_ids: Vec<String>,
-    trunks: Vec<TrunkSummary>,
+    trunk_count: u32,
 }
 
 impl ActiveRound {
@@ -125,22 +147,10 @@ impl ActiveRound {
     }
 
     /// Closes whatever trunk is still being built, if any, so a round that
-    /// settles mid-trunk still reports it — unresolved, same as
-    /// `record_trunk_item`. Idempotent: closing an already-empty builder
-    /// returns `None`.
+    /// settles mid-trunk still reports it. Idempotent: closing an
+    /// already-empty builder returns `None`.
     fn close_current_trunk_pending(&mut self) -> Option<rounds::ClosedTrunk> {
         self.current_trunk.close()
-    }
-
-    /// Resolves a closed trunk into its final `TrunkSummary` — assigning it
-    /// the next index — and appends it to this round's trunk list.
-    fn push_resolved_trunk(
-        &mut self,
-        closed: rounds::ClosedTrunk,
-        texts: &HashMap<String, String>,
-    ) {
-        let index = self.closed_trunks.len() as u32;
-        self.closed_trunks.push(closed.into_summary(index, texts));
     }
 }
 
@@ -191,10 +201,10 @@ impl SessionManager {
         };
         self.store.save_meta(&meta)?;
         let summary = meta.summary(SessionStatus::Idle);
-        self.sessions
-            .write()
-            .await
-            .insert(meta.id.clone(), Arc::new(Live::new(meta)));
+        self.sessions.write().await.insert(
+            meta.id.clone(),
+            Arc::new(Live::new(meta, self.store.clone())),
+        );
         Ok(summary)
     }
 
@@ -272,10 +282,12 @@ impl SessionManager {
             pending_permission: None,
         };
         self.store.save_meta(&meta)?;
+        // The fork inherits the conversation, not the source's round layer:
+        // its rounds happened in another session and stay addressable there.
         self.store
-            .append_items(&meta.workspace_id, &meta.id, &items)?;
+            .append_chat_items(&meta.workspace_id, &meta.id, &items)?;
         let summary = meta.summary(SessionStatus::Idle);
-        let forked = Arc::new(Live::new(meta));
+        let forked = Arc::new(Live::new(meta, self.store.clone()));
         *forked.items.lock().await = items;
         self.sessions
             .write()
@@ -296,34 +308,20 @@ impl SessionManager {
             .into_iter()
             .find(|meta| meta.id == session_id)
             .ok_or_else(|| anyhow!("no such session: {session_id}"))?;
-        // Old session logs may predate the overview-only boundary. Never let
-        // their historical tool payloads or reasoning leak back to a client.
-        let loaded = self.store.load_items(&meta.workspace_id, &meta.id)?;
+        // A session written before the relayout is rewritten into the current
+        // shape here, once. It stays openable if this fails — the old files
+        // are still there and the next open tries again — so a warning is the
+        // right response, not a refusal to open the conversation.
         if let Err(error) = self
             .store
-            .ensure_blobs_migrated(&meta.workspace_id, &meta.id, &loaded)
+            .migrate_session_layout(&meta.workspace_id, &meta.id)
         {
-            tracing::warn!("could not migrate blob references for {}: {error}", meta.id);
+            tracing::warn!("could not migrate the layout of {}: {error}", meta.id);
         }
-        let items: Vec<TimelineItem> = loaded.iter().map(overview::condense_item).collect();
-        if items != loaded {
-            self.store
-                .replace_items(&meta.workspace_id, &meta.id, &items)?;
-        }
-        // One-time backfill for a session that predates the round ledger
-        // (§8 step 2). A no-op as soon as `<session>.rounds.jsonl` exists,
-        // so this never re-runs once it has — see `ensure_rounds_migrated`.
-        if let Err(error) = self
-            .store
-            .ensure_rounds_migrated(&meta.workspace_id, &meta.id, &items)
-        {
-            tracing::warn!(
-                "could not migrate the round ledger for {}: {error}",
-                meta.id
-            );
-        }
-        let live = Arc::new(Live::new(meta));
-        *live.items.lock().await = items;
+        let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
+        let live = Arc::new(Live::new(meta, self.store.clone()));
+        *live.items.lock().await = chat.items;
+        *live.rounds.lock().await = chat.rounds;
         self.sessions
             .write()
             .await
@@ -373,199 +371,163 @@ impl SessionManager {
     async fn snapshot_for_open(
         &self,
         session_id: &str,
-        layered: bool,
         expand_last_round: bool,
     ) -> Result<SessionSnapshot> {
         let live = self.live(session_id).await?;
         let mut snapshot = live.snapshot().await?;
-        if !layered {
-            return Ok(snapshot);
-        }
-        let items = snapshot.items.clone();
-        let views = self.round_views(&live, &items).await?;
-        snapshot.items.retain(|item| {
-            !matches!(
-                item,
-                TimelineItem::Reasoning { .. } | TimelineItem::ToolCall { .. }
-            )
-        });
-        snapshot.rounds = Some(
-            views
-                .iter()
-                .map(|view| round_summary(view, &items))
-                .collect(),
-        );
+        // The open trunk's work items live alongside the narrative in memory
+        // so the round layer can serve them without a read; they are addressed
+        // through that layer, never replayed here.
+        snapshot.items.retain(|item| !store::is_work_item(item));
+        let views = self.round_views(&live).await;
+        snapshot.rounds = Some(views.iter().map(round_summary).collect());
         if expand_last_round {
             if let Some(last) = views.last() {
-                snapshot.expanded_round = Some(
-                    self.build_round_layer(&live, last, &items, None, 20, true)
-                        .await?,
-                );
+                snapshot.expanded_round =
+                    Some(self.build_round_layer(&live, last, None, 20, true).await?);
             }
         }
         Ok(snapshot)
     }
 
-    async fn round_views(
-        &self,
-        live: &Arc<Live>,
-        items: &[TimelineItem],
-    ) -> Result<Vec<RoundView>> {
-        let meta = live.meta.lock().await.clone();
-        let mut views: Vec<RoundView> = self
-            .store
-            .load_rounds(&meta.workspace_id, &meta.id)?
-            .into_iter()
+    /// Every round of the session, folded, straight from what `chat.jsonl`
+    /// already put in memory. Touches no round directory: a session with four
+    /// rounds and a session with four hundred cost the same here.
+    async fn round_views(&self, live: &Arc<Live>) -> Vec<RoundView> {
+        let active = live.active_round.lock().await.clone();
+        let open = active
+            .as_ref()
+            .filter(|round| round.outcome.is_none())
+            .map(|round| round.round_id.clone());
+        let mut views: Vec<RoundView> = live
+            .rounds
+            .lock()
+            .await
+            .iter()
             .map(|record| RoundView {
-                round_id: record.round_id,
+                round_id: record.round_id.clone(),
+                ord: record.ord,
+                user_item_id: record.user_item_id.clone(),
                 started_at_ms: record.started_at_ms,
                 ended_at_ms: record.ended_at_ms,
                 outcome: match record.outcome {
-                    RoundOutcome::Completed => RoundLayerOutcome::Completed,
-                    RoundOutcome::Failed => RoundLayerOutcome::Failed,
-                    RoundOutcome::Canceled => RoundLayerOutcome::Canceled,
-                    RoundOutcome::Superseded => RoundLayerOutcome::Superseded,
+                    Some(RoundOutcome::Completed) => RoundLayerOutcome::Completed,
+                    Some(RoundOutcome::Canceled) => RoundLayerOutcome::Canceled,
+                    Some(RoundOutcome::Superseded) => RoundLayerOutcome::Superseded,
+                    Some(RoundOutcome::Failed) => RoundLayerOutcome::Failed,
+                    // Open on disk, and nobody is running it: the daemon went
+                    // away mid-request. Saying "running" would promise output
+                    // that is never coming.
+                    None if open.as_deref() == Some(record.round_id.as_str()) => {
+                        RoundLayerOutcome::Running
+                    }
+                    None => RoundLayerOutcome::Failed,
                 },
-                item_ids: record.item_ids,
-                trunks: record.trunk_summaries,
+                trunk_count: record.trunk_count,
             })
             .collect();
-        if let Some(active) = live.active_round.lock().await.clone() {
-            if active.outcome.is_none() {
-                let item_ids = live.round_items.lock().await.clone();
-                let by_id: HashMap<&str, &TimelineItem> =
-                    items.iter().map(|item| (item.id(), item)).collect();
-                let round_items: Vec<TimelineItem> = item_ids
-                    .iter()
-                    .filter_map(|id| by_id.get(id.as_str()).map(|item| (*item).clone()))
-                    .collect();
-                views.push(RoundView {
-                    round_id: active.round_id,
-                    started_at_ms: active.started_at_ms,
+        if let Some(round) = active.filter(|round| round.outcome.is_none()) {
+            let open_trunks = round.closed_trunks.len() as u32
+                + u32::from(!live.open_trunk_items.lock().await.is_empty());
+            match views
+                .iter_mut()
+                .find(|view| view.round_id == round.round_id)
+            {
+                Some(view) => {
+                    view.outcome = RoundLayerOutcome::Running;
+                    view.trunk_count = open_trunks;
+                }
+                None => views.push(RoundView {
+                    round_id: round.round_id.clone(),
+                    ord: round.ord,
+                    user_item_id: round.user_item_id.clone(),
+                    started_at_ms: round.started_at_ms,
                     ended_at_ms: 0,
                     outcome: RoundLayerOutcome::Running,
-                    item_ids,
-                    trunks: rounds::summarize_trunks(&round_items),
-                });
+                    trunk_count: open_trunks,
+                }),
             }
         }
-        Ok(views)
+        views.sort_by_key(|view| view.ord);
+        views
+    }
+
+    /// The trunk index for one round: closed trunks from its own index file,
+    /// plus the trunk still being built, which only memory knows about.
+    async fn trunk_index(&self, live: &Arc<Live>, view: &RoundView) -> Result<Vec<TrunkSummary>> {
+        let meta = live.meta.lock().await.clone();
+        let mut summaries = self
+            .store
+            .load_trunk_index(&meta.workspace_id, &meta.id, view.ord)?;
+        if let Some(open) = self.open_trunk(live, view).await {
+            match summaries
+                .iter_mut()
+                .find(|summary| summary.index == open.summary.index)
+            {
+                Some(existing) => *existing = open.summary,
+                None => summaries.push(open.summary),
+            }
+        }
+        Ok(summaries)
+    }
+
+    /// The trunk currently being built for this round, if this round is the
+    /// open one and it has anything in it yet.
+    async fn open_trunk(&self, live: &Arc<Live>, view: &RoundView) -> Option<RoundTrunk> {
+        let index = {
+            let active = live.active_round.lock().await;
+            let round = active.as_ref()?;
+            if round.outcome.is_some() || round.round_id != view.round_id {
+                return None;
+            }
+            round.closed_trunks.len() as u32
+        };
+        live.build_open_trunk(index).await
     }
 
     async fn build_round_layer(
         &self,
         live: &Arc<Live>,
         view: &RoundView,
-        items: &[TimelineItem],
         cursor: Option<&str>,
         limit: u32,
         expand_last_trunk: bool,
     ) -> Result<RoundLayer> {
-        let end = parse_trunk_cursor(cursor, view.trunks.len())?;
+        let index = self.trunk_index(live, view).await?;
+        let end = parse_trunk_cursor(cursor, index.len())?;
         let limit = limit.clamp(1, 100) as usize;
         let start = end.saturating_sub(limit);
-        let trunks = view.trunks[start..end].to_vec();
-        let expanded_trunk = if expand_last_trunk {
-            if let Some(summary) = trunks.last() {
-                Some(
-                    self.build_round_trunk(live, view, items, summary.index)
-                        .await?,
-                )
-            } else {
-                None
-            }
-        } else {
-            None
+        let trunks = index[start..end].to_vec();
+        let expanded_trunk = match expand_last_trunk.then(|| trunks.last()).flatten() {
+            Some(summary) => Some(self.build_round_trunk(live, view, summary).await?),
+            None => None,
         };
+        let mut round = round_summary(view);
+        round.trunk_count = index.len() as u32;
         Ok(RoundLayer {
-            round: round_summary(view, items),
+            round,
             trunks,
             next_cursor: (start > 0).then(|| format!("before:{start}")),
             expanded_trunk,
         })
     }
 
+    /// One trunk's contents: a single small file, or memory when it is the
+    /// trunk still being written.
     async fn build_round_trunk(
         &self,
         live: &Arc<Live>,
         view: &RoundView,
-        items: &[TimelineItem],
-        trunk_index: u32,
+        summary: &TrunkSummary,
     ) -> Result<RoundTrunk> {
-        let summary = view
-            .trunks
-            .get(trunk_index as usize)
-            .cloned()
-            .ok_or_else(|| anyhow!("no such trunk: {trunk_index}"))?;
-        let meta = live.meta.lock().await.clone();
-        let refs = self.store.load_blob_refs(&meta.workspace_id, &meta.id)?;
-        let positions: HashMap<&str, usize> = view
-            .item_ids
-            .iter()
-            .enumerate()
-            .map(|(index, id)| (id.as_str(), index))
-            .collect();
-        let by_id: HashMap<&str, &TimelineItem> =
-            items.iter().map(|item| (item.id(), item)).collect();
-        let trunk_start = *positions
-            .get(summary.first_item_id.as_str())
-            .ok_or_else(|| anyhow!("trunk start item is missing"))?;
-        let trunk_end = view
-            .trunks
-            .get(trunk_index as usize + 1)
-            .and_then(|next| positions.get(next.first_item_id.as_str()).copied())
-            .unwrap_or(view.item_ids.len());
-        let mut batches = Vec::new();
-        for (batch_position, batch_summary) in summary.batches.iter().enumerate() {
-            let batch_start = *positions
-                .get(batch_summary.first_item_id.as_str())
-                .ok_or_else(|| anyhow!("batch start item is missing"))?;
-            let batch_end = summary
-                .batches
-                .get(batch_position + 1)
-                .and_then(|next| positions.get(next.first_item_id.as_str()).copied())
-                .unwrap_or(trunk_end);
-            let monologue = view.item_ids[batch_start.max(trunk_start)..batch_end]
-                .iter()
-                .filter_map(|id| by_id.get(id.as_str()))
-                .find_map(|item| match item {
-                    TimelineItem::AssistantMessage { text, .. } if !text.is_empty() => {
-                        Some(text.clone())
-                    }
-                    _ => None,
-                });
-            let mut blobs = Vec::new();
-            for id in &view.item_ids[batch_start.max(trunk_start)..batch_end] {
-                let Some(item) = by_id.get(id.as_str()) else {
-                    continue;
-                };
-                let (kind, overview) = match item {
-                    TimelineItem::Reasoning { text, .. } => (BlobKind::Reasoning, text.clone()),
-                    TimelineItem::ToolCall { name, detail, .. } => {
-                        let overview = match detail {
-                            genehub_proto::ToolCallDetail::Overview { overview, .. } => {
-                                overview.clone()
-                            }
-                            _ => name.clone(),
-                        };
-                        (BlobKind::ToolCall, overview)
-                    }
-                    _ => continue,
-                };
-                blobs.push(BlobOverview {
-                    item_id: id.clone(),
-                    kind,
-                    overview,
-                    blob: refs.get(id).map(|(_, blob)| blob.clone()),
-                });
+        if let Some(open) = self.open_trunk(live, view).await {
+            if open.summary.index == summary.index {
+                return Ok(open);
             }
-            batches.push(RoundBatch {
-                summary: batch_summary.clone(),
-                monologue,
-                blobs,
-            });
         }
-        Ok(RoundTrunk { summary, batches })
+        let meta = live.meta.lock().await.clone();
+        self.store
+            .load_trunk(&meta.workspace_id, &meta.id, view.ord, summary)
     }
 
     pub async fn round_layer(
@@ -576,15 +538,14 @@ impl SessionManager {
         limit: Option<u32>,
     ) -> Result<RoundLayer> {
         let live = self.live(session_id).await?;
-        let items = live.items.lock().await.clone();
-        let views = self.round_views(&live, &items).await?;
+        let views = self.round_views(&live).await;
         let view = if round_id == "latest" {
             views.last()
         } else {
             views.iter().find(|view| view.round_id == round_id)
         }
         .ok_or_else(|| anyhow!("no such round: {round_id}"))?;
-        self.build_round_layer(&live, view, &items, cursor, limit.unwrap_or(20), false)
+        self.build_round_layer(&live, view, cursor, limit.unwrap_or(20), false)
             .await
     }
 
@@ -595,22 +556,26 @@ impl SessionManager {
         trunk_index: u32,
     ) -> Result<RoundTrunk> {
         let live = self.live(session_id).await?;
-        let items = live.items.lock().await.clone();
-        let views = self.round_views(&live, &items).await?;
+        let views = self.round_views(&live).await;
         let view = views
             .iter()
             .find(|view| view.round_id == round_id)
             .ok_or_else(|| anyhow!("no such round: {round_id}"))?;
-        self.build_round_trunk(&live, view, &items, trunk_index)
-            .await
+        let summary = self
+            .trunk_index(&live, view)
+            .await?
+            .into_iter()
+            .find(|summary| summary.index == trunk_index)
+            .ok_or_else(|| anyhow!("no such trunk: {trunk_index}"))?;
+        self.build_round_trunk(&live, view, &summary).await
     }
 
-    pub async fn blob(&self, session_id: &str, hash: &str) -> Result<BlobPayload> {
+    pub async fn blob(&self, session_id: &str, blob: &BlobRef) -> Result<BlobPayload> {
         let live = self.live(session_id).await?;
         let meta = live.meta.lock().await;
         self.store
-            .get_blob(&meta.workspace_id, &meta.id, hash)?
-            .ok_or_else(|| anyhow!("no such blob: {hash}"))
+            .get_blob(&meta.workspace_id, &meta.id, blob)?
+            .ok_or_else(|| anyhow!("no such blob: {}", blob.id))
     }
 
     /// Snapshot plus whatever the client missed, in one answer.
@@ -622,7 +587,6 @@ impl SessionManager {
         &self,
         session_id: &str,
         since_seq: Option<u64>,
-        layered: bool,
         expand_last_round: bool,
     ) -> Result<(
         SessionSnapshot,
@@ -637,10 +601,10 @@ impl SessionManager {
         let replay = live.replay.lock().await;
 
         let (events, reset) = match since_seq {
-            Some(0) if layered => {
-                // The layered snapshot already contains the current session
-                // narrative and last round tail. Replaying the historical
-                // tool/reasoning stream here would defeat its byte budget.
+            Some(0) => {
+                // The snapshot already carries the session narrative and the
+                // last round's tail. Replaying the historical tool and
+                // reasoning stream here would defeat its byte budget.
                 (Vec::new(), true)
             }
             None => (Vec::new(), true),
@@ -667,7 +631,7 @@ impl SessionManager {
         drop(replay);
 
         let snapshot = self
-            .snapshot_for_open(session_id, layered, expand_last_round)
+            .snapshot_for_open(session_id, expand_last_round)
             .await?;
         Ok((snapshot, events, reset, receiver))
     }
@@ -745,7 +709,7 @@ impl SessionManager {
             (meta.workspace_id.clone(), meta.title.is_none())
         };
         self.store
-            .append_items(&workspace_id, session_id, std::slice::from_ref(&item))?;
+            .append_chat_items(&workspace_id, session_id, std::slice::from_ref(&item))?;
 
         if needs_title {
             if let Some(title) = title_from(&text) {
@@ -774,7 +738,7 @@ impl SessionManager {
         // Only recorded once the handover actually succeeded: a failed send
         // must not leave a round with zero adapter turns behind (`send`
         // resets status to Idle on this same error, as if it never happened).
-        if let Some((superseded, item_ids)) = live
+        if let Some(superseded) = live
             .begin_round(continues_round.as_deref(), &turn_id, item.id())
             .await
         {
@@ -784,7 +748,7 @@ impl SessionManager {
                 superseded.adapter_turn_ids.len(),
                 superseded.blocked_ms
             );
-            persist_round(live, &self.store, superseded, item_ids).await;
+            persist_round(live, superseded).await;
         }
 
         // The user message belongs to the turn it started.
@@ -1075,8 +1039,8 @@ impl SessionManager {
         } else {
             // Denied or canceled: no more agent work is coming for this
             // request, so the round it belonged to is done, not dangling.
-            if let Some((round, item_ids)) = live.settle_round(RoundOutcome::Canceled).await {
-                persist_round(&live, &self.store, round, item_ids).await;
+            if let Some(round) = live.settle_round(RoundOutcome::Canceled).await {
+                persist_round(&live, round).await;
             }
         }
 
@@ -1198,19 +1162,14 @@ impl SessionManager {
     }
 }
 
-fn round_summary(view: &RoundView, items: &[TimelineItem]) -> RoundSummary {
-    let wanted: HashSet<&str> = view.item_ids.iter().map(String::as_str).collect();
-    let user_item_id = items.iter().find_map(|item| match item {
-        TimelineItem::UserMessage { id, .. } if wanted.contains(id.as_str()) => Some(id.clone()),
-        _ => None,
-    });
+fn round_summary(view: &RoundView) -> RoundSummary {
     RoundSummary {
         round_id: view.round_id.clone(),
-        user_item_id,
+        user_item_id: view.user_item_id.clone(),
         started_at_ms: view.started_at_ms,
         ended_at_ms: view.ended_at_ms,
         outcome: view.outcome,
-        trunk_count: view.trunks.len() as u32,
+        trunk_count: view.trunk_count,
     }
 }
 
@@ -1227,10 +1186,11 @@ fn parse_trunk_cursor(cursor: Option<&str>, len: usize) -> Result<usize> {
 }
 
 impl Live {
-    fn new(meta: SessionMeta) -> Self {
+    fn new(meta: SessionMeta, store: Store) -> Self {
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let pending = meta.pending_permission.clone();
         Live {
+            store,
             meta: Mutex::new(meta),
             status: Mutex::new(if pending.is_some() {
                 SessionStatus::Waiting
@@ -1238,13 +1198,15 @@ impl Live {
                 SessionStatus::Idle
             }),
             items: Mutex::new(Vec::new()),
+            rounds: Mutex::new(Vec::new()),
+            blob_refs: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
             replay: Mutex::new(VecDeque::new()),
             events,
             agent: Mutex::new(None),
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             turn_items: Mutex::new(Vec::new()),
-            round_items: Mutex::new(Vec::new()),
+            open_trunk_items: Mutex::new(Vec::new()),
             pump: Mutex::new(None),
             active_round: Mutex::new(None),
         }
@@ -1297,32 +1259,18 @@ impl Live {
     /// request", and its absence — or a mismatch — means cut a new round
     /// rather than guess a stitch that cannot be undone later (§3.2).
     ///
-    /// Adds a user-message id to the open round's ledger-bound set, if not
-    /// already present. Used only by `begin_round`, for the message that
-    /// starts every `session.send` — it is written directly to disk before
-    /// the agent runs and so never passes through `apply`. A user message
-    /// never participates in trunk boundaries (§3.2 direction three), so
-    /// this never touches trunk bookkeeping.
-    async fn record_round_item_id(&self, item_id: &str) {
-        let mut round_items = self.round_items.lock().await;
-        if !round_items.iter().any(|id| id == item_id) {
-            round_items.push(item_id.to_string());
-        }
-    }
-
-    /// Adds an item to the open round's ledger-bound set and feeds it into
-    /// the round's trunk pagination (`ActiveRound::record_trunk_item`, §3.2
-    /// direction three). Idempotent: an item id already recorded for this
-    /// round is not counted twice, even if the adapter re-sends a full
-    /// `Item` event for it — this is also what keeps trunk boundaries from
-    /// double-counting a re-sent item.
+    /// Adds an item to the open trunk and feeds it into the round's trunk
+    /// pagination (`ActiveRound::record_trunk_item`, §3.2 direction three).
+    /// Idempotent: an item id already recorded is not counted twice, even if
+    /// the adapter re-sends a full `Item` event for it — this is also what
+    /// keeps trunk boundaries from double-counting a re-sent item.
     async fn record_round_item(&self, item: &TimelineItem) {
         {
-            let mut round_items = self.round_items.lock().await;
-            if round_items.iter().any(|id| id == item.id()) {
+            let mut open = self.open_trunk_items.lock().await;
+            if open.iter().any(|id| id == item.id()) {
                 return;
             }
-            round_items.push(item.id().to_string());
+            open.push(item.id().to_string());
         }
         let closed = {
             let mut active = self.active_round.lock().await;
@@ -1331,82 +1279,147 @@ impl Live {
                 _ => None,
             }
         };
-        if let Some(closed) = closed {
-            self.finish_trunk(closed).await;
+        if closed.is_some() {
+            self.finish_trunk().await;
         }
     }
 
-    async fn resolve_trunk_texts(&self, closed: &rounds::ClosedTrunk) -> HashMap<String, String> {
-        let mut wanted = HashSet::new();
-        if let Some(id) = &closed.first_monologue_item_id {
-            wanted.insert(id.as_str());
+    /// The trunk being built right now, assembled from the items still in
+    /// memory. `None` when nothing has been recorded into it yet.
+    async fn build_open_trunk(&self, index: u32) -> Option<RoundTrunk> {
+        let ids = self.open_trunk_items.lock().await.clone();
+        if ids.is_empty() {
+            return None;
         }
-        for batch in &closed.batches {
-            if let Some(id) = &batch.monologue_item_id {
-                wanted.insert(id.as_str());
+        let items = {
+            let items = self.items.lock().await;
+            let by_id: HashMap<&str, &TimelineItem> =
+                items.iter().map(|item| (item.id(), item)).collect();
+            ids.iter()
+                .filter_map(|id| by_id.get(id.as_str()).map(|item| (*item).clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut trunk = rounds::trunks_from_items(&items).into_iter().next()?;
+        trunk.summary.index = index;
+        let refs = self.blob_refs.lock().await;
+        for batch in &mut trunk.batches {
+            for blob in &mut batch.blobs {
+                blob.blob = refs.get(&blob.item_id).cloned();
             }
-            if let Some(id) = &batch.first_reasoning_item_id {
-                wanted.insert(id.as_str());
-            }
         }
-        let items = self.items.lock().await;
-        items
-            .iter()
-            .filter_map(|candidate| match candidate {
-                TimelineItem::AssistantMessage { id, text }
-                | TimelineItem::Reasoning { id, text }
-                    if wanted.contains(id.as_str()) =>
-                {
-                    Some((id.clone(), text.clone()))
-                }
-                _ => None,
-            })
-            .collect()
+        Some(trunk)
     }
 
-    /// Resolves a just-closed trunk's overview and appends it to the round's
-    /// trunk list — split from `record_round_item` so the `items` lock
-    /// (needed to resolve the overview) and the `active_round` lock (needed
-    /// to append it) are never held at the same time.
-    async fn finish_trunk(&self, closed: rounds::ClosedTrunk) {
-        let texts = self.resolve_trunk_texts(&closed).await;
-        let mut active = self.active_round.lock().await;
-        if let Some(round) = active.as_mut() {
-            round.push_resolved_trunk(closed, &texts);
+    /// Writes the trunk that just closed and lets go of it.
+    ///
+    /// This is where a long round stops costing memory: once a trunk is on
+    /// disk it is addressable by path, so its work items and their blob
+    /// references are dropped. What stays behind is one summary line per
+    /// closed trunk, which is what the round layer pages over.
+    async fn finish_trunk(&self) {
+        let (ord, index) = {
+            let active = self.active_round.lock().await;
+            let Some(round) = active.as_ref() else { return };
+            (round.ord, round.closed_trunks.len() as u32)
+        };
+        let Some(trunk) = self.build_open_trunk(index).await else {
+            return;
+        };
+        let meta = self.meta.lock().await.clone();
+        if let Err(error) = self
+            .store
+            .write_trunk(&meta.workspace_id, &meta.id, ord, &trunk)
+        {
+            // Keeping the items in memory would not save them — the next
+            // trunk close would drop them anyway — and refusing to advance
+            // would wedge the round. The trunk is lost; the round is not.
+            tracing::error!("could not write trunk {index} of {}: {error}", meta.id);
+        }
+        if let Some(round) = self.active_round.lock().await.as_mut() {
+            round.closed_trunks.push(trunk.summary);
+        }
+        let ids: Vec<String> = std::mem::take(&mut *self.open_trunk_items.lock().await);
+        let mut refs = self.blob_refs.lock().await;
+        for id in &ids {
+            refs.remove(id);
+        }
+        drop(refs);
+        self.items
+            .lock()
+            .await
+            .retain(|item| !(store::is_work_item(item) && ids.iter().any(|id| id == item.id())));
+    }
+
+    /// Rewrites the open trunk so a crash cannot cost more than the turn in
+    /// progress — the same durability boundary the flat log had.
+    async fn persist_open_trunk(&self) {
+        let (ord, index) = {
+            let active = self.active_round.lock().await;
+            let Some(round) = active.as_ref() else { return };
+            (round.ord, round.closed_trunks.len() as u32)
+        };
+        let Some(trunk) = self.build_open_trunk(index).await else {
+            return;
+        };
+        let meta = self.meta.lock().await.clone();
+        if let Err(error) = self
+            .store
+            .write_trunk(&meta.workspace_id, &meta.id, ord, &trunk)
+        {
+            tracing::warn!("could not persist the open trunk of {}: {error}", meta.id);
         }
     }
 
-    /// Returns the round that was cut short together with the item ids it
-    /// had accumulated, if any — `None` both when the round continues and
-    /// when there was nothing open to cut short (an already-settled round is
-    /// just replaced, not "superseded": nothing was taken from it). The
-    /// caller persists this pair to the round ledger (`session/rounds.rs`).
+    /// Returns the round that was cut short, if any — `None` both when the
+    /// round continues and when there was nothing open to cut short (an
+    /// already-settled round is just replaced, not "superseded": nothing was
+    /// taken from it). The caller records the returned round's final state.
     async fn begin_round(
         &self,
         continues_round: Option<&str>,
         turn_id: &str,
         user_item_id: &str,
-    ) -> Option<(ActiveRound, Vec<String>)> {
-        let mut active = self.active_round.lock().await;
-        if let Some(current) = active.as_mut() {
-            if current.outcome.is_none() && continues_round == Some(current.round_id.as_str()) {
-                if !current.adapter_turn_ids.iter().any(|id| id == turn_id) {
-                    current.adapter_turn_ids.push(turn_id.to_string());
+    ) -> Option<ActiveRound> {
+        {
+            let mut active = self.active_round.lock().await;
+            if let Some(current) = active.as_mut() {
+                if current.outcome.is_none() && continues_round == Some(current.round_id.as_str()) {
+                    if !current.adapter_turn_ids.iter().any(|id| id == turn_id) {
+                        current.adapter_turn_ids.push(turn_id.to_string());
+                    }
+                    return None;
                 }
-                drop(active);
-                self.record_round_item_id(user_item_id).await;
-                return None;
             }
         }
-        let mut superseded = match active.take() {
-            Some(mut dangling) if dangling.outcome.is_none() => {
-                dangling.outcome = Some(RoundOutcome::Superseded);
-                Some(dangling)
+        // The dangling round's last trunk is written while that round is still
+        // the active one, so it lands in its own directory rather than in the
+        // one about to be created.
+        let has_open_trunk = {
+            let mut active = self.active_round.lock().await;
+            match active.as_mut() {
+                Some(round) if round.outcome.is_none() => {
+                    round.outcome = Some(RoundOutcome::Superseded);
+                    round.close_current_trunk_pending().is_some()
+                }
+                _ => false,
             }
-            _ => None,
         };
-        *active = Some(ActiveRound {
+        if has_open_trunk {
+            self.finish_trunk().await;
+        }
+        self.open_trunk_items.lock().await.clear();
+        self.blob_refs.lock().await.clear();
+
+        let superseded = self
+            .active_round
+            .lock()
+            .await
+            .take()
+            .filter(|round| round.outcome == Some(RoundOutcome::Superseded));
+        let round = ActiveRound {
             round_id: format!("r_{}", uuid::Uuid::new_v4().simple()),
+            ord: self.rounds.lock().await.len() as u32,
+            user_item_id: Some(user_item_id.to_string()),
             adapter_turn_ids: vec![turn_id.to_string()],
             started_at_ms: now_ms(),
             blocked_since_ms: None,
@@ -1414,20 +1427,51 @@ impl Live {
             outcome: None,
             current_trunk: TrunkBuilder::default(),
             closed_trunks: Vec::new(),
-        });
-        drop(active);
-        // `dangling` is already detached from the shared state above, so
-        // resolving and appending its last trunk needs no `active_round`
-        // lock at all — only the `items` lock inside `resolve_monologue_text`.
-        if let Some(dangling) = superseded.as_mut() {
-            if let Some(closed) = dangling.close_current_trunk_pending() {
-                let texts = self.resolve_trunk_texts(&closed).await;
-                dangling.push_resolved_trunk(closed, &texts);
+        };
+        // Recorded before the agent runs, so a daemon that dies mid-request
+        // still leaves proof the request happened.
+        self.record_round(&round).await;
+        *self.active_round.lock().await = Some(round);
+        superseded
+    }
+
+    /// Writes a round's current state to `chat.jsonl` and to the in-memory
+    /// list the session layer answers from. Last write per round wins in both.
+    async fn record_round(&self, round: &ActiveRound) {
+        let record = RoundRecord {
+            schema_version: rounds::SCHEMA_VERSION,
+            round_id: round.round_id.clone(),
+            ord: round.ord,
+            user_item_id: round.user_item_id.clone(),
+            started_at_ms: round.started_at_ms,
+            ended_at_ms: if round.outcome.is_some() { now_ms() } else { 0 },
+            outcome: round.outcome,
+            adapter_turn_ids: round.adapter_turn_ids.clone(),
+            blocked_ms: round.blocked_ms,
+            synthesized: false,
+            trunk_count: round.closed_trunks.len() as u32,
+        };
+        {
+            let mut rounds = self.rounds.lock().await;
+            match rounds
+                .iter_mut()
+                .find(|existing| existing.round_id == record.round_id)
+            {
+                Some(existing) => *existing = record.clone(),
+                None => rounds.push(record.clone()),
             }
         }
-        let superseded_items = std::mem::take(&mut *self.round_items.lock().await);
-        self.record_round_item_id(user_item_id).await;
-        superseded.map(|round| (round, superseded_items))
+        let meta = self.meta.lock().await.clone();
+        if let Err(error) = self
+            .store
+            .append_round(&meta.workspace_id, &meta.id, &record)
+        {
+            tracing::error!(
+                "could not record round {} of {}: {error}",
+                record.ord,
+                meta.id
+            );
+        }
     }
 
     /// Folds a daemon-initiated continuation (approval granted, guidance
@@ -1465,8 +1509,8 @@ impl Live {
     /// (`session/rounds.rs`). `None` when there was nothing open to settle —
     /// this is also how a caller like the channel-closed fallback tells
     /// "there was a dangling round to clean up" from "there was nothing to do".
-    async fn settle_round(&self, outcome: RoundOutcome) -> Option<(ActiveRound, Vec<String>)> {
-        let pending_trunk = {
+    async fn settle_round(&self, outcome: RoundOutcome) -> Option<ActiveRound> {
+        let has_open_trunk = {
             let mut active = self.active_round.lock().await;
             let round = active.as_mut()?;
             if round.outcome.is_some() {
@@ -1476,14 +1520,14 @@ impl Live {
                 round.blocked_ms += (now_ms() - since).max(0);
             }
             round.outcome = Some(outcome);
-            round.close_current_trunk_pending()
+            round.close_current_trunk_pending().is_some()
         };
-        if let Some(closed) = pending_trunk {
-            self.finish_trunk(closed).await;
+        if has_open_trunk {
+            self.finish_trunk().await;
         }
-        let settled = self.active_round.lock().await.clone()?;
-        let item_ids = std::mem::take(&mut *self.round_items.lock().await);
-        Some((settled, item_ids))
+        self.open_trunk_items.lock().await.clear();
+        self.blob_refs.lock().await.clear();
+        self.active_round.lock().await.clone()
     }
 
     async fn shutdown(&self) {
@@ -1578,7 +1622,6 @@ async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &P
 enum BlobWrite {
     Put {
         item_id: String,
-        kind: BlobKind,
         value: serde_json::Value,
     },
     Flush(oneshot::Sender<()>),
@@ -1594,11 +1637,7 @@ fn flush_reasoning_blobs(
             text,
         });
         if let Ok(value) = value {
-            let _ = sender.send(BlobWrite::Put {
-                item_id: id,
-                kind: BlobKind::Reasoning,
-                value,
-            });
+            let _ = sender.send(BlobWrite::Put { item_id: id, value });
         }
     }
 }
@@ -1610,7 +1649,6 @@ fn preserve_tool_blob(sender: &mpsc::UnboundedSender<BlobWrite>, item: &Timeline
     if let Ok(value) = serde_json::to_value(item) {
         let _ = sender.send(BlobWrite::Put {
             item_id: id.clone(),
-            kind: BlobKind::ToolCall,
             value,
         });
     }
@@ -1644,22 +1682,29 @@ async fn pump_events(
     let blob_store = store.clone();
     let blob_workspace_id = workspace_id.clone();
     let blob_session_id = session_id.clone();
+    let blob_live = live.clone();
+    // Blocking, because it is doing file IO, and single-tasked, because that
+    // is what lets the dedup table be a plain map rather than shared state.
+    // The references it produces go back onto `Live` for the trunk writer to
+    // pick up; a `Flush` is awaited before any turn ends, so a work row is
+    // never written before its payload's address is known.
     let blob_writer = tokio::task::spawn_blocking(move || {
+        let mut seen = store::BlobDedup::new();
         while let Some(write) = blob_receiver.blocking_recv() {
             match write {
-                BlobWrite::Put {
-                    item_id,
-                    kind,
-                    value,
-                } => {
-                    if let Err(error) = blob_store.put_blob(
+                BlobWrite::Put { item_id, value } => {
+                    match blob_store.put_blob(
                         &blob_workspace_id,
                         &blob_session_id,
-                        &item_id,
-                        kind,
                         value,
+                        &mut seen,
                     ) {
-                        tracing::warn!("could not preserve blob {item_id}: {error}");
+                        Ok(blob) => {
+                            blob_live.blob_refs.blocking_lock().insert(item_id, blob);
+                        }
+                        Err(error) => {
+                            tracing::warn!("could not preserve blob {item_id}: {error}")
+                        }
                     }
                 }
                 BlobWrite::Flush(done) => {
@@ -1888,13 +1933,13 @@ async fn pump_events(
         // next `send` decides whether to continue or supersede it (§3.2).
         match &event {
             SessionEvent::TurnCompleted { .. } => {
-                if let Some((round, item_ids)) = live.settle_round(RoundOutcome::Completed).await {
-                    persist_round(&live, &store, round, item_ids).await;
+                if let Some(round) = live.settle_round(RoundOutcome::Completed).await {
+                    persist_round(&live, round).await;
                 }
             }
             SessionEvent::TurnFailed { .. } => {
-                if let Some((round, item_ids)) = live.settle_round(RoundOutcome::Failed).await {
-                    persist_round(&live, &store, round, item_ids).await;
+                if let Some(round) = live.settle_round(RoundOutcome::Failed).await {
+                    persist_round(&live, round).await;
                 }
             }
             _ => {}
@@ -2093,10 +2138,10 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
 /// shutdown`) aborts the pump task outright rather than letting `recv` see
 /// `Closed`, and a round that already settled has nothing left to clean up.
 async fn finalize_after_channel_closed(live: &Arc<Live>, store: &Store) {
-    let Some((round, item_ids)) = live.settle_round(RoundOutcome::Failed).await else {
+    let Some(round) = live.settle_round(RoundOutcome::Failed).await else {
         return;
     };
-    persist_round(live, store, round, item_ids).await;
+    persist_round(live, round).await;
     // Whatever this turn had produced so far would otherwise never reach
     // disk: `flush_turn` only ever ran from inside this same loop, on a
     // terminal event that, this time, never arrived.
@@ -2109,42 +2154,23 @@ async fn finalize_after_channel_closed(live: &Arc<Live>, store: &Store) {
     };
 }
 
-/// Appends a settled round to `<session>/session.rounds.jsonl`
-/// (`session/rounds.rs`, §8 step 2).
+/// Records a round's final state on `chat.jsonl`.
 ///
-/// Failure is logged, not propagated: a missing ledger entry degrades a
-/// later cross-session query to "this round is invisible to it", not data
-/// loss — the round's own items already reached `session.jsonl` via
-/// `flush_turn`, this is only the referencing record.
-async fn persist_round(live: &Arc<Live>, store: &Store, round: ActiveRound, item_ids: Vec<String>) {
-    let Some(outcome) = round.outcome else {
+/// Failure is logged, not propagated: a missing record degrades a later
+/// cross-session query to "this round is invisible to it", not data loss —
+/// the round's narrative and trunks already reached disk.
+async fn persist_round(live: &Arc<Live>, round: ActiveRound) {
+    if round.outcome.is_none() {
         // Should not happen: every caller only reaches here after setting an
         // outcome. Guarded anyway rather than unwrapped, because a ledger
         // write is not worth a panic over.
         return;
-    };
-    let (workspace_id, session_id) = {
-        let meta = live.meta.lock().await;
-        (meta.workspace_id.clone(), meta.id.clone())
-    };
-    let record = RoundRecord {
-        schema_version: rounds::SCHEMA_VERSION,
-        round_id: round.round_id,
-        started_at_ms: round.started_at_ms,
-        ended_at_ms: now_ms(),
-        outcome,
-        adapter_turn_ids: round.adapter_turn_ids,
-        item_ids,
-        blocked_ms: round.blocked_ms,
-        synthesized: false,
-        trunk_summaries: round.closed_trunks,
-    };
-    if let Err(error) = store.append_round(&workspace_id, &session_id, &record) {
-        tracing::error!("could not persist a round ledger entry for {session_id}: {error}");
     }
+    live.record_round(&round).await;
 }
 
-/// Writes the items this turn produced, once, when the turn ends.
+/// Writes what this turn produced, once, when the turn ends: narrative to the
+/// chat layer, work to the open trunk.
 async fn flush_turn(live: &Arc<Live>, store: &Store) {
     let ids: Vec<String> = std::mem::take(&mut *live.turn_items.lock().await);
     if ids.is_empty() {
@@ -2164,7 +2190,8 @@ async fn flush_turn(live: &Arc<Live>, store: &Store) {
         let meta = live.meta.lock().await;
         (meta.workspace_id.clone(), meta.id.clone())
     };
-    if let Err(error) = store.append_items(&workspace_id, &session_id, &settled) {
+    live.persist_open_trunk().await;
+    if let Err(error) = store.append_chat_items(&workspace_id, &session_id, &settled) {
         tracing::error!("could not persist the timeline for {session_id}: {error}");
     }
     let mut meta = live.meta.lock().await;
@@ -2233,6 +2260,14 @@ mod tests {
         )
     }
 
+    /// A `Live` with its own throwaway store. The directory handle comes back
+    /// with it so the caller keeps it alive for the length of the test.
+    fn live_session(meta: SessionMeta) -> (Arc<Live>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let live = Arc::new(Live::new(meta, Store::new(dir.path())));
+        (live, dir)
+    }
+
     #[tokio::test]
     async fn a_renamed_session_keeps_the_name_on_disk() {
         let dir = tempfile::tempdir().unwrap();
@@ -2297,7 +2332,7 @@ mod tests {
         sessions.store.save_meta(&meta()).unwrap();
         sessions
             .store
-            .append_items("w1", "s1", &[item("a", "hi")])
+            .append_chat_items("w1", "s1", &[item("a", "hi")])
             .unwrap();
         let scratch = sessions.store.scratch_dir("w1", "s1");
         std::fs::create_dir_all(&scratch).unwrap();
@@ -2305,7 +2340,12 @@ mod tests {
         sessions.delete("s1").await.unwrap();
 
         assert!(sessions.store.list_meta().unwrap().is_empty());
-        assert!(sessions.store.load_items("w1", "s1").unwrap().is_empty());
+        assert!(sessions
+            .store
+            .load_chat("w1", "s1")
+            .unwrap()
+            .items
+            .is_empty());
         assert!(
             !scratch.exists(),
             "the agent's own copy of the conversation outlived the delete"
@@ -2328,7 +2368,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_item_is_upserted_rather_than_duplicated() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         apply(
             &live,
             &SessionEvent::Item {
@@ -2353,7 +2393,7 @@ mod tests {
 
     #[tokio::test]
     async fn text_deltas_accumulate_onto_the_open_item() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         apply(
             &live,
             &SessionEvent::Item {
@@ -2380,7 +2420,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_delta_for_an_unknown_item_is_dropped_not_invented() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         apply(
             &live,
             &SessionEvent::ItemDelta {
@@ -2395,7 +2435,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_status_deltas_update_status_and_detail_in_place() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         apply(
             &live,
             &SessionEvent::Item {
@@ -2437,7 +2477,7 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_numbers_are_dense_and_start_at_one() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         for index in 1..=3 {
             let event = live
                 .publish(SessionEvent::TurnStarted {
@@ -2451,7 +2491,7 @@ mod tests {
 
     #[tokio::test]
     async fn pending_permissions_appear_in_the_snapshot_and_clear_on_answer() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         let request = PermissionRequest {
             id: "p1".into(),
             kind: PermissionRequestKind::Permission,
@@ -2489,7 +2529,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_new_interaction_replaces_a_stale_one() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         for id in ["p1", "p2"] {
             apply(
                 &live,
@@ -2599,7 +2639,7 @@ mod tests {
     async fn an_interaction_is_persisted_before_the_agent_process_is_closed() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (events, _) = broadcast::channel(1);
@@ -2665,7 +2705,8 @@ mod tests {
     async fn a_persisted_interaction_rehydrates_as_waiting_without_an_agent() {
         let mut stored = meta();
         stored.pending_permission = Some(interaction(PermissionRequestKind::Permission));
-        let live = Live::new(stored);
+        let (live, _store_dir) = live_session(stored);
+        let live = &*live;
         let snapshot = live.snapshot().await.unwrap();
         assert_eq!(snapshot.summary.status, SessionStatus::Waiting);
         assert_eq!(snapshot.pending_permissions.len(), 1);
@@ -2674,7 +2715,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_turn_stays_visible_as_failed_but_remains_retryable() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         apply(
             &live,
             &SessionEvent::TurnFailed {
@@ -2693,7 +2734,7 @@ mod tests {
     async fn only_settled_non_prompt_items_are_written_at_the_end_of_a_turn() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
 
         for event in [
             SessionEvent::Item {
@@ -2713,14 +2754,14 @@ mod tests {
         }
         flush_turn(&live, &store).await;
 
-        let written = store.load_items("w1", "s1").unwrap();
+        let written = store.load_chat("w1", "s1").unwrap().items;
         assert_eq!(written.len(), 1, "the prompt was persisted on arrival");
         assert_eq!(written[0].id(), "a");
     }
 
     #[tokio::test]
     async fn the_replay_buffer_is_bounded() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         for _ in 0..10 {
             live.publish(SessionEvent::TurnStarted {
                 turn_id: "t".into(),
@@ -2742,7 +2783,7 @@ mod tests {
 
     #[tokio::test]
     async fn usage_rides_along_on_turn_completion() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         let event = live
             .publish(SessionEvent::TurnCompleted {
                 turn_id: "t".into(),
@@ -2773,7 +2814,10 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
-        let live = Arc::new(Live::new(meta()));
+        let live = Arc::new(Live::new(meta(), store.clone()));
+        // Work only reaches disk through a round's trunk files, and in
+        // production `session.send` always opens one before the agent runs.
+        live.begin_round(None, "t", "u0").await;
         let (agent_events, _) = broadcast::channel(64);
         let mut seen = live.events.subscribe();
         let pump = tokio::spawn(pump_events(
@@ -2797,8 +2841,21 @@ mod tests {
         // The flush rides on the settle event, which was just observed — but
         // only observed on its way out, so give the pump its turn.
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let on_disk = store.load_items("w1", "s1").unwrap();
+        let on_disk = store.load_chat("w1", "s1").unwrap().items;
         (wire, on_disk, pump, agent_events, store, dir)
+    }
+
+    /// Every work row of a round, in order, as stored. The round layer is the
+    /// only way to work back to a tool call or a thinking block now: the
+    /// narrative log does not carry them.
+    fn stored_blobs(store: &Store, ord: u32) -> Vec<genehub_proto::BlobOverview> {
+        store
+            .load_trunk_index("w1", "s1", ord)
+            .unwrap()
+            .iter()
+            .flat_map(|summary| store.load_trunk("w1", "s1", ord, summary).unwrap().batches)
+            .flat_map(|batch| batch.blobs)
+            .collect()
     }
 
     /// A thinking block streams one delta per token; what reaches the wire is
@@ -2834,7 +2891,7 @@ mod tests {
             fork_checkpoint: None,
         });
 
-        let (wire, on_disk, pump, agent_events, _store, _dir) = pumped(script).await;
+        let (wire, on_disk, pump, agent_events, store, _dir) = pumped(script).await;
         drop(agent_events);
         pump.await.unwrap();
 
@@ -2873,16 +2930,19 @@ mod tests {
                 );
             }
         }
-        let persisted = on_disk
-            .iter()
-            .find(|item| item.id() == "r")
-            .expect("the thinking block is in the log");
-        match persisted {
-            TimelineItem::Reasoning { text, .. } => {
-                assert_eq!(text.chars().count(), overview::REASONING_CHARS);
-            }
-            other => panic!("unexpected {other:?}"),
-        }
+        assert!(
+            on_disk.iter().all(|item| item.id() != "r"),
+            "thinking belongs to the round layer, not to the session narrative"
+        );
+        let persisted = stored_blobs(&store, 0)
+            .into_iter()
+            .find(|blob| blob.item_id == "r")
+            .expect("the thinking block is stored as a work row");
+        assert_eq!(persisted.kind, genehub_proto::BlobKind::Reasoning);
+        assert_eq!(
+            persisted.overview.chars().count(),
+            overview::REASONING_CHARS
+        );
     }
 
     /// A shell command's output is the heaviest ordinary payload there is.
@@ -2966,14 +3026,15 @@ mod tests {
         assert_eq!(stats.fork_checkpoint.as_deref(), Some("agent-turn-7"));
         let size = serde_json::to_string(&on_disk).unwrap().len();
         assert!(size < 1_000, "the log kept the payload ({size} bytes)");
-        let blob_ref = store
-            .load_blob_refs("w1", "s1")
-            .unwrap()
-            .remove("c")
-            .expect("the compact item points at source-preserved content")
-            .1;
+        // The work row itself is the index: it carries the locator, and no
+        // separate blob index is consulted to get from item to payload.
+        let blob_ref = stored_blobs(&store, 0)
+            .into_iter()
+            .find(|blob| blob.item_id == "c")
+            .and_then(|blob| blob.blob)
+            .expect("the compact row points at source-preserved content");
         let blob = store
-            .get_blob("w1", "s1", &blob_ref.hash)
+            .get_blob("w1", "s1", &blob_ref)
             .unwrap()
             .expect("the content-addressed blob is retrievable");
         assert!(
@@ -2994,7 +3055,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_round_opens_on_the_first_adapter_turn() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         let superseded = live.begin_round(None, "t0", "u0").await;
         assert!(superseded.is_none(), "nothing was open to cut short");
 
@@ -3010,7 +3071,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_send_without_continues_round_supersedes_the_dangling_round_it_replaces() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         live.begin_round(None, "t0", "u0").await;
         let first_round_id = live
             .active_round
@@ -3021,7 +3082,7 @@ mod tests {
             .round_id
             .clone();
 
-        let (superseded, item_ids) = live
+        let superseded = live
             .begin_round(None, "t1", "u1")
             .await
             .expect("the dangling round was cut short");
@@ -3029,9 +3090,9 @@ mod tests {
         assert_eq!(superseded.outcome, Some(RoundOutcome::Superseded));
         assert_eq!(superseded.adapter_turn_ids, vec!["t0".to_string()]);
         assert_eq!(
-            item_ids,
-            vec!["u0".to_string()],
-            "the superseded round keeps the item it had accumulated"
+            superseded.user_item_id.as_deref(),
+            Some("u0"),
+            "the superseded round keeps the message that opened it"
         );
 
         let current = live.active_round.lock().await.clone().unwrap();
@@ -3044,7 +3105,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_send_with_a_matching_continues_round_folds_into_the_same_round() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         live.begin_round(None, "t0", "u0").await;
         let round_id = live
             .active_round
@@ -3069,15 +3130,19 @@ mod tests {
             "the new adapter turn must fold into the same round"
         );
         assert_eq!(
-            *live.round_items.lock().await,
-            vec!["u0".to_string(), "u1".to_string()],
-            "both turns' user messages belong to the one round"
+            round.user_item_id.as_deref(),
+            Some("u0"),
+            "the round is still the one the first message opened"
+        );
+        assert!(
+            live.open_trunk_items.lock().await.is_empty(),
+            "a user message is narrative, not work: it never enters a trunk"
         );
     }
 
     #[tokio::test]
     async fn a_continues_round_naming_an_unknown_round_starts_a_fresh_one() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         live.begin_round(None, "t0", "u0").await;
         let real_round_id = live
             .active_round
@@ -3088,12 +3153,12 @@ mod tests {
             .round_id
             .clone();
 
-        let (superseded, item_ids) = live
+        let superseded = live
             .begin_round(Some("r_does_not_exist"), "t1", "u1")
             .await
             .expect("the real dangling round is still cut short");
         assert_eq!(superseded.round_id, real_round_id);
-        assert_eq!(item_ids, vec!["u0".to_string()]);
+        assert_eq!(superseded.user_item_id.as_deref(), Some("u0"));
 
         let current = live.active_round.lock().await.clone().unwrap();
         assert_ne!(
@@ -3105,7 +3170,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_settled_round_is_replaced_quietly_not_marked_superseded_again() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         live.begin_round(None, "t0", "u0").await;
         let round_id = live
             .active_round
@@ -3130,14 +3195,14 @@ mod tests {
 
     #[tokio::test]
     async fn settle_round_is_idempotent() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         live.begin_round(None, "t0", "u0").await;
 
-        let (_, item_ids) = live
+        let settled = live
             .settle_round(RoundOutcome::Completed)
             .await
             .expect("the round was open");
-        assert_eq!(item_ids, vec!["u0".to_string()]);
+        assert_eq!(settled.user_item_id.as_deref(), Some("u0"));
         assert!(
             live.settle_round(RoundOutcome::Failed).await.is_none(),
             "a round cannot be settled twice"
@@ -3153,7 +3218,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocked_time_is_folded_in_when_the_round_resumes_or_ends() {
-        let live = Arc::new(Live::new(meta()));
+        let (live, _store_dir) = live_session(meta());
         live.begin_round(None, "t0", "u0").await;
         live.round_blocked().await;
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -3301,7 +3366,7 @@ mod tests {
         assert_eq!(round.adapter_turn_ids, vec![turn_id.clone()]);
         assert_eq!(round.outcome, Some(RoundOutcome::Completed));
 
-        let on_disk = sessions.store.load_items("w1", "s1").unwrap();
+        let on_disk = sessions.store.load_chat("w1", "s1").unwrap().items;
         let user_item_id = on_disk
             .iter()
             .find_map(|item| match item {
@@ -3310,12 +3375,12 @@ mod tests {
             })
             .expect("the prompt was written to disk");
 
-        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         assert_eq!(rounds.len(), 1, "one settled round must be ledgered");
         assert_eq!(rounds[0].round_id, round.round_id);
-        assert_eq!(rounds[0].outcome, RoundOutcome::Completed);
+        assert_eq!(rounds[0].outcome, Some(RoundOutcome::Completed));
         assert_eq!(rounds[0].adapter_turn_ids, vec![turn_id]);
-        assert!(rounds[0].item_ids.contains(&user_item_id));
+        assert_eq!(rounds[0].user_item_id.as_ref(), Some(&user_item_id));
         assert!(!rounds[0].synthesized, "a live round is never synthesized");
     }
 
@@ -3382,13 +3447,14 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         assert_eq!(rounds.len(), 1, "one settled round must be ledgered");
-        let trunks = &rounds[0].trunk_summaries;
+        let trunks = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
+        assert_eq!(rounds[0].trunk_count, 1);
         assert_eq!(
             trunks.len(),
             1,
-            "monologues divide visible batches; the trunk remains bounded by its 64-blob cap"
+            "monologues divide visible batches; the trunk remains bounded by its blob cap"
         );
         assert_eq!(trunks[0].index, 0);
         assert_eq!(trunks[0].first_item_id, "a1");
@@ -3419,7 +3485,7 @@ mod tests {
                 started_at_ms: 1,
             })
             .unwrap();
-        for i in 0..72u32 {
+        for i in 0..116u32 {
             events
                 .send(SessionEvent::Item {
                     turn_id: turn_id.clone(),
@@ -3439,16 +3505,17 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
-        let trunks = &rounds[0].trunk_summaries;
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
+        let trunks = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
+        assert_eq!(rounds[0].trunk_count, 2);
         assert_eq!(
             trunks.len(),
             2,
-            "72 tool calls split into a full 64-blob trunk and an 8-blob tail: {trunks:?}"
+            "116 tool calls split into a full 100-blob trunk and a 16-blob tail: {trunks:?}"
         );
-        assert_eq!(trunks[0].blob_count, 64);
-        assert_eq!(trunks[0].batches.len(), 4);
-        assert_eq!(trunks[1].blob_count, 8);
+        assert_eq!(trunks[0].blob_count, 100);
+        assert_eq!(trunks[0].batches.len(), 7);
+        assert_eq!(trunks[1].blob_count, 16);
         assert_eq!(trunks[1].batches.len(), 1);
     }
 
@@ -3497,8 +3564,7 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let (snapshot, replayed, reset, _) =
-            sessions.subscribe("s1", Some(0), true, true).await.unwrap();
+        let (snapshot, replayed, reset, _) = sessions.subscribe("s1", Some(0), true).await.unwrap();
         assert!(reset);
         assert!(
             replayed.is_empty(),
@@ -3528,7 +3594,7 @@ mod tests {
             .blob
             .clone()
             .expect("the compact blob row addresses source content");
-        let payload = sessions.blob("s1", &reference.hash).await.unwrap();
+        let payload = sessions.blob("s1", &reference).await.unwrap();
         assert!(payload.value.to_string().contains("raw source content"));
     }
 
@@ -3536,15 +3602,6 @@ mod tests {
     async fn trunk_index_pages_backward_without_repeating_the_round_payload() {
         let dir = tempfile::tempdir().unwrap();
         let (sessions, _events, _) = wired(dir.path()).await;
-        let trunks = (0..25)
-            .map(|index| TrunkSummary {
-                index,
-                first_item_id: format!("i{index}"),
-                blob_count: 64,
-                title: format!("阶段 {index}"),
-                batches: vec![],
-            })
-            .collect();
         sessions
             .store
             .append_round(
@@ -3553,18 +3610,42 @@ mod tests {
                 &RoundRecord {
                     schema_version: rounds::SCHEMA_VERSION,
                     round_id: "r-many".into(),
+                    ord: 0,
+                    user_item_id: None,
                     started_at_ms: 1,
                     ended_at_ms: 2,
-                    outcome: RoundOutcome::Completed,
+                    outcome: Some(RoundOutcome::Completed),
                     adapter_turn_ids: vec!["t1".into()],
-                    item_ids: vec![],
                     blocked_ms: 0,
                     synthesized: false,
-                    trunk_summaries: trunks,
+                    trunk_count: 25,
                 },
             )
             .unwrap();
+        for index in 0..25 {
+            sessions
+                .store
+                .write_trunk(
+                    "w1",
+                    "s1",
+                    0,
+                    &RoundTrunk {
+                        summary: TrunkSummary {
+                            index,
+                            first_item_id: format!("i{index}"),
+                            blob_count: 100,
+                            title: format!("阶段 {index}"),
+                            batches: vec![],
+                        },
+                        batches: vec![],
+                    },
+                )
+                .unwrap();
+        }
 
+        // A cold open, so the session layer reads the record just written
+        // rather than the empty one it has in memory.
+        sessions.sessions.write().await.clear();
         let recent = sessions
             .round_layer("s1", "r-many", None, Some(20))
             .await
@@ -3687,7 +3768,7 @@ mod tests {
             "the wait for the approval was tracked"
         );
 
-        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         assert_eq!(
             rounds.len(),
             1,
@@ -3695,7 +3776,7 @@ mod tests {
         );
         assert_eq!(rounds[0].round_id, round_id_before);
         assert_eq!(rounds[0].adapter_turn_ids.len(), 2);
-        assert_eq!(rounds[0].outcome, RoundOutcome::Completed);
+        assert_eq!(rounds[0].outcome, Some(RoundOutcome::Completed));
     }
 
     #[tokio::test]
@@ -3742,9 +3823,9 @@ mod tests {
             "no continuation means the round is done, not dangling"
         );
 
-        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         assert_eq!(rounds.len(), 1);
-        assert_eq!(rounds[0].outcome, RoundOutcome::Canceled);
+        assert_eq!(rounds[0].outcome, Some(RoundOutcome::Canceled));
     }
 
     /// The one case the daemon truly cannot decide on its own: the user
@@ -3806,9 +3887,16 @@ mod tests {
         );
         assert_eq!(round.adapter_turn_ids, vec![first_turn, second_turn]);
 
-        assert!(
-            sessions.store.load_rounds("w1", "s1").unwrap().is_empty(),
-            "a round that is still open must not appear in the ledger yet"
+        let recorded = sessions.store.load_chat("w1", "s1").unwrap().rounds;
+        assert_eq!(
+            recorded.len(),
+            1,
+            "a continued round stays one record, not one per adapter turn"
+        );
+        assert_eq!(recorded[0].round_id, dangling_round_id);
+        assert_eq!(
+            recorded[0].outcome, None,
+            "the round is on disk from the moment it opens, and still open"
         );
     }
 
@@ -3860,14 +3948,20 @@ mod tests {
         );
         assert_eq!(round.adapter_turn_ids, vec![second_turn]);
 
-        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         assert_eq!(
             rounds.len(),
-            1,
-            "the superseded round must be ledgered even though it never got a terminal adapter event"
+            2,
+            "the superseded round and the one that replaced it are both on disk"
         );
         assert_eq!(rounds[0].round_id, dangling_round_id);
-        assert_eq!(rounds[0].outcome, RoundOutcome::Superseded);
+        assert_eq!(
+            rounds[0].outcome,
+            Some(RoundOutcome::Superseded),
+            "the superseded round must be recorded even though it never got a terminal adapter event"
+        );
+        assert_eq!(rounds[1].round_id, round.round_id);
+        assert_eq!(rounds[1].outcome, None, "the replacement is still running");
     }
 
     /// The fallback `TurnCompleted`/`TurnFailed`/`TurnCanceled` do not cover:
@@ -3914,64 +4008,75 @@ mod tests {
             "a session must not stay stuck on Running with no process left"
         );
 
-        let on_disk = sessions.store.load_items("w1", "s1").unwrap();
+        let on_disk = sessions.store.load_chat("w1", "s1").unwrap().items;
         assert!(
             on_disk.iter().any(|stored| stored.id() == "a"),
             "the item produced before the crash must still reach disk"
         );
 
-        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         assert_eq!(
             rounds.len(),
             1,
             "the empty-looking round must still be ledgered"
         );
-        assert_eq!(rounds[0].outcome, RoundOutcome::Failed);
+        assert_eq!(rounds[0].outcome, Some(RoundOutcome::Failed));
         assert!(
-            rounds[0].item_ids.contains(&"a".to_string()),
-            "the round ledger must reference what the crash did manage to produce"
+            rounds[0].user_item_id.is_some(),
+            "the round must still name the request it was answering"
         );
     }
 
-    /// A session written before the round ledger existed gets one backfilled
-    /// on first open, and never again (§8 step 2's "旧会话按缺 blob 层降级为
-    /// 只读投影视图" analogue for the ledger: migrate once, then leave it be).
+    /// A session written before the relayout is rewritten on first open, and
+    /// never again: the guard is whether `chat.jsonl` is there, so a round
+    /// that settles afterwards is not clobbered by a second migration.
     #[tokio::test]
-    async fn an_old_session_gets_its_round_ledger_backfilled_exactly_once() {
+    async fn an_old_session_is_relaid_out_exactly_once() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = manager(dir.path());
-        sessions.store.save_meta(&meta()).unwrap();
-        sessions
+        // The pre-relayout shape, written by hand: a flat timeline log and a
+        // meta file beside it, both named after the session.
+        let legacy = dir.path().join("w1");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join("s1.meta.json"),
+            serde_json::to_string(&meta()).unwrap(),
+        )
+        .unwrap();
+        let lines: Vec<String> = [
+            TimelineItem::UserMessage {
+                id: "u1".into(),
+                text: "hi".into(),
+                attachments: vec![],
+            },
+            tool_call("c1", "grep"),
+            TimelineItem::TurnSummary {
+                id: "turn-summary-t1".into(),
+                stats: TurnStats {
+                    turn_id: "t1".into(),
+                    outcome: TurnOutcome::Completed,
+                    started_at_ms: 1,
+                    finished_at_ms: 2,
+                    duration_ms: 1,
+                    usage: Usage::default(),
+                    tool_calls: 1,
+                    fork_checkpoint: None,
+                },
+            },
+        ]
+        .iter()
+        .map(|item| serde_json::to_string(item).unwrap())
+        .collect();
+        std::fs::write(legacy.join("s1.jsonl"), lines.join("\n") + "\n").unwrap();
+        assert!(sessions
             .store
-            .append_items(
-                "w1",
-                "s1",
-                &[
-                    TimelineItem::UserMessage {
-                        id: "u1".into(),
-                        text: "hi".into(),
-                        attachments: vec![],
-                    },
-                    TimelineItem::TurnSummary {
-                        id: "turn-summary-t1".into(),
-                        stats: TurnStats {
-                            turn_id: "t1".into(),
-                            outcome: TurnOutcome::Completed,
-                            started_at_ms: 1,
-                            finished_at_ms: 2,
-                            duration_ms: 1,
-                            usage: Usage::default(),
-                            tool_calls: 0,
-                            fork_checkpoint: None,
-                        },
-                    },
-                ],
-            )
-            .unwrap();
-        assert!(sessions.store.load_rounds("w1", "s1").unwrap().is_empty());
+            .load_chat("w1", "s1")
+            .unwrap()
+            .rounds
+            .is_empty());
 
         sessions.live("s1").await.unwrap();
-        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         assert_eq!(
             rounds.len(),
             1,
@@ -3979,7 +4084,33 @@ mod tests {
         );
         assert!(rounds[0].synthesized);
         assert_eq!(rounds[0].round_id, "legacy_r_t1");
-        assert_eq!(rounds[0].outcome, RoundOutcome::Completed);
+        assert_eq!(rounds[0].outcome, Some(RoundOutcome::Completed));
+        assert!(
+            !legacy.join("s1.jsonl").exists(),
+            "the old flat log is removed only once the new layout is complete"
+        );
+        let narrative = sessions.store.load_chat("w1", "s1").unwrap().items;
+        assert!(
+            narrative.iter().all(|item| !store::is_work_item(item)),
+            "work must not survive migration in the narrative layer"
+        );
+        let migrated = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
+        assert_eq!(migrated.len(), 1, "the historical tool call keeps a trunk");
+        let blob = sessions
+            .store
+            .load_trunk("w1", "s1", 0, &migrated[0])
+            .unwrap()
+            .batches
+            .into_iter()
+            .flat_map(|batch| batch.blobs)
+            .find(|blob| blob.item_id == "c1")
+            .and_then(|blob| blob.blob)
+            .expect("the migrated work row addresses its payload");
+        assert!(sessions
+            .store
+            .get_blob("w1", "s1", &blob)
+            .unwrap()
+            .is_some());
 
         // Append a real round directly, as if it had settled after the
         // migration ran, then force a cold reload (as a daemon restart
@@ -3993,21 +4124,22 @@ mod tests {
                 &RoundRecord {
                     schema_version: rounds::SCHEMA_VERSION,
                     round_id: "r_after_migration".into(),
+                    ord: 1,
+                    user_item_id: None,
                     started_at_ms: 10,
                     ended_at_ms: 11,
-                    outcome: RoundOutcome::Completed,
+                    outcome: Some(RoundOutcome::Completed),
                     adapter_turn_ids: vec!["t2".into()],
-                    item_ids: vec![],
                     blocked_ms: 0,
                     synthesized: false,
-                    trunk_summaries: vec![],
+                    trunk_count: 0,
                 },
             )
             .unwrap();
         sessions.sessions.write().await.clear();
         sessions.live("s1").await.unwrap();
 
-        let rounds = sessions.store.load_rounds("w1", "s1").unwrap();
+        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         assert_eq!(
             rounds.len(),
             2,

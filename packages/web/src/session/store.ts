@@ -11,6 +11,7 @@ import type {
   LogTail,
   RemoteAccess,
   PermissionOutcome,
+  BlobRef,
   SequencedEvent,
   SessionSnapshot,
   SessionSummary,
@@ -219,7 +220,7 @@ interface WorkbenchState {
   loadRound(roundId: string): Promise<void>;
   loadOlderTrunks(roundId: string): Promise<void>;
   loadTrunk(roundId: string, trunkIndex: number): Promise<void>;
-  loadBlob(hash: string): Promise<void>;
+  loadBlob(blob: BlobRef): Promise<void>;
   /** Gives a session the name the user typed, on the machine and here. */
   renameSession(sessionId: string, title: string): Promise<void>;
   /** Erases a session. There is no undo; the caller does the asking. */
@@ -669,18 +670,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }));
   },
 
-  async loadBlob(hash) {
+  async loadBlob(blob) {
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
-    if (timelineOf(get(), sessionId).blobs[hash]) return;
+    if (timelineOf(get(), sessionId).blobs[blob.id]) return;
+    // The whole reference goes back, not just the id: the locator inside it is
+    // what lets the daemon seek straight to the payload.
     const reply = await require_(get().client).call({
       type: "blob.get",
-      payload: { sessionId, hash },
+      payload: { sessionId, blob },
     });
     if (reply?.type !== "blob") return;
     const payload = reply.data;
     patchTimeline(sessionId, set, (timeline) => ({
-      blobs: { ...timeline.blobs, [hash]: payload },
+      blobs: { ...timeline.blobs, [blob.id]: payload },
     }));
   },
 

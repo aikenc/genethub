@@ -606,7 +606,6 @@ export class Client {
       payload: {
         sessionId,
         sinceSeq: 0,
-        layered: true,
         expandLastRound: subscription.expandLastRound,
       },
     });
@@ -867,8 +866,7 @@ export class Client {
           payload: {
             sessionId,
             sinceSeq: subscription.seq,
-            layered: true,
-            expandLastRound: subscription.expandLastRound,
+                expandLastRound: subscription.expandLastRound,
           },
         }).catch(() => undefined);
         if (reply?.type !== "subscribed") return;

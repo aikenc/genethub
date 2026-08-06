@@ -171,9 +171,9 @@ pub struct SessionSnapshot {
     #[ts(type = "number")]
     pub seq: u64,
     pub pending_permissions: Vec<crate::event::PermissionRequest>,
-    /// Present for a layered session open. `items` then contains only the
-    /// session narrative; tool calls and reasoning are addressed through the
-    /// round layer below instead of being replayed wholesale.
+    /// One entry per user request. `items` carries only the session narrative;
+    /// tool calls and reasoning are addressed through the round layer instead
+    /// of being replayed wholesale (`docs/session-storage.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub rounds: Option<Vec<RoundSummary>>,
@@ -240,14 +240,27 @@ pub struct RoundTrunkSummary {
     pub batches: Vec<RoundBatchSummary>,
 }
 
+/// A complete address for one stored blob: what it is, and where it sits.
+///
+/// The locator travels with the reference on purpose (`docs/session-storage.md`
+/// §3.3). A content id alone only narrows the search to one bucket file, which
+/// is what made the old reader scan and deserialize a whole bucket per read;
+/// carrying the byte range instead makes the row that holds the reference its
+/// own index, so no separate blob index has to be built, loaded or kept honest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct BlobRef {
-    /// Lowercase SHA-256 of the canonical JSON blob payload.
-    pub hash: String,
+    /// First 24 hex characters of the payload's SHA-256. 96 bits: collision
+    /// odds stay negligible at any session size, and every trunk row carries
+    /// one, so the 40 characters saved are not decorative.
+    pub id: String,
     #[ts(type = "number")]
     pub bytes: u64,
+    /// `<bucket>:<offset>:<length>`. Opaque to clients — they hand it back
+    /// unchanged and the daemon resolves it against this session's own blob
+    /// files, verifying the id it finds there before answering.
+    pub at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -312,7 +325,7 @@ pub struct RoundLayer {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct BlobPayload {
-    pub hash: String,
+    pub id: String,
     pub value: serde_json::Value,
 }
 

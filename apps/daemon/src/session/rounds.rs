@@ -1,13 +1,22 @@
-//! The round ledger: `<session>/session.rounds.jsonl`, one `RoundRecord` per
-//! settled round (`docs/agent-analysis-substrate-proposal.md` §3.2, §8 step 2).
+//! Round records and trunk pagination.
+//!
+//! A `RoundRecord` is one line of `<session>/chat.jsonl`: the folded state of
+//! one user request (`docs/session-storage.md` §3.1). It carries no item ids
+//! and no trunk summaries on purpose — work items are located by path
+//! (`rounds/r-NNN/t-NNNN.jsonl`) and trunk summaries live in that round's own
+//! index — so nothing here grows with how long the round ran.
 //!
 //! Deliberately narrower than the proposal's full shape: no `contended` or
-//! `workspaceDelta` field, because nothing populates them yet (§8 step 5) —
-//! an empty-looking field would be a false claim of completeness (rule D).
+//! `workspaceDelta` field, because nothing populates them yet
+//! (`docs/agent-analysis-substrate-proposal.md` §8 step 5) — an empty-looking
+//! field would be a false claim of completeness (rule D).
 
 use std::collections::HashMap;
 
-use genehub_proto::{RoundBatchSummary, RoundTrunkSummary, TimelineItem, TurnOutcome};
+use genehub_proto::{
+    BlobKind, BlobOverview, RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary,
+    TimelineItem, ToolCallDetail, TurnOutcome,
+};
 use serde::{Deserialize, Serialize};
 
 use super::overview;
@@ -16,7 +25,11 @@ use super::overview;
 /// reader could misread rather than merely ignore. A reader that meets a
 /// version it does not know must fall back to a read-only, ledger-less view
 /// of the session rather than guess at the new fields' meaning.
-pub const SCHEMA_VERSION: u32 = 3;
+///
+/// 4: the path-as-index relayout. `itemIds` and `trunkSummaries` are gone,
+/// `ord` and `trunkCount` arrived, and `outcome` became optional so a round is
+/// on disk the moment it opens rather than only once it settles.
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,25 +45,38 @@ pub enum RoundOutcome {
     Superseded,
 }
 
-/// One settled round: the durable, referenceable unit of "what happened for
-/// one user request" (G8). Never rewritten once appended — a round that gets
-/// superseded or fails still keeps its record, `outcome` just says which.
+/// One round: the durable, referenceable unit of "what happened for one user
+/// request" (G8).
+///
+/// Written twice — once provisionally when the round opens, once complete when
+/// it settles — and read last-wins per `round_id`, so the file stays
+/// append-only while a crashed daemon still leaves evidence that the request
+/// existed. `outcome` is `None` on the provisional line; a `None` read back
+/// from disk for a round nobody is running means the daemon died mid-request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoundRecord {
     pub schema_version: u32,
     pub round_id: String,
+    /// Position in the session, and the round's own directory name
+    /// (`rounds/r-{ord:03}`). This is the whole mapping from the protocol's
+    /// `roundId` to storage — resolved from `chat.jsonl`, which any reader has
+    /// already loaded before it can ask for a round.
+    pub ord: u32,
+    /// The user message that opened this round, if it had one.
+    #[serde(default)]
+    pub user_item_id: Option<String>,
     pub started_at_ms: i64,
     pub ended_at_ms: i64,
-    pub outcome: RoundOutcome,
+    /// `None` while the round is still open.
+    #[serde(default)]
+    pub outcome: Option<RoundOutcome>,
     /// Upstream adapter turn ids folded into this round, in order.
+    #[serde(default)]
     pub adapter_turn_ids: Vec<String>,
-    /// Ids of items already on `session.jsonl` that belong to this round —
-    /// referenced, not duplicated, so recording a round never means
-    /// rewriting an existing item line (§3.2 direction two).
-    pub item_ids: Vec<String>,
     /// Time this round spent waiting on a human, across every pause. Not
     /// counted as the agent's own working time.
+    #[serde(default)]
     pub blocked_ms: i64,
     /// `true` for a record backfilled from a session that predates the round
     /// ledger, where one adapter turn is treated as one round because the
@@ -58,15 +84,11 @@ pub struct RoundRecord {
     /// recorded. A round settled live by the daemon always reports `false`.
     #[serde(default)]
     pub synthesized: bool,
-    /// This round's tool-call-and-thinking stream, paginated into trunks
-    /// (`docs/agent-analysis-substrate-proposal.md` §3.2 direction three, §8
-    /// step 3) — a round can run long enough that "every item gets an
-    /// overview" alone re-blows the byte budget the ledger itself exists to
-    /// avoid. Empty for records predating this field (old on-disk lines and
-    /// `migrate_legacy` output): there is nothing honest to backfill it
-    /// with, since which items shared a trunk was never recorded before.
+    /// How many trunks this round closed. The trunk summaries themselves live
+    /// in `rounds/r-NNN/index.jsonl`; keeping only the count here is what
+    /// stops a day-long round from writing a quarter-megabyte line.
     #[serde(default)]
-    pub trunk_summaries: Vec<TrunkSummary>,
+    pub trunk_count: u32,
 }
 
 pub type TrunkSummary = RoundTrunkSummary;
@@ -74,8 +96,10 @@ pub type BatchSummary = RoundBatchSummary;
 
 /// A semantic batch never exposes more than sixteen blobs at once.
 pub const BATCH_MAX_BLOBS: u32 = 16;
-/// A visible trunk contains at most four full batches.
-pub const TRUNK_MAX_BLOBS: u32 = 64;
+/// A visible trunk holds at most a hundred blobs — six full batches and part
+/// of a seventh. The cap is what keeps one trunk request bounded no matter how
+/// long its round ran.
+pub const TRUNK_MAX_BLOBS: u32 = 100;
 
 pub enum TrunkItem<'a> {
     Monologue,
@@ -214,6 +238,10 @@ impl TrunkBuilder {
             self.close_batch();
         }
         if self.blob_count >= TRUNK_MAX_BLOBS {
+            // The cap is not a multiple of the batch size, so the trunk
+            // usually fills mid-batch. Closing that batch here is what keeps
+            // its blobs inside the trunk rather than counted-but-unlisted.
+            self.close_batch();
             return self.close_finished().or(closed_trunk);
         }
         closed_trunk
@@ -296,46 +324,145 @@ pub fn summarize_trunks(items: &[TimelineItem]) -> Vec<TrunkSummary> {
         .collect()
 }
 
-/// Best-effort round ledger for a session written before the round ledger
-/// existed. Run once per session, the first time it is opened after this
-/// upgrade (`SessionManager::live`, guarded by the ledger file's presence —
-/// see `Store::ensure_rounds_migrated`).
+/// Rebuilds a round's trunks, batches and blob rows from the items it owns.
+///
+/// The single place trunk shape is derived, used by the live round, by the
+/// storage writer and by the legacy migration — three callers that must agree
+/// exactly, because a disagreement shows up as a trunk whose stored rows do
+/// not match its summary. Blob references are left empty; only the writer
+/// knows where a payload landed.
+pub fn trunks_from_items(items: &[TimelineItem]) -> Vec<RoundTrunk> {
+    let summaries = summarize_trunks(items);
+    let position = |id: &str| items.iter().position(|item| item.id() == id);
+    let mut trunks = Vec::new();
+    for (index, summary) in summaries.iter().enumerate() {
+        let start = position(&summary.first_item_id).unwrap_or(0);
+        let end = summaries
+            .get(index + 1)
+            .and_then(|next| position(&next.first_item_id))
+            .unwrap_or(items.len());
+        let mut batches = Vec::new();
+        for (batch_index, batch) in summary.batches.iter().enumerate() {
+            let batch_start = position(&batch.first_item_id).unwrap_or(start).max(start);
+            let batch_end = summary
+                .batches
+                .get(batch_index + 1)
+                .and_then(|next| position(&next.first_item_id))
+                .unwrap_or(end);
+            let slice = &items[batch_start.min(items.len())..batch_end.min(items.len())];
+            let monologue = slice.iter().find_map(|item| match item {
+                TimelineItem::AssistantMessage { text, .. } if !text.is_empty() => {
+                    Some(text.clone())
+                }
+                _ => None,
+            });
+            let blobs = slice.iter().filter_map(blob_overview).collect();
+            batches.push(RoundBatch {
+                summary: batch.clone(),
+                monologue,
+                blobs,
+            });
+        }
+        trunks.push(RoundTrunk {
+            summary: summary.clone(),
+            batches,
+        });
+    }
+    trunks
+}
+
+/// The compact row for one work item, or `None` for anything that is not work.
+pub fn blob_overview(item: &TimelineItem) -> Option<BlobOverview> {
+    let (kind, overview) = match item {
+        TimelineItem::Reasoning { text, .. } => (BlobKind::Reasoning, text.clone()),
+        TimelineItem::ToolCall { name, detail, .. } => (
+            BlobKind::ToolCall,
+            match detail {
+                ToolCallDetail::Overview { overview, .. } => overview.clone(),
+                _ => name.clone(),
+            },
+        ),
+        _ => return None,
+    };
+    Some(BlobOverview {
+        item_id: item.id().to_string(),
+        kind,
+        overview,
+        blob: None,
+    })
+}
+
+/// One round recovered from a pre-relayout session, with the items it owned.
+///
+/// The items come back attached because the migration has to write this
+/// round's trunk files and blobs, and the old flat log is the only place that
+/// grouping still exists.
+#[derive(Debug, Clone)]
+pub struct LegacyRound {
+    pub record: RoundRecord,
+    pub items: Vec<TimelineItem>,
+}
+
+/// Best-effort round segmentation for a session written before the relayout.
+/// Run once per session, the first time it is opened afterwards
+/// (`Store::migrate_session_layout`).
 ///
 /// One adapter turn becomes one round — the only grouping this data still
 /// supports, since which turns were auto-stitched or client-continued was
-/// never recorded before `ActiveRound` (§8 step 1). A trailing run of items
-/// with no `TurnSummary` — a turn that never reached a terminal event before
-/// this session predated that fallback — is left out rather than guessed at;
-/// it is still visible in the ordinary timeline view, just not round-addressable.
-pub fn migrate_legacy(items: &[TimelineItem]) -> Vec<RoundRecord> {
-    let mut records = Vec::new();
+/// never recorded before `ActiveRound`
+/// (`docs/agent-analysis-substrate-proposal.md` §8 step 1). A trailing run of
+/// items with no `TurnSummary` still becomes a round, marked failed: those
+/// items exist and dropping them would lose conversation, which is worse than
+/// recording an outcome the old data cannot confirm.
+pub fn migrate_legacy(items: &[TimelineItem]) -> Vec<LegacyRound> {
+    let mut rounds: Vec<LegacyRound> = Vec::new();
     let mut segment: Vec<TimelineItem> = Vec::new();
+    let push = |segment: &mut Vec<TimelineItem>,
+                rounds: &mut Vec<LegacyRound>,
+                stats: Option<&genehub_proto::TurnStats>| {
+        if segment.is_empty() {
+            return;
+        }
+        let ord = rounds.len() as u32;
+        let user_item_id = segment.iter().find_map(|item| match item {
+            TimelineItem::UserMessage { id, .. } => Some(id.clone()),
+            _ => None,
+        });
+        let record = RoundRecord {
+            schema_version: SCHEMA_VERSION,
+            round_id: match stats {
+                Some(stats) => format!("legacy_r_{}", stats.turn_id),
+                None => format!("legacy_r_tail_{ord}"),
+            },
+            ord,
+            user_item_id,
+            started_at_ms: stats.map(|stats| stats.started_at_ms).unwrap_or_default(),
+            ended_at_ms: stats.map(|stats| stats.finished_at_ms).unwrap_or_default(),
+            outcome: Some(match stats.map(|stats| stats.outcome) {
+                Some(TurnOutcome::Completed) => RoundOutcome::Completed,
+                Some(TurnOutcome::Canceled) => RoundOutcome::Canceled,
+                _ => RoundOutcome::Failed,
+            }),
+            adapter_turn_ids: stats
+                .map(|stats| vec![stats.turn_id.clone()])
+                .unwrap_or_default(),
+            blocked_ms: 0,
+            synthesized: true,
+            trunk_count: 0,
+        };
+        rounds.push(LegacyRound {
+            record,
+            items: std::mem::take(segment),
+        });
+    };
     for item in items {
         segment.push(item.clone());
         if let TimelineItem::TurnSummary { stats, .. } = item {
-            let outcome = match stats.outcome {
-                TurnOutcome::Completed => RoundOutcome::Completed,
-                TurnOutcome::Failed => RoundOutcome::Failed,
-                TurnOutcome::Canceled => RoundOutcome::Canceled,
-            };
-            let trunk_summaries = summarize_trunks(&segment);
-            let item_ids = segment.iter().map(|item| item.id().to_string()).collect();
-            records.push(RoundRecord {
-                schema_version: SCHEMA_VERSION,
-                round_id: format!("legacy_r_{}", stats.turn_id),
-                started_at_ms: stats.started_at_ms,
-                ended_at_ms: stats.finished_at_ms,
-                outcome,
-                adapter_turn_ids: vec![stats.turn_id.clone()],
-                item_ids,
-                blocked_ms: 0,
-                synthesized: true,
-                trunk_summaries,
-            });
-            segment.clear();
+            push(&mut segment, &mut rounds, Some(stats));
         }
     }
-    records
+    push(&mut segment, &mut rounds, None);
+    rounds
 }
 
 #[cfg(test)]
@@ -377,20 +504,23 @@ mod tests {
             },
             turn_summary("t1", TurnOutcome::Completed),
         ];
-        let records = migrate_legacy(&items);
-        assert_eq!(records.len(), 1);
-        let record = &records[0];
+        let rounds = migrate_legacy(&items);
+        assert_eq!(rounds.len(), 1);
+        let record = &rounds[0].record;
         assert!(record.synthesized);
         assert_eq!(record.round_id, "legacy_r_t1");
-        assert_eq!(record.outcome, RoundOutcome::Completed);
+        assert_eq!(record.ord, 0);
+        assert_eq!(record.user_item_id.as_deref(), Some("u1"));
+        assert_eq!(record.outcome, Some(RoundOutcome::Completed));
         assert_eq!(record.adapter_turn_ids, vec!["t1".to_string()]);
         assert_eq!(
-            record.item_ids,
-            vec![
-                "u1".to_string(),
-                "a1".to_string(),
-                "turn-summary-t1".to_string()
-            ]
+            rounds[0]
+                .items
+                .iter()
+                .map(|item| item.id())
+                .collect::<Vec<_>>(),
+            vec!["u1", "a1", "turn-summary-t1"],
+            "the round carries its own items so the migration can write them"
         );
     }
 
@@ -402,37 +532,51 @@ mod tests {
             user_message("u2"),
             turn_summary("t2", TurnOutcome::Failed),
         ];
-        let records = migrate_legacy(&items);
-        assert_eq!(records.len(), 2);
+        let rounds = migrate_legacy(&items);
+        assert_eq!(rounds.len(), 2);
+        assert_eq!(rounds[0].record.ord, 0);
         assert_eq!(
-            records[0].item_ids,
-            vec!["u1".to_string(), "turn-summary-t1".to_string()]
+            rounds[0]
+                .items
+                .iter()
+                .map(|item| item.id())
+                .collect::<Vec<_>>(),
+            vec!["u1", "turn-summary-t1"]
         );
-        assert_eq!(records[1].outcome, RoundOutcome::Failed);
+        assert_eq!(rounds[1].record.ord, 1);
+        assert_eq!(rounds[1].record.outcome, Some(RoundOutcome::Failed));
         assert_eq!(
-            records[1].item_ids,
-            vec!["u2".to_string(), "turn-summary-t2".to_string()]
+            rounds[1]
+                .items
+                .iter()
+                .map(|item| item.id())
+                .collect::<Vec<_>>(),
+            vec!["u2", "turn-summary-t2"]
         );
     }
 
     #[test]
-    fn a_trailing_turn_with_no_summary_is_left_out_of_the_ledger() {
+    fn a_trailing_turn_with_no_summary_becomes_a_failed_round_rather_than_being_dropped() {
         let items = vec![
             user_message("u1"),
             turn_summary("t1", TurnOutcome::Completed),
             user_message("u2"),
         ];
-        let records = migrate_legacy(&items);
+        let rounds = migrate_legacy(&items);
         assert_eq!(
-            records.len(),
-            1,
-            "the dangling tail after the last summary has no outcome to report"
+            rounds.len(),
+            2,
+            "dropping the tail would lose conversation the old log still has"
         );
+        assert_eq!(rounds[1].record.outcome, Some(RoundOutcome::Failed));
+        assert_eq!(rounds[1].record.user_item_id.as_deref(), Some("u2"));
     }
 
     #[test]
-    fn no_turn_summaries_at_all_produces_an_empty_but_valid_ledger() {
-        assert!(migrate_legacy(&[user_message("u1")]).is_empty());
+    fn a_session_that_never_finished_a_turn_still_migrates() {
+        let rounds = migrate_legacy(&[user_message("u1")]);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].record.outcome, Some(RoundOutcome::Failed));
     }
 
     #[test]
@@ -509,18 +653,28 @@ mod tests {
     }
 
     #[test]
-    fn a_trunk_closes_at_sixty_four_blobs() {
+    fn a_trunk_closes_at_its_blob_cap_without_stranding_the_open_batch() {
         let mut builder = TrunkBuilder::default();
         let mut closed = None;
         for index in 0..TRUNK_MAX_BLOBS {
             closed = builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
         }
         let summary = closed
-            .expect("the 64th blob closes the trunk")
+            .expect("the hundredth blob closes the trunk")
             .into_summary(0, &HashMap::new());
-        assert_eq!(summary.blob_count, 64);
-        assert_eq!(summary.batches.len(), 4);
-        assert!(summary.batches.iter().all(|batch| batch.blob_count == 16));
+        assert_eq!(summary.blob_count, 100);
+        assert_eq!(
+            summary
+                .batches
+                .iter()
+                .map(|batch| batch.blob_count)
+                .sum::<u32>(),
+            summary.blob_count,
+            "every counted blob must belong to a listed batch, or the rows for \
+             the trailing partial batch are written nowhere"
+        );
+        assert_eq!(summary.batches.len(), 7);
+        assert_eq!(summary.batches.last().unwrap().blob_count, 4);
         assert_eq!(summary.title, "调用了 16 次工具");
     }
 
