@@ -19,6 +19,19 @@ pub fn lock_pid(paths: &Paths) -> Option<u32> {
         .ok()
 }
 
+/// Whether a refused `try_lock` means somebody else holds it, rather than
+/// something being wrong with the file.
+///
+/// `ErrorKind::WouldBlock` alone is not the test. Windows reports contention as
+/// `ERROR_LOCK_VIOLATION`, which maps to no kind at all, so a build that checks
+/// only the kind reads "another process has this" as "this file is broken" —
+/// exactly backwards, and only on the platform nobody develops on.
+pub fn lock_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || (error.raw_os_error().is_some()
+            && error.raw_os_error() == fs2::lock_contended_error().raw_os_error())
+}
+
 /// Whether another process currently holds the daemon's kernel lock.
 ///
 /// File contents are only diagnostics. Unlike a pid probe, the lock is
@@ -38,7 +51,7 @@ pub fn instance_locked(paths: &Paths) -> std::io::Result<bool> {
             let _ = fs2::FileExt::unlock(&file);
             Ok(false)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) if lock_contended(&error) => Ok(true),
         Err(error) => Err(error),
     }
 }

@@ -347,7 +347,7 @@ impl WorkspaceHomes {
             .with_context(|| format!("opening {}", path.display()))?;
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if crate::lifecycle::lock_contended(&error) => {
                 let holder = fs::read_to_string(&path)
                     .ok()
                     .map(|text| text.trim().to_string())
