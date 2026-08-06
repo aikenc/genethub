@@ -276,6 +276,11 @@ pub struct BlobOverview {
 #[ts(export, export_to = "index.ts")]
 pub struct RoundBatch {
     pub summary: RoundBatchSummary,
+    /// Full process narration for this batch. It belongs to the expanded trunk,
+    /// not to the session narrative. A compact prefix remains in `summary.text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub monologue: Option<String>,
     pub blobs: Vec<BlobOverview>,
 }
 

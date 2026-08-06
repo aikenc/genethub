@@ -52,6 +52,7 @@ export function TimelineView({ state }: { state: TimelineState }) {
     return agent?.capabilities.fork ?? false;
   });
   const turns = turnBlocks(state.items);
+  const contextualTurns = contextualizeTurns(turns, rounds, state.items);
 
   // Stay at the bottom while new content arrives, unless the user scrolled up
   // to read something — then leave them where they are.
@@ -70,39 +71,48 @@ export function TimelineView({ state }: { state: TimelineState }) {
         setPinned(distance < 40);
       }}
     >
-      {turns.map((turn, index) => {
-        const narrative =
-          rounds.length === 0
-            ? turn.items
-            : turn.items.filter(
-                (item) => item.type !== "reasoning" && item.type !== "toolCall",
-              );
-        const itemIds = new Set(turn.items.map((item) => item.id));
-        const turnRounds = rounds.filter(
-          (round) => round.userItemId && itemIds.has(round.userItemId),
-        );
-        return (
-          <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
-            {narrative.map((item) => <Item key={item.id} item={item} />)}
-            {turnRounds.map((round) => <RoundCard key={round.roundId} round={round} />)}
-            {turn.stats ? (
-              <TurnFooter
-                stats={turn.stats}
-                text={assistantText(turn.items)}
-                canFork={canFork && Boolean(turn.stats.forkCheckpoint)}
-                onFork={() => void forkSession(turn.stats!.turnId)}
-              />
-            ) : index === turns.length - 1 && state.activeTurn ? (
-              <TurnFooter
-                liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
-                liveTools={countTools(turn.items)}
-                text={assistantText(turn.items)}
-                canFork={false}
-              />
-            ) : null}
-          </section>
-        );
-      })}
+      {contextualTurns.map(
+        ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
+          const hasRound = Boolean(round);
+          const narrative =
+            rounds.length === 0
+              ? turn.items
+              : turn.items.filter(
+                  (item) =>
+                    item.type !== "reasoning" &&
+                    item.type !== "toolCall" &&
+                    (!hasRound || item.type !== "assistantMessage"),
+                );
+          return (
+            <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
+              {narrative.map((item) => <Item key={item.id} item={item} />)}
+              {startedRounds.map((startedRound) => (
+                <RoundProgress
+                  key={startedRound.roundId}
+                  round={startedRound}
+                  finalSummaryText={roundFinalText}
+                />
+              ))}
+              {finalAssistant ? <Item item={finalAssistant} /> : null}
+              {turn.stats ? (
+                <TurnFooter
+                  stats={turn.stats}
+                  text={hasRound ? (finalAssistant?.text ?? "") : assistantText(turn.items)}
+                  canFork={canFork && Boolean(turn.stats.forkCheckpoint)}
+                  onFork={() => void forkSession(turn.stats!.turnId)}
+                />
+              ) : index === turns.length - 1 && state.activeTurn ? (
+                <TurnFooter
+                  liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
+                  liveTools={countTools(turn.items)}
+                  text={hasRound ? "" : assistantText(turn.items)}
+                  canFork={false}
+                />
+              ) : null}
+            </section>
+          );
+        },
+      )}
 
       {rounds
         .filter(
@@ -112,7 +122,7 @@ export function TimelineView({ state }: { state: TimelineState }) {
               (item) => item.type === "userMessage" && item.id === round.userItemId,
             ),
         )
-        .map((round) => <RoundCard key={round.roundId} round={round} />)}
+        .map((round) => <RoundProgress key={round.roundId} round={round} />)}
 
       {state.lastError ? (
         <div
@@ -225,59 +235,110 @@ function turnBlocks(items: TimelineItem[]): TurnBlock[] {
   return turns;
 }
 
-function RoundCard({ round }: { round: RoundSummary }) {
+interface ContextualTurn {
+  turn: TurnBlock;
+  startedRounds: RoundSummary[];
+  round?: RoundSummary;
+  finalAssistant?: Extract<TimelineItem, { type: "assistantMessage" }>;
+  roundFinalText?: string;
+}
+
+function contextualizeTurns(
+  turns: TurnBlock[],
+  rounds: RoundSummary[],
+  items: TimelineItem[],
+): ContextualTurn[] {
+  const positions = new Map(items.map((item, index) => [item.id, index]));
+  const positionedRounds = rounds
+    .flatMap((round) => {
+      const position = round.userItemId ? positions.get(round.userItemId) : undefined;
+      return position === undefined ? [] : [{ round, position }];
+    })
+    .sort((left, right) => left.position - right.position);
+  const finals = new Map<string, Extract<TimelineItem, { type: "assistantMessage" }>>();
+  positionedRounds.forEach(({ round, position }, index) => {
+    if (round.outcome === "running") return;
+    const end = positionedRounds[index + 1]?.position ?? items.length;
+    const final = finalAssistantMessage(items.slice(position, end));
+    if (final) finals.set(round.roundId, final);
+  });
+
+  let currentRound: RoundSummary | undefined;
+  return turns.map((turn) => {
+    const itemIds = new Set(turn.items.map((item) => item.id));
+    const startedRounds = rounds.filter(
+      (round) => round.userItemId && itemIds.has(round.userItemId),
+    );
+    if (startedRounds.length > 0) currentRound = startedRounds[startedRounds.length - 1];
+    const roundFinal = currentRound ? finals.get(currentRound.roundId) : undefined;
+    return {
+      turn,
+      startedRounds,
+      round: currentRound,
+      finalAssistant:
+        roundFinal && itemIds.has(roundFinal.id) ? roundFinal : undefined,
+      roundFinalText: roundFinal?.text,
+    };
+  });
+}
+
+function RoundProgress({
+  round,
+  finalSummaryText,
+}: {
+  round: RoundSummary;
+  finalSummaryText?: string;
+}) {
   const layer = useWorkbench((state) => state.timeline.roundLayers[round.roundId]);
   const loadRound = useWorkbench((state) => state.loadRound);
   const loadOlder = useWorkbench((state) => state.loadOlderTrunks);
-  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
-  const open =
-    manualOpen ??
-    (round.outcome === "running" || Boolean(layer?.expandedTrunk));
 
-  return (
-    <div className="overflow-hidden rounded-xl border border-line bg-surface/60" data-testid="round">
+  useEffect(() => {
+    if (round.outcome === "running" && !layer) void loadRound(round.roundId);
+  }, [layer, loadRound, round.outcome, round.roundId]);
+
+  if (!layer) {
+    return (
       <button
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-2 text-left"
-        aria-expanded={open}
-        onClick={() => {
-          const next = !open;
-          setManualOpen(next);
-          if (next && !layer) void loadRound(round.roundId);
-        }}
+        className="text-xs text-accent"
+        data-testid="round-progress-load"
+        onClick={() => void loadRound(round.roundId)}
       >
-        <span className="text-xs text-muted">
-          {round.outcome === "running" ? "处理中" : "工作过程"}
-        </span>
-        <span className="min-w-0 flex-1 truncate text-xs text-muted">
-          {round.trunkCount} 个阶段
-        </span>
-        <span className="text-xs text-accent">{open ? "收起" : "展开"}</span>
+        查看进展
       </button>
-      {open ? (
-        <div className="space-y-2 border-t border-line p-2">
-          {!layer ? <p className="px-2 py-1 text-xs text-muted">正在加载…</p> : null}
-          {layer?.nextCursor ? (
-            <button
-              type="button"
-              className="w-full rounded-lg px-2 py-1 text-xs text-accent hover:bg-surface"
-              onClick={() => void loadOlder(round.roundId)}
-            >
-              加载更早阶段
-            </button>
-          ) : null}
-          {layer?.trunks.map((trunk, index) => (
-            <TrunkCard
-              key={trunk.index}
-              round={round}
-              summary={trunk}
-              defaultOpen={
-                round.outcome === "running" && index === layer.trunks.length - 1
-              }
-            />
-          ))}
-        </div>
+    );
+  }
+
+  const trunks = layer.trunks.filter(
+    (trunk) =>
+      !(
+        finalSummaryText &&
+        trunk.batches.length > 0 &&
+        trunk.batches.every((batch) => isFinalSummaryBatch(batch, finalSummaryText))
+      ),
+  );
+
+  return (
+    <div className="space-y-2" data-testid="round-progress">
+      {layer.nextCursor ? (
+        <button
+          type="button"
+          className="w-full rounded-lg px-2 py-1 text-xs text-accent hover:bg-surface"
+          onClick={() => void loadOlder(round.roundId)}
+        >
+          加载更早进展
+        </button>
       ) : null}
+      {trunks.map((trunk, index) => (
+        <TrunkCard
+          key={trunk.index}
+          round={round}
+          summary={trunk}
+          finalSummaryText={finalSummaryText}
+          defaultOpen={round.outcome === "running" && index === trunks.length - 1}
+        />
+      ))}
     </div>
   );
 }
@@ -285,10 +346,12 @@ function RoundCard({ round }: { round: RoundSummary }) {
 function TrunkCard({
   round,
   summary,
+  finalSummaryText,
   defaultOpen,
 }: {
   round: RoundSummary;
   summary: RoundTrunkSummary;
+  finalSummaryText?: string;
   defaultOpen: boolean;
 }) {
   const detail = useWorkbench(
@@ -302,6 +365,10 @@ function TrunkCard({
     if (open && !detail) void loadTrunk(round.roundId, summary.index);
   }, [detail, loadTrunk, open, round.roundId, summary.index]);
 
+  const batches = detail?.batches.filter(
+    (batch) => !finalSummaryText || !isFinalSummaryBatch(batch.summary, finalSummaryText),
+  );
+
   return (
     <div className="overflow-hidden rounded-lg border border-line bg-bg" data-testid="round-trunk">
       <button
@@ -310,20 +377,19 @@ function TrunkCard({
         aria-expanded={open}
         onClick={() => setManualOpen(!open)}
       >
-        <span className="text-xs text-muted">阶段 {summary.index + 1}</span>
-        <span className="min-w-0 flex-1 truncate text-sm">{summary.title}</span>
+        <span className="min-w-0 flex-1 truncate text-sm">进展：{summary.title}</span>
         <span className="text-xs text-muted">{summary.blobCount} 项</span>
       </button>
       {open ? (
         <div className="space-y-2 border-t border-line p-2">
           {!detail ? <p className="px-2 py-1 text-xs text-muted">正在加载…</p> : null}
-          {detail?.batches.map((batch, index) => (
+          {batches?.map((batch, index) => (
             <BatchCard
               key={batch.summary.index}
               batch={batch}
               defaultOpen={
                 round.outcome === "running" &&
-                index === detail.batches.length - 1
+                index === batches.length - 1
               }
             />
           ))}
@@ -349,11 +415,27 @@ function BatchCard({ batch, defaultOpen }: { batch: RoundBatch; defaultOpen: boo
       </button>
       {open ? (
         <div className="space-y-1 border-t border-line px-2 py-2">
+          {batch.monologue ? (
+            <div className="px-1 py-1 text-sm" data-testid="batch-monologue">
+              <Markdown text={batch.monologue} />
+            </div>
+          ) : null}
           {batch.blobs.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
         </div>
       ) : null}
     </div>
   );
+}
+
+function isFinalSummaryBatch(
+  batch: RoundBatch["summary"],
+  finalSummaryText: string,
+): boolean {
+  if (batch.blobCount !== 0) return false;
+  const compact = batch.text.trim();
+  if (!compact) return false;
+  const prefix = compact.endsWith("…") ? compact.slice(0, -1) : compact;
+  return finalSummaryText.trimStart().startsWith(prefix);
 }
 
 function BlobRow({ blob }: { blob: BlobOverview }) {
@@ -395,6 +477,23 @@ function assistantText(items: TimelineItem[]): string {
     )
     .map((item) => item.text)
     .join("\n\n");
+}
+
+function finalAssistantMessage(
+  items: TimelineItem[],
+): Extract<TimelineItem, { type: "assistantMessage" }> | undefined {
+  let final: Extract<TimelineItem, { type: "assistantMessage" }> | undefined;
+  let finalIndex = -1;
+  let lastWorkIndex = -1;
+  items.forEach((item, index) => {
+    if (item.type === "assistantMessage") {
+      final = item;
+      finalIndex = index;
+    } else if (item.type === "reasoning" || item.type === "toolCall") {
+      lastWorkIndex = index;
+    }
+  });
+  return finalIndex > lastWorkIndex ? final : undefined;
 }
 
 function countTools(items: TimelineItem[]): number {

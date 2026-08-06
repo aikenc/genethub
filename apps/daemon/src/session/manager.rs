@@ -525,6 +525,15 @@ impl SessionManager {
                 .get(batch_position + 1)
                 .and_then(|next| positions.get(next.first_item_id.as_str()).copied())
                 .unwrap_or(trunk_end);
+            let monologue = view.item_ids[batch_start.max(trunk_start)..batch_end]
+                .iter()
+                .filter_map(|id| by_id.get(id.as_str()))
+                .find_map(|item| match item {
+                    TimelineItem::AssistantMessage { text, .. } if !text.is_empty() => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                });
             let mut blobs = Vec::new();
             for id in &view.item_ids[batch_start.max(trunk_start)..batch_end] {
                 let Some(item) = by_id.get(id.as_str()) else {
@@ -552,6 +561,7 @@ impl SessionManager {
             }
             batches.push(RoundBatch {
                 summary: batch_summary.clone(),
+                monologue,
                 blobs,
             });
         }
@@ -3509,6 +3519,11 @@ mod tests {
             .expanded_trunk
             .expect("last trunk details are present");
         assert_eq!(trunk.batches[0].blobs.len(), 1);
+        assert_eq!(
+            trunk.batches[0].monologue.as_deref(),
+            Some("先读取配置。然后修改"),
+            "process narration belongs to the expanded batch rather than being reconstructed by the client"
+        );
         let reference = trunk.batches[0].blobs[0]
             .blob
             .clone()

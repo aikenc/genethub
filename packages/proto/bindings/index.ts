@@ -518,7 +518,12 @@ name: string | null, } } | { "type": "update.check" } | { "type": "update.downlo
  */
 paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } };
 
-export type RoundBatch = { summary: RoundBatchSummary, blobs: Array<BlobOverview>, };
+export type RoundBatch = { summary: RoundBatchSummary, 
+/**
+ * Full process narration for this batch. It belongs to the expanded trunk,
+ * not to the session narrative. A compact prefix remains in `summary.text`.
+ */
+monologue?: string, blobs: Array<BlobOverview>, };
 
 /**
  * A semantic group inside a trunk: one monologue and the work following it,
