@@ -1,5 +1,5 @@
 import type { AgentInfo, SequencedEvent, SessionSummary } from "@genehub/proto";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Client } from "../protocol/client";
 import { defaultAgent, useWorkbench } from "./store";
@@ -608,6 +608,165 @@ describe("renaming and deleting a conversation", () => {
     expect(useWorkbench.getState().sessions).toEqual([]);
     expect(useWorkbench.getState().tabs).toEqual([]);
     expect(useWorkbench.getState().activeSessionId).toBeNull();
+  });
+});
+
+/**
+ * A daemon answers one request per connection at a time and drops the whole
+ * connection once too many go unanswered. Both of the ways this store used to
+ * outrun it ended the same way: a turn cut off mid-flight, and a person told
+ * only that the outcome was unknown.
+ */
+describe("asking the machine about rounds", () => {
+  function counting() {
+    let inFlight = 0;
+    let peak = 0;
+    const waiting: (() => void)[] = [];
+    const client = {
+      call: async (request: { type: string; payload: { roundId?: string } }) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise<void>((resolve) => waiting.push(resolve));
+        inFlight -= 1;
+        if (request.type !== "round.trunk.list") return undefined;
+        return {
+          type: "roundLayer",
+          data: {
+            round: {
+              roundId: request.payload.roundId,
+              userItemId: "u1",
+              startedAtMs: 1,
+              endedAtMs: 2,
+              outcome: "completed",
+              trunkCount: 0,
+            },
+            trunks: [],
+          },
+        };
+      },
+    } as unknown as Client;
+    return {
+      client,
+      peak: () => peak,
+      // Answers everything, whether it arrived one at a time or all at once,
+      // so an unserialized store fails on the count rather than on a timeout.
+      settle: async () => {
+        for (let step = 0; step < 40; step += 1) {
+          while (waiting.length > 0) waiting.shift()?.();
+          await Promise.resolve();
+          await Promise.resolve();
+        }
+      },
+    };
+  }
+
+  it("reads one round at a time however many panels want one at once", async () => {
+    const { client, peak, settle } = counting();
+    useWorkbench.setState({ client, activeSessionId: "s1" });
+
+    const reads = ["r1", "r2", "r3", "r4", "r5", "r6"].map((round) =>
+      useWorkbench.getState().loadRound(round),
+    );
+    await settle();
+    await Promise.all(reads);
+
+    expect(peak()).toBe(1);
+  });
+
+  it("owes one more read after a burst, not one per event in it", async () => {
+    let onEvent: ((event: SequencedEvent) => void) | null = null;
+    const fire = (event: SequencedEvent) => onEvent?.(event);
+    let asked = 0;
+    const held: (() => void)[] = [];
+    let holding = true;
+    const client = {
+      subscribe: async (
+        _sessionId: string,
+        handlers: { onEvent: (event: SequencedEvent) => void },
+      ) => {
+        onEvent = handlers.onEvent;
+        return {
+          snapshot: { seq: 0, items: [], summary: SESSION },
+          replayed: [],
+          reset: false,
+        };
+      },
+      unsubscribe: async () => {},
+      call: async () => {
+        asked += 1;
+        if (holding) await new Promise<void>((resolve) => held.push(resolve));
+        return undefined;
+      },
+    } as unknown as Client;
+
+    vi.useFakeTimers();
+    try {
+      useWorkbench.setState({ client });
+      await useWorkbench.getState().selectSession("s1");
+
+      // A fast agent, with the machine still working on the first question.
+      for (let seq = 1; seq <= 40; seq += 1) {
+        fire({
+          seq,
+          event: {
+            type: "item",
+            turnId: "t1",
+            item: { type: "toolCall", id: `tool${seq}`, name: "shell", status: "ok" },
+          },
+        } as unknown as SequencedEvent);
+        await vi.advanceTimersByTimeAsync(300);
+      }
+
+      // It answers, and whatever was owed comes due. A store that kept one
+      // debt per event pays out a burst here — the very shape that filled the
+      // queue on the far side.
+      holding = false;
+      while (held.length > 0) held.shift()?.();
+      await vi.advanceTimersByTimeAsync(2000);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(asked).toBeLessThanOrEqual(3);
+  });
+});
+
+describe("returning after a disconnection", () => {
+  function reconnectable(close: { code: number; reason: string }) {
+    let listener: ((state: string) => void) | null = null;
+    const client = {
+      onStateChange: (fn: (state: string) => void) => {
+        listener = fn;
+      },
+      onNotice: () => {},
+      onUpdateDownload: () => {},
+      call: async () => undefined,
+      lastCloseReason: close,
+      failure: undefined,
+    } as unknown as Client;
+    return { client, go: (state: string) => listener?.(state) };
+  }
+
+  it("stops saying it is reconnecting once it has reconnected", async () => {
+    const { client, go } = reconnectable({ code: 1000, reason: "channel receive queue exceeded" });
+    await useWorkbench.getState().attach(client);
+
+    go("reconnecting");
+    expect(useWorkbench.getState().notice).toContain("正在重连");
+
+    go("ready");
+    expect(useWorkbench.getState().notice).toBeNull();
+  });
+
+  it("leaves anything said since the drop alone", async () => {
+    const { client, go } = reconnectable({ code: 1001, reason: "relay shutting down" });
+    await useWorkbench.getState().attach(client);
+
+    go("reconnecting");
+    useWorkbench.setState({ notice: "claude 启动失败：找不到可执行文件" });
+    go("ready");
+
+    expect(useWorkbench.getState().notice).toBe("claude 启动失败：找不到可执行文件");
   });
 });
 

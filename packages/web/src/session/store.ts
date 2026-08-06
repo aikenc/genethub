@@ -322,23 +322,69 @@ function markSessionRead(summary: SessionSummary): void {
   }
 }
 
-let roundRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+/** The reconnect sentence this store put on screen, while it is still true. */
+let reconnectNotice: string | null = null;
 
+let roundReads: Promise<unknown> = Promise.resolve();
+
+/**
+ * Runs round-layer reads one after another.
+ *
+ * Opening a session mounts one progress panel per round, and each asks for the
+ * layer it does not have — so a long conversation fired a request per round in
+ * a single tick. That buys nothing: a daemon answers one request per connection
+ * at a time, so the replies arrive in the same order either way. What it costs
+ * is the inbound queue on the far side, which is short by design and takes the
+ * whole connection down with it when it fills.
+ */
+function oneAtATime<T>(work: () => Promise<T>): Promise<T> {
+  const next = roundReads.then(work, work);
+  roundReads = next.catch(() => undefined);
+  return next;
+}
+
+let roundRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let roundRefreshInFlight: Promise<void> | null = null;
+let roundRefreshAgain = false;
+
+async function refreshRound(get: () => WorkbenchState): Promise<void> {
+  await get().loadRound("latest");
+  const round = Object.values(get().timeline.roundLayers)
+    .reverse()
+    .find((layer) => layer.round.outcome === "running")?.round;
+  if (!round) return;
+  const last = get().timeline.roundLayers[round.roundId]?.trunks.at(-1);
+  if (last) await get().loadTrunk(round.roundId, last.index);
+}
+
+/**
+ * Asks the daemon for the round layer again, at most one round trip at a time.
+ *
+ * The timer alone was not enough. A daemon serves one request per connection at
+ * a time, so under a fast agent each 250ms window started another two requests
+ * on top of ones still unanswered, and the queue on the far side reached the
+ * depth at which it drops the connection — the very moment the person most
+ * wants to be watching. Only the fact that another refresh is owed is kept, not
+ * how many: the layer is a current value, and one later read tells us all that
+ * any number of skipped reads would have.
+ */
 function scheduleRoundRefresh(get: () => WorkbenchState): void {
+  if (roundRefreshInFlight) {
+    roundRefreshAgain = true;
+    return;
+  }
   if (roundRefreshTimer) clearTimeout(roundRefreshTimer);
   roundRefreshTimer = setTimeout(() => {
     roundRefreshTimer = null;
-    void get()
-      .loadRound("latest")
-      .then(() => {
-        const round = Object.values(get().timeline.roundLayers)
-          .reverse()
-          .find((layer) => layer.round.outcome === "running")?.round;
-        if (!round) return;
-        const trunks = get().timeline.roundLayers[round.roundId]?.trunks;
-        const last = trunks?.at(-1);
-        if (last) return get().loadTrunk(round.roundId, last.index);
+    const refresh = refreshRound(get)
+      .catch(() => undefined)
+      .finally(() => {
+        roundRefreshInFlight = null;
+        if (!roundRefreshAgain) return;
+        roundRefreshAgain = false;
+        scheduleRoundRefresh(get);
       });
+    roundRefreshInFlight = refresh;
   }, 250);
 }
 
@@ -389,8 +435,18 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       if (connection === "reconnecting") {
         const closed = client.lastCloseReason;
         if (closed?.reason) {
-          set({ notice: `连接被断开（${closed.code ?? "?"} ${closed.reason}），正在重连` });
+          reconnectNotice = `连接被断开（${closed.code ?? "?"} ${closed.reason}），正在重连`;
+          set({ notice: reconnectNotice });
         }
+      }
+      // Once the socket is back, a banner still saying "正在重连" is no longer
+      // a report of anything — it is the reason someone writes in to say the
+      // app is stuck reconnecting when it reconnected a minute ago. Only this
+      // line's own sentence is withdrawn; anything said since stands.
+      if (connection === "ready" && reconnectNotice) {
+        const stale = reconnectNotice;
+        reconnectNotice = null;
+        set((state) => (state.notice === stale ? { notice: null } : {}));
       }
     });
     client.onNotice((_level, message) => set({ notice: message }));
@@ -623,19 +679,21 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   async loadRound(roundId) {
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
-    const reply = await require_(get().client).call({
-      type: "round.trunk.list",
-      payload: { sessionId, roundId, cursor: null, limit: 20 },
+    return oneAtATime(async () => {
+      const reply = await require_(get().client).call({
+        type: "round.trunk.list",
+        payload: { sessionId, roundId, cursor: null, limit: 20 },
+      });
+      if (reply?.type !== "roundLayer") return;
+      const layer = reply.data;
+      patchTimeline(sessionId, set, (timeline) => ({
+        rounds: [
+          ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),
+          layer.round,
+        ],
+        roundLayers: { ...timeline.roundLayers, [layer.round.roundId]: layer },
+      }));
     });
-    if (reply?.type !== "roundLayer") return;
-    const layer = reply.data;
-    patchTimeline(sessionId, set, (timeline) => ({
-      rounds: [
-        ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),
-        layer.round,
-      ],
-      roundLayers: { ...timeline.roundLayers, [layer.round.roundId]: layer },
-    }));
   },
 
   async loadOlderTrunks(roundId) {

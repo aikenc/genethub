@@ -18,8 +18,16 @@ use crate::router::{self, SideEffect};
 use crate::state::Shared;
 use crate::transport::uplink::Admission;
 
-/// A slow or hostile peer must not turn inbound work into an unbounded heap.
-pub const SESSION_QUEUE_CAPACITY: usize = 4;
+/// How many unanswered requests one connection may have waiting.
+///
+/// Requests are served one at a time, so anything a client pipelines lands
+/// here. Four was too few to be about safety and enough to be about ordinary
+/// use: a workbench that asks for several rounds at once, or asks again while
+/// an answer is still coming, hit it and lost the connection — mid-turn, with
+/// no way to know whether what it had already sent took effect. The bound that
+/// actually protects memory is the byte semaphore beside it, which is why the
+/// outbound direction has long been this deep for the same reason.
+pub const SESSION_QUEUE_CAPACITY: usize = 256;
 /// Legitimate agent turns emit several state transitions in one scheduler
 /// slice. Keep enough frame slots for that burst while the byte semaphore below
 /// remains the authoritative memory bound for a genuinely slow peer.
