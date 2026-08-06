@@ -233,8 +233,17 @@ pub fn sessions_dir(workspace_root: &Path) -> PathBuf {
 const HOME_DIR_NAME: &str = ".genethub";
 
 /// The file whose kernel lock decides which build may write a workspace's
-/// sessions. Its contents name the holder, for the message, and nothing else.
+/// sessions.
+///
+/// Kept empty. A Windows exclusive lock blocks reads as well as writes, so
+/// anything stored here would be unreadable by precisely the process that
+/// needs it: the one that just lost the lock.
 const OWNER_LOCK: &str = "owner.lock";
+
+/// Who holds [`OWNER_LOCK`], in plain text, so the build that loses can name
+/// the one to close instead of saying "something else". Diagnostics only —
+/// the kernel lock decides, and this file is merely the label on it.
+const OWNER_NAME: &str = "owner";
 
 /// A registered workspace: where it is, and whether this daemon may write it.
 struct Home {
@@ -348,7 +357,7 @@ impl WorkspaceHomes {
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => {}
             Err(error) if crate::lifecycle::lock_contended(&error) => {
-                let holder = fs::read_to_string(&path)
+                let holder = fs::read_to_string(home_dir.join(OWNER_NAME))
                     .ok()
                     .map(|text| text.trim().to_string())
                     .filter(|text| !text.is_empty())
@@ -359,12 +368,8 @@ impl WorkspaceHomes {
             }
             Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
         }
-        // Diagnostics only, so the loser has a name to put in its message. The
-        // kernel lock is what decides; these bytes decide nothing.
         let stamp = format!("{} (pid {})\n", crate::channel::PRODUCT, std::process::id());
-        let _ = file
-            .set_len(0)
-            .and_then(|()| (&file).write_all(stamp.as_bytes()));
+        let _ = fs::write(home_dir.join(OWNER_NAME), stamp);
         home.lock = Some(file);
         Ok(())
     }

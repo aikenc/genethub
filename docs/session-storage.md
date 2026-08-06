@@ -47,7 +47,8 @@
 ## 3. 布局
 
 ```text
-<workspace>/.genethub/owner.lock              哪个 GeneHub 正在写这个工作目录
+<workspace>/.genethub/owner.lock              写入权的内核锁，内容始终为空
+<workspace>/.genethub/owner                   持锁者的名字，只用于提示
 <workspace>/.genethub/sessions/<session-id>/
   meta.json                        会话元数据，含数据格式版本号
   chat.jsonl                       会话层：叙事行 + 每个 round 一行折叠态
@@ -154,11 +155,13 @@ pub struct BlobRef {
 - **只读不升级。** 只有写操作会把 `format` 盖成本机版本，而且是在 `save_meta` 里统一盖的，不靠每个调用点记得。旧版本读一遍新会话不会改变任何东西。
 - **什么时候该 +1：** 只有当旧版本读了会**读错**的时候。加字段不算——serde 会忽略不认识的字段，旧版本照常工作，为此升版号纯属把人白白挡在外面。每次 +1 对新版本写过的每个会话都是单向门，这个分量正合适。
 
-**写入互斥用 `<work>/.genethub/owner.lock`。** 两个 daemon 同时往一个 `chat.jsonl` 里追加 round，谁也说不清结果。所以第一次写入时抢一把内核文件锁（`fs2::try_lock_exclusive`），拿到才写；文件内容写的是持有者的产品名和 pid，只用于凑出一句能读的话。
+**写入互斥用 `<work>/.genethub/owner.lock`。** 两个 daemon 同时往一个 `chat.jsonl` 里追加 round，谁也说不清结果。所以第一次写入时抢一把内核文件锁（`fs2::try_lock_exclusive`），拿到才写。
 
 - **在第一次写入时抢，不在注册工作区时抢。** 否则用户随手打开一个目录就会在里面留下 `.genethub/`。
 - **抢不到只影响写，不影响读。** 列表照列、会话照开，写的时候才报「GeneHub Beta 正占用这个项目的会话」。
+- **持有者的名字写在旁边的 `owner` 里，锁文件本身永远是空的。** Windows 的排他锁连读一起挡，写在锁文件里的名字恰恰是需要读它的那个进程读不到。这个文件只用于凑出一句能读的话，判定始终是内核锁。
 - **不需要清理陈旧锁。** 内核锁在进程崩溃时也会释放，而且每次写入都会重试一次，对方一退出这边立刻恢复，不用重启。
+- **判断「锁被占用」不能只看 `ErrorKind::WouldBlock`。** Windows 报的是 `ERROR_LOCK_VIOLATION`，不映射到任何 kind，只看 kind 会把「别人拿着」读成「这个文件坏了」。判定收在 `lifecycle::lock_contended` 一处。
 
 **resume 句柄可能失效，失效不等于会话报废。** `meta.json` 里的 `persist` 指向的是 agent CLI 自己的线程库（`~/.codex/` 之类），不在会话目录里：CLI 可能自己清过，项目也可能被复制到一台从没有过那些线程的机器上。这时候硬报错等于把这段对话永久锁死。做法是**退回新开一个线程**，同时往时间线里写一条明确的话说「它不再记得上面的内容」——这是用户唯一不能靠猜的事。失败的句柄随即清掉，不让后面每次启动都重付一遍这个发现成本。
 
