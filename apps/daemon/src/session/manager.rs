@@ -20,9 +20,9 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
-use super::store::{self, now_ms, title_from, SessionMeta, Store};
+use super::store::{self, now_ms, title_from, SessionMeta, Store, SESSION_FORMAT};
 use crate::adapter::registry::Registry;
-use crate::adapter::{AgentSession, PromptInput, ProviderMap, SessionConfig};
+use crate::adapter::{AgentSession, PersistHandle, PromptInput, ProviderMap, SessionConfig};
 
 const BROADCAST_CAPACITY: usize = 1024;
 
@@ -188,6 +188,7 @@ impl SessionManager {
             effort_id: None,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
+            format: SESSION_FORMAT,
             agent_id: agent_id.to_string(),
             title,
             cwd,
@@ -269,6 +270,7 @@ impl SessionManager {
         let meta = SessionMeta {
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: source_meta.workspace_id,
+            format: SESSION_FORMAT,
             agent_id: source_meta.agent_id,
             title,
             cwd: source_meta.cwd,
@@ -308,6 +310,16 @@ impl SessionManager {
             .into_iter()
             .find(|meta| meta.id == session_id)
             .ok_or_else(|| anyhow!("no such session: {session_id}"))?;
+        // Reading a layout this build predates would not give a partial view,
+        // it would give a wrong one, and any reply written back would corrupt
+        // the session for the build that can read it.
+        if !meta.openable() {
+            return Err(anyhow!(
+                "session {session_id} was written in format {} by a newer version of GeneHub; \
+                 this one reads up to format {SESSION_FORMAT}",
+                meta.format
+            ));
+        }
         let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
         let live = Arc::new(Live::new(meta, self.store.clone()));
         *live.items.lock().await = chat.items;
@@ -800,28 +812,74 @@ impl SessionManager {
             return Ok(());
         }
 
-        let scratch = self.store.scratch_dir(&meta.workspace_id, &meta.id)?;
-        std::fs::create_dir_all(&scratch)?;
+        let scratch = self.store.make_scratch_dir(&meta.workspace_id, &meta.id)?;
+        let config = |resume: Option<PersistHandle>| SessionConfig {
+            session_id: meta.id.clone(),
+            cwd: meta.cwd.clone(),
+            model_id: meta.model_id.clone(),
+            mode_id: mode_override.clone().or_else(|| meta.mode_id.clone()),
+            effort_id: meta.effort_id.clone(),
+            scratch_dir: scratch.clone(),
+            providers: providers.clone(),
+            resume,
+        };
 
-        let session = adapter
-            .start(SessionConfig {
-                session_id: meta.id.clone(),
-                cwd: meta.cwd.clone(),
-                model_id: meta.model_id.clone(),
-                mode_id: mode_override.or_else(|| meta.mode_id.clone()),
-                effort_id: meta.effort_id.clone(),
-                scratch_dir: scratch,
-                providers: providers.clone(),
-                resume: meta.persist.clone(),
-            })
-            .await
-            .with_context(|| format!("starting the {} agent", meta.agent_id))?;
+        // A resume handle points at state the session directory does not own —
+        // the agent CLI's own thread store, under the user's home. That store
+        // can be pruned by the CLI, wiped by the user, or simply absent on the
+        // machine the project was copied to. Refusing to start would strand the
+        // conversation for good, so a fresh thread is started instead and the
+        // timeline says plainly that the agent no longer remembers what is
+        // above — which is the one thing the user must not have to guess.
+        let mut abandoned_handle = false;
+        let session = match adapter.start(config(meta.persist.clone())).await {
+            Ok(session) => session,
+            Err(error) if meta.persist.is_some() => {
+                abandoned_handle = true;
+                tracing::warn!(
+                    agent = %meta.agent_id,
+                    session = %meta.id,
+                    %error,
+                    "could not resume the agent's thread, starting a fresh one"
+                );
+                let session = adapter
+                    .start(config(None))
+                    .await
+                    .with_context(|| format!("starting the {} agent", meta.agent_id))?;
+                let notice = SessionEvent::Item {
+                    // Belongs to the session, not to a turn: nothing has been
+                    // sent yet when the agent is started.
+                    turn_id: String::new(),
+                    item: TimelineItem::Error {
+                        id: format!("resume-lost-{}", now_ms()),
+                        message: format!(
+                            "{} 找不到这个会话之前的线程了，已新开一个继续。上面的内容它不再记得，需要的话请重新说明。",
+                            adapter.label()
+                        ),
+                    },
+                };
+                apply(live, &notice).await;
+                live.publish(notice).await;
+                session
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("starting the {} agent", meta.agent_id))
+            }
+        };
 
         let receiver = session.events();
-        if let Some(handle) = session.persistence() {
+        // Written back when the agent produced a handle, and cleared when this
+        // start had to abandon one that no longer resolves — otherwise every
+        // later start would pay for the same discovery. Not touched otherwise:
+        // several agents only learn their thread id after the first turn, and
+        // a `None` there means "not yet", not "gone".
+        let handle = session.persistence();
+        if handle.is_some() || abandoned_handle {
             let mut meta = live.meta.lock().await;
-            meta.persist = Some(handle);
-            self.store.save_meta(&meta)?;
+            if meta.persist != handle {
+                meta.persist = handle;
+                self.store.save_meta(&meta)?;
+            }
         }
         *live.agent.lock().await = Some(session);
 
@@ -2216,6 +2274,7 @@ mod tests {
             effort_id: None,
             id: "s1".into(),
             workspace_id: "w1".into(),
+            format: SESSION_FORMAT,
             agent_id: "genet".into(),
             title: None,
             cwd: PathBuf::from("/tmp"),
@@ -2252,6 +2311,138 @@ mod tests {
             Arc::new(Registry::new(&std::collections::BTreeMap::new())),
             16,
         )
+    }
+
+    /// An agent whose past threads are gone: it starts fresh, and refuses to
+    /// resume anything. Stands in for a CLI that pruned its own thread store,
+    /// or a project copied to a machine that never had those threads.
+    struct Amnesiac;
+
+    struct Blank(tokio::sync::broadcast::Sender<SessionEvent>);
+
+    #[async_trait::async_trait]
+    impl crate::adapter::AgentAdapter for Amnesiac {
+        fn id(&self) -> &str {
+            "amnesiac"
+        }
+
+        fn label(&self) -> &str {
+            "Amnesiac"
+        }
+
+        fn capabilities(&self) -> genehub_proto::Capabilities {
+            genehub_proto::Capabilities {
+                interrupt: false,
+                set_model: false,
+                set_effort: false,
+                set_mode: false,
+                permissions: false,
+                resume: true,
+                fork: false,
+                attachments: false,
+            }
+        }
+
+        async fn probe(&self) -> genehub_proto::ProbeState {
+            genehub_proto::ProbeState::Ready
+        }
+
+        async fn catalog(&self, _providers: &ProviderMap) -> genehub_proto::Catalog {
+            genehub_proto::Catalog {
+                models: Vec::new(),
+                modes: Vec::new(),
+                commands: Vec::new(),
+                default_model: None,
+                default_mode: None,
+                default_effort: None,
+            }
+        }
+
+        async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
+            if config.resume.is_some() {
+                return Err(anyhow!("no such thread"));
+            }
+            Ok(Box::new(Blank(tokio::sync::broadcast::channel(8).0)))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentSession for Blank {
+        fn events(&self) -> tokio::sync::broadcast::Receiver<SessionEvent> {
+            self.0.subscribe()
+        }
+
+        async fn send(&self, _input: PromptInput) -> Result<String> {
+            Ok("t1".into())
+        }
+
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_model(&self, _model_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_mode(&self, _mode_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn respond_permission(
+            &self,
+            _request_id: &str,
+            _outcome: genehub_proto::PermissionOutcome,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_cannot_resume_starts_over_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(Amnesiac)])),
+            16,
+        );
+        let stale = PersistHandle {
+            agent_id: "amnesiac".into(),
+            value: serde_json::json!({ "threadId": "gone" }),
+        };
+        sessions
+            .store
+            .save_meta(&SessionMeta {
+                agent_id: "amnesiac".into(),
+                persist: Some(stale),
+                ..meta()
+            })
+            .unwrap();
+
+        let live = sessions.live("s1").await.unwrap();
+        sessions
+            .ensure_started(&live, &ProviderMap::new())
+            .await
+            .expect("a conversation whose thread is gone is stranded for good");
+
+        let told = live
+            .items
+            .lock()
+            .await
+            .iter()
+            .any(|item| matches!(item, TimelineItem::Error { message, .. } if message.contains("Amnesiac")));
+        assert!(
+            told,
+            "the agent answers with no memory of the conversation above and nothing says why"
+        );
+        assert_eq!(
+            sessions.store.load_meta("w1", "s1").unwrap().persist,
+            None,
+            "a handle that just failed to resume names a thread that is gone"
+        );
     }
 
     /// A `Live` with its own throwaway store. The directory handle comes back
@@ -4114,5 +4305,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn another_build_of_genehub_finds_the_sessions_in_a_shared_project() {
+        let workspace = tempfile::tempdir().unwrap();
+        let beta = manager(workspace.path());
+        beta.store.save_meta(&meta()).unwrap();
+        beta.store
+            .append_chat_items("w1", "s1", &[item("a", "hi")])
+            .unwrap();
+
+        let written = std::fs::read_to_string(
+            workspace
+                .path()
+                .join(".genethub/sessions/s1")
+                .join("meta.json"),
+        )
+        .unwrap();
+        assert!(
+            !written.contains("workspaceId"),
+            "an id minted by this installation means nothing to the next one: {written}"
+        );
+        assert!(
+            written.contains(&format!("\"format\": {SESSION_FORMAT}")),
+            "nothing says what shape this was written in: {written}"
+        );
+
+        // The other build knows the same folder under an id of its own: the id
+        // is minted per installation, the folder is the durable fact.
+        let release = SessionManager::new(
+            {
+                let homes = crate::session::WorkspaceHomes::default();
+                homes.attach("w_other", workspace.path());
+                Store::new(homes)
+            },
+            Arc::new(Registry::new(&std::collections::BTreeMap::new())),
+            16,
+        );
+
+        let listed = release.list(Some("w_other"), false).await.unwrap();
+        assert_eq!(
+            listed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["s1"],
+            "a conversation stored in the project was invisible to the other build"
+        );
+        assert_eq!(
+            release.snapshot("s1").await.unwrap().items.len(),
+            1,
+            "the other build listed the conversation but could not read it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_from_a_newer_build_is_listed_but_refused() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = manager(workspace.path());
+        sessions.store.save_meta(&meta()).unwrap();
+
+        let meta_path = workspace
+            .path()
+            .join(".genethub/sessions/s1")
+            .join("meta.json");
+        let written = SESSION_FORMAT + 1;
+        std::fs::write(
+            &meta_path,
+            format!(r#"{{"format":{written},"title":"来自未来","whatIsThis":[1,2]}}"#),
+        )
+        .unwrap();
+
+        let listed = sessions.list(None, false).await.unwrap();
+        let [session] = listed.as_slice() else {
+            panic!("a conversation in the user's own folder vanished from the list: {listed:?}");
+        };
+        assert_eq!(session.title.as_deref(), Some("来自未来"));
+        assert_eq!(
+            session.unsupported,
+            Some(genehub_proto::UnsupportedFormat {
+                written,
+                supported: SESSION_FORMAT,
+            }),
+            "the row gives the user no way to tell why it will not open"
+        );
+
+        let refused = sessions.snapshot("s1").await.unwrap_err().to_string();
+        assert!(
+            refused.contains(&written.to_string()),
+            "reading a layout this build predates would show the wrong thing: {refused}"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_one_build_at_a_time_writes_a_project() {
+        let workspace = tempfile::tempdir().unwrap();
+        let holder = manager(workspace.path());
+        holder.store.save_meta(&meta()).unwrap();
+
+        let other = manager(workspace.path());
+        let refused = other.store.save_meta(&meta()).unwrap_err().to_string();
+        assert!(
+            refused.contains(crate::channel::PRODUCT),
+            "the second build must name who is holding the project: {refused}"
+        );
+        assert_eq!(
+            other.list(None, false).await.unwrap().len(),
+            1,
+            "losing the write lock must not hide the conversations"
+        );
+
+        drop(holder);
+        // Claiming is retried on every write, so writing resumes on its own
+        // rather than at the next restart. Given a moment, because a child
+        // process spawned anywhere in this test binary briefly inherits the
+        // descriptor the departing build was holding.
+        let mut resumed = other.store.save_meta(&meta());
+        for _ in 0..40 {
+            if resumed.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            resumed = other.store.save_meta(&meta());
+        }
+        resumed.expect("the second build had to be restarted to write again");
     }
 }

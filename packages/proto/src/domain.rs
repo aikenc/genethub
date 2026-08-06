@@ -157,6 +157,24 @@ pub struct SessionSummary {
     #[ts(type = "number")]
     pub updated_at_ms: i64,
     pub archived: bool,
+    /// Set when this session cannot be opened here. It is still listed: the
+    /// conversation is in the user's own project folder, and an unexplained
+    /// absence is worse than a row that says why it is out of reach.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported: Option<UnsupportedFormat>,
+}
+
+/// A session written by a newer build than this one.
+///
+/// Both numbers travel so a client can tell the user which side is behind
+/// without knowing anything about storage layouts itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct UnsupportedFormat {
+    pub written: u32,
+    pub supported: u32,
 }
 
 /// Everything a client needs to render a session from scratch.

@@ -85,6 +85,16 @@ impl Registry {
         }
     }
 
+    /// A registry of exactly these adapters, for tests that need to drive the
+    /// session manager without a real agent on the machine.
+    #[cfg(test)]
+    pub(crate) fn of(adapters: Vec<SharedAdapter>) -> Self {
+        Registry {
+            adapters,
+            cache: RwLock::new(None),
+        }
+    }
+
     pub fn get(&self, id: &str) -> Option<SharedAdapter> {
         self.adapters
             .iter()

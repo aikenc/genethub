@@ -686,6 +686,9 @@ function SessionRow({
 } & RowActions) {
   const [menu, setMenu] = useState<"shut" | "open" | "confirming">("shut");
   const [editing, setEditing] = useState(false);
+  // Written by a newer build into this project's folder. Listed, so the
+  // conversation does not appear to have vanished, but not openable here.
+  const unsupported = session.unsupported;
 
   if (editing) {
     return (
@@ -706,14 +709,24 @@ function SessionRow({
     <li className="group relative flex items-center">
       <button
         type="button"
+        disabled={Boolean(unsupported)}
+        title={unsupported ? whyUnsupported(unsupported) : undefined}
         className={`flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-left text-sm md:min-h-0 md:rounded-md md:py-1.5 md:text-xs ${
-          active ? "bg-raised text-fg" : "text-muted hover:bg-sidebar-hover hover:text-fg"
+          unsupported
+            ? "cursor-not-allowed text-faint"
+            : active
+              ? "bg-raised text-fg"
+              : "text-muted hover:bg-sidebar-hover hover:text-fg"
         }`}
         onClick={() => onPickSession(session.id)}
       >
         <SessionStateIcon session={session} />
         <span className="min-w-0 flex-1 truncate">{title(session)}</span>
-        {project ? <span className="shrink-0 text-[10px] text-faint">{project}</span> : null}
+        {unsupported ? (
+          <span className="shrink-0 text-[10px] text-faint">需升级</span>
+        ) : project ? (
+          <span className="shrink-0 text-[10px] text-faint">{project}</span>
+        ) : null}
       </button>
 
       <button
@@ -894,6 +907,16 @@ function SessionStateIcon({ session }: { session: ListedSession }) {
 
 /** The daemon names a session from its first message; until then this stands in. */
 const title = (session: SessionSummary) => session.title || "新会话";
+
+/**
+ * Why a conversation sitting in this project cannot be opened by this build.
+ *
+ * Sessions are stored with the code, so a beta and a release share them. The
+ * beta may write a shape the release does not know how to read, and reading it
+ * anyway would show the wrong thing rather than less.
+ */
+const whyUnsupported = (format: NonNullable<SessionSummary["unsupported"]>) =>
+  `这个会话由更新版本的 GeneHub 写入（数据格式 ${format.written}，当前版本读到 ${format.supported}），升级后才能打开。`;
 
 type Grouping = "project" | "status";
 

@@ -610,6 +610,7 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
             archived: false,
+            unsupported: None,
         };
         assert_eq!(
             sessions(Reply::Sessions(vec![summary.clone()])).unwrap(),

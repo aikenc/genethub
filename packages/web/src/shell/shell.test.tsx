@@ -126,6 +126,24 @@ describe("the left edge", () => {
     expect(useWorkbench.getState().selectSession).toHaveBeenCalledWith("s3");
   });
 
+  it("shows a session a newer build wrote, and refuses to pretend it can open it", async () => {
+    // Sessions live in the project folder, so a beta and a release share them.
+    // A conversation the release cannot read must not simply disappear from
+    // the list — the user would have nowhere to ask where it went.
+    useWorkbench.setState({
+      sessions: [
+        { ...session("s9", "w1", "在 beta 里聊的"), unsupported: { written: 5, supported: 4 } },
+      ],
+    });
+    const projects = projectRows(sidebar());
+
+    const row = within(projects[0]!).getByRole("button", { name: /在 beta 里聊的 需升级/ });
+    expect(row).toBeDisabled();
+    expect(row).toHaveAccessibleDescription(/数据格式 5/);
+    await userEvent.click(row);
+    expect(useWorkbench.getState().selectSession).not.toHaveBeenCalled();
+  });
+
   it("counts what is running, and only where something is", () => {
     const projects = projectRows(sidebar());
 

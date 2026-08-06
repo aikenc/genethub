@@ -610,7 +610,13 @@ export type SessionSummary = { id: string, workspaceId: string, agentId: string,
  * from the first thing they said. Clients supply their own placeholder;
  * the daemon has no business picking a word in the user's language.
  */
-title?: string, status: SessionStatus, modelId?: string, modeId?: string, effortId?: string, createdAtMs: number, updatedAtMs: number, archived: boolean, };
+title?: string, status: SessionStatus, modelId?: string, modeId?: string, effortId?: string, createdAtMs: number, updatedAtMs: number, archived: boolean, 
+/**
+ * Set when this session cannot be opened here. It is still listed: the
+ * conversation is in the user's own project folder, and an unexplained
+ * absence is worse than a row that says why it is out of reach.
+ */
+unsupported?: UnsupportedFormat, };
 
 /**
  * The machine-level settings a client may see and change.
@@ -677,6 +683,14 @@ export type TurnStats = { turnId: string, outcome: TurnOutcome, startedAtMs: num
  * Opaque Agent checkpoint used only when that Agent supports true forks.
  */
 forkCheckpoint?: string, };
+
+/**
+ * A session written by a newer build than this one.
+ *
+ * Both numbers travel so a client can tell the user which side is behind
+ * without knowing anything about storage layouts itself.
+ */
+export type UnsupportedFormat = { written: number, supported: number, };
 
 /**
  * How far the machine has got fetching the installer it was asked to fetch.

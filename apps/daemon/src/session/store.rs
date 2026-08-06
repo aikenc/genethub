@@ -27,7 +27,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     BlobKind, BlobOverview, BlobPayload, BlobRef, PermissionRequest, RoundBatch, RoundBatchSummary,
-    RoundTrunk, RoundTrunkSummary, SessionStatus, SessionSummary, TimelineItem,
+    RoundTrunk, RoundTrunkSummary, SessionStatus, SessionSummary, TimelineItem, UnsupportedFormat,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,11 +43,66 @@ const BLOB_ID_CHARS: usize = 24;
 /// a client-supplied length. No single settled item legitimately reaches this.
 const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 
+/// The shape this build writes a session in.
+///
+/// Sessions live in the user's project, so a beta, a release and a dev build
+/// all read and write the same directories. That only stays safe if a build can
+/// tell, before touching anything, whether the session in front of it was
+/// written by something it does not understand.
+///
+/// Bump this only when an older build reading the result would be *wrong*, not
+/// merely incomplete. Adding a field does not qualify: serde ignores what it
+/// does not know, so an older build keeps working and a bump would lock it out
+/// for nothing. Every bump is one-way for every session the new build writes
+/// to, which is exactly the weight it should carry.
+///
+/// 4 — the path-as-index layout: `chat.jsonl`, `rounds/`, `blobs/`.
+pub const SESSION_FORMAT: u32 = 4;
+
+/// What a `meta.json` from before versioning is: the layout numbered 4, which
+/// is the only one that has ever been written into a workspace.
+fn format_before_versions() -> u32 {
+    4
+}
+
+/// The part of a `meta.json` whose shape can never change.
+///
+/// Read on its own, ahead of the rest, because a version a build can only
+/// discover by successfully parsing the whole file is no version check at all —
+/// the case it exists for is precisely the one where the rest of the file has
+/// changed. It carries only what is needed to say "this conversation is here,
+/// and I cannot open it": the version that decides that, plus enough to name
+/// the row so the user can see what they are being kept out of.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MetaHeader {
+    #[serde(default = "format_before_versions")]
+    format: u32,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    created_at_ms: i64,
+    #[serde(default)]
+    updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
     pub id: String,
+    /// Which workspace this conversation belongs to.
+    ///
+    /// Derived from where the session was found, never stored. The id is a
+    /// random uuid minted per installation, so the one a beta build wrote means
+    /// nothing to a release build reading the same folder; the session sitting
+    /// inside the project it is about is the fact that survives both.
+    #[serde(default, skip)]
     pub workspace_id: String,
+    /// The layout this session is stored in, taken from the file's frozen
+    /// header rather than from this field, and always written as this build's
+    /// [`SESSION_FORMAT`] — see [`Store::save_meta`].
+    #[serde(default = "format_before_versions", skip_deserializing)]
+    pub format: u32,
     pub agent_id: String,
     /// `None` until it has been named. Metas written before this was optional
     /// read back as `Some`, which is the right answer for them.
@@ -73,6 +128,36 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
+    /// A session written by a build from the future, described from its
+    /// location and its file's frozen header alone.
+    ///
+    /// Nothing else in the file is trusted, because by definition this build
+    /// does not know what the rest of it means.
+    fn unopenable(id: String, workspace_id: String, cwd: PathBuf, header: MetaHeader) -> Self {
+        SessionMeta {
+            id,
+            workspace_id,
+            format: header.format,
+            agent_id: String::new(),
+            title: header.title,
+            cwd,
+            model_id: None,
+            mode_id: None,
+            effort_id: None,
+            created_at_ms: header.created_at_ms,
+            updated_at_ms: header.updated_at_ms,
+            archived: false,
+            persist: None,
+            pending_permission: None,
+        }
+    }
+
+    /// Whether this build understands the session's layout well enough to read
+    /// it, let alone add to it.
+    pub fn openable(&self) -> bool {
+        self.format <= SESSION_FORMAT
+    }
+
     pub fn summary(&self, status: SessionStatus) -> SessionSummary {
         SessionSummary {
             id: self.id.clone(),
@@ -86,6 +171,10 @@ impl SessionMeta {
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
             archived: self.archived,
+            unsupported: (!self.openable()).then_some(UnsupportedFormat {
+                written: self.format,
+                supported: SESSION_FORMAT,
+            }),
         }
     }
 }
@@ -143,6 +232,19 @@ pub fn sessions_dir(workspace_root: &Path) -> PathBuf {
 /// The per-workspace directory GeneHub owns inside the user's own project.
 const HOME_DIR_NAME: &str = ".genethub";
 
+/// The file whose kernel lock decides which build may write a workspace's
+/// sessions. Its contents name the holder, for the message, and nothing else.
+const OWNER_LOCK: &str = "owner.lock";
+
+/// A registered workspace: where it is, and whether this daemon may write it.
+struct Home {
+    root: PathBuf,
+    /// The workspace's write lock while this daemon holds it. Dropping the
+    /// handle releases it, so it lives exactly as long as the entry does, and
+    /// a crash releases it too — the kernel holds it, not a file's contents.
+    lock: Option<File>,
+}
+
 /// Which directory on disk belongs to each workspace id.
 ///
 /// A conversation is about a body of code, so it is kept with that code rather
@@ -153,25 +255,39 @@ const HOME_DIR_NAME: &str = ".genethub";
 /// which is the honest answer, not a path in some fallback directory.
 #[derive(Clone, Default)]
 pub struct WorkspaceHomes {
-    roots: Arc<RwLock<BTreeMap<String, PathBuf>>>,
+    roots: Arc<RwLock<BTreeMap<String, Home>>>,
 }
 
 impl WorkspaceHomes {
     pub fn attach(&self, workspace_id: &str, root: &Path) {
-        if let Ok(mut roots) = self.roots.write() {
-            roots.insert(workspace_id.to_string(), root.to_path_buf());
+        let Ok(mut roots) = self.roots.write() else {
+            return;
+        };
+        match roots.get_mut(workspace_id) {
+            // Re-registering the same folder must not drop the write lock the
+            // daemon is holding for it.
+            Some(home) if home.root == root => {}
+            Some(home) => *home = Home::at(root),
+            None => {
+                roots.insert(workspace_id.to_string(), Home::at(root));
+            }
         }
     }
 
-    fn home_dir(&self, workspace_id: &str) -> Result<PathBuf> {
+    /// Where a workspace lives on disk.
+    pub fn root(&self, workspace_id: &str) -> Result<PathBuf> {
         let roots = self
             .roots
             .read()
             .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
         roots
             .get(workspace_id)
-            .map(|root| root.join(HOME_DIR_NAME))
+            .map(|home| home.root.clone())
             .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))
+    }
+
+    fn home_dir(&self, workspace_id: &str) -> Result<PathBuf> {
+        Ok(self.root(workspace_id)?.join(HOME_DIR_NAME))
     }
 
     fn sessions_dir(&self, workspace_id: &str) -> Result<PathBuf> {
@@ -179,11 +295,87 @@ impl WorkspaceHomes {
     }
 
     /// Every registered workspace's sessions directory, in id order.
-    fn all_sessions_dirs(&self) -> Vec<PathBuf> {
+    fn all_sessions_dirs(&self) -> Vec<(String, PathBuf)> {
         let Ok(roots) = self.roots.read() else {
             return Vec::new();
         };
-        roots.values().map(|root| sessions_dir(root)).collect()
+        roots
+            .iter()
+            .map(|(id, home)| (id.clone(), sessions_dir(&home.root)))
+            .collect()
+    }
+
+    /// Whether this daemon already owns the workspace's write lock.
+    fn holds(&self, workspace_id: &str) -> bool {
+        self.roots.read().is_ok_and(|roots| {
+            roots
+                .get(workspace_id)
+                .is_some_and(|home| home.lock.is_some())
+        })
+    }
+
+    /// Takes the workspace's write lock, or names who is holding it.
+    ///
+    /// Sessions live in the project, so a beta and a release pointed at the
+    /// same folder are two processes over one set of files. Both may read;
+    /// only one may write, and the one that loses says so instead of
+    /// interleaving its rounds into the other's `chat.jsonl`.
+    ///
+    /// Claimed on the first write rather than when the workspace is
+    /// registered, because merely opening a folder must not leave a
+    /// `.genethub` behind in it. Re-attempted while unheld, so the loser
+    /// starts working the moment the other build quits — no restart, no
+    /// stale-lock cleanup, since the kernel drops it even on a crash.
+    fn claim(&self, workspace_id: &str, home_dir: &Path) -> Result<()> {
+        let mut roots = self
+            .roots
+            .write()
+            .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
+        let home = roots
+            .get_mut(workspace_id)
+            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
+        if home.lock.is_some() {
+            return Ok(());
+        }
+        let path = home_dir.join(OWNER_LOCK);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let holder = fs::read_to_string(&path)
+                    .ok()
+                    .map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| "another GeneHub".to_string());
+                return Err(anyhow!(
+                    "{holder} has this project's sessions open, so this one can only read them"
+                ));
+            }
+            Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
+        }
+        // Diagnostics only, so the loser has a name to put in its message. The
+        // kernel lock is what decides; these bytes decide nothing.
+        let stamp = format!("{} (pid {})\n", crate::channel::PRODUCT, std::process::id());
+        let _ = file
+            .set_len(0)
+            .and_then(|()| (&file).write_all(stamp.as_bytes()));
+        home.lock = Some(file);
+        Ok(())
+    }
+}
+
+impl Home {
+    fn at(root: &Path) -> Self {
+        Home {
+            root: root.to_path_buf(),
+            lock: None,
+        }
     }
 }
 
@@ -247,70 +439,122 @@ impl Store {
         Ok(self.session_dir(workspace_id, session_id)?.join("state"))
     }
 
-    /// Creates a directory under the workspace's GeneHub home, establishing the
-    /// home itself the first time.
+    /// The adapter's scratch space, ready to be written into.
+    pub fn make_scratch_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        let dir = self.scratch_dir(workspace_id, session_id)?;
+        self.prepare_write(workspace_id, &dir)?;
+        Ok(dir)
+    }
+
+    /// The one gate every write to a workspace passes through: claims the
+    /// write lock, establishes the GeneHub home the first time, and creates
+    /// the directory being written into.
     ///
-    /// Two things have to be true of that home before any session lands in it.
-    /// Every directory in it must be owner-only, because conversations were
-    /// owner-only when they lived under the daemon's data directory and moving
-    /// them into a project must not quietly widen who can read them — the outer
-    /// directory alone is not enough, since it is the user's own folder and
-    /// they may loosen it. And the home must be invisible to the project's own
-    /// version control, or the first thing a user sees after their first
-    /// message is their own `git status` full of session files.
-    fn create_dir_all(&self, workspace_id: &str, dir: &Path) -> Result<()> {
+    /// Reads deliberately do not come here. A build that cannot write a
+    /// workspace can still show every conversation in it.
+    fn prepare_write(&self, workspace_id: &str, dir: &Path) -> Result<()> {
+        let home = self.homes.home_dir(workspace_id)?;
+        // Holding the lock means the home was established to put it in, so the
+        // ordinary case — one more append to a workspace already being written
+        // — costs a map lookup and a stat, not a syscall per level.
+        if !self.homes.holds(workspace_id) {
+            self.establish_home(&home)?;
+            self.homes.claim(workspace_id, &home)?;
+        }
         if dir.exists() {
             return Ok(());
         }
-        let home = self.homes.home_dir(workspace_id)?;
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         for path in dir.ancestors().take_while(|path| path.starts_with(&home)) {
             crate::config::restrict_dir_to_owner(path)?;
         }
-        crate::config::restrict_dir_to_owner(&home)?;
-        let ignore = home.join(".gitignore");
-        if !ignore.exists() {
-            fs::write(&ignore, "*\n").with_context(|| format!("writing {}", ignore.display()))?;
-        }
         Ok(())
+    }
+
+    /// Two things have to be true of a workspace's GeneHub home before any
+    /// session lands in it. It must be owner-only, because conversations were
+    /// owner-only when they lived under the daemon's data directory and moving
+    /// them into a project must not quietly widen who can read them. And it
+    /// must be invisible to the project's own version control, or the first
+    /// thing a user sees after their first message is their own `git status`
+    /// full of session files.
+    fn establish_home(&self, home: &Path) -> Result<()> {
+        if home.exists() {
+            return Ok(());
+        }
+        fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
+        crate::config::restrict_dir_to_owner(home)?;
+        let ignore = home.join(".gitignore");
+        fs::write(&ignore, "*\n").with_context(|| format!("writing {}", ignore.display()))
     }
 
     // -- meta ---------------------------------------------------------------
 
+    /// Writes the meta, stamping it with the layout this build writes.
+    ///
+    /// The stamp is applied here rather than by the caller so that "the file
+    /// says what wrote it" cannot be forgotten at one of the dozen places a
+    /// session is touched.
     pub fn save_meta(&self, meta: &SessionMeta) -> Result<()> {
         let path = self.meta_path(&meta.workspace_id, &meta.id)?;
-        self.create_dir_all(
+        self.prepare_write(
             &meta.workspace_id,
             path.parent().expect("meta.json always has a parent"),
         )?;
-        crate::config::save_private(&path, serde_json::to_string_pretty(meta)?.as_bytes())
+        let stamped = SessionMeta {
+            format: SESSION_FORMAT,
+            ..meta.clone()
+        };
+        crate::config::save_private(&path, serde_json::to_string_pretty(&stamped)?.as_bytes())
     }
 
     pub fn load_meta(&self, workspace_id: &str, session_id: &str) -> Result<SessionMeta> {
         let path = self.meta_path(workspace_id, session_id)?;
         let raw =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        Ok(serde_json::from_str(&raw)?)
+        let header: MetaHeader = serde_json::from_str(&raw)
+            .with_context(|| format!("reading the header of {}", path.display()))?;
+        if header.format > SESSION_FORMAT {
+            return Ok(SessionMeta::unopenable(
+                session_id.to_string(),
+                workspace_id.to_string(),
+                self.homes.root(workspace_id)?,
+                header,
+            ));
+        }
+        let mut meta: SessionMeta = serde_json::from_str(&raw)?;
+        meta.workspace_id = workspace_id.to_string();
+        meta.format = header.format;
+        Ok(meta)
     }
 
     /// Every session of every registered workspace, newest first.
     ///
     /// A workspace the user has not opened on this machine contributes nothing,
     /// because its directory is the only place its sessions exist.
+    ///
+    /// Sessions a newer build wrote are listed too, marked as unopenable. They
+    /// are the user's conversations sitting in the user's own folder, so the
+    /// answer to "where did my chats go" has to be visible rather than an empty
+    /// list, even though this build cannot show what is inside them.
     pub fn list_meta(&self) -> Result<Vec<SessionMeta>> {
         let mut out = Vec::new();
-        for sessions in self.homes.all_sessions_dirs() {
+        for (workspace_id, sessions) in self.homes.all_sessions_dirs() {
             let Ok(entries) = fs::read_dir(&sessions) else {
                 continue;
             };
             for entry in entries.flatten() {
-                let meta_path = entry.path().join("meta.json");
-                if !meta_path.exists() {
+                let session_id = entry.file_name().to_string_lossy().into_owned();
+                if !entry.path().join("meta.json").exists() {
                     continue;
                 }
-                match fs::read_to_string(&meta_path).map(|raw| serde_json::from_str(&raw)) {
-                    Ok(Ok(meta)) => out.push(meta),
-                    _ => tracing::warn!("skipping unreadable session meta {}", meta_path.display()),
+                match self.load_meta(&workspace_id, &session_id) {
+                    Ok(meta) => out.push(meta),
+                    Err(error) => tracing::warn!(
+                        session = %session_id,
+                        %error,
+                        "skipping a session whose meta could not be read"
+                    ),
                 }
             }
         }
@@ -368,7 +612,7 @@ impl Store {
             return Ok(());
         }
         let path = self.chat_path(workspace_id, session_id)?;
-        self.create_dir_all(
+        self.prepare_write(
             workspace_id,
             path.parent().expect("chat.jsonl always has a parent"),
         )?;
@@ -438,7 +682,7 @@ impl Store {
         trunk: &RoundTrunk,
     ) -> Result<()> {
         let dir = self.round_dir(workspace_id, session_id, ord)?;
-        self.create_dir_all(workspace_id, &dir)?;
+        self.prepare_write(workspace_id, &dir)?;
         let mut body = Vec::new();
         for batch in &trunk.batches {
             writeln!(
@@ -478,7 +722,7 @@ impl Store {
         summary: &RoundTrunkSummary,
     ) -> Result<()> {
         let path = self.trunk_index_path(workspace_id, session_id, ord)?;
-        self.create_dir_all(
+        self.prepare_write(
             workspace_id,
             path.parent().expect("index.jsonl always has a parent"),
         )?;
@@ -638,7 +882,7 @@ impl Store {
             .collect();
         let bucket = id[..2].to_string();
         let dir = self.blob_dir(workspace_id, session_id)?;
-        self.create_dir_all(workspace_id, &dir)?;
+        self.prepare_write(workspace_id, &dir)?;
         let path = dir.join(format!("b-{bucket}.jsonl"));
         let line = serde_json::to_vec(&BlobRecord {
             id: id.clone(),
@@ -713,7 +957,17 @@ impl Store {
     /// Missing files are not an error: this is also the cleanup path for a
     /// session that never got as far as being written.
     pub fn delete(&self, workspace_id: &str, session_id: &str) -> Result<()> {
-        let _ = fs::remove_dir_all(self.session_dir(workspace_id, session_id)?);
+        let dir = self.session_dir(workspace_id, session_id)?;
+        if !dir.exists() {
+            return Ok(());
+        }
+        // Removing a conversation is a write like any other, and the build that
+        // holds the workspace may be in the middle of appending to this one.
+        if !self.homes.holds(workspace_id) {
+            self.homes
+                .claim(workspace_id, &self.homes.home_dir(workspace_id)?)?;
+        }
+        let _ = fs::remove_dir_all(dir);
         Ok(())
     }
 }
