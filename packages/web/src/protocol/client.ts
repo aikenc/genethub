@@ -194,6 +194,14 @@ export class ClientRequestTooLargeError extends Error {
 export const MAX_AUTHENTICATED_PLAINTEXT_BYTES = 2_900_000;
 export const MAX_CHANNEL_WIRE_BYTES = 4 * 1024 * 1024;
 
+/**
+ * How long a connection must stay up before it counts as healthy enough to
+ * reset the reconnect backoff. Anything shorter is a flap: the dial itself
+ * succeeded, but whatever killed the last channel killed this one too, and
+ * the next attempt should wait longer, not start over.
+ */
+const STABLE_AFTER_MS = 30_000;
+
 function validHostedCredential(
   credential: unknown,
 ): credential is HostedChannelCredential {
@@ -314,6 +322,7 @@ export class Client {
   private stopped = false;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
   private redialGeneration = 0;
   private redialInFlight = false;
   private redialAbort: AbortController | null = null;
@@ -540,6 +549,7 @@ export class Client {
     this.stopped = true;
     this.clearConnectTimer();
     this.clearRetryTimer();
+    this.clearStableTimer();
     this.redialGeneration += 1;
     this.redialAbort?.abort();
     this.redialAbort = null;
@@ -878,7 +888,15 @@ export class Client {
 
     if (this.socket !== socket || this.socketEpoch !== epoch || this.stopped)
       return;
-    this.attempt = 0;
+    // A connection that dies seconds after coming up must not reset the
+    // backoff: when the far side keeps killing every fresh channel, resetting
+    // here is what turns reconnect into a one-second dial loop. The attempt
+    // counter is reset only once the connection has proven it can stay up.
+    this.clearStableTimer();
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = null;
+      this.attempt = 0;
+    }, STABLE_AFTER_MS);
     this.setState("ready");
     this.flushQueue(socket, epoch);
     await this.resubscribe();
@@ -1087,6 +1105,7 @@ export class Client {
     if (this.stopped || (socket && this.socket !== socket)) return;
     this.lastClose = close;
     this.clearConnectTimer();
+    this.clearStableTimer();
     const epoch = this.socketEpoch;
     this.setState("reconnecting");
     this.socket = null;
@@ -1121,7 +1140,12 @@ export class Client {
     const backoff =
       this.options.backoffMs ??
       ((attempt) => Math.min(1000 * 2 ** attempt, 15_000));
-    const delay = backoff(this.attempt++);
+    const base = backoff(this.attempt++);
+    // Spread the crowd out: a relay that restarts otherwise marches every
+    // client back through the door in lockstep.
+    const delay = this.options.backoffMs
+      ? base
+      : Math.round(base * (0.75 + Math.random() * 0.5));
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.connect();
@@ -1138,6 +1162,12 @@ export class Client {
     if (this.retryTimer === null) return;
     clearTimeout(this.retryTimer);
     this.retryTimer = null;
+  }
+
+  private clearStableTimer(): void {
+    if (this.stableTimer === null) return;
+    clearTimeout(this.stableTimer);
+    this.stableTimer = null;
   }
 
   private clearRedialTimer(): void {

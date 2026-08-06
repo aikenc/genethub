@@ -805,6 +805,41 @@ describe("the daemon connection", () => {
     expect(resyncs).toEqual([{ replayed: [3], reset: false }]);
   });
 
+  it("keeps escalating the backoff while every fresh connection dies at once", async () => {
+    const queue = socketQueue();
+    const attempts: number[] = [];
+    const client = new Client({
+      url: "ws://test",
+      socketFactory: queue.factory,
+      backoffMs: (attempt) => {
+        attempts.push(attempt);
+        return 0;
+      },
+    });
+    client.connect();
+    queue.latest().open();
+    await settle();
+    queue.latest().acceptHandshake();
+    await settle();
+
+    queue.latest().close();
+    await settle();
+
+    // The redial and its handshake both succeed, which used to reset the
+    // counter on the spot — so a far side that kills every fresh channel a
+    // second after it opens became a one-second dial loop, forever.
+    queue.latest().open();
+    await settle();
+    queue.latest().acceptHandshake();
+    await settle();
+
+    queue.latest().close();
+    await settle();
+
+    expect(attempts).toEqual([0, 1]);
+    client.close();
+  });
+
   /**
    * The daemon dropping events used to arrive as a sentence in English asking
    * the person to reconnect. Anyone who did not reconnect kept a timeline with a

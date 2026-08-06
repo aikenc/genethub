@@ -2,6 +2,7 @@ import type { AgentInfo, SequencedEvent, SessionSummary } from "@genehub/proto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Client } from "../protocol/client";
+import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { defaultAgent, useWorkbench } from "./store";
 
 /**
@@ -767,6 +768,33 @@ describe("returning after a disconnection", () => {
     go("ready");
 
     expect(useWorkbench.getState().notice).toBe("claude 启动失败：找不到可执行文件");
+  });
+
+  it("withdraws the connection-loss sentence once the connection is back", async () => {
+    const { client, go } = reconnectable({ code: 1006, reason: "" });
+    // The requests the drop took down reject the way a lost request does.
+    (client as { call: unknown }).call = async () => {
+      throw new ConnectionOutcomeUnknownError({ code: 1006 });
+    };
+    await useWorkbench.getState().attach(client);
+
+    expect(useWorkbench.getState().notice).toContain("the connection was lost");
+
+    go("ready");
+    expect(useWorkbench.getState().notice).toBeNull();
+  });
+
+  it("keeps a failure that is not the connection speaking", async () => {
+    const { client, go } = reconnectable({ code: 1006, reason: "" });
+    (client as { call: unknown }).call = async () => {
+      throw new Error("session.list 失败：磁盘已满");
+    };
+    await useWorkbench.getState().attach(client);
+
+    expect(useWorkbench.getState().notice).toBe("session.list 失败：磁盘已满");
+
+    go("ready");
+    expect(useWorkbench.getState().notice).toBe("session.list 失败：磁盘已满");
   });
 });
 
