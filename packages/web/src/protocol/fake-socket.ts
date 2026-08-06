@@ -28,10 +28,11 @@ export class FakeSocket implements WebSocketLike {
     this.sent.push(JSON.parse(data) as Sent);
   }
 
-  close(): void {
+  /** Closes, optionally the way a peer that explained itself would. */
+  close(reason?: { code: number; reason: string }): void {
     if (this.closed) return;
     this.closed = true;
-    this.onclose?.({});
+    this.onclose?.(reason ?? {});
   }
 
   /** The server accepting the connection. */

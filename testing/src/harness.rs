@@ -89,11 +89,15 @@ impl Journey {
         self.data_dir.join("logs")
     }
 
-    /// A session's own directory (`docs/session-storage.md` §3).
+    /// A session's own directory, inside the workspace it belongs to
+    /// (`docs/session-storage.md` §3).
     pub fn session_dir(&self, session_id: &str) -> PathBuf {
-        self.data_dir
+        // The registered root, not the path the test handed over: the daemon
+        // canonicalises on open, and on some platforms that is a different
+        // string for the same directory.
+        Path::new(&self.workspace.root)
+            .join(".genethub")
             .join("sessions")
-            .join(&self.workspace.id)
             .join(session_id)
     }
 

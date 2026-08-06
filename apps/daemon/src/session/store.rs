@@ -2,24 +2,29 @@
 //! that a path locates a file and a reference locates a byte range — never a
 //! scan (`docs/session-storage.md`).
 //!
+//! Sessions live in the workspace they are about, not in the daemon's data
+//! directory:
+//!
 //! ```text
-//! <root>/<workspace>/<session>/meta.json
-//! <root>/<workspace>/<session>/chat.jsonl                 narrative + one row per round
-//! <root>/<workspace>/<session>/rounds/r-000/index.jsonl   one row per trunk
-//! <root>/<workspace>/<session>/rounds/r-000/t-0000.jsonl  one trunk's batches and blob rows
-//! <root>/<workspace>/<session>/blobs/b-9f.jsonl           blob payloads, bucketed by content id
-//! <root>/<workspace>/<session>/state/                     adapter scratch
+//! <workspace>/.genethub/sessions/<session>/meta.json
+//! <workspace>/.genethub/sessions/<session>/chat.jsonl                 narrative + one row per round
+//! <workspace>/.genethub/sessions/<session>/rounds/r-000/index.jsonl   one row per trunk
+//! <workspace>/.genethub/sessions/<session>/rounds/r-000/t-0000.jsonl  one trunk's batches and blob rows
+//! <workspace>/.genethub/sessions/<session>/blobs/b-9f.jsonl           blob payloads, bucketed by content id
+//! <workspace>/.genethub/sessions/<session>/state/                     adapter scratch
 //! ```
 //!
 //! Deltas are never written. Only settled items reach disk, which keeps a
 //! session proportional to what was actually said rather than to the number of
 //! tokens streamed (`docs/daemon.md` §4).
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     BlobKind, BlobOverview, BlobPayload, BlobRef, PermissionRequest, RoundBatch, RoundBatchSummary,
     RoundTrunk, RoundTrunkSummary, SessionStatus, SessionSummary, TimelineItem,
@@ -28,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::rounds::{self, RoundRecord};
+use super::rounds::RoundRecord;
 use crate::adapter::PersistHandle;
 
 /// Content ids are the first 24 hex characters of a SHA-256. 96 bits keeps
@@ -130,102 +135,171 @@ struct BlobRecord {
     value: Value,
 }
 
+/// The directory a workspace keeps its sessions in.
+pub fn sessions_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(HOME_DIR_NAME).join("sessions")
+}
+
+/// The per-workspace directory GeneHub owns inside the user's own project.
+const HOME_DIR_NAME: &str = ".genethub";
+
+/// Which directory on disk belongs to each workspace id.
+///
+/// A conversation is about a body of code, so it is kept with that code rather
+/// than in the daemon's data directory: copying a project copies its history,
+/// deleting one deletes it, and an uninstall does not take it away. Only the
+/// workspace registry knows where a workspace lives, so the store is told, and
+/// a session whose workspace is no longer registered is not locatable at all —
+/// which is the honest answer, not a path in some fallback directory.
+#[derive(Clone, Default)]
+pub struct WorkspaceHomes {
+    roots: Arc<RwLock<BTreeMap<String, PathBuf>>>,
+}
+
+impl WorkspaceHomes {
+    pub fn attach(&self, workspace_id: &str, root: &Path) {
+        if let Ok(mut roots) = self.roots.write() {
+            roots.insert(workspace_id.to_string(), root.to_path_buf());
+        }
+    }
+
+    fn home_dir(&self, workspace_id: &str) -> Result<PathBuf> {
+        let roots = self
+            .roots
+            .read()
+            .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
+        roots
+            .get(workspace_id)
+            .map(|root| root.join(HOME_DIR_NAME))
+            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))
+    }
+
+    fn sessions_dir(&self, workspace_id: &str) -> Result<PathBuf> {
+        Ok(self.home_dir(workspace_id)?.join("sessions"))
+    }
+
+    /// Every registered workspace's sessions directory, in id order.
+    fn all_sessions_dirs(&self) -> Vec<PathBuf> {
+        let Ok(roots) = self.roots.read() else {
+            return Vec::new();
+        };
+        roots.values().map(|root| sessions_dir(root)).collect()
+    }
+}
+
 #[derive(Clone)]
 pub struct Store {
-    root: PathBuf,
+    homes: WorkspaceHomes,
 }
 
 impl Store {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Store { root: root.into() }
+    pub fn new(homes: WorkspaceHomes) -> Self {
+        Store { homes }
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
+    pub fn session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        Ok(self.homes.sessions_dir(workspace_id)?.join(session_id))
     }
 
-    fn workspace_dir(&self, workspace_id: &str) -> PathBuf {
-        self.root.join(workspace_id)
+    fn meta_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .session_dir(workspace_id, session_id)?
+            .join("meta.json"))
     }
 
-    pub fn session_dir(&self, workspace_id: &str, session_id: &str) -> PathBuf {
-        self.workspace_dir(workspace_id).join(session_id)
+    fn chat_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .session_dir(workspace_id, session_id)?
+            .join("chat.jsonl"))
     }
 
-    fn meta_path(&self, workspace_id: &str, session_id: &str) -> PathBuf {
-        self.session_dir(workspace_id, session_id).join("meta.json")
-    }
-
-    fn chat_path(&self, workspace_id: &str, session_id: &str) -> PathBuf {
-        self.session_dir(workspace_id, session_id)
-            .join("chat.jsonl")
-    }
-
-    fn round_dir(&self, workspace_id: &str, session_id: &str, ord: u32) -> PathBuf {
-        self.session_dir(workspace_id, session_id)
+    fn round_dir(&self, workspace_id: &str, session_id: &str, ord: u32) -> Result<PathBuf> {
+        Ok(self
+            .session_dir(workspace_id, session_id)?
             .join("rounds")
-            .join(format!("r-{ord:03}"))
+            .join(format!("r-{ord:03}")))
     }
 
-    fn trunk_index_path(&self, workspace_id: &str, session_id: &str, ord: u32) -> PathBuf {
-        self.round_dir(workspace_id, session_id, ord)
-            .join("index.jsonl")
+    fn trunk_index_path(&self, workspace_id: &str, session_id: &str, ord: u32) -> Result<PathBuf> {
+        Ok(self
+            .round_dir(workspace_id, session_id, ord)?
+            .join("index.jsonl"))
     }
 
-    fn trunk_path(&self, workspace_id: &str, session_id: &str, ord: u32, trunk: u32) -> PathBuf {
-        self.round_dir(workspace_id, session_id, ord)
-            .join(format!("t-{trunk:04}.jsonl"))
+    fn trunk_path(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        ord: u32,
+        trunk: u32,
+    ) -> Result<PathBuf> {
+        Ok(self
+            .round_dir(workspace_id, session_id, ord)?
+            .join(format!("t-{trunk:04}.jsonl")))
     }
 
-    fn blob_dir(&self, workspace_id: &str, session_id: &str) -> PathBuf {
-        self.session_dir(workspace_id, session_id).join("blobs")
+    fn blob_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        Ok(self.session_dir(workspace_id, session_id)?.join("blobs"))
     }
 
     /// Private per-session scratch space for adapters.
-    pub fn scratch_dir(&self, workspace_id: &str, session_id: &str) -> PathBuf {
-        self.session_dir(workspace_id, session_id).join("state")
+    pub fn scratch_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        Ok(self.session_dir(workspace_id, session_id)?.join("state"))
+    }
+
+    /// Creates a directory under the workspace's GeneHub home, establishing the
+    /// home itself the first time.
+    ///
+    /// Two things have to be true of that home before any session lands in it.
+    /// It must be owner-only, because conversations were owner-only when they
+    /// lived under the daemon's data directory and moving them into a project
+    /// must not quietly widen who can read them. And it must be invisible to
+    /// the project's own version control, or the first thing a user sees after
+    /// their first message is their own `git status` full of session files.
+    fn create_dir_all(&self, workspace_id: &str, dir: &Path) -> Result<()> {
+        let home = self.homes.home_dir(workspace_id)?;
+        let established = home.exists();
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        if !established {
+            crate::config::restrict_dir_to_owner(&home)?;
+        }
+        let ignore = home.join(".gitignore");
+        if !ignore.exists() {
+            fs::write(&ignore, "*\n").with_context(|| format!("writing {}", ignore.display()))?;
+        }
+        Ok(())
     }
 
     // -- meta ---------------------------------------------------------------
 
     pub fn save_meta(&self, meta: &SessionMeta) -> Result<()> {
-        let path = self.meta_path(&meta.workspace_id, &meta.id);
+        let path = self.meta_path(&meta.workspace_id, &meta.id)?;
+        self.create_dir_all(
+            &meta.workspace_id,
+            path.parent().expect("meta.json always has a parent"),
+        )?;
         crate::config::save_private(&path, serde_json::to_string_pretty(meta)?.as_bytes())
     }
 
     pub fn load_meta(&self, workspace_id: &str, session_id: &str) -> Result<SessionMeta> {
-        let path = self.meta_path(workspace_id, session_id);
+        let path = self.meta_path(workspace_id, session_id)?;
         let raw =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         Ok(serde_json::from_str(&raw)?)
     }
 
-    /// Every session on disk, newest first.
+    /// Every session of every registered workspace, newest first.
     ///
-    /// Pre-relayout sessions kept their meta beside the timeline as
-    /// `<session>.meta.json`; they are still listed so a user can open one and
-    /// have it migrated, rather than watching their history disappear.
+    /// A workspace the user has not opened on this machine contributes nothing,
+    /// because its directory is the only place its sessions exist.
     pub fn list_meta(&self) -> Result<Vec<SessionMeta>> {
         let mut out = Vec::new();
-        let Ok(workspaces) = fs::read_dir(&self.root) else {
-            return Ok(out);
-        };
-        for workspace in workspaces.flatten() {
-            if !workspace.path().is_dir() {
-                continue;
-            }
-            let Ok(entries) = fs::read_dir(workspace.path()) else {
+        for sessions in self.homes.all_sessions_dirs() {
+            let Ok(entries) = fs::read_dir(&sessions) else {
                 continue;
             };
             for entry in entries.flatten() {
-                let path = entry.path();
-                let meta_path = if path.is_dir() {
-                    path.join("meta.json")
-                } else if path.to_string_lossy().ends_with(".meta.json") {
-                    path
-                } else {
-                    continue;
-                };
+                let meta_path = entry.path().join("meta.json");
                 if !meta_path.exists() {
                     continue;
                 }
@@ -288,8 +362,11 @@ impl Store {
         if rows.is_empty() {
             return Ok(());
         }
-        let path = self.chat_path(workspace_id, session_id);
-        fs::create_dir_all(path.parent().expect("chat.jsonl always has a parent"))?;
+        let path = self.chat_path(workspace_id, session_id)?;
+        self.create_dir_all(
+            workspace_id,
+            path.parent().expect("chat.jsonl always has a parent"),
+        )?;
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
         crate::config::restrict_to_owner(&path)?;
         for row in rows {
@@ -304,7 +381,7 @@ impl Store {
     /// A single bad line — a half-written record from a power cut, or a record
     /// from a newer version — must not make the whole conversation unopenable.
     pub fn load_chat(&self, workspace_id: &str, session_id: &str) -> Result<ChatLog> {
-        let path = self.chat_path(workspace_id, session_id);
+        let path = self.chat_path(workspace_id, session_id)?;
         let file = match File::open(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ChatLog::default()),
@@ -355,8 +432,8 @@ impl Store {
         ord: u32,
         trunk: &RoundTrunk,
     ) -> Result<()> {
-        let dir = self.round_dir(workspace_id, session_id, ord);
-        fs::create_dir_all(&dir)?;
+        let dir = self.round_dir(workspace_id, session_id, ord)?;
+        self.create_dir_all(workspace_id, &dir)?;
         let mut body = Vec::new();
         for batch in &trunk.batches {
             writeln!(
@@ -383,7 +460,7 @@ impl Store {
                 )?;
             }
         }
-        let path = self.trunk_path(workspace_id, session_id, ord, trunk.summary.index);
+        let path = self.trunk_path(workspace_id, session_id, ord, trunk.summary.index)?;
         crate::config::save_private(&path, &body)?;
         self.append_trunk_summary(workspace_id, session_id, ord, &trunk.summary)
     }
@@ -395,8 +472,11 @@ impl Store {
         ord: u32,
         summary: &RoundTrunkSummary,
     ) -> Result<()> {
-        let path = self.trunk_index_path(workspace_id, session_id, ord);
-        fs::create_dir_all(path.parent().expect("index.jsonl always has a parent"))?;
+        let path = self.trunk_index_path(workspace_id, session_id, ord)?;
+        self.create_dir_all(
+            workspace_id,
+            path.parent().expect("index.jsonl always has a parent"),
+        )?;
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
         crate::config::restrict_to_owner(&path)?;
         writeln!(file, "{}", serde_json::to_string(summary)?)?;
@@ -411,7 +491,7 @@ impl Store {
         session_id: &str,
         ord: u32,
     ) -> Result<Vec<RoundTrunkSummary>> {
-        let path = self.trunk_index_path(workspace_id, session_id, ord);
+        let path = self.trunk_index_path(workspace_id, session_id, ord)?;
         let file = match File::open(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -448,7 +528,7 @@ impl Store {
         ord: u32,
         summary: &RoundTrunkSummary,
     ) -> Result<RoundTrunk> {
-        let path = self.trunk_path(workspace_id, session_id, ord, summary.index);
+        let path = self.trunk_path(workspace_id, session_id, ord, summary.index)?;
         let file = match File::open(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -552,8 +632,8 @@ impl Store {
             .take(BLOB_ID_CHARS)
             .collect();
         let bucket = id[..2].to_string();
-        let dir = self.blob_dir(workspace_id, session_id);
-        fs::create_dir_all(&dir)?;
+        let dir = self.blob_dir(workspace_id, session_id)?;
+        self.create_dir_all(workspace_id, &dir)?;
         let path = dir.join(format!("b-{bucket}.jsonl"));
         let line = serde_json::to_vec(&BlobRecord {
             id: id.clone(),
@@ -591,7 +671,7 @@ impl Store {
             return Ok(None);
         }
         let path = self
-            .blob_dir(workspace_id, session_id)
+            .blob_dir(workspace_id, session_id)?
             .join(format!("b-{bucket}.jsonl"));
         let mut file = match File::open(&path) {
             Ok(file) => file,
@@ -626,116 +706,10 @@ impl Store {
     /// inside the agent, which is not what anyone means by "delete".
     ///
     /// Missing files are not an error: this is also the cleanup path for a
-    /// session that never got as far as being written, and it still sweeps the
-    /// pre-relayout filenames so an interrupted migration leaves nothing.
+    /// session that never got as far as being written.
     pub fn delete(&self, workspace_id: &str, session_id: &str) -> Result<()> {
-        let _ = fs::remove_dir_all(self.session_dir(workspace_id, session_id));
-        for legacy in self.legacy_paths(workspace_id, session_id) {
-            let _ = fs::remove_file(legacy);
-        }
-        let _ = fs::remove_dir_all(
-            self.workspace_dir(workspace_id)
-                .join(format!("{session_id}.state")),
-        );
+        let _ = fs::remove_dir_all(self.session_dir(workspace_id, session_id)?);
         Ok(())
-    }
-
-    fn legacy_paths(&self, workspace_id: &str, session_id: &str) -> Vec<PathBuf> {
-        let dir = self.workspace_dir(workspace_id);
-        vec![
-            dir.join(format!("{session_id}.jsonl")),
-            dir.join(format!("{session_id}.rounds.jsonl")),
-            dir.join(format!("{session_id}.blobrefs.jsonl")),
-            dir.join(format!("{session_id}.meta.json")),
-        ]
-    }
-
-    /// Rewrites a pre-relayout session into the current layout, once.
-    ///
-    /// The guard is whether `chat.jsonl` exists — a file's presence, not its
-    /// contents, exactly as the older one-shot migrations decided. Old files
-    /// are removed only after the new ones are fully written, so an
-    /// interruption leaves the session in its old shape and the next open
-    /// tries again.
-    ///
-    /// Payload that an even older migration already condensed away is gone for
-    /// good; those items arrive here with no blob to reference, and this does
-    /// not pretend otherwise.
-    pub fn migrate_session_layout(&self, workspace_id: &str, session_id: &str) -> Result<bool> {
-        if self.chat_path(workspace_id, session_id).exists() {
-            return Ok(false);
-        }
-        let legacy_timeline = self
-            .workspace_dir(workspace_id)
-            .join(format!("{session_id}.jsonl"));
-        let legacy_meta = self
-            .workspace_dir(workspace_id)
-            .join(format!("{session_id}.meta.json"));
-        if !legacy_timeline.exists() && !legacy_meta.exists() {
-            return Ok(false);
-        }
-
-        if legacy_meta.exists() {
-            let raw = fs::read_to_string(&legacy_meta)?;
-            let meta: SessionMeta = serde_json::from_str(&raw)?;
-            self.save_meta(&meta)?;
-        }
-
-        let items = load_legacy_items(&legacy_timeline)?;
-        let mut rows: Vec<ChatRow> = Vec::new();
-        for legacy in rounds::migrate_legacy(&items) {
-            let ord = legacy.record.ord;
-            let mut record = legacy.record;
-            let trunks = rounds::trunks_from_items(&legacy.items);
-            for trunk in &trunks {
-                let mut stored = trunk.clone();
-                for batch in &mut stored.batches {
-                    for blob in &mut batch.blobs {
-                        let Some(source) =
-                            legacy.items.iter().find(|item| item.id() == blob.item_id)
-                        else {
-                            continue;
-                        };
-                        blob.blob = Some(self.put_blob(
-                            workspace_id,
-                            session_id,
-                            serde_json::to_value(source)?,
-                        )?);
-                    }
-                }
-                self.write_trunk(workspace_id, session_id, ord, &stored)?;
-            }
-            record.trunk_count = trunks.len() as u32;
-            rows.push(ChatRow::Round { round: record });
-            for item in &legacy.items {
-                if !is_work_item(item) {
-                    rows.push(ChatRow::Item { item: item.clone() });
-                }
-            }
-        }
-        self.append_chat_rows(workspace_id, session_id, &rows)?;
-        // Only now is the new shape complete enough to drop the old one.
-        for legacy in self.legacy_paths(workspace_id, session_id) {
-            let _ = fs::remove_file(legacy);
-        }
-        let legacy_blobs = self
-            .workspace_dir(workspace_id)
-            .join(session_id)
-            .join("blobs");
-        if legacy_blobs.exists() {
-            for entry in fs::read_dir(&legacy_blobs)?.flatten() {
-                if entry.path().extension().is_some_and(|ext| ext == "batch") {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
-        let legacy_state = self
-            .workspace_dir(workspace_id)
-            .join(format!("{session_id}.state"));
-        if legacy_state.exists() {
-            let _ = fs::rename(legacy_state, self.scratch_dir(workspace_id, session_id));
-        }
-        Ok(true)
     }
 }
 
@@ -763,26 +737,6 @@ fn parse_locator(at: &str) -> Option<(String, u64, u64)> {
         return None;
     }
     Some((bucket.to_string(), offset, length))
-}
-
-fn load_legacy_items(path: &Path) -> Result<Vec<TimelineItem>> {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
-    };
-    let mut items = Vec::new();
-    for line in BufReader::new(file).lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<TimelineItem>(&line) {
-            Ok(item) => items.push(item),
-            Err(error) => tracing::warn!("skipping unreadable legacy line: {error}"),
-        }
-    }
-    Ok(items)
 }
 
 pub fn now_ms() -> i64 {

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use genehub_proto::{
     BlobKind, BlobOverview, RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary,
-    TimelineItem, ToolCallDetail, TurnOutcome,
+    TimelineItem, ToolCallDetail,
 };
 use serde::{Deserialize, Serialize};
 
@@ -206,9 +206,7 @@ impl TrunkBuilder {
         if self.first_item_id.is_none() {
             self.first_item_id = Some(item_id.to_string());
         }
-        if self.current_batch.item_ids.is_empty() {
-            self.current_batch.item_ids.push(item_id.to_string());
-        } else if !self.current_batch.item_ids.iter().any(|id| id == item_id) {
+        if !self.current_batch.item_ids.iter().any(|id| id == item_id) {
             self.current_batch.item_ids.push(item_id.to_string());
         }
         match item {
@@ -392,197 +390,9 @@ pub fn blob_overview(item: &TimelineItem) -> Option<BlobOverview> {
     })
 }
 
-/// One round recovered from a pre-relayout session, with the items it owned.
-///
-/// The items come back attached because the migration has to write this
-/// round's trunk files and blobs, and the old flat log is the only place that
-/// grouping still exists.
-#[derive(Debug, Clone)]
-pub struct LegacyRound {
-    pub record: RoundRecord,
-    pub items: Vec<TimelineItem>,
-}
-
-/// Best-effort round segmentation for a session written before the relayout.
-/// Run once per session, the first time it is opened afterwards
-/// (`Store::migrate_session_layout`).
-///
-/// One adapter turn becomes one round — the only grouping this data still
-/// supports, since which turns were auto-stitched or client-continued was
-/// never recorded before `ActiveRound`
-/// (`docs/agent-analysis-substrate-proposal.md` §8 step 1). A trailing run of
-/// items with no `TurnSummary` still becomes a round, marked failed: those
-/// items exist and dropping them would lose conversation, which is worse than
-/// recording an outcome the old data cannot confirm.
-pub fn migrate_legacy(items: &[TimelineItem]) -> Vec<LegacyRound> {
-    let mut rounds: Vec<LegacyRound> = Vec::new();
-    let mut segment: Vec<TimelineItem> = Vec::new();
-    let push = |segment: &mut Vec<TimelineItem>,
-                rounds: &mut Vec<LegacyRound>,
-                stats: Option<&genehub_proto::TurnStats>| {
-        if segment.is_empty() {
-            return;
-        }
-        let ord = rounds.len() as u32;
-        let user_item_id = segment.iter().find_map(|item| match item {
-            TimelineItem::UserMessage { id, .. } => Some(id.clone()),
-            _ => None,
-        });
-        let record = RoundRecord {
-            schema_version: SCHEMA_VERSION,
-            round_id: match stats {
-                Some(stats) => format!("legacy_r_{}", stats.turn_id),
-                None => format!("legacy_r_tail_{ord}"),
-            },
-            ord,
-            user_item_id,
-            started_at_ms: stats.map(|stats| stats.started_at_ms).unwrap_or_default(),
-            ended_at_ms: stats.map(|stats| stats.finished_at_ms).unwrap_or_default(),
-            outcome: Some(match stats.map(|stats| stats.outcome) {
-                Some(TurnOutcome::Completed) => RoundOutcome::Completed,
-                Some(TurnOutcome::Canceled) => RoundOutcome::Canceled,
-                _ => RoundOutcome::Failed,
-            }),
-            adapter_turn_ids: stats
-                .map(|stats| vec![stats.turn_id.clone()])
-                .unwrap_or_default(),
-            blocked_ms: 0,
-            synthesized: true,
-            trunk_count: 0,
-        };
-        rounds.push(LegacyRound {
-            record,
-            items: std::mem::take(segment),
-        });
-    };
-    for item in items {
-        segment.push(item.clone());
-        if let TimelineItem::TurnSummary { stats, .. } = item {
-            push(&mut segment, &mut rounds, Some(stats));
-        }
-    }
-    push(&mut segment, &mut rounds, None);
-    rounds
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genehub_proto::{TurnStats, Usage};
-
-    fn turn_summary(turn_id: &str, outcome: TurnOutcome) -> TimelineItem {
-        TimelineItem::TurnSummary {
-            id: format!("turn-summary-{turn_id}"),
-            stats: TurnStats {
-                turn_id: turn_id.to_string(),
-                outcome,
-                started_at_ms: 1,
-                finished_at_ms: 2,
-                duration_ms: 1,
-                usage: Usage::default(),
-                tool_calls: 0,
-                fork_checkpoint: None,
-            },
-        }
-    }
-
-    fn user_message(id: &str) -> TimelineItem {
-        TimelineItem::UserMessage {
-            id: id.into(),
-            text: "hi".into(),
-            attachments: vec![],
-        }
-    }
-
-    #[test]
-    fn one_adapter_turn_becomes_one_synthesized_round() {
-        let items = vec![
-            user_message("u1"),
-            TimelineItem::AssistantMessage {
-                id: "a1".into(),
-                text: "hello".into(),
-            },
-            turn_summary("t1", TurnOutcome::Completed),
-        ];
-        let rounds = migrate_legacy(&items);
-        assert_eq!(rounds.len(), 1);
-        let record = &rounds[0].record;
-        assert!(record.synthesized);
-        assert_eq!(record.round_id, "legacy_r_t1");
-        assert_eq!(record.ord, 0);
-        assert_eq!(record.user_item_id.as_deref(), Some("u1"));
-        assert_eq!(record.outcome, Some(RoundOutcome::Completed));
-        assert_eq!(record.adapter_turn_ids, vec!["t1".to_string()]);
-        assert_eq!(
-            rounds[0]
-                .items
-                .iter()
-                .map(|item| item.id())
-                .collect::<Vec<_>>(),
-            vec!["u1", "a1", "turn-summary-t1"],
-            "the round carries its own items so the migration can write them"
-        );
-    }
-
-    #[test]
-    fn multiple_turns_become_multiple_rounds_split_at_each_turn_summary() {
-        let items = vec![
-            user_message("u1"),
-            turn_summary("t1", TurnOutcome::Completed),
-            user_message("u2"),
-            turn_summary("t2", TurnOutcome::Failed),
-        ];
-        let rounds = migrate_legacy(&items);
-        assert_eq!(rounds.len(), 2);
-        assert_eq!(rounds[0].record.ord, 0);
-        assert_eq!(
-            rounds[0]
-                .items
-                .iter()
-                .map(|item| item.id())
-                .collect::<Vec<_>>(),
-            vec!["u1", "turn-summary-t1"]
-        );
-        assert_eq!(rounds[1].record.ord, 1);
-        assert_eq!(rounds[1].record.outcome, Some(RoundOutcome::Failed));
-        assert_eq!(
-            rounds[1]
-                .items
-                .iter()
-                .map(|item| item.id())
-                .collect::<Vec<_>>(),
-            vec!["u2", "turn-summary-t2"]
-        );
-    }
-
-    #[test]
-    fn a_trailing_turn_with_no_summary_becomes_a_failed_round_rather_than_being_dropped() {
-        let items = vec![
-            user_message("u1"),
-            turn_summary("t1", TurnOutcome::Completed),
-            user_message("u2"),
-        ];
-        let rounds = migrate_legacy(&items);
-        assert_eq!(
-            rounds.len(),
-            2,
-            "dropping the tail would lose conversation the old log still has"
-        );
-        assert_eq!(rounds[1].record.outcome, Some(RoundOutcome::Failed));
-        assert_eq!(rounds[1].record.user_item_id.as_deref(), Some("u2"));
-    }
-
-    #[test]
-    fn a_session_that_never_finished_a_turn_still_migrates() {
-        let rounds = migrate_legacy(&[user_message("u1")]);
-        assert_eq!(rounds.len(), 1);
-        assert_eq!(rounds[0].record.outcome, Some(RoundOutcome::Failed));
-    }
-
-    #[test]
-    fn an_empty_session_produces_an_empty_ledger() {
-        assert!(migrate_legacy(&[]).is_empty());
-    }
 
     fn texts(entries: &[(&str, &str)]) -> HashMap<String, String> {
         entries

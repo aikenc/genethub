@@ -125,8 +125,17 @@ relay 只能问三个问题、订阅一件事，定义在 `src/contract/wire.ts`
 | Control 撤销 SSE 单事件上限 | `RELAY_MAX_REVOCATION_BUFFER_BYTES` | 1 MiB |
 | Presence 本地刷新硬上限 | `RELAY_PRESENCE_REFRESH_MAX` | 30s；Legacy/Fabric 实际都取 Control grant 租约一半与此值的较小者 |
 | 心跳 | `RELAY_HEARTBEAT` | 30s |
+| 日志级别 | `RELAY_LOG` | `info`；`debug` 额外打每条 channel 的开与关 |
 
 单连接或全进程发送预算超限都只断开触发发送的慢连接；已经健康的其他连接不受牵连。每笔预算在 `ws.send` 回调、错误或 socket 关闭时只释放一次。
+
+### 6.1 每一次断开都写下原因
+
+上面这些限额是会**主动切断连接**的，而被切断的一方看不到原因：浏览器只知道 socket 没了，正在飞的那个请求变成「结果未知」。原因只存在于 Relay 这一侧。
+
+所以 `closeSocket` 与 `terminate` 是全部主动关闭的唯一出口，且每次都写一行 `warn`，带上 close code 与理由（`too slow`、`frame too large`、`the client missed a heartbeat`……）。这不是可选的观测点：不写在这里，就没有任何人能回答一个会话为什么掉了。
+
+浏览器侧对应地把 close code 与 reason 原样带进报错文案。用户报「它就是断了」没法查，报 `1013 too slow` 直接指到是哪条预算。
 
 ---
 

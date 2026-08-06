@@ -383,6 +383,15 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       // device, protocol mismatch — and none of those are fixed by waiting. Say
       // it, instead of leaving a spinner and a guess about ports.
       if (connection === "closed" && client.failure) set({ notice: client.failure.message });
+      // A reconnect on its own is routine and worth no words. One the far side
+      // explained is not: that sentence is the only account anyone will ever
+      // get of why the work in flight was lost.
+      if (connection === "reconnecting") {
+        const closed = client.lastCloseReason;
+        if (closed?.reason) {
+          set({ notice: `连接被断开（${closed.code ?? "?"} ${closed.reason}），正在重连` });
+        }
+      }
     });
     client.onNotice((_level, message) => set({ notice: message }));
     client.onUpdateDownload((download) => set({ download }));

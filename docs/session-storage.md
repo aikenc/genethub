@@ -8,7 +8,7 @@
 
 ## 1. 为什么要重排
 
-分层是在协议上做的，磁盘上从来没有分过层。旧布局是这样：
+分层是在协议上做的，磁盘上从来没有分过层。旧布局是这样，全部在 daemon 自己的数据目录下：
 
 ```text
 <data>/sessions/<workspace>/<session>.jsonl          每个 settled item 一行，包括每次工具调用
@@ -47,7 +47,7 @@
 ## 3. 布局
 
 ```text
-<sessions-root>/<session-id>/
+<workspace>/.genethub/sessions/<session-id>/
   meta.json                        会话元数据
   chat.jsonl                       会话层：叙事行 + 每个 round 一行折叠态
   rounds/r-000/index.jsonl         round 层索引：一行一个 trunk 摘要
@@ -60,7 +60,18 @@
 
 会话目录**自包含**：除了 `meta.json` 里记的 `workspaceId`，没有任何一个文件名依赖外部上下文。整个目录可以整体移动、整体删除、整体备份。
 
-> `<sessions-root>` 今天是 `<data>/sessions/<workspace-hash>/`。会话目录自包含之后，把它换成工作目录内的 `<work>/.genethub/sessions/` 只是换一个根，不动本文任何一条规则。真要搬还需要另外三件事：写 `.git/info/exclude` 而不是 `.gitignore`、workspace observation 排除自己、以及一个中心工作区注册表来支撑横向查询——那是另一项任务。
+### 3.0 会话存在工作区里
+
+根是**工作区自己的目录**，不是 daemon 的数据目录。一段对话是关于一堆代码的，它就跟着那堆代码走：复制项目连历史一起复制，删掉项目历史也一起没，卸载 GeneHub 不带走任何人的东西。
+
+只有工作区注册表知道每个 workspace id 落在哪个目录，所以它在注册工作区的同一处告诉 `Store`（`Workspaces::load` / `open`）。工作区没注册，它的会话就定位不到——这是诚实的答案，好过在某个兜底目录里给出一个路径。列会话因此也只列已注册工作区，跨机器的横向查询要靠 Hub，不靠扫本地磁盘。
+
+`.genethub/` 建立时做两件事，都在任何会话文件落盘之前：
+
+- **`chmod 700`**。会话在数据目录里时是 owner-only 的，搬进用户项目不能顺手放宽。
+- **写一份内容为 `*` 的 `.gitignore`**，整个目录自我忽略。否则用户发出第一条消息后看到的第一件事，是自己的 `git status` 里多出一堆会话文件。
+
+用 `.gitignore` 而不是 `.git/info/exclude`：前者对非 git 仓库、对 jj/hg、对还没 `git init` 的目录同样成立，且一份文件解决所有情况，不需要探测版本控制系统。
 
 ### 3.1 chat.jsonl
 
@@ -159,17 +170,13 @@ N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = �
 
 ---
 
-## 6. 迁移
+## 6. 不迁移
 
-旧布局与新布局不共存。会话第一次被打开时**一次性重写**，与既有的 `ensure_rounds_migrated` 同一套纪律：
+旧布局的会话**不搬**，代码里也没有搬运它们的路径。
 
-1. 读旧 `.jsonl`、`.rounds.jsonl`、`.blobrefs.jsonl` 与旧 blob 批文件。
-2. 按旧账本的 round 分段；旧账本缺失时退回「一个 adapter turn 一个 round」，标 `synthesized: true`。
-3. 用与运行时同一个 `TrunkBuilder` 重新切分 trunk，写出新目录。
-4. 旧 blob 正文按新 id 与新桶重写，得到带 offset 的引用。
-5. 全部写完并 fsync 后才删旧文件；中途失败保留旧文件，下次打开重来。
+一度写过一个：打开会话时把旧的 `.jsonl` / `.rounds.jsonl` / `.blobrefs.jsonl` 重切成新目录。它连着 `LegacyRound`、`migrate_legacy` 和一组只有它用得上的 `Store` 私有方法，是这套存储里最大的一块代码，服务的却是一批开发期数据——没有任何生产用户的会话是旧格式。两次布局变更之间还要维持它同时理解两种形状，成本会一直付下去。删掉了。
 
-判据是新目录里 `chat.jsonl` 是否存在，与旧迁移一样只看文件在不在、不看内容多少。已经被历史 `replace_items` 抹掉的正文**不可恢复**，迁移不假装能取回，那些 item 迁过来时没有 blob 引用。
+结果是：旧目录里的会话不再出现在列表里，也打不开。它们的文件还在原地，谁想要可以自己去 `<data>/sessions/` 拿。这是一次性代价，换掉的是长期背着一条没人走的代码路径。
 
 ---
 

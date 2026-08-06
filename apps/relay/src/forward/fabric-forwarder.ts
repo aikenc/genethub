@@ -137,7 +137,7 @@ export class FabricForwarder {
       this.core.sweepExpired();
       for (const peer of this.peers) {
         if (!peer.alive) {
-          this.terminate(peer.socket);
+          this.terminate(peer.socket, "the endpoint missed a heartbeat");
           continue;
         }
         peer.alive = false;
@@ -420,25 +420,30 @@ export class FabricForwarder {
     try {
       socket.send(payload, { binary: true }, (error) => {
         release();
-        if (error) this.terminate(socket);
+        if (error) this.terminate(socket, "the send failed");
       });
     } catch {
       release();
-      this.terminate(socket);
+      this.terminate(socket, "the send threw");
     }
   }
 
+  /** Logged for the same reason the legacy forwarder logs its closes: the
+   * reason exists only on this side, and a peer that is cut off cannot report
+   * anything but "the connection ended". */
   private closeSocket(socket: WebSocket, code?: number, reason = ""): void {
     if (socket.readyState === socket.CLOSED || socket.readyState === socket.CLOSING) return;
+    log.warn("fabric: closing a socket", { code: code ?? null, reason });
     try {
       if (code === undefined) socket.close();
       else socket.close(code, reason);
     } catch {
-      this.terminate(socket);
+      this.terminate(socket, "the close handshake failed");
     }
   }
 
-  private terminate(socket: WebSocket): void {
+  private terminate(socket: WebSocket, why = "unspecified"): void {
+    log.warn("fabric: terminating a socket", { why });
     try {
       socket.terminate();
     } catch {
@@ -451,7 +456,7 @@ export class FabricForwarder {
     try {
       socket.ping();
     } catch {
-      this.terminate(socket);
+      this.terminate(socket, "the heartbeat ping threw");
     }
   }
 

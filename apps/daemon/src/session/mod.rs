@@ -5,4 +5,4 @@ pub mod store;
 
 pub use manager::SessionManager;
 pub use rounds::{RoundOutcome, RoundRecord};
-pub use store::{ensure_within, now_ms, SessionMeta, Store};
+pub use store::{ensure_within, now_ms, SessionMeta, Store, WorkspaceHomes};

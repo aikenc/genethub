@@ -442,6 +442,18 @@ describe("the daemon connection", () => {
     client.close();
   });
 
+  it("repeats whatever the close frame said, since nothing else records it", async () => {
+    const { client, socket } = await connected();
+
+    const uncertain = client.call({ type: "agent.list" });
+    // Exactly what Relay sends when a client falls behind its send budget.
+    socket.close({ code: 1013, reason: "too slow" });
+
+    await expect(uncertain).rejects.toThrow("1013 too slow");
+    expect(client.lastCloseReason).toEqual({ code: 1013, reason: "too slow" });
+    client.close();
+  });
+
   it("fail-closes when authenticated receive work exceeds its frame budget", async () => {
     const capabilityId = "capability_backlog";
     const secret = "3".repeat(64);

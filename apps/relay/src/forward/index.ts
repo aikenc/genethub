@@ -160,7 +160,7 @@ export class Forwarder {
     this.heartbeat = setInterval(() => {
       for (const machine of this.machines.values()) {
         if (!machine.alive) {
-          this.terminate(machine.socket);
+          this.terminate(machine.socket, "the uplink missed a heartbeat");
           continue;
         }
         machine.alive = false;
@@ -168,7 +168,7 @@ export class Forwarder {
         for (const [channel, client] of machine.clients) {
           if (!client.alive) {
             machine.clients.delete(channel);
-            this.terminate(client.socket);
+            this.terminate(client.socket, "the client missed a heartbeat");
             continue;
           }
           client.alive = false;
@@ -602,6 +602,11 @@ export class Forwarder {
     const channel = newChannelId();
     const client: ClientConnection = { socket, clientId, alive: true };
     machine.clients.set(channel, client);
+    log.debug("forward: a client channel opened", {
+      channel,
+      machineId: machine.machineId,
+      channels: machine.clients.size,
+    });
     this.deliver(machine.socket, encode(Kind.Open, channel, channelCapability), true);
 
     socket.on("message", (data, isBinary) => {
@@ -632,6 +637,11 @@ export class Forwarder {
     const detach = () => {
       if (machine.clients.get(channel) !== client) return;
       machine.clients.delete(channel);
+      log.debug("forward: a client channel closed", {
+        channel,
+        machineId: machine.machineId,
+        channels: machine.clients.size,
+      });
       this.deliver(machine.socket, encode(Kind.Close, channel, "client detached"), true);
     };
 
@@ -656,25 +666,35 @@ export class Forwarder {
     try {
       socket.send(payload, { binary }, (error) => {
         release();
-        if (error) this.terminate(socket);
+        if (error) this.terminate(socket, "the send failed");
       });
     } catch {
       release();
-      this.terminate(socket);
+      this.terminate(socket, "the send threw");
     }
   }
 
+  /**
+   * Every deliberate close goes through here, and every one of them is logged.
+   *
+   * A peer that is cut off sees only that its connection ended; whatever it was
+   * waiting for is left with an unknown outcome. The reason exists on this side
+   * alone, so if it is not written down here nobody can ever answer why a
+   * session dropped.
+   */
   private closeSocket(socket: WebSocket, code?: number, reason = ""): void {
     if (socket.readyState === socket.CLOSED || socket.readyState === socket.CLOSING) return;
+    log.warn("forward: closing a socket", { code: code ?? null, reason });
     try {
       if (code === undefined) socket.close();
       else socket.close(code, boundedCloseReason(reason));
     } catch {
-      this.terminate(socket);
+      this.terminate(socket, "the close handshake failed");
     }
   }
 
-  private terminate(socket: WebSocket): void {
+  private terminate(socket: WebSocket, why = "unspecified"): void {
+    log.warn("forward: terminating a socket", { why });
     try {
       socket.terminate();
     } catch {
@@ -687,7 +707,7 @@ export class Forwarder {
     try {
       socket.ping();
     } catch {
-      this.terminate(socket);
+      this.terminate(socket, "the heartbeat ping threw");
     }
   }
 

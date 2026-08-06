@@ -710,6 +710,11 @@ async fn run_with_policy(
             // future feature; either way, dropping it beats guessing.
             KIND_BINARY => {}
             KIND_CLOSE => {
+                tracing::info!(
+                    channel,
+                    reason = %String::from_utf8_lossy(payload),
+                    "the Hub closed a client channel"
+                );
                 channels.remove(&channel);
                 if let Some(pending) = pending_channels.remove(&channel) {
                     pending.task.abort();
@@ -873,12 +878,22 @@ async fn send_with_deadline(sink: &Sink, message: Message, deadline: Duration) -
     .context("writing to the Hub uplink")
 }
 
+/// Ends one browser's channel, and says why in the log.
+///
+/// The reason travels to Relay but no further: the browser is told its socket
+/// closed and nothing else, so its request fails with an unknown outcome. This
+/// side is the only place the cause is ever written down.
 async fn send_channel_close(
     sink: &Sink,
     channel: &str,
     reason: &'static [u8],
     write_timeout: Duration,
 ) -> Result<()> {
+    tracing::info!(
+        channel,
+        reason = %String::from_utf8_lossy(reason),
+        "closing a client channel"
+    );
     send_with_deadline(
         sink,
         Message::Binary(encode(KIND_CLOSE, channel, reason)),

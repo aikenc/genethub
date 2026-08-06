@@ -308,16 +308,6 @@ impl SessionManager {
             .into_iter()
             .find(|meta| meta.id == session_id)
             .ok_or_else(|| anyhow!("no such session: {session_id}"))?;
-        // A session written before the relayout is rewritten into the current
-        // shape here, once. It stays openable if this fails — the old files
-        // are still there and the next open tries again — so a warning is the
-        // right response, not a refusal to open the conversation.
-        if let Err(error) = self
-            .store
-            .migrate_session_layout(&meta.workspace_id, &meta.id)
-        {
-            tracing::warn!("could not migrate the layout of {}: {error}", meta.id);
-        }
         let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
         let live = Arc::new(Live::new(meta, self.store.clone()));
         *live.items.lock().await = chat.items;
@@ -810,7 +800,7 @@ impl SessionManager {
             return Ok(());
         }
 
-        let scratch = self.store.scratch_dir(&meta.workspace_id, &meta.id);
+        let scratch = self.store.scratch_dir(&meta.workspace_id, &meta.id)?;
         std::fs::create_dir_all(&scratch)?;
 
         let session = adapter
@@ -2246,11 +2236,19 @@ mod tests {
         }
     }
 
+    /// A store whose single workspace, `w1`, is a throwaway directory. Sessions
+    /// live inside their workspace, so a test has to say which one that is.
+    fn test_store(workspace_root: &std::path::Path) -> Store {
+        let homes = crate::session::WorkspaceHomes::default();
+        homes.attach("w1", workspace_root);
+        Store::new(homes)
+    }
+
     /// A manager over a throwaway directory. Neither rename nor delete asks the
     /// registry anything, so an empty one is enough to exercise both.
     fn manager(root: &std::path::Path) -> SessionManager {
         SessionManager::new(
-            Store::new(root),
+            test_store(root),
             Arc::new(Registry::new(&std::collections::BTreeMap::new())),
             16,
         )
@@ -2260,7 +2258,7 @@ mod tests {
     /// with it so the caller keeps it alive for the length of the test.
     fn live_session(meta: SessionMeta) -> (Arc<Live>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let live = Arc::new(Live::new(meta, Store::new(dir.path())));
+        let live = Arc::new(Live::new(meta, test_store(dir.path())));
         (live, dir)
     }
 
@@ -2330,7 +2328,7 @@ mod tests {
             .store
             .append_chat_items("w1", "s1", &[item("a", "hi")])
             .unwrap();
-        let scratch = sessions.store.scratch_dir("w1", "s1");
+        let scratch = sessions.store.scratch_dir("w1", "s1").unwrap();
         std::fs::create_dir_all(&scratch).unwrap();
 
         sessions.delete("s1").await.unwrap();
@@ -2634,7 +2632,7 @@ mod tests {
     #[tokio::test]
     async fn an_interaction_is_persisted_before_the_agent_process_is_closed() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path());
+        let store = test_store(dir.path());
         let (live, _store_dir) = live_session(meta());
         let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2729,7 +2727,7 @@ mod tests {
     #[tokio::test]
     async fn only_settled_non_prompt_items_are_written_at_the_end_of_a_turn() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path());
+        let store = test_store(dir.path());
         let (live, _store_dir) = live_session(meta());
 
         for event in [
@@ -2809,7 +2807,7 @@ mod tests {
         tempfile::TempDir,
     ) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path());
+        let store = test_store(dir.path());
         let live = Arc::new(Live::new(meta(), store.clone()));
         // Work only reaches disk through a round's trunk files, and in
         // production `session.send` always opens one before the agent runs.
@@ -4075,125 +4073,29 @@ mod tests {
         );
     }
 
-    /// A session written before the relayout is rewritten on first open, and
-    /// never again: the guard is whether `chat.jsonl` is there, so a round
-    /// that settles afterwards is not clobbered by a second migration.
+    /// Sessions belong to the code they are about, so they are written inside
+    /// the workspace rather than in the daemon's data directory — and the
+    /// directory they land in keeps itself out of the project's own history.
     #[tokio::test]
-    async fn an_old_session_is_relaid_out_exactly_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = manager(dir.path());
-        // The pre-relayout shape, written by hand: a flat timeline log and a
-        // meta file beside it, both named after the session.
-        let legacy = dir.path().join("w1");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(
-            legacy.join("s1.meta.json"),
-            serde_json::to_string(&meta()).unwrap(),
-        )
-        .unwrap();
-        let lines: Vec<String> = [
-            TimelineItem::UserMessage {
-                id: "u1".into(),
-                text: "hi".into(),
-                attachments: vec![],
-            },
-            tool_call("c1", "grep"),
-            TimelineItem::TurnSummary {
-                id: "turn-summary-t1".into(),
-                stats: TurnStats {
-                    turn_id: "t1".into(),
-                    outcome: TurnOutcome::Completed,
-                    started_at_ms: 1,
-                    finished_at_ms: 2,
-                    duration_ms: 1,
-                    usage: Usage::default(),
-                    tool_calls: 1,
-                    fork_checkpoint: None,
-                },
-            },
-        ]
-        .iter()
-        .map(|item| serde_json::to_string(item).unwrap())
-        .collect();
-        std::fs::write(legacy.join("s1.jsonl"), lines.join("\n") + "\n").unwrap();
-        assert!(sessions
-            .store
-            .load_chat("w1", "s1")
-            .unwrap()
-            .rounds
-            .is_empty());
+    async fn a_session_is_written_inside_its_workspace_without_showing_up_in_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = manager(workspace.path());
 
-        sessions.live("s1").await.unwrap();
-        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
-        assert_eq!(
-            rounds.len(),
-            1,
-            "the historical turn is backfilled as one synthesized round"
-        );
-        assert!(rounds[0].synthesized);
-        assert_eq!(rounds[0].round_id, "legacy_r_t1");
-        assert_eq!(rounds[0].outcome, Some(RoundOutcome::Completed));
-        assert!(
-            !legacy.join("s1.jsonl").exists(),
-            "the old flat log is removed only once the new layout is complete"
-        );
-        let narrative = sessions.store.load_chat("w1", "s1").unwrap().items;
-        assert!(
-            narrative.iter().all(|item| !store::is_work_item(item)),
-            "work must not survive migration in the narrative layer"
-        );
-        let migrated = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
-        assert_eq!(migrated.len(), 1, "the historical tool call keeps a trunk");
-        let blob = sessions
-            .store
-            .load_trunk("w1", "s1", 0, &migrated[0])
-            .unwrap()
-            .batches
-            .into_iter()
-            .flat_map(|batch| batch.blobs)
-            .find(|blob| blob.item_id == "c1")
-            .and_then(|blob| blob.blob)
-            .expect("the migrated work row addresses its payload");
-        assert!(sessions
-            .store
-            .get_blob("w1", "s1", &blob)
-            .unwrap()
-            .is_some());
-
-        // Append a real round directly, as if it had settled after the
-        // migration ran, then force a cold reload (as a daemon restart
-        // would) to prove the second `live()` call does not re-migrate and
-        // clobber it.
+        sessions.store.save_meta(&meta()).unwrap();
         sessions
             .store
-            .append_round(
-                "w1",
-                "s1",
-                &RoundRecord {
-                    schema_version: rounds::SCHEMA_VERSION,
-                    round_id: "r_after_migration".into(),
-                    ord: 1,
-                    user_item_id: None,
-                    started_at_ms: 10,
-                    ended_at_ms: 11,
-                    outcome: Some(RoundOutcome::Completed),
-                    adapter_turn_ids: vec!["t2".into()],
-                    blocked_ms: 0,
-                    synthesized: false,
-                    trunk_count: 0,
-                },
-            )
+            .append_chat_items("w1", "s1", &[item("a", "hi")])
             .unwrap();
-        sessions.sessions.write().await.clear();
-        sessions.live("s1").await.unwrap();
 
-        let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
-        assert_eq!(
-            rounds.len(),
-            2,
-            "the round appended after migration must survive a second load untouched"
+        let home = workspace.path().join(".genethub");
+        assert!(
+            home.join("sessions").join("s1").join("chat.jsonl").exists(),
+            "the conversation is kept with the project it is about"
         );
-        assert_eq!(rounds[0].round_id, "legacy_r_t1");
-        assert_eq!(rounds[1].round_id, "r_after_migration");
+        assert_eq!(
+            std::fs::read_to_string(home.join(".gitignore")).unwrap(),
+            "*\n",
+            "a user's own `git status` must not fill up with session files"
+        );
     }
 }
