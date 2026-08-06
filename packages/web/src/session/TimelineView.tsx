@@ -348,7 +348,12 @@ function TrunkCard({
     (state) => state.timeline.roundTrunks[`${round.roundId}:${summary.index}`],
   );
   const loadTrunk = useWorkbench((state) => state.loadTrunk);
-  const [open, setOpen] = useState(false);
+  // Which trunk is the live tail changes as the round advances, so the default
+  // has to be read on every render rather than captured once. A null override
+  // follows that default; clicking detaches this trunk from it, so the work the
+  // user opened to read does not collapse under them when the tail moves on.
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = manualOpen ?? active;
 
   useEffect(() => {
     if (open && !detail) void loadTrunk(round.roundId, summary.index);
@@ -364,7 +369,7 @@ function TrunkCard({
         type="button"
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
         aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setManualOpen(!open)}
       >
         <span className="min-w-0 flex-1 truncate text-sm">
           {active ? "进展" : "过程"}：{normalizeProgressTitle(summary.title)}
@@ -377,7 +382,13 @@ function TrunkCard({
           {batches?.length === 1 ? (
             <BatchContent batch={batches[0]!} />
           ) : (
-            batches?.map((batch) => <BatchCard key={batch.summary.index} batch={batch} />)
+            batches?.map((batch, index) => (
+              <BatchCard
+                key={batch.summary.index}
+                batch={batch}
+                active={active && index === batches.length - 1}
+              />
+            ))
           )}
         </div>
       ) : null}
@@ -385,15 +396,16 @@ function TrunkCard({
   );
 }
 
-function BatchCard({ batch }: { batch: RoundBatch }) {
-  const [open, setOpen] = useState(false);
+function BatchCard({ batch, active }: { batch: RoundBatch; active: boolean }) {
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = manualOpen ?? active;
   return (
     <div className="overflow-hidden rounded-lg bg-surface" data-testid="round-batch">
       <button
         type="button"
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
         aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setManualOpen(!open)}
       >
         {open ? (
           <span className="ml-auto text-xs text-accent">收起</span>

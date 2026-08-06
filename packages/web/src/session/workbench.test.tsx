@@ -164,12 +164,6 @@ describe("what the user sees in a session", () => {
     expect(screen.getByTestId("round-progress")).not.toHaveTextContent("阶段");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("进展：先检查配置。");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("2 项");
-    expect(within(screen.getByTestId("round-trunk")).getByRole("button")).toHaveAttribute(
-      "aria-expanded",
-      "false",
-    );
-    expect(screen.queryByTestId("round-batch")).not.toBeInTheDocument();
-    await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
     expect(screen.getByTestId("batch-monologue")).toHaveTextContent("先检查配置，再逐项核对。");
     expect(screen.getByText("确认结构")).toBeInTheDocument();
     expect(screen.getByText("读取配置")).toBeInTheDocument();
@@ -278,7 +272,6 @@ describe("what the user sees in a session", () => {
     );
 
     render(<TimelineView state={state} />);
-    await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
     const rows = screen.getAllByTestId("blob-row");
 
     await userEvent.click(within(rows[0]!).getByRole("button"));
@@ -345,8 +338,52 @@ describe("what the user sees in a session", () => {
     const trunks = screen.getAllByTestId("round-trunk");
     expect(trunks[0]!).toHaveTextContent("过程：盘点入口。64 项");
     expect(trunks[1]!).toHaveTextContent("进展：核对权限。3 项");
+    // Watching an agent work is the point of a running round: its tail is open,
+    // and only the settled work behind it is folded away.
     expect(within(trunks[0]!).getByRole("button")).toHaveAttribute("aria-expanded", "false");
-    expect(within(trunks[1]!).getByRole("button")).toHaveAttribute("aria-expanded", "false");
+    expect(within(trunks[1]!).getByRole("button")).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("moves the open tail along with the round and lets a reader hold one open", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    const first = { index: 0, firstItemId: "a1", blobCount: 2, title: "先盘点入口。", batches: [] };
+    const second = { index: 1, firstItemId: "a2", blobCount: 1, title: "再核对权限。", batches: [] };
+    const running = (trunks: typeof first[]) =>
+      showRounds(
+        apply(emptyTimeline(), {
+          type: "item",
+          turnId: "t1",
+          item: { type: "userMessage", id: "u1", text: "审计", attachments: [] },
+        }),
+        { rounds: [round], roundLayers: { r1: { round, trunks } } },
+      );
+
+    const view = render(<TimelineView state={running([first])} />);
+    expect(within(screen.getByTestId("round-trunk")).getByRole("button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    // The tail advances: what was live becomes history and folds itself away,
+    // so a long round does not end up a wall of everything it ever did.
+    view.rerender(<TimelineView state={running([first, second])} />);
+    let trunks = screen.getAllByTestId("round-trunk");
+    expect(within(trunks[0]!).getByRole("button")).toHaveAttribute("aria-expanded", "false");
+    expect(within(trunks[1]!).getByRole("button")).toHaveAttribute("aria-expanded", "true");
+
+    // Unless someone is reading it. An automatic default must never shut a
+    // panel a person deliberately opened.
+    await userEvent.click(within(trunks[0]!).getByRole("button"));
+    view.rerender(<TimelineView state={running([first, second])} />);
+    trunks = screen.getAllByTestId("round-trunk");
+    expect(within(trunks[0]!).getByRole("button")).toHaveAttribute("aria-expanded", "true");
   });
 
   it("uses compact batch text only while collapsed and full narration after expansion", async () => {
