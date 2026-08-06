@@ -27,13 +27,14 @@
 ; The image names are defines rather than literals because they are the one
 ; thing that differs between the channels, and the lines install side by
 ; side on one machine: each channel's installer must stop its own processes
-; and leave the other lines' alone. `scripts/channel.mjs` rewrites these four
+; and leave the other lines' alone. `scripts/channel.mjs` rewrites these five
 ; lines when it stamps a channel; nothing else here changes.
 
 !define GH_DESKTOP_EXE "genethub-desktop-dev.exe"
 !define GH_CLI_EXE "genet-dev.exe"
 !define GH_AGENT_EXE "genet-agent-dev.exe"
 !define GH_DATA_DIR_NAME "GeneHub-dev"
+!define GH_BUNDLE_ID "com.genethub.desktop.dev"
 
 !macro StopGeneHubProcesses
   DetailPrint "正在停止 GeneHub 后台进程…"
@@ -61,18 +62,37 @@
   ; agents along, and a stale lock only wastes one taskkill on a pid that is
   ; already gone.
   ;
-  ; The data directory is the channel's own, so each line's installer reads
-  ; its own lock and leaves the other line's daemon alone. A daemon started
-  ; with the data-dir override pointed elsewhere is out of reach here — the
+  ; The lock lives in the daemon's data directory, and there are two of those,
+  ; one per way a daemon comes to be. A CLI-started daemon (`genet daemon
+  ; start`) uses the channel's platform data directory. The daemon the desktop
+  ; shell supervises is always started with the data-dir override (`daemon.rs`
+  ; `spawn`), pointed at the shell's own app-data directory — which on Windows
+  ; carries the bundle identifier as an extra level, because Tauri's
+  ; `app_data_dir()` is `%APPDATA%\<identifier>`. Reading only the first of
+  ; these finds no lock, skips the kill, and meets the supervised daemon still
+  ; holding `bin\genet.exe`: the upgrade that ends in "Error opening file for
+  ; writing", where Retry can never help because this hook has already run.
+  ;
+  ; Both directories are the channel's own, so each line's installer reads its
+  ; own locks and leaves the other lines' daemons alone. A daemon started with
+  ; a hand-set data-dir override pointed elsewhere is still out of reach — the
   ; same blind spot the old image-name kill had for renamed installs.
-  IfFileExists "$APPDATA\${GH_DATA_DIR_NAME}\daemon.lock" 0 genehub_no_lock
+  IfFileExists "$APPDATA\${GH_DATA_DIR_NAME}\daemon.lock" 0 genehub_no_cli_lock
     FileOpen $3 "$APPDATA\${GH_DATA_DIR_NAME}\daemon.lock" r
     FileRead $3 $4
     FileClose $3
     DetailPrint "正在停止 daemon (pid $4)…"
     nsExec::Exec 'taskkill /F /T /PID $4'
     Pop $0
-  genehub_no_lock:
+  genehub_no_cli_lock:
+  IfFileExists "$APPDATA\${GH_BUNDLE_ID}\${GH_DATA_DIR_NAME}\daemon.lock" 0 genehub_no_shell_lock
+    FileOpen $3 "$APPDATA\${GH_BUNDLE_ID}\${GH_DATA_DIR_NAME}\daemon.lock" r
+    FileRead $3 $4
+    FileClose $3
+    DetailPrint "正在停止 shell 的 daemon (pid $4)…"
+    nsExec::Exec 'taskkill /F /T /PID $4'
+    Pop $0
+  genehub_no_shell_lock:
   nsExec::Exec 'taskkill /F /T /IM ${GH_AGENT_EXE}'
   Pop $0
 

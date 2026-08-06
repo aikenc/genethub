@@ -664,6 +664,15 @@ impl SessionManager {
             // rather than join it.
             *status = SessionStatus::Running;
         }
+        // Told to every client, not just the one that pressed send. The claim
+        // above was invisible on the wire until `TurnStarted`, which is behind
+        // the agent's startup — seconds for a third-party CLI — so a second
+        // window went on showing an idle session it was happy to send into, and
+        // got this same refusal for its trouble.
+        live.publish(SessionEvent::SessionStatusChanged {
+            status: SessionStatus::Running,
+        })
+        .await;
         let started = self
             .start_turn(
                 &live,
@@ -676,8 +685,13 @@ impl SessionManager {
             .await;
         if started.is_err() {
             // Nothing is running after all, and a session stuck on Running would
-            // refuse every later prompt.
+            // refuse every later prompt. Withdrawn on the wire as well, or every
+            // client keeps the busy state this call just announced.
             *live.status.lock().await = SessionStatus::Idle;
+            live.publish(SessionEvent::SessionStatusChanged {
+                status: SessionStatus::Idle,
+            })
+            .await;
         }
         started
     }
@@ -3672,11 +3686,25 @@ mod tests {
     struct FakeSession {
         events: broadcast::Sender<SessionEvent>,
         next_turn: Arc<AtomicU64>,
+        /// Fails the handover the way a CLI that died on startup does.
+        refuses: bool,
     }
 
     impl FakeSession {
         fn sharing(events: broadcast::Sender<SessionEvent>, next_turn: Arc<AtomicU64>) -> Self {
-            FakeSession { events, next_turn }
+            FakeSession {
+                events,
+                next_turn,
+                refuses: false,
+            }
+        }
+
+        fn refusing(events: broadcast::Sender<SessionEvent>) -> Self {
+            FakeSession {
+                events,
+                next_turn: Arc::new(AtomicU64::new(0)),
+                refuses: true,
+            }
         }
     }
 
@@ -3687,6 +3715,9 @@ mod tests {
         }
 
         async fn send(&self, _input: PromptInput) -> Result<String> {
+            if self.refuses {
+                anyhow::bail!("the agent stopped before it was ready");
+            }
             let id = self.next_turn.fetch_add(1, Ordering::SeqCst);
             Ok(format!("t{id}"))
         }
@@ -3763,6 +3794,90 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+    }
+
+    /// Every `SessionStatusChanged` a call published, in order.
+    fn statuses(seen: &mut broadcast::Receiver<SequencedEvent>) -> Vec<SessionStatus> {
+        let mut out = Vec::new();
+        while let Ok(event) = seen.try_recv() {
+            if let SessionEvent::SessionStatusChanged { status } = event.event {
+                out.push(status);
+            }
+        }
+        out
+    }
+
+    /// Starting an agent takes time the wire used to say nothing about. Until
+    /// `TurnStarted` arrived — behind a process spawn and a handshake, seconds
+    /// for a third-party CLI — every other client still saw an idle session, so
+    /// it offered a send button for it and got this call's own refusal back.
+    #[tokio::test]
+    async fn send_says_the_session_is_busy_before_it_reaches_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, _events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+        let live = sessions.live("s1").await.unwrap();
+        let mut seen = live.events.subscribe();
+
+        sessions
+            .send("s1", "hello".into(), vec![], &providers, None)
+            .await
+            .expect("accepted");
+
+        let mut published = Vec::new();
+        while let Ok(event) = seen.try_recv() {
+            published.push(event.event);
+        }
+        let busy = published
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    SessionEvent::SessionStatusChanged {
+                        status: SessionStatus::Running
+                    }
+                )
+            })
+            .expect("the busy status reached the clients");
+        let prompt = published
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    SessionEvent::Item {
+                        item: TimelineItem::UserMessage { .. },
+                        ..
+                    }
+                )
+            })
+            .expect("the prompt reached the clients");
+        assert!(
+            busy < prompt,
+            "the session must be known to be busy before anything else, got {published:?}"
+        );
+    }
+
+    /// And withdrawn when it turns out nothing is running after all, or every
+    /// client keeps a busy session that will never finish.
+    #[tokio::test]
+    async fn a_refused_handover_withdraws_the_busy_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+        let live = sessions.live("s1").await.unwrap();
+        *live.agent.lock().await = Some(Box::new(FakeSession::refusing(events.clone())));
+        let mut seen = live.events.subscribe();
+
+        sessions
+            .send("s1", "hello".into(), vec![], &providers, None)
+            .await
+            .expect_err("the handover failed");
+
+        assert_eq!(
+            statuses(&mut seen),
+            vec![SessionStatus::Running, SessionStatus::Idle]
+        );
+        assert_eq!(*live.status.lock().await, SessionStatus::Idle);
     }
 
     #[tokio::test]
