@@ -220,17 +220,28 @@ describe("the app as the browser loads it", () => {
     ).toBeInTheDocument();
   });
 
-  it("says the device was revoked rather than sending someone to check ports", async () => {
-    // Driven through the real client: the socket connects, the machine refuses
-    // the handshake, and the reason has to survive all the way to the screen.
-    // The generic advice — "make sure the port is reachable" — is actively
-    // misleading here, because the port is plainly fine.
-    const queue = socketQueue();
+  it("reports an E2EE identity failure rather than blaming network reachability", async () => {
+    const queue = socketQueue({ secret: "wrong-secret" });
+    const host = {
+      kind: "browser" as const,
+      endpoint: async () => ({
+        url: ENDPOINT,
+        via: "relay" as const,
+        label: "测试机",
+        credential: { deviceId: "d_1", secret: "expected-secret" },
+      }),
+      notify: () => {},
+      openExternal: () => {},
+    };
     render(
       <App
-        connect={(endpoint) =>
-          new Client({ url: endpoint.url, socketFactory: queue.factory })
-        }
+        host={host}
+        connect={(endpoint) => new Client({
+          url: endpoint.url,
+          credential: endpoint.credential,
+          socketFactory: queue.factory,
+          rtcEnabled: false,
+        })}
       />,
     );
 
@@ -238,14 +249,10 @@ describe("the app as the browser loads it", () => {
     const socket = queue.latest();
     socket.open();
     await waitFor(() => socket.lastOf("hello"));
-    socket.fail(
-      socket.lastOf("hello").id,
-      "unauthorized",
-      "这个设备已经不在这台机器的授权列表里",
-    );
+    socket.acceptHandshake("wrong-secret");
 
     expect(
-      await screen.findByText("这个设备已经不在这台机器的授权列表里"),
+      await screen.findByText(/端到端身份验证/),
     ).toBeInTheDocument();
     expect(screen.getByText(/重新配对/)).toBeInTheDocument();
     expect(screen.queryByText(/确认地址里的端口/)).not.toBeInTheDocument();

@@ -4,20 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import type { Endpoint } from "../host";
 import type { WebSocketLike } from "../protocol/client";
+import { FakeSocket } from "../protocol/fake-socket";
 import { useWorkbench } from "../session/store";
 import { claimMachine } from "./claim";
 import { forgetMachine, listMachines, pairingLink, readPairingLink } from "./machines";
-import {
-  channelServerProof,
-  deriveChannelSessionKey,
-  openChannelFrame,
-  sealChannelFrame,
-} from "./proof";
 
 const INVITE_ID = `inv_${"1".repeat(32)}`;
 const INVITE_SECRET = "2".repeat(64);
 const CODE = `${INVITE_ID}.${INVITE_SECRET}`;
-const ENDPOINT = "wss://relay.example.com/forward/client?rendezvous=abc";
+const ENDPOINT = "wss://machine.example.com/peer";
 
 /**
  * A machine on the other end of a pairing link, with a switch for the case
@@ -26,98 +21,40 @@ const ENDPOINT = "wss://relay.example.com/forward/client?rendezvous=abc";
  */
 function machineSocket({ knowsCode = true }: { knowsCode?: boolean } = {}) {
   return (_url: string) => {
-    const context = `invite:${INVITE_ID}`;
     const secret = knowsCode ? INVITE_SECRET : "3".repeat(64);
-    const serverNonce = "server-nonce";
-    let key: Awaited<ReturnType<typeof deriveChannelSessionKey>> | null = null;
-    const socket = {
-      onopen: null as (() => void) | null,
-      onclose: null as (() => void) | null,
-      onerror: null as (() => void) | null,
-      onmessage: null as ((event: { data: string }) => void) | null,
-      closed: false,
-      send(raw: string) {
-        void (async () => {
-          const request = JSON.parse(raw) as {
-            id: string;
-            type: string;
-            payload: {
-              sequence?: number;
-              body?: string;
-              mac?: string;
-              invite?: { nonce: string };
-            };
-          };
-          if (request.type === "hello") {
-            const clientNonce = request.payload.invite!.nonce;
-            const p = await channelServerProof(secret, context, clientNonce, serverNonce);
-            key = await deriveChannelSessionKey(secret, context, clientNonce, serverNonce);
-            socket.onmessage?.({
-              data: JSON.stringify({
-                type: "result",
-                id: request.id,
-                ok: true,
-                payload: {
-                  type: "hello",
-                  data: {
-                    daemonVersion: "test",
-                    protocolVersion: 2,
-                    machineId: "m_1",
-                    fingerprint: "AAAA-BBBB",
-                    transport: "forwarded",
-                    machineName: "工作机",
-                    proof: p,
-                    serverNonce,
-                  },
-                },
-              }),
-            });
-            return;
-          }
-
-          if (!key) throw new Error("claim arrived before the fake handshake completed");
-          const plaintext = await openChannelFrame(
-            key,
-            "client-to-daemon",
-            request.payload.sequence!,
-            request.payload.body!,
-            request.payload.mac!,
-          );
-          const inner = JSON.parse(plaintext) as { id: string };
-          const reply = JSON.stringify({
-            type: "result",
-            id: inner.id,
-            ok: true,
-            payload: {
-              type: "claimed",
-              data: {
-                machineId: "m_1",
-                deviceId: "d_1",
-                secret: "s_1",
-                machineName: "工作机",
-                fingerprint: "AAAA-BBBB",
-                proof: "",
-              },
-            },
-          });
-          const sealed = await sealChannelFrame(key, "daemon-to-client", 1, reply);
-          socket.onmessage?.({
-            data: JSON.stringify({
-              type: "authenticated",
-              sequence: 1,
-              body: sealed.body,
-              mac: sealed.mac,
-            }),
-          });
-        })();
-      },
-      close() {
-        socket.closed = true;
-      },
-    };
-    queueMicrotask(() => socket.onopen?.());
-    return socket as unknown as WebSocketLike;
+    const socket = new FakeSocket({ secret, autoIdentity: false });
+    queueMicrotask(() => {
+      socket.open();
+      void (async () => {
+        await sent(socket, "hello");
+        socket.acceptHandshake(secret);
+        if (!knowsCode) return;
+        const claim = await sent(socket, "device.claim");
+        socket.reply(claim.id, {
+          type: "claimed",
+          data: {
+            machineId: "m_1",
+            deviceId: "d_1",
+            secret: "s_1",
+            machineName: "工作机",
+            fingerprint: "AAAA-BBBB",
+          },
+        });
+      })();
+    });
+    return socket;
   };
+}
+
+async function sent(socket: FakeSocket, type: string) {
+  for (let turn = 0; turn < 100; turn += 1) {
+    try {
+      return socket.lastOf(type);
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  throw new Error(`fake peer did not receive ${type}`);
 }
 
 /**
@@ -232,54 +169,24 @@ describe("redeeming a pairing invite", () => {
 
     await expect(
       claimMachine(ENDPOINT, CODE, "手机", silent, { responseTimeoutMs: 5 }),
-    ).rejects.toThrow(/认证回复/);
+    ).rejects.toThrow(/超时|过期/);
     expect(closed).toBe(true);
   });
 
   it("times out and closes when authenticated Hello succeeds but claim never returns", async () => {
     let closed = false;
     const noClaimReply = (_url: string) => {
-      const context = `invite:${INVITE_ID}`;
-      const secret = INVITE_SECRET;
-      const serverNonce = "server-nonce";
-      const socket = {
-        onopen: null as (() => void) | null,
-        onclose: null,
-        onerror: null,
-        onmessage: null as ((event: { data: string }) => void) | null,
-        sends: 0,
-        send(raw: string) {
-          socket.sends += 1;
-          if (socket.sends !== 1) return;
-          const hello = JSON.parse(raw) as {
-            id: string;
-            payload: { invite: { nonce: string } };
-          };
-          void channelServerProof(
-            secret,
-            context,
-            hello.payload.invite.nonce,
-            serverNonce,
-          ).then((p) =>
-            socket.onmessage?.({
-              data: JSON.stringify({
-                type: "result",
-                id: hello.id,
-                ok: true,
-                payload: {
-                  type: "hello",
-                  data: { serverNonce, proof: p },
-                },
-              }),
-            }),
-          );
-        },
-        close() {
-          closed = true;
-        },
+      const socket = new FakeSocket({ secret: INVITE_SECRET, autoIdentity: false });
+      const close = socket.close.bind(socket);
+      socket.close = (...args) => {
+        closed = true;
+        close(...args);
       };
-      queueMicrotask(() => socket.onopen?.());
-      return socket as unknown as WebSocketLike;
+      queueMicrotask(() => {
+        socket.open();
+        void sent(socket, "hello").then(() => socket.acceptHandshake());
+      });
+      return socket;
     };
 
     await expect(

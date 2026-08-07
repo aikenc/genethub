@@ -36,6 +36,8 @@ import {
  */
 export interface Target {
   id: string;
+  /** Stable daemon-owned handle used in portable asset-preview URLs. */
+  deviceHandle?: string;
   label: string;
   /**
    * The machine this shell is running on. Not a mode: it is one entry in the
@@ -70,6 +72,8 @@ export interface Endpoint {
   credential?: { deviceId: string; secret: string };
   /** Fresh hosted-channel secret paired with this one-use Relay URL. */
   channelCredential?: { capabilityId: string; secret: string };
+  /** One-use opaque route consumed as the first OPEN on a Fabric endpoint. */
+  fabricRouteTicket?: string;
   /** Out-of-band proof that a loopback listener owns the daemon endpoint. */
   localServerProof?: LocalServerProof;
 }
@@ -282,6 +286,7 @@ export function browserHost(
       // of them; even the one on this very computer is reached the same way.
       return listMachines().map((machine) => ({
         id: machine.machineId,
+        deviceHandle: machine.machineId,
         label: machine.name,
         kind: "remote" as const,
         fingerprint: machine.fingerprint,
@@ -361,6 +366,7 @@ export function desktopHost(
       const here = await local().catch(() => null);
       const paired = listMachines().map((machine) => ({
         id: machine.machineId,
+        deviceHandle: machine.machineId,
         label: machine.name,
         kind: "remote" as const,
         fingerprint: machine.fingerprint,
@@ -375,11 +381,12 @@ export function desktopHost(
       // down, and burying them under an error about an account server is the
       // wrong trade at the moment somebody is trying to open their own laptop.
       const account = here
-        ? await hubMachines(here.url, socketFactory).catch(() => [])
+        ? await hubMachines(here, socketFactory).catch(() => [])
         : [];
       return [
         {
           id: LOCAL_TARGET,
+          deviceHandle: here?.localServerProof?.machineId,
           label: "这台电脑",
           kind: "local" as const,
           online: here !== null,
@@ -394,6 +401,7 @@ export function desktopHost(
           .filter((machine) => !known.includes(machine.fingerprint))
           .map((machine) => ({
             id: machine.id,
+            deviceHandle: machine.deviceHandle,
             label: machine.name,
             kind: "remote" as const,
             online: machine.online,
@@ -423,7 +431,7 @@ export function desktopHost(
       // used to open a second handshake just to read a label, and would fail
       // the whole switch if the daemon hiccupped between the two.
       const switched = await onDaemon(
-        here.url,
+        here,
         async (client) => {
           const ticket = await client.call({
             type: "hub.connect",
@@ -443,6 +451,7 @@ export function desktopHost(
               capabilityId: ticket.data.channelCapability,
               secret: ticket.data.channelSecret,
             },
+            fabricRouteTicket: ticket.data.fabricRouteTicket,
           };
         },
         socketFactory,
@@ -527,11 +536,11 @@ export function desktopHost(
  * a machine that was never paired with a Hub.
  */
 async function hubMachines(
-  url: string,
+  endpoint: Endpoint,
   socketFactory?: (url: string) => WebSocketLike,
 ): Promise<HubMachine[]> {
   const reply = await onDaemon(
-    url,
+    endpoint,
     (client) => client.call({ type: "hub.machines" }),
     socketFactory,
   );
@@ -547,13 +556,18 @@ async function hubMachines(
  * loopback port and saves keeping a second live client in sync with the first.
  */
 async function onDaemon<T>(
-  url: string,
+  endpoint: Endpoint,
   exchange: (client: Client) => Promise<T>,
   socketFactory?: (url: string) => WebSocketLike,
 ): Promise<T> {
   const client = new Client({
-    url,
+    url: endpoint.url,
     clientName: "genehub-app",
+    credential: endpoint.credential,
+    channelCredential: endpoint.channelCredential,
+    fabricRouteTicket: endpoint.fabricRouteTicket,
+    localServerProof: endpoint.localServerProof,
+    rtcEnabled: false,
     ...(socketFactory ? { socketFactory } : {}),
   });
   // Wait until ready (or give up) rather than failing on the first
@@ -598,7 +612,7 @@ async function onDaemon<T>(
 function reach(paired: PairedMachine | null, url: string): Endpoint {
   return {
     url,
-    via: url.includes("/forward/client") ? "relay" : "lan",
+    via: url.includes("/fabric/v2") ? "relay" : "lan",
     label: paired?.name ?? new URL(url).host,
     fingerprint: paired?.fingerprint,
     credential: paired

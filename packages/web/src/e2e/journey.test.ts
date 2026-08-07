@@ -67,6 +67,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
       daemon = started.process;
       client = new Client({
         url: started.url,
+        localServerProof: started.localServerProof,
         socketFactory: (url) => new WebSocket(url) as unknown as WebSocketLike,
         clientName: "e2e",
       });
@@ -179,7 +180,10 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
         },
       });
 
-      await waitFor(() => assistantText(timeline).includes("读完了"), 20_000);
+      await waitFor(
+        () => assistantText(timeline).includes("读完了") && timeline.status === "idle",
+        20_000,
+      );
       expect(timeline.status).toBe("idle");
       expect(timeline.lastError).toBeNull();
     }, 30_000);
@@ -332,13 +336,9 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
         );
       }
 
-      const read = await client.call({
-        type: "file.read",
-        payload: { workspaceId, path: "notes.md" },
-      });
-      expect(read?.type === "fileContent" && read.data.content).toContain(
-        "hello",
-      );
+      const preview = await client.preview(workspaceId, "notes.md");
+      expect(preview.metadata.kind).toBe("markdown");
+      expect(new TextDecoder().decode(preview.bytes)).toContain("hello");
 
       const terminal = await client.call({
         type: "pty.open",
@@ -481,7 +481,18 @@ async function startMockModel(): Promise<MockModel> {
 function startDaemon(
   dataDir: string,
   defaultWorkspace: string,
-): Promise<{ process: ChildProcess; url: string }> {
+): Promise<{
+  process: ChildProcess;
+  url: string;
+  localServerProof: {
+    proof: string;
+    challenge: string;
+    pid: number;
+    machineId: string;
+    fingerprint: string;
+    expiresAt: number;
+  };
+}> {
   return new Promise((resolve, reject) => {
     const child = spawn(DAEMON, ["daemon", "run"], {
       env: {
@@ -504,10 +515,25 @@ function startDaemon(
     );
     child.stdout?.on("data", (chunk: Buffer) => {
       for (const line of chunk.toString().split("\n").filter(Boolean)) {
-        const frame = JSON.parse(line) as { event: string; url: string };
+        const frame = JSON.parse(line) as {
+          event: string;
+          url: string;
+          serverProof: string;
+          admission: {
+            challenge: string;
+            pid: number;
+            machineId: string;
+            fingerprint: string;
+            expiresAt: number;
+          };
+        };
         if (frame.event !== "listening") continue;
         clearTimeout(timer);
-        resolve({ process: child, url: frame.url });
+        resolve({
+          process: child,
+          url: frame.url,
+          localServerProof: { proof: frame.serverProof, ...frame.admission },
+        });
       }
     });
   });

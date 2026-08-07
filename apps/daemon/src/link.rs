@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, Mutex};
 use crate::config::{Enrollment, Paths};
 use crate::hub;
 use crate::state::AppState;
-use crate::transport::uplink::Uplink;
+use crate::transport::fabric::FabricUplink;
 
 enum Stage {
     Unpaired,
@@ -26,7 +26,7 @@ enum Stage {
     },
     Paired {
         enrollment: Enrollment,
-        uplink: Uplink,
+        uplink: FabricUplink,
         catalog_sync: CatalogSync,
     },
     /// Kept until the next attempt, so the reason stays on screen rather than
@@ -489,49 +489,9 @@ fn dial(
     state: &Arc<AppState>,
     pty: &broadcast::Sender<ServerFrame>,
     enrollment: &Enrollment,
-) -> Uplink {
-    let client = Arc::new(hub::Client::new(&enrollment.hub_url));
-    let enrollment_for_admission = Arc::new(enrollment.clone());
-    let channel_client = client.clone();
-    let enrollment_for_channel = enrollment_for_admission.clone();
-    let lease_client = channel_client.clone();
-    let enrollment_for_lease = enrollment_for_channel.clone();
-    Uplink::start_refreshing_hosted(
-        state.clone(),
-        pty.clone(),
-        enrollment.uplink_url.clone(),
-        move || {
-            let client = client.clone();
-            let enrollment = enrollment_for_admission.clone();
-            async move {
-                Ok(client
-                    .uplink_admission(&enrollment)
-                    .await?
-                    .map(|admission| admission.ticket))
-            }
-        },
-        move |capability| {
-            let client = channel_client.clone();
-            let enrollment = enrollment_for_channel.clone();
-            async move {
-                Ok(client
-                    .channel_admission(&enrollment, &capability)
-                    .await?
-                    .map(
-                        |admission| crate::transport::uplink::HostedChannelAdmission {
-                            secret: admission.secret,
-                            lease_id: admission.lease_id,
-                            expires_at: admission.expires_at,
-                        },
-                    ))
-            }
-        },
-        move |lease_id| {
-            let client = lease_client.clone();
-            let enrollment = enrollment_for_lease.clone();
-            async move { client.renew_channel_lease(&enrollment, &lease_id).await }
-        },
-    )
+) -> FabricUplink {
+    let _ = pty;
+    FabricUplink::start(state.clone(), enrollment.clone())
 }
 
 /// What the owner will see this machine called in their list.
@@ -560,8 +520,6 @@ mod tests {
         Enrollment {
             hub_url: "https://hub.example/subpath".into(),
             machine_id: "machine-row".into(),
-            uplink_url: "wss://relay.example/forward/daemon".into(),
-            fabric_url: Some("wss://relay.example/fabric/v2".into()),
             daemon_id: "daemon-stable".into(),
             secret: "node-secret".into(),
             workspace_catalog_generation: generation.map(str::to_string),

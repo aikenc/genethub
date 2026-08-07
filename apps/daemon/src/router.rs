@@ -12,8 +12,7 @@ use genehub_proto::{
 use tokio::sync::broadcast;
 
 use crate::state::Shared;
-use crate::transport::uplink::Admission;
-use crate::{channel_auth, files, git};
+use crate::{files, git};
 
 /// What a handled request may ask the connection to do beyond replying.
 pub enum SideEffect {
@@ -30,13 +29,6 @@ pub enum SideEffect {
 pub struct Handled {
     pub reply: Result<Reply, ProtocolError>,
     pub effect: SideEffect,
-    /// Set when this request authenticated the connection as a known device,
-    /// so the connection can be dropped if that device is later revoked.
-    pub device: Option<String>,
-    /// Established by a successful mutually authenticated Hello. Session owns
-    /// the key and refuses every subsequent unsigned frame.
-    pub authentication: Option<channel_auth::SessionKey>,
-    pub bootstrap_invite: Option<String>,
 }
 
 impl Handled {
@@ -44,9 +36,6 @@ impl Handled {
         Handled {
             reply: Ok(reply),
             effect: SideEffect::None,
-            device: None,
-            authentication: None,
-            bootstrap_invite: None,
         }
     }
 
@@ -57,9 +46,6 @@ impl Handled {
                 message: message.into(),
             }),
             effect: SideEffect::None,
-            device: None,
-            authentication: None,
-            bootstrap_invite: None,
         }
     }
 }
@@ -85,157 +71,11 @@ fn failed(error: anyhow::Error) -> Handled {
     Handled {
         reply: Err(ProtocolError { code, message }),
         effect: SideEffect::None,
-        device: None,
-        authentication: None,
-        bootstrap_invite: None,
     }
 }
 
-pub async fn handle(
-    state: &Shared,
-    transport: TransportKind,
-    admission: &Admission,
-    request: Request,
-) -> Handled {
+pub async fn handle(state: &Shared, transport: TransportKind, request: Request) -> Handled {
     match request {
-        Request::Hello {
-            protocol_version,
-            device,
-            channel,
-            invite,
-            ..
-        } => {
-            if protocol_version != PROTOCOL_VERSION {
-                // Refusing beats guessing: a client that speaks a different
-                // version will misread events in ways that look like data loss.
-                return Handled::err(
-                    ErrorCode::ProtocolVersion,
-                    format!(
-                        "this daemon speaks protocol {PROTOCOL_VERSION}, the client asked for {protocol_version}"
-                    ),
-                );
-            }
-
-            if [device.is_some(), channel.is_some(), invite.is_some()]
-                .into_iter()
-                .filter(|present| *present)
-                .count()
-                > 1
-            {
-                return Handled::err(
-                    ErrorCode::Unauthorized,
-                    "choose exactly one channel credential",
-                );
-            }
-
-            let server_nonce = crate::devices::random_token();
-            let authenticated = match (&device, &channel, &invite, admission) {
-                (
-                    Some(auth),
-                    None,
-                    None,
-                    Admission::DeviceRequired | Admission::Vouched | Admission::Loopback { .. },
-                ) => match state.devices.authenticate_session(auth, &server_nonce) {
-                    Ok((id, proof, key)) => Some((Some(id), proof, key, None)),
-                    Err(error) => {
-                        return Handled::err(ErrorCode::Unauthorized, format!("{error:#}"))
-                    }
-                },
-                (
-                    None,
-                    Some(auth),
-                    None,
-                    Admission::Hosted {
-                        capability_id,
-                        secret,
-                        ..
-                    },
-                ) if auth.capability_id == *capability_id => {
-                    let context = channel_auth::hosted_context(capability_id);
-                    if let Err(error) = channel_auth::verify_proof(
-                        &channel_auth::client_proof(secret, &context, &auth.nonce),
-                        &auth.proof,
-                    ) {
-                        return Handled::err(ErrorCode::Unauthorized, format!("{error:#}"));
-                    }
-                    Some((
-                        None,
-                        channel_auth::server_proof(secret, &context, &auth.nonce, &server_nonce),
-                        channel_auth::derive_key(secret, &context, &auth.nonce, &server_nonce),
-                        None,
-                    ))
-                }
-                (None, None, Some(auth), Admission::DeviceRequired) => {
-                    match state.devices.authenticate_invite(auth, &server_nonce) {
-                        Ok((invite_id, proof, key)) => Some((None, proof, key, Some(invite_id))),
-                        Err(error) => {
-                            return Handled::err(ErrorCode::Unauthorized, format!("{error:#}"))
-                        }
-                    }
-                }
-                // Only the loopback token may vouch without an end-to-end
-                // message key. Legacy LAN and all forwarded channels fail closed.
-                (None, None, None, Admission::Loopback { .. })
-                    if transport == TransportKind::Loopback =>
-                {
-                    None
-                }
-                _ => {
-                    return Handled::err(
-                        ErrorCode::Unauthorized,
-                        "this connection requires end-to-end channel authentication",
-                    )
-                }
-            };
-
-            let private_identity = authenticated.is_some();
-            Handled {
-                reply: Ok(Reply::Hello(HelloResult {
-                    daemon_version: if private_identity {
-                        String::new()
-                    } else {
-                        state.version.clone()
-                    },
-                    protocol_version: PROTOCOL_VERSION,
-                    machine_id: if private_identity {
-                        String::new()
-                    } else {
-                        state.machine.machine_id.clone()
-                    },
-                    fingerprint: if private_identity {
-                        String::new()
-                    } else {
-                        state.machine.fingerprint()
-                    },
-                    transport,
-                    machine_name: if private_identity {
-                        String::new()
-                    } else {
-                        crate::link::default_display_name()
-                    },
-                    proof: authenticated
-                        .as_ref()
-                        .map(|(_, proof, _, _)| proof.clone())
-                        .or_else(|| match admission {
-                            Admission::Loopback { server_proof } => Some(server_proof.clone()),
-                            _ => None,
-                        }),
-                    server_nonce: authenticated.as_ref().map(|_| server_nonce),
-                })),
-                effect: SideEffect::None,
-                device: authenticated.as_ref().and_then(|(id, _, _, _)| id.clone()),
-                bootstrap_invite: authenticated
-                    .as_ref()
-                    .and_then(|(_, _, _, invite)| invite.clone()),
-                authentication: authenticated.map(|(_, _, key, _)| key),
-            }
-        }
-
-        Request::Authenticated { .. } => Handled::err(
-            ErrorCode::Unauthorized,
-            "authenticated envelopes are verified by the connection layer",
-        ),
-
         Request::ConnectionIdentity => Handled::ok(Reply::Hello(HelloResult {
             daemon_version: state.version.clone(),
             protocol_version: PROTOCOL_VERSION,
@@ -243,8 +83,7 @@ pub async fn handle(
             fingerprint: state.machine.fingerprint(),
             transport,
             machine_name: crate::link::default_display_name(),
-            proof: None,
-            server_nonce: None,
+            rtc_supported: true,
         })),
 
         Request::Subscribe {
@@ -266,9 +105,6 @@ pub async fn handle(
                     session_id,
                     receiver,
                 },
-                device: None,
-                authentication: None,
-                bootstrap_invite: None,
             },
             Err(error) => failed(error),
         },
@@ -276,9 +112,6 @@ pub async fn handle(
         Request::Unsubscribe { session_id } => Handled {
             reply: Ok(Reply::Ack),
             effect: SideEffect::Unsubscribe { session_id },
-            device: None,
-            authentication: None,
-            bootstrap_invite: None,
         },
 
         Request::AgentList => {
@@ -650,26 +483,13 @@ pub async fn handle(
             Handled::ok(Reply::Invite(invite))
         }
 
-        Request::DeviceClaim {
-            code,
-            device_name,
-            nonce,
-            proof,
-        } => match state.devices.claim(&code, &device_name, &nonce, &proof) {
-            Ok((mut credential, _)) => {
-                credential.machine_name = crate::link::default_display_name();
-                credential.machine_id = state.machine.machine_id.clone();
-                credential.fingerprint = state.machine.fingerprint();
-                Handled::ok(Reply::Claimed(credential))
-            }
-            // Deliberately one message for every way this can fail. Telling a
-            // stranger which part they got wrong is telling them what to try
-            // next.
-            Err(_) => Handled::err(
-                ErrorCode::Unauthorized,
-                "这个配对链接已经失效了，请在机器上重新生成一个",
-            ),
-        },
+        // The protocol-v3 peer handshake authenticates an invitation before
+        // this RPC exists. `handle_rpc` consumes the invitation on that narrow
+        // bootstrap endpoint; an ordinary authenticated peer cannot claim one.
+        Request::DeviceClaim { .. } => Handled::err(
+            ErrorCode::Unauthorized,
+            "配对邀请只能在对应的加密引导连接中兑换",
+        ),
 
         Request::DeviceRevoke { device_id } => match state.devices.revoke(&device_id) {
             Ok(_) => Handled::ok(Reply::Devices {
@@ -760,21 +580,6 @@ pub async fn handle(
             };
             match files::tree(&workspace.root, &target, depth.unwrap_or(2).min(8)) {
                 Ok(tree) => Handled::ok(Reply::FileTree(tree)),
-                Err(error) => failed(error),
-            }
-        }
-
-        Request::FileRead { workspace_id, path } => {
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            let target = match state.workspaces.resolve(&workspace_id, &path).await {
-                Ok(target) => target,
-                Err(error) => return failed(error),
-            };
-            match files::read(&workspace.root, &target) {
-                Ok(content) => Handled::ok(Reply::FileContent(content)),
                 Err(error) => failed(error),
             }
         }
@@ -894,14 +699,6 @@ async fn remote_status(state: &Shared) -> genehub_proto::RemoteAccess {
     }
 }
 
-/// Requests allowed before a successful `hello`.
-///
-/// Redeeming an invite is the other one: the device doing it has no credential
-/// yet, which is the entire point of the exchange.
-pub fn needs_handshake(request: &Request) -> bool {
-    !matches!(request, Request::Hello { .. } | Request::DeviceClaim { .. })
-}
-
 pub fn transport_for(remote: Option<std::net::IpAddr>) -> TransportKind {
     match remote {
         Some(ip) if ip.is_loopback() => TransportKind::Loopback,
@@ -928,33 +725,6 @@ mod tests {
             TransportKind::Lan
         );
         assert_eq!(transport_for(None), TransportKind::Forwarded);
-    }
-
-    /// Two requests may arrive before a handshake, and it matters that this list
-    /// is exactly two: everything before `hello` runs for a caller nobody has
-    /// authenticated yet.
-    #[test]
-    fn only_hello_and_redeeming_an_invite_may_precede_the_handshake() {
-        assert!(!needs_handshake(&Request::Hello {
-            client_name: "web".into(),
-            protocol_version: 1,
-            device: None,
-            channel: None,
-            invite: None,
-        }));
-        // The device doing this has no credential yet, which is the whole point
-        // of the exchange — requiring one first would make pairing impossible.
-        assert!(!needs_handshake(&Request::DeviceClaim {
-            code: "invite".into(),
-            device_name: "手机上的浏览器".into(),
-            nonce: "n".into(),
-            proof: "p".into(),
-        }));
-
-        assert!(needs_handshake(&Request::AgentList));
-        // Named on purpose: it is the one that would hand a stranger the list of
-        // authorized devices.
-        assert!(needs_handshake(&Request::DeviceList));
     }
 
     #[test]

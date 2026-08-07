@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { WebSocket } from "ws";
 
 import { FABRIC_PATH } from "../src/contract/fabric-wire.js";
-import { CLIENT_PATH, DAEMON_PATH } from "../src/contract/index.js";
 import {
   decodeFabricFrame,
   encodeFabricFrame,
@@ -13,13 +12,11 @@ import {
   FABRIC_INITIAL_STREAM_CREDIT,
   FabricReset,
 } from "../src/forward/fabric-frame.js";
-import { decode, Kind } from "../src/forward/frame.js";
 import { AuthorityHttpError } from "../src/shared/authority-error.js";
 import { config } from "../src/shared/config.js";
 import {
   closed,
   connect,
-  FakeAuthority,
   FakeFabricAuthority,
   nextMessage,
   opened,
@@ -61,13 +58,12 @@ async function waitFor(condition: () => boolean, message: string): Promise<void>
 }
 
 describe("Fabric v2 over real WebSockets", () => {
-  const legacy = new FakeAuthority();
   const authority = new FakeFabricAuthority();
   const sockets = new Set<WebSocket>();
   let stack: TestRelay;
 
   beforeEach(async () => {
-    stack = await startTestRelay(legacy, authority);
+    stack = await startTestRelay(authority);
   });
 
   afterEach(async () => {
@@ -502,9 +498,9 @@ describe("Fabric v2 over real WebSockets", () => {
   });
 
   it("refreshes Fabric from the granted lease independently of heartbeat traffic", async () => {
-    const limits = config.limits as { presenceRefreshMaxSeconds: number };
-    const previous = limits.presenceRefreshMaxSeconds;
-    limits.presenceRefreshMaxSeconds = 0.01;
+    const limits = config.limits as { fabricPresenceRefreshMaxSeconds: number };
+    const previous = limits.fabricPresenceRefreshMaxSeconds;
+    limits.fabricPresenceRefreshMaxSeconds = 0.01;
     try {
       await endpoint("credential:presence-refresh", "endpoint:presence-refresh", {
         presenceLeaseSeconds: 60,
@@ -519,7 +515,7 @@ describe("Fabric v2 over real WebSockets", () => {
         "Fabric presence refresh did not run",
       );
     } finally {
-      limits.presenceRefreshMaxSeconds = previous;
+      limits.fabricPresenceRefreshMaxSeconds = previous;
     }
   });
 
@@ -587,33 +583,4 @@ describe("Fabric v2 over real WebSockets", () => {
     assert.equal(stack.relay.fabricForwarder?.stats().endpoints, 0);
   });
 
-  it("keeps the complete v1 forwarding path alive beside Fabric v2", async () => {
-    await endpoint("credential:v2", "endpoint:v2");
-
-    legacy.grantDaemon("legacy-uplink", { machineId: "m_legacy", daemonId: "d_legacy" });
-    const daemon = opened(
-      await connect(`${stack.wsOrigin}${DAEMON_PATH}`, {
-        headers: { authorization: "Bearer legacy-uplink" },
-      }),
-    );
-    sockets.add(daemon);
-    legacy.grantClient("legacy-client", { machineId: "m_legacy", clientId: "c_legacy" });
-    const client = opened(await connect(`${stack.wsOrigin}${CLIENT_PATH}?ticket=legacy-client`));
-    sockets.add(client);
-
-    const openedFrame = decode(await nextMessage(daemon));
-    assert.ok(openedFrame);
-    assert.equal(openedFrame.kind, Kind.Open);
-
-    const forwarded = nextMessage(daemon);
-    client.send("legacy payload");
-    const legacyFrame = decode(await forwarded);
-    assert.ok(legacyFrame);
-    assert.equal(legacyFrame.kind, Kind.Text);
-    assert.equal(legacyFrame.channel, openedFrame.channel);
-    assert.deepEqual(legacyFrame.payload, Buffer.from("legacy payload"));
-
-    assert.equal(stack.relay.forwarder.stats().machines, 1);
-    assert.equal(stack.relay.fabricForwarder?.stats().endpoints, 1);
-  });
 });

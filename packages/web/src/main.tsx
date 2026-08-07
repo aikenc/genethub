@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
 import { PRODUCT } from "./channel";
+import { AssetPreviewPage } from "./preview/AssetPreviewPage";
+import { parseAssetPreviewPath } from "./preview/url";
 import { watchViewport } from "./shell/viewport";
 import "./theme.css";
 import { applyTheme, useTheme, watchSystemTheme } from "./theme/store";
@@ -32,8 +34,10 @@ watchSystemTheme((theme) => useTheme.getState().systemChanged(theme));
 // any pane is open, and every one of them is inside the same fixed box.
 watchViewport();
 
+const preview = parseAssetPreviewPath(window.location.pathname);
+
 createRoot(root).render(
   <StrictMode>
-    <App />
+    {preview ? <AssetPreviewPage source={preview} /> : <App />}
   </StrictMode>,
 );

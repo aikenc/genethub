@@ -2,7 +2,7 @@ import type { Reply, Request } from "@genehub/proto";
 import type { ProviderInfo } from "@genehub/proto";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChangesPanel } from "../changes/ChangesPanel";
 import { FilesPanel } from "../files/FilesPanel";
@@ -32,6 +32,15 @@ function stubDaemon(answers: Partial<Record<Request["type"], (payload: never) =>
     onNotice: () => () => {},
     onUpdateDownload: () => () => {},
     onStateChange: () => () => {},
+    identity: {
+      daemonVersion: "test",
+      protocolVersion: 3,
+      machineId: "m_device",
+      machineName: "test",
+      fingerprint: "AA-BB",
+      transport: "forwarded",
+      rtcSupported: false,
+    },
   } as unknown as Client;
   return { client, calls };
 }
@@ -41,9 +50,9 @@ function install(client: Client) {
     client,
     workspaces: [{ id: "w1", name: "demo", root: "/tmp/demo", isGitRepo: true }],
     sessions: [],
+    activeWorkspaceId: "w1",
     activeSessionId: null,
     tree: null,
-    file: null,
     git: null,
     diff: null,
     settings: null,
@@ -54,7 +63,6 @@ function install(client: Client) {
 beforeEach(() => {
   useWorkbench.setState({
     tree: null,
-    file: null,
     git: null,
     diff: null,
     settings: null,
@@ -135,7 +143,8 @@ describe("the log panel", () => {
 });
 
 describe("the files panel", () => {
-  it("opens a file and saves an edit back to the machine", async () => {
+  it("opens a stable workspace-relative Preview URL in its own page", async () => {
+    const opened = vi.spyOn(window, "open").mockImplementation(() => null);
     const { client, calls } = stubDaemon({
       "file.tree": () => ({
         type: "fileTree",
@@ -146,33 +155,23 @@ describe("the files panel", () => {
           children: [{ name: "notes.md", path: "notes.md", isDir: false }],
         },
       }),
-      "file.read": () => ({
-        type: "fileContent",
-        data: { path: "notes.md", content: "before", truncated: false, isText: true },
-      }),
-      "file.write": () => ({ type: "ack" }),
-      "git.status": () => ({ type: "gitStatus", data: { changes: [], clean: true } }),
     });
     install(client);
 
     render(<FilesPanel />);
     const entry = await screen.findByText("notes.md");
     await userEvent.click(entry);
-
-    const editor = await screen.findByLabelText("notes.md 的内容");
-    expect(editor).toHaveValue("before");
-
-    await userEvent.clear(editor);
-    await userEvent.type(editor, "after");
-    await userEvent.click(screen.getByRole("button", { name: "保存" }));
-
-    await waitFor(() => {
-      const written = calls.find((call) => call.type === "file.write");
-      expect(written?.payload).toMatchObject({ path: "notes.md", content: "after" });
-    });
+    expect(opened).toHaveBeenCalledWith(
+      "http://localhost:3000/assets/preview/v1/m_device/w1/notes.md",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    expect(calls.some((call) => call.type === "file.tree")).toBe(true);
+    expect(calls.some((call) => call.type === "file.write")).toBe(false);
   });
 
-  it("will not offer to save a file that has not been touched", async () => {
+  it("does not load file bytes into the workbench store", async () => {
+    const opened = vi.spyOn(window, "open").mockImplementation(() => null);
     const { client } = stubDaemon({
       "file.tree": () => ({
         type: "fileTree",
@@ -183,17 +182,13 @@ describe("the files panel", () => {
           children: [{ name: "notes.md", path: "notes.md", isDir: false }],
         },
       }),
-      "file.read": () => ({
-        type: "fileContent",
-        data: { path: "notes.md", content: "before", truncated: false, isText: true },
-      }),
     });
     install(client);
 
     render(<FilesPanel />);
     await userEvent.click(await screen.findByText("notes.md"));
-    await screen.findByLabelText("notes.md 的内容");
-    expect(screen.getByRole("button", { name: "已保存" })).toBeDisabled();
+    expect(opened).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("textbox")).toBeNull();
   });
 });
 
@@ -716,7 +711,7 @@ describe("the version section", () => {
     render(
       <SettingsPanel
         host={host}
-        endpoint={{ url: "wss://example.test/forward/client", via: "relay", label: "服务器" }}
+        endpoint={{ url: "wss://example.test/fabric/v2?ticket=test", via: "relay", label: "服务器" }}
       />,
     );
     await userEvent.click(await screen.findByTestId("check-update"));

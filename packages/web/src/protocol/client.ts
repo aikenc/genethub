@@ -1,5 +1,8 @@
 import type {
+  AssetPreviewError,
+  AssetPreviewMetadata,
   HelloResult,
+  PeerWelcome,
   ProtocolError,
   Reply,
   Request,
@@ -9,18 +12,29 @@ import type {
 } from "@genehub/proto";
 
 import {
-  channelClientProof,
-  channelServerProof,
-  deriveChannelSessionKey,
-  deviceChannelContext,
-  hostedChannelContext,
-  openChannelFrame,
-  randomNonce,
-  sealChannelFrame,
-  type ChannelSessionKey,
-} from "../devices/proof";
+  DATA_PLANE_VERSION,
+  DataEndpoint,
+  DataPlaneError,
+  DataReset,
+  openFabricDataLink,
+  WebSocketRecordCarrier,
+  binaryMessage,
+  collectBody,
+  openRtcDataLink,
+  preparePeerHandshake,
+  type DataStream,
+  type FabricDataLink,
+  type PeerCredential,
+  type RtcDataLink,
+} from "../dataplane";
+import type { BinaryWebSocketLike } from "../dataplane/websocket";
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = DATA_PLANE_VERSION;
+export const MAX_RPC_BODY_BYTES = 2_900_000;
+const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_EVENT_BYTES = 3 * 1024 * 1024;
+const encoder = new TextEncoder();
+const decoder = new TextDecoder("utf-8", { fatal: true });
 
 export interface HostedChannelCredential {
   capabilityId: string;
@@ -33,93 +47,66 @@ export interface LocalServerProof {
   pid: number;
   machineId: string;
   fingerprint: string;
-  /** Unix seconds; the proof is rejected locally once this deadline passes. */
   expiresAt: number;
+}
+
+export interface InviteChannelCredential {
+  inviteId: string;
+  secret: string;
 }
 
 export interface ProtocolDial {
   url: string;
+  fabricRouteTicket?: string;
   channelCredential?: HostedChannelCredential;
   localServerProof?: LocalServerProof;
 }
 
-export type ConnectionState =
-  "connecting" | "ready" | "reconnecting" | "closed";
+export type ConnectionState = "connecting" | "ready" | "reconnecting" | "closed";
+export type RtcState =
+  | "disabled"
+  | "unavailable"
+  | "standby"
+  | "connecting"
+  | "connected"
+  | "failed";
 
 export interface ClientOptions {
   url: string;
-  /**
-   * Where to dial on a *retry*, when the address above cannot be used twice.
-   *
-   * A forwarding ticket is spent by the connection that used it, so a client
-   * that redialled `url` would fail every attempt after the first — one wifi
-   * hiccup and the session is over with no sign of why. Absent means the
-   * address keeps working, which is true of a loopback port and of a pairing
-   * credential.
-   */
   redial?: (signal?: AbortSignal) => Promise<string | ProtocolDial>;
   clientName?: string;
-  /**
-   * Present when this browser paired with the machine earlier. Required by a
-   * machine reached through a rendezvous relay, which vouches for nobody.
-   */
   credential?: { deviceId: string; secret: string };
-  /** Fresh on every hosted reconnect and never placed in the Relay URL. */
   channelCredential?: HostedChannelCredential;
-  /** Listener proof obtained out-of-band from the owner-only local shell. */
+  fabricRouteTicket?: string;
   localServerProof?: LocalServerProof;
-  /** Injected in tests, and by the desktop host when it wants its own socket. */
+  inviteCredential?: InviteChannelCredential;
+  rtcEnabled?: boolean;
+  /** Test/embedding seam; production uses the browser WebRTC implementation. */
+  rtcFactory?: (base: DataEndpoint) => Promise<RtcDataLink>;
   socketFactory?: (url: string) => WebSocketLike;
-  /** Delay before each reconnection attempt. Also injected in tests. */
   backoffMs?: (attempt: number) => number;
-  /**
-   * How long a socket may stay in CONNECTING before it is replaced.
-   *
-   * Some WebKit releases can strand a WebSocket without firing either
-   * `error` or `close`. Without a deadline that leaves the whole workbench on
-   * “connecting” forever, and a one-use relay ticket is never exchanged for a
-   * fresh one.
-   */
   connectTimeoutMs?: number;
-  /** Total time allowed for minting the next one-use address. */
   redialTimeoutMs?: number;
-  /** How long an opened socket may stay silent before completing Hello. */
   helloTimeoutMs?: number;
-  /** Deadline for a request after its bytes have been handed to WebSocket. */
   requestTimeoutMs?: number;
-  /** Maximum requests retained while no authenticated socket is available. */
   maxQueuedRequests?: number;
-  /** Maximum unresolved business requests, including ones already sent. */
   maxPendingRequests?: number;
-  /** Total plaintext bytes retained by queued, pending or encrypting requests. */
   maxPendingBytes?: number;
-  /** Maximum authenticated frames waiting for ordered WebCrypto processing. */
-  maxReceiveBacklogFrames?: number;
-  /** Maximum encoded bytes retained by the ordered receive chain. */
-  maxReceiveBacklogBytes?: number;
-  /** Maximum time a request may wait for a connection before being rejected. */
   maxQueueAgeMs?: number;
   now?: () => number;
-  /** Observability hook; callback failures never change transport state. */
   onError?: (error: unknown) => void;
 }
 
-/** The slice of `WebSocket` this client uses, so a fake is cheap to write. */
-export interface WebSocketLike {
-  send(data: string): void;
-  close(): void;
-  onopen: ((event: unknown) => void) | null;
-  onclose: ((event: unknown) => void) | null;
-  onerror: ((event: unknown) => void) | null;
-  onmessage: ((event: { data: unknown }) => void) | null;
+export interface WebSocketLike extends BinaryWebSocketLike {}
+
+export interface CloseReason {
+  code?: number;
+  reason?: string;
 }
 
-/**
- * Events arrive addressed to a topic, `session:<id>`. Subscriptions are keyed
- * by the session id itself, because that is what every caller has.
- */
-function sessionOf(topic: string): string {
-  return topic.startsWith("session:") ? topic.slice("session:".length) : topic;
+export interface AssetPreviewResult {
+  metadata: AssetPreviewMetadata;
+  bytes: Uint8Array;
 }
 
 export class ProtocolError_ extends Error {
@@ -129,50 +116,21 @@ export class ProtocolError_ extends Error {
   }
 }
 
-/** What a WebSocket said on its way out, when it said anything. */
-export interface CloseReason {
-  code?: number;
-  reason?: string;
+export class AssetPreviewError_ extends Error {
+  constructor(
+    public readonly detail: AssetPreviewError,
+    public readonly status: number,
+    public readonly sourceBytes?: number,
+  ) {
+    super(previewErrorMessage(detail, sourceBytes));
+    this.name = "AssetPreviewError";
+  }
 }
 
-/**
- * Renders a close for a person: `1013 too slow` when both halves are there,
- * either half alone otherwise, and nothing at all when the socket simply
- * vanished — which is itself the answer, and better than inventing one.
- */
-/** The close event as the DOM delivers it, without trusting its shape. */
-function asCloseReason(event: unknown): CloseReason | undefined {
-  if (typeof event !== "object" || event === null) return undefined;
-  const { code, reason } = event as { code?: unknown; reason?: unknown };
-  return {
-    ...(typeof code === "number" ? { code } : {}),
-    ...(typeof reason === "string" ? { reason: reason.slice(0, 200) } : {}),
-  };
-}
-
-function describeClose(close?: CloseReason): string {
-  const code = typeof close?.code === "number" ? String(close.code) : "";
-  const reason = close?.reason?.trim() ?? "";
-  const detail = [code, reason].filter(Boolean).join(" ");
-  return detail ? `（${detail}）` : "";
-}
-
-/**
- * The request reached a socket, but that connection disappeared before a
- * result arrived. Retrying automatically would be unsafe for commands: the
- * daemon may already have applied the operation.
- *
- * Whatever the close frame said is repeated verbatim. A user who reports "it
- * just disconnected" cannot be helped; one who reports `1013 too slow` names
- * the budget that cut them off.
- */
 export class ConnectionOutcomeUnknownError extends Error {
   constructor(public readonly close?: CloseReason) {
-    super(
-      `the connection was lost after the request was sent${describeClose(
-        close,
-      )}; its outcome is unknown`,
-    );
+    const detail = describeClose(close);
+    super(`the connection was lost after the request was sent${detail}; its outcome is unknown`);
     this.name = "ConnectionOutcomeUnknownError";
   }
 }
@@ -186,167 +144,122 @@ export class ClientRequestTimeoutError extends Error {
 
 export class ClientRequestTooLargeError extends Error {
   constructor() {
-    super("request is too large for one authenticated channel frame");
+    super("request is too large for the data-plane RPC exchange");
     this.name = "ClientRequestTooLargeError";
   }
 }
 
-export const MAX_AUTHENTICATED_PLAINTEXT_BYTES = 2_900_000;
-export const MAX_CHANNEL_WIRE_BYTES = 4 * 1024 * 1024;
-
-function validHostedCredential(
-  credential: unknown,
-): credential is HostedChannelCredential {
-  if (typeof credential !== "object" || credential === null) return false;
-  const candidate = credential as Record<string, unknown>;
-  return (
-    typeof candidate.capabilityId === "string" &&
-    candidate.capabilityId.length > 0 &&
-    candidate.capabilityId.length <= 256 &&
-    typeof candidate.secret === "string" &&
-    candidate.secret.length > 0 &&
-    candidate.secret.length <= 512
-  );
-}
-
-function validLocalServerProof(
-  proof: unknown,
-): proof is LocalServerProof {
-  if (typeof proof !== "object" || proof === null) return false;
-  const candidate = proof as Record<string, unknown>;
-  return (
-    typeof candidate.proof === "string" &&
-    /^[0-9a-f]{64}$/.test(candidate.proof) &&
-    typeof candidate.challenge === "string" &&
-    /^[0-9a-f]{64}$/.test(candidate.challenge) &&
-    Number.isSafeInteger(candidate.pid) &&
-    (candidate.pid as number) > 0 &&
-    typeof candidate.machineId === "string" &&
-    candidate.machineId.length > 0 &&
-    candidate.machineId.length <= 256 &&
-    typeof candidate.fingerprint === "string" &&
-    candidate.fingerprint.length > 0 &&
-    candidate.fingerprint.length <= 256 &&
-    Number.isSafeInteger(candidate.expiresAt) &&
-    (candidate.expiresAt as number) > 0
-  );
-}
-
 export class ClientQueueFullError extends Error {
   constructor() {
-    super("too many requests are already waiting for the connection");
+    super("too many requests are already waiting for this peer");
     this.name = "ClientQueueFullError";
   }
 }
 
-type Pending = {
-  resolve: (reply: Reply | undefined) => void;
-  reject: (error: unknown) => void;
-  kind: "request" | "handshake";
-  sentEpoch: symbol | null;
-  timer: ReturnType<typeof setTimeout> | null;
-  deadlineAt: number;
-  bytes: number;
-  pendingActive: boolean;
-  sendActive: boolean;
-  accounted: boolean;
-};
-
-type Queued = { id: string; frame: string };
-
 interface Subscription {
-  /** Last sequence number applied, so a reconnect asks for the gap only. */
   seq: number;
   onEvent(event: SequencedEvent): void;
-  /**
-   * Called after a reconnect. `reset` means the gap was too old and the
-   * snapshot is a fresh start rather than a continuation.
-   */
   onResync(snapshot: unknown, replayed: SequencedEvent[], reset: boolean): void;
-  /** One gap repair per session; later notices only request another pass. */
   resync: Promise<void> | null;
-  /** An event/desync arrived while the current repair was in flight. */
   needsResync: boolean;
   expandLastRound: boolean;
 }
 
+interface PendingCall {
+  request: Request;
+  bytes: number;
+  resolve(value: Reply | undefined): void;
+  reject(error: unknown): void;
+  queueTimer: ReturnType<typeof setTimeout> | null;
+  started: boolean;
+}
+
+function sessionOf(topic: string): string {
+  return topic.startsWith("session:") ? topic.slice("session:".length) : topic;
+}
+
 /**
- * The daemon connection.
- *
- * Reconnection is the interesting part. A dropped socket must not lose events
- * and must not replay ones already shown, so every subscription remembers the
- * last sequence number it applied and asks for the gap by number rather than
- * by time. When the gap is older than the daemon's retained window it says so,
- * and the caller starts from the snapshot instead of quietly missing history.
+ * Business client over protocol v3. WebSocket/Fabric/RTC are only carriers;
+ * RPC, events and Preview each use independent E2EE logical streams.
  */
 export class Client {
   private socket: WebSocketLike | null = null;
-  private socketEpoch: symbol | null = null;
+  private fabricLink: FabricDataLink | null = null;
+  private dialingTransport = false;
+  private endpoint: DataEndpoint | null = null;
+  private epoch: symbol | null = null;
   private activeChannelCredential: HostedChannelCredential | undefined;
   private activeLocalServerProof: LocalServerProof | undefined;
-  private channelKey: ChannelSessionKey | null = null;
-  private outboundSequence = 0;
-  private inboundSequence = 0;
-  private sendChain: Promise<void> = Promise.resolve();
-  private receiveChain: Promise<void> = Promise.resolve();
-  private receiveBacklogFrames = 0;
-  private receiveBacklogBytes = 0;
-  /** What the last socket said on its way out, for whoever asks why. */
-  private lastClose: CloseReason | undefined;
-  private keyReady: Promise<void> = Promise.resolve();
-  private releaseKeyReady: (() => void) | null = null;
-  private expectedHello: { id: string; epoch: symbol } | null = null;
-  private readonly pending = new Map<string, Pending>();
-  private pendingRequestBytes = 0;
+  private activeFabricRouteTicket: string | undefined;
+  private readonly queue: PendingCall[] = [];
+  private readonly active = new Set<PendingCall>();
+  private pendingBytes = 0;
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly stateListeners = new Set<(state: ConnectionState) => void>();
-  private readonly ptyListeners = new Set<
-    (ptyId: string, data: string | null) => void
-  >();
-  private readonly noticeListeners = new Set<
-    (level: string, message: string) => void
-  >();
-  private readonly downloadListeners = new Set<
-    (download: UpdateDownload) => void
-  >();
-  private nextId = 1;
-  private attempt = 0;
+  private readonly rtcListeners = new Set<(state: RtcState) => void>();
+  private readonly ptyListeners = new Set<(ptyId: string, data: string | null) => void>();
+  private readonly noticeListeners = new Set<(level: string, message: string) => void>();
+  private readonly downloadListeners = new Set<(download: UpdateDownload) => void>();
+  private state: ConnectionState = "connecting";
   private stopped = false;
+  private attempt = 0;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private redialGeneration = 0;
-  private redialInFlight = false;
-  private redialAbort: AbortController | null = null;
   private redialTimer: ReturnType<typeof setTimeout> | null = null;
-  private queue: Queued[] = [];
-  private state: ConnectionState = "connecting";
-  /** Why the connection gave up, when it did so for a reason worth showing. */
+  private redialAbort: AbortController | null = null;
+  private redialGeneration = 0;
+  private redialing = false;
+  private lastClose: CloseReason | undefined;
+  private rtcEnabled: boolean;
+  private rtcState_: RtcState;
+  private rtcLink: RtcDataLink | null = null;
+  private rtcGeneration = 0;
+
   failure: ProtocolError | null = null;
-  /** What the daemon said it is, including the key fingerprint to compare. */
   identity: HelloResult | null = null;
 
   constructor(private readonly options: ClientOptions) {
     this.activeChannelCredential = options.channelCredential;
     this.activeLocalServerProof = options.localServerProof;
+    this.activeFabricRouteTicket = options.fabricRouteTicket ?? embeddedFabricRoute(options.url);
+    this.rtcEnabled = options.rtcEnabled !== false;
+    this.rtcState_ = this.rtcEnabled ? "standby" : "disabled";
   }
 
   get connectionState(): ConnectionState {
     return this.state;
   }
 
-  /**
-   * What ended the last socket, when it said anything.
-   *
-   * A reconnect on its own explains nothing, and the far side is the only one
-   * that knows whether this was a network blip or a budget being enforced.
-   */
   get lastCloseReason(): CloseReason | undefined {
     return this.lastClose;
+  }
+
+  get rtcState(): RtcState {
+    return this.rtcState_;
   }
 
   onStateChange(listener: (state: ConnectionState) => void): () => void {
     this.stateListeners.add(listener);
     return () => this.stateListeners.delete(listener);
+  }
+
+  onRtcStateChange(listener: (state: RtcState) => void): () => void {
+    this.rtcListeners.add(listener);
+    return () => this.rtcListeners.delete(listener);
+  }
+
+  setRtcEnabled(enabled: boolean): void {
+    if (this.rtcEnabled === enabled) return;
+    this.rtcEnabled = enabled;
+    if (!enabled) {
+      this.closeRtc();
+      this.setRtcState("disabled");
+      return;
+    }
+    this.setRtcState("standby");
+    if (this.endpoint && this.epoch && this.identity && this.state === "ready") {
+      void this.startRtc(this.endpoint, this.epoch);
+    }
   }
 
   onPty(listener: (ptyId: string, data: string | null) => void): () => void {
@@ -359,289 +272,142 @@ export class Client {
     return () => this.noticeListeners.delete(listener);
   }
 
-  /**
-   * How far the machine has got fetching an installer.
-   *
-   * Pushed rather than polled, and to every client rather than the one that
-   * asked: the download outlives the panel the button was on.
-   */
   onUpdateDownload(listener: (download: UpdateDownload) => void): () => void {
     this.downloadListeners.add(listener);
     return () => this.downloadListeners.delete(listener);
   }
 
   connect(): void {
-    if (this.stopped || this.socket || this.redialInFlight) return;
+    if (this.stopped || this.socket || this.fabricLink || this.dialingTransport || this.redialing) return;
     this.clearRetryTimer();
-    const { url, redial } = this.options;
-    if (this.attempt === 0 || !redial) {
-      this.dial(url);
-      return;
-    }
-
-    // Asking where to dial can itself fail — the control plane that mints the
-    // address may be the thing that is down. That is a dropped connection like
-    // any other, so it backs off and asks again rather than giving up here.
-    this.redialInFlight = true;
-    const generation = ++this.redialGeneration;
-    const controller = new AbortController();
-    this.redialAbort = controller;
-    this.redialTimer = setTimeout(() => {
-      if (this.stopped || generation !== this.redialGeneration) return;
-      this.redialTimer = null;
-      controller.abort();
-      this.redialAbort = null;
-      this.redialInFlight = false;
-      this.redialGeneration += 1;
-      this.scheduleReconnect();
-    }, this.options.redialTimeoutMs ?? 10_000);
-    void Promise.resolve()
-      .then(() => redial(controller.signal))
-      .then(
-      (fresh) => {
-        if (this.stopped || generation !== this.redialGeneration) return;
-        this.clearRedialTimer();
-        this.redialAbort = null;
-        this.redialInFlight = false;
-        if (typeof fresh === "string") {
-          // A hosted reconnect must rotate its secret with its URL. A string
-          // remains valid only for loopback/rendezvous callers using no hosted
-          // credential.
-          if (this.activeChannelCredential || this.activeLocalServerProof)
-            return this.authenticationFailed();
-          this.dial(fresh);
-        } else {
-          if (
-            typeof fresh !== "object" ||
-            fresh === null ||
-            typeof fresh.url !== "string" ||
-            fresh.url.length === 0 ||
-            fresh.url.length > 8_192
-          ) {
-            return this.authenticationFailed();
-          }
-          if (this.activeChannelCredential) {
-            if (!validHostedCredential(fresh.channelCredential) || fresh.localServerProof) {
-              return this.authenticationFailed();
-            }
-          } else if (this.activeLocalServerProof) {
-            if (
-              !validLocalServerProof(fresh.localServerProof) ||
-              fresh.channelCredential ||
-              fresh.localServerProof.challenge ===
-                this.activeLocalServerProof.challenge ||
-              fresh.localServerProof.proof === this.activeLocalServerProof.proof
-            ) {
-              return this.authenticationFailed();
-            }
-          }
-          this.activeChannelCredential = fresh.channelCredential;
-          this.activeLocalServerProof = fresh.localServerProof;
-          this.dial(fresh.url);
-        }
-      },
-      () => {
-        if (this.stopped || generation !== this.redialGeneration) return;
-        this.clearRedialTimer();
-        this.redialAbort = null;
-        this.redialInFlight = false;
-        this.scheduleReconnect();
-      },
-      );
-  }
-
-  private dial(url: string): void {
-    const factory =
-      this.options.socketFactory ??
-      ((at: string) => new WebSocket(at) as WebSocketLike);
-    let socket: WebSocketLike;
-    try {
-      socket = factory(url);
-    } catch {
-      this.scheduleReconnect();
-      return;
-    }
-    const epoch = Symbol("protocol-connection");
-    this.socket = socket;
-    this.socketEpoch = epoch;
-    this.channelKey = null;
-    this.outboundSequence = 0;
-    this.inboundSequence = 0;
-    this.sendChain = Promise.resolve();
-    this.receiveChain = Promise.resolve();
-    this.receiveBacklogFrames = 0;
-    this.receiveBacklogBytes = 0;
-    if (this.options.credential || this.activeChannelCredential) {
-      this.keyReady = new Promise<void>((resolve) => {
-        this.releaseKeyReady = resolve;
+    if (this.attempt === 0 || !this.options.redial) {
+      this.dial({
+        url: this.options.url,
+        channelCredential: this.activeChannelCredential,
+        localServerProof: this.activeLocalServerProof,
+        fabricRouteTicket: this.activeFabricRouteTicket,
       });
-    } else {
-      this.keyReady = Promise.resolve();
-      this.releaseKeyReady = null;
+      return;
     }
-    this.expectedHello = null;
-    this.clearConnectTimer();
-    this.connectTimer = setTimeout(
-      () => this.abandon(socket),
-      this.options.connectTimeoutMs ?? 5_000,
-    );
-
-    socket.onopen = () => {
-      if (this.socket !== socket || this.stopped) return;
-      this.clearConnectTimer();
-      void this.handshake(socket, epoch);
-    };
-    socket.onmessage = (event) => {
-      if (this.socket !== socket) return;
-      if (typeof event.data !== "string") {
-        this.authenticationFailed(socket, epoch);
-        return;
-      }
-      const raw = event.data;
-      const rawBytes = new TextEncoder().encode(raw).byteLength;
-      if (rawBytes > MAX_CHANNEL_WIRE_BYTES) {
-        this.authenticationFailed(socket, epoch);
-        return;
-      }
-      if (!this.channelKey && !this.releaseKeyReady) {
-        void this.receive(raw, socket, epoch).catch(() =>
-          this.authenticationFailed(socket, epoch),
-        );
-        return;
-      }
-      if (
-        this.receiveBacklogFrames >= (this.options.maxReceiveBacklogFrames ?? 64) ||
-        this.receiveBacklogBytes + rawBytes >
-          (this.options.maxReceiveBacklogBytes ?? 8 * 1024 * 1024)
-      ) {
-        this.authenticationFailed(
-          socket,
-          epoch,
-          "事件到达速度超出本页面的解密能力，连接已关闭",
-        );
-        return;
-      }
-      this.receiveBacklogFrames += 1;
-      this.receiveBacklogBytes += rawBytes;
-      this.receiveChain = this.receiveChain
-        .then(() => this.receive(raw, socket, epoch))
-        .catch(() => this.authenticationFailed(socket, epoch))
-        .finally(() => {
-          if (this.socketEpoch !== epoch) return;
-          this.receiveBacklogFrames -= 1;
-          this.receiveBacklogBytes -= rawBytes;
-        });
-    };
-    socket.onclose = (event) => this.dropped(socket, asCloseReason(event));
-    socket.onerror = () => socket.close();
+    this.redial();
   }
 
   close(): void {
+    if (this.stopped && this.state === "closed") return;
     this.stopped = true;
-    this.clearConnectTimer();
-    this.clearRetryTimer();
     this.redialGeneration += 1;
     this.redialAbort?.abort();
     this.redialAbort = null;
-    this.clearRedialTimer();
-    this.redialInFlight = false;
-    this.setState("closed");
-    this.socket?.close();
+    this.redialing = false;
+    this.clearTimers();
+    const endpoint = this.endpoint;
+    const socket = this.socket;
+    const fabricLink = this.fabricLink;
+    this.endpoint = null;
     this.socket = null;
-    this.socketEpoch = null;
-    this.releaseKeyReady?.();
-    this.releaseKeyReady = null;
-    this.queue = [];
-    for (const pending of this.pending.values()) {
-      this.clearPendingTimer(pending);
-      this.finishPendingReservation(pending);
-      const { reject } = pending;
-      reject(new Error("the connection was closed"));
-    }
-    this.pending.clear();
+    this.fabricLink = null;
+    this.dialingTransport = false;
+    this.epoch = null;
+    this.closeRtc();
+    endpoint?.close("client closed");
+    socket?.close(1000, "client closed");
+    fabricLink?.close();
+    this.rejectQueued(new Error("the connection was closed"));
+    this.setState("closed");
   }
 
-  /** Sends a request and resolves with its reply. */
   async call(request: Request): Promise<Reply | undefined> {
-    const id = String(this.nextId++);
-    const frame = JSON.stringify({ id, ...request });
-    const frameBytes = new TextEncoder().encode(frame).byteLength;
-    if (frameBytes > MAX_AUTHENTICATED_PLAINTEXT_BYTES) {
+    const bytes = encoder.encode(JSON.stringify(request)).byteLength;
+    if (bytes > MAX_RPC_BODY_BYTES) {
       throw new ClientRequestTooLargeError();
     }
-    const readyEpoch =
-      this.state === "ready" && this.socket ? this.socketEpoch : null;
-    const businessPending = [...this.pending.values()].filter(
-      (pending) => pending.kind === "request",
-    ).length;
-    if (businessPending >= (this.options.maxPendingRequests ?? 128)) {
-      throw new ClientQueueFullError();
-    }
     if (
-      this.pendingRequestBytes + frameBytes >
-      (this.options.maxPendingBytes ?? 16 * 1024 * 1024)
+      this.queue.length + this.active.size >= (this.options.maxPendingRequests ?? 128) ||
+      this.pendingBytes + bytes > (this.options.maxPendingBytes ?? 16 * 1024 * 1024)
     ) {
       throw new ClientQueueFullError();
     }
-    if (
-      !readyEpoch &&
-      this.queue.length >= (this.options.maxQueuedRequests ?? 128)
-    ) {
+    if (!this.endpoint && this.queue.length >= (this.options.maxQueuedRequests ?? 128)) {
       throw new ClientQueueFullError();
     }
-    const promise = new Promise<Reply | undefined>((resolve, reject) => {
-      const pending: Pending = {
+    return new Promise<Reply | undefined>((resolve, reject) => {
+      const pending: PendingCall = {
+        request,
+        bytes,
         resolve,
         reject,
-        kind: "request",
-        sentEpoch: null,
-        timer: null,
-        deadlineAt:
-          (this.options.now?.() ?? Date.now()) +
-          (readyEpoch
-            ? (this.options.requestTimeoutMs ?? 60_000)
-            : Math.min(
-                this.options.maxQueueAgeMs ?? 30_000,
-                this.options.requestTimeoutMs ?? 60_000,
-              )),
-        bytes: frameBytes,
-        pendingActive: true,
-        sendActive: false,
-        accounted: true,
+        queueTimer: null,
+        started: false,
       };
-      this.pendingRequestBytes += frameBytes;
-      this.pending.set(id, pending);
-      if (!readyEpoch) {
-        this.armPending(
-          id,
-          pending,
-          this.options.maxQueueAgeMs ?? 30_000,
-          "the request waited too long for a connection",
-        );
+      this.pendingBytes += bytes;
+      const endpoint = this.state === "ready" ? this.requestEndpoint() : null;
+      const epoch = endpoint ? this.epoch : null;
+      if (endpoint && epoch) {
+        this.startCall(pending, endpoint, epoch);
+      } else {
+        pending.queueTimer = setTimeout(() => {
+          const index = this.queue.indexOf(pending);
+          if (index < 0) return;
+          this.queue.splice(index, 1);
+          this.release(pending);
+          reject(new ClientRequestTimeoutError("the request waited too long for a connection"));
+        }, this.options.maxQueueAgeMs ?? 30_000);
+        this.queue.push(pending);
       }
     });
-
-    if (readyEpoch) this.sendRequest(id, frame, readyEpoch);
-    // Queued rather than rejected: a request typed during a blip should land
-    // when the socket comes back, not fail in the user's face.
-    else this.queue.push({ id, frame });
-
-    return promise;
   }
 
-  /**
-   * Subscribes to a session. Returns the initial snapshot; later reconnects
-   * deliver theirs through `onResync`.
-   */
+  async preview(workspaceHandle: string, path: string): Promise<AssetPreviewResult> {
+    const endpoint = this.requireReadyEndpoint();
+    const stream = endpoint.open({
+      version: DATA_PLANE_VERSION,
+      method: "asset.preview",
+      metadata: {
+        source: { kind: "workspaceFile", workspaceHandle, path },
+      },
+      bodyLength: 0,
+      timeoutMs: 15_000,
+    });
+    const operation = (async () => {
+      await stream.finish();
+      const head = await stream.responseHead;
+      if (head.status !== 200) {
+        const metadata = asRecord(head.metadata);
+        throw new AssetPreviewError_(
+          previewError(metadata.error),
+          head.status,
+          typeof metadata.sourceBytes === "number" ? metadata.sourceBytes : undefined,
+        );
+      }
+      if (
+        typeof head.bodyLength !== "number" ||
+        !Number.isSafeInteger(head.bodyLength) ||
+        head.bodyLength < 0 ||
+        head.bodyLength > MAX_PREVIEW_BYTES
+      ) {
+        stream.reset(DataReset.TooLarge);
+        throw new AssetPreviewError_("tooLarge", 413, head.bodyLength);
+      }
+      const metadata = previewMetadata(head.metadata);
+      const bytes = await collectBody(stream.body(), MAX_PREVIEW_BYTES);
+      if (
+        bytes.byteLength !== head.bodyLength ||
+        metadata.sourceBytes !== bytes.byteLength
+      ) {
+        throw new DataPlaneError("the preview body does not match its exact metadata");
+      }
+      return { metadata, bytes };
+    })();
+    return withTimeout(operation, 15_000, "asset preview timed out", () =>
+      stream.reset(DataReset.Timeout),
+    );
+  }
+
   async subscribe(
     sessionId: string,
     handlers: Pick<Subscription, "onEvent" | "onResync">,
     options: { expandLastRound?: boolean } = {},
-  ): Promise<{
-    snapshot: unknown;
-    replayed: SequencedEvent[];
-    reset: boolean;
-  }> {
+  ): Promise<{ snapshot: unknown; replayed: SequencedEvent[]; reset: boolean }> {
     const subscription: Subscription = {
       seq: 0,
       ...handlers,
@@ -650,25 +416,16 @@ export class Client {
       expandLastRound: options.expandLastRound ?? true,
     };
     this.subscriptions.set(sessionId, subscription);
-
     const reply = await this.call({
       type: "subscribe",
-      payload: {
-        sessionId,
-        sinceSeq: 0,
-        expandLastRound: subscription.expandLastRound,
-      },
+      payload: { sessionId, sinceSeq: 0, expandLastRound: subscription.expandLastRound },
     });
     if (reply?.type !== "subscribed") {
       this.subscriptions.delete(sessionId);
       throw new Error(`unexpected reply to subscribe: ${reply?.type}`);
     }
-    for (const event of reply.data.replayed) subscription.seq = event.seq;
-    return {
-      snapshot: reply.data.snapshot,
-      replayed: reply.data.replayed,
-      reset: reply.data.reset,
-    };
+    for (const event of reply.data.replayed) subscription.seq = Math.max(subscription.seq, event.seq);
+    return { snapshot: reply.data.snapshot, replayed: reply.data.replayed, reset: reply.data.reset };
   }
 
   async unsubscribe(sessionId: string): Promise<void> {
@@ -676,260 +433,393 @@ export class Client {
     await this.call({ type: "unsubscribe", payload: { sessionId } });
   }
 
-  // -------------------------------------------------------------------------
-
-  private async handshake(socket: WebSocketLike, epoch: symbol): Promise<void> {
-    const credential = this.options.credential;
-    const channelCredential = this.activeChannelCredential;
-    const localServerProof = this.activeLocalServerProof;
-    if (
-      (channelCredential && !validHostedCredential(channelCredential)) ||
-      (localServerProof && !validLocalServerProof(localServerProof))
-    ) {
-      this.authenticationFailed();
+  private dial(dial: ProtocolDial): void {
+    this.activeChannelCredential = dial.channelCredential;
+    this.activeLocalServerProof = dial.localServerProof;
+    this.activeFabricRouteTicket = dial.fabricRouteTicket;
+    if (dial.fabricRouteTicket) {
+      this.dialFabric(dial);
       return;
     }
-    if (
-      [credential, channelCredential, localServerProof].filter(Boolean).length > 1
-    ) {
-      this.authenticationFailed();
-      return;
-    }
-    const secret = credential?.secret ?? channelCredential?.secret;
-    const context = credential
-      ? deviceChannelContext(credential.deviceId)
-      : channelCredential
-        ? hostedChannelContext(channelCredential.capabilityId)
-        : null;
-    const id = String(this.nextId++);
-    const promise = new Promise<Reply | undefined>((resolve, reject) => {
-      const pending: Pending = {
-        resolve,
-        reject,
-        kind: "handshake",
-        sentEpoch: epoch,
-        timer: null,
-        deadlineAt:
-          (this.options.now?.() ?? Date.now()) +
-          (this.options.helloTimeoutMs ?? 10_000),
-        bytes: 0,
-        pendingActive: true,
-        sendActive: false,
-        accounted: false,
-      };
-      this.pending.set(id, pending);
-      this.expectedHello = { id, epoch };
-      this.armPending(
-        id,
-        pending,
-        this.options.helloTimeoutMs ?? 10_000,
-        "the daemon did not answer Hello before its deadline",
-        () => this.abandon(socket),
-      );
-    });
-    // Proof generation crosses an asynchronous WebCrypto boundary. Install the
-    // epoch/correlation gate before that await: a Relay controls delivery timing
-    // and must not be able to resolve an ordinary queued RPC with plaintext in
-    // the small window between WebSocket open and Hello being sent.
-    void promise.catch(() => {});
+    let socket: WebSocketLike;
     try {
-      const nonce = secret && context ? randomNonce() : null;
-      const clientProof =
-        secret && context && nonce
-          ? await channelClientProof(secret, context, nonce)
-          : null;
-      const frame = JSON.stringify({
-        id,
-        type: "hello",
-        payload: {
-          // Remote-facing client labels are fixed; a person's chosen name is
-          // business metadata and only travels after encryption is active.
-          clientName: secret
-            ? "genehub-client"
-            : (this.options.clientName ?? "genehub-web"),
-          protocolVersion: PROTOCOL_VERSION,
-          device:
-            credential && nonce && clientProof
-              ? {
-                  deviceId: credential.deviceId,
-                  nonce,
-                  proof: clientProof,
-                }
-              : undefined,
-          channel:
-            channelCredential && nonce && clientProof
-              ? {
-                  capabilityId: channelCredential.capabilityId,
-                  nonce,
-                  proof: clientProof,
-                }
-              : undefined,
-        },
+      const factory =
+        this.options.socketFactory ?? ((url: string) => new WebSocket(url) as WebSocketLike);
+      socket = factory(dial.url);
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
+    if ("binaryType" in socket) socket.binaryType = "arraybuffer";
+    const epoch = Symbol("data-plane-peer");
+    this.socket = socket;
+    this.epoch = epoch;
+    this.endpoint = null;
+    this.connectTimer = setTimeout(
+      () => this.dropSocket(socket, epoch),
+      this.options.connectTimeoutMs ?? 5_000,
+    );
+    socket.onopen = () => {
+      if (!this.isCurrent(socket, epoch)) return;
+      this.clearConnectTimer();
+      void this.establish(socket, epoch).catch((error: unknown) => {
+        if (!this.isCurrent(socket, epoch)) return;
+        if (error instanceof PeerAuthenticationError) {
+          this.failClosed(error.message);
+        } else {
+          this.report(error);
+          this.dropSocket(socket, epoch);
+        }
       });
-      if (this.socket !== socket || this.socketEpoch !== epoch || this.stopped)
-        return;
-      socket.send(frame);
-      const reply = await promise;
-      if (reply?.type !== "hello") {
-        throw new ProtocolError_({
-          code: "protocolVersion",
-          message: "the daemon did not complete the Hello handshake",
-        });
-      }
-      if (secret && context && nonce) {
-        if (!reply.data.serverNonce) {
-          throw new ProtocolError_({
-            code: "unauthorized",
-            message: "the daemon omitted its channel challenge",
-          });
-        }
-        const expected = await channelServerProof(
-          secret,
-          context,
-          nonce,
-          reply.data.serverNonce,
-        );
-        if (reply.data.proof !== expected) {
-          throw new ProtocolError_({
-            code: "unauthorized",
-            message: "对面不是你配对过的那台机器，连接已断开",
-          });
-        }
-        this.channelKey = await deriveChannelSessionKey(
-          secret,
-          context,
-          nonce,
-          reply.data.serverNonce,
-        );
-        this.releaseKeyReady?.();
-        this.releaseKeyReady = null;
-        this.expectedHello = null;
-        const identityId = String(this.nextId++);
-        const identityFrame = JSON.stringify({
-          id: identityId,
-          type: "connection.identity",
-        });
-        const identityPromise = new Promise<Reply | undefined>(
-          (resolve, reject) => {
-            this.pending.set(identityId, {
-              resolve,
-              reject,
-              kind: "handshake",
-              sentEpoch: null,
-              timer: null,
-              deadlineAt:
-                (this.options.now?.() ?? Date.now()) +
-                (this.options.helloTimeoutMs ?? 10_000),
-              bytes: 0,
-              pendingActive: true,
-              sendActive: false,
-              accounted: false,
-            });
-          },
-        );
-        this.sendRequest(identityId, identityFrame, epoch);
-        const identity = await identityPromise;
-        if (identity?.type !== "hello") {
-          throw new ProtocolError_({
-            code: "unauthorized",
-            message: "the daemon did not return its encrypted identity",
-          });
-        }
-        this.identity = identity.data;
-      } else if (localServerProof) {
-        const now = this.options.now?.() ?? Date.now();
-        if (
-          !validLocalServerProof(localServerProof) ||
-          localServerProof.expiresAt * 1000 <= now ||
-          reply.data.protocolVersion !== PROTOCOL_VERSION ||
-          reply.data.transport !== "loopback" ||
-          reply.data.machineId !== localServerProof.machineId ||
-          reply.data.fingerprint !== localServerProof.fingerprint ||
-          reply.data.serverNonce !== undefined ||
-          reply.data.proof !== localServerProof.proof
-        ) {
-          throw new ProtocolError_({
-            code: "unauthorized",
-            message: "本地端口没有证明它是桌面端启动的 daemon，连接已中止",
-          });
-        }
-        this.expectedHello = null;
-        this.identity = reply.data;
-      } else {
-        this.expectedHello = null;
-        this.identity = reply.data;
-      }
+    };
+    socket.onclose = (event) => this.dropped(socket, epoch, asCloseReason(event));
+    socket.onerror = () => this.dropSocket(socket, epoch);
+  }
+
+  private dialFabric(dial: ProtocolDial): void {
+    const epoch = Symbol("fabric-data-peer");
+    this.epoch = epoch;
+    this.endpoint = null;
+    this.dialingTransport = true;
+    let credential: PeerCredential;
+    try {
+      credential = this.peerCredential();
     } catch (error) {
-      this.releaseKeyReady?.();
-      this.releaseKeyReady = null;
-      if (this.socket !== socket || this.socketEpoch !== epoch || this.stopped)
-        return;
-      // A refused handshake is not something retrying fixes: the versions do
-      // not match, or the credential is wrong. Stop, and keep the reason so the
-      // UI can say which of those it was instead of spinning forever.
-      if (error instanceof ProtocolError_) {
-        this.failure = error.detail;
-        this.close();
+      this.dialingTransport = false;
+      if (error instanceof PeerAuthenticationError) {
+        this.failClosed(error.message);
       } else {
-        this.abandon(socket);
+        this.report(error);
+        this.droppedTransport(epoch);
       }
       return;
     }
+    void openFabricDataLink({
+      url: dial.url,
+      routeTicket: dial.fabricRouteTicket!,
+      credential,
+      clientName: this.options.clientName,
+      rtcSupported: this.rtcEnabled && rtcAvailableHere(),
+      ...(this.options.socketFactory
+        ? { socketFactory: this.options.socketFactory as unknown as (url: string) => import("../fabric").FabricSocketLike }
+        : {}),
+      onError: (error) => this.report(error),
+    }).then(
+      async (link) => {
+        this.dialingTransport = false;
+        if (!this.isCurrentEpoch(epoch)) {
+          link.close();
+          return;
+        }
+        this.fabricLink = link;
+        this.endpoint = link.endpoint;
+        link.endpoint.onClose((reason) => {
+          if (this.fabricLink !== link || this.epoch !== epoch) return;
+          this.report(reason);
+          this.droppedTransport(epoch, this.lastClose);
+        });
+        try {
+          await this.activateEndpoint(link.endpoint, epoch);
+        } catch (error) {
+          if (!this.isCurrentEpoch(epoch)) return;
+          if (error instanceof PeerAuthenticationError) this.failClosed(error.message);
+          else {
+            this.report(error);
+            link.close();
+            this.droppedTransport(epoch);
+          }
+        }
+      },
+      (error: unknown) => {
+        this.dialingTransport = false;
+        if (!this.isCurrentEpoch(epoch)) return;
+        this.report(error);
+        this.droppedTransport(epoch);
+      },
+    );
+  }
 
-    if (this.socket !== socket || this.socketEpoch !== epoch || this.stopped)
+  private async establish(socket: WebSocketLike, epoch: symbol): Promise<void> {
+    const credential = this.peerCredential();
+    const prepared = await preparePeerHandshake(credential, {
+      clientName: this.options.clientName,
+      rtcSupported: this.rtcEnabled && rtcAvailableHere(),
+    });
+    const welcomeBytes = nextBinaryMessage(
+      socket,
+      this.options.helloTimeoutMs ?? 10_000,
+    );
+    socket.send(encoder.encode(JSON.stringify(prepared.hello)));
+    const welcomeWire = await welcomeBytes;
+    let welcome: PeerWelcome;
+    try {
+      welcome = JSON.parse(decoder.decode(welcomeWire)) as PeerWelcome;
+    } catch (cause) {
+      throw new PeerAuthenticationError("the daemon returned an invalid peer welcome", { cause });
+    }
+    let key;
+    try {
+      key = await prepared.complete(welcome);
+    } catch (cause) {
+      throw new PeerAuthenticationError("对面没有通过端到端身份验证，连接已中止", { cause });
+    }
+    if (!this.isCurrent(socket, epoch)) return;
+
+    const carrier = new WebSocketRecordCarrier(socket);
+    const endpoint = new DataEndpoint({
+      role: "client",
+      carrier,
+      key,
+      maxReceiveBytesPerStream: 4 * 1024 * 1024,
+      onError: (error) => this.report(error),
+    });
+    this.endpoint = endpoint;
+    endpoint.onClose((reason) => {
+      if (this.epoch !== epoch) return;
+      this.report(reason);
+      this.dropped(socket, epoch, closeReasonFromUnknown(reason) ?? this.lastClose);
+    });
+
+    await this.activateEndpoint(endpoint, epoch);
+  }
+
+  private async activateEndpoint(endpoint: DataEndpoint, epoch: symbol): Promise<void> {
+    // Pairing is a deliberately tiny bootstrap session. The daemon permits
+    // exactly one encrypted device.claim RPC and reveals identity in that
+    // reply, so opening the normal identity/events streams here would widen
+    // the invitation's authority for no product benefit.
+    if (this.options.inviteCredential) {
+      this.failure = null;
+      this.attempt = 0;
+      this.setState("ready");
+      this.flushQueue(endpoint, epoch);
       return;
+    }
+
+    const identity = await this.rpc(endpoint, { type: "connection.identity" });
+    if (identity?.type !== "hello") {
+      throw new PeerAuthenticationError("the encrypted peer identity was not returned");
+    }
+    this.verifyIdentity(identity.data);
+    if (!this.isCurrentEpoch(epoch) || this.endpoint !== endpoint) return;
+    this.identity = identity.data;
+    this.failure = null;
     this.attempt = 0;
     this.setState("ready");
-    this.flushQueue(socket, epoch);
-    await this.resubscribe();
+    this.flushQueue(endpoint, epoch);
+    void this.runEvents(endpoint, epoch);
+    void this.resubscribe();
+    void this.startRtc(endpoint, epoch);
   }
 
-  /** Asks for the gap on every open session. */
-  private async resubscribe(): Promise<void> {
-    for (const sessionId of [...this.subscriptions.keys()]) {
-      await this.fillGap(sessionId);
+  private peerCredential(): PeerCredential {
+    const candidates: PeerCredential[] = [];
+    if (this.options.credential) {
+      candidates.push({ kind: "device", ...this.options.credential });
+    }
+    if (this.activeChannelCredential) {
+      candidates.push({ kind: "hosted", ...this.activeChannelCredential });
+    }
+    if (this.activeLocalServerProof) {
+      if (!validLocalServerProof(this.activeLocalServerProof, this.options.now?.() ?? Date.now())) {
+        throw new PeerAuthenticationError("本地 daemon 的一次性连接凭证已失效");
+      }
+      candidates.push({ kind: "loopback", secret: this.activeLocalServerProof.proof });
+    }
+    if (this.options.inviteCredential) {
+      candidates.push({ kind: "invite", ...this.options.inviteCredential });
+    }
+    if (candidates.length !== 1 || !validPeerCredential(candidates[0]!)) {
+      throw new PeerAuthenticationError("this endpoint requires exactly one valid E2EE credential");
+    }
+    return candidates[0]!;
+  }
+
+  private verifyIdentity(identity: HelloResult): void {
+    const expected = this.activeLocalServerProof;
+    if (
+      expected &&
+      (identity.transport !== "loopback" ||
+        identity.machineId !== expected.machineId ||
+        identity.fingerprint !== expected.fingerprint)
+    ) {
+      throw new PeerAuthenticationError("本地端口返回了不匹配的 daemon 身份");
     }
   }
 
-  /**
-   * Asks for whatever happened on one session since the last sequence number
-   * this client saw.
-   *
-   * The same request serves a reconnect and a dropped-events notice, because
-   * they are the same situation: this client's view stops at some sequence
-   * number and the daemon's does not.
-   */
+  private startCall(pending: PendingCall, endpoint: DataEndpoint, epoch: symbol): void {
+    pending.started = true;
+    if (pending.queueTimer !== null) clearTimeout(pending.queueTimer);
+    pending.queueTimer = null;
+    this.active.add(pending);
+    void this.rpc(endpoint, pending.request)
+      .then(pending.resolve, (error: unknown) => {
+        if (
+          error instanceof ProtocolError_ ||
+          error instanceof ClientRequestTimeoutError ||
+          this.stopped
+        ) {
+          pending.reject(error);
+        } else if (this.epoch !== epoch || endpoint.state === "closed") {
+          pending.reject(new ConnectionOutcomeUnknownError(this.lastClose));
+        } else {
+          pending.reject(error);
+        }
+      })
+      .finally(() => {
+        this.active.delete(pending);
+        this.release(pending);
+      });
+  }
+
+  private async rpc(endpoint: DataEndpoint, request: Request): Promise<Reply | undefined> {
+    const body = encoder.encode(JSON.stringify(request));
+    const stream = endpoint.open({
+      version: DATA_PLANE_VERSION,
+      method: "rpc",
+      metadata: null,
+      bodyLength: body.byteLength,
+      timeoutMs: this.options.requestTimeoutMs ?? 60_000,
+    });
+    const operation = (async () => {
+      if (body.byteLength > 0) await stream.write(body);
+      await stream.finish();
+      const head = await stream.responseHead;
+      if (head.error) throw new ProtocolError_(head.error);
+      if (head.status !== 200) {
+        throw new ProtocolError_({ code: "internal", message: `RPC failed (${head.status})` });
+      }
+      if (
+        typeof head.bodyLength === "number" &&
+        head.bodyLength > MAX_RPC_BODY_BYTES
+      ) {
+        stream.reset(DataReset.TooLarge);
+        throw new ClientRequestTooLargeError();
+      }
+      const value = await collectBody(stream.body(), MAX_RPC_BODY_BYTES);
+      return value.byteLength === 0 ? undefined : (JSON.parse(decoder.decode(value)) as Reply);
+    })();
+    return withTimeout(
+      operation,
+      this.options.requestTimeoutMs ?? 60_000,
+      "the daemon did not answer the request before its deadline",
+      () => stream.reset(DataReset.Timeout),
+    );
+  }
+
+  private async runEvents(endpoint: DataEndpoint, epoch: symbol): Promise<void> {
+    try {
+      const stream = endpoint.open({
+        version: DATA_PLANE_VERSION,
+        method: "events",
+        metadata: null,
+        bodyLength: 0,
+      });
+      await stream.finish();
+      const head = await stream.responseHead;
+      if (head.status !== 200 || asRecord(head.metadata).codec !== "json-u32be") {
+        throw new DataPlaneError("the daemon refused the event stream");
+      }
+      await this.readEvents(stream, endpoint, epoch);
+      if (this.endpoint === endpoint && this.epoch === epoch) {
+        throw new DataPlaneError("the event stream ended unexpectedly");
+      }
+    } catch (error) {
+      if (this.endpoint !== endpoint || this.epoch !== epoch || this.stopped) return;
+      this.report(error);
+      endpoint.close("event stream failed");
+    }
+  }
+
+  private async readEvents(
+    stream: DataStream,
+    endpoint: DataEndpoint,
+    epoch: symbol,
+  ): Promise<void> {
+    let buffered = new Uint8Array();
+    for await (const chunk of stream.body()) {
+      if (this.endpoint !== endpoint || this.epoch !== epoch) return;
+      const joined = new Uint8Array(buffered.byteLength + chunk.byteLength);
+      joined.set(buffered);
+      joined.set(chunk, buffered.byteLength);
+      buffered = joined;
+      while (buffered.byteLength >= 4) {
+        const length = new DataView(
+          buffered.buffer,
+          buffered.byteOffset,
+          buffered.byteLength,
+        ).getUint32(0, false);
+        if (length === 0 || length > MAX_EVENT_BYTES) {
+          throw new DataPlaneError("invalid event message length");
+        }
+        if (buffered.byteLength < 4 + length) break;
+        const frame = JSON.parse(decoder.decode(buffered.slice(4, 4 + length))) as ServerFrame;
+        buffered = buffered.slice(4 + length);
+        this.receiveEvent(frame);
+      }
+      if (buffered.byteLength > MAX_EVENT_BYTES + 4) {
+        throw new DataPlaneError("event stream buffer is too large");
+      }
+    }
+    if (buffered.byteLength !== 0) throw new DataPlaneError("truncated event message");
+  }
+
+  private receiveEvent(frame: ServerFrame): void {
+    switch (frame.type) {
+      case "event": {
+        const sessionId = sessionOf(frame.topic);
+        const subscription = this.subscriptions.get(sessionId);
+        if (!subscription || frame.payload.seq <= subscription.seq) return;
+        if (subscription.resync || frame.payload.seq !== subscription.seq + 1) {
+          void this.fillGap(sessionId);
+          return;
+        }
+        subscription.seq = frame.payload.seq;
+        this.callListener(() => subscription.onEvent(frame.payload));
+        return;
+      }
+      case "pty":
+        for (const listener of this.ptyListeners) this.callListener(() => listener(frame.ptyId, frame.data));
+        return;
+      case "ptyClosed":
+        for (const listener of this.ptyListeners) this.callListener(() => listener(frame.ptyId, null));
+        return;
+      case "notice":
+        for (const listener of this.noticeListeners) this.callListener(() => listener(frame.level, frame.message));
+        return;
+      case "updateDownload":
+        for (const listener of this.downloadListeners) this.callListener(() => listener(frame.download));
+        return;
+      case "desync":
+        void this.fillGap(frame.sessionId);
+        return;
+    }
+  }
+
+  private async resubscribe(): Promise<void> {
+    for (const sessionId of [...this.subscriptions.keys()]) await this.fillGap(sessionId);
+  }
+
   private async fillGap(sessionId: string): Promise<void> {
     const subscription = this.subscriptions.get(sessionId);
     if (!subscription) return;
     subscription.needsResync = true;
     if (subscription.resync) return subscription.resync;
-
     const repair = (async () => {
-      while (
-        this.subscriptions.get(sessionId) === subscription &&
-        subscription.needsResync
-      ) {
+      while (this.subscriptions.get(sessionId) === subscription && subscription.needsResync) {
         subscription.needsResync = false;
         const reply = await this.call({
           type: "subscribe",
           payload: {
             sessionId,
             sinceSeq: subscription.seq,
-                expandLastRound: subscription.expandLastRound,
+            expandLastRound: subscription.expandLastRound,
           },
         }).catch(() => undefined);
         if (reply?.type !== "subscribed") return;
-
-        for (const event of reply.data.replayed) {
-          if (event.seq > subscription.seq) subscription.seq = event.seq;
-        }
+        for (const event of reply.data.replayed) subscription.seq = Math.max(subscription.seq, event.seq);
         this.callListener(() =>
-          subscription.onResync(
-            reply.data.snapshot,
-            reply.data.replayed,
-            reply.data.reset,
-          ),
+          subscription.onResync(reply.data.snapshot, reply.data.replayed, reply.data.reset),
         );
       }
     })();
@@ -941,401 +831,474 @@ export class Client {
     }
   }
 
-  private async receive(
-    raw: string,
-    socket: WebSocketLike,
-    epoch: symbol,
-  ): Promise<void> {
-    if (this.socket !== socket || this.socketEpoch !== epoch) return;
-    let frame: ServerFrame;
-    try {
-      frame = JSON.parse(raw) as ServerFrame;
-    } catch {
-      if (this.channelKey || this.state !== "ready")
-        throw new Error("malformed authenticated channel frame");
-      return;
-    }
-
-    if (frame.type === "authenticated" && !this.channelKey && this.releaseKeyReady) {
-      await this.keyReady;
-      if (this.socket !== socket || this.socketEpoch !== epoch) return;
-    }
-
-    const channelKey = this.channelKey;
-    if (channelKey) {
-      if (frame.type !== "authenticated") {
-        throw new Error("unsigned frame after channel authentication");
+  private flushQueue(_endpoint: DataEndpoint, epoch: symbol): void {
+    for (const pending of this.queue.splice(0)) {
+      const endpoint = this.requestEndpoint();
+      if (endpoint) this.startCall(pending, endpoint, epoch);
+      else {
+        this.release(pending);
+        pending.reject(new DataPlaneError("the peer is not ready"));
       }
-      const expected = this.inboundSequence + 1;
-      if (!Number.isSafeInteger(expected) || frame.sequence !== expected) {
-        throw new Error("replayed or out-of-order channel frame");
-      }
-      const plaintext = await openChannelFrame(
-        channelKey,
-        "daemon-to-client",
-        frame.sequence,
-        frame.body,
-        frame.mac,
-      );
-      if (
-        this.socket !== socket ||
-        this.socketEpoch !== epoch ||
-        this.channelKey !== channelKey
-      )
-        return;
-      frame = JSON.parse(plaintext) as ServerFrame;
-      if (frame.type === "authenticated") {
-        throw new Error("nested authenticated channel frame");
-      }
-      this.inboundSequence = expected;
-    } else if (frame.type === "authenticated") {
-      throw new Error("authenticated frame arrived before Hello completed");
-    } else if (this.state !== "ready") {
-      const expected = this.expectedHello;
-      if (
-        !expected ||
-        expected.epoch !== epoch ||
-        frame.type !== "result" ||
-        frame.id !== expected.id ||
-        this.pending.get(frame.id)?.kind !== "handshake"
-      ) {
-        throw new Error("unexpected plaintext frame during Hello");
-      }
-    }
-
-    switch (frame.type) {
-      case "result": {
-        const pending = this.pending.get(frame.id);
-        if (!pending) return;
-        this.pending.delete(frame.id);
-        this.finishPendingReservation(pending);
-        this.clearPendingTimer(pending);
-        if (frame.ok) pending.resolve(frame.payload);
-        else {
-          pending.reject(
-            new ProtocolError_(
-              frame.error ?? {
-                code: "internal",
-                message: "the daemon reported a failure",
-              },
-            ),
-          );
-        }
-        return;
-      }
-      case "event": {
-        const sessionId = sessionOf(frame.topic);
-        const subscription = this.subscriptions.get(sessionId);
-        if (!subscription) return;
-        // Out-of-order or duplicate events are dropped rather than applied:
-        // the sequence number is the only thing that decides what is new.
-        if (frame.payload.seq <= subscription.seq) return;
-        if (
-          subscription.resync ||
-          frame.payload.seq !== subscription.seq + 1
-        ) {
-          void this.fillGap(sessionId);
-          return;
-        }
-        subscription.seq = frame.payload.seq;
-        this.callListener(() => subscription.onEvent(frame.payload));
-        return;
-      }
-      case "pty":
-        for (const listener of this.ptyListeners)
-          this.callListener(() => listener(frame.ptyId, frame.data));
-        return;
-      case "ptyClosed":
-        for (const listener of this.ptyListeners)
-          this.callListener(() => listener(frame.ptyId, null));
-        return;
-      case "notice":
-        for (const listener of this.noticeListeners)
-          this.callListener(() => listener(frame.level, frame.message));
-        return;
-      case "updateDownload":
-        for (const listener of this.downloadListeners)
-          this.callListener(() => listener(frame.download));
-        return;
-      case "desync":
-        // The daemon fell behind and dropped events for this session. Nothing
-        // to tell the person: the hole is closable from here, with the same
-        // request used after a reconnect.
-        void this.fillGap(frame.sessionId);
-        return;
     }
   }
 
-  /**
-   * Gives up a socket WebKit left suspended in CONNECTING.
-   *
-   * Its handlers are detached first because `close()` may synchronously fire
-   * `onclose` in a test double and asynchronously in a browser. Either way one
-   * failed dial must schedule exactly one retry.
-   */
-  private abandon(socket: WebSocketLike): void {
-    if (this.stopped || this.socket !== socket) return;
+  private dropped(
+    socket: WebSocketLike,
+    epoch: symbol,
+    close?: CloseReason,
+  ): void {
+    if (!this.isCurrent(socket, epoch) || this.stopped) return;
+    this.droppedTransport(epoch, close);
+  }
+
+  private droppedTransport(epoch: symbol, close?: CloseReason): void {
+    if (!this.isCurrentEpoch(epoch)) return;
+    this.lastClose = close;
+    // An invite is a one-use bootstrap opportunity, not a reconnectable
+    // credential. Replaying the same URL after a timeout/close is both futile
+    // and misleading, so pairing terminates on the first carrier loss.
+    if (this.options.inviteCredential) {
+      this.failure = {
+        code: "unauthorized",
+        message: "连接这台机器超时，或配对链接已过期",
+      };
+      this.close();
+      return;
+    }
+    this.clearConnectTimer();
+    this.endpoint = null;
+    this.socket = null;
+    this.fabricLink = null;
+    this.epoch = null;
+    this.closeRtc();
+    if (this.rtcEnabled) this.setRtcState("standby");
+    this.setState("reconnecting");
+    this.scheduleReconnect();
+  }
+
+  private dropSocket(socket: WebSocketLike, epoch: symbol): void {
+    if (!this.isCurrent(socket, epoch)) return;
     socket.onopen = null;
     socket.onclose = null;
     socket.onerror = null;
     socket.onmessage = null;
     socket.close();
-    this.dropped(socket);
+    this.dropped(socket, epoch);
   }
 
-  private dropped(socket?: WebSocketLike, close?: CloseReason): void {
-    if (this.stopped || (socket && this.socket !== socket)) return;
-    this.lastClose = close;
-    this.clearConnectTimer();
-    const epoch = this.socketEpoch;
-    this.setState("reconnecting");
-    this.socket = null;
-    this.socketEpoch = null;
-    this.redialGeneration += 1;
-    this.redialInFlight = false;
-    this.releaseKeyReady?.();
-    this.releaseKeyReady = null;
+  private redial(): void {
+    const redial = this.options.redial;
+    if (!redial) return;
+    this.redialing = true;
+    const generation = ++this.redialGeneration;
+    const controller = new AbortController();
+    this.redialAbort = controller;
+    this.redialTimer = setTimeout(() => controller.abort(), this.options.redialTimeoutMs ?? 10_000);
+    void redial(controller.signal).then(
+      (fresh) => {
+        if (this.stopped || generation !== this.redialGeneration) return;
+        this.finishRedial();
+        const dial = typeof fresh === "string" ? { url: fresh } : fresh;
+        if (!validDial(dial)) {
+          this.failClosed("the control plane returned an invalid peer route");
+          return;
+        }
+        if (
+          (this.activeChannelCredential && !dial.channelCredential) ||
+          (this.activeLocalServerProof && !dial.localServerProof) ||
+          (this.activeFabricRouteTicket && !dial.fabricRouteTicket)
+        ) {
+          this.failClosed("the refreshed route omitted its one-use E2EE credential");
+          return;
+        }
+        this.dial(dial);
+      },
+      () => {
+        if (this.stopped || generation !== this.redialGeneration) return;
+        this.finishRedial();
+        this.scheduleReconnect();
+      },
+    );
+  }
 
-    // A sent command is never moved back into the offline queue. Its side
-    // effects may have happened even though the result was lost.
-    if (epoch) {
-      for (const [id, pending] of this.pending) {
-        if (pending.sentEpoch !== epoch) continue;
-        this.pending.delete(id);
-        this.finishPendingReservation(pending);
-        this.clearPendingTimer(pending);
-        pending.reject(
-          pending.kind === "handshake"
-            ? new Error("the connection was lost during Hello")
-            : new ConnectionOutcomeUnknownError(close),
-        );
-      }
-    }
-
-    this.scheduleReconnect();
+  private finishRedial(): void {
+    if (this.redialTimer !== null) clearTimeout(this.redialTimer);
+    this.redialTimer = null;
+    this.redialAbort = null;
+    this.redialing = false;
   }
 
   private scheduleReconnect(): void {
-    if (this.stopped || this.socket || this.retryTimer !== null) return;
+    if (
+      this.stopped ||
+      this.socket ||
+      this.fabricLink ||
+      this.dialingTransport ||
+      this.retryTimer !== null ||
+      this.redialing
+    ) return;
     this.setState("reconnecting");
-    const backoff =
-      this.options.backoffMs ??
-      ((attempt) => Math.min(1000 * 2 ** attempt, 15_000));
-    const delay = backoff(this.attempt++);
+    const delay = (this.options.backoffMs ?? ((attempt) => Math.min(1000 * 2 ** attempt, 15_000)))(
+      this.attempt++,
+    );
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.connect();
     }, delay);
   }
 
-  private clearConnectTimer(): void {
-    if (this.connectTimer === null) return;
-    clearTimeout(this.connectTimer);
-    this.connectTimer = null;
+  private requireReadyEndpoint(): DataEndpoint {
+    const endpoint = this.state === "ready" ? this.requestEndpoint() : null;
+    if (!endpoint) {
+      throw new DataPlaneError("the peer is not ready");
+    }
+    return endpoint;
   }
 
-  private clearRetryTimer(): void {
-    if (this.retryTimer === null) return;
-    clearTimeout(this.retryTimer);
-    this.retryTimer = null;
+  private requestEndpoint(): DataEndpoint | null {
+    if (this.rtcLink?.endpoint.state === "open") return this.rtcLink.endpoint;
+    return this.endpoint?.state === "open" ? this.endpoint : null;
   }
 
-  private clearRedialTimer(): void {
-    if (this.redialTimer === null) return;
-    clearTimeout(this.redialTimer);
-    this.redialTimer = null;
-  }
-
-  private sendRequest(id: string, frame: string, epoch: symbol): void {
-    const plainPending = this.pending.get(id);
-    const plainSocket = this.socket;
-    if (
-      !this.channelKey &&
-      plainPending &&
-      plainSocket &&
-      this.socketEpoch === epoch
-    ) {
-      plainPending.sentEpoch = epoch;
-      this.armPending(
-        id,
-        plainPending,
-        this.options.requestTimeoutMs ?? 60_000,
-        "the daemon did not answer the request before its deadline",
-      );
-      try {
-        plainSocket.send(frame);
-      } catch {
-        this.pending.delete(id);
-        this.finishPendingReservation(plainPending);
-        this.clearPendingTimer(plainPending);
-        plainPending.reject(new ConnectionOutcomeUnknownError());
-        this.abandon(plainSocket);
-      }
+  private async startRtc(base: DataEndpoint, epoch: symbol): Promise<void> {
+    if (!this.rtcEnabled) {
+      this.setRtcState("disabled");
       return;
     }
-    if (plainPending) {
-      // From the moment encryption is scheduled, a disconnect makes the
-      // outcome conservatively unknown. Otherwise a socket drop during slow
-      // WebCrypto leaves this request neither queued nor rejectable.
-      plainPending.sentEpoch = epoch;
-      plainPending.sendActive = true;
-      this.armPending(
-        id,
-        plainPending,
-        this.options.requestTimeoutMs ?? 60_000,
-        "the daemon did not answer the request before its deadline",
-      );
+    if (!this.identity?.rtcSupported || !rtcAvailableHere()) {
+      this.setRtcState("unavailable");
+      return;
     }
-    const operation = this.sendChain.then(async () => {
-      const pending = this.pending.get(id);
-      const socket = this.socket;
-      if (!pending || !socket || this.socketEpoch !== epoch) return;
-      let wire = frame;
-      const channelKey = this.channelKey;
-      if (channelKey) {
-        const sequence = this.outboundSequence + 1;
-        if (!Number.isSafeInteger(sequence)) {
-          throw new Error("channel sequence exhausted");
-        }
-        const sealed = await sealChannelFrame(
-          channelKey,
-          "client-to-daemon",
-          sequence,
-          frame,
-        );
-        if (
-          this.socket !== socket ||
-          this.socketEpoch !== epoch ||
-          this.channelKey !== channelKey
-        )
-          return;
-        if (this.pending.get(id) !== pending) return;
-        wire = JSON.stringify({
-          id,
-          type: "authenticated",
-          payload: { sequence, body: sealed.body, mac: sealed.mac },
-        });
-        this.outboundSequence = sequence;
+    // A loopback WebSocket is already direct, private and lower overhead. RTC
+    // is an upgrade for network carriers, not a replacement for localhost.
+    if (this.identity.transport === "loopback") {
+      this.setRtcState("standby");
+      return;
+    }
+    const generation = ++this.rtcGeneration;
+    this.closeRtc(false);
+    this.setRtcState("connecting");
+    try {
+      const link = await (this.options.rtcFactory ?? openRtcDataLink)(base);
+      if (
+        generation !== this.rtcGeneration ||
+        this.stopped ||
+        this.endpoint !== base ||
+        this.epoch !== epoch
+      ) {
+        link.close();
+        return;
       }
-      try {
-        socket.send(wire);
-      } catch {
-        this.pending.delete(id);
-        this.finishPendingReservation(pending);
-        this.clearPendingTimer(pending);
-        pending.reject(new ConnectionOutcomeUnknownError());
-        this.abandon(socket);
+      const identity = await this.rpc(link.endpoint, { type: "connection.identity" });
+      if (
+        identity?.type !== "hello" ||
+        identity.data.machineId !== this.identity?.machineId ||
+        identity.data.fingerprint !== this.identity.fingerprint
+      ) {
+        link.close();
+        throw new PeerAuthenticationError("RTC 直连返回了不匹配的 daemon 身份");
       }
-    });
-    const socket = this.socket;
-    this.sendChain = operation
-      .catch(() => this.authenticationFailed(socket, epoch))
-      .finally(() => {
-        if (plainPending) this.finishSendReservation(plainPending);
+      if (generation !== this.rtcGeneration || this.endpoint !== base || this.epoch !== epoch) {
+        link.close();
+        return;
+      }
+      this.rtcLink = link;
+      link.endpoint.onClose((reason) => {
+        if (this.rtcLink !== link) return;
+        this.rtcLink = null;
+        this.report(reason);
+        if (this.rtcEnabled && this.state === "ready") this.setRtcState("failed");
       });
-  }
-
-  private flushQueue(socket: WebSocketLike, epoch: symbol): void {
-    while (this.queue.length > 0) {
-      if (this.socket !== socket || this.socketEpoch !== epoch) return;
-      const queued = this.queue.shift();
-      if (!queued) return;
-      this.sendRequest(queued.id, queued.frame, epoch);
+      this.setRtcState("connected");
+    } catch (error) {
+      if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base) return;
+      this.report(error);
+      this.setRtcState("failed");
     }
   }
 
-  private armPending(
-    id: string,
-    pending: Pending,
-    timeoutMs: number,
-    message: string,
-    onTimeout?: () => void,
-  ): void {
-    this.clearPendingTimer(pending);
-    pending.timer = setTimeout(
-      () => {
-        if (this.pending.get(id) !== pending) return;
-        this.pending.delete(id);
-        this.finishPendingReservation(pending);
-        this.queue = this.queue.filter((entry) => entry.id !== id);
-        pending.timer = null;
-        pending.reject(new ClientRequestTimeoutError(message));
-        onTimeout?.();
-      },
-      Math.max(
-        1,
-        Math.min(
-          timeoutMs,
-          pending.deadlineAt - (this.options.now?.() ?? Date.now()),
-        ),
-      ),
-    );
+  private closeRtc(increment = true): void {
+    if (increment) this.rtcGeneration += 1;
+    const link = this.rtcLink;
+    this.rtcLink = null;
+    link?.close();
   }
 
-  private clearPendingTimer(pending: Pending): void {
-    if (pending.timer === null) return;
-    clearTimeout(pending.timer);
-    pending.timer = null;
+  private release(pending: PendingCall): void {
+    if (pending.bytes === 0) return;
+    this.pendingBytes = Math.max(0, this.pendingBytes - pending.bytes);
+    pending.bytes = 0;
   }
 
-  private finishPendingReservation(pending: Pending): void {
-    pending.pendingActive = false;
-    this.maybeReleaseReservation(pending);
+  private rejectQueued(error: Error): void {
+    for (const pending of this.queue.splice(0)) {
+      if (pending.queueTimer !== null) clearTimeout(pending.queueTimer);
+      this.release(pending);
+      pending.reject(error);
+    }
   }
 
-  private finishSendReservation(pending: Pending): void {
-    pending.sendActive = false;
-    this.maybeReleaseReservation(pending);
+  private failClosed(message: string): void {
+    this.failure = { code: "unauthorized", message };
+    this.close();
   }
 
-  private maybeReleaseReservation(pending: Pending): void {
-    if (!pending.accounted || pending.pendingActive || pending.sendActive) return;
-    pending.accounted = false;
-    this.pendingRequestBytes = Math.max(
-      0,
-      this.pendingRequestBytes - pending.bytes,
-    );
+  private isCurrent(socket: WebSocketLike, epoch: symbol): boolean {
+    return !this.stopped && this.socket === socket && this.epoch === epoch;
+  }
+
+  private isCurrentEpoch(epoch: symbol): boolean {
+    return !this.stopped && this.epoch === epoch;
   }
 
   private setState(state: ConnectionState): void {
     if (this.state === state) return;
     this.state = state;
-    for (const listener of this.stateListeners)
-      this.callListener(() => listener(state));
+    for (const listener of this.stateListeners) this.callListener(() => listener(state));
+  }
+
+  private setRtcState(state: RtcState): void {
+    if (this.rtcState_ === state) return;
+    this.rtcState_ = state;
+    for (const listener of this.rtcListeners) this.callListener(() => listener(state));
   }
 
   private callListener(listener: () => void): void {
     try {
       listener();
     } catch (error) {
-      try {
-        this.options.onError?.(error);
-      } catch {
-        // Observability is outside the connection state machine too.
-      }
+      this.report(error);
     }
   }
 
-  /**
-   * Fails the connection closed, recording why.
-   *
-   * Most callers here really are reporting an unverifiable frame, but not all:
-   * a receive backlog that outgrows its budget is congestion, not forgery, and
-   * a connection that reports the wrong one sends whoever debugs it looking for
-   * an attacker that was never there.
-   */
-  private authenticationFailed(
-    socket?: WebSocketLike | null,
-    epoch?: symbol | null,
-    why = "通道消息无法验证，连接已安全关闭",
-  ): void {
-    if (
-      this.stopped ||
-      (socket !== undefined && socket !== null && this.socket !== socket) ||
-      (epoch !== undefined && epoch !== null && this.socketEpoch !== epoch)
-    )
-      return;
-    this.failure = { code: "unauthorized", message: why };
-    this.close();
+  private report(error: unknown): void {
+    try {
+      this.options.onError?.(error);
+    } catch {
+      // Observability never owns transport state.
+    }
   }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer !== null) clearTimeout(this.connectTimer);
+    this.connectTimer = null;
+  }
+
+  private clearRetryTimer(): void {
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+  }
+
+  private clearTimers(): void {
+    this.clearConnectTimer();
+    this.clearRetryTimer();
+    if (this.redialTimer !== null) clearTimeout(this.redialTimer);
+    this.redialTimer = null;
+  }
+}
+
+/** Self-hosted pairing links carry their reusable opaque route beside the
+ * endpoint admission so a freshly paired browser needs no server directory.
+ * Hosted routes remain explicit, short-lived fields returned by Control. */
+function embeddedFabricRoute(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.pathname !== "/fabric/v2") return undefined;
+    const route = url.searchParams.get("route");
+    return route && route.length <= 4096 ? route : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+class PeerAuthenticationError extends Error {
+  constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, options);
+    this.name = "PeerAuthenticationError";
+  }
+}
+
+function nextBinaryMessage(socket: WebSocketLike, timeoutMs: number): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      action();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new ClientRequestTimeoutError("peer handshake timed out"))),
+      timeoutMs,
+    );
+    socket.onmessage = (event) => {
+      void binaryMessage(event.data).then(
+        (bytes) =>
+          finish(() => {
+            if (bytes.byteLength > 8 * 1024) reject(new Error("peer welcome is too large"));
+            else resolve(bytes);
+          }),
+        (error: unknown) => finish(() => reject(error)),
+      );
+    };
+    socket.onerror = (error) => finish(() => reject(error));
+    socket.onclose = (event) => finish(() => reject(new Error(`peer closed during handshake${describeClose(asCloseReason(event))}`)));
+  });
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+  expired?: () => void,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      expired?.();
+      reject(new ClientRequestTimeoutError(message));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function validLocalServerProof(value: LocalServerProof, now: number): boolean {
+  return (
+    /^[0-9a-f]{64}$/.test(value.proof) &&
+    /^[0-9a-f]{64}$/.test(value.challenge) &&
+    Number.isSafeInteger(value.pid) &&
+    value.pid > 0 &&
+    value.machineId.length > 0 &&
+    value.machineId.length <= 256 &&
+    value.fingerprint.length > 0 &&
+    value.fingerprint.length <= 256 &&
+    Number.isSafeInteger(value.expiresAt) &&
+    value.expiresAt * 1000 > now
+  );
+}
+
+function validPeerCredential(value: PeerCredential): boolean {
+  if (!value.secret || value.secret.length > 512) return false;
+  switch (value.kind) {
+    case "loopback":
+      return /^[0-9a-f]{64}$/.test(value.secret);
+    case "device":
+      return value.deviceId.length > 0 && value.deviceId.length <= 256;
+    case "hosted":
+      return value.capabilityId.length > 0 && value.capabilityId.length <= 256;
+    case "invite":
+      return /^inv_[0-9a-f]{32}$/.test(value.inviteId);
+  }
+}
+
+function validDial(value: unknown): value is ProtocolDial {
+  if (!value || typeof value !== "object") return false;
+  const dial = value as ProtocolDial;
+  return typeof dial.url === "string" && dial.url.length > 0 && dial.url.length <= 8192;
+}
+
+function asCloseReason(event: unknown): CloseReason | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const value = event as { code?: unknown; reason?: unknown };
+  return {
+    ...(typeof value.code === "number" ? { code: value.code } : {}),
+    ...(typeof value.reason === "string" ? { reason: value.reason.slice(0, 200) } : {}),
+  };
+}
+
+function closeReasonFromUnknown(value: unknown, depth = 0): CloseReason | undefined {
+  if (!value || typeof value !== "object" || depth > 4) return undefined;
+  const record = value as { code?: unknown; reason?: unknown; cause?: unknown };
+  if (typeof record.code === "number" || typeof record.reason === "string") {
+    return asCloseReason(record);
+  }
+  return closeReasonFromUnknown(record.cause, depth + 1);
+}
+
+function describeClose(close?: CloseReason): string {
+  const detail = [close?.code, close?.reason?.trim()].filter(Boolean).join(" ");
+  return detail ? `（${detail}）` : "";
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function previewError(value: unknown): AssetPreviewError {
+  return value === "notFound" ||
+    value === "forbidden" ||
+    value === "unsupported" ||
+    value === "tooLarge" ||
+    value === "sourceChanged"
+    ? value
+    : "sourceChanged";
+}
+
+function previewMetadata(value: unknown): AssetPreviewMetadata {
+  const metadata = asRecord(value);
+  if (
+    (metadata.kind !== "image" &&
+      metadata.kind !== "markdown" &&
+      metadata.kind !== "text" &&
+      metadata.kind !== "html" &&
+      metadata.kind !== "video") ||
+    typeof metadata.mediaType !== "string" ||
+    typeof metadata.sourceBytes !== "number" ||
+    !Number.isSafeInteger(metadata.sourceBytes) ||
+    metadata.sourceBytes < 0 ||
+    metadata.sourceBytes > MAX_PREVIEW_BYTES ||
+    typeof metadata.version !== "string" ||
+    !/^[0-9a-f]{32}$/.test(metadata.version) ||
+    !previewMediaMatches(metadata.kind, metadata.mediaType)
+  ) {
+    throw new DataPlaneError("the daemon returned invalid preview metadata");
+  }
+  return metadata as unknown as AssetPreviewMetadata;
+}
+
+function previewMediaMatches(kind: unknown, mediaType: unknown): boolean {
+  if (typeof mediaType !== "string") return false;
+  switch (kind) {
+    case "image":
+      return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mediaType);
+    case "markdown":
+      return mediaType === "text/markdown";
+    case "text":
+      return mediaType === "text/plain";
+    case "html":
+      return mediaType === "text/html";
+    case "video":
+      return mediaType === "video/mp4" || mediaType === "video/webm";
+    default:
+      return false;
+  }
+}
+
+function previewErrorMessage(error: AssetPreviewError, sourceBytes?: number): string {
+  switch (error) {
+    case "notFound":
+      return "找不到这个文件";
+    case "forbidden":
+      return "这个路径不在当前工作区内";
+    case "unsupported":
+      return "这种文件暂不支持预览";
+    case "tooLarge":
+      return `文件超过 2 MiB，暂不支持预览${sourceBytes ? `（${sourceBytes} bytes）` : ""}`;
+    case "sourceChanged":
+      return "读取时文件发生了变化，请重试";
+  }
+}
+
+function rtcAvailableHere(): boolean {
+  return typeof globalThis.RTCPeerConnection === "function";
 }

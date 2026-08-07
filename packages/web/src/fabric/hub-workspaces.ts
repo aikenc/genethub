@@ -25,6 +25,9 @@ export interface HubWorkspaceRoute {
   placementRevision: number;
   /** Metadata for a future E2EE handshake; this transport does not verify it. */
   targetFingerprint: string;
+  /** Peer-auth secret is returned only to this browser, never to Relay. */
+  peerCapability: string;
+  peerSecret: string;
 }
 
 export interface HubWorkspaceOperation {
@@ -340,6 +343,8 @@ function routeOf(value: unknown): HubWorkspaceRoute {
     ),
     placementRevision: placementRevision as number,
     targetFingerprint: requiredString(value, "targetFingerprint", "invalid_fabric_route"),
+    peerCapability: requiredString(value, "peerCapability", "invalid_fabric_route"),
+    peerSecret: requiredString(value, "peerSecret", "invalid_fabric_route"),
   };
 }
 

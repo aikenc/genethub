@@ -39,7 +39,6 @@ describe("upgrade request targets", () => {
   it("fails malformed targets closed instead of throwing from an event listener", () => {
     assert.equal(requestTarget("http://[not-an-ip"), null);
     assert.equal(requestTarget("http://%"), null);
-    assert.equal(requestTarget("/forward/client")?.pathname, "/forward/client");
     assert.equal(requestTarget("/fabric/v2")?.pathname, "/fabric/v2");
   });
 

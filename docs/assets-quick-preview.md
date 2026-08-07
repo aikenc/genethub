@@ -1,27 +1,81 @@
-# 提案 C：轻量 Asset Preview（Exchange streaming + 2 MiB 直接拒绝）
+# 轻量 Asset Preview v1
 
-> 状态：MVP 设计，尚未实现。通用连接、WebSocket/WebRTC providers、framing、调度、请求响应和无 fallback 迁移规则见 [轻量 E2EE Data Plane](./e2ee-data-plane.md)；完整 WebRoot、大视频和任意文件流是后续能力，见 [云端 Assets Gateway](./assets-cloud-gateway.md) 与 [daemon HTTPS + SNI 字节隧道](./assets-daemon-https-sni-tunnel.md)；信任边界见 [安全模型](./security-model.md)。
+> 状态：MVP 已实现并通过全量验证，作为 validated candidate 提交。底层连接见 [E2EE Data Plane v3](./e2ee-data-plane.md)。多文件 WebRoot、大文件和公开 Assets Gateway 不在本版本内。
 
-## 1. 决策摘要
+## 1. 产品结论
 
-- Preview 是普通的 streaming `Exchange` handler，不定义 transport、DataFrame 或专用物理连接。
-- Viewer 发出一次 `asset.preview` request；它独占一条短生命周期 logical stream。daemon 先返回 bounded response head，再把文件写入 response body；`TransportEndpoint` 自动切为不超过 16 KiB 的 frame 并公平调度。
-- daemon 只返回完整原文件：`sourceBytes <= 2 MiB` 才能预览，超过即 `tooLarge`；不做 thumbnail、摘要、截断、转码、poster、probe 或 Range。
-- 图片、Markdown、普通 UTF-8 文本、单文件 HTML 和小视频由浏览器基于完整 bytes 展示。
-- HTML 完整运行 inline CSS/script，并允许绝对 HTTPS/WSS 网络访问；但不能读取 workspace 相对文件。UI 明示“活动 HTML · 网络已开启”。
-- `asset.preview` 成为用户可见文件读取入口；同一次协议 cutover 中删除 `file.read` 及所有旧调用，不保留兼容周期或 fallback。
-- 点击文件默认打开独立 Viewer；规范 URL 直接包含 workspace handle 与 workspace-relative path，便于 FilesPanel、Agent 和聊天生成可点击文档链接。同一 URL 可由另一台已配对电脑或手机重新授权打开。
-- MVP 唯一 source 是已注册 workspace 中的普通文件。它不接受上传 bytes、Blob、HTTP(S) URL、Git object、内存文档、Agent artifact id 或任意绝对文件系统路径。
-- 不增加 Service Worker、daemon TLS、HTTP Range、媒体处理依赖或云端内容缓存。
+Asset Preview 是给人和 Agent 快速打开 workspace 文件的轻量查看器：
 
-这份文档只回答 Preview 的业务契约。WebSocket/WebRTC provider selection、frame size、flow control 与 handler 隔离全部由通用 Data Plane 决定。Preview 使用当前 ready provider，既不强制 RTC，也不感知 RTC 是否连通。
+- 唯一入口是 daemon 已注册 workspace 中的**相对文件路径**。
+- URL 明文包含稳定 device handle、workspace handle 和相对路径；路径不是秘密，也不是授权凭证。
+- 同一个 URL 可在另一台已配对电脑或手机浏览器打开。查看设备不需要安装 daemon；它只需能够加载工作台并持有本地配对凭证，或已登录有权访问该设备的托管账号。
+- 文件由资源所在设备的 daemon 读取，经已有 E2EE Data Plane 返回；Relay 不看到 workspace、path、MIME 或文件 bytes。
+- 只返回完整原文件。源文件 `<= 2 MiB` 才成功，超过直接提示无法预览。
+- 支持图片、Markdown、普通文本、单文件 HTML、MP4/WebM 小视频。
+- HTML 可运行 inline/HTTPS script 并访问 HTTPS/WSS 网络，但位于无同源权限的 sandbox iframe 中，不能取得工作台权限。
+- 点击文件在独立页面打开。浮窗 iframe、WebRoot 和多文件 HTML 留到后续。
+- `file.read` 已删除，文件查看器统一使用 Preview；写文件仍是独立业务能力。
 
-## 2. Preview 的 Exchange 契约
+MVP 明确不做缩略图、摘要、截断、转码、poster、probe、Range、缓存、上传 bytes、HTTP URL、Git object、Agent artifact、多文件目录映射、Service Worker 或 daemon HTTPS。
 
-Preview 使用通用 HTTP-like Exchange：
+## 2. 规范 URL
+
+```text
+https://<workbench-origin>/<deployment-base>/assets/preview/v1/
+  <deviceHandle>/<workspaceHandle>/<workspace-relative-path>
+```
+
+例子：
+
+```text
+https://app.example/assets/preview/v1/dev_7k2/ws_docs/docs/architecture.png
+https://app.example/console/assets/preview/v1/dev_7k2/ws_docs/reports/result.md
+```
+
+真实 URL 不换行。`deployment-base` 来自前端构建的 base path，因此根部署和 `/console/` 等子路径部署都能 deep-link。
+
+这三个 locator 都是可见的：
+
+- `deviceHandle`：daemon 拥有的稳定设备句柄；不是用户输入的展示名。
+- `workspaceHandle`：该连接可解析的 workspace locator。普通本地/整机连接使用 daemon workspace id；workspace-scoped hosted route 可使用 Control 分配的外部 handle。
+- `path`：从 workspace 根开始的规范相对路径，例如 `docs/readme.md`。
+
+URL **不是 capability**。仅知道或转发 URL 不会获得文件：Viewer 必须重新取得目标 endpoint/route，并以当前浏览器已有的配对 credential 或账号 session 完成 peer authentication。daemon 最终再次校验 workspace scope 和 path。
+
+前端统一使用：
+
+```ts
+assetPreviewUrl(deviceHandle, workspaceHandle, relativePath)
+parseAssetPreviewPath(location.pathname)
+```
+
+FilesPanel、Agent 输出和聊天链接应共享这个 builder，不能手拼 URL。解析器要求 percent-encoding canonical round-trip，拒绝 encoded slash、空 segment、`.`、`..`、反斜杠、NUL、drive/ADS 冒号和平台尾随点/空格。相对 path 最多 4096 UTF-8 bytes；device/workspace segment 最多 256 字符。
+
+## 3. 打开流程
+
+```text
+用户点击规范 URL
+  │
+  ├─ Viewer 解析 device/workspace/path
+  ├─ Host.targets() 按 deviceHandle 找目标
+  ├─ Host.openTarget() 获取新 endpoint + one-use route admission
+  ├─ Client 完成 v3 peer authentication
+  ├─ 校验 daemon 返回的 machineId == URL deviceHandle
+  └─ 发起 asset.preview Exchange
+         └─ daemon 校验 workspace/path、完整读取、返回 bytes
+```
+
+Cloud console 在入口就识别 Preview deep link，并使用账号机器列表或浏览器本地 pairing roster 解析设备；不要求先进入 workbench 选择机器。连接重建会重新签发 one-use Fabric endpoint/route ticket，不复用已消费票据。
+
+独立 Viewer 为本次预览创建自己的 `Client`。页面卸载会关闭该 client、所有在途 stream 和 RTC/Fabric carrier，并释放 Blob URL。它不依赖另一个 tab 中已存在的 JS connection，因此链接可以复制到已授权的其他设备。
+
+## 4. Exchange 契约
+
+Preview 只是通用 v3 Exchange method，不定义新的 transport：
 
 ```text
 RequestHead {
+  version: 3,
   method: "asset.preview",
   metadata: {
     source: {
@@ -31,203 +85,131 @@ RequestHead {
     }
   },
   bodyLength: 0,
-  timeoutMs
+  timeoutMs: 15000
 }
-RequestEnd
+FIN
 
 ResponseHead {
   status,
   metadata: {
-    kind?,
-    mediaType?,
-    sourceBytes?,
-    version?,
-    error?: notFound | forbidden | unsupported | tooLarge | sourceChanged
+    kind?, mediaType?, sourceBytes?, version?,
+    error?: notFound | forbidden | unsupported | tooLarge | sourceChanged,
+    limitBytes?: 2097152
   },
-  bodyLength?
+  bodyLength
 }
-ResponseBody(bytes...)
-ResponseEnd
+DATA*
+FIN
 ```
 
-它没有 `preview/1` transport，也不在 Fabric OPEN 中放 service metadata：
+method、metadata、status 和 body 都在 E2EE record 内。body 是 streaming bytes，不经过 JSON/base64；DataEndpoint 自动切成最多 16 KiB record 并与其他 logical streams 公平轮转。
 
-- method、workspace、path、MIME、错误和 body 都位于端到端加密的 Exchange stream 内；
-- WebSocket provider 上 Relay 只见 opaque endpoint/route、stream/frame 长度和时序，不见 Preview 语义或内容；RTC direct 时 Preview bytes 不经过 Relay；
-- request/response 由 logical stream identity 关联，不占用全连接 request id 或业务 sequence；
-- response body 是 streaming bytes，不经过 JSON/base64，也不使用只适合小对象的 unary wrapper；
-- Viewer 取消、超时或关闭时 RESET 这一条 stream，不关闭 endpoint、PeerConnection 或其他业务；
-- Preview 是只读且幂等，但断线后也不自动跨 placement 重放；Viewer 重新取得 route/capability 后发起新 Exchange。
+请求没有 body。成功 response 的 `bodyLength`、`sourceBytes` 和实际收到的 bytes 必须完全相等且不超过 2 MiB，否则 Viewer fail-close 当前 stream。失败 response body 必须为空。
 
-业务 handler 不选择 provider、物理连接或 priority。大 response 出现 backlog 后，`TransportEndpoint` 的等权 round-robin 会自动把它与其他 runnable streams 轮转。
+`source.kind` 在 MVP 只有 `workspaceFile`。未来若支持 artifact、Git revision 或生成文档，应新增明确 contract，而不是让 `path` 指向 workspace 外资源。
 
-`source.kind` 在 MVP 不是可扩展 union：唯一合法值就是 `workspaceFile`。显式字段只是把安全边界固定在协议里，避免未来 Agent 为了预览临时内容而绕过 workspace/path 授权。未来若增加 artifact、Git revision 或 generated document，应新增独立 source contract 和生命周期，而不是把内容塞进 `path`。
-
-## 3. daemon handler：完整文件或明确失败
+## 5. daemon 文件边界
 
 ```text
 MAX_PREVIEW_SOURCE_BYTES = 2 * 1024 * 1024
+PREVIEW_WORKERS = 2
+PREVIEW_TIMEOUT = 15 seconds
 ```
 
-规则只有一条：**完整原文件不超过 2 MiB 才返回；否则不预览。**
+daemon 的顺序是：
 
-handler 的最小实现：
+1. 校验 canonical workspace-relative path。
+2. 校验 route 限定的 workspace handle；解析为 daemon-local workspace id。
+3. 从已注册 workspace 获取 root，以 capability directory API 打开相对路径。
+4. 要求目标是普通文件；不把目录、FIFO、设备或 socket 当文件流。
+5. 先读 metadata。大于 2 MiB 直接返回 `tooLarge`，不开始传输。
+6. 最多读取 `2 MiB + 1`；增长越界返回 `tooLarge`，长度变化返回 `sourceChanged`。
+7. 按扩展名和有限 magic/UTF-8 规则确定 allowlist 类型。
+8. 对完整 bytes 计算截短 SHA-256 version，发送精确 response head 和 body。
 
-1. 在独立 handler task 中校验 workspace capability 与 path；通过已有 directory-safe API 打开普通文件，拒绝目录、设备、FIFO/socket、绝对路径、`..`、Windows prefix/ADS 与越界 symlink。
-2. 从已经打开的 handle 读取 metadata；`size > 2 MiB` 立即返回 `tooLarge` response head，不读取 body。
-3. 对合格文件最多读取 `2 MiB + 1 byte`；如果文件增长、版本变化或多出一个 byte，返回 `sourceChanged/tooLarge`，不发送 partial body。
-4. 检查 allowlisted 类型。文本必须是有效 UTF-8；不支持的类型返回 `unsupported`。
-5. 发送成功 ResponseHead 后，把完整 bytes 写入 Exchange body；TransportEndpoint 负责 16 KiB frame、credit 和调度。
+文件读取在 `spawn_blocking` 中执行，最多两个并发 Preview worker；它不占 carrier reader 或 DataEndpoint writer task。handler 等待 worker 时只占自己的 logical stream。
 
-文件读取在 Data Plane 提供的有界 blocking/IO pool 中进行。carrier reader/writer 不调用这个 handler；磁盘慢、FIFO 欺骗、handler timeout 或 response backpressure 只能停住当前 stream。
+路径边界使用 `cap-std::fs::Dir` 相对于已验证 workspace root 打开，并有 symlink escape 测试。绝对路径、`..`、编码分隔符和平台歧义 spelling 在 URL 层与 daemon 层分别拒绝，不能依赖前端校验作为安全边界。
 
-可以为不超过 2 MiB 的合格文件使用单个有界 buffer，以便在发送 ResponseHead 前确认“完整或失败”。这不是通用 Data Plane 聚合 body 的许可；它是 Preview 业务上限内的原子展示选择。
+## 6. 类型 allowlist
 
-## 4. 支持类型
+成功响应只产生以下组合：
 
-| 类型 | daemon 工作 | Browser 工作 | 超过 2 MiB |
-| --- | --- | --- | --- |
-| PNG/JPEG/WebP/GIF | magic/扩展名校验，原 bytes | Blob + `<img>` | 无法预览 |
-| Markdown | UTF-8 校验，原 bytes | 安全 Markdown renderer | 无法预览 |
-| 普通文本/代码 | UTF-8 校验，原 bytes | `<pre>` 或编辑器 | 无法预览 |
-| 单文件 HTML | UTF-8 校验，原 bytes | network-enabled sandbox iframe | 无法预览 |
-| MP4/WebM 等小视频 | magic/扩展名校验，原 bytes | Blob + `<video>` | 无法预览 |
+| kind | mediaType | 识别规则 |
+|---|---|---|
+| `image` | `image/png` | `.png` + PNG signature |
+| `image` | `image/jpeg` | `.jpg/.jpeg` + JPEG signature |
+| `image` | `image/gif` | `.gif` + GIF87a/GIF89a |
+| `image` | `image/webp` | `.webp` + RIFF/WEBP |
+| `video` | `video/mp4` | `.mp4` + `ftyp` box marker |
+| `video` | `video/webm` | `.webm` + EBML marker |
+| `markdown` | `text/markdown` | `.md/.markdown/.mdown` + valid UTF-8 |
+| `html` | `text/html` | `.html/.htm` + valid UTF-8 |
+| `text` | `text/plain` | 明确的源码/配置/日志扩展名 + valid UTF-8 |
 
-MVP 明确没有：图片解码或 thumbnail、Markdown outline/摘要、HTML prefix/修复、视频 probe/poster/转码、Range、offset read 或 arbitrary download。Exchange streaming 只是通用传输方式，不能被 Preview handler 扩展成无上限文件下载器。
+文本前 8000 个字符含 NUL 或 UTF-8 非法时拒绝。daemon 不相信浏览器传来的 MIME，也不做通用 MIME sniffing。未知扩展名、扩展名与 magic 不符或其他二进制返回 `unsupported`。
 
-2 MiB 只限制源 bytes，不限制图片解码像素、HTML/script CPU 或第三方网络响应。独立页面能隔离普通 UI 生命周期，但不是进程级资源沙箱；目标浏览器无法可靠承受的格式应直接不支持。
+## 7. 浏览器渲染
 
-## 5. 单文件 HTML：完整渲染，明确允许网络
+### 图片与视频
 
-“单文件”只限制 workspace 输入：daemon 只发送一个 HTML 文件，不解析或打包相邻文件。它不表示浏览器离线。
+Viewer 用完整 bytes 创建带 daemon allowlist MIME 的 Blob URL。图片使用 `<img>`，MP4/WebM 使用带 controls 的 `<video>`。没有 Range 和转码，因此 2 MiB 上限同时控制内存和首屏等待。
 
-- 完整 HTML bytes 不截断；inline HTML、CSS、classic/module script 和 event handler 可以运行；
-- 绝对 `https:` 图片、字体、样式、脚本、媒体以及 fetch/XHR 可以由浏览器访问，`wss:` 也可用；
-- `./app.js`、`/style.css` 等 workspace 相对引用不解析。需要相邻文件时使用完整 WebRoot；
-- `http:` mixed content、外部 iframe、object/embed、worker、form submit、popup/download、top navigation 和敏感浏览器权限仍阻断。
+### Markdown 与文本
 
-### 5.1 产品承诺
+Markdown 使用现有 `react-markdown` + GFM renderer，不启用 raw HTML。Markdown 图片不会自动联网；链接使用独立 tab 和 `noopener/noreferrer`。普通文本按 UTF-8 解码到 `<pre>`。
 
-允许 script 联网后，准确边界是：
+### 活动单文件 HTML
 
-> GeneHub 保护 Browser↔daemon 传输、Relay 保密性、应用 session 和未选择的 workspace 资源；GeneHub 不保证被打开的 HTML 本身仍然保密。
+HTML 在 `iframe srcdoc` 中运行：
 
-HTML 可以读取自己的 DOM/source 并发往允许的 HTTPS/WSS endpoint；第三方会看到 viewer IP、User-Agent 和时间等元数据，浏览器也可能按自身策略携带目标站点的 ambient credential。这不是 E2EE 失效，而是明文到达授权浏览器后，用户运行了一个可联网的 active document。
-
-这是可接受的产品取舍，但 Viewer 必须始终显示 `活动 HTML · 网络已开启`。第一版不提供容易产生错误安全感的“严格离线”开关。将来如需审查不受信任 HTML，应另做默认禁脚本的 inert/sanitized mode。
-
-### 5.2 Renderer 隔离
-
-HTML iframe 必须：
-
-- 只在用户显式打开后创建，使用 `sandbox="allow-scripts"`，不加入 `allow-same-origin`、forms、popups、downloads、modals 或 top-navigation；
-- 不注入 access token、route ticket、workspace handle、设备密钥或 parent API；不接受文档的 `postMessage`，不提供 host bridge；
-- 在任何用户节点之前插入可信 CSP 与固定首个 `<base href="https://preview.invalid/">`，移除用户 `<base>`/CSP meta，使相对 URL 失败而不是落到 GeneHub origin；
-- CSP 只开放 inline/HTTPS script/style、data/blob/HTTPS 图片媒体与 HTTPS/WSS connect，并阻断 object、frame、worker 和 form；
-- 设置 `referrerpolicy="no-referrer"`；Permissions Policy 关闭 camera、microphone、geolocation、clipboard、USB、serial、display capture、fullscreen 和 presentation；
-- 不依赖实验性的 `credentialless` 作为安全边界。若 GeneHub 使用 ambient cookie 授权，发布前必须证明 opaque-origin iframe 不能凭 cookie 改变 GeneHub 状态，或使用无 GeneHub cookie 的隔离 renderer origin。
-
-网络开放后，验收重点不是“零请求”，而是 iframe 无法访问 parent/session、无法读取其他 workspace 文件、相对 URL 不命中 GeneHub，且敏感权限和导航能力被阻断。
-
-## 6. 独立 Viewer 与跨设备 URL
-
-稳定 Locator：
-
-```text
-https://app.genethub.com/assets/preview/v1/w_6M4Q/docs/readme.md
-https://app.genethub.com/assets/preview/v1/w_6M4Q/reports/实验%20结果.md
+```html
+<iframe
+  sandbox="allow-scripts"
+  referrerpolicy="no-referrer"
+  srcdoc="..."
+/>
 ```
 
-- URL 是 locator，不是 capability。`w_6M4Q` 标识已注册 workspace，余下 pathname 是 workspace-relative file path；不包含 daemon 的 workspace root，也不接受 `/Users/...`、盘符或 UNC 绝对路径；
-- path 不再放 fragment，也不作为秘密处理。它会出现在地址栏、浏览器历史、复制内容和普通 Frontdoor URL 处理中；文件名敏感的 workspace 不应把链接贴到不可信位置；
-- URL builder 必须逐 segment UTF-8 percent-encode。Viewer 恰好解码一次，拒绝空目标、`.`、`..`、NUL、反斜杠、编码 `/`/`\\`、Windows drive/UNC/ADS 和非规范等价形式；daemon 在已授权 workspace root 下重新执行同样的 path 边界检查；
-- Agent/Chat 只通过共享的 `assetPreviewUrl(workspaceHandle, relativePath)` builder 生成链接，不能拼接 URL，也不能把当前机器绝对路径转换成链接；Agent 必须先把文档写入当前 workspace，再引用它；
-- 另一台已配对电脑或手机打开同一链接时，以自己的 session 重新取得 daemon route 与业务 capability，再发起新的 Preview Exchange；查看端不需要 daemon，源 daemon 必须在线；
-- FilesPanel 使用 `window.open(viewerUrl, "_blank", "noopener,noreferrer")`；Viewer 不依赖 opener；
-- 页面拥有自己的 Exchange、loading/error、Blob 与 iframe 生命周期。关闭页面即 RESET stream 并 revoke Blob URL；
-- 页面只允许同源 workbench 将来 iframe；第三方站点不能嵌入。浮窗以后复用同一 Viewer URL，不复制 renderer。
+关键边界：
 
-第一版不做 modal、浮窗状态同步、拖拽、多 pane 或 Service Worker。
+- 没有 `allow-same-origin`，document 是 opaque origin，不能读父页面 DOM、cookie、localStorage、IndexedDB 或 GeneHub credential。
+- 没有表单、弹窗、top navigation、下载、摄像头、麦克风、定位、剪贴板、USB、串口或 worker 权限。
+- Viewer 删除源文件自带 `<base>` 和 CSP，插入固定 `https://preview.invalid/` base 与自己的 CSP。
+- 允许 inline script/style，以及绝对 HTTPS script/style/image/media/font 和 HTTPS/WSS connect。
+- 禁止 object、嵌套 frame、worker、form action；相对资源会指向不可用的固定 base，不会隐式读取 workspace 邻接文件。
+- UI 明示“活动 HTML · 网络已开启”。
 
-## 7. `file.read` 废弃
+`srcdoc` 会继承承载 Preview 页面的 HTTP CSP；iframe 内的 `<meta>` 只能继续收紧，不能放宽它。因此生产 edge 必须只对 `/assets/preview/v1/*` 页面提供上述 active-HTML CSP，并让普通工作台继续使用不含 `unsafe-inline` 的严格策略。Cloud 的 Caddy 配置已按路径分开；自托管若统一下发 `script-src 'self'`，HTML 文档能显示，但其中脚本会被浏览器阻止。这是部署契约，不能靠在 iframe 内插入另一条 CSP 绕过。
 
-当前 `file.read` 最多读 2 MiB，文本可能截断，二进制只返回占位字符串；这与“完整文件或明确失败”冲突，也会把大内容塞进 legacy JSON RPC。项目尚在早期，因此直接迁移并删除，不维护 deprecation runtime。
+“允许网络”是产品取舍：HTML 本身可向互联网发送它已经拥有的文件内容，所以用户不应把不可信 HTML 当成静态文档；但 sandbox 隔离保证它不能因此取得 GeneHub 页面或其他本地文件的权限。未来若提供无网络模式，应是显式渲染模式，不与当前契约混淆。
 
-迁移规则：
+## 8. 多文件 HTML 为什么不在 MVP
 
-1. `file.tree` 保留并迁移为小 unary Exchange；`file.write` 迁移为独立 mutation Exchange。
-2. Web 的 `openFile(path)` 改为打开 Viewer；Viewer 只使用 streaming `asset.preview` Exchange。
-3. 普通 UTF-8 text/code 加入 Preview allowlist，现有 `.rs/.json/.txt` 查看能力不倒退。
-4. 若保留编辑，初始化读取使用 Preview exact bytes；保存仍走 `file.write`，不复用 Preview stream。
-5. 同一个应用协议 bump 中删除 `Request::FileRead`、`Reply::FileContent`、daemon handler、Web store 字段、旧调用与旧测试。
-6. 不提供旧/新协议 adapter、feature flag、解析失败 fallback 或兼容周期。版本不匹配只显示 `upgradeRequired`。
+相对 URL 需要一个可解析的目录命名空间；单次 E2EE Exchange 只返回一个文件，浏览器不会自动把 iframe 的后续 HTTP 请求映射回 daemon。正确方案需要 WebRoot session、受限资源路由、生命周期、缓存/Range 和更细的 path policy，或 daemon HTTPS + 字节隧道。
 
-删除的是旧查看协议，不是 directory-safe open、`file.tree` 或 `file.write`。Preview 必须随全量 Data Plane cutover 一起交付，不能成为 legacy Client 旁边的第二条长期路径。
+MVP 的固定 base 会让相对 CSS、JS、图片和模块 import 明确失败，而不是悄悄发起新的未授权 workspace read。多文件站点应使用 [云端 Assets Gateway](./assets-cloud-gateway.md) 或 [daemon HTTPS + SNI 字节隧道](./assets-daemon-https-sni-tunnel.md) 的后续提案；不引入 Service Worker。
 
-## 8. 失败、资源和日志
+## 9. 错误与用户提示
 
-| 条件 | 结果 |
-| --- | --- |
-| 文件 `> 2 MiB` | `tooLarge`，显示实际大小与 2 MiB 上限 |
-| 读取期间变化 | `sourceChanged`，不展示 partial |
-| 类型不支持/文本非 UTF-8 | `unsupported`，不回退 arbitrary download |
-| daemon 离线 | 显示 placement 离线，不从云端取旧副本 |
-| placement 歧义 | 要求用户选择，不随机切源 |
-| Viewer 关闭/超时 | RESET 当前 Exchange，其他 streams/session 保持可用 |
+| error | HTTP-like status | UI 含义 |
+|---|---:|---|
+| `notFound` | 404 | 找不到文件 |
+| `forbidden` | 403 | workspace/path 不在当前授权内 |
+| `unsupported` | 415 | 类型不在 allowlist |
+| `tooLarge` | 413 | 超过 2 MiB，不预览 |
+| `sourceChanged` | 409/500/408 | 读取期间变化、worker 异常或超时，请重试 |
 
-daemon 建议最多并发 2 个 Preview，单 Preview deadline 15 秒，单文件 buffer 最多 `2 MiB + 1`。读取运行在有界 blocking pool；普通 async timeout 不能假装强杀已经阻塞的 OS read，但 timeout 后不得继续排队发送。
+连接未配对、设备离线、URL 设备与握手身份不一致、版本不兼容和 E2EE 认证失败使用连接层错误，不伪装成文件不存在。协议版本不匹配直接关闭，不尝试旧 `file.read`。
 
-daemon/Relay structured logs 只允许 source size bucket、result bytes、duration、renderer kind 和低基数错误码；不主动记录 path、HTML title、Markdown 内容、精细 MIME 或 body。规范 Viewer URL 已明确暴露 workspace-relative path，因此 Frontdoor access log、浏览器历史和用户复制内容可能含 path；这不是 Preview 的保密承诺。浏览器仍不得把文件 bytes 放进 URL、localStorage、IndexedDB、Service Worker cache 或错误上报。
+## 10. MVP 验收
 
-## 9. 最小实施顺序
-
-### Phase A：通用 Data Plane 基础
-
-- WebSocket 与 WebRTC `TransportEndpoint`、Exchange 与 Duplex 均能完成同一个小 unary 调用；
-- 16 KiB frame、逐流 credit、等权 round-robin、RESET、有界队列与 handler 隔离测试通过；
-- Preview 不自行访问 WebSocket、RTCDataChannel、provider selector 或 frame encoder。
-
-### Phase B：Preview、Viewer 与业务迁移
-
-- 实现 `asset.preview` Exchange、2 MiB exact-or-error、类型 allowlist；
-- 实现唯一的 `workspaceFile` source、规范 path URL/parser 与共享 `assetPreviewUrl()` builder；
-- 实现独立 Viewer 与图片/Markdown/text/video Blob 生命周期；
-- 文件树点击 Viewer，同一 URL 在另一已配对浏览器重新授权可用；
-- Agent 写入 workspace 的 Markdown/HTML/图片等文件后，可以只凭 workspace handle + relative path 输出同一 Viewer 链接；
-- 相同 Preview contract suite 分别覆盖 WebSocket 与 RTC provider，RTC 建立/断开不改变业务响应；
-- 将所有其他 legacy 请求、push 与 PTY 按 Data Plane 迁移表迁完；中间状态不发布。
-
-### Phase C：HTML 与原子 cutover
-
-- 实现 network-enabled sandbox、固定 base、CSP/Permissions Policy 和 host 隔离测试；
-- bump 协议版本，同时切换 Web/daemon 入口并删除 `file.read` 及其余 legacy Client/codec/handler；
-- 静态搜索、编译和端到端测试证明无旧调用、无 dual stack、无 fallback；
-- 浮窗、多文件 HTML、Range 与 WebRoot 都留给后续独立能力。
-
-## 10. 验收标准
-
-业务/连接解耦：
-
-- Preview 模块只依赖 Exchange request/response/body API，不 import WebSocket、RTCDataChannel、DataFrame、provider 或 scheduler；
-- 一次 2 MiB response 在 wire 上自动成为不超过 16 KiB 的 frames；Preview handler 没有 chunk size 常量；
-- handler 慢读、慢写、磁盘阻塞或 Viewer 取消，不停住 carrier loop 或其他 Exchange；
-- WebSocket 路径的 Relay 抓包和日志看不到 method、workspace path、MIME、错误或 body；RTC 路径不经过 Relay 数据面。
-
-文件/产品：
-
-- `size == 2 MiB` 完整展示；`size > 2 MiB` 在 body 前失败；没有任何 overview、截断、转码或 Range 路径；
-- traversal、absolute path、Windows prefix/ADS、symlink escape 与未授权 workspace 全部 fail-close；
-- pathname 中的 workspace-relative path 可见、可复制且 round-trip；空路径、双重编码、编码分隔符与非 `workspaceFile` source 全部拒绝；
-- 点击打开独立 Viewer；同一 URL 可由另一已配对浏览器重新授权；Web、daemon、proto 与测试中无 `file.read`/`FileContent` 运行路径；
-- FilesPanel、Agent 与 Chat 使用同一个 URL builder；Agent 不能预览 workspace 外路径或尚未落盘的内容；
-- RTC connected 时新 Preview 走 direct provider；RTC 不可用时同一 Preview 契约走 WebSocket，业务层没有 provider 分支；
-- 没有 legacy adapter、兼容 feature flag 或 fallback；旧版本只得到 `upgradeRequired`；
-- Viewer 关闭后 stream RESET、Blob revoke，正文不进入持久缓存或 telemetry。
-
-HTML：
-
-- inline 与绝对 HTTPS 依赖可运行；workspace 相对 URL 不访问 GeneHub，也不被解释为相邻文件；
-- iframe 无 parent/session/host bridge，不能读取未选择文件；敏感权限、frame、form、popup/download 和 top navigation 被阻断；
-- UI 明示网络开启，文档和测试不声称 no-egress；cookie-auth 场景通过跨 origin/CSRF 验证。
-
-结论：Preview 只是一项 2 MiB 内“完整文件或明确失败”的业务能力。它恰好是验证 streaming Exchange、背压和 handler 隔离的好用例，但不再反向定义连接模型。
+- URL 可 round-trip Unicode、空格和部署子路径；拒绝 traversal、encoded slash、反斜杠和非 canonical encoding。
+- FilesPanel 用当前 daemon identity + workspace id + 相对 path 生成独立 Viewer URL。
+- Cloud 根入口可直接渲染 Preview deep link，并按 URL device handle 找账号或本地 pairing target。
+- 两台独立已配对客户端能用同一 locator 通过真实 self-hosted Relay/daemon 读取相同 bytes。
+- 文件恰好 2 MiB 成功，2 MiB + 1 byte 明确 `tooLarge`；没有截断或 overview。
+- allowlist、UTF-8、magic、普通文件和 symlink escape 均有 daemon 测试。
+- 成功 response 精确校验三处长度；取消、超时和页面关闭能释放 stream/client/Blob。
+- HTML script 可运行，网络策略可见，父页面同源权限不可得，相对 workspace 资源不可解析。
+- `file.read`、`FileContent` 和旧查看器没有运行路径或 fallback。

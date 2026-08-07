@@ -146,67 +146,6 @@ impl Devices {
         }
     }
 
-    /// Redeems an invite for a long-lived credential.
-    ///
-    /// The code is never compared against something the caller sent in the
-    /// clear: the caller proves it knows the code, and this side proves the
-    /// same back. An impostor sitting in the rendezvous slot therefore cannot
-    /// harvest an invite by pretending to be the machine.
-    pub fn claim(
-        &self,
-        code: &str,
-        device_name: &str,
-        nonce: &str,
-        presented: &str,
-    ) -> Result<(DeviceCredential, String)> {
-        let device_name = validate_device_name(device_name)?;
-        let mut state = self.state.lock().unwrap();
-        validate_nonce(nonce)?;
-
-        let now = Utc::now();
-        state.invites.retain(|invite| invite.expires_at > now);
-        let Some((invite_id, invite_secret)) = code.split_once('.') else {
-            return Err(anyhow!("this pairing link is no longer valid"));
-        };
-        let position = state
-            .invites
-            .iter()
-            .position(|invite| {
-                constant_time_eq(&invite.id, invite_id)
-                    && constant_time_eq(&invite.secret, invite_secret)
-                    && constant_time_eq(&proof("client", nonce, code), presented)
-            })
-            .ok_or_else(|| anyhow!("this pairing link is no longer valid"))?;
-        if state.devices.len() >= MAX_DEVICES {
-            return Err(anyhow!(
-                "this machine has reached its authorized-device limit"
-            ));
-        }
-        self.remember_nonce(&mut state, nonce)?;
-        let invite = state.invites.remove(position);
-        let invite_code = format!("{}.{}", invite.id, invite.secret);
-
-        let device = Device {
-            id: format!("d_{}", random_token()),
-            name: device_name,
-            secret: random_token(),
-            paired_at: now,
-            last_seen_at: None,
-        };
-        let credential = DeviceCredential {
-            device_id: device.id.clone(),
-            machine_id: String::new(),
-            secret: device.secret.clone(),
-            machine_name: String::new(),
-            fingerprint: String::new(),
-            proof: proof("server", nonce, &invite_code),
-        };
-        let id = device.id.clone();
-        state.devices.push(device);
-        self.persist(&state)?;
-        Ok((credential, id))
-    }
-
     /// Authenticates a pairing-link PSK without consuming it. Consumption is
     /// the later encrypted claim, so a Relay cannot steal the invite merely by
     /// replaying or racing the public Hello.
@@ -273,7 +212,6 @@ impl Devices {
             secret: device.secret.clone(),
             machine_name: String::new(),
             fingerprint: String::new(),
-            proof: String::new(),
         };
         let id = device.id.clone();
         state.devices.push(device);
@@ -281,31 +219,10 @@ impl Devices {
         Ok((credential, id))
     }
 
-    /// Checks a device in and returns this machine's half of the proof.
-    pub fn authenticate(&self, auth: &DeviceAuth) -> Result<String> {
-        let mut state = self.state.lock().unwrap();
-        validate_nonce(&auth.nonce)?;
-        let position = state
-            .devices
-            .iter()
-            .position(|device| device.id == auth.device_id)
-            .ok_or_else(|| anyhow!("this device is not authorized on this machine"))?;
-        let secret = state.devices[position].secret.clone();
-        if !constant_time_eq(&proof("client", &auth.nonce, &secret), &auth.proof) {
-            return Err(anyhow!("this device is not authorized on this machine"));
-        }
-        self.remember_nonce(&mut state, &auth.nonce)?;
-        let device = &mut state.devices[position];
-        device.last_seen_at = Some(Utc::now());
-        let answer = proof("server", &auth.nonce, &secret);
-        self.persist(&state)?;
-        Ok(answer)
-    }
-
     /// Authenticates a device and derives a connection-specific key.
     ///
-    /// Unlike the legacy mutual proof, both fresh nonces and the device id are
-    /// bound into the transcript. A relay that records one whole connection
+    /// Both fresh nonces and the device id are bound into the transcript. A
+    /// relay that records one whole connection
     /// therefore cannot replay its signed requests after reconnect or on a
     /// different device channel.
     pub fn authenticate_session(
@@ -430,15 +347,6 @@ fn validate_nonce(nonce: &str) -> Result<()> {
     Ok(())
 }
 
-/// One half of the mutual proof.
-///
-/// The secret goes last so that a length extension on the digest cannot turn
-/// one answer into another.
-pub fn proof(role: &str, nonce: &str, secret: &str) -> String {
-    let digest = Sha256::digest(format!("genehub-{role}:{nonce}:{secret}").as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 /// Where clients meet this machine.
 ///
 /// Derived from the machine identity so it survives restarts, and from the
@@ -461,10 +369,6 @@ pub fn random_token() -> String {
     )
 }
 
-fn constant_time_eq(expected: &str, presented: &str) -> bool {
-    crate::transport::auth::token_matches(expected, presented)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,64 +383,67 @@ mod tests {
         uuid::Uuid::new_v4().simple().to_string()
     }
 
-    /// The happy path, and the shape every other test leans on.
+    /// Completes the protocol-v3 invitation handshake and its one encrypted
+    /// claim RPC, which is the shape every other test leans on.
     fn claim(devices: &Devices, name: &str) -> (String, String) {
         let invite = devices.invite();
-        let nonce = nonce();
-        let (credential, _) = devices
-            .claim(
-                &invite.code,
-                name,
-                &nonce,
-                &proof("client", &nonce, &invite.code),
+        let (invite_id, invite_secret) = invite.code.split_once('.').unwrap();
+        let client_nonce = nonce();
+        let server_nonce = nonce();
+        let context = format!("invite:{invite_id}");
+        devices
+            .authenticate_invite(
+                &InviteAuth {
+                    invite_id: invite_id.to_string(),
+                    nonce: client_nonce.clone(),
+                    proof: channel_auth::client_proof(invite_secret, &context, &client_nonce),
+                },
+                &server_nonce,
             )
-            .expect("a fresh invite is redeemable");
-        assert_eq!(credential.proof, proof("server", &nonce, &invite.code));
+            .expect("a fresh invitation authenticates");
+        let (credential, _) = devices
+            .claim_authenticated(invite_id, name)
+            .expect("the authenticated invitation is redeemable");
         (credential.device_id, credential.secret)
     }
 
     #[test]
-    fn a_claimed_device_can_authenticate_and_the_machine_proves_itself_back() {
+    fn a_claimed_device_establishes_a_fresh_mutually_authenticated_session() {
         let (devices, _dir) = devices();
         let (device_id, secret) = claim(&devices, "phone");
 
-        let nonce = nonce();
-        let answer = devices
-            .authenticate(&DeviceAuth {
-                device_id,
-                nonce: nonce.clone(),
-                proof: proof("client", &nonce, &secret),
-            })
+        let client_nonce = nonce();
+        let server_nonce = nonce();
+        let context = channel_auth::device_context(&device_id);
+        let (_, answer, _key) = devices
+            .authenticate_session(
+                &DeviceAuth {
+                    device_id,
+                    nonce: client_nonce.clone(),
+                    proof: channel_auth::client_proof(&secret, &context, &client_nonce),
+                },
+                &server_nonce,
+            )
             .expect("an authorized device gets in");
-        assert_eq!(answer, proof("server", &nonce, &secret));
+        channel_auth::verify_proof(
+            &channel_auth::server_proof(&secret, &context, &client_nonce, &server_nonce),
+            &answer,
+        )
+        .unwrap();
     }
 
     #[test]
     fn invalid_device_names_do_not_consume_the_invite_or_touch_disk() {
         let (devices, dir) = devices();
         let invite = devices.invite();
-        let challenge = nonce();
+        let (invite_id, _) = invite.code.split_once('.').unwrap();
         let invalid = format!("phone\u{202e}{}", "x".repeat(80));
         let error = devices
-            .claim(
-                &invite.code,
-                &invalid,
-                &challenge,
-                &proof("client", &challenge, &invite.code),
-            )
+            .claim_authenticated(invite_id, &invalid)
             .unwrap_err();
         assert!(format!("{error:#}").contains("device name"));
         assert!(!dir.path().join("devices.json").exists());
-
-        let retry = nonce();
-        assert!(devices
-            .claim(
-                &invite.code,
-                "手机浏览器",
-                &retry,
-                &proof("client", &retry, &invite.code),
-            )
-            .is_ok());
+        assert!(devices.claim_authenticated(invite_id, "手机浏览器").is_ok());
     }
 
     #[test]
@@ -552,38 +459,31 @@ mod tests {
     fn an_invite_works_exactly_once() {
         let (devices, _dir) = devices();
         let invite = devices.invite();
-
-        let first = nonce();
+        let (invite_id, _) = invite.code.split_once('.').unwrap();
         devices
-            .claim(
-                &invite.code,
-                "phone",
-                &first,
-                &proof("client", &first, &invite.code),
-            )
+            .claim_authenticated(invite_id, "phone")
             .expect("the first use is the one that counts");
-
-        let second = nonce();
         let error = devices
-            .claim(
-                &invite.code,
-                "laptop",
-                &second,
-                &proof("client", &second, &invite.code),
-            )
+            .claim_authenticated(invite_id, "laptop")
             .expect_err("a spent invite is worthless");
         assert!(format!("{error:#}").contains("no longer valid"));
     }
 
-    /// Whoever holds the invite must prove it. Sending the code alone would let
-    /// anything sitting between the two sides collect invites.
     #[test]
-    fn claiming_without_the_proof_is_refused() {
+    fn an_invitation_id_without_its_secret_cannot_open_the_bootstrap_channel() {
         let (devices, _dir) = devices();
         let invite = devices.invite();
-        let nonce = nonce();
+        let (invite_id, _) = invite.code.split_once('.').unwrap();
+        let client_nonce = nonce();
         assert!(devices
-            .claim(&invite.code, "phone", &nonce, "not-the-proof")
+            .authenticate_invite(
+                &InviteAuth {
+                    invite_id: invite_id.to_string(),
+                    nonce: client_nonce,
+                    proof: "not-the-proof".into(),
+                },
+                &nonce(),
+            )
             .is_err());
     }
 
@@ -592,27 +492,40 @@ mod tests {
         let (devices, _dir) = devices();
         let (device_id, _) = claim(&devices, "phone");
 
-        let nonce = nonce();
+        let client_nonce = nonce();
+        let context = channel_auth::device_context(&device_id);
         assert!(devices
-            .authenticate(&DeviceAuth {
-                device_id,
-                nonce: nonce.clone(),
-                proof: proof("client", &nonce, "a-guess"),
-            })
+            .authenticate_session(
+                &DeviceAuth {
+                    device_id,
+                    nonce: client_nonce.clone(),
+                    proof: channel_auth::client_proof("a-guess", &context, &client_nonce),
+                },
+                &nonce(),
+            )
             .is_err());
     }
 
     #[test]
     fn an_unknown_device_is_refused() {
         let (devices, _dir) = devices();
-        let nonce = nonce();
-        assert!(devices
-            .authenticate(&DeviceAuth {
-                device_id: "d_nobody".into(),
-                nonce: nonce.clone(),
-                proof: proof("client", &nonce, "whatever"),
-            })
-            .is_err());
+        let client_nonce = nonce();
+        assert!(
+            devices
+                .authenticate_session(
+                    &DeviceAuth {
+                        device_id: "d_nobody".into(),
+                        nonce: client_nonce.clone(),
+                        proof: channel_auth::client_proof(
+                            "whatever",
+                            "device:d_nobody",
+                            &client_nonce,
+                        ),
+                    },
+                    &nonce(),
+                )
+                .is_err()
+        );
     }
 
     /// An observed proof is bound to its nonce, and a nonce is good once. This
@@ -622,14 +535,17 @@ mod tests {
         let (devices, _dir) = devices();
         let (device_id, secret) = claim(&devices, "phone");
 
-        let nonce = nonce();
+        let client_nonce = nonce();
+        let context = channel_auth::device_context(&device_id);
         let auth = DeviceAuth {
             device_id,
-            nonce: nonce.clone(),
-            proof: proof("client", &nonce, &secret),
+            nonce: client_nonce.clone(),
+            proof: channel_auth::client_proof(&secret, &context, &client_nonce),
         };
-        devices.authenticate(&auth).expect("the first use is fine");
-        assert!(devices.authenticate(&auth).is_err());
+        devices
+            .authenticate_session(&auth, &nonce())
+            .expect("the first use is fine");
+        assert!(devices.authenticate_session(&auth, &nonce()).is_err());
     }
 
     #[test]
@@ -642,13 +558,17 @@ mod tests {
         assert_eq!(revocations.try_recv().unwrap(), device_id);
         assert!(devices.list().is_empty());
 
-        let nonce = nonce();
+        let client_nonce = nonce();
+        let context = channel_auth::device_context(&device_id);
         assert!(devices
-            .authenticate(&DeviceAuth {
-                device_id,
-                nonce: nonce.clone(),
-                proof: proof("client", &nonce, &secret),
-            })
+            .authenticate_session(
+                &DeviceAuth {
+                    device_id,
+                    nonce: client_nonce.clone(),
+                    proof: channel_auth::client_proof(&secret, &context, &client_nonce),
+                },
+                &nonce(),
+            )
             .is_err());
     }
 
@@ -669,13 +589,17 @@ mod tests {
 
         let devices = Devices::load(&path);
         assert_eq!(devices.list().len(), 1);
-        let nonce = nonce();
+        let client_nonce = nonce();
+        let context = channel_auth::device_context(&device_id);
         assert!(devices
-            .authenticate(&DeviceAuth {
-                device_id,
-                nonce: nonce.clone(),
-                proof: proof("client", &nonce, &secret),
-            })
+            .authenticate_session(
+                &DeviceAuth {
+                    device_id,
+                    nonce: client_nonce.clone(),
+                    proof: channel_auth::client_proof(&secret, &context, &client_nonce),
+                },
+                &nonce(),
+            )
             .is_ok());
     }
 
@@ -683,19 +607,23 @@ mod tests {
     fn an_expired_invite_is_gone() {
         let (devices, _dir) = devices();
         let invite = devices.invite();
+        let (invite_id, invite_secret) = invite.code.split_once('.').unwrap();
         {
             let mut state = devices.state.lock().unwrap();
             for entry in state.invites.iter_mut() {
                 entry.expires_at = Utc::now() - Duration::minutes(1);
             }
         }
-        let nonce = nonce();
+        let client_nonce = nonce();
+        let context = format!("invite:{invite_id}");
         assert!(devices
-            .claim(
-                &invite.code,
-                "phone",
-                &nonce,
-                &proof("client", &nonce, &invite.code)
+            .authenticate_invite(
+                &InviteAuth {
+                    invite_id: invite_id.to_string(),
+                    nonce: client_nonce.clone(),
+                    proof: channel_auth::client_proof(invite_secret, &context, &client_nonce,),
+                },
+                &nonce(),
             )
             .is_err());
     }

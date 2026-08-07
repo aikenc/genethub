@@ -3,7 +3,6 @@ import type {
   Attachment,
   DeviceInfo,
   DeviceInvite,
-  FileContent,
   FileNode,
   GitStatus,
   HubClaim,
@@ -135,7 +134,6 @@ interface WorkbenchState {
   devices: DeviceInfo[];
   remote: RemoteAccess | null;
   tree: FileNode | null;
-  file: FileContent | null;
   git: GitStatus | null;
   diff: string | null;
   settings: Settings | null;
@@ -173,8 +171,6 @@ interface WorkbenchState {
   /** Changes a workspace's display name without moving its directory. */
   renameWorkspace(workspaceId: string, name: string): Promise<void>;
   loadTree(path?: string): Promise<void>;
-  openFile(path: string): Promise<void>;
-  saveFile(content: string): Promise<void>;
   refreshGit(): Promise<void>;
   loadDiff(path?: string): Promise<void>;
   commit(message: string, paths?: string[]): Promise<void>;
@@ -410,7 +406,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   devices: [],
   remote: null,
   tree: null,
-  file: null,
   git: null,
   diff: null,
   settings: null,
@@ -969,25 +964,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set((state) => ({
       tree: path && state.tree ? graft(state.tree, path, reply.data) : reply.data,
     }));
-  },
-
-  async openFile(path) {
-    const client = require_(get().client);
-    const workspaceId = currentWorkspace(get());
-    if (!workspaceId) return;
-    const reply = await client.call({ type: "file.read", payload: { workspaceId, path } });
-    if (reply?.type === "fileContent") set({ file: reply.data });
-  },
-
-  async saveFile(content) {
-    const client = require_(get().client);
-    const workspaceId = currentWorkspace(get());
-    const open = get().file;
-    if (!workspaceId || !open) return;
-    await client.call({ type: "file.write", payload: { workspaceId, path: open.path, content } });
-    set({ file: { ...open, content } });
-    // Saving is the most common way the change list stops being accurate.
-    await get().refreshGit();
   },
 
   async refreshGit() {

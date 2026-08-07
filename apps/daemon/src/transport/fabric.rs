@@ -1,0 +1,741 @@
+//! Endpoint-neutral Fabric v2 uplink.
+//!
+//! Relay routes one opaque outer stream to this node. That stream carries one
+//! mutually authenticated v3 peer link; the peer link then multiplexes all
+//! business exchanges with its own bounded, fair frames.
+
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use futures_util::{SinkExt, StreamExt};
+use genehub_proto::{PeerAuth, PeerHello, TransportKind};
+use tokio::sync::{mpsc, Notify};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::Message;
+
+use crate::config::Enrollment;
+use crate::dataplane::{endpoint, handshake};
+use crate::state::Shared;
+use crate::transport::admission::Admission;
+
+const VERSION: u8 = 2;
+const HEADER_BYTES: usize = 28;
+const STREAM_ID_BYTES: usize = 16;
+const MAX_WIRE_FRAME_BYTES: usize = genehub_proto::MAX_DATA_FRAME_BYTES + HEADER_BYTES;
+const INITIAL_CREDIT: u64 = genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64;
+const MAX_PEERS: usize = 32;
+const MAX_PENDING: usize = 8;
+const WRITER_QUEUE: usize = 256;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const BACKOFF: [u64; 6] = [1, 2, 5, 10, 30, 60];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum Kind {
+    Open = 1,
+    Incoming = 2,
+    Accept = 3,
+    Data = 4,
+    WindowUpdate = 5,
+    Fin = 6,
+    Reset = 7,
+    Ping = 8,
+    Pong = 9,
+}
+
+#[derive(Clone)]
+struct Frame {
+    kind: Kind,
+    stream_id: [u8; STREAM_ID_BYTES],
+    value: u64,
+    payload: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct Writer {
+    messages: mpsc::Sender<Message>,
+}
+
+impl Writer {
+    async fn frame(&self, frame: Frame) -> Result<()> {
+        self.messages
+            .send(Message::Binary(encode(&frame)?))
+            .await
+            .map_err(|_| anyhow!("Fabric socket writer stopped"))
+    }
+
+    async fn reset(&self, stream_id: [u8; STREAM_ID_BYTES], code: u64) {
+        let _ = self
+            .frame(Frame {
+                kind: Kind::Reset,
+                stream_id,
+                value: code,
+                payload: Vec::new(),
+            })
+            .await;
+    }
+}
+
+#[derive(Clone)]
+struct Credit {
+    inner: Arc<CreditInner>,
+}
+
+struct CreditInner {
+    value: Mutex<u64>,
+    maximum: u64,
+    notify: Notify,
+}
+
+impl Credit {
+    fn new(value: u64) -> Result<Self> {
+        if value == 0 || value > genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64 {
+            anyhow::bail!("invalid Fabric stream credit");
+        }
+        Ok(Self {
+            inner: Arc::new(CreditInner {
+                value: Mutex::new(value),
+                maximum: value,
+                notify: Notify::new(),
+            }),
+        })
+    }
+
+    async fn take(&self, bytes: usize) -> Result<()> {
+        let bytes = u64::try_from(bytes)?;
+        if bytes == 0 || bytes > self.inner.maximum {
+            anyhow::bail!("Fabric record does not fit its stream window");
+        }
+        loop {
+            let notified = self.inner.notify.notified();
+            {
+                let mut value = self.inner.value.lock().unwrap();
+                if *value >= bytes {
+                    *value -= bytes;
+                    return Ok(());
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn add(&self, value: u64) -> bool {
+        if value == 0 {
+            return false;
+        }
+        let mut current = self.inner.value.lock().unwrap();
+        let Some(next) = current.checked_add(value) else {
+            return false;
+        };
+        if next > self.inner.maximum {
+            return false;
+        }
+        *current = next;
+        drop(current);
+        self.inner.notify.notify_waiters();
+        true
+    }
+}
+
+struct PeerSlot {
+    generation: u64,
+    inbound: mpsc::Sender<Vec<u8>>,
+    remote_sequence: u64,
+    outbound_credit: Credit,
+}
+
+type Peers = Arc<tokio::sync::Mutex<HashMap<[u8; STREAM_ID_BYTES], PeerSlot>>>;
+type Pending = Arc<tokio::sync::Mutex<HashSet<[u8; STREAM_ID_BYTES]>>>;
+
+pub struct FabricUplink {
+    task: tokio::task::JoinHandle<()>,
+    online: Arc<AtomicBool>,
+}
+
+impl FabricUplink {
+    /// Managed Hub: refresh the one-use endpoint admission before every dial
+    /// and redeem every incoming peer capability directly with Control.
+    pub fn start(state: Shared, enrollment: Enrollment) -> Self {
+        let online = Arc::new(AtomicBool::new(false));
+        let task_online = online.clone();
+        let task = tokio::spawn(async move {
+            let client = crate::hub::Client::new(&enrollment.hub_url);
+            let mut attempt = 0usize;
+            loop {
+                let result = async {
+                    let admission = client.fabric_admission(&enrollment).await?;
+                    run_once(
+                        state.clone(),
+                        &admission.url,
+                        PeerAdmissionSource::Hosted(enrollment.clone()),
+                        &task_online,
+                    )
+                    .await
+                }
+                .await;
+                task_online.store(false, Ordering::Relaxed);
+                if let Err(error) = result {
+                    tracing::warn!(%error, "Fabric uplink disconnected");
+                }
+                let delay = BACKOFF[attempt.min(BACKOFF.len() - 1)];
+                attempt = (attempt + 1).min(BACKOFF.len() - 1);
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
+        });
+        Self { task, online }
+    }
+
+    /// Self-hosted rendezvous: the endpoint admission is reusable routing
+    /// material, while authority remains the daemon's paired-device list.
+    pub fn start_rendezvous(state: Shared, url: String) -> Self {
+        let online = Arc::new(AtomicBool::new(false));
+        let task_online = online.clone();
+        let task = tokio::spawn(async move {
+            let mut attempt = 0usize;
+            loop {
+                let result = run_once(
+                    state.clone(),
+                    &url,
+                    PeerAdmissionSource::DeviceRequired,
+                    &task_online,
+                )
+                .await;
+                task_online.store(false, Ordering::Relaxed);
+                if let Err(error) = result {
+                    tracing::warn!(%error, "rendezvous Fabric uplink disconnected");
+                }
+                let delay = BACKOFF[attempt.min(BACKOFF.len() - 1)];
+                attempt = (attempt + 1).min(BACKOFF.len() - 1);
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
+        });
+        Self { task, online }
+    }
+
+    pub fn is_online(&self) -> bool {
+        self.online.load(Ordering::Relaxed)
+    }
+
+    pub fn stop(&self) {
+        self.task.abort();
+        self.online.store(false, Ordering::Relaxed);
+    }
+}
+
+async fn run_once(
+    state: Shared,
+    url: &str,
+    admission_source: PeerAdmissionSource,
+    online: &AtomicBool,
+) -> Result<()> {
+    validate_fabric_url(url)?;
+    let request = url
+        .into_client_request()
+        .context("building the Fabric uplink request")?;
+    let config = WebSocketConfig {
+        max_write_buffer_size: 512 * 1024,
+        max_message_size: Some(MAX_WIRE_FRAME_BYTES),
+        max_frame_size: Some(MAX_WIRE_FRAME_BYTES),
+        ..WebSocketConfig::default()
+    };
+    let (socket, _) = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async_with_config(request, Some(config), false),
+    )
+    .await
+    .context("Fabric WebSocket handshake timed out")??;
+    online.store(true, Ordering::Relaxed);
+    tracing::info!("Fabric v2 uplink established");
+
+    let (mut sink, mut source) = socket.split();
+    let (messages_tx, mut messages_rx) = mpsc::channel::<Message>(WRITER_QUEUE);
+    let writer = Writer {
+        messages: messages_tx.clone(),
+    };
+    let socket_writer = tokio::spawn(async move {
+        while let Some(message) = messages_rx.recv().await {
+            sink.send(message).await?;
+        }
+        Result::<()>::Ok(())
+    });
+    let peers: Peers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let pending: Pending = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+    let generation = Arc::new(AtomicU64::new(0));
+    let tasks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    let read_result = async {
+        while let Some(message) = source.next().await {
+            match message? {
+                Message::Binary(bytes) => {
+                    let frame = decode(&bytes).ok_or_else(|| anyhow!("malformed Fabric frame"))?;
+                    receive(
+                        frame,
+                        &state,
+                        &admission_source,
+                        &writer,
+                        &peers,
+                        &pending,
+                        &generation,
+                        &tasks,
+                    )
+                    .await?;
+                }
+                Message::Ping(payload) => {
+                    messages_tx
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|_| anyhow!("Fabric writer stopped"))?;
+                }
+                Message::Close(_) => break,
+                Message::Text(_) => anyhow::bail!("Fabric sent a text WebSocket message"),
+                _ => {}
+            }
+        }
+        Result::<()>::Ok(())
+    }
+    .await;
+
+    online.store(false, Ordering::Relaxed);
+    peers.lock().await.clear();
+    for task in tasks.lock().await.drain(..) {
+        task.abort();
+    }
+    socket_writer.abort();
+    read_result?;
+    anyhow::bail!("Fabric WebSocket ended")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn receive(
+    frame: Frame,
+    state: &Shared,
+    admission_source: &PeerAdmissionSource,
+    writer: &Writer,
+    peers: &Peers,
+    pending: &Pending,
+    generation: &Arc<AtomicU64>,
+    tasks: &Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+) -> Result<()> {
+    match frame.kind {
+        Kind::Incoming => {
+            if frame.stream_id == [0; STREAM_ID_BYTES]
+                || frame.value == 0
+                || frame.value > INITIAL_CREDIT
+                || frame.payload.is_empty()
+                || frame.payload.len() > genehub_proto::MAX_EXCHANGE_HEAD_BYTES
+            {
+                writer.reset(frame.stream_id, 3).await;
+                return Ok(());
+            }
+            {
+                let peers = peers.lock().await;
+                let mut pending = pending.lock().await;
+                if peers.contains_key(&frame.stream_id)
+                    || pending.contains(&frame.stream_id)
+                    || peers.len() + pending.len() >= MAX_PEERS
+                    || pending.len() >= MAX_PENDING
+                {
+                    drop(pending);
+                    drop(peers);
+                    writer.reset(frame.stream_id, 10).await;
+                    return Ok(());
+                }
+                pending.insert(frame.stream_id);
+            }
+            let peer_generation = generation.fetch_add(1, Ordering::Relaxed) + 1;
+            let task = tokio::spawn(serve_peer(
+                state.clone(),
+                admission_source.clone(),
+                writer.clone(),
+                peers.clone(),
+                pending.clone(),
+                frame,
+                peer_generation,
+            ));
+            let mut tasks = tasks.lock().await;
+            tasks.retain(|task| !task.is_finished());
+            tasks.push(task);
+        }
+        Kind::Data => {
+            let mut peers = peers.lock().await;
+            let Some(slot) = peers.get_mut(&frame.stream_id) else {
+                drop(peers);
+                writer.reset(frame.stream_id, 1).await;
+                return Ok(());
+            };
+            let bytes = u64::try_from(frame.payload.len())?;
+            if bytes == 0
+                || frame.value != slot.remote_sequence + 1
+                || slot.inbound.try_send(frame.payload).is_err()
+            {
+                peers.remove(&frame.stream_id);
+                drop(peers);
+                writer.reset(frame.stream_id, 6).await;
+                return Ok(());
+            }
+            slot.remote_sequence = frame.value;
+            // The bounded carrier queue accepted ownership, so this outer
+            // stream can return exactly the credit it consumed.
+            let update = Frame {
+                kind: Kind::WindowUpdate,
+                stream_id: frame.stream_id,
+                value: bytes,
+                payload: Vec::new(),
+            };
+            drop(peers);
+            writer.frame(update).await?;
+        }
+        Kind::WindowUpdate => {
+            if !frame.payload.is_empty() || frame.value == 0 {
+                anyhow::bail!("invalid Fabric WINDOW_UPDATE");
+            }
+            let peers = peers.lock().await;
+            let Some(slot) = peers.get(&frame.stream_id) else {
+                drop(peers);
+                writer.reset(frame.stream_id, 1).await;
+                return Ok(());
+            };
+            if !slot.outbound_credit.add(frame.value) {
+                anyhow::bail!("Fabric peer exceeded its credit window");
+            }
+        }
+        Kind::Fin | Kind::Reset => {
+            peers.lock().await.remove(&frame.stream_id);
+        }
+        Kind::Ping => {
+            if frame.stream_id != [0; STREAM_ID_BYTES] || !frame.payload.is_empty() {
+                anyhow::bail!("invalid Fabric PING");
+            }
+            writer
+                .frame(Frame {
+                    kind: Kind::Pong,
+                    ..frame
+                })
+                .await?;
+        }
+        Kind::Pong => {}
+        Kind::Open | Kind::Accept => anyhow::bail!("invalid frame for a Fabric node endpoint"),
+    }
+    Ok(())
+}
+
+async fn serve_peer(
+    state: Shared,
+    admission_source: PeerAdmissionSource,
+    writer: Writer,
+    peers: Peers,
+    pending: Pending,
+    frame: Frame,
+    generation: u64,
+) {
+    let result = serve_peer_inner(
+        state,
+        &admission_source,
+        &writer,
+        &peers,
+        &pending,
+        &frame,
+        generation,
+    )
+    .await;
+    pending.lock().await.remove(&frame.stream_id);
+    if let Err(error) = result {
+        tracing::debug!(%error, "Fabric peer stream refused");
+        writer.reset(frame.stream_id, 4).await;
+    }
+    let mut peers = peers.lock().await;
+    if peers
+        .get(&frame.stream_id)
+        .is_some_and(|slot| slot.generation == generation)
+    {
+        peers.remove(&frame.stream_id);
+    }
+}
+
+async fn serve_peer_inner(
+    state: Shared,
+    admission_source: &PeerAdmissionSource,
+    writer: &Writer,
+    peers: &Peers,
+    pending: &Pending,
+    frame: &Frame,
+    generation: u64,
+) -> Result<()> {
+    let hello: PeerHello =
+        serde_json::from_slice(&frame.payload).context("invalid Fabric peer hello")?;
+    let admitted = admission_source.resolve(&hello).await?;
+    let accepted = handshake::accept(
+        &state,
+        TransportKind::Forwarded,
+        admitted.admission,
+        &frame.payload,
+        admitted.local_workspace_id,
+        admitted.workspace_handle,
+    )?;
+    let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
+    let credit = Credit::new(frame.value)?;
+    peers.lock().await.insert(
+        frame.stream_id,
+        PeerSlot {
+            generation,
+            inbound,
+            remote_sequence: 0,
+            outbound_credit: credit.clone(),
+        },
+    );
+    pending.lock().await.remove(&frame.stream_id);
+    writer
+        .frame(Frame {
+            kind: Kind::Accept,
+            stream_id: frame.stream_id,
+            value: INITIAL_CREDIT,
+            payload: serde_json::to_vec(&accepted.welcome)?,
+        })
+        .await?;
+
+    let peer_writer = writer.clone();
+    let stream_id = frame.stream_id;
+    let mut outgoing = tokio::spawn(async move {
+        let mut sequence = 0u64;
+        while let Some(record) = outbound.recv().await {
+            if record.is_empty() || record.len() > genehub_proto::MAX_DATA_FRAME_BYTES {
+                anyhow::bail!("data-plane record exceeds the Fabric bound");
+            }
+            credit.take(record.len()).await?;
+            sequence = sequence
+                .checked_add(1)
+                .context("Fabric sequence exhausted")?;
+            peer_writer
+                .frame(Frame {
+                    kind: Kind::Data,
+                    stream_id,
+                    value: sequence,
+                    payload: record,
+                })
+                .await?;
+        }
+        Result::<()>::Ok(())
+    });
+    let mut endpoint = tokio::spawn(endpoint::serve(
+        state,
+        accepted.key,
+        accepted.access,
+        carrier,
+    ));
+    let expiry = async move {
+        match admitted.expires_at {
+            Some(expires_at) => {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(expires_at)).await
+            }
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(expiry);
+    let result = tokio::select! {
+        result = &mut endpoint => result.context("Fabric data endpoint stopped")?,
+        result = &mut outgoing => result.context("Fabric peer writer stopped")?,
+        _ = &mut expiry => Err(anyhow!("Fabric route expired")),
+    };
+    endpoint.abort();
+    outgoing.abort();
+    result
+}
+
+#[derive(Clone)]
+enum PeerAdmissionSource {
+    Hosted(Enrollment),
+    DeviceRequired,
+}
+
+struct ResolvedPeerAdmission {
+    admission: Admission,
+    workspace_handle: Option<String>,
+    local_workspace_id: Option<String>,
+    expires_at: Option<std::time::Instant>,
+}
+
+impl PeerAdmissionSource {
+    async fn resolve(&self, hello: &PeerHello) -> Result<ResolvedPeerAdmission> {
+        match self {
+            Self::Hosted(enrollment) => {
+                let capability_id = match &hello.auth {
+                    PeerAuth::Hosted { capability_id, .. } => capability_id.clone(),
+                    _ => anyhow::bail!("Fabric peer did not present a hosted capability"),
+                };
+                let admitted = crate::hub::Client::new(&enrollment.hub_url)
+                    .fabric_peer_admission(enrollment, &capability_id)
+                    .await?
+                    .ok_or_else(|| anyhow!("Fabric peer capability was refused"))?;
+                let expires_at = admitted.expires_at;
+                Ok(ResolvedPeerAdmission {
+                    admission: Admission::Fabric {
+                        capability_id,
+                        secret: admitted.secret,
+                        expires_at,
+                    },
+                    workspace_handle: admitted.workspace_handle,
+                    local_workspace_id: admitted.local_workspace_id,
+                    expires_at: Some(expires_at),
+                })
+            }
+            Self::DeviceRequired => {
+                if !matches!(
+                    hello.auth,
+                    PeerAuth::Device { .. } | PeerAuth::Invite { .. }
+                ) {
+                    anyhow::bail!("rendezvous peers must present a daemon-issued credential");
+                }
+                Ok(ResolvedPeerAdmission {
+                    admission: Admission::DeviceRequired,
+                    workspace_handle: None,
+                    local_workspace_id: None,
+                    // The outer Fabric route owns its lifetime. There is no
+                    // Control lease in the self-hosted model.
+                    expires_at: None,
+                })
+            }
+        }
+    }
+}
+
+fn encode(frame: &Frame) -> Result<Vec<u8>> {
+    let control = matches!(frame.kind, Kind::Ping | Kind::Pong);
+    if control != (frame.stream_id == [0; STREAM_ID_BYTES]) {
+        anyhow::bail!("invalid Fabric stream id class");
+    }
+    if HEADER_BYTES + frame.payload.len() > MAX_WIRE_FRAME_BYTES {
+        anyhow::bail!("Fabric frame exceeds its wire bound");
+    }
+    let mut out = Vec::with_capacity(HEADER_BYTES + frame.payload.len());
+    out.push(VERSION);
+    out.push(frame.kind as u8);
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&frame.stream_id);
+    out.extend_from_slice(&frame.value.to_be_bytes());
+    out.extend_from_slice(&frame.payload);
+    Ok(out)
+}
+
+fn decode(bytes: &[u8]) -> Option<Frame> {
+    if bytes.len() < HEADER_BYTES || bytes.len() > MAX_WIRE_FRAME_BYTES || bytes[0] != VERSION {
+        return None;
+    }
+    if u16::from_be_bytes(bytes[2..4].try_into().ok()?) != 0 {
+        return None;
+    }
+    let kind = match bytes[1] {
+        1 => Kind::Open,
+        2 => Kind::Incoming,
+        3 => Kind::Accept,
+        4 => Kind::Data,
+        5 => Kind::WindowUpdate,
+        6 => Kind::Fin,
+        7 => Kind::Reset,
+        8 => Kind::Ping,
+        9 => Kind::Pong,
+        _ => return None,
+    };
+    let stream_id: [u8; STREAM_ID_BYTES] = bytes[4..20].try_into().ok()?;
+    let control = matches!(kind, Kind::Ping | Kind::Pong);
+    if control != (stream_id == [0; STREAM_ID_BYTES]) {
+        return None;
+    }
+    Some(Frame {
+        kind,
+        stream_id,
+        value: u64::from_be_bytes(bytes[20..28].try_into().ok()?),
+        payload: bytes[HEADER_BYTES..].to_vec(),
+    })
+}
+
+/// Fabric endpoint admissions are deliberately carried in the WebSocket URL:
+/// browsers cannot set an Authorization header. Accept exactly one `ticket`
+/// query value and keep every other URL authority rule fail-closed.
+pub(crate) fn validate_fabric_url(value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value).context("parsing the Fabric endpoint URL")?;
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        anyhow::bail!("Fabric endpoint URLs cannot contain credentials or fragments");
+    }
+    let mut query = url.query_pairs();
+    let Some((name, ticket)) = query.next() else {
+        anyhow::bail!("Fabric endpoint URL has no admission ticket");
+    };
+    if name != "ticket" || ticket.is_empty() || ticket.len() > 4096 || query.next().is_some() {
+        anyhow::bail!("Fabric endpoint URL must contain exactly one bounded ticket");
+    }
+    let host = url
+        .host_str()
+        .context("the Fabric endpoint URL has no host")?
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let loopback = host
+        .parse::<IpAddr>()
+        .ok()
+        .is_some_and(|address| address.is_loopback());
+    match url.scheme() {
+        "wss" => Ok(()),
+        "ws" if loopback => Ok(()),
+        "ws" => anyhow::bail!(
+            "remote Fabric admissions require wss; ws is allowed only for a literal loopback IP"
+        ),
+        other => anyhow::bail!("unsupported Fabric endpoint URL scheme '{other}'"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fabric_codec_matches_the_browser_and_relay_golden_vector() {
+        let mut id = [0u8; 16];
+        for (index, byte) in id.iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+        let frame = Frame {
+            kind: Kind::Data,
+            stream_id: id,
+            value: 1,
+            payload: b"hi".to_vec(),
+        };
+        assert_eq!(
+            hex(&encode(&frame).unwrap()),
+            "02040000000102030405060708090a0b0c0d0e0f00000000000000016869"
+        );
+        let decoded = decode(&encode(&frame).unwrap()).unwrap();
+        assert_eq!(decoded.kind, Kind::Data);
+        assert_eq!(decoded.stream_id, id);
+        assert_eq!(decoded.value, 1);
+        assert_eq!(decoded.payload, b"hi");
+    }
+
+    #[test]
+    fn fabric_url_accepts_only_one_ticket_on_a_safe_websocket_origin() {
+        for good in [
+            "wss://relay.example/fabric/v2?ticket=one-use",
+            "ws://127.0.0.1:8787/fabric/v2?ticket=local",
+            "ws://[::1]:8787/fabric/v2?ticket=local",
+        ] {
+            validate_fabric_url(good).unwrap();
+        }
+        for bad in [
+            "wss://relay.example/fabric/v2",
+            "wss://relay.example/fabric/v2?ticket=",
+            "wss://relay.example/fabric/v2?ticket=a&route=b",
+            "wss://user:pass@relay.example/fabric/v2?ticket=a",
+            "ws://relay.example/fabric/v2?ticket=a",
+            "https://relay.example/fabric/v2?ticket=a",
+        ] {
+            assert!(validate_fabric_url(bad).is_err(), "accepted {bad}");
+        }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+}

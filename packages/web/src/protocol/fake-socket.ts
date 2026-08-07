@@ -1,5 +1,26 @@
-import type { Reply, SequencedEvent, ServerFrame } from "@genehub/proto";
+import type {
+  HelloResult,
+  PeerHello,
+  ProtocolError,
+  Reply,
+  Request,
+  SequencedEvent,
+  ServerFrame,
+} from "@genehub/proto";
 
+import {
+  channelServerProof,
+  deriveChannelSessionKey,
+  deviceChannelContext,
+  hostedChannelContext,
+} from "../devices/proof";
+import {
+  DATA_PLANE_VERSION,
+  DataEndpoint,
+  collectBody,
+  type DataStream,
+  type RecordCarrier,
+} from "../dataplane";
 import type { WebSocketLike } from "./client";
 
 interface Sent {
@@ -8,12 +29,23 @@ interface Sent {
   payload?: Record<string, unknown>;
 }
 
+export const TEST_PEER_SECRET = "a".repeat(64);
+
+export interface FakePeerOptions {
+  /** PSK expected by the fake peer. */
+  secret?: string;
+  identity?: Partial<HelloResult>;
+  /** Identity is normally the one daemon RPC the fake answers itself. */
+  autoIdentity?: boolean;
+}
+
 /**
- * A socket the test drives by hand.
+ * A small in-memory v3 daemon behind a WebSocket-shaped carrier.
  *
- * The point is to control ordering: a reconnect that races a reply, an event
- * arriving before its subscribe returns, a gap the daemon cannot fill. None of
- * those are reachable against a real socket without sleeping and hoping.
+ * Tests still decide exactly when the socket opens, authenticates, replies and
+ * drops, but the bytes between those decisions are the real bounded E2EE data
+ * frames. This keeps higher-level tests from silently preserving an obsolete
+ * wire protocol.
  */
 export class FakeSocket implements WebSocketLike {
   onopen: ((event: unknown) => void) | null = null;
@@ -21,81 +53,256 @@ export class FakeSocket implements WebSocketLike {
   onerror: ((event: unknown) => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
 
+  binaryType = "arraybuffer";
+  bufferedAmount = 0;
   readonly sent: Sent[] = [];
   closed = false;
 
-  send(data: string): void {
-    this.sent.push(JSON.parse(data) as Sent);
+  private hello: PeerHello | null = null;
+  private endpoint: DataEndpoint | null = null;
+  private events: DataStream | null = null;
+  private readonly streams = new Map<string, DataStream>();
+  private recordHandler: ((record: Uint8Array) => void) | null = null;
+  private readonly carrierCloseHandlers = new Set<(reason?: unknown) => void>();
+
+  constructor(private readonly options: FakePeerOptions = {}) {}
+
+  send(data: string | ArrayBuffer | ArrayBufferView | Blob): void {
+    const bytes = immediateBytes(data);
+    if (!this.hello) {
+      const hello = JSON.parse(new TextDecoder().decode(bytes)) as PeerHello;
+      this.hello = hello;
+      this.sent.push({
+        id: "hello",
+        type: "hello",
+        payload: hello as unknown as Record<string, unknown>,
+      });
+      return;
+    }
+    if (!this.recordHandler) {
+      // Application bytes before the peer welcome are always a protocol bug.
+      this.close(1002, "encrypted record before peer welcome");
+      return;
+    }
+    this.recordHandler(bytes);
   }
 
   /** Closes, optionally the way a peer that explained itself would. */
-  close(reason?: { code: number; reason: string }): void {
+  close(code?: number | { code: number; reason: string }, reason?: string): void {
     if (this.closed) return;
     this.closed = true;
-    this.onclose?.(reason ?? {});
+    const event =
+      typeof code === "object"
+        ? code
+        : code === undefined
+          ? {}
+          : { code, reason: reason ?? "" };
+    for (const handler of this.carrierCloseHandlers) handler(event);
+    this.onclose?.(event);
   }
 
-  /** The server accepting the connection. */
+  /** The WebSocket transport accepting the connection. */
   open(): void {
     this.onopen?.({});
   }
 
-  /** Answers a request by id. */
-  reply(id: string, payload: Reply | undefined): void {
-    this.deliver({ type: "result", id, ok: true, payload });
-  }
-
-  fail(id: string, code = "internal", message = "nope"): void {
-    this.deliver({
-      type: "result",
-      id,
-      ok: false,
-      error: { code: code as never, message },
-    });
-  }
-
   /**
-   * Pushes a session event. The topic is built the way the daemon builds it,
-   * because a fake that addresses events differently from the real thing is a
-   * fake that hides exactly the bug it should be catching.
+   * Completes the real v3 PSK transcript and starts an in-memory server
+   * DataEndpoint. A different secret is useful for authentication-failure
+   * tests.
    */
+  acceptHandshake(
+    secret = this.options.secret ?? TEST_PEER_SECRET,
+    identity: Partial<HelloResult> = {},
+  ): void {
+    void this.accept(secret, identity);
+  }
+
+  /** Answers an RPC captured by `lastOf`. */
+  reply(id: string, payload: Reply | undefined): void {
+    const bytes = payload === undefined
+      ? new Uint8Array()
+      : new TextEncoder().encode(JSON.stringify(payload));
+    void this.respond(id, { status: 200, metadata: null }, bytes);
+  }
+
+  /** Returns a protocol error on one captured logical stream. */
+  fail(id: string, code = "internal", message = "nope"): void {
+    void this.respond(
+      id,
+      {
+        status: code === "unauthorized" ? 401 : 400,
+        metadata: null,
+        error: { code: code as ProtocolError["code"], message },
+      },
+      new Uint8Array(),
+    );
+  }
+
+  /** Responds to a non-RPC exchange, including Asset Preview. */
+  respondExchange(
+    id: string,
+    status: number,
+    metadata: unknown,
+    bytes: Uint8Array = new Uint8Array(),
+  ): void {
+    void this.respond(
+      id,
+      { status, metadata: metadata as never, bodyLength: bytes.byteLength },
+      bytes,
+    );
+  }
+
+  /** Pushes a session event over the long-lived encrypted event stream. */
   event(sessionId: string, event: SequencedEvent): void {
     this.deliver({ type: "event", topic: `session:${sessionId}`, payload: event });
   }
 
+  /** Pushes any server event using the event stream's length-delimited codec. */
   deliver(frame: ServerFrame): void {
-    this.onmessage?.({ data: JSON.stringify(frame) });
+    const stream = this.events;
+    if (!stream) throw new Error("the client has not opened its event stream");
+    const body = new TextEncoder().encode(JSON.stringify(frame));
+    const packet = new Uint8Array(4 + body.byteLength);
+    new DataView(packet.buffer).setUint32(0, body.byteLength, false);
+    packet.set(body, 4);
+    void stream.write(packet);
   }
 
-  /** The last request of a given type, which is usually the one under test. */
+  /** The last business request or exchange of a given type. */
   lastOf(type: string): Sent {
     const found = [...this.sent].reverse().find((message) => message.type === type);
-    if (!found) throw new Error(`no ${type} was sent; saw ${this.sent.map((s) => s.type).join(", ")}`);
+    if (!found) {
+      throw new Error(
+        `no ${type} was sent; saw ${this.sent.map((message) => message.type).join(", ")}`,
+      );
+    }
     return found;
   }
 
-  /** Completes the handshake so a test can get to the interesting part. */
-  acceptHandshake(): void {
-    const hello = this.lastOf("hello");
-    this.reply(hello.id, {
-      type: "hello",
-      data: {
-        daemonVersion: "test",
-        protocolVersion: 1,
-        machineId: "m_test",
-        machineName: "测试机器",
-        fingerprint: "AAAA-BBBB",
-        transport: "loopback",
+  private async accept(secret: string, identity: Partial<HelloResult>): Promise<void> {
+    const hello = this.hello;
+    if (!hello || this.closed) throw new Error("the client has not sent PeerHello");
+    const context = contextOf(hello);
+    const serverNonce = "b".repeat(32);
+    const [proof, key] = await Promise.all([
+      channelServerProof(secret, context, nonceOf(hello), serverNonce),
+      deriveChannelSessionKey(secret, context, nonceOf(hello), serverNonce),
+    ]);
+    if (this.closed) return;
+
+    const carrier: RecordCarrier = {
+      send: (record) => {
+        const copy = record.slice();
+        queueMicrotask(() => this.onmessage?.({ data: copy }));
       },
+      onRecord: (handler) => {
+        this.recordHandler = handler;
+        return () => {
+          if (this.recordHandler === handler) this.recordHandler = null;
+        };
+      },
+      onClose: (handler) => {
+        this.carrierCloseHandlers.add(handler);
+        return () => this.carrierCloseHandlers.delete(handler);
+      },
+      close: (reason) => this.close(1000, reason),
+    };
+    this.endpoint = new DataEndpoint({
+      role: "server",
+      carrier,
+      key,
+      maxReceiveBytesPerStream: 4 * 1024 * 1024,
     });
+    this.endpoint.onIncoming((stream) => {
+      void this.handle(stream, identity).catch(() => {});
+    });
+    const welcome = new TextEncoder().encode(
+      JSON.stringify({ version: DATA_PLANE_VERSION, serverNonce, proof }),
+    );
+    this.onmessage?.({ data: welcome });
+  }
+
+  private async handle(stream: DataStream, identity: Partial<HelloResult>): Promise<void> {
+    const method = stream.requestHead.method;
+    if (method === "events") {
+      await collectBody(stream.body(), 1);
+      await stream.respond({
+        status: 200,
+        metadata: { codec: "json-u32be" },
+        bodyLength: undefined,
+      });
+      this.events = stream;
+      return;
+    }
+
+    const body = await collectBody(stream.body(), 4 * 1024 * 1024);
+    const id = String(stream.id);
+    if (method === "rpc") {
+      const request = JSON.parse(new TextDecoder().decode(body)) as Request;
+      this.sent.push({
+        id,
+        type: request.type,
+        ...(!("payload" in request) || request.payload === undefined
+          ? {}
+          : { payload: request.payload as unknown as Record<string, unknown> }),
+      });
+      this.streams.set(id, stream);
+      if (request.type === "connection.identity" && this.options.autoIdentity !== false) {
+        this.reply(id, {
+          type: "hello",
+          data: {
+            daemonVersion: "test",
+            protocolVersion: DATA_PLANE_VERSION,
+            machineId: "m_test",
+            machineName: "测试机器",
+            fingerprint: "AAAA-BBBB",
+            transport: this.hello?.auth.type === "loopback" ? "loopback" : "forwarded",
+            rtcSupported: false,
+            ...this.options.identity,
+            ...identity,
+          },
+        });
+      }
+      return;
+    }
+
+    this.sent.push({
+      id,
+      type: method,
+      payload: stream.requestHead.metadata as unknown as Record<string, unknown>,
+    });
+    this.streams.set(id, stream);
+  }
+
+  private async respond(
+    id: string,
+    head: {
+      status: number;
+      metadata: unknown;
+      bodyLength?: number;
+      error?: ProtocolError;
+    },
+    bytes: Uint8Array,
+  ): Promise<void> {
+    const stream = this.streams.get(id);
+    if (!stream) throw new Error(`no logical stream ${id} is waiting for a reply`);
+    this.streams.delete(id);
+    await stream.respond({
+      status: head.status,
+      metadata: head.metadata as never,
+      bodyLength: head.bodyLength ?? bytes.byteLength,
+      error: head.error,
+    });
+    if (bytes.byteLength > 0) await stream.write(bytes);
+    await stream.finish();
   }
 }
 
-/** Hands out sockets in order, so a test can watch a reconnect happen. */
-export function socketQueue(): {
+/** Hands out independently configured sockets in dial order. */
+export function socketQueue(options: FakePeerOptions = {}): {
   factory: (url: string) => WebSocketLike;
   sockets: FakeSocket[];
-  /** Every address dialled, in order. A reconnect may not reuse a spent one. */
   urls: string[];
   latest(): FakeSocket;
 } {
@@ -104,7 +311,7 @@ export function socketQueue(): {
   return {
     factory: (url) => {
       urls.push(url);
-      const socket = new FakeSocket();
+      const socket = new FakeSocket(options);
       sockets.push(socket);
       return socket;
     },
@@ -116,4 +323,32 @@ export function socketQueue(): {
       return socket;
     },
   };
+}
+
+function contextOf(hello: PeerHello): string {
+  switch (hello.auth.type) {
+    case "loopback":
+      return "loopback";
+    case "device":
+      return deviceChannelContext(hello.auth.deviceId);
+    case "hosted":
+      return hostedChannelContext(hello.auth.capabilityId);
+    case "invite":
+      return `invite:${hello.auth.inviteId}`;
+  }
+}
+
+function nonceOf(hello: PeerHello): string {
+  return hello.auth.nonce;
+}
+
+function immediateBytes(data: string | ArrayBuffer | ArrayBufferView | Blob): Uint8Array {
+  if (typeof data === "string") return new TextEncoder().encode(data);
+  if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(
+      data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+    );
+  }
+  throw new TypeError("FakeSocket only accepts synchronously readable WebSocket messages");
 }

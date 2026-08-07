@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use futures_util::{SinkExt, StreamExt};
-use genehub_proto::{ErrorCode, ProtocolError, ServerFrame};
+use genehub_proto::PeerWelcome;
 use tokio_tungstenite::tungstenite::Message;
 
 fn genet() -> Command {
@@ -78,28 +78,22 @@ fn a_failed_dial_never_prints_the_local_daemon_bearer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hello_version_rejection_is_typed_and_not_marked_retryable() {
+async fn data_plane_version_rejection_is_typed_and_not_marked_retryable() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
-        let Message::Text(request) = socket.next().await.unwrap().unwrap() else {
-            panic!("Hello must be a text frame");
+        let Message::Binary(_) = socket.next().await.unwrap().unwrap() else {
+            panic!("PeerHello must be a binary frame");
         };
-        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
-        let id = request["id"].as_str().unwrap().to_string();
-        let response = ServerFrame::Result {
-            id,
-            ok: false,
-            payload: None,
-            error: Some(ProtocolError {
-                code: ErrorCode::ProtocolVersion,
-                message: "test daemon requires another version".into(),
-            }),
+        let response = PeerWelcome {
+            version: 999,
+            server_nonce: "11".repeat(16),
+            proof: "22".repeat(32),
         };
         socket
-            .send(Message::Text(serde_json::to_string(&response).unwrap()))
+            .send(Message::Binary(serde_json::to_vec(&response).unwrap()))
             .await
             .unwrap();
     });

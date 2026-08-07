@@ -331,14 +331,6 @@ pub struct Enrollment {
     pub hub_url: String,
     /// The Hub's id for this machine, shown in the owner's list.
     pub machine_id: String,
-    pub uplink_url: String,
-    /// Endpoint-neutral Fabric address advertised by a v2-capable Hub.
-    ///
-    /// Optional for state written by older Hubs. Merely remembering the
-    /// address does not route incoming Fabric streams into the daemon's local
-    /// RPC; that requires the separate end-to-end capability boundary.
-    #[serde(default)]
-    pub fabric_url: Option<String>,
     pub daemon_id: String,
     /// Presented only to the Hub HTTPS boundary to mint short-lived uplink
     /// admissions. Only its hash is persisted by the Hub, and the reusable

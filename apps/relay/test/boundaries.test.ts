@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src");
-const REMOTE_AUTHORITY = /(?:remote-authority|remote-fabric-authority)\.ts$/;
+const REMOTE_AUTHORITY = /remote-fabric-authority\.ts$/;
 
 function filesUnder(dir: string): string[] {
   const out: string[] = [];
@@ -64,29 +64,6 @@ describe("what the relay is allowed to know", () => {
           `${path.relative(SRC, file)} must not import anything local`,
         );
       }
-    }
-  });
-
-  it("keeps every contract method in a shape that survives being a network call", () => {
-    const source = readFileSync(path.join(SRC, "contract/index.ts"), "utf8");
-    const body = source.slice(source.indexOf("interface ChannelAuthority"));
-    // `onRevoked` is deliberately excluded: it registers a callback rather than
-    // making a call, so it has no return value to cross a boundary.
-    const calls = [...body.matchAll(/^ {2}(\w+)\([^)]*\):\s*([^;]+);/gm)].filter(
-      ([, name]) => name !== "onRevoked",
-    );
-    assert.deepEqual(
-      calls.map(([, name]) => name),
-      ["authorizeDaemon", "inspectClient", "authorizeClient", "reportPresence"],
-      "a new contract method needs a deliberate decision, not a silent one",
-    );
-
-    for (const [, name, returns] of calls) {
-      assert.match(
-        returns!.trim(),
-        /^Promise</,
-        `${name} must be async: it is always a network call now`,
-      );
     }
   });
 

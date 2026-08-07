@@ -178,7 +178,7 @@ workspace registry
 - 单文件预览默认只授权所选文件；“作为站点打开”才授权目录树，并让用户看到 WebRoot 范围；
 - local workspace 重注册、root 替换或 placement generation 改变会使旧 SiteCapability 失效。
 
-现有 `file.read` 会随 Data Plane cutover 删除。WebRoot 读取使用独立的 `asset.web.*` Exchange handlers 和 streaming body，不能把图片/视频 base64 塞进 unary payload，也不能复活 legacy RPC。
+`file.read` 已随 protocol-v3 cutover 删除。未来 WebRoot 读取应使用独立的 `asset.web.*` Exchange handlers 和 streaming body，不能把图片/视频 base64 塞进 unary payload，也不能复活旧查看协议。
 
 ### 7.1 多文件 HTML 示例
 

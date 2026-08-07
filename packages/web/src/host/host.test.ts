@@ -7,11 +7,13 @@ describe("finding the machine to connect to", () => {
     const host = browserHost({
       hash:
         "#endpoint=" +
-        encodeURIComponent("wss://hub.example.com/forward/client?ticket=abc"),
+        encodeURIComponent(
+          "wss://hub.example.com/fabric/v2?ticket=client-abc&route=machine-abc",
+        ),
     });
     const endpoint = await host.endpoint();
     expect(endpoint?.via).toBe("relay");
-    expect(endpoint?.url).toContain("ticket=abc");
+    expect(endpoint?.url).toContain("ticket=client-abc");
   });
 
   it("calls a direct address direct, rather than labelling everything relayed", async () => {

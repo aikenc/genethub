@@ -127,21 +127,6 @@ export const config = {
   },
 
   limits: {
-    maxDaemons: boundedEnv("RELAY_MAX_DAEMONS", 5000, 1, 1_000_000),
-    /**
-     * Bounds durable-in-process legacy admission fences. A node identity has
-     * no authority expiry, so Relay never evicts one merely to make room: once
-     * full, a previously unseen machine fails closed until Relay restarts.
-     */
-    maxLegacyGenerationFences: boundedEnv(
-      "RELAY_MAX_LEGACY_GENERATION_FENCES",
-      100_000,
-      1,
-      2_000_000,
-    ),
-    maxClientsPerMachine: boundedEnv("RELAY_MAX_CLIENTS_PER_MACHINE", 8, 1, 1024),
-    /** Bounds raw legacy upgrades waiting on the remote authority. */
-    maxPendingLegacyUpgrades: boundedEnv("RELAY_MAX_PENDING_UPGRADES", 256, 1, 100_000),
     /** All endpoint kinds share this one Fabric admission budget. */
     maxFabricEndpoints: boundedEnv("RELAY_MAX_FABRIC_ENDPOINTS", 10_000, 1, 1_000_000),
     /** Bounds raw upgrades waiting on the remote admission authority. */
@@ -190,9 +175,9 @@ export const config = {
     maxFrameBytes,
     /** Uplink is dropped if no traffic and no pong for this long. */
     heartbeatSeconds: boundedEnv("RELAY_HEARTBEAT", 30, 1, 300),
-    /** Refreshes Control's crash-safe legacy presence lease. */
-    presenceRefreshMaxSeconds: boundedEnv(
-      "RELAY_PRESENCE_REFRESH_MAX",
+    /** Upper bound while refreshing Control's crash-safe Fabric presence lease. */
+    fabricPresenceRefreshMaxSeconds: boundedEnv(
+      "RELAY_FABRIC_PRESENCE_REFRESH_MAX",
       30,
       5,
       300,

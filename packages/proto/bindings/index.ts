@@ -8,6 +8,19 @@ export type AgentInfo = { id: string, label: string, probe: ProbeState, capabili
  */
 builtin: boolean, };
 
+export type AssetPreviewError = "notFound" | "forbidden" | "unsupported" | "tooLarge" | "sourceChanged";
+
+export type AssetPreviewKind = "image" | "markdown" | "text" | "html" | "video";
+
+export type AssetPreviewMetadata = { kind: AssetPreviewKind, mediaType: string, sourceBytes: number, 
+/**
+ * Stable enough to make a stale viewer response detectable without
+ * exposing an operating-system path.
+ */
+version: string, };
+
+export type AssetPreviewRequest = { source: WorkspaceFileSource, };
+
 export type Attachment = { name: string, mime: string, path?: string, 
 /**
  * Inline payload, base64. Only set for small pastes such as screenshots.
@@ -74,77 +87,6 @@ fork: boolean, attachments: boolean, };
 export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, commands: Array<CommandInfo>, defaultModel?: string, defaultMode?: string, defaultEffort?: string, };
 
 /**
- * Proof for a Control-issued per-channel secret.
- */
-export type ChannelAuth = { 
-/**
- * Opaque, one-use name carried in OPEN. It is context, not a credential.
- */
-capabilityId: string, nonce: string, proof: string, };
-
-/**
- * A request as it arrives on the wire: an envelope id plus the request body.
- */
-export type ClientEnvelope = { id: string, } & ({ "type": "hello", "payload": { clientName: string, protocolVersion: number, 
-/**
- * Present when the client holds a device credential for this machine.
- * Required on forwarded connections: the machine decides admission
- * itself, and a relay vouches for nobody.
- */
-device: DeviceAuth | null, 
-/**
- * Present for a Hub-issued channel. The opaque capability names the
- * one-use secret the target daemon obtained directly from Control;
- * Relay sees the name but never the secret or either proof.
- */
-channel: ChannelAuth | null, 
-/**
- * Temporary proof for encrypted first-device bootstrap.
- */
-invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
-/**
- * Prefetches the last round's trunk index and final trunk details in
- * the subscription response.
- */
-expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
-/**
- * Claims this message as a continuation of a round left open by an
- * interrupt, rather than a new one. Only interrupts need this: the
- * daemon auto-stitches approval and guidance continuations on its
- * own, because those are unambiguous (`docs/architecture.md`'s
- * analysis substrate proposal §3.2). Absent, unknown, or naming a
- * round that already ended, this is treated as a new round — a
- * wrong stitch is a worse failure than an extra round.
- */
-continuesRound: string | null, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
-/**
- * `None` leaves the stored key alone; an empty string clears it.
- */
-apiKey: string | null, baseUrl: string | null, 
-/**
- * What to call it on screen, for a provider the user is adding.
- */
-label: string | null, 
-/**
- * `openai` | `anthropic`, when the address does not belong to a
- * provider we already know the shape of.
- */
-dialect: string | null, 
-/**
- * Models by hand, for an endpoint that cannot list its own.
- */
-models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payload": { providerId: string, } } | { "type": "log.tail", "payload": { 
-/**
- * Omitted means the daemon's own log, which is what an error is about
- * almost every time.
- */
-name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, nonce: string, proof: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.read", "payload": { workspaceId: string, path: string, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
-/**
- * Empty means "everything currently changed".
- */
-paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } });
-
-/**
  * A slash command the agent understands.
  *
  * Nothing about running one is special: it is sent as ordinary prompt text, and
@@ -186,11 +128,7 @@ machineId: string,
  * Shared with this machine only. Never sent again after this reply: later
  * connections prove knowledge of it instead (`security-model.md` §4.2).
  */
-secret: string, machineName: string, fingerprint: string, 
-/**
- * The machine's half of the mutual proof, over the nonce the client sent.
- */
-proof: string, };
+secret: string, machineName: string, fingerprint: string, };
 
 /**
  * One entry in the machine's authorized-devices list.
@@ -225,11 +163,12 @@ export type DirectoryListing = { path: string, parent: string | null, directorie
 
 export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "protocolVersion";
 
-export type FileContent = { path: string, content: string, truncated: boolean, 
 /**
- * False when the file looked binary; `content` is then a placeholder.
+ * The first encrypted record on a client-opened logical stream.
  */
-isText: boolean, };
+export type ExchangeRequestHead = { version: number, method: string, metadata: JsonValue, bodyLength?: number, timeoutMs?: number, };
+
+export type ExchangeResponseHead = { status: number, metadata: JsonValue, bodyLength?: number, error?: ProtocolError, };
 
 export type FileNode = { name: string, 
 /**
@@ -253,17 +192,10 @@ export type HelloResult = { daemonVersion: string, protocolVersion: number, mach
  */
 fingerprint: string, transport: TransportKind, machineName: string, 
 /**
- * The machine's half of mutual authentication. For remote channels this
- * proves the device/capability secret and is paired with `server_nonce`;
- * for loopback it is a domain-separated, one-use listener proof delivered
- * to the client out-of-band and has no `server_nonce`.
+ * Advertised inside the encrypted data plane. The viewer's local RTC
+ * preference still decides whether negotiation is attempted.
  */
-proof?: string, 
-/**
- * The daemon's fresh half of the channel transcript. Present whenever
- * `proof` is present and required to derive this connection's key.
- */
-serverNonce?: string, };
+rtcSupported: boolean, };
 
 /**
  * The ways back into an identity that has no password.
@@ -297,7 +229,11 @@ export type HubMachine = {
  * The Hub's id, which is also what `HubStatus::Paired` reports for this
  * machine — so a client can tell which entry is the one it is sitting on.
  */
-id: string, name: string, online: boolean, fingerprint: string, lastSeenAt?: string, };
+id: string, 
+/**
+ * Stable daemon-owned handle used by Preview locators across clients.
+ */
+deviceHandle: string, name: string, online: boolean, fingerprint: string, lastSeenAt?: string, };
 
 /**
  * Where this machine stands with a Hub.
@@ -336,6 +272,10 @@ channelCapability: string,
  * Per-connection E2E secret. Never placed in a URL or Relay API.
  */
 channelSecret: string, 
+/**
+ * One-shot outer Fabric route. It contains no workspace/path/business data.
+ */
+fabricRouteTicket: string, fabricRouteExpiresAt: string, 
 /**
  * The target machine's key fingerprint, learned from the Hub rather than
  * from the connection — which is what makes comparing the two worth
@@ -388,6 +328,25 @@ export type ModelInfo = { id: string, label: string, contextWindow?: number, rea
 efforts: Array<string>, };
 
 export type NoticeLevel = "info" | "warning" | "error";
+
+/**
+ * How a peer proves possession of an end-to-end secret during carrier setup.
+ *
+ * Only a capability *name* is present for hosted sessions.  The daemon
+ * redeems that name directly with Control; the Relay never receives the
+ * secret.  Loopback uses the one-use proof delivered by the owner-only shell
+ * as its short-lived PSK.
+ */
+export type PeerAuth = { "type": "loopback", context: string, nonce: string, proof: string, } | { "type": "device", deviceId: string, nonce: string, proof: string, } | { "type": "hosted", capabilityId: string, nonce: string, proof: string, } | { "type": "invite", inviteId: string, nonce: string, proof: string, };
+
+export type PeerHello = { version: number, clientName: string, auth: PeerAuth, 
+/**
+ * Capability advertisement only.  Signaling remains encrypted data-plane
+ * traffic and no RTC address is ever placed in this hello.
+ */
+rtcSupported: boolean, };
+
+export type PeerWelcome = { version: number, serverNonce: string, proof: string, };
 
 export type PermissionOption = { id: string, label: string, kind: PermissionOptionKind, };
 
@@ -464,25 +423,9 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "fileContent", "data": FileContent } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
 
-export type Request = { "type": "hello", "payload": { clientName: string, protocolVersion: number, 
-/**
- * Present when the client holds a device credential for this machine.
- * Required on forwarded connections: the machine decides admission
- * itself, and a relay vouches for nobody.
- */
-device: DeviceAuth | null, 
-/**
- * Present for a Hub-issued channel. The opaque capability names the
- * one-use secret the target daemon obtained directly from Control;
- * Relay sees the name but never the secret or either proof.
- */
-channel: ChannelAuth | null, 
-/**
- * Temporary proof for encrypted first-device bootstrap.
- */
-invite: InviteAuth | null, } } | { "type": "connection.identity" } | { "type": "authenticated", "payload": { sequence: number, body: string, mac: string, } } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
+export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
  * Prefetches the last round's trunk index and final trunk details in
  * the subscription response.
@@ -519,7 +462,7 @@ models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payloa
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, nonce: string, proof: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.read", "payload": { workspaceId: string, path: string, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */
@@ -559,6 +502,13 @@ export type RoundTrunk = { summary: RoundTrunkSummary, batches: Array<RoundBatch
  */
 export type RoundTrunkSummary = { index: number, firstItemId: string, blobCount: number, title: string, batches: Array<RoundBatchSummary>, };
 
+/**
+ * Non-trickle RTC signaling carried inside an already E2EE Exchange.
+ */
+export type RtcNegotiationRequest = { sdp: string, };
+
+export type RtcNegotiationResponse = { sdp: string, capabilityId: string, secret: string, };
+
 export type SearchMatch = { path: string, line?: number, preview: string, };
 
 /**
@@ -572,7 +522,7 @@ export type SequencedEvent = { seq: number, sessionId: string, event: SessionEve
 /**
  * Anything the daemon sends to a client.
  */
-export type ServerFrame = { "type": "authenticated", sequence: number, body: string, mac: string, } | { "type": "result", id: string, ok: boolean, payload?: Reply, error?: ProtocolError, } | { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "desync", sessionId: string, missed: number, };
+export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "desync", sessionId: string, missed: number, };
 
 export type SessionEvent = { "type": "turnStarted", turnId: string, 
 /**
@@ -775,5 +725,9 @@ downloadUrl?: string,
 problem?: string, };
 
 export type Usage = { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number, costUsd?: number, };
+
+export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
+
+export type WorkspaceFileSourceKind = "workspaceFile";
 
 export type WorkspaceInfo = { id: string, name: string, root: string, isGitRepo: boolean, };

@@ -26,9 +26,15 @@ apps/daemon/src/
 ├── config.rs         配置与数据目录
 ├── transport/
 │   ├── local.rs      本地 HTTP + WebSocket（127.0.0.1，回环）
-│   ├── uplink.rs     出站长连接到 Hub 转发层，供远端客户端接入
-│   └── auth.rs       远程客户端的配对凭证校验
-├── proto/            由 packages/proto 生成 + 手写辅助
+│   ├── fabric.rs     endpoint-neutral /fabric/v2 出站 uplink
+│   └── admission.rs  loopback/device/hosted/RTC peer admission
+├── dataplane/
+│   ├── handshake.rs  protocol-v3 PSK 双向证明
+│   ├── frame.rs      16 KiB record 内的 logical-stream frame
+│   ├── endpoint.rs   Exchange、流控、公平 writer、handler 隔离
+│   ├── preview.rs    ≤2 MiB workspace 文件 Preview
+│   ├── rtc.rs        E2EE signaling + WebRTC DataChannel
+│   └── client.rs     daemon/CLI 使用的 v3 client endpoint
 ├── session/
 │   ├── manager.rs    会话生命周期、订阅广播、断线重放
 │   ├── store.rs      落盘（JSONL 追加 + 索引）
@@ -39,11 +45,11 @@ apps/daemon/src/
 │   ├── genet/        内置 agent（stdio JSONL）
 │   └── acp/          通用 ACP（stdio NDJSON）
 ├── workspace.rs      项目与工作区
-├── files.rs          目录树、读写、监听
+├── files.rs          目录树、精确 Preview 读取、写入
 ├── git.rs            status / diff / commit（调 git 命令，不引 libgit2）
 ├── pty.rs            终端会话
 ├── updates.rs        有没有更新的版本（有人问才查，见 §7）
-└── pairing.rs        设备配对、Hub 登记
+└── devices.rs        设备配对、凭证与即时撤销
 ```
 
 MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、MCP 注入、插件系统、会话 fork/rewind。
@@ -54,44 +60,57 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 
 ### 3.1 传输
 
-| 通道 | 用途 | 优先级 |
-|------|------|--------|
-| `ws://127.0.0.1:<port>/ws` | 同机客户端（桌面壳内的 WebView） | ① 最优 |
-| 出站长连接到 Hub/Relay | 另一台设备访问；daemon 主动连出，不监听非 loopback 端口 | ② |
+| carrier | 用途 |
+|---|---|
+| `ws://127.0.0.1:<port>/ws` | 同机 client；loopback 一次性 admission |
+| daemon 出站 `wss://<relay>/fabric/v2` | 所有跨设备连接的 E2EE baseline；一条 uplink 接收多条 routed peer carrier |
+| ordered reliable WebRTC DataChannel | 远端 peer 的可选 direct carrier；通过 baseline 内的 E2EE Exchange 协商 |
 
-两条通道**说同一套消息**，差别只在鉴权与加密层。客户端按优先级依次尝试，对用户不可见。daemon 永远不在公网或局域网监听特权协议。旧配置中的 `lanEnabled: true` 会让启动明确失败：当前没有 LAN TLS/mTLS，不能把可开 PTY 的机器级 bearer 放进明文 `ws://`。同 Wi-Fi 的访问也走 WSS Relay；只有 `127.0.0.1` 使用明文 WS。
+三个 carrier 都承载同一套 protocol-v3 E2EE record、`DataEndpoint` 和 Exchange。daemon 永远不在公网或局域网监听特权协议；旧 `lanEnabled: true` 会明确失败。同 Wi-Fi 也先走 WSS Fabric，RTC 成功后新请求才 direct；只有 literal loopback 可使用明文 WS。
 
 ### 3.2 消息形状
 
-请求/响应 + 服务端推送，统一 JSON 信封：
+peer carrier 先用配对 PSK、hosted peer secret、loopback proof 或 RTC 临时 secret 完成 `PeerHello/PeerWelcome` 双向证明。之后每个 carrier message 是最多 16 KiB 的 AES-256-GCM record；record 内是一条业务无关 logical-stream frame。
 
-```jsonc
-// 客户端 → daemon
-{ "id": "c1", "type": "session.send", "payload": { "sessionId": "...", "text": "..." } }
-// daemon → 客户端（应答）
-{ "id": "c1", "type": "result", "ok": true, "payload": { ... } }
-// daemon → 客户端（推送）
-{ "type": "event", "topic": "session:<id>", "payload": { /* SessionEvent */ } }
+```text
+OPEN  RequestHead { version, method, metadata, bodyLength?, timeoutMs? }
+DATA* request bytes
+FIN
+
+HEAD  ResponseHead { status, metadata, bodyLength?, error? }
+DATA* response bytes
+FIN
 ```
 
-**一条连接同一时刻只处理一个请求。** 客户端可以流水线发多个，它们排在一条有界队列里；队列满了 daemon 会带原因关掉这条 channel，而不是阻塞——多条 channel 共用一条到 Hub 的 uplink，阻塞一条就是阻塞全部。
+每个客户端主动请求各占一条 logical stream。stream 有独立 sequence、256 KiB credit、receive queue、task、timeout、FIN/RESET 和精确 body-length 校验。writer 以 round-robin 每个 runnable stream 每轮一帧，因此 Preview 或慢 RPC 不会独占应用层发送链。
 
-这个上界曾经是 4，太小了：工作台一次问几个 round，或者上一个答案还没回来就再问一次，就会被当成异常关掉——而且往往正是一轮跑到一半的时候，客户端只知道「请求发出去了，结果未知」。现在是 256，真正守住内存的是旁边那个 16MiB 字节信号量（出站方向一直是同样的理由和同样的深度）。关闭原因里会写清到底多少个请求没被应答，日志里看到就能判断是客户端不讲道理还是上界定低了。
+carrier reader 只验证/decrypt 一条 record、decode 一条 frame 并投递到有界队列，不 await 文件 IO、Agent 或 handler。每个 incoming stream 在独立 task 中处理；阻塞 Preview 读取进入最多 2 路的 blocking 槽。单 peer 最多 256 active streams；daemon RTC registry 最多 32 peers。
 
-反过来，**客户端也不该把这条队列当成缓冲区**。会话工作台对 round 层的读取全程串行、同一时刻只有一个在途请求：daemon 本来就是一个一个答的，并发发出去不会更快，只会去撞这个上界。
+完整 framing、Relay 可见性和 RTC 取舍见 [e2ee-data-plane.md](./e2ee-data-plane.md)。
 
 ### 3.3 MVP 方法集
 
+DataEndpoint method 只有四个：
+
+| Exchange method | 用途 |
+|---|---|
+| `rpc` | 现有版本化 `Request/Reply` 业务 schema，作为 body；不再是 connection envelope |
+| `events` | 长期 response stream；`u32be length + ServerFrame JSON` |
+| `asset.preview` | workspace-relative、完整或失败、≤2 MiB 的文件 Preview |
+| `rtc.negotiate` | 在已认证基线连接内交换非 trickle SDP |
+
+`rpc` body 的 MVP 方法集：
+
 | 域 | 方法 |
 |----|------|
-| 握手 | `hello`（版本、能力、机器指纹）、`subscribe` / `unsubscribe` |
+| 连接/订阅 | `connection.identity`、`subscribe` / `unsubscribe` |
 | Agent | `agent.list`（含 probe 状态与 catalog）、`agent.refresh` |
 | 会话 | `session.create` / `list` / `get` / `send` / `interrupt` / `close` / `archive` / `rename` / `delete` |
 | 会话配置 | `session.setModel` / `setMode` / `respondPermission` |
 | 设备 | `device.list` / `invite` / `claim` / `revoke` / `remoteAttach` / `remoteDetach` |
 | 控制面 | `hub.status` / `pair` / `trial` / `claimLink` / `unpair`（可选，见 [desktop-client.md](./desktop-client.md) §8） |
 | 工作区 | `workspace.list` / `open` / `create` |
-| 文件 | `file.tree` / `read` / `write` / `watch` |
+| 文件 | `file.tree` / `file.write`；用户可见读取只走 `asset.preview`，没有 `file.read` |
 | Git | `git.status` / `git.diff` / `git.commit` |
 | 终端 | `pty.open` / `write` / `resize` / `close`（输出走推送） |
 | 更新 | `update.check` / `update.download` / `update.downloadState` / `update.dismiss`（见 §7） |

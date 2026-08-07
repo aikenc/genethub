@@ -54,7 +54,7 @@ testing/              ← 跨部件旅程测试
 |------|------|
 | daemon 内核 ↔ 具体 agent | 只经 adapter trait；内核不出现任何 agent 名字的分支 |
 | daemon ↔ 前端 | 只走归一化会话协议；agent 的线格式不外泄 |
-| relay ↔ 控制面 | 版本化 HTTP 契约，定义在 `apps/relay/src/contract/wire.ts` 与 `fabric-wire.ts` |
+| relay ↔ 控制面 | 版本化 Fabric HTTP 契约，只定义在 `apps/relay/src/contract/fabric-wire.ts` 并由 Cloud 镜像 |
 | 桌面壳 ↔ daemon | 进程分离，本地 WS 通信，不做进程内链接 |
 | 前端 ↔ 宿主 | 只经 `packages/web/src/host/`，业务组件不出现 `if (isTauri)` |
 | 协议定义 | 只在 `packages/proto`，前后端都从这里生成 |
@@ -63,14 +63,15 @@ testing/              ← 跨部件旅程测试
 
 ---
 
-## 4. 两条连接路径
+## 4. 三种 carrier，一套 DataEndpoint
 
 | 路径 | 何时用 | 代价 |
 |------|--------|------|
-| `127.0.0.1` | 桌面壳内，最常见 | 无 |
-| 经 relay | 任何跨设备访问，包括同一个 Wi-Fi | 多一跳；托管模式需要控制面签发票据 |
+| loopback WebSocket | 桌面壳内 | 无公网依赖 |
+| `/fabric/v2` WSS baseline | 任何跨设备访问，包括同一个 Wi-Fi | 多一跳；托管模式需要 Control admission |
+| WebRTC DataChannel direct | baseline 已认证、双方启用且 ICE 可达 | 少一跳；MVP 无 TURN，不能保证成功 |
 
-同机桌面壳只连接 loopback；跨设备统一连接 relay。当前没有 WebRTC、P2P、局域网地址探测或 direct fallback。断网时仍可在运行 daemon 的同一台电脑上使用桌面端。
+三者承载同一 protocol-v3 E2EE record、logical streams 和 Exchange。跨设备始终先有 Fabric baseline，再通过加密 signaling 建立 RTC；RTC 失败时 baseline 继续可用。没有 live stream migration 或请求自动重放。断网时仍可在运行 daemon 的同一台电脑上使用桌面端。
 
 ---
 

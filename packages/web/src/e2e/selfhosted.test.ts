@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,7 @@ import { WebSocket } from "ws";
 import { claimMachine } from "../devices/claim";
 import type { PairedMachine } from "../devices/machines";
 import { Client, type WebSocketLike } from "../protocol/client";
+import { assetPreviewUrl, parseAssetPreviewPath } from "../preview/url";
 import {
   applySequenced,
   assistantText,
@@ -75,6 +76,7 @@ describe.skipIf(
 
     owner = new Client({
       url: local.url,
+      localServerProof: local.localServerProof,
       socketFactory,
       clientName: "owner",
     });
@@ -171,6 +173,46 @@ describe.skipIf(
     paired.close();
     stranger.close();
   }, 40_000);
+
+  it("previews one workspace-relative link from two paired browsers", async () => {
+    const relative = "docs/preview.md";
+    const source = "# Portable preview\n\n来自 daemon 文件系统。\n";
+    const workspaceRoot = path.join(homeDir, "GeneHub");
+    mkdirSync(path.join(workspaceRoot, "docs"), { recursive: true });
+    writeFileSync(path.join(workspaceRoot, relative), source);
+
+    const first = await pairedClient("预览浏览器一");
+    const workspaces = await first.call({ type: "workspace.list" });
+    if (workspaces?.type !== "workspaces" || !workspaces.data[0]) {
+      throw new Error("the machine offered no preview workspace");
+    }
+    const workspace = workspaces.data[0].id;
+    const device = first.identity?.machineId;
+    if (!device) throw new Error("the preview peer returned no device handle");
+    const url = assetPreviewUrl(
+      device,
+      workspace,
+      relative,
+      "https://viewer.example",
+    );
+    expect(parseAssetPreviewPath(new URL(url).pathname)).toEqual({
+      deviceHandle: device,
+      workspaceHandle: workspace,
+      path: relative,
+    });
+
+    const second = await pairedClient("预览浏览器二");
+    const [one, two] = await Promise.all([
+      first.preview(workspace, relative),
+      second.preview(workspace, relative),
+    ]);
+    for (const preview of [one, two]) {
+      expect(preview.metadata.kind).toBe("markdown");
+      expect(new TextDecoder().decode(preview.bytes)).toBe(source);
+    }
+    first.close();
+    second.close();
+  }, 50_000);
 
   it("holds a conversation over the relay, streamed the whole way", async () => {
     // The point of the product, over the only path a self-hosted deployment
@@ -354,7 +396,18 @@ async function startRelay(
 function startDaemon(
   dataDir: string,
   defaultWorkspace: string,
-): Promise<{ process: ChildProcess; url: string }> {
+): Promise<{
+  process: ChildProcess;
+  url: string;
+  localServerProof: {
+    proof: string;
+    challenge: string;
+    pid: number;
+    machineId: string;
+    fingerprint: string;
+    expiresAt: number;
+  };
+}> {
   return new Promise((resolve, reject) => {
     const child = spawn(DAEMON, ["daemon", "run"], {
       env: {
@@ -382,10 +435,22 @@ function startDaemon(
         const frame = JSON.parse(line) as {
           event: string;
           url: string;
+          serverProof: string;
+          admission: {
+            challenge: string;
+            pid: number;
+            machineId: string;
+            fingerprint: string;
+            expiresAt: number;
+          };
         };
         if (frame.event !== "listening") continue;
         clearTimeout(timer);
-        resolve({ process: child, url: frame.url });
+        resolve({
+          process: child,
+          url: frame.url,
+          localServerProof: { proof: frame.serverProof, ...frame.admission },
+        });
       }
     });
   });

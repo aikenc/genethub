@@ -58,9 +58,6 @@ struct PollReply {
 #[serde(rename_all = "camelCase")]
 struct EnrollReply {
     machine_id: String,
-    uplink_url: String,
-    #[serde(default)]
-    fabric_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,40 +75,27 @@ pub struct FabricAdmission {
     pub admission_expires_at: String,
 }
 
-/// Short-lived, one-use credential for one legacy v1 uplink handshake.
-///
-/// Intentionally contains no Relay URL: routing comes from the durable
-/// enrollment, while this value is fetched again immediately before every
-/// dial. Do not derive `Debug`; a ticket must not appear in diagnostic output.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LegacyUplinkAdmission {
-    pub ticket: String,
-    pub expires_at: String,
-}
-
 /// One-use E2E secret fetched by the target daemon. The opaque capability may
 /// cross Relay; this value never does and must not implement `Debug`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChannelAdmissionReply {
     secret: String,
-    lease_id: String,
-    lease_expires_at: String,
+    #[serde(default)]
+    expires_at: Option<String>,
+    #[serde(default)]
+    workspace_handle: Option<String>,
+    #[serde(default)]
+    local_workspace_id: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ChannelLeaseReply {
-    lease_expires_at: String,
-}
-
-/// Validated local lease material. Control's timestamp can only shorten the
-/// lease; it can never extend authority beyond the daemon's ten-minute cap.
-pub struct ChannelAdmission {
+/// One route-bound Fabric peer secret and its optional workspace scope.
+/// Deliberately no Debug: it contains E2EE key material.
+pub struct FabricPeerAdmission {
     pub secret: String,
-    pub lease_id: String,
     pub expires_at: Instant,
+    pub workspace_handle: Option<String>,
+    pub local_workspace_id: Option<String>,
 }
 
 pub struct Client {
@@ -363,47 +347,15 @@ impl Client {
         read_json(response, MAX_JSON_RESPONSE_BYTES, "Fabric admission reply").await
     }
 
-    /// Exchanges the reusable enrollment secret for one Relay-safe v1 dial.
-    ///
-    /// `Ok(None)` is a terminal credential rejection. Other failures are
-    /// transient and the uplink loop may retry the HTTPS exchange, but it must
-    /// never fall back to putting the reusable secret in a WebSocket request.
-    pub async fn uplink_admission(
-        &self,
-        enrollment: &Enrollment,
-    ) -> Result<Option<LegacyUplinkAdmission>> {
-        let response = self
-            .http
-            .post(self.url("/api/relay/v1/uplink-admissions")?)
-            .bearer_auth(&enrollment.secret)
-            .json(&serde_json::json!({ "daemonId": enrollment.daemon_id }))
-            .send()
-            .await
-            .context("requesting a one-use uplink admission")?;
-        if matches!(response.status().as_u16(), 401 | 403) {
-            return Ok(None);
-        }
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "the Hub refused uplink admission: {}",
-                response.status()
-            ));
-        }
-        read_json(response, MAX_JSON_RESPONSE_BYTES, "uplink admission reply")
-            .await
-            .map(Some)
-    }
-
-    /// Atomically redeems one OPEN capability at Control. The long-lived
-    /// enrollment credential is sent only on this HTTPS request, never Relay.
-    pub async fn channel_admission(
+    /// Redeems a route-bound Fabric peer capability after Relay spent its route.
+    pub async fn fabric_peer_admission(
         &self,
         enrollment: &Enrollment,
         capability_id: &str,
-    ) -> Result<Option<ChannelAdmission>> {
+    ) -> Result<Option<FabricPeerAdmission>> {
         let request = self
             .http
-            .post(self.url("/api/relay/v1/channel-admissions/redeem")?)
+            .post(self.url("/api/fabric/v2/peer-admissions/redeem")?)
             .bearer_auth(&enrollment.secret)
             .json(&serde_json::json!({
                 "daemonId": enrollment.daemon_id,
@@ -412,99 +364,47 @@ impl Client {
             .send();
         let response = tokio::time::timeout(Duration::from_secs(5), request)
             .await
-            .context("channel admission request timed out")?
-            .context("requesting channel admission")?;
+            .context("Fabric peer admission request timed out")?
+            .context("requesting Fabric peer admission")?;
         if matches!(response.status().as_u16(), 401 | 403 | 404) {
             return Ok(None);
         }
         if !response.status().is_success() {
             return Err(anyhow!(
-                "the Hub refused channel admission: {}",
+                "the Hub refused Fabric peer admission: {}",
                 response.status()
             ));
         }
         let reply: ChannelAdmissionReply = read_json(
             response,
             MAX_CHANNEL_ADMISSION_BYTES,
-            "channel admission reply",
+            "Fabric peer admission reply",
         )
         .await?;
-        if !(43..=128).contains(&reply.secret.len())
-            || !reply
-                .secret
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        {
+        validate_channel_secret(&reply.secret)?;
+        let expires = reply
+            .expires_at
+            .ok_or_else(|| anyhow!("the Hub omitted the Fabric route expiry"))?;
+        let expires = chrono::DateTime::parse_from_rfc3339(&expires)
+            .context("parsing the Fabric peer expiry")?
+            .with_timezone(&chrono::Utc);
+        let remaining = (expires - chrono::Utc::now())
+            .to_std()
+            .map_err(|_| anyhow!("the Hub returned an expired Fabric route"))?;
+        if remaining.is_zero() {
+            return Err(anyhow!("the Hub returned an expired Fabric route"));
+        }
+        if reply.workspace_handle.is_some() != reply.local_workspace_id.is_some() {
             return Err(anyhow!(
-                "the Hub returned a weak or malformed channel secret"
+                "the Hub returned an incomplete Fabric workspace scope"
             ));
         }
-        if !(1..=128).contains(&reply.lease_id.len())
-            || !reply
-                .lease_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        {
-            return Err(anyhow!("the Hub returned an invalid channel lease id"));
-        }
-        let expires_at = chrono::DateTime::parse_from_rfc3339(&reply.lease_expires_at)
-            .context("parsing the channel admission expiry")?
-            .with_timezone(&chrono::Utc);
-        let remaining = (expires_at - chrono::Utc::now())
-            .to_std()
-            .map_err(|_| anyhow!("the Hub returned an expired channel admission"))?;
-        if remaining.is_zero() {
-            return Err(anyhow!("the Hub returned an expired channel admission"));
-        }
-        Ok(Some(ChannelAdmission {
+        Ok(Some(FabricPeerAdmission {
             secret: reply.secret,
-            lease_id: reply.lease_id,
-            expires_at: Instant::now() + remaining.min(Duration::from_secs(600)),
+            expires_at: Instant::now() + remaining,
+            workspace_handle: reply.workspace_handle,
+            local_workspace_id: reply.local_workspace_id,
         }))
-    }
-
-    /// Renews an already admitted session directly with Control. An explicit
-    /// auth/not-found answer means the lease was revoked and is terminal;
-    /// transport/5xx failures remain transient until the local hard deadline.
-    pub async fn renew_channel_lease(
-        &self,
-        enrollment: &Enrollment,
-        lease_id: &str,
-    ) -> Result<Option<Instant>> {
-        let response = self
-            .http
-            .post(self.url("/api/relay/v1/channel-admissions/renew")?)
-            .bearer_auth(&enrollment.secret)
-            .json(&serde_json::json!({
-                "daemonId": enrollment.daemon_id,
-                "leaseId": lease_id,
-            }))
-            .send()
-            .await
-            .context("renewing channel lease")?;
-        if matches!(response.status().as_u16(), 401 | 403 | 404) {
-            return Ok(None);
-        }
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "the Hub refused channel lease renewal: {}",
-                response.status()
-            ));
-        }
-        let reply: ChannelLeaseReply =
-            read_json(response, MAX_CHANNEL_ADMISSION_BYTES, "channel lease reply").await?;
-        let expires_at = chrono::DateTime::parse_from_rfc3339(&reply.lease_expires_at)
-            .context("parsing the channel lease expiry")?
-            .with_timezone(&chrono::Utc);
-        let remaining = (expires_at - chrono::Utc::now())
-            .to_std()
-            .map_err(|_| anyhow!("the Hub returned an expired channel lease"))?;
-        if remaining.is_zero() {
-            return Err(anyhow!("the Hub returned an expired channel lease"));
-        }
-        Ok(Some(
-            Instant::now() + remaining.min(Duration::from_secs(600)),
-        ))
     }
 
     /// A one-time address for reaching one of them through the forwarding layer.
@@ -602,18 +502,9 @@ impl Client {
         }
         let reply: EnrollReply =
             read_json(response, MAX_JSON_RESPONSE_BYTES, "enrollment reply").await?;
-        crate::transport::uplink::validate_uplink_url(&reply.uplink_url)
-            .context("the Hub returned an unsafe legacy uplink URL")?;
-        if let Some(fabric_url) = &reply.fabric_url {
-            crate::transport::uplink::validate_uplink_url(fabric_url)
-                .context("the Hub returned an unsafe Fabric URL")?;
-        }
-
         Ok(Enrollment {
             hub_url: self.origin.clone(),
             machine_id: reply.machine_id,
-            uplink_url: reply.uplink_url,
-            fabric_url: reply.fabric_url,
             daemon_id: daemon_id.to_string(),
             secret,
             workspace_catalog_generation: None,
@@ -637,6 +528,17 @@ impl Client {
         }
         Ok(())
     }
+}
+
+fn validate_channel_secret(secret: &str) -> Result<()> {
+    if !(43..=128).contains(&secret.len())
+        || !secret
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        anyhow::bail!("the Hub returned a weak or malformed channel secret");
+    }
+    Ok(())
 }
 
 fn validate_control_url(url: &reqwest::Url) -> Result<()> {
@@ -940,8 +842,6 @@ mod tests {
         let enrollment = Enrollment {
             hub_url: origin.clone(),
             machine_id: "mch_private".into(),
-            uplink_url: "ws://relay.test/forward/daemon".into(),
-            fabric_url: Some("ws://relay.test/fabric/v2".into()),
             daemon_id: "dmn_private".into(),
             secret: "node-secret".into(),
             workspace_catalog_generation: Some("wcg_previous".into()),
@@ -1008,8 +908,6 @@ mod tests {
         let enrollment = Enrollment {
             hub_url: origin.clone(),
             machine_id: "mch_private".into(),
-            uplink_url: "ws://relay.example/forward/daemon".into(),
-            fabric_url: Some("ws://relay.example/fabric/v2".into()),
             daemon_id: "dmn_private".into(),
             secret: "long-lived-node-secret".into(),
             workspace_catalog_generation: None,
@@ -1030,110 +928,6 @@ mod tests {
             .to_ascii_lowercase()
             .contains("authorization: bearer long-lived-node-secret"));
         assert!(!admission.url.contains("long-lived-node-secret"));
-    }
-
-    #[tokio::test]
-    async fn legacy_uplink_admission_exchanges_the_reusable_secret_only_with_control() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin = format!("http://{}", listener.local_addr().unwrap());
-        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buffer = vec![0u8; 4096];
-            let used = socket.read(&mut buffer).await.unwrap();
-            let request = String::from_utf8(buffer[..used].to_vec()).unwrap();
-            let _ = seen_tx.send(request);
-            let body =
-                r#"{"ticket":"one-use-uplink-ticket","expiresAt":"2030-01-01T00:00:00.000Z"}"#;
-            socket
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-        });
-        let enrollment = Enrollment {
-            hub_url: origin.clone(),
-            machine_id: "mch_private".into(),
-            uplink_url: "ws://relay.example/forward/daemon".into(),
-            fabric_url: None,
-            daemon_id: "dmn_private".into(),
-            secret: "long-lived-node-secret".into(),
-            workspace_catalog_generation: None,
-        };
-
-        let admission = Client::new(&origin)
-            .uplink_admission(&enrollment)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(admission.ticket, "one-use-uplink-ticket");
-        assert_eq!(admission.expires_at, "2030-01-01T00:00:00.000Z");
-        assert!(!admission.ticket.contains(&enrollment.secret));
-
-        let request = seen_rx.await.unwrap();
-        assert!(request.starts_with("POST /api/relay/v1/uplink-admissions "));
-        assert!(request
-            .to_ascii_lowercase()
-            .contains("authorization: bearer long-lived-node-secret"));
-        let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(body).unwrap()["daemonId"],
-            "dmn_private"
-        );
-    }
-
-    #[tokio::test]
-    async fn only_an_explicit_control_auth_rejection_is_terminal_for_uplink_admission() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            for status in ["503 Service Unavailable", "403 Forbidden"] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = vec![0u8; 4096];
-                let _ = socket.read(&mut request).await.unwrap();
-                socket
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .unwrap();
-            }
-        });
-        let enrollment = Enrollment {
-            hub_url: origin.clone(),
-            machine_id: "mch_private".into(),
-            uplink_url: "ws://relay.example/forward/daemon".into(),
-            fabric_url: None,
-            daemon_id: "dmn_private".into(),
-            secret: "long-lived-node-secret".into(),
-            workspace_catalog_generation: None,
-        };
-        let client = Client::new(&origin);
-
-        let transient = match client.uplink_admission(&enrollment).await {
-            Err(error) => error,
-            Ok(_) => panic!("a Control 503 must remain retryable"),
-        };
-        assert!(format!("{transient:#}").contains("503"));
-        assert!(client
-            .uplink_admission(&enrollment)
-            .await
-            .unwrap()
-            .is_none());
-        server.await.unwrap();
     }
 
     #[tokio::test]

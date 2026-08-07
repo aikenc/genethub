@@ -9,6 +9,7 @@ import type { Target } from "./host";
 import { LogsPanel } from "./logs/LogsPanel";
 import { Client, type ProtocolDial } from "./protocol/client";
 import { SettingsPanel } from "./settings/SettingsPanel";
+import { readRtcEnabled } from "./settings/rtc";
 import { Composer } from "./session/Composer";
 import { PermissionCard } from "./session/Permission";
 import { TimelineView } from "./session/TimelineView";
@@ -41,7 +42,9 @@ const openConnection = (
     redial,
     credential: endpoint.credential,
     channelCredential: endpoint.channelCredential,
+    fabricRouteTicket: endpoint.fabricRouteTicket,
     localServerProof: endpoint.localServerProof,
+    rtcEnabled: readRtcEnabled(),
   });
 
 /**
@@ -559,6 +562,9 @@ function dialOf(endpoint: Endpoint): ProtocolDial {
     url: endpoint.url,
     ...(endpoint.channelCredential
       ? { channelCredential: endpoint.channelCredential }
+      : {}),
+    ...(endpoint.fabricRouteTicket
+      ? { fabricRouteTicket: endpoint.fabricRouteTicket }
       : {}),
     ...(endpoint.localServerProof
       ? { localServerProof: endpoint.localServerProof }

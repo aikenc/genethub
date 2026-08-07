@@ -431,8 +431,6 @@ mod machine_state_tests {
         let enrollment = Enrollment {
             hub_url: "https://hub.example".into(),
             machine_id: "mch_test".into(),
-            uplink_url: "wss://relay.example/forward/daemon".into(),
-            fabric_url: Some("wss://relay.example/fabric/v2".into()),
             daemon_id: "dmn_test".into(),
             secret: "secret".into(),
             workspace_catalog_generation: Some("wcg_test".into()),

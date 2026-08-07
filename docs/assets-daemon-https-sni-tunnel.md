@@ -90,7 +90,7 @@ SiteCapability {
 }
 ```
 
-daemon 必须先以 capability-safe 的目录 API 打开 workspace，再相对它打开 WebRoot；后续所有路径解析都相对这个已打开的目录句柄完成，不能先 `canonicalize()` 检查、再用环境路径 `open()`。现有 `file.read` 的 workspace confinement 可以复用原则，但不能复用其“文本优先、2 MiB 截断、二进制占位符”的响应形态。
+daemon 必须先以 capability-safe 的目录 API 打开 workspace，再相对它打开 WebRoot；后续所有路径解析都相对这个已打开的目录句柄完成，不能先 `canonicalize()` 检查、再用环境路径 `open()`。轻量 `asset.preview` 的 workspace confinement 原则可以复用，但 WebRoot 不能复用其“单个完整文件、2 MiB、无相对资源”的响应契约。
 
 WebRoot 规则：
 

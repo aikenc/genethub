@@ -21,7 +21,7 @@
 
 | 组件 | 信任级别 | 能看到 | 看不到 |
 |------|----------|--------|--------|
-| relay | **按不可信设计** | IP、时序、包大小、通道 id、初始 proof | 没有通道 secret；业务 payload 是密文且不落库 |
+| relay | **按不可信设计** | IP、时序、包大小、opaque endpoint/route/outer-stream id、初始 peer hello | 没有 peer secret；Exchange method/metadata/body 是密文且不落库 |
 | 控制面 | **托管形态需信任** | 账号、连接元数据、它生成的临时 channel secret | 业务帧不经过它，但它技术上可持密钥仿冒客户端；不是零知识 |
 | daemon | 可信（你自己的机器） | 全部 | — |
 | 托管 Web 前端/桌面壳 | 可信 | 浏览器或本机持有的凭证与明文 | — |
@@ -32,13 +32,13 @@ relay 与控制面是两个进程、两个仓库，这不是部署细节而是�
 
 ### 1.1 现在的加密到什么程度，说清楚
 
-**转发业务帧现在对 Relay 加密。** 客户端与 daemon 先基于配对 PSK 或 hosted channel secret 做双向 HMAC proof；随后按方向派生密钥，用严格递增序号、AES-256-GCM 与独立 HMAC 封装所有业务帧。Relay 能看元数据、丢包、延迟或重放密文，但没有 secret 就不能读取或伪造；重放与串通道会因序号、方向和 context 不匹配而 fail-close。
+**转发业务帧现在对 Relay 加密。** 客户端与 daemon 先基于配对 PSK 或 hosted peer secret 做双向 HMAC proof；随后派生本次 peer link 的 AES-256-GCM key，用严格方向序号和绑定 version/context/direction/sequence 的 AAD 封装每个 protocol-v3 record。AES-GCM 已同时提供机密性与完整性；HMAC 用于握手与 key derivation，不再给每个 record 叠加第二个 MAC。Relay 能看元数据、丢包、延迟或重放密文，但没有 secret 就不能读取或伪造；重放与串 peer 注入会因序号、方向、context 或 AEAD tag 不匹配而 fail-close。
 
-**这不是整个平台零知识，也没有前向保密。** Hosted channel secret 由 Control 生成：一份随短期票据交给浏览器，一份由目标 daemon 通过 HTTPS 兑换。Control/平台运营方技术上知道活跃会话密钥，并可主动仿冒客户端；托管 Web 前端也能接触浏览器侧凭证。当前对称 PSK 不提供独立公钥握手、密钥妥协后的前向保密或可验证客户端代码。
+**这不是整个平台零知识，也没有前向保密。** Hosted peer secret 由 Control 生成：一份随短期 Fabric connection admission 交给浏览器，一份由目标 daemon 通过 HTTPS 兑换。Control/平台运营方技术上知道该 peer secret，并可主动仿冒客户端；托管 Web 前端也能接触浏览器侧凭证。当前对称 PSK 不提供独立公钥握手、密钥妥协后的前向保密或可验证客户端代码。
 
 因此对外表述统一为：
 
-> Relay 不持有通道 secret，业务帧对它是带认证的密文；它仍能看到连接元数据并拒绝服务。托管 Control 生成临时通道 secret，平台不是零知识。公钥握手与前向保密尚未实现。
+> Relay 不持有 peer secret，Exchange 和业务 frame 对它是带认证的密文；它仍能看到连接元数据、初始有界 peer hello 并拒绝服务。托管 Control 生成临时 peer secret，平台不是零知识。公钥握手与前向保密尚未实现。
 
 可以写“Relay 单独无法解密或伪造业务内容”；不要写“Hub/平台技术上无法查看或控制”。
 
@@ -62,13 +62,15 @@ relay 与控制面是两个进程、两个仓库，这不是部署细节而是�
 | 设备转移链接 | 一次性 URL | ≤ 15 分钟，一次性 | 一个新设备会话 | ✓ |
 | 恢复密钥 | 桌面本地；控制面存哈希 | 长期 | 临时身份被接管 | ✓ |
 | 设备码 / enrollmentToken | Control 可能短期明文存储，消费或过期后清除 | ≤ 10 分钟 | 可把机器登记到攻击者账号 | ✓（过期即失效） |
-| daemon uplink secret | daemon 本地；控制面只存 sha256 | 长期 | 可冒充该机器挂上转发 | ✓ |
-| 通道票据 | URL 查询串 | ≤ 2 分钟，一次性 | 一次接入机会 | ✓（用即作废） |
-| hosted channel secret | 浏览器短期持有；daemon 兑换；Control 数据库在活跃/待兑换窗口内可能存明文 | 短期，消费、撤销或过期后清除 | 在窗口内可解密或仿冒对应通道 | ✓（撤销/到期） |
+| daemon enrollment secret | daemon 本地；控制面存 verifier | 长期 | 可冒充该机器申请 Fabric endpoint/admission | ✓ |
+| Fabric endpoint ticket | URL 查询串或 bearer | 短期、单次 | 一次 endpoint 接入机会 | ✓（用即作废/撤销） |
+| Fabric route ticket | E2EE client 取得，Fabric OPEN 携带 | 短期、单次 | 一次到指定 opaque target 的 outer stream 机会 | ✓（用即作废/撤销） |
+| hosted peer secret | 浏览器短期持有；daemon 兑换；Control 在待兑换窗口内存明文 | 短期，兑换、撤销或过期后清除 | 在窗口内可认证或仿冒对应 peer | ✓（撤销/到期） |
+| RTC 临时 secret | 只在已认证 E2EE signaling stream 与 daemon 内存中 | ≤ 30 秒完成认证 | 在窗口内可尝试接入该 RTC PeerConnection，但不扩大继承权限 | 过期/连接关闭 |
 | 本机密钥 | daemon 启动时生成，仅写入当前用户可读的 `endpoint.json` | 进程生命周期 | 可签发本机 daemon 的准入与控制 proof | 重启即换 |
 | 本机 WebSocket 准入 | stdout / CLI / Tauri IPC 中的一次性 URL | ≤ 15 秒且单次核销 | 一次本机连接机会 | 用即失效 |
 
-通道票据走查询串是不得已：浏览器发起 WebSocket 握手时无法设置请求头。代价用两条约束抵消——一次性、有效期以秒计，并且核销与校验在同一条 SQL 里完成，两个并发接入不可能都成功。
+Fabric endpoint ticket 走查询串是不得已：浏览器发起 WebSocket 握手时无法设置请求头。代价用两条约束抵消——一次性、短期，并且核销与校验在同一事务中完成，两个并发接入不可能都成功。route ticket 与 peer capability 分域，拿到 endpoint admission 不等于获得 daemon 业务权限。
 
 ---
 
@@ -89,20 +91,20 @@ relay 与控制面是两个进程、两个仓库，这不是部署细节而是�
 
 ---
 
-## 4. 转发准入：Relay 不判，daemon 执行认证
+## 4. 转发准入：Relay 只判 opaque admission，daemon 执行 peer 认证
 
-**Relay 永远不做业务准入决策。** 自建形态由 daemon 的本地设备表判断；托管形态由 Control 先核验账号/来源会话/目标机器并发短期 capability 与独立租约，daemon 只接受能证明持有兑换所得 secret 的通道。Control 明确拒绝或租约到期会 fail-close；暂时不可达只允许到本地硬截止时间，不会降级为匿名访问。
+**Relay 永远不做业务准入决策。** 它只向 authority 核验 opaque endpoint/route ticket。自建形态由 daemon 的本地设备表判断；托管形态由 Control 先核验账号、来源 session 和目标机器，签发短期 Fabric route 与独立 peer capability，daemon 只接受能证明持有兑换所得 secret 的 peer。Control/Relay revocation 或 presence lease 失效会关闭 outer stream；不会降级为匿名访问。
 
 daemon 本地维护一份已授权设备列表，形态就是 `authorized_keys`——设备名、首次接入时间、最后活跃时间。撤销就是删一行并断开那条连接，立即生效，不依赖任何推送到达。
 
 ```
-客户端连 relay 的某个 rendezvous 槽位
+客户端与 daemon 各自接入 Relay Fabric endpoint
         │
         ▼
-relay 把两条 socket 接起来（它只做这一件事）
+客户端用 opaque route ticket 打开一条到 daemon 的 outer stream
         │
         ▼
-daemon 检查这个设备在不在自己的已授权列表里 → 放行或断开
+daemon 完成 PSK 双向证明并检查设备/workspace scope → 放行或断开
 ```
 
 ### 4.1 配对：链接是一次机会，不是钥匙
@@ -118,7 +120,7 @@ rendezvous 槽位可能被抢占：谁知道那个 id，谁就能抢先挂上去
 ```
 客户端 → 机器：context、随机数 clientNonce、HMAC(client proof)
 机器  → 客户端：随机数 serverNonce、HMAC(server proof)
-双方：由 secret + context + 两个 nonce 派生方向密钥
+双方：由 secret + context + 两个 nonce 派生本次 peer-link AEAD key
 ```
 
 抢占者两个方向都答不出来。随机数不允许重复使用，所以截获一次也没法重放。
@@ -127,15 +129,15 @@ rendezvous 槽位可能被抢占：谁知道那个 id，谁就能抢先挂上去
 
 ### 4.3 托管部署上叠加的东西
 
-托管浏览器先从 Control 取得一次性 Relay ticket、opaque capability 和随机 channel secret。Relay 只核销 ticket 并把 capability 放进 `OPEN`；daemon 使用 enrollment credential 直接向 Control 兑换同一 secret 与独立 lease，然后双方完成 v2 proof。业务身份只在加密建立后发送。
+托管浏览器从 Control 取得一次性 Fabric endpoint ticket、route ticket、opaque peer capability 和随机 peer secret。Relay 只核销 endpoint/route ticket 并转发 `PeerHello`；daemon 使用 enrollment credential 直接向 Control 兑换同一 secret，然后双方完成 protocol-v3 proof。业务 identity、Exchange 和 Preview 内容只在 E2EE 建立后发送。
 
-活跃通道由 daemon 直接向 Control 续租，不依赖 Relay 转发续租结果。401/403/404 是立即撤销；网络/5xx 在本地硬截止前退避重试，到期必断。这能限制恶意 Relay 压住撤销消息，但不能防御已持有 channel secret 的恶意 Control。
+Relay 维护 Control 签发的 endpoint presence lease，并订阅 endpoint/route revocation；失去 revocation 同步时 fail-close 当前 endpoints。这能限制旧 ticket 和被撤销 connection 继续生效，但不能防御已持有 peer secret 的恶意 Control。
 
 ### 4.4 其余要点
 
-- 限额是必需品：单连接缓冲、单机并发客户端数、单帧大小、在线机器总数（[relay.md](./relay.md) §6）。
+- 限额是必需品：endpoint/stream 数、pending admission、单连接与进程缓冲、单帧大小（[relay.md](./relay.md) §5）。
 - 自建 relay 的 join token 只约束机器挂上行连接。客户端只能连到已存在的槽位，白吃流量得先占一个槽位。
-- 配对 Hello 只暴露 invite id、nonce 与 proof；设备名和新签发凭证在 proof 后的加密帧内返回。Relay 看不到 PSK 或新凭证。
+- 初始 `PeerHello` 可能暴露通用 client label、RTC capability、device/invite/capability selector、nonce 与 proof；设备展示名和新签发凭证在 proof 后的加密 Exchange 中返回。Relay 看不到 PSK、peer secret 或新凭证。
 
 ---
 
