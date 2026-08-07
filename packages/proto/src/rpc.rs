@@ -433,6 +433,8 @@ pub struct DirectoryListing {
     pub path: String,
     pub parent: Option<String>,
     pub directories: Vec<DirectoryEntry>,
+    /// Openable VS Code workspace definitions in this directory.
+    pub workspace_files: Vec<DirectoryEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

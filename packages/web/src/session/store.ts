@@ -857,9 +857,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const state = get();
     const deviceHandle = state.client?.identity?.machineId;
     const workspaceId = currentWorkspace(state);
+    const workspace = state.workspaces.find((entry) => entry.id === workspaceId);
+    const primaryFolder = workspace?.folders?.[0]?.pathPrefix ?? "";
     const artifactPreviewBaseUrl =
       deviceHandle && workspaceId
-        ? assetPreviewBaseUrl(deviceHandle, workspaceId)
+        ? assetPreviewBaseUrl(deviceHandle, workspaceId, primaryFolder)
         : null;
     await asked(set, () =>
       require_(get().client).call({

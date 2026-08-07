@@ -21,6 +21,9 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     if request.source.kind != WorkspaceFileSourceKind::WorkspaceFile {
         return preview_error(stream, 400, AssetPreviewError::Forbidden, None).await;
     }
+    if crate::files::validate_preview_path(&request.source.path).is_err() {
+        return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await;
+    }
 
     let (workspace_id, expected_handle) = match (
         services.access.workspace_id.as_deref(),
@@ -36,9 +39,17 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     if request.source.workspace_handle != expected_handle {
         return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await;
     }
-    let workspace = match services.state.workspaces.get(workspace_id).await {
-        Ok(workspace) => workspace,
-        Err(_) => return preview_error(stream, 404, AssetPreviewError::NotFound, None).await,
+    if services.state.workspaces.get(workspace_id).await.is_err() {
+        return preview_error(stream, 404, AssetPreviewError::NotFound, None).await;
+    }
+    let resolved = match services
+        .state
+        .workspaces
+        .resolve(workspace_id, &request.source.path)
+        .await
+    {
+        Ok(resolved) => resolved,
+        Err(_) => return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await,
     };
 
     let slot = match tokio::time::timeout(
@@ -54,8 +65,8 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         Ok(Err(_)) => return Err(anyhow!("preview worker pool stopped")),
         Err(_) => return preview_error(stream, 408, AssetPreviewError::SourceChanged, None).await,
     };
-    let root = workspace.root;
-    let path = request.source.path;
+    let root = resolved.root;
+    let path = resolved.relative.to_string_lossy().replace('\\', "/");
     let read = tokio::task::spawn_blocking(move || {
         let _slot = slot;
         crate::files::preview(&root, &path)

@@ -48,7 +48,13 @@ function stubDaemon(answers: Partial<Record<Request["type"], (payload: never) =>
 function install(client: Client) {
   useWorkbench.setState({
     client,
-    workspaces: [{ id: "w1", name: "demo", root: "/tmp/demo", isGitRepo: true }],
+    workspaces: [{
+      id: "w1",
+      name: "demo",
+      root: "/tmp/demo",
+      isGitRepo: true,
+      folders: [{ name: "demo", root: "/tmp/demo", pathPrefix: "" }],
+    }],
     sessions: [],
     activeWorkspaceId: "w1",
     activeSessionId: null,
@@ -211,7 +217,14 @@ describe("the files panel", () => {
                 name: "demo",
                 path: "",
                 isDir: true,
-                children: [{ name: "docs", path: "docs", isDir: true }],
+                // This is the exact shape older Rust daemons emitted for None.
+                // Clicking it must not call null.map() and unmount the page.
+                children: [{
+                  name: "docs",
+                  path: "docs",
+                  isDir: true,
+                  children: null as never,
+                }],
               },
             },
     });

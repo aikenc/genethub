@@ -20,10 +20,32 @@ const MAX_TREE_NODES: usize = 10_000;
 /// `target` with a hundred thousand files, and a client asking for "the tree"
 /// should not be able to stall the daemon.
 pub fn tree(root: &Path, path: &Path, depth: u32) -> Result<FileNode> {
+    tree_with_prefix(root, path, depth, "", None)
+}
+
+/// Builds a tree whose client-visible paths live under a virtual root segment.
+///
+/// The capability root stays the concrete folder. Only the names returned to
+/// the client are prefixed, so a multi-root workspace never turns a virtual
+/// path into ambient filesystem authority.
+pub fn tree_with_prefix(
+    root: &Path,
+    path: &Path,
+    depth: u32,
+    path_prefix: &str,
+    root_name: Option<&str>,
+) -> Result<FileNode> {
     let directory = workspace_dir(root)?;
     let relative = workspace_relative(root, path)?;
     let mut remaining = MAX_TREE_NODES;
-    tree_in(&directory, &relative, depth, &mut remaining)
+    tree_in(
+        &directory,
+        &relative,
+        depth,
+        &mut remaining,
+        path_prefix,
+        root_name,
+    )
 }
 
 fn tree_in(
@@ -31,12 +53,19 @@ fn tree_in(
     relative: &Path,
     depth: u32,
     remaining: &mut usize,
+    path_prefix: &str,
+    root_name: Option<&str>,
 ) -> Result<FileNode> {
     if *remaining == 0 {
         anyhow::bail!("file tree exceeded the node safety limit");
     }
     *remaining -= 1;
-    let display_path = relative.to_string_lossy().replace('\\', "/");
+    let relative_display = relative.to_string_lossy().replace('\\', "/");
+    let display_path = match (path_prefix.is_empty(), relative_display.is_empty()) {
+        (true, _) => relative_display,
+        (false, true) => path_prefix.to_string(),
+        (false, false) => format!("{path_prefix}/{relative_display}"),
+    };
     // `strip_prefix(root)` represents the root itself as an empty path, while
     // capability-relative filesystem APIs spell that directory `.`.
     let capability_path = if relative.as_os_str().is_empty() {
@@ -47,6 +76,7 @@ fn tree_in(
     let name = relative
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
+        .or_else(|| root_name.map(str::to_string))
         .unwrap_or_else(|| ".".to_string());
 
     let metadata = directory
@@ -83,7 +113,14 @@ fn tree_in(
             if is_noise(&entry_path) {
                 continue;
             }
-            match tree_in(directory, &entry_path, depth.saturating_sub(1), remaining) {
+            match tree_in(
+                directory,
+                &entry_path,
+                depth.saturating_sub(1),
+                remaining,
+                path_prefix,
+                None,
+            ) {
                 Ok(node) => entries.push(node),
                 // A file that vanished or cannot be stat'd should not fail the
                 // whole listing.
@@ -198,7 +235,7 @@ pub fn preview(
     })
 }
 
-fn validate_preview_path(path: &str) -> std::result::Result<(), PreviewFailure> {
+pub(crate) fn validate_preview_path(path: &str) -> std::result::Result<(), PreviewFailure> {
     if path.is_empty()
         || path.len() > 4096
         || path.contains('\0')
@@ -260,17 +297,17 @@ fn preview_type(
     }
 
     let text = std::str::from_utf8(bytes).map_err(|_| PreviewFailure::Unsupported)?;
-    if text.chars().take(8_000).any(|character| character == '\0') {
+    if text.contains('\0') {
         return Err(PreviewFailure::Unsupported);
     }
     match extension.as_str() {
         "md" | "markdown" | "mdown" => Ok((AssetPreviewKind::Markdown, "text/markdown")),
         "html" | "htm" => Ok((AssetPreviewKind::Html, "text/html")),
-        "txt" | "text" | "log" | "rs" | "js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx" | "css"
-        | "json" | "jsonl" | "yaml" | "yml" | "toml" | "xml" | "csv" | "py" | "go" | "java"
-        | "c" | "h" | "cc" | "cpp" | "hpp" | "sh" | "bash" | "zsh" | "fish" | "sql" | "ini"
-        | "conf" | "env" | "gitignore" | "dockerfile" => Ok((AssetPreviewKind::Text, "text/plain")),
-        _ => Err(PreviewFailure::Unsupported),
+        // A text document is a property of its bytes, not of whether this
+        // release happened to know its suffix. The browser infers a language
+        // when it can and safely falls back to escaped plain text when it
+        // cannot; valid UTF-8 without NUL is therefore always previewable.
+        _ => Ok((AssetPreviewKind::Text, "text/plain")),
     }
 }
 
@@ -428,13 +465,37 @@ mod tests {
         );
         std::fs::write(dir.path().join("fake.png"), b"not a png").unwrap();
         assert_eq!(
-            preview(dir.path(), "fake.png").unwrap_err(),
-            PreviewFailure::Unsupported
+            preview(dir.path(), "fake.png").unwrap().metadata.kind,
+            AssetPreviewKind::Text
         );
         std::fs::write(dir.path().join("real.png"), b"\x89PNG\r\n\x1a\nrest").unwrap();
         assert_eq!(
             preview(dir.path(), "real.png").unwrap().metadata.media_type,
             "image/png"
+        );
+        std::fs::write(
+            dir.path().join("build.custom-language"),
+            "target all:\n\tcompile --safe\n",
+        )
+        .unwrap();
+        assert_eq!(
+            preview(dir.path(), "build.custom-language")
+                .unwrap()
+                .metadata
+                .kind,
+            AssetPreviewKind::Text
+        );
+        std::fs::write(dir.path().join("binary.custom"), b"prefix\0suffix").unwrap();
+        assert_eq!(
+            preview(dir.path(), "binary.custom").unwrap_err(),
+            PreviewFailure::Unsupported
+        );
+        let mut late_nul = vec![b'a'; 9_000];
+        late_nul.push(0);
+        std::fs::write(dir.path().join("late-nul.custom"), late_nul).unwrap();
+        assert_eq!(
+            preview(dir.path(), "late-nul.custom").unwrap_err(),
+            PreviewFailure::Unsupported
         );
     }
 

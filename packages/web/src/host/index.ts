@@ -153,6 +153,8 @@ export interface Host {
   window?: WindowControls;
   /** Present only where a native picker exists. */
   pickDirectory?(): Promise<string | null>;
+  /** Native picker restricted to VS Code .code-workspace files. */
+  pickWorkspaceFile?(): Promise<string | null>;
   /**
    * Reveals the log directory in the file manager.
    *
@@ -490,6 +492,9 @@ export function desktopHost(
     },
     async pickDirectory() {
       return tauri.core.invoke<string | null>("pick_directory");
+    },
+    async pickWorkspaceFile() {
+      return tauri.core.invoke<string | null>("pick_workspace_file");
     },
     openLogs() {
       void tauri.core.invoke("open_logs");

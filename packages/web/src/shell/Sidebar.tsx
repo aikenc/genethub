@@ -591,7 +591,20 @@ function WorkspaceRow({
             </button>
           </div>
           <Detail label="名称" value={workspace.name} />
-          <Detail label="完整路径" value={workspace.root} />
+          {workspace.workspaceFile ? (
+            <Detail label="工作区文件" value={workspace.workspaceFile} />
+          ) : null}
+          {(workspace.folders?.length ? workspace.folders : [{
+            name: workspace.name,
+            root: workspace.root,
+            pathPrefix: "",
+          }]).map((folder, index) => (
+            <Detail
+              key={folder.root}
+              label={index === 0 ? "Agent 目录" : folder.name}
+              value={folder.root}
+            />
+          ))}
           <Detail label="所属设备" value={deviceName} />
         </div>
       ) : null}

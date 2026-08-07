@@ -356,6 +356,17 @@ describe("an action the user asked for that fails", () => {
       activeSessionId: "s1",
       activeWorkspaceId: "w1",
       sessions: [SESSION],
+      workspaces: [{
+        id: "w1",
+        name: "suite",
+        root: "/srv/product",
+        isGitRepo: true,
+        workspaceFile: "/srv/suite.code-workspace",
+        folders: [
+          { name: "Product", root: "/srv/product", pathPrefix: "Product" },
+          { name: "Docs", root: "/srv/docs", pathPrefix: "Docs" },
+        ],
+      }],
     });
 
     await useWorkbench.getState().send("生成报告");
@@ -367,7 +378,7 @@ describe("an action the user asked for that fails", () => {
         text: "生成报告",
         attachments: [],
         artifactPreviewBaseUrl:
-          "http://localhost:3000/assets/preview/v1/m_device/w1/",
+          "http://localhost:3000/assets/preview/v1/m_device/w1/Product/",
         continuesRound: null,
       },
     });
@@ -805,7 +816,13 @@ describe("returning after a disconnection", () => {
 
 describe("renaming a workspace", () => {
   it("uses the name returned by the machine", async () => {
-    const workspace = { id: "w1", name: "project", root: "/tmp/project", isGitRepo: false };
+    const workspace = {
+      id: "w1",
+      name: "project",
+      root: "/tmp/project",
+      isGitRepo: false,
+      folders: [{ name: "project", root: "/tmp/project", pathPrefix: "" }],
+    };
     const client = {
       call: async (request: { type: string }) =>
         request.type === "workspace.rename"

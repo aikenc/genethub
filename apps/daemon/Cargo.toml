@@ -21,6 +21,7 @@ futures-util.workspace = true
 fs2.workspace = true
 hmac.workspace = true
 ignore.workspace = true
+json5.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

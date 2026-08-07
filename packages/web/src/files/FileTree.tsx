@@ -49,7 +49,10 @@ function Node({
   onExpand(path: string): void;
 }) {
   const [open, setOpen] = useState(false);
-  const children = node.children;
+  // Older daemons serialized Rust None as JSON null even though the generated
+  // TypeScript contract said this optional field was absent. Normalize both:
+  // attempting null.map() here used to unmount the complete React workbench.
+  const children = node.children ?? undefined;
 
   // A root refresh intentionally replaces its shallow listing. Nodes keep
   // their React key (and therefore their open state), then refill their own

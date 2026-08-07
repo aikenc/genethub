@@ -24,6 +24,7 @@ const workspace = (id: string, name: string): WorkspaceInfo => ({
   name,
   root: `/home/me/${name}`,
   isGitRepo: true,
+  folders: [{ name, root: "/home/me/" + name, pathPrefix: "" }],
 });
 
 const session = (id: string, workspaceId: string, title: string, running = false): SessionSummary => ({
@@ -184,7 +185,7 @@ describe("the left edge", () => {
 
     const details = screen.getByText("目录详情").parentElement?.parentElement;
     expect(details).toHaveTextContent("名称genethub");
-    expect(details).toHaveTextContent("完整路径/home/me/genethub");
+    expect(details).toHaveTextContent("Agent 目录/home/me/genethub");
     expect(details).toHaveTextContent("所属设备开发工作站");
   });
 

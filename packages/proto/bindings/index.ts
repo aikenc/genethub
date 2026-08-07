@@ -159,7 +159,11 @@ rendezvousUrl?: string, expiresAt: string, };
 
 export type DirectoryEntry = { name: string, path: string, };
 
-export type DirectoryListing = { path: string, parent: string | null, directories: Array<DirectoryEntry>, };
+export type DirectoryListing = { path: string, parent: string | null, directories: Array<DirectoryEntry>, 
+/**
+ * Openable VS Code workspace definitions in this directory.
+ */
+workspaceFiles: Array<DirectoryEntry>, };
 
 export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "protocolVersion";
 
@@ -738,4 +742,22 @@ export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHand
 
 export type WorkspaceFileSourceKind = "workspaceFile";
 
-export type WorkspaceInfo = { id: string, name: string, root: string, isGitRepo: boolean, };
+export type WorkspaceFolderInfo = { 
+/**
+ * Explorer label from `.code-workspace#folders[].name`, or the directory name.
+ */
+name: string, 
+/**
+ * Absolute path on the owning device. It never leaves the E2EE application channel.
+ */
+root: string, 
+/**
+ * Empty for a plain folder workspace; otherwise the first virtual path segment.
+ */
+pathPrefix: string, };
+
+export type WorkspaceInfo = { id: string, name: string, 
+/**
+ * The first folder and Agent working directory.
+ */
+root: string, isGitRepo: boolean, folders: Array<WorkspaceFolderInfo>, workspaceFile?: string, };

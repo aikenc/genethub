@@ -1,22 +1,22 @@
-# 轻量 Asset Preview v2
+# 轻量 Asset Preview v3
 
-> 状态：v2 已实现。它保持 v1 的单文件/E2EE 边界，在已验证 MVP 上补齐目录浏览、刷新、文档渲染和 Agent 产物链接。底层连接见 [E2EE Data Plane v3](./e2ee-data-plane.md)。多文件 WebRoot、大文件和公开 Assets Gateway 仍不在本版本内。
+> 状态：v3 已实现。它保持单文件、4 MiB 与 E2EE 边界，在 v2 上补齐真实目录崩页修复、VS Code `.code-workspace` 多根文件系统和通用文本高亮。底层连接见 [E2EE Data Plane v3](./e2ee-data-plane.md)。多文件 WebRoot、大文件和公开 Assets Gateway 仍不在本版本内。
 
 ## 1. 产品结论
 
 Asset Preview 是给人和 Agent 快速打开 workspace 文件的轻量查看器：
 
-- 唯一入口是 daemon 已注册 workspace 中的**相对文件路径**。
+- 唯一入口是 daemon 已注册 workspace 中的**虚拟相对文件路径**。普通目录保持原路径；`.code-workspace` 使用 `<folder-prefix>/<path>` 区分多个根。
 - URL 明文包含稳定 device handle、workspace handle 和相对路径；路径不是秘密，也不是授权凭证。
 - 同一个 URL 可在另一台已配对电脑或手机浏览器打开。查看设备不需要安装 daemon；它只需能够加载工作台并持有本地配对凭证，或已登录有权访问该设备的托管账号。
 - 文件由资源所在设备的 daemon 读取，经已有 E2EE Data Plane 返回；Relay 不看到 workspace、path、MIME 或文件 bytes。
 - 只返回完整原文件。源文件 `<= 4 MiB` 才成功，超过直接提示无法预览。
-- 支持图片、Markdown、普通文本、单文件 HTML、MP4/WebM 小视频。
+- 支持图片、Markdown、任意有效 UTF-8 且不含 NUL 的文本、单文件 HTML、MP4/WebM 小视频；已知源码/配置格式尽可能语法着色。
 - HTML 可运行 inline/HTTPS script 并访问 HTTPS/WSS 网络，但位于无同源权限的 sandbox iframe 中，不能取得工作台权限。
 - 点击文件在独立页面打开。浮窗 iframe、WebRoot 和多文件 HTML 留到后续。
 - `file.read` 已删除，文件查看器统一使用 Preview；写文件仍是独立业务能力。
 
-v2 明确不做缩略图、摘要、截断、转码、poster、probe、Range、缓存、上传 bytes、HTTP URL、Git object、多文件目录映射、Service Worker 或 daemon HTTPS。Agent artifact 仍是 workspace 普通文件；本版本只让 Agent 按统一 locator 输出链接，没有新增 artifact 存储。
+v3 明确不做缩略图、摘要、截断、转码、poster、probe、Range、缓存、上传 bytes、HTTP URL、Git object、多文件 HTML 目录映射、Service Worker 或 daemon HTTPS。Agent artifact 仍是 workspace 普通文件；本版本只让 Agent 按统一 locator 输出链接，没有新增 artifact 存储。
 
 ## 2. 规范 URL
 
@@ -40,7 +40,9 @@ URL 中的 `/v1/` 是 locator contract 版本，不跟随 Viewer UI 迭代。v2 
 
 - `deviceHandle`：daemon 拥有的稳定设备句柄；不是用户输入的展示名。
 - `workspaceHandle`：该连接可解析的 workspace locator。普通本地/整机连接使用 daemon workspace id；workspace-scoped hosted route 可使用 Control 分配的外部 handle。
-- `path`：从 workspace 根开始的规范相对路径，例如 `docs/readme.md`。
+- `path`：规范虚拟相对路径。普通目录 workspace 例如 `docs/readme.md`；从 `.code-workspace` 打开的 workspace 例如 `Product/src/main.ts` 或 `Docs/guide.md`，首段是 daemon 为每个根生成并持久化的唯一 `pathPrefix`。
+
+`.code-workspace` 读取 [VS Code multi-root workspace schema](https://code.visualstudio.com/docs/editing/workspaces/multi-root-workspaces#_workspace-file-schema) 的 `folders[].path/name` 子集：支持 JSONC/JSON5 注释、尾逗号，以及相对 workspace 文件或绝对的本地路径；`settings`、`extensions` 等字段不参与 GeneHub 行为。MVP 不接受 `uri`/remote root，最多 32 个根，定义文件最多 1 MiB。Explorer 按文件顺序显示每个根；Agent、会话存储、终端和 Git 始终使用第一个根，只有文件树、`file.write` 与 Asset Preview 使用全部根。
 
 URL **不是 capability**。仅知道或转发 URL 不会获得文件：Viewer 必须重新取得目标 endpoint/route，并以当前浏览器已有的配对 credential 或账号 session 完成 peer authentication。daemon 最终再次校验 workspace scope 和 path。
 
@@ -122,11 +124,11 @@ daemon 的顺序是：
 
 1. 校验 canonical workspace-relative path。
 2. 校验 route 限定的 workspace handle；解析为 daemon-local workspace id。
-3. 从已注册 workspace 获取 root，以 capability directory API 打开相对路径。
+3. 普通 workspace 直接使用第一根；`.code-workspace` 先把 path 的首段解析为持久化 folder prefix，再以对应 capability directory API 打开余下相对路径。
 4. 要求目标是普通文件；不把目录、FIFO、设备或 socket 当文件流。
 5. 先读 metadata。大于 4 MiB 直接返回 `tooLarge`，不开始传输。
 6. 最多读取 `4 MiB + 1`；增长越界返回 `tooLarge`，长度变化返回 `sourceChanged`。
-7. 按扩展名和有限 magic/UTF-8 规则确定 allowlist 类型。
+7. 图片/视频按扩展名 + magic 判定；Markdown/HTML 按扩展名 + UTF-8 判定；其他有效 UTF-8 无 NUL 内容作为安全文本。
 8. 对完整 bytes 计算截短 SHA-256 version，发送精确 response head 和 body。
 
 文件读取在 `spawn_blocking` 中执行，最多两个并发 Preview worker；它不占 carrier reader 或 DataEndpoint writer task。handler 等待 worker 时只占自己的 logical stream。
@@ -147,9 +149,9 @@ daemon 的顺序是：
 | `video` | `video/webm` | `.webm` + EBML marker |
 | `markdown` | `text/markdown` | `.md/.markdown/.mdown` + valid UTF-8 |
 | `html` | `text/html` | `.html/.htm` + valid UTF-8 |
-| `text` | `text/plain` | 明确的源码/配置/日志扩展名 + valid UTF-8 |
+| `text` | `text/plain` | 其他扩展名 + valid UTF-8 + 无 NUL |
 
-文本前 8000 个字符含 NUL 或 UTF-8 非法时拒绝。daemon 不相信浏览器传来的 MIME，也不做通用 MIME sniffing。未知扩展名、扩展名与 magic 不符或其他二进制返回 `unsupported`。
+文本中任意位置含 NUL 或 UTF-8 非法时拒绝。daemon 不相信浏览器传来的 MIME，也不做可执行的通用 MIME sniffing；未知扩展名只要满足文本判定就作为转义文本显示。图片/视频仍必须同时匹配扩展名与 magic；否则若 bytes 本身是文本就降级为文本，其他二进制返回 `unsupported`。
 
 ## 7. 浏览器渲染
 
@@ -159,7 +161,7 @@ Viewer 用完整 bytes 创建带 daemon allowlist MIME 的 Blob URL。图片使�
 
 ### Markdown 与文本
 
-Markdown 使用 `react-markdown` + GFM，不启用 raw HTML。document 变体有完整标题层级、列表/任务列表、引用、表格、inline code、代码块复制与常用语言语法着色；未知语言由 highlighter 自动识别，单块超过 256 KiB 时回到已转义纯文本，避免高亮器独占主线程。普通文本按 UTF-8 解码到 `<pre>`。
+Markdown 使用 `react-markdown` + GFM，不启用 raw HTML。document 变体有完整标题层级、列表/任务列表、引用、表格、inline code、代码块复制与常用语言语法着色；未知语言由 highlighter 自动识别，单块超过 256 KiB 时回到已转义纯文本，避免高亮器独占主线程。普通文本复用同一高亮组件：按文件名/扩展名推断常见源码、配置、构建和脚本语言，未知格式自动检测，始终先转义再显示，并拥有独立双向滚动容器。
 
 ````markdown
 ```mermaid
@@ -215,17 +217,21 @@ MVP 的固定 base 会让相对 CSS、JS、图片和模块 import 明确失败�
 
 连接未配对、设备离线、URL 设备与握手身份不一致、版本不兼容和 E2EE 认证失败使用连接层错误，不伪装成文件不存在。协议版本不匹配直接关闭，不尝试旧 `file.read`。
 
-## 10. v2 文件界面与 Agent 链接
+## 10. v3 文件界面、多根工作区与 Agent 链接
 
 FilesPanel 把目录和文件交互彻底分开：文件才打开 Preview，目录只在当前树中展开。每次打开 Files pane 都重新获取 root；窗口重新获得焦点/可见性时自动刷新，并提供明确的“刷新”按钮。root 刷新后，仍处于展开状态的目录会重新获取自己的 subtree，不会把整个工作台导航到目录 URL，也不会永久停在“载入中”。
+
+协议中的折叠目录以**缺失 `children`**表示，而不是 `children: null`；Web 仍归一化旧 daemon 的 null。这个边界有协议序列化和整页组件两层回归测试：旧实现点击真实目录后执行 `null.map()`，React 因未捕获 render error 卸载整个工作台，正是“全 page 都没了”的根因。
+
+打开项目入口同时接受普通目录和 `.code-workspace`。远端目录浏览器列出子目录及当前目录中的 workspace 文件；桌面原生壳提供相邻的“打开项目文件夹”和“打开工作区”动作。多根 Explorer 顶层是各 folder label，节点 path 始终带唯一 `pathPrefix`，daemon 在每次 tree/write/preview 时重新解析到具体 capability root，不能用前缀穿越到另一个根。
 
 浏览器在每次 `session.send` 中附带结构化 `artifactPreviewBaseUrl`：
 
 ```text
-https://<当前域名>/<当前渠道>/assets/preview/v1/<device>/<workspace>/
+https://<当前域名>/<当前渠道>/assets/preview/v1/<device>/<workspace>/[<first-folder-prefix>/]
 ```
 
-这是上下文，不是 capability。daemon 只接受 canonical HTTP(S)、无 userinfo/query/fragment、精确包含一个 device/workspace 且 workspace 与当前 session 一致的 Preview prefix；它生成产品固定的路径规范提示，客户端不能直接传任意 system prompt。提示要求 Agent 只追加逐 segment percent-encode 的 workspace-relative path，并只链接已存在、类型受支持且不超过 4 MiB 的普通文件。
+这是上下文，不是 capability。daemon 只接受 canonical HTTP(S)、无 userinfo/query/fragment、精确包含一个 device/workspace 和至多一个 folder prefix，且 workspace 与当前 session 一致的 Preview prefix；它生成产品固定的路径规范提示，客户端不能直接传任意 system prompt。多根时浏览器把第一个 folder prefix 预先放进 base URL，因此 Agent 仍只追加相对其 cwd 的路径。提示要求逐 segment percent-encode，并只链接已存在、类型受支持且不超过 4 MiB 的普通文件。
 
 `SessionConfig.additional_system_prompt` 是唯一 adapter 边界：
 
@@ -247,7 +253,11 @@ https://<当前域名>/<当前渠道>/assets/preview/v1/<device>/<workspace>/
 - 两台独立已配对客户端能用同一 locator 通过真实 self-hosted Relay/daemon 读取相同 bytes。
 - 文件恰好 4 MiB 成功，4 MiB + 1 byte 明确 `tooLarge`；没有截断或 overview。
 - 目录只展开不导航；重新打开、回到页面或按刷新均能看到新文件，展开目录在 root refresh 后自行恢复。
+- 真实 wire 的折叠目录字段缺失；旧端的 `children:null` 也只触发展开请求，不会卸载页面。
+- `.code-workspace` 的注释、尾逗号、相对/绝对本地 path、folder name 和重复名称消歧可用；URI root、重复目录、越界路径、超量定义明确拒绝。
+- 多根 tree/write/Preview 都按 `pathPrefix` 到达正确 capability root；Agent/session/terminal/Git cwd 仍是第一根，Agent Preview base 已包含第一根前缀。
 - 长 Markdown 可滚动，GFM/inline code/fenced code 高亮和安全 Mermaid 流程图可用。
+- 任意有效 UTF-8 无 NUL 文件可读；已知源码/配置/构建格式按路径着色，未知文本自动识别或安全退化为转义纯文本。
 - `session.send` 的 Preview prefix 包含当前 origin、deployment channel、device 与 workspace；daemon 拒绝 active/ambiguous URL，所有已注册 adapter 都收到同一产品规范。
 - allowlist、UTF-8、magic、普通文件和 symlink escape 均有 daemon 测试。
 - 成功 response 精确校验三处长度；取消、超时和页面关闭能释放 stream/client/Blob。

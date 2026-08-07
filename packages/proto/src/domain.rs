@@ -125,11 +125,28 @@ pub struct AgentInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
+pub struct WorkspaceFolderInfo {
+    /// Explorer label from `.code-workspace#folders[].name`, or the directory name.
+    pub name: String,
+    /// Absolute path on the owning device. It never leaves the E2EE application channel.
+    pub root: String,
+    /// Empty for a plain folder workspace; otherwise the first virtual path segment.
+    pub path_prefix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
 pub struct WorkspaceInfo {
     pub id: String,
     pub name: String,
+    /// The first folder and Agent working directory.
     pub root: String,
     pub is_git_repo: bool,
+    pub folders: Vec<WorkspaceFolderInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_file: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -358,10 +375,12 @@ pub struct FileNode {
     /// Workspace-relative, always forward-slashed so clients need no per-OS logic.
     pub path: String,
     pub is_dir: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     #[ts(type = "number")]
     pub size: Option<u64>,
     /// Absent means "not expanded yet" rather than "empty".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub children: Option<Vec<FileNode>>,
 }
@@ -780,4 +799,29 @@ pub struct InviteAuth {
     pub invite_id: String,
     pub nonce: String,
     pub proof: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapsed_file_tree_fields_are_absent_instead_of_null() {
+        let node = FileNode {
+            name: "docs".into(),
+            path: "docs".into(),
+            is_dir: true,
+            size: None,
+            children: None,
+        };
+        let wire = serde_json::to_value(node).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "name": "docs",
+                "path": "docs",
+                "isDir": true,
+            })
+        );
+    }
 }

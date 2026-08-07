@@ -204,6 +204,17 @@ function Items({
         >
           打开项目…
         </Item>
+        <Item
+          disabled={endpoint.via !== "loopback" || !host.pickWorkspaceFile}
+          onSelect={run(() => {
+            if (endpoint.via !== "loopback") return;
+            void host.pickWorkspaceFile?.().then((picked) => {
+              if (picked) void openWorkspace(picked);
+            });
+          })}
+        >
+          打开工作区…
+        </Item>
         <Separator />
         <Item onSelect={run(() => openTab("settings"))}>设置</Item>
         <Item onSelect={run(() => host.window?.close())}>关闭窗口</Item>

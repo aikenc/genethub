@@ -238,10 +238,28 @@ pub struct CustomAgent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceFolderEntry {
+    pub name: String,
+    pub root: PathBuf,
+    /// Empty for a folder workspace. A `.code-workspace` assigns every root a
+    /// unique, URL-safe first segment so file and Preview paths are unambiguous.
+    pub path_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceEntry {
     pub id: String,
     pub name: String,
+    /// The first folder is deliberately duplicated here as a first-class fact:
+    /// it remains the Agent/session/terminal/git working directory.
     pub root: PathBuf,
+    /// Every filesystem root visible in Explorer and Asset Preview, in order.
+    /// Empty only while loading a pre-multi-root config; startup migrates it.
+    #[serde(default)]
+    pub folders: Vec<WorkspaceFolderEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_file: Option<PathBuf>,
     /// A revisioned catalogue fact, sampled when the daemon starts or the
     /// workspace is first opened. Keeping it in config prevents a filesystem
     /// change from producing a different Hub snapshot at the same revision.
@@ -263,6 +281,36 @@ impl Config {
     pub fn save(&self, path: &Path) -> Result<()> {
         let body = serde_json::to_string_pretty(self)?;
         save_private(path, body.as_bytes())
+    }
+
+    /// Rewrites the old one-root representation once, instead of carrying a
+    /// permanent runtime fallback through every filesystem operation.
+    pub fn migrate_workspace_folders(&mut self, path: &Path) -> Result<()> {
+        let mut changed = false;
+        for workspace in &mut self.workspaces {
+            if workspace.folders.is_empty() {
+                workspace.folders.push(WorkspaceFolderEntry {
+                    name: workspace
+                        .root
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| workspace.name.clone()),
+                    root: workspace.root.clone(),
+                    path_prefix: String::new(),
+                });
+                changed = true;
+            }
+            if workspace.folders.first().map(|folder| &folder.root) != Some(&workspace.root) {
+                anyhow::bail!(
+                    "workspace {} primary root does not match its first folder",
+                    workspace.id
+                );
+            }
+        }
+        if changed {
+            self.save(path)?;
+        }
+        Ok(())
     }
 
     /// Makes the catalogue generation durable before it is ever uploaded.
@@ -944,6 +992,12 @@ mod tests {
             id: "w1".into(),
             name: "demo".into(),
             root: PathBuf::from("/tmp/demo"),
+            folders: vec![WorkspaceFolderEntry {
+                name: "demo".into(),
+                root: PathBuf::from("/tmp/demo"),
+                path_prefix: String::new(),
+            }],
+            workspace_file: None,
             is_git_repo: false,
         });
         config.save(&path).unwrap();
@@ -952,6 +1006,32 @@ mod tests {
         assert_eq!(loaded.port, 1234);
         assert_eq!(loaded.workspaces.len(), 1);
         assert_eq!(loaded.workspaces[0].name, "demo");
+    }
+
+    #[test]
+    fn legacy_workspace_roots_are_migrated_once_to_folder_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let root = dir.path().join("project");
+        let mut config = Config::default();
+        config.workspaces.push(WorkspaceEntry {
+            id: "w1".into(),
+            name: "Project".into(),
+            root: root.clone(),
+            folders: Vec::new(),
+            workspace_file: None,
+            is_git_repo: false,
+        });
+        config.save(&path).unwrap();
+
+        let mut loaded = Config::load(&path).unwrap();
+        loaded.migrate_workspace_folders(&path).unwrap();
+        assert_eq!(loaded.workspaces[0].folders.len(), 1);
+        assert_eq!(loaded.workspaces[0].folders[0].root, root);
+        assert!(loaded.workspaces[0].folders[0].path_prefix.is_empty());
+
+        let saved = Config::load(&path).unwrap();
+        assert_eq!(saved.workspaces[0].folders.len(), 1);
     }
 
     #[test]
@@ -1108,6 +1188,12 @@ mod tests {
             id: "w1".into(),
             name: "project".into(),
             root: project.clone(),
+            folders: vec![WorkspaceFolderEntry {
+                name: "project".into(),
+                root: project.clone(),
+                path_prefix: String::new(),
+            }],
+            workspace_file: None,
             is_git_repo: false,
         });
 

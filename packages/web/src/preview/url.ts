@@ -32,10 +32,14 @@ export function assetPreviewUrl(
 export function assetPreviewBaseUrl(
   deviceHandle: string,
   workspaceHandle: string,
+  workspaceFolder = "",
   origin = typeof location === "undefined" ? "" : location.origin,
   basePath = previewBasePath(),
 ): string {
-  const pathname = assetPreviewBasePath(deviceHandle, workspaceHandle, basePath);
+  const base = assetPreviewBasePath(deviceHandle, workspaceHandle, basePath);
+  const pathname = workspaceFolder
+    ? base + encodeURIComponent(locatorSegment(workspaceFolder, "workspace folder")) + "/"
+    : base;
   return origin ? new URL(pathname, origin).toString() : pathname;
 }
 

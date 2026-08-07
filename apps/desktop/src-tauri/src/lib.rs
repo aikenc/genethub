@@ -310,6 +310,25 @@ async fn pick_directory(app: tauri::AppHandle) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+/// A separate native action mirrors VS Code's "Open Workspace from File".
+/// Native dialogs cannot portably select either a directory or a file in one
+/// gesture, so the workbench presents the two adjacent choices.
+#[tauri::command]
+async fn pick_workspace_file(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("VS Code Workspace", &["code-workspace"])
+        .pick_file(move |picked| {
+            let _ = tx.send(picked.and_then(|path| path.into_path().ok()));
+        });
+    rx.await
+        .ok()
+        .flatten()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 /// Resolves a binary shipped beside the executable, falling back to PATH so
 /// `tauri dev` works against a `cargo build` without a packaged bundle.
 fn bundled_binary(app: &tauri::AppHandle, name: &str) -> Option<PathBuf> {
@@ -436,7 +455,8 @@ pub fn run() {
             app_version,
             app_update_status,
             notify,
-            pick_directory
+            pick_directory,
+            pick_workspace_file
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the app")

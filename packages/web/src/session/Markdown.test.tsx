@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { Markdown } from "./Markdown";
+import { HighlightedCode, languageForPath, Markdown } from "./Markdown";
 
 vi.mock("mermaid", () => ({
   default: {
@@ -111,6 +111,19 @@ describe("an agent's reply", () => {
 
     expect(container.querySelector(".hljs-keyword")).toHaveTextContent("const");
     expect(screen.getByText("typescript")).toBeInTheDocument();
+  });
+
+  it("infers common source and config languages for standalone text Preview", () => {
+    expect(languageForPath("src/main.cpp")).toBe("cpp");
+    expect(languageForPath("infra/Dockerfile")).toBe("dockerfile");
+    expect(languageForPath("suite.code-workspace")).toBe("json");
+    expect(languageForPath("data/new-language")).toBeUndefined();
+
+    const { container } = render(
+      <HighlightedCode text={"class Preview { public: int value = 4; };"} language="cpp" document />,
+    );
+    expect(container.querySelector(".gh-code-document")).toBeInTheDocument();
+    expect(container.querySelector(".hljs-keyword")).toBeInTheDocument();
   });
 
   it("renders Mermaid lazily as an inert SVG image", async () => {

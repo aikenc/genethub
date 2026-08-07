@@ -60,11 +60,23 @@ describe("portable Asset Preview locators", () => {
       assetPreviewBaseUrl(
         "device office",
         "workspace docs",
+        "",
         "https://app.example",
         "/relay-dev-2/",
       ),
     ).toBe(
       "https://app.example/relay-dev-2/assets/preview/v1/device%20office/workspace%20docs/",
+    );
+    expect(
+      assetPreviewBaseUrl(
+        "device office",
+        "workspace docs",
+        "Product 源码",
+        "https://app.example",
+        "/relay-dev-2/",
+      ),
+    ).toBe(
+      "https://app.example/relay-dev-2/assets/preview/v1/device%20office/workspace%20docs/Product%20%E6%BA%90%E7%A0%81/",
     );
   });
 });

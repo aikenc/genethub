@@ -4,7 +4,7 @@ import type { AssetPreviewMetadata } from "@genehub/proto";
 
 import { detectHost, type Endpoint, type Host } from "../host";
 import { Client, type AssetPreviewResult, type ProtocolDial } from "../protocol/client";
-import { Markdown } from "../session/Markdown";
+import { HighlightedCode, languageForPath, Markdown } from "../session/Markdown";
 import { readRtcEnabled } from "../settings/rtc";
 import type { AssetPreviewLocation } from "./url";
 
@@ -70,13 +70,19 @@ export function AssetPreviewPage({
           <p className="mt-2 text-xs text-muted">{state.message}</p>
         </section>
       ) : (
-        <PreviewDocument result={state.result} />
+        <PreviewDocument result={state.result} path={source.path} />
       )}
     </main>
   );
 }
 
-function PreviewDocument({ result }: { result: AssetPreviewResult }) {
+function PreviewDocument({
+  result,
+  path,
+}: {
+  result: AssetPreviewResult;
+  path: string;
+}) {
   const { metadata, bytes } = result;
   if (metadata.kind === "markdown") {
     return (
@@ -89,9 +95,11 @@ function PreviewDocument({ result }: { result: AssetPreviewResult }) {
   }
   if (metadata.kind === "text") {
     return (
-      <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-xs leading-relaxed">
-        {decodeText(bytes)}
-      </pre>
+      <HighlightedCode
+        text={decodeText(bytes)}
+        language={languageForPath(path)}
+        document
+      />
     );
   }
   if (metadata.kind === "html") {

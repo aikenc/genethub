@@ -63,8 +63,14 @@ fn failed(error: anyhow::Error) -> Handled {
         ErrorCode::Forbidden
     } else if message.contains("already running") {
         ErrorCode::Conflict
-    } else if message.contains("no such") {
+    } else if message.contains("no such") || message.contains("does not exist") {
         ErrorCode::NotFound
+    } else if message.contains("workspace file")
+        || message.contains("workspace folder")
+        || message.contains(".code-workspace")
+        || message.contains("not a directory")
+    {
+        ErrorCode::BadRequest
     } else if message.contains("does not") || message.contains("not supported") {
         ErrorCode::Unsupported
     } else {
@@ -576,19 +582,11 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             path,
             depth,
         } => {
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            let target = match state
+            match state
                 .workspaces
-                .resolve(&workspace_id, path.as_deref().unwrap_or("."))
+                .tree(&workspace_id, path.as_deref(), depth.unwrap_or(2).min(8))
                 .await
             {
-                Ok(target) => target,
-                Err(error) => return failed(error),
-            };
-            match files::tree(&workspace.root, &target, depth.unwrap_or(2).min(8)) {
                 Ok(tree) => Handled::ok(Reply::FileTree(tree)),
                 Err(error) => failed(error),
             }
@@ -603,11 +601,7 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
                 Ok(target) => target,
                 Err(error) => return failed(error),
             };
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            match files::write(&workspace.root, &target, &content) {
+            match files::write(&target.root, &target.absolute, &content) {
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }

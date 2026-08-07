@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -61,6 +62,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
       dataDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-data-"));
       homeDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-home-"));
       workspaceDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-work-"));
+      mkdirSync(path.join(workspaceDir, "docs"));
       writeFileSync(path.join(workspaceDir, "notes.md"), "hello\n");
 
       const started = await startDaemon(dataDir, path.join(homeDir, "GeneHub"));
@@ -337,6 +339,9 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
         expect(tree.data.children?.map((child) => child.name)).toContain(
           "notes.md",
         );
+        expect(
+          tree.data.children?.find((child) => child.name === "docs")?.children,
+        ).toBeUndefined();
       }
 
       const preview = await client.preview(workspaceId, "notes.md");
@@ -366,6 +371,66 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           payload: { ptyId: terminal.data.ptyId },
         });
       }
+    }, 20_000);
+
+    it("opens a multi-root workspace and previews a file from either root", async () => {
+      const docs = path.join(homeDir, "suite-docs");
+      mkdirSync(docs);
+      writeFileSync(path.join(docs, "guide.custom-text"), "section: preview\n");
+      const definition = path.join(homeDir, "suite.code-workspace");
+      writeFileSync(
+        definition,
+        JSON.stringify({
+          folders: [
+            { name: "Product", path: workspaceDir },
+            { name: "Docs", path: docs },
+          ],
+        }),
+      );
+
+      const opened = await client.call({
+        type: "workspace.open",
+        payload: { root: definition },
+      });
+      expect(opened?.type).toBe("workspace");
+      if (opened?.type !== "workspace") return;
+      expect(opened.data.root).toBe(realpathSync(workspaceDir));
+      expect(opened.data.folders.map((folder) => folder.pathPrefix)).toEqual([
+        "Product",
+        "Docs",
+      ]);
+
+      const root = await client.call({
+        type: "file.tree",
+        payload: { workspaceId: opened.data.id, path: null, depth: 1 },
+      });
+      expect(root?.type).toBe("fileTree");
+      if (root?.type !== "fileTree") return;
+      expect(root.data.children?.map((node) => node.path)).toEqual([
+        "Product",
+        "Docs",
+      ]);
+      expect(root.data.children?.[0]?.children).toBeUndefined();
+
+      const preview = await client.preview(
+        opened.data.id,
+        "Docs/guide.custom-text",
+      );
+      expect(preview.metadata.kind).toBe("text");
+      expect(new TextDecoder().decode(preview.bytes)).toContain("section: preview");
+
+      const write = await client.call({
+        type: "file.write",
+        payload: {
+          workspaceId: opened.data.id,
+          path: "Docs/generated.json",
+          content: '{"multiRoot":true}\n',
+        },
+      });
+      expect(write?.type).toBe("ack");
+      expect(readFileSync(path.join(docs, "generated.json"), "utf8")).toBe(
+        '{"multiRoot":true}\n',
+      );
     }, 20_000);
   },
 );
