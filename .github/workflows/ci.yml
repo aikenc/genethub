@@ -4,11 +4,139 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Release calls this with force_full=true. Ordinary push/PR never do — the
+  # full suite is the tag's cost, not every merge to main.
+  workflow_call:
+    inputs:
+      force_full:
+        description: Run every job regardless of changed paths
+        type: boolean
+        required: false
+        default: false
+
+# One live run per PR (or branch). A newer push cancels the rest — otherwise the
+# queue is full of superseded builds while the reviewer waits on the latest tip.
+# Release invocations get their own group so a tag verify cannot cancel a PR.
+concurrency:
+  group: >-
+    open-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.force_full || 'path' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
 
 permissions:
   contents: read
 
 jobs:
+  # Decide which heavy jobs this change actually needs. main push and pull
+  # requests share the same path filter; only release (force_full) runs everything.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      relay: ${{ steps.filter.outputs.relay }}
+      web: ${{ steps.filter.outputs.web }}
+      desktop: ${{ steps.filter.outputs.desktop }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Tag / rehearsal release: pay for the whole matrix once, at the point
+          # something is about to ship. main and PR stay on the path filter.
+          if [ "${{ inputs.force_full }}" = "true" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "relay=true" >> "$GITHUB_OUTPUT"
+            echo "web=true" >> "$GITHUB_OUTPUT"
+            echo "desktop=true" >> "$GITHUB_OUTPUT"
+            echo "force_full: full suite"
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+            if [ "$base" = "0000000000000000000000000000000000000000" ] || [ -z "$base" ]; then
+              echo "rust=true" >> "$GITHUB_OUTPUT"
+              echo "relay=true" >> "$GITHUB_OUTPUT"
+              echo "web=true" >> "$GITHUB_OUTPUT"
+              echo "desktop=true" >> "$GITHUB_OUTPUT"
+              echo "no usable before SHA: full suite"
+              exit 0
+            fi
+          fi
+
+          mapfile -t files < <(git diff --name-only "$base" "$head")
+          printf 'changed (%d):\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+
+          rust=false
+          relay=false
+          web=false
+          desktop=false
+          # Workflow or shared CI fixtures changed: trust nothing, run everything.
+          force=false
+
+          for f in "${files[@]}"; do
+            case "$f" in
+              .github/workflows/*|.github/agent-clis/*)
+                force=true
+                ;;
+              Cargo.toml|Cargo.lock|apps/daemon/*|apps/cli/*|apps/agent/*|apps/proto/*|testing/*)
+                rust=true
+                ;;
+              apps/relay/*)
+                relay=true
+                ;;
+              packages/web/*)
+                web=true
+                ;;
+              apps/desktop/*)
+                desktop=true
+                ;;
+            esac
+          done
+
+          if [ "$force" = true ]; then
+            rust=true
+            relay=true
+            web=true
+            desktop=true
+          fi
+
+          # The web job's mandatory journeys drive a real daemon, agent, and
+          # relay. A change on either side of that wire must re-prove it.
+          if [ "$rust" = true ] || [ "$relay" = true ]; then
+            web=true
+          fi
+
+          # Daemon persistence is shared with the desktop shell; a daemon-only
+          # change still has to exercise Windows DACL and supervision.
+          if [ "$rust" = true ]; then
+            for f in "${files[@]}"; do
+              case "$f" in
+                apps/daemon/*|apps/cli/*|Cargo.toml|Cargo.lock)
+                  desktop=true
+                  break
+                  ;;
+              esac
+            done
+          fi
+
+          {
+            echo "rust=$rust"
+            echo "relay=$relay"
+            echo "web=$web"
+            echo "desktop=$desktop"
+          } >> "$GITHUB_OUTPUT"
+          echo "filter: rust=$rust relay=$relay web=$web desktop=$desktop"
+
   # A lock file records where each tarball came from. Written on a machine with a
   # company mirror in its npm config, it records that mirror — and then every
   # install anywhere else fails, including the release build, which is where it
@@ -34,10 +162,12 @@ jobs:
       - name: Every third-party action must be pinned to a commit
         run: |
           set -euo pipefail
+          # Local reusable workflows (`./.github/workflows/...`) are allowed;
+          # everything else must be a third-party action pinned to a full SHA.
           bad="$(grep -rhoE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+[^[:space:]#]+' \
             --include='*.yml' --include='*.yaml' .github/workflows \
             | sed -E 's/.*uses:[[:space:]]+//' \
-            | grep -Ev '^(\./|[^@]+@[0-9a-f]{40})$' || true)"
+            | grep -Ev '^(\./.+|[^@]+@[0-9a-f]{40})$' || true)"
           if [ -n "$bad" ]; then
             echo "these actions are not pinned to a full commit SHA:" >&2
             echo "$bad" >&2
@@ -64,6 +194,8 @@ jobs:
           echo "no path collides on a case-insensitive filesystem"
 
   rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -76,6 +208,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: .github/agent-clis/package-lock.json
       # The adapter journeys (docs/testing.md §8.1's "专项测试") drive real
       # third-party CLIs. Without them the cases skip themselves; installing
       # costs nothing since the Claude Code one only actually runs when
@@ -127,8 +261,20 @@ jobs:
               | while IFS= read -r line; do echo "::error::$line"; done
             exit "$status"
           fi
+      # The web job reuses these instead of compiling the same debug bins again.
+      # Retention is short: they are only a same-run handoff.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: open-ci-bins
+          path: |
+            target/debug/genet-dev
+            target/debug/genet-agent-dev
+          if-no-files-found: error
+          retention-days: 1
 
   relay:
+    needs: changes
+    if: needs.changes.outputs.relay == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -140,13 +286,33 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: apps/relay/package-lock.json
       - run: npm ci
       - run: npm run typecheck
       # Covers the boundary checks from architecture.md §6.4 and the digest that
       # keeps the contract from changing on one side only.
       - run: npm test
+      # Built once here so the web job does not pay for another `npm ci` + build
+      # when both jobs run on the same tip.
+      - run: npm run build
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: open-ci-relay-dist
+          path: apps/relay/dist/
+          if-no-files-found: error
+          retention-days: 1
 
   web:
+    needs: [changes, rust, relay]
+    # `always()` so a skipped rust/relay job does not cancel a web-only PR.
+    # Still refuse to run when a dependency that did run has failed.
+    if: >-
+      always()
+      && needs.changes.result == 'success'
+      && needs.changes.outputs.web == 'true'
+      && (needs.rust.result == 'success' || needs.rust.result == 'skipped')
+      && (needs.relay.result == 'success' || needs.relay.result == 'skipped')
     runs-on: ubuntu-latest
     env:
       GENET_E2E_REQUIRED: "1"
@@ -162,17 +328,43 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            packages/web/package-lock.json
+            apps/relay/package-lock.json
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        if: needs.rust.result != 'success'
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      # The end-to-end case drives a real daemon and a real agent. Without the
-      # binaries it skips itself, which would quietly drop the only test that
-      # covers the wire between the two languages.
-      - run: cargo build -p genet-cli -p genet-agent
+        if: needs.rust.result != 'success'
+      # Prefer the bins the rust job already produced. Rebuild only when that job
+      # did not run (web-only / relay-only tip).
+      # Download to the workspace root: upload-artifact v4 keeps paths relative to
+      # the uploader's workspace, so a nested `path:` here would double the prefix
+      # (`target/debug/target/debug/...`) and the e2e binary checks would fail.
+      - name: Reuse daemon and agent bins from the rust job
+        if: needs.rust.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: open-ci-bins
+          path: .
+      - name: Build daemon and agent bins
+        if: needs.rust.result != 'success'
+        run: cargo build -p genet-cli -p genet-agent
         working-directory: .
+      - run: chmod +x target/debug/genet-dev target/debug/genet-agent-dev
+        working-directory: .
+      - name: Reuse relay dist from the relay job
+        if: needs.relay.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: open-ci-relay-dist
+          path: .
       # And the self-hosted case drives a real relay on top of that. This is
       # the job that proves the open repository stands on its own — a relay and
       # a folder of static files — so letting it skip would drop the claim.
-      - run: npm ci && npm run build
+      - name: Build relay
+        if: needs.relay.result != 'success'
+        run: npm ci && npm run build
         working-directory: apps/relay
       - run: npm ci
       - run: npm run typecheck
@@ -185,6 +377,8 @@ jobs:
       - run: npm run build
 
   desktop:
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -217,3 +411,48 @@ jobs:
       # listener behind the supervisor's back is Unix-specific.
       - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --test supervision
       - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --test wiring --test supervision -- -D warnings
+
+  # Single required check for branch protection. Skipped path-filtered jobs are
+  # fine; a failed or cancelled job that was supposed to run is not.
+  gate:
+    needs: [changes, lockfiles, rust, relay, web, desktop]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every scheduled job to pass
+        shell: bash
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          LOCKFILES: ${{ needs.lockfiles.result }}
+          RUST: ${{ needs.rust.result }}
+          RELAY: ${{ needs.relay.result }}
+          WEB: ${{ needs.web.result }}
+          DESKTOP: ${{ needs.desktop.result }}
+          WANT_RUST: ${{ needs.changes.outputs.rust }}
+          WANT_RELAY: ${{ needs.changes.outputs.relay }}
+          WANT_WEB: ${{ needs.changes.outputs.web }}
+          WANT_DESKTOP: ${{ needs.changes.outputs.desktop }}
+        run: |
+          set -euo pipefail
+          fail=0
+          check() {
+            local name="$1" result="$2" required="${3:-true}"
+            if [ "$required" != "true" ]; then
+              echo "ok: $name skipped (not selected)"
+              return
+            fi
+            case "$result" in
+              success) echo "ok: $name" ;;
+              *)
+                echo "::error::$name finished as $result"
+                fail=1
+                ;;
+            esac
+          }
+          check changes "$CHANGES" true
+          check lockfiles "$LOCKFILES" true
+          check rust "$RUST" "$WANT_RUST"
+          check relay "$RELAY" "$WANT_RELAY"
+          check web "$WEB" "$WANT_WEB"
+          check desktop "$DESKTOP" "$WANT_DESKTOP"
+          exit "$fail"
