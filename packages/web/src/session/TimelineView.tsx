@@ -469,6 +469,9 @@ function TrunkCard({
   const batches = detail?.batches.filter(
     (batch) => !finalSummaryText || !isFinalSummaryBatch(batch.summary, finalSummaryText),
   );
+  const singleBatch = batches?.length === 1 ? batches[0] : undefined;
+  const singleBatchTitle = splitMonologue(singleBatch?.monologue ?? "").first;
+  const trunkTitle = singleBatchTitle || progressTitle(summary.title);
 
   return (
     <div className="overflow-hidden rounded-lg border border-line bg-bg" data-testid="round-trunk">
@@ -478,16 +481,25 @@ function TrunkCard({
         aria-expanded={open}
         onClick={() => setManualOpen(!open)}
       >
-        <span className="min-w-0 flex-1 truncate text-sm">
-          {active ? "进展" : "过程"}：{normalizeProgressTitle(summary.title)}
+        <span className="shrink-0" aria-hidden="true">
+          🧭
         </span>
-        <span className="text-xs text-muted">{summary.blobCount} 项</span>
+        <span className="min-w-0 flex-1 break-words text-sm font-medium">
+          {trunkTitle}
+        </span>
+        <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>
+        <span className="shrink-0 text-xs text-accent" aria-hidden="true">
+          {open ? "▴" : "▾"}
+        </span>
       </button>
       {open ? (
-        <div className="space-y-2 border-t border-line p-2">
+        <div className="space-y-2 px-2 pb-2">
           {!detail ? <p className="px-2 py-1 text-xs text-muted">正在加载…</p> : null}
-          {batches?.length === 1 ? (
-            <BatchContent batch={batches[0]!} />
+          {singleBatch ? (
+            <BatchContent
+              batch={singleBatch}
+              monologue={monologueAfterTitle(singleBatch.monologue ?? "", summary.title)}
+            />
           ) : (
             batches?.map((batch, index) => (
               <BatchCard
@@ -506,36 +518,78 @@ function TrunkCard({
 function BatchCard({ batch, active }: { batch: RoundBatch; active: boolean }) {
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
   const open = manualOpen ?? active;
+  const monologue = splitMonologue(batch.monologue ?? "");
   return (
-    <div className="overflow-hidden rounded-lg bg-surface" data-testid="round-batch">
+    <div
+      className="overflow-hidden rounded-lg border border-line bg-surface"
+      data-testid="round-batch"
+    >
       <button
         type="button"
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
         aria-expanded={open}
         onClick={() => setManualOpen(!open)}
       >
-        {open ? (
-          <span className="ml-auto text-xs text-accent">收起</span>
-        ) : (
-          <span className="min-w-0 flex-1 truncate text-xs">{batch.summary.text}</span>
-        )}
+        <span className="shrink-0" aria-hidden="true">
+          💭
+        </span>
+        <span className="min-w-0 flex-1 break-words text-xs">
+          {monologue.first || batch.summary.text}
+        </span>
+        <span className="shrink-0 text-xs text-muted">{batch.summary.blobCount} 项</span>
+        <span className="shrink-0 text-xs text-accent" aria-hidden="true">
+          {open ? "▴" : "▾"}
+        </span>
       </button>
-      {open ? <BatchContent batch={batch} bordered /> : null}
+      {open ? <BatchContent batch={batch} monologue={monologue.rest} /> : null}
     </div>
   );
 }
 
-function BatchContent({ batch, bordered = false }: { batch: RoundBatch; bordered?: boolean }) {
+function BatchContent({
+  batch,
+  monologue = batch.monologue,
+}: {
+  batch: RoundBatch;
+  monologue?: string;
+}) {
   return (
-    <div className={`space-y-1 px-2 py-2 ${bordered ? "border-t border-line" : ""}`}>
-      {batch.monologue ? (
+    <div className="space-y-1 px-2 pb-2">
+      {monologue ? (
         <div className="px-1 py-1 text-sm" data-testid="batch-monologue">
-          <Markdown text={batch.monologue} />
+          <Markdown text={monologue} />
         </div>
       ) : null}
       {batch.blobs.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
     </div>
   );
+}
+
+function splitMonologue(monologue: string): { first: string; rest: string } {
+  const lines = monologue.replace(/\r\n/gu, "\n").split("\n");
+  while (lines[0]?.trim() === "") lines.shift();
+  const firstLine = lines.shift()?.trim() ?? "";
+  const sentenceEnd = firstLine.search(/[。！？!?]|[.](?=\s|$)/u);
+  const end = sentenceEnd < 0 ? firstLine.length : sentenceEnd + 1;
+  const first = firstLine.slice(0, end).trim().replace(/(?:\.{3}|…)+$/u, "");
+  const sameLineRest = firstLine.slice(end).trim();
+  const rest = [sameLineRest, ...lines].filter(Boolean).join("\n").trim();
+  return { first, rest };
+}
+
+function monologueAfterTitle(monologue: string, title: string): string {
+  const { first, rest } = splitMonologue(monologue);
+  const comparable = (text: string) =>
+    normalizeProgressTitle(text)
+      .replace(/[\p{P}\p{S}\s]/gu, "")
+      .toLocaleLowerCase();
+  const firstKey = comparable(first);
+  const titleKey = comparable(title);
+  const duplicate =
+    firstKey.length >= 4 &&
+    titleKey.length >= 4 &&
+    (firstKey.startsWith(titleKey) || titleKey.startsWith(firstKey));
+  return duplicate ? rest : monologue;
 }
 
 function normalizeProgressTitle(title: string): string {
@@ -545,6 +599,11 @@ function normalizeProgressTitle(title: string): string {
     .replace(/^接下来(?:我)?(?:会|将|要)?\s*/, "")
     .replace(/^现在(?:我)?(?:会|将|要)?\s*/, "");
   return normalized || title.trim();
+}
+
+function progressTitle(title: string): string {
+  const normalized = normalizeProgressTitle(title);
+  return splitMonologue(normalized).first || normalized.replace(/(?:\.{3}|…)+$/u, "").trim();
 }
 
 function isFinalSummaryBatch(
