@@ -22,6 +22,14 @@ permissions:
   contents: read
 
 jobs:
+  # Full CI matrix (rust, relay, web e2e, desktop Win/mac). Ordinary main/PR
+  # runs stay path-filtered; the tag is where every job has to pass together
+  # before an installer or tarball is built.
+  verify:
+    uses: ./.github/workflows/ci.yml
+    with:
+      force_full: true
+
   # What this run is. Every later job reads the answers from here rather than
   # re-deriving them, so there is exactly one place where the tag's shape
   # becomes a channel.
@@ -168,7 +176,7 @@ jobs:
   # dependency. macOS waits for signing and notarisation, without which the
   # download is a security warning with an app behind it.
   installers:
-    needs: channel
+    needs: [channel, verify]
     strategy:
       fail-fast: false
       matrix:
@@ -380,7 +388,7 @@ jobs:
   # on ubuntu-22.04 was requiring GLIBC_2.34 and failing on those machines with
   # a wall of `version 'GLIBC_…' not found` — exactly what `curl | sh` users hit.
   binaries:
-    needs: channel
+    needs: [channel, verify]
     strategy:
       fail-fast: false
       matrix:
