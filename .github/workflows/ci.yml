@@ -338,15 +338,15 @@ jobs:
         if: needs.rust.result != 'success'
       # Prefer the bins the rust job already produced. Rebuild only when that job
       # did not run (web-only / relay-only tip).
-      # Download to the workspace root: upload-artifact v4 keeps paths relative to
-      # the uploader's workspace, so a nested `path:` here would double the prefix
-      # (`target/debug/target/debug/...`) and the e2e binary checks would fail.
+      # upload-artifact stores files relative to the paths' common ancestor. The
+      # two binaries therefore arrive at the download root, which must be the
+      # debug directory expected by the journeys.
       - name: Reuse daemon and agent bins from the rust job
         if: needs.rust.result == 'success'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: open-ci-bins
-          path: .
+          path: target/debug
       - name: Build daemon and agent bins
         if: needs.rust.result != 'success'
         run: cargo build -p genet-cli -p genet-agent
@@ -358,7 +358,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: open-ci-relay-dist
-          path: .
+          path: apps/relay/dist
       # And the self-hosted case drives a real relay on top of that. This is
       # the job that proves the open repository stands on its own — a relay and
       # a folder of static files — so letting it skip would drop the claim.
