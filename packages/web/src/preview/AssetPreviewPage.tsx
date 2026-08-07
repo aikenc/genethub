@@ -55,8 +55,8 @@ export function AssetPreviewPage({
   }, [host, source.deviceHandle, source.path, source.workspaceHandle]);
 
   return (
-    <main className="flex min-h-screen flex-col bg-bg text-fg">
-      <header className="flex min-h-11 items-center gap-3 border-b border-line px-4 py-2">
+    <main className="flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg">
+      <header className="flex min-h-11 shrink-0 items-center gap-3 border-b border-line px-4 py-2">
         <span className="min-w-0 truncate font-mono text-xs">{source.path}</span>
         <span className="ml-auto shrink-0 text-[11px] text-faint">
           {source.workspaceHandle}
@@ -80,8 +80,10 @@ function PreviewDocument({ result }: { result: AssetPreviewResult }) {
   const { metadata, bytes } = result;
   if (metadata.kind === "markdown") {
     return (
-      <article className="mx-auto w-full max-w-4xl flex-1 overflow-auto px-5 py-6 text-sm leading-relaxed">
-        <Markdown text={decodeText(bytes)} />
+      <article className="min-h-0 w-full flex-1 overflow-y-auto overscroll-contain touch-pan-y">
+        <div className="mx-auto max-w-4xl px-5 py-6 sm:px-8 sm:py-10">
+          <Markdown text={decodeText(bytes)} variant="document" />
+        </div>
       </article>
     );
   }

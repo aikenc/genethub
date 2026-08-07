@@ -630,6 +630,12 @@ impl AgentAdapter for ClaudeAdapter {
             command.args(["--effort", effort]);
         }
 
+        super::append_system_prompt_arg(
+            &mut command,
+            "--append-system-prompt",
+            config.additional_system_prompt.as_deref(),
+        );
+
         if let Some(session_id) = config
             .resume
             .as_ref()
@@ -2335,6 +2341,7 @@ mod tests {
         let session = adapter
             .start(SessionConfig {
                 effort_id: None,
+                additional_system_prompt: None,
                 session_id: "s1".into(),
                 cwd: dir.path().to_path_buf(),
                 model_id: None,

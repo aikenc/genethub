@@ -432,6 +432,14 @@ export type Request = { "type": "connection.identity" } | { "type": "subscribe",
  */
 expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
 /**
+ * Browser-composed, deployment-aware Asset Preview prefix for this
+ * session's workspace. It is context, not authority: opening a link
+ * still performs normal target selection, authentication and E2EE.
+ * The daemon validates the URL shape and turns it into fixed Agent
+ * guidance; arbitrary client-authored system prompts are never accepted.
+ */
+artifactPreviewBaseUrl: string | null, 
+/**
  * Claims this message as a continuation of a round left open by an
  * interrupt, rather than a new one. Only interrupts need this: the
  * daemon auto-stitches approval and guidance continuations on its

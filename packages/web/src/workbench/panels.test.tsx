@@ -190,6 +190,73 @@ describe("the files panel", () => {
     expect(opened).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("textbox")).toBeNull();
   });
+
+  it("expands a directory in place instead of navigating the whole UI", async () => {
+    const opened = vi.spyOn(window, "open").mockImplementation(() => null);
+    const { client, calls } = stubDaemon({
+      "file.tree": (payload: { path?: string | null }) =>
+        payload.path === "docs"
+          ? {
+              type: "fileTree",
+              data: {
+                name: "docs",
+                path: "docs",
+                isDir: true,
+                children: [{ name: "guide.md", path: "docs/guide.md", isDir: false }],
+              },
+            }
+          : {
+              type: "fileTree",
+              data: {
+                name: "demo",
+                path: "",
+                isDir: true,
+                children: [{ name: "docs", path: "docs", isDir: true }],
+              },
+            },
+    });
+    install(client);
+
+    render(<FilesPanel />);
+    await userEvent.click(await screen.findByRole("treeitem", { name: /docs/ }));
+
+    expect(await screen.findByText("guide.md")).toBeInTheDocument();
+    expect(opened).not.toHaveBeenCalled();
+    expect(calls).toContainEqual({
+      type: "file.tree",
+      payload: { workspaceId: "w1", path: "docs", depth: 1 },
+    });
+    expect(screen.getByText(/单个文件上限 4 MiB/)).toBeInTheDocument();
+  });
+
+  it("refreshes the root without requiring a page reload", async () => {
+    let roots = 0;
+    const { client } = stubDaemon({
+      "file.tree": () => {
+        roots += 1;
+        return {
+          type: "fileTree",
+          data: {
+            name: "demo",
+            path: "",
+            isDir: true,
+            children: [
+              { name: roots === 1 ? "before.md" : "after.md", path: roots === 1 ? "before.md" : "after.md", isDir: false },
+            ],
+          },
+        };
+      },
+    });
+    install(client);
+
+    render(<FilesPanel />);
+    expect(await screen.findByText("before.md")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    expect(await screen.findByText("after.md")).toBeInTheDocument();
+    expect(screen.queryByText("before.md")).toBeNull();
+    expect(roots).toBe(2);
+  });
 });
 
 describe("the changes panel", () => {

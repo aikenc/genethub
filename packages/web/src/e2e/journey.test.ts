@@ -176,6 +176,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           sessionId: session.data.id,
           text: "看看 notes.md",
           attachments: [],
+          artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
       });
@@ -226,6 +227,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           sessionId: session.data.id,
           text: "写个 result.txt",
           attachments: [],
+          artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
       });
@@ -293,6 +295,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
               sessionId: session.data.id,
               text: "说点什么",
               attachments: [],
+              artifactPreviewBaseUrl: null,
               continuesRound: null,
             },
           });

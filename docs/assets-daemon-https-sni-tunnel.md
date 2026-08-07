@@ -90,7 +90,7 @@ SiteCapability {
 }
 ```
 
-daemon 必须先以 capability-safe 的目录 API 打开 workspace，再相对它打开 WebRoot；后续所有路径解析都相对这个已打开的目录句柄完成，不能先 `canonicalize()` 检查、再用环境路径 `open()`。轻量 `asset.preview` 的 workspace confinement 原则可以复用，但 WebRoot 不能复用其“单个完整文件、2 MiB、无相对资源”的响应契约。
+daemon 必须先以 capability-safe 的目录 API 打开 workspace，再相对它打开 WebRoot；后续所有路径解析都相对这个已打开的目录句柄完成，不能先 `canonicalize()` 检查、再用环境路径 `open()`。轻量 `asset.preview` 的 workspace confinement 原则可以复用，但 WebRoot 不能复用其“单个完整文件、4 MiB、无相对资源”的响应契约。
 
 WebRoot 规则：
 
@@ -377,7 +377,7 @@ SNI Edge、Control、Relay 必须是独立进程和服务身份。Edge 日志只
 
 可靠性与性能：
 
-- Range、HEAD、304、取消、慢客户端和大文件流式传输不经过 2 MiB 文本 RPC，也不产生整文件内存缓冲；
+- Range、HEAD、304、取消、慢客户端和大文件流式传输不经过 4 MiB 轻量 Preview，也不产生整文件内存缓冲；
 - 单 view 超限只终止该 view，不影响 daemon endpoint 上的聊天、终端或其他 streams；
 - 证书续期失败不会回退自签名或共享 key，只停止创建新 view 并给稳定 Viewer 明确状态。
 

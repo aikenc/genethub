@@ -1,82 +1,131 @@
-import { memo, useState } from "react";
+import hljs from "highlight.js/lib/core";
+import bash from "highlight.js/lib/languages/bash";
+import css from "highlight.js/lib/languages/css";
+import diff from "highlight.js/lib/languages/diff";
+import go from "highlight.js/lib/languages/go";
+import http from "highlight.js/lib/languages/http";
+import ini from "highlight.js/lib/languages/ini";
+import java from "highlight.js/lib/languages/java";
+import javascript from "highlight.js/lib/languages/javascript";
+import json from "highlight.js/lib/languages/json";
+import markdown from "highlight.js/lib/languages/markdown";
+import plaintext from "highlight.js/lib/languages/plaintext";
+import python from "highlight.js/lib/languages/python";
+import rust from "highlight.js/lib/languages/rust";
+import sql from "highlight.js/lib/languages/sql";
+import typescript from "highlight.js/lib/languages/typescript";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
+import { memo, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-/**
- * An agent's reply, rendered as the markdown it is.
- *
- * It was plain text until now, which meant every list arrived as a wall of
- * hyphens, every table as pipes, and every code block indistinguishable from
- * prose — while `web-workbench.md` §2 had been promising markdown rendering all
- * along.
- *
- * No raw HTML: `react-markdown` ignores it unless a plugin is added, and none is.
- * That is not a detail to leave to chance here — this text comes from a model,
- * which means it can be steered by anything the model read, including a file in
- * the repository it was told to summarise.
- */
-export const Markdown = memo(function Markdown({ text }: { text: string }) {
+const HIGHLIGHT_BYTES = 256 * 1024;
+const MERMAID_BYTES = 128 * 1024;
+
+for (const [name, language] of [
+  ["bash", bash],
+  ["css", css],
+  ["diff", diff],
+  ["go", go],
+  ["http", http],
+  ["ini", ini],
+  ["java", java],
+  ["javascript", javascript],
+  ["json", json],
+  ["markdown", markdown],
+  ["plaintext", plaintext],
+  ["python", python],
+  ["rust", rust],
+  ["sql", sql],
+  ["typescript", typescript],
+  ["xml", xml],
+  ["yaml", yaml],
+] as const) {
+  hljs.registerLanguage(name, language);
+}
+
+const LANGUAGE_ALIASES: Record<string, string> = {
+  cjs: "javascript",
+  html: "xml",
+  js: "javascript",
+  jsx: "javascript",
+  md: "markdown",
+  py: "python",
+  rs: "rust",
+  sh: "bash",
+  shell: "bash",
+  text: "plaintext",
+  ts: "typescript",
+  tsx: "typescript",
+  yml: "yaml",
+};
+
+export type MarkdownVariant = "chat" | "document";
+
+/** Safe, styled GFM used by both conversations and standalone documents. */
+export const Markdown = memo(function Markdown({
+  text,
+  variant = "chat",
+}: {
+  text: string;
+  variant?: MarkdownVariant;
+}) {
   return (
-    <div className="space-y-2 break-words text-fg" data-testid="markdown">
+    <div
+      className={`gh-markdown gh-markdown-${variant} break-words text-fg`}
+      data-testid="markdown"
+    >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          p: ({ children }) => <p className="whitespace-pre-wrap">{children}</p>,
-          h1: ({ children }) => <h1 className="mt-1 text-base font-medium">{children}</h1>,
-          h2: ({ children }) => <h2 className="mt-1 text-sm font-medium">{children}</h2>,
-          h3: ({ children }) => <h3 className="mt-1 text-sm font-medium">{children}</h3>,
-          ul: ({ children }) => <ul className="ml-4 list-disc space-y-1">{children}</ul>,
-          ol: ({ children }) => <ol className="ml-4 list-decimal space-y-1">{children}</ol>,
-          li: ({ children }) => <li className="pl-0.5">{children}</li>,
-          blockquote: ({ children }) => (
-            <blockquote className="border-l-2 border-line pl-3 text-muted">{children}</blockquote>
-          ),
-          hr: () => <hr className="border-line" />,
-          strong: ({ children }) => <strong className="font-medium text-fg">{children}</strong>,
+          p: ({ children }) => <p>{children}</p>,
+          h1: ({ children }) => <h1>{children}</h1>,
+          h2: ({ children }) => <h2>{children}</h2>,
+          h3: ({ children }) => <h3>{children}</h3>,
+          h4: ({ children }) => <h4>{children}</h4>,
+          h5: ({ children }) => <h5>{children}</h5>,
+          h6: ({ children }) => <h6>{children}</h6>,
+          ul: ({ children, className }) => <ul className={className}>{children}</ul>,
+          ol: ({ children, className }) => <ol className={className}>{children}</ol>,
+          li: ({ children, className }) => <li className={className}>{children}</li>,
+          blockquote: ({ children }) => <blockquote>{children}</blockquote>,
+          hr: () => <hr />,
+          strong: ({ children }) => <strong>{children}</strong>,
+          em: ({ children }) => <em>{children}</em>,
+          del: ({ children }) => <del>{children}</del>,
           a: ({ href, children }) => (
-            // Somewhere else entirely: this is a link a model wrote, and it opens
-            // in its own tab rather than replacing the workbench.
-            <a
-              href={href}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="text-accent underline underline-offset-2"
-            >
+            <a href={href} target="_blank" rel="noreferrer noopener">
               {children}
             </a>
           ),
           code: ({ className, children }) => {
             const text = String(children).replace(/\n$/, "");
-            // `react-markdown` gives fenced blocks a `language-*` class and
-            // inline spans none, which is the only thing that tells them apart.
+            const language = className?.replace(/^language-/, "");
             if (!className?.startsWith("language-") && !text.includes("\n")) {
-              return (
-                <code className="rounded bg-raised px-1 py-0.5 font-mono text-[0.9em]">
-                  {text}
-                </code>
-              );
+              return <code className="gh-inline-code">{text}</code>;
             }
-            return <Code text={text} language={className?.replace("language-", "")} />;
+            if (language?.toLowerCase() === "mermaid") {
+              return <MermaidDiagram source={text} />;
+            }
+            return <Code text={text} language={language} />;
           },
           pre: ({ children }) => <>{children}</>,
           table: ({ children }) => (
-            <div className="max-w-full overflow-x-auto touch-pan-x">
-              <table className="w-full border-collapse text-xs">{children}</table>
+            <div className="gh-table-wrap touch-pan-x">
+              <table>{children}</table>
             </div>
           ),
-          th: ({ children }) => (
-            <th className="border border-line bg-raised px-2 py-1 text-left font-medium">
-              {children}
-            </th>
+          th: ({ children }) => <th>{children}</th>,
+          td: ({ children }) => <td>{children}</td>,
+          input: ({ type, checked, disabled }) => (
+            <input type={type} checked={checked} disabled={disabled} readOnly />
           ),
-          td: ({ children }) => <td className="border border-line px-2 py-1">{children}</td>,
-          // Never fetch an image merely because a model wrote Markdown for it.
-          // Repository text can steer a model into emitting a tracking URL or
-          // a request to a loopback/private service. Hosted CSP blocks most of
-          // those requests, but the static self-hosted workbench must be safe
-          // without depending on deployment headers too.
+          // Model/document-authored images never trigger a request. An image
+          // can still be previewed explicitly through its authenticated Asset
+          // Preview URL; merely rendering Markdown is not authorization to load.
           img: ({ alt }) => (
-            <span className="rounded border border-line px-1.5 py-0.5 text-xs text-faint">
+            <span className="gh-blocked-image">
               图片已阻止{alt ? `：${alt}` : ""}
             </span>
           ),
@@ -88,19 +137,15 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
   );
 });
 
-/**
- * A fenced code block, with the one control that turns out to matter: getting it
- * out of here and into an editor.
- */
 function Code({ text, language }: { text: string; language?: string }) {
   const [copied, setCopied] = useState(false);
+  const highlighted = highlight(text, language);
   return (
-    <div className="min-w-0 max-w-full overflow-hidden rounded-md border border-line bg-raised">
-      <div className="flex items-center justify-between gap-2 border-b border-line px-2 py-1">
-        <span className="font-mono text-[11px] text-faint">{language || "code"}</span>
+    <div className="gh-code-block">
+      <div className="gh-code-header">
+        <span>{language || highlighted.language || "code"}</span>
         <button
           type="button"
-          className="text-[11px] text-accent"
           onClick={() => {
             void navigator.clipboard?.writeText(text);
             setCopied(true);
@@ -110,9 +155,142 @@ function Code({ text, language }: { text: string; language?: string }) {
           {copied ? "已复制" : "复制"}
         </button>
       </div>
-      <pre className="max-h-96 max-w-full overflow-x-auto whitespace-pre-wrap break-all px-2 py-1.5 font-mono text-xs leading-relaxed text-fg">
-        <code>{text}</code>
+      <pre>
+        <code
+          className="hljs"
+          // highlight.js escapes source text before adding its own spans.
+          dangerouslySetInnerHTML={{ __html: highlighted.html }}
+        />
       </pre>
     </div>
   );
+}
+
+function highlight(text: string, requested?: string): { html: string; language?: string } {
+  if (new TextEncoder().encode(text).byteLength > HIGHLIGHT_BYTES) {
+    return { html: escapeHtml(text), language: requested };
+  }
+  const normalized = requested?.toLowerCase();
+  const language = normalized ? (LANGUAGE_ALIASES[normalized] ?? normalized) : undefined;
+  try {
+    if (language && hljs.getLanguage(language)) {
+      return { html: hljs.highlight(text, { language }).value, language };
+    }
+    const detected = hljs.highlightAuto(text);
+    return { html: detected.value, language: detected.language };
+  } catch {
+    return { html: escapeHtml(text), language: requested };
+  }
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+let diagramSequence = 0;
+let mermaidReady: Promise<(typeof import("mermaid"))["default"]> | null = null;
+
+function MermaidDiagram({ source }: { source: string }) {
+  const id = useRef(`gh-mermaid-${++diagramSequence}`);
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "ready"; url: string }
+    | { kind: "error"; message: string }
+  >({ kind: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setState({ kind: "loading" });
+
+    if (new TextEncoder().encode(source).byteLength > MERMAID_BYTES) {
+      setState({ kind: "error", message: "流程图源码过大，无法安全渲染" });
+      return () => {};
+    }
+
+    void loadMermaid()
+      .then((mermaid) => mermaid.render(id.current, source))
+      .then(({ svg }) => {
+        const safe = safeMermaidSvg(svg);
+        objectUrl = URL.createObjectURL(new Blob([safe], { type: "image/svg+xml" }));
+        if (cancelled) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+          return;
+        }
+        setState({ kind: "ready", url: objectUrl });
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setState({
+            kind: "error",
+            message: error instanceof Error ? error.message : "流程图语法无效",
+          });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [source]);
+
+  return (
+    <figure className="gh-mermaid" data-testid="mermaid-diagram">
+      {state.kind === "loading" ? (
+        <p role="status">正在绘制流程图…</p>
+      ) : state.kind === "error" ? (
+        <div role="alert">
+          <p>流程图无法渲染：{state.message}</p>
+          <pre>{source}</pre>
+        </div>
+      ) : (
+        <img src={state.url} alt="Markdown 流程图" />
+      )}
+    </figure>
+  );
+}
+
+function loadMermaid(): Promise<(typeof import("mermaid"))["default"]> {
+  mermaidReady ??= import("mermaid").then(({ default: mermaid }) => {
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      suppressErrorRendering: true,
+      theme: "base",
+      flowchart: { htmlLabels: false, useMaxWidth: true },
+    });
+    return mermaid;
+  });
+  return mermaidReady;
+}
+
+/**
+ * Mermaid already runs in strict mode. This second, small boundary is what lets
+ * us expose the result as an SVG image without retaining active/linkable SVG
+ * nodes should a future Mermaid release broaden its output.
+ */
+function safeMermaidSvg(svg: string): string {
+  const document_ = new DOMParser().parseFromString(svg, "image/svg+xml");
+  if (document_.querySelector("parsererror")) throw new Error("流程图输出无效");
+  document_.querySelectorAll("script, foreignObject, image, a").forEach((node) => node.remove());
+  document_.querySelectorAll("*").forEach((node) => {
+    for (const attribute of Array.from(node.attributes)) {
+      const name = attribute.name.toLowerCase();
+      const value = attribute.value.trim().toLowerCase();
+      if (
+        name.startsWith("on") ||
+        ((name === "href" || name === "xlink:href") && !value.startsWith("#")) ||
+        (name === "style" && /url\s*\(\s*['\"]?(?!#)/i.test(attribute.value))
+      ) {
+        node.removeAttribute(attribute.name);
+      }
+    }
+  });
+  return new XMLSerializer().serializeToString(document_.documentElement);
 }

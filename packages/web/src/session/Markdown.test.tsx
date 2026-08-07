@@ -4,6 +4,15 @@ import { describe, expect, it, vi } from "vitest";
 
 import { Markdown } from "./Markdown";
 
+vi.mock("mermaid", () => ({
+  default: {
+    initialize: vi.fn(),
+    render: vi.fn(async () => ({
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><script>alert(1)</script><a href="https://tracker.example"><text>流程</text></a><text>完成</text></svg>',
+    })),
+  },
+}));
+
 /**
  * An agent's reply is markdown, and used to be shown as if it were not: lists
  * arrived as hyphens, tables as pipes, code as prose.
@@ -93,5 +102,39 @@ describe("an agent's reply", () => {
     // fenced block used to cut a sentence in half.
     expect(screen.queryByRole("button", { name: "复制" })).not.toBeInTheDocument();
     expect(screen.getByText("apps/daemon/src/main.rs")).toBeInTheDocument();
+  });
+
+  it("syntax-highlights fenced source code", () => {
+    const { container } = render(
+      <Markdown text={"```typescript\nconst answer: number = 42;\n```"} variant="document" />,
+    );
+
+    expect(container.querySelector(".hljs-keyword")).toHaveTextContent("const");
+    expect(screen.getByText("typescript")).toBeInTheDocument();
+  });
+
+  it("renders Mermaid lazily as an inert SVG image", async () => {
+    const create = vi.fn((_blob: Blob) => "blob:flowchart");
+    const revoke = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: create });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revoke });
+    const { unmount } = render(
+      <Markdown text={"```mermaid\nflowchart LR\n  A --> B\n```"} variant="document" />,
+    );
+
+    const diagram = await screen.findByRole("img", { name: "Markdown 流程图" });
+    expect(diagram).toHaveAttribute("src", "blob:flowchart");
+    const svg = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error);
+      reader.onload = () => resolve(String(reader.result));
+      reader.readAsText(create.mock.calls[0]?.[0] as Blob);
+    });
+    expect(svg).not.toContain("tracker.example");
+    expect(svg).not.toContain("<script");
+    unmount();
+    expect(revoke).toHaveBeenCalledWith("blob:flowchart");
+    Reflect.deleteProperty(URL, "createObjectURL");
+    Reflect.deleteProperty(URL, "revokeObjectURL");
   });
 });

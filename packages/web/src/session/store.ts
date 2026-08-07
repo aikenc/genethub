@@ -24,6 +24,7 @@ import { create } from "zustand";
 import type { Host } from "../host";
 import type { Client, ConnectionState } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
+import { assetPreviewBaseUrl } from "../preview/url";
 import { applySequenced, emptyTimeline, fromSnapshot, type TimelineState } from "./timeline";
 
 /**
@@ -853,13 +854,26 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // at the first message, not when the button was pressed.
     const sessionId = await start(get, set);
     if (!sessionId) return;
+    const state = get();
+    const deviceHandle = state.client?.identity?.machineId;
+    const workspaceId = currentWorkspace(state);
+    const artifactPreviewBaseUrl =
+      deviceHandle && workspaceId
+        ? assetPreviewBaseUrl(deviceHandle, workspaceId)
+        : null;
     await asked(set, () =>
       require_(get().client).call({
         type: "session.send",
         // Continuing a round after an interrupt is not wired into the UI
         // yet — every message from here is a fresh round until it is
         // (docs/agent-analysis-substrate-proposal.md §3.2).
-        payload: { sessionId, text, attachments, continuesRound: null },
+        payload: {
+          sessionId,
+          text,
+          attachments,
+          artifactPreviewBaseUrl,
+          continuesRound: null,
+        },
       }),
     );
   },

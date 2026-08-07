@@ -21,7 +21,7 @@ pub const MAX_ACTIVE_DATA_STREAMS: usize = 256;
 /// A finite exchange is deliberately small; indefinite event streams omit a
 /// body length and remain bounded by stream credit instead.
 pub const MAX_FINITE_EXCHANGE_BODY_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_PREVIEW_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_PREVIEW_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 const _: () = assert!(MAX_EXCHANGE_HEAD_BYTES < MAX_DATA_FRAME_BYTES);
 
 /// How a peer proves possession of an end-to-end secret during carrier setup.
@@ -212,6 +212,6 @@ mod tests {
     fn the_wire_limits_stay_small_and_preview_stays_exact() {
         assert_eq!(MAX_DATA_FRAME_BYTES, 16_384);
         assert_eq!(MAX_FINITE_EXCHANGE_BODY_BYTES, 4_194_304);
-        assert_eq!(MAX_PREVIEW_SOURCE_BYTES, 2_097_152);
+        assert_eq!(MAX_PREVIEW_SOURCE_BYTES, 4_194_304);
     }
 }

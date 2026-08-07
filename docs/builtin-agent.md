@@ -76,10 +76,13 @@ Genet Agent **不是给人直接用的 CLI**：没有交互式界面、没有 pr
 genet-agent --mode rpc
             [--model <provider/id>] [--thinking <level>]
             [--no-session | --session <file>]
+            [--add-system-prompt <text>]...
             [--mcp-config <path>] [--extension <path>]...
 ```
 
 后两个参数 MVP 内接受并忽略（记一行 stderr 日志），**不能因为不认识而退出**——这样 adapter 可以对所有后端统一拼参数，不必为内置 agent 特判。
+
+`--add-system-prompt` 可重复，每项作为独立的 `<additional_system_prompt>` 块放在项目 context/skills 之后、当前工作目录之前。它不是 RPC 命令，也不会成为 user message；daemon 当前用它注入动态 Asset Preview 产物链接规范。参数值直接作为一个 argv 传入，不经 shell 拼接。独立调用者能使用这个参数，因此 Agent CLI 提供的是通用“追加系统上下文”能力，不认识 domain、channel、device 或 workspace。
 
 ### 3.2 帧格式
 

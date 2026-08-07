@@ -340,6 +340,39 @@ describe("an action the user asked for that fails", () => {
     expect(useWorkbench.getState().notice).toBeNull();
   });
 
+  it("sends deployment-aware artifact link context without changing the user text", async () => {
+    const calls: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+    const client = {
+      call: async (request: { type: string; payload?: Record<string, unknown> }) => {
+        calls.push(request);
+        return undefined;
+      },
+      identity: { machineId: "m_device" },
+      subscribe: async () => ({ snapshot: { seq: 0, items: [], summary: SESSION }, replayed: [], reset: false }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      activeSessionId: "s1",
+      activeWorkspaceId: "w1",
+      sessions: [SESSION],
+    });
+
+    await useWorkbench.getState().send("生成报告");
+
+    expect(calls).toContainEqual({
+      type: "session.send",
+      payload: {
+        sessionId: "s1",
+        text: "生成报告",
+        attachments: [],
+        artifactPreviewBaseUrl:
+          "http://localhost:3000/assets/preview/v1/m_device/w1/",
+        continuesRound: null,
+      },
+    });
+  });
+
   it("reports a session that could not be opened, rather than staying empty", async () => {
     useWorkbench.setState({
       client: refusingClient("no adapter registered for 'codex'"),

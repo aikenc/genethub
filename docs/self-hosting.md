@@ -115,7 +115,7 @@ URL 明文保留设备、workspace 和相对路径，便于 Agent 输出可点�
 - 已配对电脑或手机打开同一 URL 后，从自己的 roster 找到 `deviceHandle`，重新连接对应 rendezvous slot，并用自己的 device credential 完成 E2EE。
 - 未配对浏览器只会得到“尚未获准连接资源所在设备”，不会因为知道 URL 而读取文件。
 - 查看设备不需要 daemon；资源所在电脑的 daemon 必须在线。
-- daemon 按 URL 中 workspace-relative path 读取完整文件；超过 2 MiB 或类型不支持会直接拒绝。
+- daemon 按 URL 中 workspace-relative path 读取完整文件；超过 4 MiB 或类型不支持会直接拒绝。
 - workspace/path/MIME/bytes 都在 v3 E2EE record 内，Relay 看不到。
 
 同一个 URL 的“相同”包括 workbench origin。如果你有多个静态域名，需要由产品层选择 canonical origin；MVP 不做跨 origin credential 同步。
@@ -157,6 +157,6 @@ AES-GCM 已提供密文完整性；HMAC 用于双向握手和 key derivation，�
 - reverse proxy 允许 `/fabric/v2` WebSocket upgrade。
 - daemon 只配置 `https://` Relay URL，uplink 状态在线。
 - browser 完成一次配对，目标列表能看到资源电脑。
-- 打开一个小于 2 MiB 的 `.md` Preview 链接，另一已配对浏览器打开同一链接得到相同内容。
+- 打开一个不超过 4 MiB 的 `.md` Preview 链接，另一已配对浏览器打开同一链接得到相同内容。
 - 设置中 RTC 至少给出明确状态；RTC `failed` 时 Preview 仍可经 baseline 成功。
 - 撤销 browser device 后，它的 live connection 和 Preview 立即失效。

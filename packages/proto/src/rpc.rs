@@ -94,6 +94,13 @@ pub enum Request {
         text: String,
         #[serde(default)]
         attachments: Vec<Attachment>,
+        /// Browser-composed, deployment-aware Asset Preview prefix for this
+        /// session's workspace. It is context, not authority: opening a link
+        /// still performs normal target selection, authentication and E2EE.
+        /// The daemon validates the URL shape and turns it into fixed Agent
+        /// guidance; arbitrary client-authored system prompts are never accepted.
+        #[serde(default)]
+        artifact_preview_base_url: Option<String>,
         /// Claims this message as a continuation of a round left open by an
         /// interrupt, rather than a new one. Only interrupts need this: the
         /// daemon auto-stitches approval and guidance continuations on its

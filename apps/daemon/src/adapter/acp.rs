@@ -190,6 +190,7 @@ impl AgentAdapter for AcpAdapter {
             resume_method: std::sync::Mutex::new(None),
             model_config_id: Mutex::new(hello.model_config_id),
             mode_config_id: Mutex::new(hello.mode_config_id),
+            additional_system_prompt: config.additional_system_prompt.clone(),
         };
 
         tokio::spawn(read_loop(stdout, events, pending, turn));
@@ -236,6 +237,10 @@ struct AcpSession {
     resume_method: std::sync::Mutex<Option<ResumeMethod>>,
     model_config_id: Mutex<Option<String>>,
     mode_config_id: Mutex<Option<String>>,
+    /// ACP has no standard system/developer-instruction field. The adapter
+    /// therefore carries product guidance as a clearly delimited leading text
+    /// block on each prompt, while the daemon timeline retains only user text.
+    additional_system_prompt: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -378,7 +383,10 @@ impl AgentSession for AcpSession {
         let turn_state = self.turn.clone();
         let params = json!({
             "sessionId": session_id,
-            "prompt": prompt_blocks(&input),
+            "prompt": prompt_blocks_with_context(
+                &input,
+                self.additional_system_prompt.as_deref(),
+            ),
         });
 
         // `session/prompt` only returns when the whole turn is done, so it runs
@@ -938,6 +946,20 @@ fn prompt_blocks(input: &PromptInput) -> Vec<Value> {
     blocks
 }
 
+fn prompt_blocks_with_context(input: &PromptInput, context: Option<&str>) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    if let Some(context) = context.filter(|value| !value.trim().is_empty()) {
+        blocks.push(json!({
+            "type": "text",
+            "text": format!(
+                "<genehub_system_guidance>\n{context}\n</genehub_system_guidance>\n\nThe next block is the user's request."
+            ),
+        }));
+    }
+    blocks.extend(prompt_blocks(input));
+    blocks
+}
+
 fn permission_options(params: &Value) -> Vec<PermissionOption> {
     params
         .get("options")
@@ -1303,6 +1325,28 @@ mod tests {
                 json!({ "type": "image", "mimeType": "image/png", "data": "Zm9v" }),
             ]
         );
+    }
+
+    #[test]
+    fn artifact_guidance_is_isolated_ahead_of_the_acp_user_prompt() {
+        let input = PromptInput {
+            text: "生成报告".into(),
+            attachments: vec![],
+        };
+        let blocks = prompt_blocks_with_context(
+            &input,
+            Some("Use https://app.example/assets/preview/v1/device/workspace/"),
+        );
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("<genehub_system_guidance>"));
+        assert!(blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("https://app.example/assets/preview/v1/device/workspace/"));
+        assert_eq!(blocks[1], json!({ "type": "text", "text": "生成报告" }));
     }
 
     /// Attachments with no inline payload (a bare path) are not forwarded —

@@ -14,14 +14,39 @@ export function assetPreviewUrl(
   origin = typeof location === "undefined" ? "" : location.origin,
   basePath = previewBasePath(),
 ): string {
-  const device = locatorSegment(deviceHandle, "device handle");
-  const workspace = locatorSegment(workspaceHandle, "workspace handle");
   const relative = previewPath(path);
-  const pathname = `${previewPrefix(basePath)}${encodeURIComponent(device)}/${encodeURIComponent(workspace)}/${relative
+  const pathname = `${assetPreviewBasePath(deviceHandle, workspaceHandle, basePath)}${relative
     .split("/")
     .map((part) => encodeURIComponent(part))
     .join("/")}`;
   return origin ? new URL(pathname, origin).toString() : pathname;
+}
+
+/**
+ * Exact deployment/device/workspace prefix Agents append artifact paths to.
+ *
+ * It deliberately contains no placeholder path: the daemon validates this
+ * structured prefix before turning it into fixed system guidance, and Agents
+ * only ever append a workspace-relative path.
+ */
+export function assetPreviewBaseUrl(
+  deviceHandle: string,
+  workspaceHandle: string,
+  origin = typeof location === "undefined" ? "" : location.origin,
+  basePath = previewBasePath(),
+): string {
+  const pathname = assetPreviewBasePath(deviceHandle, workspaceHandle, basePath);
+  return origin ? new URL(pathname, origin).toString() : pathname;
+}
+
+function assetPreviewBasePath(
+  deviceHandle: string,
+  workspaceHandle: string,
+  basePath: string,
+): string {
+  const device = locatorSegment(deviceHandle, "device handle");
+  const workspace = locatorSegment(workspaceHandle, "workspace handle");
+  return `${previewPrefix(basePath)}${encodeURIComponent(device)}/${encodeURIComponent(workspace)}/`;
 }
 
 export function parseAssetPreviewPath(

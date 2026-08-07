@@ -48,7 +48,11 @@ pub async fn run_prompt(state: Arc<Mutex<State>>, text: String) {
             Snapshot {
                 model,
                 messages: guard.session.messages.clone(),
-                system_prompt: crate::prompt::build(&guard.cwd, &guard.skills),
+                system_prompt: crate::prompt::build(
+                    &guard.cwd,
+                    &guard.skills,
+                    &guard.additional_system_prompts,
+                ),
                 thinking_level: guard.thinking_level.clone(),
                 cwd: guard.cwd.clone(),
             }
@@ -452,6 +456,7 @@ mod tests {
             current_model: model,
             thinking_level: "medium".into(),
             auto_compaction: true,
+            additional_system_prompts: Vec::new(),
             skills: Vec::<Skill>::new(),
             cwd,
             stats: Usage::default(),

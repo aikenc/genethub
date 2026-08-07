@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assetPreviewUrl, parseAssetPreviewPath } from "./url";
+import { assetPreviewBaseUrl, assetPreviewUrl, parseAssetPreviewPath } from "./url";
 
 describe("portable Asset Preview locators", () => {
   it("keeps the device, workspace and workspace-relative path visible", () => {
@@ -53,5 +53,18 @@ describe("portable Asset Preview locators", () => {
       path: "docs/readme.md",
     });
     expect(parseAssetPreviewPath(new URL(url).pathname, "/")).toBeNull();
+  });
+
+  it("composes the Agent artifact prefix from origin, channel, device and workspace", () => {
+    expect(
+      assetPreviewBaseUrl(
+        "device office",
+        "workspace docs",
+        "https://app.example",
+        "/relay-dev-2/",
+      ),
+    ).toBe(
+      "https://app.example/relay-dev-2/assets/preview/v1/device%20office/workspace%20docs/",
+    );
   });
 });

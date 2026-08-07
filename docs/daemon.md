@@ -32,7 +32,7 @@ apps/daemon/src/
 │   ├── handshake.rs  protocol-v3 PSK 双向证明
 │   ├── frame.rs      16 KiB record 内的 logical-stream frame
 │   ├── endpoint.rs   Exchange、流控、公平 writer、handler 隔离
-│   ├── preview.rs    ≤2 MiB workspace 文件 Preview
+│   ├── preview.rs    ≤4 MiB workspace 文件 Preview
 │   ├── rtc.rs        E2EE signaling + WebRTC DataChannel
 │   └── client.rs     daemon/CLI 使用的 v3 client endpoint
 ├── session/
@@ -96,7 +96,7 @@ DataEndpoint method 只有四个：
 |---|---|
 | `rpc` | 现有版本化 `Request/Reply` 业务 schema，作为 body；不再是 connection envelope |
 | `events` | 长期 response stream；`u32be length + ServerFrame JSON` |
-| `asset.preview` | workspace-relative、完整或失败、≤2 MiB 的文件 Preview |
+| `asset.preview` | workspace-relative、完整或失败、≤4 MiB 的文件 Preview |
 | `rtc.negotiate` | 在已认证基线连接内交换非 trickle SDP |
 
 `rpc` body 的 MVP 方法集：

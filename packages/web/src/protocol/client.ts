@@ -31,7 +31,7 @@ import type { BinaryWebSocketLike } from "../dataplane/websocket";
 
 export const PROTOCOL_VERSION = DATA_PLANE_VERSION;
 export const MAX_RPC_BODY_BYTES = 2_900_000;
-const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_PREVIEW_BYTES = 4 * 1024 * 1024;
 const MAX_EVENT_BYTES = 3 * 1024 * 1024;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -1293,7 +1293,7 @@ function previewErrorMessage(error: AssetPreviewError, sourceBytes?: number): st
     case "unsupported":
       return "这种文件暂不支持预览";
     case "tooLarge":
-      return `文件超过 2 MiB，暂不支持预览${sourceBytes ? `（${sourceBytes} bytes）` : ""}`;
+      return `文件超过 4 MiB，暂不支持预览${sourceBytes ? `（${sourceBytes} bytes）` : ""}`;
     case "sourceChanged":
       return "读取时文件发生了变化，请重试";
   }

@@ -58,6 +58,20 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 
 恢复优先使用各家的原生 session id；ACP 优先用标准 `session/resume`，仅在 Agent 明确只声明旧的 `loadSession` 能力时使用 `session/load`。给 Agent 的恢复提示是 daemon 内部控制消息，不会伪装成用户在时间线里又说了一句话。
 
+### 2.3 产品系统上下文
+
+所有 adapter 接收同一个 `SessionConfig.additional_system_prompt`，但上层不认识任何 CLI 的私有字段。当前用途是 Asset Preview 产物链接：浏览器按自己真实的 origin + deployment channel + device + workspace 组成结构化 prefix，daemon 校验后生成固定规范，再交给 adapter。
+
+| Agent | adapter 映射 |
+|---|---|
+| Genet | CLI `--add-system-prompt` |
+| Claude Code | CLI `--append-system-prompt` |
+| Codex | app-server `thread/start` / `thread/resume` 的 `developerInstructions` |
+| OpenCode | message API 的 `system` |
+| Cursor / 自定义 ACP | 标准 ACP 没有 system 字段；每个 `session/prompt` 的首个 text block 是明确标记的 GeneHub context，下一 block 才是原样 user request |
+
+这不是允许 Web 客户端提交任意 system prompt 的接口。RPC 只传 Asset Preview base URL，固定文字由 daemon 拥有；用户消息在 GeneHub 时间线中保持原样。新增产品上下文先扩展 `SessionConfig`，再由各 adapter 映射，禁止在 session manager 里按 agent id 分支。
+
 ```bash
 npm install -g @anthropic-ai/claude-code
 ```

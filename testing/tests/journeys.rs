@@ -2046,6 +2046,7 @@ async fn an_empty_prompt_is_refused_before_it_reaches_the_model() {
             session_id: session,
             text: "   ".into(),
             attachments: vec![],
+            artifact_preview_base_url: None,
             continues_round: None,
         })
         .await;

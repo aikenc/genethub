@@ -344,6 +344,7 @@ impl Journey {
                 session_id: session_id.to_string(),
                 text: text.to_string(),
                 attachments: vec![],
+                artifact_preview_base_url: None,
                 continues_round: continues_round.map(str::to_string),
             })
             .await?;

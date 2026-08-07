@@ -17,7 +17,7 @@ const TOOL_SNIPPETS: [(&str, &str); 7] = [
     ("bash", "run a shell command"),
 ];
 
-pub fn build(cwd: &Path, skills: &[Skill]) -> String {
+pub fn build(cwd: &Path, skills: &[Skill], additional_system_prompts: &[String]) -> String {
     let tools_list = TOOL_SNIPPETS
         .iter()
         .map(|(name, snippet)| format!("- {name}: {snippet}"))
@@ -61,6 +61,15 @@ Guidelines:
         prompt.push_str(&skills::format_for_prompt(skills));
     }
 
+    for additional in additional_system_prompts {
+        if additional.trim().is_empty() {
+            continue;
+        }
+        prompt.push_str("\n\n<additional_system_prompt>\n");
+        prompt.push_str(additional);
+        prompt.push_str("\n</additional_system_prompt>");
+    }
+
     prompt.push_str(&format!(
         "\nCurrent working directory: {}",
         cwd.to_string_lossy().replace('\\', "/")
@@ -94,7 +103,7 @@ mod tests {
     #[test]
     fn prompt_lists_tools_and_ends_with_cwd() {
         let dir = temp_dir("basic");
-        let prompt = build(&dir, &[]);
+        let prompt = build(&dir, &[], &[]);
         assert!(prompt.contains("- bash: run a shell command"));
         assert!(prompt.contains("Guidelines:"));
         assert!(prompt
@@ -106,7 +115,7 @@ mod tests {
     fn agents_md_is_injected_as_project_context() {
         let dir = temp_dir("context");
         std::fs::write(dir.join("AGENTS.md"), "always run tests").unwrap();
-        let prompt = build(&dir, &[]);
+        let prompt = build(&dir, &[], &[]);
         assert!(prompt.contains("<project_context>"));
         assert!(prompt.contains("always run tests"));
     }
@@ -121,9 +130,23 @@ mod tests {
             base_dir: dir.clone(),
             disable_model_invocation: false,
         }];
-        let prompt = build(&dir, &skills);
+        let prompt = build(&dir, &skills, &[]);
         let skills_at = prompt.find("<available_skills>").unwrap();
         let cwd_at = prompt.find("Current working directory:").unwrap();
         assert!(skills_at < cwd_at);
+    }
+
+    #[test]
+    fn additional_system_prompt_is_after_project_context_and_before_cwd() {
+        let dir = temp_dir("additional");
+        let prompt = build(
+            &dir,
+            &[],
+            &["Use https://app.example/assets/preview/v1/device/workspace/".into()],
+        );
+        let added_at = prompt.find("<additional_system_prompt>").unwrap();
+        let cwd_at = prompt.find("Current working directory:").unwrap();
+        assert!(added_at < cwd_at);
+        assert!(prompt.contains("https://app.example/assets/preview/v1/device/workspace/"));
     }
 }

@@ -391,14 +391,14 @@ mod tests {
     }
 
     #[test]
-    fn preview_returns_the_complete_two_megabyte_boundary() {
+    fn preview_returns_the_complete_four_megabyte_boundary() {
         let dir = tempfile::tempdir().unwrap();
         let bytes = vec![b'x'; genehub_proto::MAX_PREVIEW_SOURCE_BYTES];
         std::fs::write(dir.path().join("exact.txt"), &bytes).unwrap();
         let shown = preview(dir.path(), "exact.txt").unwrap();
         assert_eq!(shown.bytes, bytes);
         assert_eq!(shown.metadata.kind, AssetPreviewKind::Text);
-        assert_eq!(shown.metadata.source_bytes, 2_097_152);
+        assert_eq!(shown.metadata.source_bytes, 4_194_304);
 
         std::fs::write(
             dir.path().join("large.txt"),
@@ -408,7 +408,7 @@ mod tests {
         assert_eq!(
             preview(dir.path(), "large.txt").unwrap_err(),
             PreviewFailure::TooLarge {
-                source_bytes: 2_097_153
+                source_bytes: 4_194_305
             }
         );
     }

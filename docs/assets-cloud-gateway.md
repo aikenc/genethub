@@ -442,4 +442,4 @@ Gateway 最小化：
 | 运维复杂度 | 中 | 很高 |
 | 建议定位 | **后续 WebRoot 默认候选** | 云端明文不可接受时的高级路线 |
 
-推荐决策：当前 MVP 先交付 2 MiB 单文件 Preview，不实现 WebRoot、ViewLease 或 `asset.web.*`。后续确认多文件站点需求后，再先实现两种方案共用的 URL、ViewLease、SiteCapability 与 WebRoot 契约，并以 Cloud Asset Gateway 作为默认候选。SNI 方案只有在 Phase 0 证明公共 CA 可规模化、并且产品明确愿意承担这项成本后进入实现。两条路线共享 TransportEndpoint、daemon 文件能力和 Viewer 语义，但不能用 Gateway 的成功测试替代 SNI/PKI 的安全证明。
+推荐决策：当前轻量版先交付 4 MiB 单文件 Preview，不实现 WebRoot、ViewLease 或 `asset.web.*`。后续确认多文件站点需求后，再先实现两种方案共用的 URL、ViewLease、SiteCapability 与 WebRoot 契约，并以 Cloud Asset Gateway 作为默认候选。SNI 方案只有在 Phase 0 证明公共 CA 可规模化、并且产品明确愿意承担这项成本后进入实现。两条路线共享 TransportEndpoint、daemon 文件能力和 Viewer 语义，但不能用 Gateway 的成功测试替代 SNI/PKI 的安全证明。

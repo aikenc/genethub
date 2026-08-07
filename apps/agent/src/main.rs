@@ -87,6 +87,7 @@ async fn main() {
         thinking_level,
         auto_compaction: true,
         skills: skills::load(&cwd, &data_dir),
+        additional_system_prompts: args.add_system_prompt,
         cwd,
         stats: Usage::default(),
         streaming: false,

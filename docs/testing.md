@@ -164,7 +164,7 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 |------|------------|
 | 让 agent 改代码后看变更 | 变更面板列出改动，diff 渲染正确 |
 | 提交 | commit 后变更面板清空，git log 有记录 |
-| 浏览文件 | 文件树生成带设备、workspace 与相对路径的 Preview URL；支持图片、Markdown、文本、单文件活动 HTML 和视频，超过 2 MiB 原样拒绝 |
+| 浏览文件 | 文件树目录原位展开且可刷新；生成带设备、workspace 与相对路径的 Preview URL；支持图片、完整 Markdown/高亮/Mermaid、文本、单文件活动 HTML 和视频，超过 4 MiB 原样拒绝 |
 | 终端 | 开、输入、resize、关；输出正常回显 |
 | 大输出 | 触发截断且明确标注 |
 | 路径穿越 | 越出工作区的读写被拒绝 |

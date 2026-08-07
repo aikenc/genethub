@@ -1,5 +1,5 @@
 import type { FileNode } from "@genehub/proto";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /**
  * The project tree.
@@ -51,6 +51,14 @@ function Node({
   const [open, setOpen] = useState(false);
   const children = node.children;
 
+  // A root refresh intentionally replaces its shallow listing. Nodes keep
+  // their React key (and therefore their open state), then refill their own
+  // subtree. Without this an open folder became an endless "载入中" row after
+  // refresh because expansion was only requested from the click handler.
+  useEffect(() => {
+    if (node.isDir && open && children === undefined) onExpand(node.path);
+  }, [children, node.isDir, node.path, onExpand, open]);
+
   return (
     <li role="none">
       <button
@@ -69,7 +77,6 @@ function Node({
           }
           const next = !open;
           setOpen(next);
-          if (next && children === undefined) onExpand(node.path);
         }}
       >
         <span className="w-3 shrink-0 text-muted">{node.isDir ? (open ? "▾" : "▸") : ""}</span>

@@ -57,7 +57,9 @@ impl Handled {
 /// something actionable rather than render blank.
 fn failed(error: anyhow::Error) -> Handled {
     let message = format!("{error:#}");
-    let code = if message.contains("escapes the workspace") {
+    let code = if message.contains("Asset Preview base URL") {
+        ErrorCode::BadRequest
+    } else if message.contains("escapes the workspace") {
         ErrorCode::Forbidden
     } else if message.contains("already running") {
         ErrorCode::Conflict
@@ -207,6 +209,7 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             session_id,
             text,
             attachments,
+            artifact_preview_base_url,
             continues_round,
         } => {
             if text.trim().is_empty() && attachments.is_empty() {
@@ -215,7 +218,14 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             let providers = state.providers().await;
             match state
                 .sessions
-                .send(&session_id, text, attachments, &providers, continues_round)
+                .send(
+                    &session_id,
+                    text,
+                    attachments,
+                    &providers,
+                    artifact_preview_base_url,
+                    continues_round,
+                )
                 .await
             {
                 Ok(_) => Handled::ok(Reply::Ack),

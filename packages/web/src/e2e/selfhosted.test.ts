@@ -257,6 +257,7 @@ describe.skipIf(
         sessionId,
         text: "这个仓库能编译吗？",
         attachments: [],
+        artifactPreviewBaseUrl: null,
         continuesRound: null,
       },
     });

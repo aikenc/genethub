@@ -228,3 +228,241 @@ input:focus-visible {
 .light .agent-brand-light {
   display: block;
 }
+
+/* Markdown is content, not workbench chrome. These rules give documents a
+ * complete typographic hierarchy while the chat variant keeps its compact
+ * rhythm. Syntax colours use the same semantic palette in both app themes. */
+.gh-markdown {
+  min-width: 0;
+  color: rgb(var(--fg));
+}
+
+.gh-markdown > :first-child {
+  margin-top: 0;
+}
+
+.gh-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.gh-markdown p,
+.gh-markdown ul,
+.gh-markdown ol,
+.gh-markdown blockquote,
+.gh-markdown .gh-table-wrap,
+.gh-markdown .gh-code-block,
+.gh-markdown .gh-mermaid {
+  margin: 0.75em 0;
+}
+
+.gh-markdown-document {
+  font-size: 15px;
+  line-height: 1.75;
+}
+
+.gh-markdown-chat {
+  font-size: inherit;
+  line-height: 1.6;
+}
+
+.gh-markdown h1,
+.gh-markdown h2,
+.gh-markdown h3,
+.gh-markdown h4,
+.gh-markdown h5,
+.gh-markdown h6 {
+  scroll-margin-top: 1rem;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.gh-markdown h1 {
+  margin: 1.5em 0 0.7em;
+  padding-bottom: 0.35em;
+  border-bottom: 1px solid rgb(var(--line));
+  font-size: 1.8em;
+}
+
+.gh-markdown h2 {
+  margin: 1.4em 0 0.65em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid rgb(var(--line));
+  font-size: 1.4em;
+}
+
+.gh-markdown h3 { margin: 1.25em 0 0.55em; font-size: 1.18em; }
+.gh-markdown h4 { margin: 1.15em 0 0.5em; font-size: 1.05em; }
+.gh-markdown h5,
+.gh-markdown h6 { margin: 1em 0 0.45em; font-size: 1em; color: rgb(var(--muted)); }
+
+.gh-markdown-chat h1 { font-size: 1.25em; }
+.gh-markdown-chat h2 { font-size: 1.12em; }
+.gh-markdown-chat h1,
+.gh-markdown-chat h2 { margin-top: 1em; }
+
+.gh-markdown ul,
+.gh-markdown ol {
+  padding-left: 1.6em;
+}
+
+.gh-markdown ul { list-style: disc; }
+.gh-markdown ol { list-style: decimal; }
+.gh-markdown li + li { margin-top: 0.25em; }
+.gh-markdown li > ul,
+.gh-markdown li > ol { margin: 0.25em 0; }
+.gh-markdown .contains-task-list { list-style: none; padding-left: 0.25em; }
+.gh-markdown .task-list-item { display: flex; align-items: flex-start; gap: 0.55em; }
+.gh-markdown .task-list-item input { margin-top: 0.35em; accent-color: rgb(var(--accent)); }
+
+.gh-markdown blockquote {
+  border-left: 3px solid rgb(var(--accent) / 0.65);
+  padding: 0.15em 0 0.15em 1em;
+  color: rgb(var(--muted));
+}
+
+.gh-markdown blockquote > :first-child { margin-top: 0; }
+.gh-markdown blockquote > :last-child { margin-bottom: 0; }
+.gh-markdown strong { font-weight: 650; }
+.gh-markdown del { color: rgb(var(--faint)); }
+
+.gh-markdown a {
+  color: rgb(var(--accent-bright));
+  text-decoration: underline;
+  text-decoration-color: rgb(var(--accent-bright) / 0.45);
+  text-underline-offset: 0.18em;
+}
+
+.gh-markdown a:hover { text-decoration-color: currentColor; }
+.gh-markdown hr { margin: 1.75em 0; border: 0; border-top: 1px solid rgb(var(--line)); }
+
+.gh-inline-code {
+  border: 1px solid rgb(var(--line));
+  border-radius: 0.3em;
+  background: rgb(var(--raised));
+  padding: 0.12em 0.35em;
+  color: rgb(var(--accent-bright));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+.gh-code-block {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid rgb(var(--line));
+  border-radius: 0.55rem;
+  background: rgb(var(--sidebar));
+}
+
+.gh-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-height: 2rem;
+  border-bottom: 1px solid rgb(var(--line));
+  padding: 0.25rem 0.65rem;
+  color: rgb(var(--faint));
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.gh-code-header button { color: rgb(var(--accent-bright)); }
+.gh-code-block pre { max-width: 100%; overflow: auto; padding: 0.8rem 0.9rem; }
+.gh-code-block code {
+  display: block;
+  min-width: max-content;
+  color: rgb(var(--fg));
+  font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  tab-size: 2;
+}
+
+.hljs-comment,
+.hljs-quote { color: rgb(var(--faint)); font-style: italic; }
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-link { color: #d98ed7; }
+.hljs-string,
+.hljs-title,
+.hljs-name,
+.hljs-type,
+.hljs-attribute,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition { color: #83c995; }
+.hljs-number,
+.hljs-meta,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-params { color: #d6a85f; }
+.hljs-variable,
+.hljs-template-variable,
+.hljs-selector-class,
+.hljs-selector-id { color: #79b8e8; }
+.hljs-deletion { color: #df7b72; }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 700; }
+
+.light .hljs-keyword,
+.light .hljs-selector-tag,
+.light .hljs-literal,
+.light .hljs-section,
+.light .hljs-link { color: #8d328b; }
+.light .hljs-string,
+.light .hljs-title,
+.light .hljs-name,
+.light .hljs-type,
+.light .hljs-attribute,
+.light .hljs-symbol,
+.light .hljs-bullet,
+.light .hljs-addition { color: #24733b; }
+.light .hljs-number,
+.light .hljs-meta,
+.light .hljs-built_in,
+.light .hljs-builtin-name,
+.light .hljs-params { color: #8a5c12; }
+.light .hljs-variable,
+.light .hljs-template-variable,
+.light .hljs-selector-class,
+.light .hljs-selector-id { color: #17649b; }
+.light .hljs-deletion { color: #a8322b; }
+
+.gh-table-wrap { max-width: 100%; overflow-x: auto; }
+.gh-markdown table { width: 100%; border-collapse: collapse; font-size: 0.92em; }
+.gh-markdown th,
+.gh-markdown td { border: 1px solid rgb(var(--line)); padding: 0.45em 0.65em; text-align: left; }
+.gh-markdown th { background: rgb(var(--raised)); font-weight: 650; }
+.gh-markdown tbody tr:nth-child(even) { background: rgb(var(--surface) / 0.55); }
+
+.gh-blocked-image {
+  display: inline-block;
+  border: 1px solid rgb(var(--line));
+  border-radius: 0.3rem;
+  padding: 0.15rem 0.45rem;
+  color: rgb(var(--faint));
+  font-size: 0.85em;
+}
+
+.gh-mermaid {
+  overflow-x: auto;
+  border: 1px solid rgb(var(--line));
+  border-radius: 0.55rem;
+  background: #fff;
+  padding: 1rem;
+  color: #222;
+  text-align: center;
+}
+
+.gh-mermaid img { display: block; width: auto; max-width: 100%; height: auto; margin: 0 auto; }
+.gh-mermaid p { margin: 0; color: rgb(var(--muted)); font-size: 0.9em; }
+.gh-mermaid [role="alert"] { color: rgb(var(--danger)); text-align: left; }
+.gh-mermaid [role="alert"] pre { margin-top: 0.6rem; overflow: auto; color: #333; font-size: 12px; }
+
+@media (max-width: 767px) {
+  .gh-markdown-document { font-size: 16px; }
+  .gh-markdown h1 { font-size: 1.55em; }
+  .gh-markdown h2 { font-size: 1.3em; }
+  .gh-code-block code { font-size: 13px; }
+}

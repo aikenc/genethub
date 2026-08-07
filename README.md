@@ -62,7 +62,7 @@ cd apps/desktop && ./scripts/bundle.mjs                 # Windows/macOS 桌面�
 | [security-model.md](./docs/security-model.md) | 信任边界、凭证与撤销、加密现状 |
 | [self-hosting.md](./docs/self-hosting.md) | 自建：全部自己跑，或只跑 relay |
 | [e2ee-data-plane.md](./docs/e2ee-data-plane.md) | protocol v3：logical streams、E2EE、Fabric baseline 与 WebRTC direct |
-| [assets-quick-preview.md](./docs/assets-quick-preview.md) | workspace-relative、≤2 MiB 的轻量文件 Preview |
+| [assets-quick-preview.md](./docs/assets-quick-preview.md) | workspace-relative、≤4 MiB、完整 Markdown 与 Agent 产物链接的轻量 Preview |
 | [tech-stack.md](./docs/tech-stack.md) | 技术选型与部署拓扑 |
 | [testing.md](./docs/testing.md) | 测试矩阵：跨部件集成与真实模型 E2E |
 | [roadmap.md](./docs/roadmap.md) | MVP → 多 agent → 协作 → 端到端加密 |
