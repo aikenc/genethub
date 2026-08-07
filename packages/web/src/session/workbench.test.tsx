@@ -129,7 +129,7 @@ describe("what the user sees in a session", () => {
         batches: [
           {
             summary: batch,
-            monologue: "先检查配置，再逐项核对。",
+            monologue: "先检查配置。再逐项核对。",
             blobs: [
               {
                 itemId: "think1",
@@ -162,9 +162,11 @@ describe("what the user sees in a session", () => {
     expect(screen.queryByText("查看进展")).not.toBeInTheDocument();
     expect(screen.getByTestId("round-progress")).not.toHaveTextContent("工作过程");
     expect(screen.getByTestId("round-progress")).not.toHaveTextContent("阶段");
-    expect(screen.getByTestId("round-trunk")).toHaveTextContent("进展：先检查配置。");
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("🧭");
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("先检查配置。");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("2 项");
-    expect(screen.getByTestId("batch-monologue")).toHaveTextContent("先检查配置，再逐项核对。");
+    expect(screen.getByTestId("batch-monologue")).toHaveTextContent("再逐项核对。");
+    expect(screen.getByTestId("batch-monologue")).not.toHaveTextContent("先检查配置。");
     expect(screen.getByText("确认结构")).toBeInTheDocument();
     expect(screen.getByText("读取配置")).toBeInTheDocument();
 
@@ -336,8 +338,10 @@ describe("what the user sees in a session", () => {
     render(<TimelineView state={state} />);
 
     const trunks = screen.getAllByTestId("round-trunk");
-    expect(trunks[0]!).toHaveTextContent("过程：盘点入口。64 项");
-    expect(trunks[1]!).toHaveTextContent("进展：核对权限。3 项");
+    expect(trunks[0]!).toHaveTextContent("🧭");
+    expect(trunks[0]!).toHaveTextContent("盘点入口。64 项");
+    expect(trunks[1]!).toHaveTextContent("🧭");
+    expect(trunks[1]!).toHaveTextContent("核对权限。3 项");
     // Watching an agent work is the point of a running round: its tail is open,
     // and only the settled work behind it is folded away.
     expect(within(trunks[0]!).getByRole("button")).toHaveAttribute("aria-expanded", "false");
@@ -427,8 +431,12 @@ describe("what the user sees in a session", () => {
           "r1:0": {
             summary,
             batches: [
-              { summary: first, monologue: "完整独白：核对入口与权限。", blobs: [] },
-              { summary: second, monologue: "完整独白：核对部署边界。", blobs: [] },
+              {
+                summary: first,
+                monologue: "核对入口与权限。随后检查角色边界。",
+                blobs: [],
+              },
+              { summary: second, monologue: "核对部署边界。", blobs: [] },
             ],
           },
         },
@@ -440,12 +448,15 @@ describe("what the user sees in a session", () => {
 
     const batches = screen.getAllByTestId("round-batch");
     expect(batches).toHaveLength(2);
+    expect(batches[0]!).toHaveTextContent("💭");
     expect(batches[0]!).toHaveTextContent("核对入口与权限");
-    expect(batches[0]!).not.toHaveTextContent("2 项");
+    expect(batches[0]!).toHaveTextContent("2 项");
 
-    await userEvent.click(within(batches[0]!).getByRole("button"));
-    expect(within(batches[0]!).getByRole("button")).not.toHaveTextContent("核对入口与权限");
-    expect(batches[0]!).toHaveTextContent("完整独白：核对入口与权限。");
+    const batchHeader = within(batches[0]!).getByRole("button");
+    await userEvent.click(batchHeader);
+    expect(batchHeader).toHaveTextContent("核对入口与权限");
+    expect(batches[0]!).toHaveTextContent("随后检查角色边界。");
+    expect(screen.getByTestId("batch-monologue")).not.toHaveTextContent("核对入口与权限。");
   });
 
   it("keeps historical trunks collapsed and preserves a manual expansion", async () => {
@@ -557,9 +568,9 @@ describe("what the user sees in a session", () => {
     const timeline = screen.getByTestId("timeline");
     expect(screen.getAllByTestId("assistant-message")).toHaveLength(1);
     expect(screen.getByTestId("round-trunk")).toHaveTextContent(
-      "过程：彻底核对权限链路。8 项",
+      "先彻底核对权限链路，再给结论。8 项",
     );
-    expect(timeline.textContent?.indexOf("过程：彻底核对权限链路。")).toBeLessThan(
+    expect(timeline.textContent?.indexOf("先彻底核对权限链路，再给结论。")).toBeLessThan(
       timeline.textContent?.indexOf("最终结论：需要修复授权边界。") ?? -1,
     );
     expect(timeline).not.toHaveTextContent("阶段 1");
