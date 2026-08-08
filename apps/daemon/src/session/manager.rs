@@ -3854,7 +3854,9 @@ mod tests {
         let sessions = manager(root);
         sessions.store.save_meta(&meta()).unwrap();
         let live = sessions.live("s1").await.unwrap();
-        let (events, _) = broadcast::channel(64);
+        // Match the production adapter buffer: pagination tests deliberately
+        // send more than 64 events and are not overflow tests.
+        let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let turn_ids = Arc::new(AtomicU64::new(0));
         *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
             events.clone(),
@@ -4101,7 +4103,19 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        eventually("persisted the narrated trunk", async || {
+            let Ok(chat) = sessions.store.load_chat("w1", "s1") else {
+                return false;
+            };
+            let Ok(trunks) = sessions.store.load_trunk_index("w1", "s1", 0) else {
+                return false;
+            };
+            chat.rounds
+                .first()
+                .is_some_and(|round| round.trunk_count == 1)
+                && trunks.len() == 1
+        })
+        .await;
 
         let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         assert_eq!(rounds.len(), 1, "one settled round must be ledgered");
@@ -4166,7 +4180,19 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        eventually("persisted both paginated trunks", async || {
+            let Ok(chat) = sessions.store.load_chat("w1", "s1") else {
+                return false;
+            };
+            let Ok(trunks) = sessions.store.load_trunk_index("w1", "s1", 0) else {
+                return false;
+            };
+            chat.rounds
+                .first()
+                .is_some_and(|round| round.trunk_count == 2)
+                && trunks.len() == 2
+        })
+        .await;
 
         let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         let trunks = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
@@ -4225,7 +4251,23 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        eventually("persisted the expanded trunk and its blob", async || {
+            let Ok(index) = sessions.store.load_trunk_index("w1", "s1", 0) else {
+                return false;
+            };
+            let Some(summary) = index.last() else {
+                return false;
+            };
+            let Ok(trunk) = sessions.store.load_trunk("w1", "s1", 0, summary) else {
+                return false;
+            };
+            trunk
+                .batches
+                .iter()
+                .flat_map(|batch| &batch.blobs)
+                .any(|blob| blob.blob.is_some())
+        })
+        .await;
 
         let (snapshot, replayed, reset, _) = sessions.subscribe("s1", Some(0), true).await.unwrap();
         assert!(reset);
