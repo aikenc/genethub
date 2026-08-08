@@ -287,6 +287,12 @@ fabricRouteTicket: string, fabricRouteExpiresAt: string,
  */
 fingerprint: string, };
 
+export type InteractionAnswer = { questionId: string, selectedOptionIds: Array<string>, freeformText?: string, };
+
+export type InteractionOption = { id: string, label: string, };
+
+export type InteractionQuestion = { id: string, prompt: string, allowMultiple: boolean, allowFreeform: boolean, options: Array<InteractionOption>, };
+
 /**
  * Proof of the PSK carried in the fragment half of a pairing link.
  */
@@ -356,7 +362,7 @@ export type PermissionOption = { id: string, label: string, kind: PermissionOpti
 
 export type PermissionOptionKind = "allowOnce" | "allowAlways" | "reject";
 
-export type PermissionOutcome = { "outcome": "selected", optionId: string, } | { "outcome": "timedOut", appliedDefault: string, } | { "outcome": "canceled" };
+export type PermissionOutcome = { "outcome": "selected", optionId: string, } | { "outcome": "answered", answers: Array<InteractionAnswer>, } | { "outcome": "timedOut", appliedDefault: string, } | { "outcome": "canceled" };
 
 export type PermissionRequest = { id: string, 
 /**
@@ -367,9 +373,15 @@ kind: PermissionRequestKind, title: string, detail?: string,
 /**
  * The tool call this approval gates, when it gates one.
  */
-toolCallId?: string, options: Array<PermissionOption>, };
+toolCallId?: string, options: Array<PermissionOption>, 
+/**
+ * Structured questions carried by Agent-native interaction tools. Empty
+ * for the original one-row approval card, so older stored sessions keep
+ * their exact behaviour.
+ */
+questions?: Array<InteractionQuestion>, };
 
-export type PermissionRequestKind = "permission" | "question";
+export type PermissionRequestKind = "permission" | "question" | "planApproval";
 
 export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { "state": "unavailable", reason: string, };
 
@@ -474,7 +486,7 @@ models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payloa
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */

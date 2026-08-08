@@ -1,17 +1,30 @@
 import type { AgentInfo, Attachment, CommandInfo } from "@genehub/proto";
-import { Paperclip } from "lucide-react";
-import { useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Loader2, Paperclip } from "lucide-react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { attachmentPreviewUrl, AttachmentTooLarge, fileToAttachment, imageFilesFromClipboard } from "./attachments";
 import { ComposerControls } from "./ComposerControls";
 
 /**
+ * What the composer is in the middle of.
+ *
+ * `sending` is the gap between pressing send and the daemon reporting a turn,
+ * which is where an agent process gets started — seconds for a cold CLI. It is
+ * deliberately its own state: there is no turn to interrupt yet, so offering
+ * stop there would offer something that cannot work, and offering send again
+ * only produces the daemon's refusal.
+ */
+export type ComposerPhase = "idle" | "sending" | "running";
+
+/**
  * Floating input at the bottom of the chat pane.
  *
- * Enter sends, shift+enter breaks the line. While a turn is running the send
- * control becomes stop — one affordance, because the user's intent is never
- * ambiguous. Agent and runtime settings live in one quiet footer summary; its
- * responsive detail panel keeps the richer catalog out of the conversation.
+ * Enter sends, shift+enter breaks the line. The send control carries the phase:
+ * an arrow to send, a spinner nobody can press while the message is on its way,
+ * and stop once a turn is really running — one affordance, because the user's
+ * intent is never ambiguous. Agent and runtime settings live in one quiet footer
+ * summary; its responsive detail panel keeps the richer catalog out of the
+ * conversation.
  *
  * Typing `/` opens the agent's own command list, when it has one. Running a
  * command needs nothing special — it goes out as ordinary text — so this is only
@@ -19,7 +32,7 @@ import { ComposerControls } from "./ComposerControls";
  * of commands and skills that are invisible outside its own terminal.
  */
 export function Composer({
-  running,
+  phase,
   disabled,
   agents,
   agentId,
@@ -29,6 +42,7 @@ export function Composer({
   agentLocked,
   attachmentsSupported,
   commands,
+  restoreDraft,
   onSend,
   onInterrupt,
   onPickAgent,
@@ -36,8 +50,9 @@ export function Composer({
   onPickMode,
   onPickEffort,
   onHeightChange,
+  onRestoreDraft,
 }: {
-  running: boolean;
+  phase: ComposerPhase;
   disabled?: boolean;
   agents: AgentInfo[];
   agentId: string | null;
@@ -52,6 +67,8 @@ export function Composer({
   attachmentsSupported?: boolean;
   /** The current agent's slash commands, if it named any. */
   commands?: CommandInfo[];
+  /** A message coming back for editing after it failed to send. */
+  restoreDraft?: { text: string; attachments: Attachment[] } | null;
   onSend(text: string, attachments: Attachment[]): void;
   onInterrupt(): void;
   onPickAgent(id: string): void;
@@ -62,6 +79,8 @@ export function Composer({
    * timeline. Its owner uses this to keep the last message and permission
    * prompt above the real card instead of a guessed fixed offset. */
   onHeightChange?(height: number): void;
+  /** Acknowledges that `restoreDraft` has been taken into the field. */
+  onRestoreDraft?(): void;
 }) {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -104,6 +123,11 @@ export function Composer({
   };
 
   const send = () => {
+    // The button is gone outside `idle`, but the textarea's Enter is not: it
+    // used to reach the daemon mid-turn and come back as "a turn is already
+    // running in this session", which describes our own key handler rather than
+    // anything the reader did wrong.
+    if (phase !== "idle" || disabled) return;
     const text = draft.trim();
     if (!text && attachments.length === 0) return;
     setDraft("");
@@ -111,6 +135,16 @@ export function Composer({
     setDismissed(false);
     onSend(text, attachments);
   };
+
+  // A message that failed comes back whole, text and attachments together, so
+  // it can be edited rather than retyped.
+  useEffect(() => {
+    if (!restoreDraft) return;
+    setDraft(restoreDraft.text);
+    setAttachments(restoreDraft.attachments);
+    onRestoreDraft?.();
+    textarea.current?.focus();
+  }, [restoreDraft, onRestoreDraft]);
 
   const addFiles = async (files: File[]) => {
     if (!attachmentsSupported) {
@@ -319,7 +353,7 @@ export function Composer({
               modeId={modeId}
               effortId={effortId ?? null}
               compact={!active}
-              disabled={disabled || running}
+              disabled={disabled || phase !== "idle"}
               agentLocked={agentLocked}
               onOpenChange={setSettingsOpen}
               onPickAgent={onPickAgent}
@@ -356,7 +390,7 @@ export function Composer({
                   : "添加文件（当前 Agent 不支持附件）"
               }
               title={attachmentsSupported ? "添加文件（当前仅支持图片）" : "当前 Agent 不支持附件"}
-              disabled={disabled || running || !attachmentsSupported}
+              disabled={disabled || phase !== "idle" || !attachmentsSupported}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setDismissed(true);
@@ -368,7 +402,25 @@ export function Composer({
             >
               <Paperclip className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
             </button>
-            {running ? (
+            {phase === "sending" ? (
+              // Still a button, and still focusable: `disabled` would throw the
+              // focus of whoever just clicked it back to the document. It is
+              // `aria-disabled` with nothing behind the click instead, so the
+              // wait is unmistakably not interactive without moving anyone's
+              // place in the page.
+              <button
+                type="button"
+                aria-label="发送中"
+                aria-disabled="true"
+                aria-busy="true"
+                onMouseDown={(event) => event.preventDefault()}
+                className={`flex !min-h-0 !min-w-0 shrink-0 cursor-default items-center justify-center rounded-full bg-accent/40 text-white ${
+                  active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
+                }`}
+              >
+                <Loader2 className="h-6 w-6 animate-spin md:h-4 md:w-4" aria-hidden />
+              </button>
+            ) : phase === "running" ? (
               <button
                 type="button"
                 aria-label="停止"

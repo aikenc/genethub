@@ -236,7 +236,7 @@ pub struct CustomAgent {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceFolderEntry {
     pub name: String,
@@ -246,7 +246,7 @@ pub struct WorkspaceFolderEntry {
     pub path_prefix: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceEntry {
     pub id: String,
@@ -260,6 +260,10 @@ pub struct WorkspaceEntry {
     pub folders: Vec<WorkspaceFolderEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_file: Option<PathBuf>,
+    /// Hidden from the active registry, but retained so reopening the same
+    /// project restores its id and therefore its on-disk conversation history.
+    #[serde(default)]
+    pub removed: bool,
     /// A revisioned catalogue fact, sampled when the daemon starts or the
     /// workspace is first opened. Keeping it in config prevents a filesystem
     /// change from producing a different Hub snapshot at the same revision.
@@ -308,6 +312,53 @@ impl Config {
             }
         }
         if changed {
+            self.save(path)?;
+        }
+        Ok(())
+    }
+
+    /// Collapses the short-lived representation that allowed a folder and a
+    /// `.code-workspace` with the same first root to mint different ids.
+    ///
+    /// Session history deliberately lives below that first root and derives its
+    /// current workspace id from the registry. Two ids for one root therefore
+    /// duplicate every conversation and contend for the same owner lock. Keep
+    /// the oldest id, prefer the richer multi-root view, and publish one catalog
+    /// revision for the durable repair.
+    pub fn migrate_workspace_identities(&mut self, path: &Path) -> Result<()> {
+        let mut changed = false;
+        let mut by_root = std::collections::HashMap::<PathBuf, usize>::new();
+        let mut ids = std::collections::HashSet::new();
+        let mut merged: Vec<WorkspaceEntry> = Vec::with_capacity(self.workspaces.len());
+
+        for mut workspace in std::mem::take(&mut self.workspaces) {
+            if workspace.id.trim().is_empty() || !ids.insert(workspace.id.clone()) {
+                workspace.id = format!("w_{}", uuid::Uuid::new_v4().simple());
+                ids.insert(workspace.id.clone());
+                changed = true;
+            }
+            if let Some(index) = by_root.get(&workspace.root).copied() {
+                let existing = &mut merged[index];
+                let id = existing.id.clone();
+                let removed = existing.removed && workspace.removed;
+                if existing.workspace_file.is_none() && workspace.workspace_file.is_some() {
+                    workspace.id = id;
+                    workspace.name = existing.name.clone();
+                    workspace.removed = removed;
+                    *existing = workspace;
+                } else {
+                    existing.removed = removed;
+                }
+                changed = true;
+                continue;
+            }
+            by_root.insert(workspace.root.clone(), merged.len());
+            merged.push(workspace);
+        }
+        self.workspaces = merged;
+
+        if changed {
+            self.workspace_catalog_revision = self.workspace_catalog_revision.saturating_add(1);
             self.save(path)?;
         }
         Ok(())
@@ -998,6 +1049,7 @@ mod tests {
                 path_prefix: String::new(),
             }],
             workspace_file: None,
+            removed: false,
             is_git_repo: false,
         });
         config.save(&path).unwrap();
@@ -1020,6 +1072,7 @@ mod tests {
             root: root.clone(),
             folders: Vec::new(),
             workspace_file: None,
+            removed: false,
             is_git_repo: false,
         });
         config.save(&path).unwrap();
@@ -1032,6 +1085,70 @@ mod tests {
 
         let saved = Config::load(&path).unwrap();
         assert_eq!(saved.workspaces[0].folders.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_agent_roots_migrate_to_one_id_and_prefer_the_multi_root_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let root = dir.path().join("product");
+        let docs = dir.path().join("docs");
+        let definition = dir.path().join("suite.code-workspace");
+        let folder = WorkspaceFolderEntry {
+            name: "product".into(),
+            root: root.clone(),
+            path_prefix: String::new(),
+        };
+        let mut config = Config {
+            workspaces: vec![
+                WorkspaceEntry {
+                    id: "w_folder".into(),
+                    name: "product".into(),
+                    root: root.clone(),
+                    folders: vec![folder.clone()],
+                    workspace_file: None,
+                    removed: false,
+                    is_git_repo: false,
+                },
+                WorkspaceEntry {
+                    id: "w_suite".into(),
+                    name: "suite".into(),
+                    root: root.clone(),
+                    folders: vec![
+                        WorkspaceFolderEntry {
+                            name: "Product".into(),
+                            root: root.clone(),
+                            path_prefix: "Product".into(),
+                        },
+                        WorkspaceFolderEntry {
+                            name: "Docs".into(),
+                            root: docs,
+                            path_prefix: "Docs".into(),
+                        },
+                    ],
+                    workspace_file: Some(definition.clone()),
+                    removed: true,
+                    is_git_repo: false,
+                },
+            ],
+            ..Config::default()
+        };
+
+        config.migrate_workspace_identities(&path).unwrap();
+
+        assert_eq!(config.workspaces.len(), 1);
+        assert_eq!(config.workspaces[0].id, "w_folder");
+        assert_eq!(
+            config.workspaces[0].workspace_file.as_deref(),
+            Some(definition.as_path())
+        );
+        assert_eq!(config.workspaces[0].folders.len(), 2);
+        assert!(
+            !config.workspaces[0].removed,
+            "either active source keeps the identity active"
+        );
+        assert_eq!(config.workspace_catalog_revision, 1);
+        assert_eq!(Config::load(&path).unwrap().workspaces.len(), 1);
     }
 
     #[test]
@@ -1194,6 +1311,7 @@ mod tests {
                 path_prefix: String::new(),
             }],
             workspace_file: None,
+            removed: false,
             is_git_repo: false,
         });
 

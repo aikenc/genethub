@@ -151,10 +151,10 @@ export interface Host {
    * workbench has to draw the title bar itself.
    */
   window?: WindowControls;
-  /** Present only where a native picker exists. */
-  pickDirectory?(): Promise<string | null>;
+  /** Present only where a native picker exists. Starts near current work when possible. */
+  pickDirectory?(initialDirectory?: string): Promise<string | null>;
   /** Native picker restricted to VS Code .code-workspace files. */
-  pickWorkspaceFile?(): Promise<string | null>;
+  pickWorkspaceFile?(initialDirectory?: string): Promise<string | null>;
   /**
    * Reveals the log directory in the file manager.
    *
@@ -490,11 +490,15 @@ export function desktopHost(
         void tauri.core.invoke("set_window_background", { dark });
       },
     },
-    async pickDirectory() {
-      return tauri.core.invoke<string | null>("pick_directory");
+    async pickDirectory(initialDirectory) {
+      return tauri.core.invoke<string | null>("pick_directory", {
+        initialDirectory: initialDirectory ?? null,
+      });
     },
-    async pickWorkspaceFile() {
-      return tauri.core.invoke<string | null>("pick_workspace_file");
+    async pickWorkspaceFile(initialDirectory) {
+      return tauri.core.invoke<string | null>("pick_workspace_file", {
+        initialDirectory: initialDirectory ?? null,
+      });
     },
     openLogs() {
       void tauri.core.invoke("open_logs");

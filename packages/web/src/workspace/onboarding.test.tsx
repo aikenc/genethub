@@ -132,6 +132,7 @@ async function start(client: Client, host: Host) {
 }
 
 beforeEach(() => {
+  localStorage.clear();
   useWorkbench.setState({
     client: null,
     workspaces: [],
@@ -286,6 +287,68 @@ describe("the first run", () => {
     await waitFor(() => {
       expect(calls.find((call) => call.type === "workspace.open")?.payload).toEqual({
         root: "/srv/app",
+      });
+    });
+  });
+
+  it("starts the project browser at the selected workspace before an older remembered path", async () => {
+    localStorage.setItem("genehub:project-picker:loopback:本机", "/srv/older");
+    const { client, calls } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({
+        type: "workspaces",
+        data: [workspace("w1", "current", "/srv/current", false)],
+      }),
+      "session.list": () => ({ type: "sessions", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "directory.list": (payload: { path: string | null }) => ({
+        type: "directory",
+        data: {
+          path: payload.path ?? "/home/me",
+          parent: "/srv",
+          directories: [],
+          workspaceFiles: [],
+        },
+      }),
+    });
+    await start(client, hostWith());
+
+    await userEvent.click(
+      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+    );
+
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "directory.list")?.payload).toEqual({
+        path: "/srv/current",
+      });
+    });
+  });
+
+  it("falls back to the last browsed directory when no workspace is selected", async () => {
+    localStorage.setItem("genehub:project-picker:loopback:本机", "/srv/remembered");
+    const { client, calls } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({ type: "workspaces", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "directory.list": (payload: { path: string | null }) => ({
+        type: "directory",
+        data: {
+          path: payload.path ?? "/home/me",
+          parent: "/srv",
+          directories: [],
+          workspaceFiles: [],
+        },
+      }),
+    });
+    await start(client, hostWith());
+
+    await userEvent.click(
+      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+    );
+
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "directory.list")?.payload).toEqual({
+        path: "/srv/remembered",
       });
     });
   });

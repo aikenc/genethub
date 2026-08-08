@@ -570,6 +570,28 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             }
         }
 
+        Request::WorkspaceRemove { workspace_id } => {
+            let sessions = match state.sessions.list(Some(&workspace_id), true).await {
+                Ok(sessions) => sessions,
+                Err(error) => return failed(error),
+            };
+            if sessions.iter().any(|session| {
+                matches!(
+                    session.status,
+                    genehub_proto::SessionStatus::Running | genehub_proto::SessionStatus::Waiting
+                )
+            }) {
+                return Handled::err(
+                    ErrorCode::Conflict,
+                    "stop the workspace's running or waiting sessions before removing it",
+                );
+            }
+            match state.workspaces.remove(&workspace_id).await {
+                Ok(workspaces) => Handled::ok(Reply::Workspaces(workspaces)),
+                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+            }
+        }
+
         Request::DirectoryList { path } => {
             match crate::workspace::list_directory(path.as_deref().map(Path::new)) {
                 Ok(listing) => Handled::ok(Reply::Directory(listing)),

@@ -22,6 +22,14 @@ permissions:
   contents: read
 
 jobs:
+  # Full CI matrix (rust, relay, web e2e, desktop Win/mac). Ordinary main/PR
+  # runs stay path-filtered; the tag is where every job has to pass together
+  # before an installer or tarball is built.
+  verify:
+    uses: ./.github/workflows/ci.yml
+    with:
+      force_full: true
+
   # What this run is. Every later job reads the answers from here rather than
   # re-deriving them, so there is exactly one place where the tag's shape
   # becomes a channel.
@@ -168,7 +176,7 @@ jobs:
   # dependency. macOS waits for signing and notarisation, without which the
   # download is a security warning with an app behind it.
   installers:
-    needs: channel
+    needs: [channel, verify]
     strategy:
       fail-fast: false
       matrix:
@@ -263,7 +271,16 @@ jobs:
           # would kill CLI clients with it (`genethub-cli.md` §2).
           grep -q 'taskkill /F /T /PID' apps/desktop/src-tauri/installer.nsh             || { echo "::error::the installer no longer stops the daemon by its lock-file pid"; exit 1; }
           grep -q 'daemon.lock' apps/desktop/src-tauri/installer.nsh             || { echo "::error::the installer does not read the daemon's lock file"; exit 1; }
+          # The shell-supervised daemon's lock sits under the bundle identifier
+          # (Tauri `app_data_dir`), not the plain data dir — reading only the
+          # latter was the upgrade that could not stop its own daemon.
+          grep -q 'APPDATA\\${GH_BUNDLE_ID}\\${GH_DATA_DIR_NAME}\\daemon.lock' apps/desktop/src-tauri/installer.nsh             || { echo "::error::the installer does not read the shell-supervised daemon's lock"; exit 1; }
           ! grep -q 'IM genet' apps/desktop/src-tauri/installer.nsh             || { echo "::error::the installer kills genet by image name — that takes CLI clients down with the daemon"; exit 1; }
+          # The vendored NSIS template exists to make upgrades default to
+          # installing over the top; if the override is gone the template is
+          # either unsynced or the config no longer points at it.
+          grep -q '; GH:' apps/desktop/src-tauri/installer.nsi             || { echo "::error::the vendored installer.nsi lost the overwrite-by-default override"; exit 1; }
+          grep -q '"template": "installer.nsi"' apps/desktop/src-tauri/tauri.conf.json             || { echo "::error::tauri.conf.json no longer builds from the vendored installer.nsi"; exit 1; }
           channel="$(node scripts/channel.mjs --show)"
           for name in $names; do
             found="$(find apps/desktop/src-tauri/target/release target/release \
@@ -371,7 +388,7 @@ jobs:
   # on ubuntu-22.04 was requiring GLIBC_2.34 and failing on those machines with
   # a wall of `version 'GLIBC_…' not found` — exactly what `curl | sh` users hit.
   binaries:
-    needs: channel
+    needs: [channel, verify]
     strategy:
       fail-fast: false
       matrix:

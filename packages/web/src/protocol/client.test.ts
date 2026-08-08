@@ -160,6 +160,29 @@ describe("the v3 peer connection", () => {
     expect(queue.urls[1]).toContain("42124");
     client.close();
   });
+
+  it("keeps escalating backoff while fresh encrypted carriers keep flapping", async () => {
+    const attempts: number[] = [];
+    const { client, queue } = await connected({
+      backoffMs: (attempt) => {
+        attempts.push(attempt);
+        return 0;
+      },
+    });
+
+    queue.latest().close(1012, "restart");
+    await waitFor(() => queue.sockets.length === 2);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+
+    queue.latest().close(1012, "restart again");
+    await waitFor(() => queue.sockets.length === 3);
+
+    expect(attempts).toEqual([0, 1]);
+    client.close();
+  });
 });
 
 describe("RPC exchanges are independent logical streams", () => {

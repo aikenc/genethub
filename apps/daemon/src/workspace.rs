@@ -125,7 +125,9 @@ impl Workspaces {
         let mut entries = self.entries.write().await;
         for entry in &self.config.read().await.workspaces {
             debug_assert!(!entry.folders.is_empty());
-            self.homes.attach(&entry.id, &entry.root);
+            if !entry.removed {
+                self.homes.attach(&entry.id, &entry.root);
+            }
             entries.insert(entry.id.clone(), entry.clone());
         }
     }
@@ -141,8 +143,12 @@ impl Workspaces {
     /// Only ever runs on an empty registry, so a user who opened their own
     /// projects never sees it appear.
     pub async fn ensure_default(&self, root: &Path) -> Result<WorkspaceInfo> {
-        if let Some(existing) = self.list().await.into_iter().next() {
-            return Ok(existing);
+        if let Some(existing) = self.entries.read().await.values().next() {
+            // A user who deliberately removed their last project should come
+            // back to an empty registry, not find a new default folder created
+            // behind their back. The retained entry is enough to distinguish
+            // that from a machine which has never opened anything.
+            return Ok(describe(existing));
         }
         std::fs::create_dir_all(root)
             .with_context(|| format!("creating the default workspace at {}", root.display()))?;
@@ -150,8 +156,14 @@ impl Workspaces {
     }
 
     pub async fn list(&self) -> Vec<WorkspaceInfo> {
-        let mut out: Vec<WorkspaceInfo> =
-            self.entries.read().await.values().map(describe).collect();
+        let mut out: Vec<WorkspaceInfo> = self
+            .entries
+            .read()
+            .await
+            .values()
+            .filter(|entry| !entry.removed)
+            .map(describe)
+            .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
@@ -161,6 +173,7 @@ impl Workspaces {
         let entries = self.entries.read().await;
         let mut workspaces: Vec<CatalogWorkspace> = entries
             .values()
+            .filter(|entry| !entry.removed)
             .map(|entry| CatalogWorkspace {
                 local_workspace_id: entry.id.clone(),
                 reported_name: safe_catalog_name(&entry.name, &entry.id),
@@ -183,6 +196,7 @@ impl Workspaces {
             .read()
             .await
             .get(id)
+            .filter(|entry| !entry.removed)
             .cloned()
             .ok_or_else(|| anyhow!("no such workspace: {id}"))
     }
@@ -273,15 +287,46 @@ impl Workspaces {
             ));
         };
 
-        // Keep the write lock from the duplicate check through commit. Two
-        // concurrent WorkspaceOpen calls for the same canonical path must not
-        // mint two local ids (and therefore two Hub workspaces).
+        // Keep the write lock from the identity check through commit. The first
+        // folder is the Agent cwd and session-history anchor, so opening that
+        // folder through a `.code-workspace` must enhance the existing entry,
+        // not mint a competing id over the same `.genethub` home.
         let mut entries = self.entries.write().await;
         if let Some(existing) = entries
             .values()
-            .find(|entry| same_workspace_source(entry, &candidate))
+            .find(|entry| entry.root == candidate.root)
+            .cloned()
         {
-            return Ok(describe(existing));
+            let mut updated = candidate;
+            updated.id = existing.id.clone();
+            // The label belongs to the durable project identity, not whichever
+            // folder/workspace-file view most recently opened it. In particular,
+            // switching views must not erase a name the user chose.
+            updated.name = existing.name.clone();
+            updated.removed = false;
+            if updated == existing {
+                return Ok(describe(&existing));
+            }
+
+            let catalog_changed = existing.removed
+                || existing.name != updated.name
+                || existing.is_git_repo != updated.is_git_repo;
+            let mut config = self.config.write().await;
+            let mut next = config.clone();
+            let saved = next
+                .workspaces
+                .iter_mut()
+                .find(|entry| entry.id == existing.id)
+                .ok_or_else(|| anyhow!("workspace {} is missing from config", existing.id))?;
+            *saved = updated.clone();
+            if catalog_changed {
+                next.workspace_catalog_revision = next.workspace_catalog_revision.saturating_add(1);
+            }
+            next.save(&self.config_path)?;
+            *config = next;
+            self.homes.attach(&updated.id, &updated.root);
+            entries.insert(updated.id.clone(), updated.clone());
+            return Ok(describe(&updated));
         }
 
         let entry = candidate;
@@ -299,6 +344,38 @@ impl Workspaces {
         Ok(describe(&entry))
     }
 
+    /// Removes a project from the active registry without touching its files or
+    /// conversations. The durable entry is a tombstone with enough identity to
+    /// reactivate the same id when the source is opened again.
+    pub async fn remove(&self, id: &str) -> Result<Vec<WorkspaceInfo>> {
+        let mut entries = self.entries.write().await;
+        let entry = entries
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+        if entry.removed {
+            return Ok(active_descriptions(entries.values()));
+        }
+
+        let mut updated = entry;
+        updated.removed = true;
+        let mut config = self.config.write().await;
+        let mut next = config.clone();
+        let saved = next
+            .workspaces
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| anyhow!("workspace {id} is missing from config"))?;
+        saved.removed = true;
+        next.workspace_catalog_revision = next.workspace_catalog_revision.saturating_add(1);
+        next.save(&self.config_path)?;
+        *config = next;
+        entries.insert(id.to_string(), updated);
+        self.homes.detach(id);
+
+        Ok(active_descriptions(entries.values()))
+    }
+
     /// Changes only the label shown to the user; the directory itself stays put.
     pub async fn rename(&self, id: &str, name: &str) -> Result<WorkspaceInfo> {
         let name: String = name.trim().chars().take(80).collect();
@@ -310,6 +387,9 @@ impl Workspaces {
         let entry = entries
             .get(id)
             .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+        if entry.removed {
+            return Err(anyhow!("no such workspace: {id}"));
+        }
         if entry.name == name {
             return Ok(describe(entry));
         }
@@ -331,6 +411,17 @@ impl Workspaces {
 
         Ok(describe(&updated))
     }
+}
+
+fn active_descriptions<'a>(
+    entries: impl Iterator<Item = &'a WorkspaceEntry>,
+) -> Vec<WorkspaceInfo> {
+    let mut out: Vec<_> = entries
+        .filter(|entry| !entry.removed)
+        .map(describe)
+        .collect();
+    out.sort_by(|left, right| left.name.cmp(&right.name));
+    out
 }
 
 fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
@@ -370,6 +461,7 @@ fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {
             path_prefix: String::new(),
         }],
         workspace_file: None,
+        removed: false,
         is_git_repo: root.join(".git").exists(),
     }
 }
@@ -463,6 +555,7 @@ fn code_workspace(path: &Path) -> Result<WorkspaceEntry> {
         root: root.clone(),
         folders,
         workspace_file: Some(path.to_path_buf()),
+        removed: false,
         is_git_repo: root.join(".git").exists(),
     })
 }
@@ -510,14 +603,6 @@ fn unique_path_prefix(name: &str, used: &mut HashSet<String>) -> String {
         suffix += 1;
     }
     candidate
-}
-
-fn same_workspace_source(existing: &WorkspaceEntry, candidate: &WorkspaceEntry) -> bool {
-    match (&existing.workspace_file, &candidate.workspace_file) {
-        (Some(existing), Some(candidate)) => existing == candidate,
-        (None, None) => existing.root == candidate.root,
-        _ => false,
-    }
 }
 
 fn is_workspace_file(path: &Path) -> bool {
@@ -670,6 +755,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_remove_persistence_keeps_the_workspace_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let config = Arc::new(RwLock::new(Config::default()));
+        let config_path = dir.path().join("config.json");
+        let spaces = Workspaces::new(
+            config.clone(),
+            config_path.clone(),
+            WorkspaceHomes::default(),
+        );
+        let opened = spaces.open(&project, None).await.unwrap();
+        crate::config::fail_next_private_save(&config_path);
+
+        assert!(spaces.remove(&opened.id).await.is_err());
+        assert_eq!(spaces.get(&opened.id).await.unwrap().id, opened.id);
+        assert!(!config.read().await.workspaces[0].removed);
+        assert_eq!(spaces.catalog().await.revision, 1);
+    }
+
+    #[tokio::test]
     async fn a_git_checkout_is_reported_as_one() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
@@ -811,6 +917,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_workspace_file_and_its_agent_root_share_one_durable_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let product = dir.path().join("product");
+        let docs = dir.path().join("docs");
+        std::fs::create_dir(&product).unwrap();
+        std::fs::create_dir(&docs).unwrap();
+        let definition = dir.path().join("suite.code-workspace");
+        std::fs::write(
+            &definition,
+            r#"{ folders: [{ path: "product" }, { path: "docs" }] }"#,
+        )
+        .unwrap();
+        let spaces = workspaces(dir.path()).await;
+
+        let folder = spaces.open(&product, None).await.unwrap();
+        spaces.rename(&folder.id, "Core").await.unwrap();
+        let multi_root = spaces.open(&definition, None).await.unwrap();
+
+        assert_eq!(multi_root.id, folder.id);
+        assert_eq!(multi_root.name, "Core");
+        assert_eq!(
+            multi_root.workspace_file.as_deref(),
+            Some(
+                definition
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(multi_root.folders.len(), 2);
+        assert_eq!(spaces.list().await.len(), 1);
+
+        let plain_again = spaces.open(&product, None).await.unwrap();
+        assert_eq!(plain_again.id, folder.id);
+        assert_eq!(plain_again.name, "Core");
+        assert!(plain_again.workspace_file.is_none());
+        assert_eq!(plain_again.folders.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reopening_a_workspace_file_refreshes_its_roots_without_changing_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["product", "docs", "tests"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let definition = dir.path().join("suite.code-workspace");
+        std::fs::write(
+            &definition,
+            r#"{ folders: [{ path: "product" }, { path: "docs" }] }"#,
+        )
+        .unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let first = spaces.open(&definition, None).await.unwrap();
+
+        std::fs::write(
+            &definition,
+            r#"{ folders: [{ path: "product" }, { path: "tests" }] }"#,
+        )
+        .unwrap();
+        let refreshed = spaces.open(&definition, None).await.unwrap();
+
+        assert_eq!(refreshed.id, first.id);
+        assert_eq!(refreshed.folders[1].name, "tests");
+        assert_eq!(spaces.catalog().await.revision, 1);
+    }
+
+    #[tokio::test]
+    async fn changing_the_agent_root_creates_a_new_identity_instead_of_moving_history() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["product", "replacement"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let definition = dir.path().join("suite.code-workspace");
+        std::fs::write(&definition, r#"{ folders: [{ path: "product" }] }"#).unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let first = spaces.open(&definition, None).await.unwrap();
+
+        std::fs::write(&definition, r#"{ folders: [{ path: "replacement" }] }"#).unwrap();
+        let moved = spaces.open(&definition, None).await.unwrap();
+
+        assert_ne!(moved.id, first.id);
+        assert_ne!(moved.root, first.root);
+        assert_eq!(spaces.list().await.len(), 2);
+    }
+
+    #[tokio::test]
     async fn a_code_workspace_rejects_remote_uri_roots() {
         let dir = tempfile::tempdir().unwrap();
         let definition = dir.path().join("remote.code-workspace");
@@ -949,6 +1142,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removing_a_workspace_retains_files_history_and_identity_for_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let session = project.join(".genethub/sessions/s_1/meta.json");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(&session, "conversation stays here").unwrap();
+        let config = Arc::new(RwLock::new(Config::default()));
+        let config_path = dir.path().join("config.json");
+        let spaces = Workspaces::new(
+            config.clone(),
+            config_path.clone(),
+            WorkspaceHomes::default(),
+        );
+        let opened = spaces.open(&project, None).await.unwrap();
+
+        assert!(spaces.remove(&opened.id).await.unwrap().is_empty());
+        assert!(spaces.list().await.is_empty());
+        assert!(spaces.catalog().await.workspaces.is_empty());
+        assert!(spaces.get(&opened.id).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(&session).unwrap(),
+            "conversation stays here"
+        );
+        assert!(Config::load(&config_path).unwrap().workspaces[0].removed);
+
+        let reopened = spaces.open(&project, None).await.unwrap();
+        assert_eq!(reopened.id, opened.id);
+        assert_eq!(spaces.list().await.len(), 1);
+        assert!(!config.read().await.workspaces[0].removed);
+    }
+
+    #[tokio::test]
+    async fn a_removed_last_workspace_does_not_recreate_the_default_on_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let opened = spaces.open(&project, None).await.unwrap();
+        spaces.remove(&opened.id).await.unwrap();
+
+        let default = dir.path().join("GeneHub");
+        let retained = spaces.ensure_default(&default).await.unwrap();
+        assert_eq!(retained.id, opened.id);
+        assert!(!default.exists());
+        assert!(spaces.list().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn the_hub_catalog_contains_no_local_paths_and_has_a_stable_order() {
         let dir = tempfile::tempdir().unwrap();
         let first = dir.path().join("first-secret-path");
@@ -997,6 +1238,7 @@ mod tests {
                     path_prefix: String::new(),
                 }],
                 workspace_file: None,
+                removed: false,
                 is_git_repo: false,
             }],
             ..Config::default()

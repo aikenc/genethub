@@ -10,7 +10,7 @@ import { LogsPanel } from "./logs/LogsPanel";
 import { Client, type ProtocolDial } from "./protocol/client";
 import { SettingsPanel } from "./settings/SettingsPanel";
 import { readRtcEnabled } from "./settings/rtc";
-import { Composer } from "./session/Composer";
+import { Composer, type ComposerPhase } from "./session/Composer";
 import { PermissionCard } from "./session/Permission";
 import { TimelineView } from "./session/TimelineView";
 import { defaultAgent, useWorkbench } from "./session/store";
@@ -24,6 +24,7 @@ import { useTheme } from "./theme/store";
 import { TerminalPanel } from "./terminal/TerminalPanel";
 import { UpdateToast } from "./updates/UpdateToast";
 import { OpenProject } from "./workspace/OpenProject";
+import { WorkspaceIcon } from "./workspace/WorkspaceIcon";
 
 /**
  * Both defaults live out here, and they have to.
@@ -129,6 +130,20 @@ export function App({
   // into Send and made an in-flight turn look lost.
   const running =
     workbench.timeline.status === "running" || workbench.timeline.status === "waiting";
+  // Three states, not two. Between pressing send and the daemon reporting a
+  // turn there is nothing to interrupt — the agent process may still be
+  // starting — so that gap gets its own non-interactive treatment rather than a
+  // stop button that cannot work or a send button that only earns a refusal.
+  // `activeTurn` is safe to consult here, unlike on its own, because it is only
+  // asked about while this client is holding a message: a reconnect into a
+  // running session has no pending message and still resolves to `running`.
+  const pending = workbench.timeline.pending;
+  const phase: ComposerPhase =
+    pending && !pending.error && !workbench.timeline.activeTurn
+      ? "sending"
+      : running
+        ? "running"
+        : "idle";
   // A draft is a conversation with nothing in it yet, so the composer answers to
   // the choices held on the draft until there is a session to hold them.
   const draft = workbench.draft;
@@ -450,7 +465,7 @@ export function App({
                       </div>
                     ) : null}
                     <Composer
-                      running={running}
+                      phase={phase}
                       agents={workbench.agents}
                       agentId={agentId}
                       modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}
@@ -458,11 +473,17 @@ export function App({
                       effortId={
                         workbench.timeline.effortId ?? draft?.effortId ?? null
                       }
-                      agentLocked={workbench.timeline.items.length > 0}
+                      // A message in flight locks the Agent too: switching would
+                      // open a new conversation and abandon it.
+                      agentLocked={
+                        workbench.timeline.items.length > 0 || Boolean(pending)
+                      }
                       attachmentsSupported={
                         currentAgent?.capabilities.attachments ?? false
                       }
                       commands={currentAgent?.catalog.commands}
+                      restoreDraft={workbench.restoreDraft}
+                      onRestoreDraft={workbench.restoredDraft}
                       onHeightChange={setComposerHeight}
                       onSend={(text, attachments) =>
                         void workbench.send(text, attachments)
@@ -658,7 +679,10 @@ function FirstRun({
 
   return (
     <Splash>
-      <p className="text-sm">{workspace.name} 已就绪。</p>
+      <p className="flex items-center gap-1.5 text-sm">
+        <WorkspaceIcon workspace={workspace} />
+        <span>{workspace.name} 已就绪。</span>
+      </p>
       <p className="mb-3 text-xs text-muted">开一个会话，直接说你想做什么。</p>
       <button
         type="button"

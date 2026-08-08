@@ -283,6 +283,14 @@ impl WorkspaceHomes {
         }
     }
 
+    /// Stops exposing one workspace's history without deleting any of it.
+    /// Reattaching the same id and root makes every session visible again.
+    pub fn detach(&self, workspace_id: &str) {
+        if let Ok(mut roots) = self.roots.write() {
+            roots.remove(workspace_id);
+        }
+    }
+
     /// Where a workspace lives on disk.
     pub fn root(&self, workspace_id: &str) -> Result<PathBuf> {
         let roots = self

@@ -83,6 +83,7 @@ beforeEach(() => {
     newSession: vi.fn(),
     renameSession: vi.fn(async () => {}),
     renameWorkspace: vi.fn(async () => {}),
+    removeWorkspace: vi.fn(async () => {}),
     deleteSession: vi.fn(async () => {}),
   });
 });
@@ -162,7 +163,7 @@ describe("the left edge", () => {
 
   it("renames a workspace in place", async () => {
     sidebar();
-    await userEvent.click(screen.getByRole("button", { name: "genethub 的目录操作" }));
+    await userEvent.click(screen.getByRole("button", { name: "genethub 的工作区操作" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
     const field = screen.getByLabelText("工作区名称");
     await userEvent.clear(field);
@@ -180,13 +181,34 @@ describe("the left edge", () => {
         onNavigate={() => {}}
       />,
     );
-    await userEvent.click(screen.getByRole("button", { name: "genethub 的目录操作" }));
+    await userEvent.click(screen.getByRole("button", { name: "genethub 的工作区操作" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "详情" }));
 
-    const details = screen.getByText("目录详情").parentElement?.parentElement;
+    const details = screen.getByText("工作区详情").parentElement?.parentElement;
     expect(details).toHaveTextContent("名称genethub");
     expect(details).toHaveTextContent("Agent 目录/home/me/genethub");
     expect(details).toHaveTextContent("所属设备开发工作站");
+  });
+
+  it("distinguishes folders from saved workspaces and removes only after confirmation", async () => {
+    const saved = {
+      ...workspace("w2", "paseo"),
+      workspaceFile: "/home/me/paseo.code-workspace",
+    };
+    useWorkbench.setState((state) => ({
+      workspaces: [state.workspaces[0]!, saved, state.workspaces[2]!],
+    }));
+    const tree = sidebar();
+    expect(tree.querySelectorAll('[data-project-icon="folder"]')).toHaveLength(2);
+    expect(tree.querySelectorAll('[data-project-icon="workspace"]')).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "demo 的工作区操作" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "从列表移除" }));
+    expect(screen.getByText(/文件和会话不会删除/)).toBeInTheDocument();
+    expect(useWorkbench.getState().removeWorkspace).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "确认移除" }));
+    expect(useWorkbench.getState().removeWorkspace).toHaveBeenCalledWith("w3");
   });
 
   it("reaches into folded projects when searching, or the search finds nothing", async () => {
@@ -255,6 +277,127 @@ describe("chat tab state", () => {
 
     expect(screen.getByRole("img", { name: "运行中" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "运行异常" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * "会话的tab栏不能上下滑动", "移动端目前只能显示两个tab".
+ *
+ * Both are the same strip failing to behave like one: it took its width from
+ * the titles, so a phone ran out of room after two, and the only device most
+ * people point at it with — a wheel that goes up and down — could not reach
+ * whatever that pushed off the right edge.
+ */
+describe("the tab strip when the tabs outrun the room", () => {
+  /** jsdom does no layout, so the strip is told how much of it is off screen. */
+  const measure = (
+    element: HTMLElement,
+    { scrollWidth, clientWidth, scrollLeft = 0 }: Record<string, number>,
+  ) => {
+    let position = scrollLeft;
+    Object.defineProperty(element, "scrollWidth", { configurable: true, value: scrollWidth });
+    Object.defineProperty(element, "clientWidth", { configurable: true, value: clientWidth });
+    Object.defineProperty(element, "scrollLeft", {
+      configurable: true,
+      get: () => position,
+      set: (next: number) => {
+        position = next;
+      },
+    });
+  };
+
+  const wheel = (element: HTMLElement, delta: Partial<WheelEventInit>) => {
+    const event = new WheelEvent("wheel", { bubbles: true, cancelable: true, ...delta });
+    element.dispatchEvent(event);
+    return event;
+  };
+
+  const strip = (count = 6) => {
+    useWorkbench.setState({
+      tabs: Array.from({ length: count }, (_, index) => ({
+        id: `chat:s${index}`,
+        kind: "chat" as const,
+        title: `会话 ${index}`,
+        sessionId: `s${index}`,
+      })),
+      activeTabId: "chat:s0",
+    });
+    render(<TabBar />);
+    return screen.getByRole("button", { name: "会话 0" }).closest("div")!.parentElement!;
+  };
+
+  it("gives every tab the same share of a phone, sized so a fourth one peeks in", () => {
+    strip();
+
+    const tab = screen.getByRole("button", { name: "会话 0" }).closest("div")!;
+    // Three whole tabs and half of the next: enough of the fourth is visible to
+    // say the strip continues, which is the part two full-width tabs never did.
+    expect(tab).toHaveClass("w-[28.5%]", "shrink-0", "grow");
+    // A desktop keeps its title-shaped tabs.
+    expect(tab).toHaveClass("md:w-auto", "md:max-w-[14rem]", "md:shrink", "md:grow-0");
+  });
+
+  it("never grows a vertical scrollbar beside the strip", () => {
+    const element = strip();
+
+    // overflow-x alone would promote overflow-y to auto and paint a thumb on
+    // the right edge of a row that only moves sideways.
+    expect(element).toHaveClass("overflow-x-auto", "overflow-y-hidden");
+    expect(element.parentElement).toHaveClass("overflow-hidden");
+  });
+
+  it("lets the close control out of the 44px square the phone gives every button", () => {
+    strip();
+
+    // Three of those squares are the whole strip; the row's own height is what
+    // keeps this hittable.
+    expect(screen.getByRole("button", { name: "关闭 会话 0" })).toHaveClass(
+      "h-11",
+      "w-7",
+      "!min-h-0",
+      "!min-w-0",
+    );
+  });
+
+  it("reads at 0.75rem on every screen without shortening the strip", () => {
+    const bar = strip().parentElement!;
+
+    // Written out, not `text-xs`: the shared phone typography lifts that class
+    // to 14px, which is how the strip ended up at body-copy size.
+    expect(screen.getByRole("button", { name: "会话 0" }).closest("div")!).toHaveClass(
+      "text-[0.75rem]",
+    );
+    expect(bar).toHaveClass("h-11", "md:h-9");
+  });
+
+  it("travels sideways when the wheel has only up and down to offer", () => {
+    const element = strip();
+    measure(element, { scrollWidth: 900, clientWidth: 400 });
+
+    const event = wheel(element, { deltaY: 120 });
+
+    expect(element.scrollLeft).toBe(120);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("leaves a sideways gesture to the strip's own scrolling", () => {
+    const element = strip();
+    measure(element, { scrollWidth: 900, clientWidth: 400 });
+
+    const event = wheel(element, { deltaX: 90, deltaY: 10 });
+
+    expect(element.scrollLeft).toBe(0);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("hands the gesture back to the page once the strip has nowhere left to go", () => {
+    const element = strip();
+    measure(element, { scrollWidth: 900, clientWidth: 400, scrollLeft: 500 });
+
+    const event = wheel(element, { deltaY: 120 });
+
+    expect(element.scrollLeft).toBe(500);
+    expect(event.defaultPrevented).toBe(false);
   });
 });
 

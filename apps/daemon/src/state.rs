@@ -105,6 +105,7 @@ impl AppState {
         let mut config = Config::load(&paths.config_file())?;
         config.ensure_workspace_catalog_generation(&paths.config_file())?;
         config.migrate_workspace_folders(&paths.config_file())?;
+        config.migrate_workspace_identities(&paths.config_file())?;
         config.refresh_workspace_catalog_facts(&paths.config_file())?;
         let machine = MachineState::load_or_create(&paths.state_file())?;
         let devices = Devices::load(paths.devices_file());

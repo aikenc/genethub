@@ -674,6 +674,15 @@ impl SessionManager {
             // rather than join it.
             *status = SessionStatus::Running;
         }
+        // Told to every client, not just the one that pressed send. The claim
+        // above was invisible on the wire until `TurnStarted`, which is behind
+        // the agent's startup — seconds for a third-party CLI — so a second
+        // window went on showing an idle session it was happy to send into, and
+        // got this same refusal for its trouble.
+        live.publish(SessionEvent::SessionStatusChanged {
+            status: SessionStatus::Running,
+        })
+        .await;
         let started = self
             .start_turn(
                 &live,
@@ -687,12 +696,20 @@ impl SessionManager {
             .await;
         if started.is_err() {
             // Nothing is running after all, and a session stuck on Running would
-            // refuse every later prompt.
+            // refuse every later prompt. Withdrawn on the wire as well, or every
+            // client keeps the busy state this call just announced.
             *live.status.lock().await = SessionStatus::Idle;
+            live.publish(SessionEvent::SessionStatusChanged {
+                status: SessionStatus::Idle,
+            })
+            .await;
         }
         started
     }
 
+    // These are the already-separated protocol fields for one handoff; wrapping
+    // them again would add a second request shape inside the session manager.
+    #[allow(clippy::too_many_arguments)]
     async fn start_turn(
         &self,
         live: &Arc<Live>,
@@ -1024,6 +1041,11 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
+        if !live.pending_permissions.lock().await.is_empty() {
+            return Err(anyhow!(
+                "answer or cancel the pending Agent interaction before changing mode"
+            ));
+        }
         match live.agent.lock().await.as_ref() {
             Some(agent) => agent.set_mode(mode_id).await?,
             None => {
@@ -1628,36 +1650,126 @@ fn continuation_for(
     request: &PermissionRequest,
     outcome: &PermissionOutcome,
 ) -> Result<Option<Continuation>> {
+    match request.kind {
+        PermissionRequestKind::Permission => {
+            let Some(option) = selected_option(request, outcome)? else {
+                return Ok(None);
+            };
+            if option.kind == PermissionOptionKind::Reject {
+                return Ok(None);
+            }
+            Ok(Some(Continuation {
+                elevated: true,
+                prompt: format!(
+                    "The user approved the interrupted permission request: {}. Resume the original \
+                     task from the current conversation state and do not repeat completed work.",
+                    option.label
+                ),
+            }))
+        }
+        PermissionRequestKind::PlanApproval => {
+            let Some(option) = selected_option(request, outcome)? else {
+                return Ok(None);
+            };
+            if option.kind == PermissionOptionKind::Reject {
+                return Ok(None);
+            }
+            Ok(Some(Continuation {
+                elevated: false,
+                prompt: format!(
+                    "The user approved the interrupted plan '{}'. Continue implementing that plan \
+                     from the current conversation state and do not repeat completed work.",
+                    request.title
+                ),
+            }))
+        }
+        PermissionRequestKind::Question => {
+            let answer = question_answer(request, outcome)?;
+            let Some(answer) = answer else {
+                return Ok(None);
+            };
+            Ok(Some(Continuation {
+                elevated: false,
+                prompt: format!(
+                    "The user answered the interrupted questions:\n{answer}\nResume the original \
+                     task from the current conversation state and do not repeat completed work."
+                ),
+            }))
+        }
+    }
+}
+
+fn selected_option<'a>(
+    request: &'a PermissionRequest,
+    outcome: &PermissionOutcome,
+) -> Result<Option<&'a genehub_proto::PermissionOption>> {
     let PermissionOutcome::Selected { option_id } = outcome else {
         return Ok(None);
     };
-    let option = request
+    request
         .options
         .iter()
         .find(|option| option.id == *option_id)
-        .ok_or_else(|| anyhow!("'{option_id}' is not an option for this interaction"))?;
+        .map(Some)
+        .ok_or_else(|| anyhow!("'{option_id}' is not an option for this interaction"))
+}
 
-    match request.kind {
-        PermissionRequestKind::Permission if option.kind == PermissionOptionKind::Reject => {
-            Ok(None)
-        }
-        PermissionRequestKind::Permission => Ok(Some(Continuation {
-            elevated: true,
-            prompt: format!(
-                "The user approved the interrupted permission request: {}. Resume the original \
-                 task from the current conversation state and do not repeat completed work.",
-                option.label
-            ),
-        })),
-        PermissionRequestKind::Question => Ok(Some(Continuation {
-            elevated: false,
-            prompt: format!(
-                "The user answered the interrupted question '{}': {}. Resume the original task \
-                 from the current conversation state and do not repeat completed work.",
-                request.title, option.label
-            ),
-        })),
+fn question_answer(
+    request: &PermissionRequest,
+    outcome: &PermissionOutcome,
+) -> Result<Option<String>> {
+    if let Some(option) = selected_option(request, outcome)? {
+        return Ok(Some(format!("- {}: {}", request.title, option.label)));
     }
+    let PermissionOutcome::Answered { answers } = outcome else {
+        return Ok(None);
+    };
+    let mut lines = Vec::new();
+    for question in request.questions.as_deref().unwrap_or_default() {
+        let answer = answers
+            .iter()
+            .find(|answer| answer.question_id == question.id)
+            .ok_or_else(|| anyhow!("question '{}' was not answered", question.id))?;
+        if !question.allow_multiple && answer.selected_option_ids.len() > 1 {
+            return Err(anyhow!(
+                "question '{}' accepts only one option",
+                question.id
+            ));
+        }
+        let mut values = Vec::new();
+        for option_id in &answer.selected_option_ids {
+            let option = question
+                .options
+                .iter()
+                .find(|option| option.id == *option_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "'{option_id}' is not an option for question '{}'",
+                        question.id
+                    )
+                })?;
+            values.push(option.label.clone());
+        }
+        let freeform = answer
+            .freeform_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        if freeform.is_some() && !question.allow_freeform {
+            return Err(anyhow!(
+                "question '{}' does not accept a free-form answer",
+                question.id
+            ));
+        }
+        if let Some(text) = freeform {
+            values.push(text.to_string());
+        }
+        if values.is_empty() {
+            return Err(anyhow!("question '{}' has no answer", question.id));
+        }
+        lines.push(format!("- {}: {}", question.prompt, values.join(", ")));
+    }
+    Ok((!lines.is_empty()).then(|| lines.join("\n")))
 }
 
 async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &PermissionRequest) {
@@ -2774,6 +2886,7 @@ mod tests {
             detail: None,
             tool_call_id: None,
             options: vec![],
+            questions: None,
         };
         apply(
             &live,
@@ -2816,6 +2929,7 @@ mod tests {
                         detail: None,
                         tool_call_id: None,
                         options: vec![],
+                        questions: None,
                     },
                 },
             )
@@ -2856,6 +2970,7 @@ mod tests {
                     kind: PermissionOptionKind::Reject,
                 },
             ],
+            questions: None,
         }
     }
 
@@ -2974,6 +3089,138 @@ mod tests {
         .expect("a question answer resumes");
         assert!(!continuation.elevated);
         assert!(continuation.prompt.contains("No"));
+    }
+
+    #[test]
+    fn structured_answers_all_survive_the_stop_and_resume_boundary() {
+        let mut request = interaction(PermissionRequestKind::Question);
+        request.questions = Some(vec![
+            genehub_proto::InteractionQuestion {
+                id: "environment".into(),
+                prompt: "Where should this ship?".into(),
+                allow_multiple: false,
+                allow_freeform: false,
+                options: vec![genehub_proto::InteractionOption {
+                    id: "beta".into(),
+                    label: "Beta".into(),
+                }],
+            },
+            genehub_proto::InteractionQuestion {
+                id: "note".into(),
+                prompt: "Anything else?".into(),
+                allow_multiple: false,
+                allow_freeform: true,
+                options: vec![],
+            },
+        ]);
+        let continuation = continuation_for(
+            &request,
+            &PermissionOutcome::Answered {
+                answers: vec![
+                    genehub_proto::InteractionAnswer {
+                        question_id: "environment".into(),
+                        selected_option_ids: vec!["beta".into()],
+                        freeform_text: None,
+                    },
+                    genehub_proto::InteractionAnswer {
+                        question_id: "note".into(),
+                        selected_option_ids: vec![],
+                        freeform_text: Some("Keep the rollback switch".into()),
+                    },
+                ],
+            },
+        )
+        .unwrap()
+        .expect("complete answers resume");
+        assert!(!continuation.elevated);
+        assert!(continuation
+            .prompt
+            .contains("Where should this ship?: Beta"));
+        assert!(continuation.prompt.contains("Keep the rollback switch"));
+    }
+
+    #[test]
+    fn structured_answers_are_validated_at_the_daemon_boundary() {
+        let mut request = interaction(PermissionRequestKind::Question);
+        request.questions = Some(vec![genehub_proto::InteractionQuestion {
+            id: "environment".into(),
+            prompt: "Where should this ship?".into(),
+            allow_multiple: false,
+            allow_freeform: false,
+            options: vec![
+                genehub_proto::InteractionOption {
+                    id: "beta".into(),
+                    label: "Beta".into(),
+                },
+                genehub_proto::InteractionOption {
+                    id: "official".into(),
+                    label: "Official".into(),
+                },
+            ],
+        }]);
+        let outcome = |selected_option_ids, freeform_text| PermissionOutcome::Answered {
+            answers: vec![genehub_proto::InteractionAnswer {
+                question_id: "environment".into(),
+                selected_option_ids,
+                freeform_text,
+            }],
+        };
+
+        assert!(continuation_for(
+            &request,
+            &outcome(vec!["beta".into(), "official".into()], None),
+        )
+        .err()
+        .expect("multiple choices must be rejected")
+        .to_string()
+        .contains("only one option"));
+        assert!(
+            continuation_for(&request, &outcome(vec![], Some("somewhere else".into())),)
+                .err()
+                .expect("free-form input must be rejected")
+                .to_string()
+                .contains("does not accept a free-form answer")
+        );
+    }
+
+    #[test]
+    fn a_plan_only_resumes_after_explicit_approval() {
+        let request = interaction(PermissionRequestKind::PlanApproval);
+        assert!(continuation_for(
+            &request,
+            &PermissionOutcome::Selected {
+                option_id: "no".into(),
+            },
+        )
+        .unwrap()
+        .is_none());
+        let approved = continuation_for(
+            &request,
+            &PermissionOutcome::Selected {
+                option_id: "yes".into(),
+            },
+        )
+        .unwrap()
+        .expect("approval resumes");
+        assert!(!approved.elevated);
+        assert!(approved.prompt.contains("Continue?"));
+    }
+
+    #[tokio::test]
+    async fn mode_changes_cannot_bypass_a_waiting_interaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, _, _) = wired(dir.path()).await;
+        let live = sessions.live("s1").await.unwrap();
+        live.pending_permissions
+            .lock()
+            .await
+            .push(interaction(PermissionRequestKind::Question));
+
+        let error = sessions
+            .set_mode("s1", "agent", &ProviderMap::new())
+            .await
+            .expect_err("the question must be resolved first");
+        assert!(error.to_string().contains("pending Agent interaction"));
     }
 
     #[tokio::test]
@@ -3532,11 +3779,25 @@ mod tests {
     struct FakeSession {
         events: broadcast::Sender<SessionEvent>,
         next_turn: Arc<AtomicU64>,
+        /// Fails the handover the way a CLI that died on startup does.
+        refuses: bool,
     }
 
     impl FakeSession {
         fn sharing(events: broadcast::Sender<SessionEvent>, next_turn: Arc<AtomicU64>) -> Self {
-            FakeSession { events, next_turn }
+            FakeSession {
+                events,
+                next_turn,
+                refuses: false,
+            }
+        }
+
+        fn refusing(events: broadcast::Sender<SessionEvent>) -> Self {
+            FakeSession {
+                events,
+                next_turn: Arc::new(AtomicU64::new(0)),
+                refuses: true,
+            }
         }
     }
 
@@ -3547,6 +3808,9 @@ mod tests {
         }
 
         async fn send(&self, _input: PromptInput) -> Result<String> {
+            if self.refuses {
+                anyhow::bail!("the agent stopped before it was ready");
+            }
             let id = self.next_turn.fetch_add(1, Ordering::SeqCst);
             Ok(format!("t{id}"))
         }
@@ -3623,6 +3887,90 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+    }
+
+    /// Every `SessionStatusChanged` a call published, in order.
+    fn statuses(seen: &mut broadcast::Receiver<SequencedEvent>) -> Vec<SessionStatus> {
+        let mut out = Vec::new();
+        while let Ok(event) = seen.try_recv() {
+            if let SessionEvent::SessionStatusChanged { status } = event.event {
+                out.push(status);
+            }
+        }
+        out
+    }
+
+    /// Starting an agent takes time the wire used to say nothing about. Until
+    /// `TurnStarted` arrived — behind a process spawn and a handshake, seconds
+    /// for a third-party CLI — every other client still saw an idle session, so
+    /// it offered a send button for it and got this call's own refusal back.
+    #[tokio::test]
+    async fn send_says_the_session_is_busy_before_it_reaches_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, _events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+        let live = sessions.live("s1").await.unwrap();
+        let mut seen = live.events.subscribe();
+
+        sessions
+            .send("s1", "hello".into(), vec![], &providers, None, None)
+            .await
+            .expect("accepted");
+
+        let mut published = Vec::new();
+        while let Ok(event) = seen.try_recv() {
+            published.push(event.event);
+        }
+        let busy = published
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    SessionEvent::SessionStatusChanged {
+                        status: SessionStatus::Running
+                    }
+                )
+            })
+            .expect("the busy status reached the clients");
+        let prompt = published
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    SessionEvent::Item {
+                        item: TimelineItem::UserMessage { .. },
+                        ..
+                    }
+                )
+            })
+            .expect("the prompt reached the clients");
+        assert!(
+            busy < prompt,
+            "the session must be known to be busy before anything else, got {published:?}"
+        );
+    }
+
+    /// And withdrawn when it turns out nothing is running after all, or every
+    /// client keeps a busy session that will never finish.
+    #[tokio::test]
+    async fn a_refused_handover_withdraws_the_busy_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+        let live = sessions.live("s1").await.unwrap();
+        *live.agent.lock().await = Some(Box::new(FakeSession::refusing(events.clone())));
+        let mut seen = live.events.subscribe();
+
+        sessions
+            .send("s1", "hello".into(), vec![], &providers, None, None)
+            .await
+            .expect_err("the handover failed");
+
+        assert_eq!(
+            statuses(&mut seen),
+            vec![SessionStatus::Running, SessionStatus::Idle]
+        );
+        assert_eq!(*live.status.lock().await, SessionStatus::Idle);
     }
 
     #[tokio::test]

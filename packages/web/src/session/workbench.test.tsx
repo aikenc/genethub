@@ -55,8 +55,18 @@ const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
   ...overrides,
 });
 
+/** Real actions, so a test that stubs one hands it back. */
+const { retryPending, editPending } = useWorkbench.getState();
+
 afterEach(() => {
-  useWorkbench.setState({ timeline: emptyTimeline() });
+  useWorkbench.setState({
+    timeline: emptyTimeline(),
+    sessions: [],
+    activeSessionId: null,
+    agents: [],
+    retryPending,
+    editPending,
+  });
 });
 
 /** Puts one session's round layer on screen, the way a snapshot would. */
@@ -83,6 +93,67 @@ describe("what the user sees in a session", () => {
 
     render(<TimelineView state={state} />);
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("正在读取");
+  });
+
+  /**
+   * The bubble is the answer to "did it send?", and it has to be there before
+   * the daemon can answer that. The named wait behind it is the answer to the
+   * next question, which only a slow agent start ever raises.
+   */
+  it("shows an unconfirmed message straight away and names a slow agent start", async () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          id: "s1",
+          workspaceId: "w1",
+          agentId: "cursor",
+          title: undefined,
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          archived: false,
+          status: "idle",
+        },
+      ],
+      activeSessionId: "s1",
+      agents: [agent({ id: "cursor", label: "Cursor", builtin: false })],
+    });
+    const state: TimelineState = {
+      ...emptyTimeline(),
+      pending: { text: "重构存储层", attachments: [], sentAtMs: Date.now(), error: null },
+    };
+
+    render(<TimelineView state={state} />);
+    expect(screen.getByTestId("pending-message")).toHaveTextContent("重构存储层");
+    expect(screen.queryByText("正在启动 Cursor…")).not.toBeInTheDocument();
+
+    await waitFor(() => expect(screen.getByText("正在启动 Cursor…")).toBeInTheDocument());
+  });
+
+  it("leaves a failed message on screen with a way to send or edit it again", async () => {
+    const retryPending = vi.fn(async () => {});
+    const editPending = vi.fn();
+    useWorkbench.setState({ retryPending, editPending });
+    const state: TimelineState = {
+      ...emptyTimeline(),
+      pending: {
+        text: "启动 Cursor 试试",
+        attachments: [],
+        sentAtMs: Date.now(),
+        error: "cursor-agent is not installed",
+      },
+    };
+
+    render(<TimelineView state={state} />);
+    const bubble = screen.getByTestId("pending-message");
+    expect(bubble).toHaveTextContent("启动 Cursor 试试");
+    expect(bubble).toHaveTextContent("发送失败：cursor-agent is not installed");
+    // A failed send is not a wait, so it never claims to be starting anything.
+    expect(screen.queryByText(/正在启动/)).not.toBeInTheDocument();
+
+    await userEvent.click(within(bubble).getByRole("button", { name: "重试" }));
+    expect(retryPending).toHaveBeenCalled();
+    await userEvent.click(within(bubble).getByRole("button", { name: "编辑" }));
+    expect(editPending).toHaveBeenCalled();
   });
 
   it("keeps thinking out of the way until it is asked for", async () => {
@@ -129,7 +200,7 @@ describe("what the user sees in a session", () => {
         batches: [
           {
             summary: batch,
-            monologue: "先检查配置，再逐项核对。",
+            monologue: "先检查配置。再逐项核对。",
             blobs: [
               {
                 itemId: "think1",
@@ -162,9 +233,11 @@ describe("what the user sees in a session", () => {
     expect(screen.queryByText("查看进展")).not.toBeInTheDocument();
     expect(screen.getByTestId("round-progress")).not.toHaveTextContent("工作过程");
     expect(screen.getByTestId("round-progress")).not.toHaveTextContent("阶段");
-    expect(screen.getByTestId("round-trunk")).toHaveTextContent("进展：先检查配置。");
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("🧭");
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("先检查配置。");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("2 项");
-    expect(screen.getByTestId("batch-monologue")).toHaveTextContent("先检查配置，再逐项核对。");
+    expect(screen.getByTestId("batch-monologue")).toHaveTextContent("再逐项核对。");
+    expect(screen.getByTestId("batch-monologue")).not.toHaveTextContent("先检查配置。");
     expect(screen.getByText("确认结构")).toBeInTheDocument();
     expect(screen.getByText("读取配置")).toBeInTheDocument();
 
@@ -336,8 +409,10 @@ describe("what the user sees in a session", () => {
     render(<TimelineView state={state} />);
 
     const trunks = screen.getAllByTestId("round-trunk");
-    expect(trunks[0]!).toHaveTextContent("过程：盘点入口。64 项");
-    expect(trunks[1]!).toHaveTextContent("进展：核对权限。3 项");
+    expect(trunks[0]!).toHaveTextContent("🧭");
+    expect(trunks[0]!).toHaveTextContent("盘点入口。64 项");
+    expect(trunks[1]!).toHaveTextContent("🧭");
+    expect(trunks[1]!).toHaveTextContent("核对权限。3 项");
     // Watching an agent work is the point of a running round: its tail is open,
     // and only the settled work behind it is folded away.
     expect(within(trunks[0]!).getByRole("button")).toHaveAttribute("aria-expanded", "false");
@@ -427,8 +502,12 @@ describe("what the user sees in a session", () => {
           "r1:0": {
             summary,
             batches: [
-              { summary: first, monologue: "完整独白：核对入口与权限。", blobs: [] },
-              { summary: second, monologue: "完整独白：核对部署边界。", blobs: [] },
+              {
+                summary: first,
+                monologue: "核对入口与权限。随后检查角色边界。",
+                blobs: [],
+              },
+              { summary: second, monologue: "核对部署边界。", blobs: [] },
             ],
           },
         },
@@ -440,12 +519,15 @@ describe("what the user sees in a session", () => {
 
     const batches = screen.getAllByTestId("round-batch");
     expect(batches).toHaveLength(2);
+    expect(batches[0]!).toHaveTextContent("💭");
     expect(batches[0]!).toHaveTextContent("核对入口与权限");
-    expect(batches[0]!).not.toHaveTextContent("2 项");
+    expect(batches[0]!).toHaveTextContent("2 项");
 
-    await userEvent.click(within(batches[0]!).getByRole("button"));
-    expect(within(batches[0]!).getByRole("button")).not.toHaveTextContent("核对入口与权限");
-    expect(batches[0]!).toHaveTextContent("完整独白：核对入口与权限。");
+    const batchHeader = within(batches[0]!).getByRole("button");
+    await userEvent.click(batchHeader);
+    expect(batchHeader).toHaveTextContent("核对入口与权限");
+    expect(batches[0]!).toHaveTextContent("随后检查角色边界。");
+    expect(screen.getByTestId("batch-monologue")).not.toHaveTextContent("核对入口与权限。");
   });
 
   it("keeps historical trunks collapsed and preserves a manual expansion", async () => {
@@ -557,9 +639,9 @@ describe("what the user sees in a session", () => {
     const timeline = screen.getByTestId("timeline");
     expect(screen.getAllByTestId("assistant-message")).toHaveLength(1);
     expect(screen.getByTestId("round-trunk")).toHaveTextContent(
-      "过程：彻底核对权限链路。8 项",
+      "先彻底核对权限链路，再给结论。8 项",
     );
-    expect(timeline.textContent?.indexOf("过程：彻底核对权限链路。")).toBeLessThan(
+    expect(timeline.textContent?.indexOf("先彻底核对权限链路，再给结论。")).toBeLessThan(
       timeline.textContent?.indexOf("最终结论：需要修复授权边界。") ?? -1,
     );
     expect(timeline).not.toHaveTextContent("阶段 1");
@@ -570,6 +652,74 @@ describe("what the user sees in a session", () => {
       "先彻底核对权限链路，再给结论。",
     );
     expect(screen.getAllByText("最终结论：需要修复授权边界。")).toHaveLength(1);
+  });
+
+  it("keeps a completed answer visible while its round projection still says running", () => {
+    const staleRound = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "给出结论", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "assistantMessage", id: "a1", text: "这是已经持久化的最终结论。" },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "turnSummary",
+        id: "turn-summary-t1",
+        stats: {
+          turnId: "t1",
+          outcome: "completed",
+          startedAtMs: 1,
+          finishedAtMs: 2,
+          durationMs: 1,
+          usage: {
+            inputTokens: 10,
+            outputTokens: 20,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+          toolCalls: 0,
+        },
+      },
+    });
+    state = showRounds(state, {
+      rounds: [staleRound],
+      roundLayers: {
+        r1: {
+          round: staleRound,
+          trunks: [
+            {
+              index: 0,
+              firstItemId: "a1",
+              blobCount: 0,
+              title: "仍在刷新",
+              batches: [],
+            },
+          ],
+        },
+      },
+    });
+
+    render(<TimelineView state={state} />);
+
+    expect(screen.getByTestId("assistant-message")).toHaveTextContent(
+      "这是已经持久化的最终结论。",
+    );
+    expect(screen.getByText(/20 输出 tokens/)).toBeInTheDocument();
   });
 
   it("keeps a successful shell call compact until its details are requested", async () => {
@@ -679,7 +829,7 @@ describe("what the user sees in a session", () => {
 
 function composerProps(overrides: Partial<ComponentProps<typeof Composer>> = {}) {
   return {
-    running: false,
+    phase: "idle" as const,
     agents: [agent()],
     agentId: "genet",
     modelId: null,
@@ -845,12 +995,86 @@ describe("the controls offered to the user", () => {
 
   it("turns send into stop while a turn is running", async () => {
     const onInterrupt = vi.fn();
-    render(<Composer {...composerProps({ running: true, onInterrupt })} />);
+    render(<Composer {...composerProps({ phase: "running", onInterrupt })} />);
 
     expect(screen.queryByLabelText("停止")).toBeInTheDocument();
     expect(screen.queryByLabelText("发送")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("发送中")).not.toBeInTheDocument();
     await userEvent.click(screen.getByLabelText("停止"));
     expect(onInterrupt).toHaveBeenCalled();
+  });
+
+  /**
+   * The wait between pressing send and a turn actually starting. There is no
+   * turn to stop yet and sending again only earns the daemon's refusal, so the
+   * control is a spinner nobody can press — and the keyboard has to be shut out
+   * too, because the textarea's Enter never went through the button.
+   */
+  it("shows a non-interactive spinner while a sent message is unconfirmed", async () => {
+    const onSend = vi.fn();
+    const onInterrupt = vi.fn();
+    render(
+      <Composer
+        {...composerProps({ phase: "sending", onSend, onInterrupt, attachmentsSupported: true })}
+      />,
+    );
+
+    const spinner = screen.getByLabelText("发送中");
+    expect(screen.queryByLabelText("发送")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("停止")).not.toBeInTheDocument();
+    expect(spinner).toHaveAttribute("aria-disabled", "true");
+    expect(spinner).toHaveAttribute("aria-busy", "true");
+    expect(spinner.querySelector(".animate-spin")).not.toBeNull();
+
+    await userEvent.click(spinner);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(onInterrupt).not.toHaveBeenCalled();
+
+    await userEvent.type(screen.getByLabelText("任务描述"), "再补一句{Enter}");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /添加文件/ })).toBeDisabled();
+  });
+
+  it("keeps the geometry of the row stable across all three phases", () => {
+    const sizes = (["idle", "sending", "running"] as const).map((phase) => {
+      const view = render(<Composer {...composerProps({ phase })} />);
+      const label = phase === "idle" ? "发送" : phase === "sending" ? "发送中" : "停止";
+      const control = screen.getByLabelText(label);
+      const classes = ["h-[45px]", "w-[45px]", "md:h-[30px]", "md:w-[30px]"].filter((name) =>
+        control.classList.contains(name),
+      );
+      view.unmount();
+      return classes.length;
+    });
+    expect(sizes).toEqual([4, 4, 4]);
+  });
+
+  it("takes a failed message back into the field, attachments and all", async () => {
+    const onRestoreDraft = vi.fn();
+    const onSend = vi.fn();
+    render(
+      <Composer
+        {...composerProps({
+          onSend,
+          onRestoreDraft,
+          attachmentsSupported: true,
+          restoreDraft: {
+            text: "刚才没发出去的话",
+            attachments: [{ name: "shot.png", mime: "image/png", dataBase64: "AAA" }],
+          },
+        })}
+      />,
+    );
+
+    await waitFor(() => expect(onRestoreDraft).toHaveBeenCalled());
+    expect(screen.getByLabelText("任务描述")).toHaveValue("刚才没发出去的话");
+    expect(screen.getByAltText("shot.png")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText("发送"));
+    expect(onSend).toHaveBeenCalledWith(
+      "刚才没发出去的话",
+      expect.arrayContaining([expect.objectContaining({ name: "shot.png" })]),
+    );
   });
 
   it("expands from one idle line when focused and collapses again on blur", async () => {
@@ -987,6 +1211,7 @@ describe("the controls offered to the user", () => {
           kind: "permission",
           title: "允许运行 rm -rf build？",
           detail: "rm -rf build",
+          questions: [],
           options: [
             { id: "allow", label: "允许一次", kind: "allowOnce" },
             { id: "deny", label: "拒绝", kind: "reject" },
@@ -1008,6 +1233,7 @@ describe("the controls offered to the user", () => {
           id: "q1",
           kind: "question",
           title: "选择发布环境",
+          questions: [],
           options: [{ id: "beta", label: "Beta", kind: "allowOnce" }],
         }}
         onAnswer={vi.fn()}
@@ -1016,6 +1242,86 @@ describe("the controls offered to the user", () => {
 
     expect(screen.getByLabelText("Agent 提问")).toBeInTheDocument();
     expect(screen.getByText("任务已暂停；回答后会从原会话继续。")).toBeInTheDocument();
+  });
+
+  it("labels plan approval as a stopped plan decision", () => {
+    render(
+      <PermissionCard
+        request={{
+          id: "plan-1",
+          kind: "planApproval",
+          title: "实现计划",
+          detail: "先持久化，再恢复。",
+          options: [
+            { id: "accept", label: "批准并继续", kind: "allowOnce" },
+            { id: "reject", label: "拒绝计划", kind: "reject" },
+          ],
+        }}
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("Agent 计划确认")).toBeInTheDocument();
+    expect(screen.getByText("任务已暂停；确认计划后会从原会话继续。")).toBeInTheDocument();
+  });
+
+  it("keeps multi-question answers together in one durable interaction", async () => {
+    const onAnswer = vi.fn();
+    render(
+      <PermissionCard
+        request={{
+          id: "q-many",
+          kind: "question",
+          title: "发布选择",
+          options: [],
+          questions: [
+            {
+              id: "environment",
+              prompt: "发布到哪里？",
+              allowMultiple: false,
+              allowFreeform: true,
+              options: [
+                { id: "beta", label: "Beta" },
+                { id: "official", label: "Official" },
+              ],
+            },
+            {
+              id: "checks",
+              prompt: "执行哪些检查？",
+              allowMultiple: true,
+              allowFreeform: false,
+              options: [
+                { id: "smoke", label: "冒烟" },
+                { id: "regression", label: "回归" },
+              ],
+            },
+          ],
+        }}
+        onAnswer={onAnswer}
+      />,
+    );
+
+    await userEvent.click(screen.getByLabelText("Official"));
+    await userEvent.click(screen.getByLabelText("冒烟"));
+    await userEvent.click(screen.getByLabelText("回归"));
+    await userEvent.type(screen.getByPlaceholderText("其他答案或补充说明"), "保留回滚开关");
+    await userEvent.click(screen.getByRole("button", { name: "提交答案" }));
+
+    expect(onAnswer).toHaveBeenCalledWith({
+      outcome: "answered",
+      answers: [
+        {
+          questionId: "environment",
+          selectedOptionIds: ["official"],
+          freeformText: "保留回滚开关",
+        },
+        {
+          questionId: "checks",
+          selectedOptionIds: ["smoke", "regression"],
+          freeformText: undefined,
+        },
+      ],
+    });
   });
 });
 

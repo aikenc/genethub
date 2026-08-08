@@ -68,6 +68,12 @@ pub struct PermissionRequest {
     #[ts(optional)]
     pub tool_call_id: Option<String>,
     pub options: Vec<PermissionOption>,
+    /// Structured questions carried by Agent-native interaction tools. Empty
+    /// for the original one-row approval card, so older stored sessions keep
+    /// their exact behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub questions: Option<Vec<InteractionQuestion>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -77,6 +83,40 @@ pub enum PermissionRequestKind {
     #[default]
     Permission,
     Question,
+    PlanApproval,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct InteractionQuestion {
+    pub id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub allow_multiple: bool,
+    #[serde(default)]
+    pub allow_freeform: bool,
+    pub options: Vec<InteractionOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct InteractionOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct InteractionAnswer {
+    pub question_id: String,
+    #[serde(default)]
+    pub selected_option_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub freeform_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -104,6 +144,13 @@ pub enum PermissionOutcome {
     #[serde(rename_all = "camelCase")]
     Selected {
         option_id: String,
+    },
+    /// Answers to one or more structured questions. Kept separate from
+    /// `Selected` so permission decisions cannot accidentally be interpreted
+    /// as free-form Agent input.
+    #[serde(rename_all = "camelCase")]
+    Answered {
+        answers: Vec<InteractionAnswer>,
     },
     /// Legacy wire outcome retained so older peers can still decode it. The
     /// daemon no longer creates approval timers: stopped interactions persist

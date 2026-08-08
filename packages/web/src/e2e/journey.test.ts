@@ -394,6 +394,9 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
       });
       expect(opened?.type).toBe("workspace");
       if (opened?.type !== "workspace") return;
+      // A folder and a .code-workspace rooted in that folder are two views of
+      // one durable project, not two session stores contending for one path.
+      expect(opened.data.id).toBe(workspaceId);
       expect(opened.data.root).toBe(realpathSync(workspaceDir));
       expect(opened.data.folders.map((folder) => folder.pathPrefix)).toEqual([
         "Product",
@@ -431,6 +434,44 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
       expect(readFileSync(path.join(docs, "generated.json"), "utf8")).toBe(
         '{"multiRoot":true}\n',
       );
+
+      const sessionsBefore = await client.call({
+        type: "session.list",
+        payload: { workspaceId, includeArchived: true },
+      });
+      expect(sessionsBefore?.type).toBe("sessions");
+      if (sessionsBefore?.type !== "sessions") return;
+      expect(sessionsBefore.data.length).toBeGreaterThan(0);
+
+      const removed = await client.call({
+        type: "workspace.remove",
+        payload: { workspaceId },
+      });
+      expect(removed?.type).toBe("workspaces");
+      if (removed?.type !== "workspaces") return;
+      expect(removed.data.some((workspace) => workspace.id === workspaceId)).toBe(
+        false,
+      );
+
+      const sessionsWhileRemoved = await client.call({
+        type: "session.list",
+        payload: { workspaceId, includeArchived: true },
+      });
+      expect(sessionsWhileRemoved).toEqual({ type: "sessions", data: [] });
+
+      const reopened = await client.call({
+        type: "workspace.open",
+        payload: { root: definition },
+      });
+      expect(reopened?.type).toBe("workspace");
+      if (reopened?.type !== "workspace") return;
+      expect(reopened.data.id).toBe(workspaceId);
+
+      const sessionsAfter = await client.call({
+        type: "session.list",
+        payload: { workspaceId, includeArchived: true },
+      });
+      expect(sessionsAfter).toEqual(sessionsBefore);
     }, 20_000);
   },
 );

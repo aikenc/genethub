@@ -880,7 +880,8 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::GitDiff { workspace_id, .. }
         | Request::GitCommit { workspace_id, .. }
         | Request::PtyOpen { workspace_id, .. }
-        | Request::WorkspaceRename { workspace_id, .. } => Some(workspace_id),
+        | Request::WorkspaceRename { workspace_id, .. }
+        | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
         _ => None,
     }
 }

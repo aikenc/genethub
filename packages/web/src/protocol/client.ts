@@ -36,6 +36,9 @@ const MAX_EVENT_BYTES = 3 * 1024 * 1024;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
+/** A carrier that dies before this point is flapping, not a healthy recovery. */
+const STABLE_AFTER_MS = 30_000;
+
 export interface HostedChannelCredential {
   capabilityId: string;
   secret: string;
@@ -205,6 +208,7 @@ export class Client {
   private attempt = 0;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
   private redialTimer: ReturnType<typeof setTimeout> | null = null;
   private redialAbort: AbortController | null = null;
   private redialGeneration = 0;
@@ -604,7 +608,14 @@ export class Client {
     if (!this.isCurrentEpoch(epoch) || this.endpoint !== endpoint) return;
     this.identity = identity.data;
     this.failure = null;
-    this.attempt = 0;
+    // Completing E2EE proves identity, but not that the carrier is healthy.
+    // A relay that kills every fresh channel must keep escalating backoff
+    // instead of returning to a one-second reconnect loop after each Hello.
+    this.clearStableTimer();
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = null;
+      this.attempt = 0;
+    }, STABLE_AFTER_MS);
     this.setState("ready");
     this.flushQueue(endpoint, epoch);
     void this.runEvents(endpoint, epoch);
@@ -866,6 +877,7 @@ export class Client {
       return;
     }
     this.clearConnectTimer();
+    this.clearStableTimer();
     this.endpoint = null;
     this.socket = null;
     this.fabricLink = null;
@@ -938,9 +950,13 @@ export class Client {
       this.redialing
     ) return;
     this.setState("reconnecting");
-    const delay = (this.options.backoffMs ?? ((attempt) => Math.min(1000 * 2 ** attempt, 15_000)))(
-      this.attempt++,
-    );
+    const backoff =
+      this.options.backoffMs ?? ((attempt: number) => Math.min(1000 * 2 ** attempt, 15_000));
+    const base = backoff(this.attempt++);
+    // A shared relay restart should not bring every browser back in lockstep.
+    const delay = this.options.backoffMs
+      ? base
+      : Math.round(base * (0.75 + Math.random() * 0.5));
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.connect();
@@ -1089,9 +1105,15 @@ export class Client {
     this.retryTimer = null;
   }
 
+  private clearStableTimer(): void {
+    if (this.stableTimer !== null) clearTimeout(this.stableTimer);
+    this.stableTimer = null;
+  }
+
   private clearTimers(): void {
     this.clearConnectTimer();
     this.clearRetryTimer();
+    this.clearStableTimer();
     if (this.redialTimer !== null) clearTimeout(this.redialTimer);
     this.redialTimer = null;
   }

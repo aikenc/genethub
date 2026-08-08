@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Endpoint, Host, Target } from "../host";
 import { useWorkbench } from "../session/store";
 import { OpenProject } from "../workspace/OpenProject";
+import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 import { TargetSwitcher } from "./TargetSwitcher";
 
@@ -50,6 +51,7 @@ export function Sidebar({
     activeWorkspaceId,
     selectWorkspace,
     renameWorkspace,
+    removeWorkspace,
     newSession,
     renameSession,
     deleteSession,
@@ -251,6 +253,7 @@ export function Sidebar({
                 onNavigate();
               }}
               onRenameWorkspace={(id, name) => void renameWorkspace(id, name)}
+              onRemoveWorkspace={(id) => removeWorkspace(id)}
               onPickSession={go}
               {...actions}
             />
@@ -318,8 +321,8 @@ function RecentSessionsDialog({
   const recent = [...sessions]
     .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
     .slice(0, 30);
-  const workspaceName = (workspaceId: string) =>
-    workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? "未知工作区";
+  const workspaceOf = (workspaceId: string) =>
+    workspaces.find((workspace) => workspace.id === workspaceId);
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" role="presentation">
@@ -352,8 +355,9 @@ function RecentSessionsDialog({
           </button>
         </header>
         <ul className="min-h-0 divide-y divide-line overflow-y-auto px-2 py-2">
-          {recent.map((session) => (
-            <li key={session.id}>
+          {recent.map((session) => {
+            const workspace = workspaceOf(session.workspaceId);
+            return <li key={session.id}>
               <button
                 type="button"
                 className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left hover:bg-raised ${
@@ -364,14 +368,17 @@ function RecentSessionsDialog({
                 <SessionStatusIcon status={session.status} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm text-fg">{title(session)}</span>
-                  <span className="mt-1 block truncate text-xs text-faint">
-                    {workspaceName(session.workspaceId)} · {recentTime(session.updatedAtMs)}
+                  <span className="mt-1 flex items-center gap-1 truncate text-xs text-faint">
+                    {workspace ? <WorkspaceIcon workspace={workspace} className="h-3 w-3" /> : null}
+                    <span className="truncate">
+                      {workspace?.name ?? "未知工作区"} · {recentTime(session.updatedAtMs)}
+                    </span>
                   </span>
                 </span>
                 <span className="shrink-0 text-xs text-muted">{sessionStatus(session.status)}</span>
               </button>
-            </li>
-          ))}
+            </li>;
+          })}
         </ul>
       </section>
     </div>
@@ -410,6 +417,7 @@ function Projects({
   onToggle,
   onPickWorkspace,
   onRenameWorkspace,
+  onRemoveWorkspace,
   ...actions
 }: {
   workspaces: WorkspaceInfo[];
@@ -421,6 +429,7 @@ function Projects({
   onToggle(workspaceId: string): void;
   onPickWorkspace(workspaceId: string): void;
   onRenameWorkspace(workspaceId: string, name: string): void;
+  onRemoveWorkspace(workspaceId: string): Promise<void>;
 } & RowActions) {
   return (
     <ul aria-label="工作区">
@@ -444,6 +453,7 @@ function Projects({
             onToggle={() => onToggle(workspace.id)}
             onPick={() => onPickWorkspace(workspace.id)}
             onRename={rename}
+            onRemove={() => onRemoveWorkspace(workspace.id)}
           >
             {shut ? null : mine.length > 0 ? (
               <ul className="ml-3 border-l border-line pl-1">
@@ -475,6 +485,7 @@ function WorkspaceRow({
   onToggle,
   onPick,
   onRename,
+  onRemove,
   children,
 }: {
   workspace: WorkspaceInfo;
@@ -485,11 +496,14 @@ function WorkspaceRow({
   onToggle(): void;
   onPick(): void;
   onRename(name: string): void;
+  onRemove(): Promise<void>;
   children: ReactNode;
 }) {
   const [editing, setEditing] = useState(false);
   const [menu, setMenu] = useState(false);
   const [details, setDetails] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeBusy, setRemoveBusy] = useState(false);
   return (
     <li className="group relative mb-1">
       {editing ? (
@@ -517,11 +531,12 @@ function WorkspaceRow({
           </button>
           <button
             type="button"
-            className="min-w-0 flex-1 truncate py-2 text-left font-medium hover:text-fg md:py-1"
+            className="flex min-w-0 flex-1 items-center gap-1.5 py-2 text-left font-medium hover:text-fg md:py-1"
             title={workspace.root}
             onClick={onPick}
           >
-            {workspace.name}
+            <WorkspaceIcon workspace={workspace} />
+            <span className="min-w-0 truncate">{workspace.name}</span>
           </button>
           {running > 0 ? (
             <span className="flex shrink-0 items-center gap-1 text-[10px] text-ok">
@@ -531,7 +546,7 @@ function WorkspaceRow({
           ) : null}
           <button
             type="button"
-            aria-label={`${workspace.name} 的目录操作`}
+            aria-label={`${workspace.name} 的工作区操作`}
             aria-expanded={menu}
             className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-7 md:w-6 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
             onClick={() => setMenu((open) => !open)}
@@ -544,7 +559,7 @@ function WorkspaceRow({
         <>
           <button
             type="button"
-            aria-label="收起目录操作"
+            aria-label="收起工作区操作"
             className="fixed inset-0 z-40 cursor-default"
             onClick={() => setMenu(false)}
           />
@@ -574,16 +589,29 @@ function WorkspaceRow({
             >
               重命名
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={running > 0}
+              title={running > 0 ? "先停止这个工作区中正在运行或等待的会话" : undefined}
+              className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40 md:min-h-0 md:py-1.5 md:text-xs"
+              onClick={() => {
+                setMenu(false);
+                setRemoving(true);
+              }}
+            >
+              从列表移除
+            </button>
           </div>
         </>
       ) : null}
       {details ? (
         <div className="mx-1 mb-2 rounded-lg border border-line bg-surface p-3 text-xs">
           <div className="mb-2 flex items-center justify-between">
-            <span className="font-medium text-fg">目录详情</span>
+            <span className="font-medium text-fg">工作区详情</span>
             <button
               type="button"
-              aria-label="关闭目录详情"
+              aria-label="关闭工作区详情"
               className="rounded px-2 py-1 text-faint hover:bg-raised hover:text-fg"
               onClick={() => setDetails(false)}
             >
@@ -606,6 +634,38 @@ function WorkspaceRow({
             />
           ))}
           <Detail label="所属设备" value={deviceName} />
+        </div>
+      ) : null}
+      {removing ? (
+        <div className="mx-1 mb-2 rounded-lg border border-line-strong bg-surface p-3 text-xs">
+          <p className="font-medium text-fg">从列表移除「{workspace.name}」？</p>
+          <p className="mt-1 leading-relaxed text-muted">
+            文件和会话不会删除；以后重新打开同一目录即可继续。
+          </p>
+          <div className="mt-3 flex justify-end gap-2">
+            <button
+              type="button"
+              disabled={removeBusy}
+              className="rounded px-2 py-1 text-muted hover:bg-raised disabled:opacity-40"
+              onClick={() => setRemoving(false)}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              disabled={removeBusy}
+              className="rounded bg-danger px-2 py-1 text-white disabled:opacity-40"
+              onClick={() => {
+                setRemoveBusy(true);
+                void onRemove().finally(() => {
+                  setRemoveBusy(false);
+                  setRemoving(false);
+                });
+              }}
+            >
+              {removeBusy ? "移除中…" : "确认移除"}
+            </button>
+          </div>
         </div>
       ) : null}
       {children}
@@ -639,7 +699,7 @@ function Statuses({
   activeSessionId: string | null;
 } & RowActions) {
   const named = (session: ListedSession) =>
-    workspaces.find((entry) => entry.id === session.workspaceId)?.name;
+    workspaces.find((entry) => entry.id === session.workspaceId);
 
   const groups = [
     { label: "运行异常", rows: sessions.filter((session) => session.status === "failed") },
@@ -695,7 +755,7 @@ function SessionRow({
 }: {
   session: ListedSession;
   active: boolean;
-  project?: string;
+  project?: WorkspaceInfo;
 } & RowActions) {
   const [menu, setMenu] = useState<"shut" | "open" | "confirming">("shut");
   const [editing, setEditing] = useState(false);
@@ -738,7 +798,10 @@ function SessionRow({
         {unsupported ? (
           <span className="shrink-0 text-[10px] text-faint">需升级</span>
         ) : project ? (
-          <span className="shrink-0 text-[10px] text-faint">{project}</span>
+          <span className="flex shrink-0 items-center gap-1 text-[10px] text-faint">
+            <WorkspaceIcon workspace={project} className="h-3 w-3" />
+            {project.name}
+          </span>
         ) : null}
       </button>
 

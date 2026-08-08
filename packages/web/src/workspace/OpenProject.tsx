@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import type { Endpoint, Host } from "../host";
 import { useWorkbench } from "../session/store";
+import { ProjectIcon } from "./WorkspaceIcon";
 
 /**
  * How a folder or saved VS Code workspace gets onto the workbench.
@@ -24,10 +25,16 @@ export function OpenProject({
 }) {
   const openWorkspace = useWorkbench((state) => state.openWorkspace);
   const client = useWorkbench((state) => state.client);
+  const workspaces = useWorkbench((state) => state.workspaces);
+  const activeWorkspaceId = useWorkbench((state) => state.activeWorkspaceId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [picker, setPicker] = useState<DirectoryListing | null>(null);
   const [pickerBusy, setPickerBusy] = useState(false);
+  const activeWorkspace =
+    workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null;
+  const rememberedDirectory = () => recallPickerDirectory(endpoint);
+  const startingDirectory = () => activeWorkspace?.root ?? rememberedDirectory();
 
   const open = async (root: string) => {
     if (!root.trim()) return;
@@ -35,6 +42,10 @@ export function OpenProject({
     setError(null);
     try {
       await openWorkspace(root.trim());
+      rememberPickerDirectory(
+        endpoint,
+        isWorkspaceFile(root) ? (picker?.path ?? parentDirectory(root)) : root,
+      );
       setPicker(null);
       onOpened?.();
     } catch (failure) {
@@ -46,22 +57,69 @@ export function OpenProject({
 
   const canBrowseThisMachine = endpoint.via === "loopback" && host.pickDirectory;
 
+  const pickNative = async (
+    pick: (initialDirectory?: string) => Promise<string | null>,
+  ) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const picked = await pick(startingDirectory());
+      if (picked) await open(picked);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const readDirectory = async (path?: string) => {
+    if (!client) throw new Error("设备尚未连接");
+    const reply = await client.call({
+      type: "directory.list",
+      payload: { path: path ?? null },
+    });
+    if (reply?.type !== "directory") throw new Error("设备没有返回目录列表");
+    return reply.data;
+  };
+
   const browse = async (path?: string) => {
-    if (!client) return;
     setPickerBusy(true);
     setError(null);
     try {
-      const reply = await client.call({
-        type: "directory.list",
-        payload: { path: path ?? null },
-      });
-      if (reply?.type !== "directory") throw new Error("设备没有返回目录列表");
-      setPicker(reply.data);
+      const listing = await readDirectory(path);
+      setPicker(listing);
+      rememberPickerDirectory(endpoint, listing.path);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       setPickerBusy(false);
     }
+  };
+
+  const beginBrowse = async () => {
+    if (!client) return;
+    setPickerBusy(true);
+    setError(null);
+    const starts: Array<string | undefined> = [];
+    for (const candidate of [activeWorkspace?.root, rememberedDirectory()]) {
+      if (candidate && !starts.includes(candidate)) starts.push(candidate);
+    }
+    // Let the daemon choose its home only after the two user-owned hints.
+    starts.push(undefined);
+    let failure: unknown = new Error("无法读取目录");
+    for (const start of starts) {
+      try {
+        const listing = await readDirectory(start);
+        setPicker(listing);
+        rememberPickerDirectory(endpoint, listing.path);
+        setPickerBusy(false);
+        return;
+      } catch (error) {
+        failure = error;
+      }
+    }
+    setError(failure instanceof Error ? failure.message : String(failure));
+    setPickerBusy(false);
   };
 
   if (canBrowseThisMachine) {
@@ -71,10 +129,7 @@ export function OpenProject({
           type="button"
           className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-40"
           disabled={busy}
-          onClick={async () => {
-            const picked = await host.pickDirectory!();
-            if (picked) await open(picked);
-          }}
+          onClick={() => void pickNative(host.pickDirectory!)}
         >
           {busy ? "打开中…" : "打开项目文件夹…"}
         </button>
@@ -83,10 +138,7 @@ export function OpenProject({
             type="button"
             className="rounded border border-line px-3 py-1.5 text-xs text-muted hover:bg-raised disabled:opacity-40"
             disabled={busy}
-            onClick={async () => {
-              const picked = await host.pickWorkspaceFile!();
-              if (picked) await open(picked);
-            }}
+            onClick={() => void pickNative(host.pickWorkspaceFile!)}
           >
             打开 .code-workspace…
           </button>
@@ -102,7 +154,7 @@ export function OpenProject({
         type="button"
         className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-40"
         disabled={busy || pickerBusy || !client}
-        onClick={() => void browse()}
+        onClick={() => void beginBrowse()}
       >
         {pickerBusy ? "读取中…" : "选择文件夹或 .code-workspace…"}
       </button>
@@ -133,7 +185,7 @@ export function OpenProject({
               ) : null}
               {picker.directories.map((directory) => (
                 <button key={directory.path} type="button" className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg hover:bg-raised" onClick={() => void browse(directory.path)}>
-                  <span aria-hidden>📁</span><span className="truncate">{directory.name}</span>
+                  <ProjectIcon kind="folder" /><span className="truncate">{directory.name}</span>
                 </button>
               ))}
               {(picker.workspaceFiles ?? []).map((workspace) => (
@@ -143,7 +195,7 @@ export function OpenProject({
                   className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg hover:bg-raised"
                   onClick={() => void open(workspace.path)}
                 >
-                  <span aria-hidden>◇</span>
+                  <ProjectIcon kind="workspace" />
                   <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
                   <span className="shrink-0 text-[10px] text-faint">Workspace</span>
                 </button>
@@ -163,4 +215,38 @@ export function OpenProject({
       ) : null}
     </div>
   );
+}
+
+function pickerStorageKey(endpoint: Endpoint): string {
+  const machine =
+    endpoint.fingerprint ?? endpoint.credential?.deviceId ?? `${endpoint.via}:${endpoint.label}`;
+  return `genehub:project-picker:${machine}`;
+}
+
+function recallPickerDirectory(endpoint: Endpoint): string | undefined {
+  try {
+    return globalThis.localStorage?.getItem(pickerStorageKey(endpoint)) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberPickerDirectory(endpoint: Endpoint, directory?: string): void {
+  if (!directory) return;
+  try {
+    globalThis.localStorage?.setItem(pickerStorageKey(endpoint), directory);
+  } catch {
+    // A browsing preference is optional; private mode may reject storage.
+  }
+}
+
+function isWorkspaceFile(path: string): boolean {
+  return path.toLowerCase().endsWith(".code-workspace");
+}
+
+/** Handles both daemon path families without asking the browser which OS owns them. */
+function parentDirectory(path: string): string | undefined {
+  const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (separator < 0) return undefined;
+  return separator === 0 ? path.slice(0, 1) : path.slice(0, separator);
 }

@@ -300,6 +300,9 @@ pub enum Request {
     WorkspaceCreate { root: String, name: String },
     #[serde(rename = "workspace.rename", rename_all = "camelCase")]
     WorkspaceRename { workspace_id: String, name: String },
+    /// Hides a workspace registration while retaining its identity and history.
+    #[serde(rename = "workspace.remove", rename_all = "camelCase")]
+    WorkspaceRemove { workspace_id: String },
     /// Lists folders on the daemon's machine before a workspace exists.
     #[serde(rename = "directory.list", rename_all = "camelCase")]
     DirectoryList {

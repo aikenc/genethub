@@ -298,10 +298,20 @@ fn notify(app: tauri::AppHandle, title: String, body: Option<String>) {
 
 /// A native folder picker, so adding a project does not mean typing a path.
 #[tauri::command]
-async fn pick_directory(app: tauri::AppHandle) -> Option<String> {
+async fn pick_directory(
+    app: tauri::AppHandle,
+    initial_directory: Option<String>,
+) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog().file().pick_folder(move |picked| {
+    let mut dialog = app.dialog().file();
+    if let Some(directory) = initial_directory
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+    {
+        dialog = dialog.set_directory(directory);
+    }
+    dialog.pick_folder(move |picked| {
         let _ = tx.send(picked.and_then(|path| path.into_path().ok()));
     });
     rx.await
@@ -314,15 +324,25 @@ async fn pick_directory(app: tauri::AppHandle) -> Option<String> {
 /// Native dialogs cannot portably select either a directory or a file in one
 /// gesture, so the workbench presents the two adjacent choices.
 #[tauri::command]
-async fn pick_workspace_file(app: tauri::AppHandle) -> Option<String> {
+async fn pick_workspace_file(
+    app: tauri::AppHandle,
+    initial_directory: Option<String>,
+) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
+    let mut dialog = app
+        .dialog()
         .file()
-        .add_filter("VS Code Workspace", &["code-workspace"])
-        .pick_file(move |picked| {
-            let _ = tx.send(picked.and_then(|path| path.into_path().ok()));
-        });
+        .add_filter("VS Code Workspace", &["code-workspace"]);
+    if let Some(directory) = initial_directory
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+    {
+        dialog = dialog.set_directory(directory);
+    }
+    dialog.pick_file(move |picked| {
+        let _ = tx.send(picked.and_then(|path| path.into_path().ok()));
+    });
     rx.await
         .ok()
         .flatten()

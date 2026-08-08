@@ -23,9 +23,16 @@ import { create } from "zustand";
 
 import type { Host } from "../host";
 import type { Client, ConnectionState } from "../protocol/client";
+import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import { assetPreviewBaseUrl } from "../preview/url";
-import { applySequenced, emptyTimeline, fromSnapshot, type TimelineState } from "./timeline";
+import {
+  applySequenced,
+  emptyTimeline,
+  fromSnapshot,
+  type PendingMessage,
+  type TimelineState,
+} from "./timeline";
 
 /**
  * A closable work surface, not a global mode switch.
@@ -122,6 +129,14 @@ interface WorkbenchState {
   /** Six tabs fit a phone; a desktop can keep sixteen useful work surfaces. */
   tabLimit: number;
   notice: string | null;
+  /**
+   * Content on its way back to the composer, put there by `editPending`.
+   *
+   * The draft itself belongs to the composer, so a failed message can only be
+   * returned for editing through a channel like this one; whoever picks it up
+   * clears it with `restoredDraft`.
+   */
+  restoreDraft: { text: string; attachments: Attachment[] } | null;
   hub: HubStatus | null;
   /**
    * The last way into this machine's identity the Hub handed out.
@@ -171,6 +186,8 @@ interface WorkbenchState {
   selectWorkspace(workspaceId: string): Promise<void>;
   /** Changes a workspace's display name without moving its directory. */
   renameWorkspace(workspaceId: string, name: string): Promise<void>;
+  /** Hides a workspace registration without deleting files or conversations. */
+  removeWorkspace(workspaceId: string): Promise<void>;
   loadTree(path?: string): Promise<void>;
   refreshGit(): Promise<void>;
   loadDiff(path?: string): Promise<void>;
@@ -228,6 +245,12 @@ interface WorkbenchState {
   setTabLimit(limit: number): void;
   setRightPanel(panel: RightPanel): void;
   send(text: string, attachments?: Attachment[]): Promise<void>;
+  /** Sends a failed message again, unchanged. */
+  retryPending(): Promise<void>;
+  /** Takes a failed message back into the composer instead of resending it. */
+  editPending(): void;
+  /** Acknowledges that the composer has taken `restoreDraft` back. */
+  restoredDraft(): void;
   /** Creates an independent Agent context through one completed turn. */
   forkSession(turnId: string): Promise<void>;
   interrupt(): Promise<void>;
@@ -322,6 +345,37 @@ function markSessionRead(summary: SessionSummary): void {
 /** The reconnect sentence this store put on screen, while it is still true. */
 let reconnectNotice: string | null = null;
 
+/**
+ * The connection-loss sentence put on screen by a request that died with the
+ * socket. It reports a condition, not an event: once the connection is back
+ * and the timeline has resynchronised, the loss it describes no longer
+ * exists, and leaving the banner up only teaches people to ignore banners.
+ */
+let connectionLossNotice: string | null = null;
+
+/**
+ * The message of an error that is a dropped connection speaking, or null for
+ * anything else. `ConnectionOutcomeUnknownError` covers requests in flight;
+ * the Hello path rejects with a plain Error carrying the same prefix.
+ */
+function connectionLossMessage(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  return error instanceof ConnectionOutcomeUnknownError ||
+    message.startsWith("the connection was lost")
+    ? message
+    : null;
+}
+
+/**
+ * Surfaces a failure and remembers it when it is a dropped connection
+ * speaking, so the banner can be withdrawn when the connection returns.
+ */
+function reportError(set: Setter, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  if (connectionLossMessage(error)) connectionLossNotice = message;
+  set({ notice: message });
+}
+
 let roundReads: Promise<unknown> = Promise.resolve();
 
 /**
@@ -402,6 +456,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   subscribedSessionIds: [],
   tabLimit: 16,
   notice: null,
+  restoreDraft: null,
   hub: null,
   claim: null,
   devices: [],
@@ -418,6 +473,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   download: { state: "idle" },
 
   async attach(client) {
+    reconnectNotice = null;
+    connectionLossNotice = null;
     set({ client, notice: null });
     client.onStateChange((connection) => {
       set({ connection });
@@ -437,33 +494,49 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       }
       // Once the socket is back, a banner still saying "正在重连" is no longer
       // a report of anything — it is the reason someone writes in to say the
-      // app is stuck reconnecting when it reconnected a minute ago. Only this
-      // line's own sentence is withdrawn; anything said since stands.
-      if (connection === "ready" && reconnectNotice) {
-        const stale = reconnectNotice;
-        reconnectNotice = null;
-        set((state) => (state.notice === stale ? { notice: null } : {}));
+      // app is stuck reconnecting when it reconnected a minute ago. The same
+      // goes for a request the drop took down: the timeline has since said
+      // what became of it. Only these lines' own sentences are withdrawn;
+      // anything said since stands.
+      if (connection === "ready") {
+        if (reconnectNotice) {
+          const stale = reconnectNotice;
+          reconnectNotice = null;
+          set((state) => (state.notice === stale ? { notice: null } : {}));
+        }
+        if (connectionLossNotice) {
+          const stale = connectionLossNotice;
+          connectionLossNotice = null;
+          set((state) => (state.notice === stale ? { notice: null } : {}));
+        }
       }
     });
     client.onNotice((_level, message) => set({ notice: message }));
     client.onUpdateDownload((download) => set({ download }));
     try {
+      // Hub status and the download prompt do not read anything the catalog
+      // loads, so they fly alongside it instead of queueing behind two relay
+      // round trips — on a slow link that queueing is most of what switching
+      // to a machine used to cost.
+      const ancillary = (async () => {
+        await get().refreshHub();
+        // Asked on connect, unlike the update check itself. A download that was
+        // running when the window closed is still running, and the prompt to
+        // install it has to come back with the window rather than wait for
+        // someone to go looking in settings for a file they already have.
+        const download = await client.call({ type: "update.downloadState" });
+        if (download?.type === "updateDownload") set({ download: download.data });
+      })().catch((error: unknown) => unattended(client, get, set)(error));
       await refreshCatalog(client, set);
       if (get().client === client) await land(get);
-      await get().refreshHub();
-      // Asked on connect, unlike the update check itself. A download that was
-      // running when the window closed is still running, and the prompt to
-      // install it has to come back with the window rather than wait for
-      // someone to go looking in settings for a file they already have.
-      const download = await client.call({ type: "update.downloadState" });
-      if (download?.type === "updateDownload") set({ download: download.data });
+      await ancillary;
     } catch (error) {
       // A connection can disappear halfway through being asked things: the tab
       // is closing, or the daemon restarted and the shell has already pointed
       // us at its replacement. Neither is worth reporting — but an error on the
       // connection we are still using is, and it used to go nowhere at all.
       if (get().client !== client) return;
-      set({ notice: error instanceof Error ? error.message : String(error) });
+      reportError(set, error);
     }
   },
 
@@ -509,6 +582,58 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set((state) => ({
       workspaces: upsertBy(state.workspaces, reply.data, (workspace) => workspace.id),
     }));
+  },
+
+  async removeWorkspace(workspaceId) {
+    const client = require_(get().client);
+    const before = get();
+    const removedSessionIds = new Set(
+      before.sessions
+        .filter((session) => session.workspaceId === workspaceId)
+        .map((session) => session.id),
+    );
+    const removedTabs = before.tabs.filter(
+      (tab) =>
+        (tab.sessionId && removedSessionIds.has(tab.sessionId)) ||
+        (tab.id === DRAFT_TAB && before.draft?.workspaceId === workspaceId),
+    );
+    const reply = await asked(set, () =>
+      client.call({ type: "workspace.remove", payload: { workspaceId } }),
+    );
+    if (reply?.type !== "workspaces") return;
+
+    discardSubscriptions(client, removedTabs);
+    const removedWasActive =
+      before.activeWorkspaceId === workspaceId ||
+      (before.activeSessionId ? removedSessionIds.has(before.activeSessionId) : false) ||
+      before.draft?.workspaceId === workspaceId;
+    const nextWorkspaceId = removedWasActive
+      ? (reply.data[0]?.id ?? null)
+      : before.activeWorkspaceId;
+    set((state) => {
+      const tabs = state.tabs.filter((tab) => !removedTabs.some((removed) => removed.id === tab.id));
+      const activeTabId = tabs.some((tab) => tab.id === state.activeTabId)
+        ? state.activeTabId
+        : (tabs.at(-1)?.id ?? null);
+      return {
+        workspaces: reply.data,
+        activeWorkspaceId: nextWorkspaceId,
+        activeSessionId: removedWasActive ? null : state.activeSessionId,
+        draft: state.draft?.workspaceId === workspaceId ? null : state.draft,
+        tabs,
+        activeTabId,
+        timeline: removedWasActive ? emptyTimeline() : state.timeline,
+        sessionTimelines: omitMany(state.sessionTimelines, [...removedSessionIds]),
+        subscribedSessionIds: state.subscribedSessionIds.filter(
+          (id) => !removedSessionIds.has(id),
+        ),
+        tree: removedWasActive ? null : state.tree,
+        git: removedWasActive ? null : state.git,
+        diff: removedWasActive ? null : state.diff,
+      };
+    });
+    await loadSessions(client, set);
+    if (removedWasActive && nextWorkspaceId) await land(get);
   },
 
   newSession(workspaceId, agentId) {
@@ -640,7 +765,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         },
         onResync: (resnapshot, events, reset) => {
         const base = reset
-          ? fromSnapshot(resnapshot as SessionSnapshot)
+          ? fromSnapshot(resnapshot as SessionSnapshot, timelineOf(get(), sessionId).pending)
           : get().sessionTimelines[sessionId] ?? emptyTimeline();
         for (const event of events) {
           if (event.event.type === "titleChanged") applyTitle(sessionId, event.event.title, set);
@@ -657,7 +782,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     );
 
     const typedSnapshot = snapshot as SessionSnapshot;
-    const base = fromSnapshot(typedSnapshot);
+    const base = fromSnapshot(typedSnapshot, timelineOf(get(), sessionId).pending);
     // A slower subscription must not repaint whichever session the user opened
     // next. This is easy to hit when switching pages over a relay: both replies
     // are valid, but only the currently selected session owns the timeline.
@@ -850,21 +975,51 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // The previous complaint goes away as the next attempt starts, so a stale
     // line does not get read as a description of what just happened.
     set({ notice: null });
+    const active = get().activeSessionId;
+    // Only one message may be in flight. The daemon enforces this too, but its
+    // refusal arrives as a red line about a turn already running — which is a
+    // report of our own double send, not news the reader can act on.
+    //
+    // A failed message is not in flight: it is waiting for a decision, and
+    // typing a new one is a decision. It gives up its place here rather than
+    // silently swallowing the next thing the user says.
+    const inFlight = active ? timelineOf(get(), active).pending : null;
+    if (inFlight && !inFlight.error) return;
+
+    // On screen before anything leaves this machine, and before the round trips
+    // in `start`. Everything below can take seconds.
+    const pending: PendingMessage = {
+      text,
+      attachments,
+      sentAtMs: Date.now(),
+      error: null,
+    };
+    if (active) patchTimeline(active, set, () => ({ pending }));
+
     // This is where a draft becomes a conversation: the machine hears about it
     // at the first message, not when the button was pressed.
-    const sessionId = await start(get, set);
-    if (!sessionId) return;
-    const state = get();
-    const deviceHandle = state.client?.identity?.machineId;
-    const workspaceId = currentWorkspace(state);
-    const workspace = state.workspaces.find((entry) => entry.id === workspaceId);
-    const primaryFolder = workspace?.folders?.[0]?.pathPrefix ?? "";
-    const artifactPreviewBaseUrl =
-      deviceHandle && workspaceId
-        ? assetPreviewBaseUrl(deviceHandle, workspaceId, primaryFolder)
-        : null;
-    await asked(set, () =>
-      require_(get().client).call({
+    const sessionId = await start(get, set, pending);
+    if (!sessionId) {
+      // `asked` has already said why, if anything was asked at all. With a
+      // session there is a bubble to mark; a conversation that could not even be
+      // created has nowhere to put one, so the text goes back to the composer
+      // rather than nowhere — it only exists here.
+      if (active) failPending(active, set, get().notice ?? "无法开始会话");
+      else set({ restoreDraft: { text, attachments } });
+      return;
+    }
+
+    try {
+      const state = get();
+      const deviceHandle = state.client?.identity?.machineId;
+      const workspaceId = currentWorkspace(state);
+      const workspace = state.workspaces.find((entry) => entry.id === workspaceId);
+      const primaryFolder = workspace?.folders?.[0]?.pathPrefix ?? "";
+      const artifactPreviewBaseUrl =
+        deviceHandle && workspaceId
+          ? assetPreviewBaseUrl(deviceHandle, workspaceId, primaryFolder)
+          : null;
+      await require_(get().client).call({
         type: "session.send",
         // Continuing a round after an interrupt is not wired into the UI
         // yet — every message from here is a fresh round until it is
@@ -876,8 +1031,49 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           artifactPreviewBaseUrl,
           continuesRound: null,
         },
-      }),
-    );
+      });
+      // The daemon publishes the user message before it answers this call, and
+      // replies and events share one socket in arrival order, so the real item
+      // is already here. This is the second of the two ways the placeholder
+      // goes away, and it costs nothing to keep both (`timeline.apply` has the
+      // other): a reply that never comes must not leave a bubble behind.
+      patchTimeline(sessionId, set, () => ({ pending: null }));
+    } catch (error) {
+      // A lost connection is not a failed send. The prompt may well have been
+      // taken — `ConnectionOutcomeUnknownError` exists to say exactly that —
+      // and calling it a failure would put a second bubble next to the real one
+      // as soon as the replay lands. Leave it pending; the resync decides.
+      if (error instanceof ConnectionOutcomeUnknownError) return;
+      const message = error instanceof Error ? error.message : String(error);
+      failPending(sessionId, set, message);
+      set({ notice: message });
+    }
+  },
+
+  async retryPending() {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const pending = timelineOf(get(), sessionId).pending;
+    if (!pending?.error) return;
+    // Cleared first, or `send` would take this for a message already in flight.
+    patchTimeline(sessionId, set, () => ({ pending: null }));
+    await get().send(pending.text, pending.attachments);
+  },
+
+  editPending() {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const pending = timelineOf(get(), sessionId).pending;
+    if (!pending?.error) return;
+    patchTimeline(sessionId, set, () => ({ pending: null }));
+    set({
+      notice: null,
+      restoreDraft: { text: pending.text, attachments: pending.attachments },
+    });
+  },
+
+  restoredDraft() {
+    set({ restoreDraft: null });
   },
 
   async forkSession(turnId) {
@@ -1259,6 +1455,8 @@ async function land(get: () => WorkbenchState): Promise<void> {
 async function start(
   get: () => WorkbenchState,
   set: Setter,
+  /** Carried into the new session's timeline, which does not exist until here. */
+  pending: PendingMessage | null = null,
 ): Promise<string | null> {
   const state = get();
   if (state.activeSessionId) return state.activeSessionId;
@@ -1288,10 +1486,20 @@ async function start(
   set((current) => ({ sessions: [reply.data, ...current.sessions] }));
   // Clears the draft and turns its tab into this session's.
   await get().selectSession(reply.data.id);
+  // Before `setEffort`, which is another round trip: the first message of a new
+  // conversation should not be the one message that waits longest to appear.
+  if (pending) patchTimeline(reply.data.id, set, () => ({ pending }));
   // `session.create` has no field for it, so the one choice that cannot ride
   // along is made immediately afterwards instead of being lost.
   if (draft.effortId) await get().setEffort(draft.effortId);
   return reply.data.id;
+}
+
+/** Marks a message as definitely not sent, keeping its text where it can be reused. */
+function failPending(sessionId: string, set: Setter, message: string): void {
+  patchTimeline(sessionId, set, (timeline) =>
+    timeline.pending ? { pending: { ...timeline.pending, error: message } } : {},
+  );
 }
 
 /** Records a choice made before there was a session to make it on. */
@@ -1455,7 +1663,7 @@ function upsertBy<T>(list: T[], item: T, key: (value: T) => string): T[] {
 function unattended(client: Client, get: () => WorkbenchState, set: Setter) {
   return (error: unknown): undefined => {
     if (get().client !== client) return undefined;
-    set({ notice: error instanceof Error ? error.message : String(error) });
+    reportError(set, error);
     return undefined;
   };
 }
@@ -1473,7 +1681,7 @@ async function asked<T>(set: Setter, run: () => Promise<T>): Promise<T | undefin
   try {
     return await run();
   } catch (error) {
-    set({ notice: error instanceof Error ? error.message : String(error) });
+    reportError(set, error);
     return undefined;
   }
 }

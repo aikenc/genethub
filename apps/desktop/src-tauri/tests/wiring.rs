@@ -208,6 +208,27 @@ fn the_windows_installer_stops_the_daemon_before_replacing_it() {
         data_dir,
         "the installer looks for daemon.lock somewhere the daemon does not write it"
     );
+
+    // The shell-supervised daemon's lock sits one level deeper: the shell's
+    // app-data directory carries the bundle identifier on Windows (Tauri
+    // `app_data_dir()` is `%APPDATA%/<identifier>`), and the shell always
+    // starts its daemon with the data-dir override pointed there
+    // (`daemon.rs` `spawn`). An installer that reads only the CLI location
+    // finds no lock and skips the kill — then meets the supervised daemon
+    // still holding the exe it is about to write, with a Retry that can
+    // never help because the hook has already run.
+    assert_eq!(
+        nsis_define(&script, "GH_BUNDLE_ID"),
+        config()["identifier"]
+            .as_str()
+            .expect("the config has no identifier"),
+        "the installer's name for the shell's app-data level is not the bundle identifier"
+    );
+    assert!(
+        script.contains("$APPDATA\\${GH_BUNDLE_ID}\\${GH_DATA_DIR_NAME}\\daemon.lock"),
+        "the installer does not read the shell-supervised daemon's lock — \
+         the daemon the tray app starts is the one it fails to stop"
+    );
 }
 
 /// The shell restarts the daemon about a second after it dies, on purpose: that
@@ -256,6 +277,26 @@ fn the_installer_stops_the_supervisor_before_the_thing_it_supervises() {
     assert!(
         supervisor.contains("fn watch"),
         "nothing supervises the daemon any more, so this test's premise is stale"
+    );
+}
+
+/// An upgrade used to default to uninstalling the old version first — the
+/// whole old uninstaller run for what a file overwrite does, and the heavier
+/// failure mode while a daemon is still holding the install directory. The
+/// vendored NSIS template flips that default (`; GH:` in PageReinstall); if
+/// the config stops pointing at it, or a template resync drops the override,
+/// upgrades quietly return to uninstall-first.
+#[test]
+fn the_windows_installer_defaults_upgrades_to_overwriting() {
+    let config = config();
+    let template = config["bundle"]["windows"]["nsis"]["template"]
+        .as_str()
+        .expect("no custom NSIS template: upgrades default to uninstall-first");
+    let script = read(repo().join("apps/desktop/src-tauri").join(template));
+    assert!(
+        script.contains("; GH:"),
+        "the vendored template lost the overwrite-by-default override — \
+         resync it with the bundler's installer.nsi and re-apply the GH block"
     );
 }
 
