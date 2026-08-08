@@ -26,6 +26,8 @@ export interface FabricEndpointConnection {
   readonly streams: Map<string, FabricStreamLeg>;
   readonly pending: Map<string, symbol>;
   readonly tombstones: Map<string, number>;
+  /** Bounded grace for frames already crossing the opposite socket at close. */
+  readonly lateFrameBudgets: Map<string, number>;
   closed: boolean;
   strikes: number;
   send(frame: FabricFrame): void;
@@ -56,6 +58,7 @@ export interface FabricCoreOptions {
   maxStrikes?: number;
   tombstoneMs?: number;
   maxTombstonesPerEndpoint?: number;
+  maxLateFramesPerClosedStream?: number;
   revocationTombstoneMs?: number;
   maxRevocationTombstones?: number;
   maxConnectionGenerations?: number;
@@ -105,6 +108,7 @@ export class FabricCore {
   private readonly maxStrikes: number;
   private readonly tombstoneMs: number;
   private readonly maxTombstones: number;
+  private readonly maxLateFramesPerClosedStream: number;
   private readonly revocationTombstoneMs: number;
   private readonly maxRevocationTombstones: number;
   private readonly maxConnectionGenerations: number;
@@ -123,6 +127,8 @@ export class FabricCore {
     this.maxStrikes = options.maxStrikes ?? 8;
     this.tombstoneMs = options.tombstoneMs ?? 60_000;
     this.maxTombstones = options.maxTombstonesPerEndpoint ?? 512;
+    this.maxLateFramesPerClosedStream =
+      options.maxLateFramesPerClosedStream ?? 256;
     this.revocationTombstoneMs = options.revocationTombstoneMs ?? 5 * 60_000;
     this.maxRevocationTombstones = options.maxRevocationTombstones ?? 4_096;
     this.maxConnectionGenerations = options.maxConnectionGenerations ?? 100_000;
@@ -193,6 +199,7 @@ export class FabricCore {
     this.pendingCount = Math.max(0, this.pendingCount - connection.pending.size);
     connection.pending.clear();
     connection.tombstones.clear();
+    connection.lateFrameBudgets.clear();
 
     const bindings = new Set([...connection.streams.values()].map((leg) => leg.binding));
     for (const binding of bindings) {
@@ -591,7 +598,11 @@ export class FabricCore {
 
     for (const leg of [binding.initiator, binding.responder]) {
       leg.connection.streams.delete(leg.localStreamId);
-      this.remember(leg.connection, leg.localStreamId);
+      this.remember(
+        leg.connection,
+        leg.localStreamId,
+        this.maxLateFramesPerClosedStream,
+      );
       if (
         reason !== null &&
         leg.connection !== silent &&
@@ -613,6 +624,12 @@ export class FabricCore {
   ): void {
     if (!connection.tombstones.has(streamId)) {
       this.reject(connection, streamId, FabricReset.UnknownStream);
+      return;
+    }
+    const remaining = connection.lateFrameBudgets.get(streamId) ?? 0;
+    if (remaining > 0) {
+      if (remaining === 1) connection.lateFrameBudgets.delete(streamId);
+      else connection.lateFrameBudgets.set(streamId, remaining - 1);
       return;
     }
     this.strike(connection);
@@ -664,20 +681,33 @@ export class FabricCore {
     return null;
   }
 
-  private remember(connection: FabricEndpointConnection, streamId: string): void {
+  private remember(
+    connection: FabricEndpointConnection,
+    streamId: string,
+    lateFrameBudget = 0,
+  ): void {
     connection.tombstones.set(streamId, this.now() + this.tombstoneMs);
+    if (lateFrameBudget > 0) {
+      connection.lateFrameBudgets.set(streamId, lateFrameBudget);
+    } else {
+      connection.lateFrameBudgets.delete(streamId);
+    }
     this.pruneTombstones(connection);
     while (connection.tombstones.size > this.maxTombstones) {
       const oldest = connection.tombstones.keys().next().value as string | undefined;
       if (!oldest) break;
       connection.tombstones.delete(oldest);
+      connection.lateFrameBudgets.delete(oldest);
     }
   }
 
   private pruneTombstones(connection: FabricEndpointConnection): void {
     const now = this.now();
     for (const [streamId, expiresAt] of connection.tombstones) {
-      if (expiresAt <= now) connection.tombstones.delete(streamId);
+      if (expiresAt <= now) {
+        connection.tombstones.delete(streamId);
+        connection.lateFrameBudgets.delete(streamId);
+      }
     }
   }
 

@@ -318,6 +318,7 @@ export class FabricForwarder {
       streams: new Map(),
       pending: new Map(),
       tombstones: new Map(),
+      lateFrameBudgets: new Map(),
       closed: false,
       strikes: 0,
       send: (frame) => this.deliver(socket, encodeFabricFrame(frame)),
