@@ -1,4 +1,4 @@
-import type { AgentInfo, Reply, Request } from "@genehub/proto";
+import type { AgentInfo, Reply, Request, WorkspaceInfo } from "@genehub/proto";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -110,6 +110,21 @@ function hostWith(overrides: Partial<Host> = {}): Host {
   };
 }
 
+function workspace(
+  id: string,
+  name: string,
+  root: string,
+  isGitRepo: boolean,
+): WorkspaceInfo {
+  return {
+    id,
+    name,
+    root,
+    isGitRepo,
+    folders: [{ name, root, rootHandle: `r_${name}` }],
+  };
+}
+
 /** Renders the app against a stubbed daemon, with no socket anywhere. */
 async function start(client: Client, host: Host) {
   render(<App host={host} connect={() => client} />);
@@ -117,6 +132,7 @@ async function start(client: Client, host: Host) {
 }
 
 beforeEach(() => {
+  localStorage.clear();
   useWorkbench.setState({
     client: null,
     workspaces: [],
@@ -154,7 +170,7 @@ describe("the first run", () => {
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
       "workspace.open": () => ({
         type: "workspace",
-        data: { id: "w1", name: "app", root: "/home/me/app", isGitRepo: true },
+        data: workspace("w1", "app", "/home/me/app", true),
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
     });
@@ -170,6 +186,45 @@ describe("the first run", () => {
       expect(opened?.payload).toEqual({ root: "/home/me/app" });
     });
     expect(pickDirectory).toHaveBeenCalled();
+  });
+
+  it("uses the native .code-workspace picker when the desktop offers it", async () => {
+    const { client, calls } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({ type: "workspaces", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "workspace.open": () => ({
+        type: "workspace",
+        data: {
+          ...workspace("w1", "suite", "/home/me/product", true),
+          workspaceFile: "/home/me/suite.code-workspace",
+          folders: [
+            { name: "Product", root: "/home/me/product", rootHandle: "r_product" },
+            { name: "Docs", root: "/home/me/docs", rootHandle: "r_docs" },
+          ],
+        },
+      }),
+      "session.list": () => ({ type: "sessions", data: [] }),
+    });
+    const pickWorkspaceFile = vi.fn(async () => "/home/me/suite.code-workspace");
+    await start(
+      client,
+      hostWith({
+        pickDirectory: async () => null,
+        pickWorkspaceFile,
+      }),
+    );
+
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "打开 .code-workspace…" })[0]!,
+    );
+
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "workspace.open")?.payload).toEqual({
+        root: "/home/me/suite.code-workspace",
+      });
+    });
+    expect(pickWorkspaceFile).toHaveBeenCalled();
   });
 
   it("does not browse this device when the desktop shell is connected to a remote machine", async () => {
@@ -188,7 +243,9 @@ describe("the first run", () => {
       }),
     );
 
-    expect(await screen.findAllByRole("button", { name: "选择项目文件夹…" })).not.toHaveLength(0);
+    expect(
+      await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }),
+    ).not.toHaveLength(0);
     expect(screen.queryByRole("button", { name: "打开项目文件夹…" })).not.toBeInTheDocument();
     expect(pickDirectory).not.toHaveBeenCalled();
   });
@@ -204,25 +261,142 @@ describe("the first run", () => {
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
       "workspace.open": () => ({
         type: "workspace",
-        data: { id: "w1", name: "app", root: "/srv/app", isGitRepo: false },
+        data: workspace("w1", "app", "/srv/app", false),
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
       "directory.list": (payload: { path: string | null }) => ({
         type: "directory",
         data: payload.path
-          ? { path: "/srv/app", parent: "/srv", directories: [] }
-          : { path: "/srv", parent: "/", directories: [{ name: "app", path: "/srv/app" }] },
+          ? { path: "/srv/app", parent: "/srv", directories: [], workspaceFiles: [] }
+          : {
+              path: "/srv",
+              parent: "/",
+              directories: [{ name: "app", path: "/srv/app" }],
+              workspaceFiles: [],
+            },
       }),
     });
     await start(client, hostWith());
 
-    await userEvent.click((await screen.findAllByRole("button", { name: "选择项目文件夹…" }))[0]!);
+    await userEvent.click(
+      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+    );
     await userEvent.click(await screen.findByRole("button", { name: /app/ }));
     await userEvent.click(screen.getByRole("button", { name: "选择当前文件夹" }));
 
     await waitFor(() => {
       expect(calls.find((call) => call.type === "workspace.open")?.payload).toEqual({
         root: "/srv/app",
+      });
+    });
+  });
+
+  it("starts the project browser at the selected workspace before an older remembered path", async () => {
+    localStorage.setItem("genehub:project-picker:loopback:本机", "/srv/older");
+    const { client, calls } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({
+        type: "workspaces",
+        data: [workspace("w1", "current", "/srv/current", false)],
+      }),
+      "session.list": () => ({ type: "sessions", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "directory.list": (payload: { path: string | null }) => ({
+        type: "directory",
+        data: {
+          path: payload.path ?? "/home/me",
+          parent: "/srv",
+          directories: [],
+          workspaceFiles: [],
+        },
+      }),
+    });
+    await start(client, hostWith());
+
+    await userEvent.click(
+      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+    );
+
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "directory.list")?.payload).toEqual({
+        path: "/srv/current",
+      });
+    });
+  });
+
+  it("falls back to the last browsed directory when no workspace is selected", async () => {
+    localStorage.setItem("genehub:project-picker:loopback:本机", "/srv/remembered");
+    const { client, calls } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({ type: "workspaces", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "directory.list": (payload: { path: string | null }) => ({
+        type: "directory",
+        data: {
+          path: payload.path ?? "/home/me",
+          parent: "/srv",
+          directories: [],
+          workspaceFiles: [],
+        },
+      }),
+    });
+    await start(client, hostWith());
+
+    await userEvent.click(
+      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+    );
+
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "directory.list")?.payload).toEqual({
+        path: "/srv/remembered",
+      });
+    });
+  });
+
+  it("opens a .code-workspace file exposed by the remote directory picker", async () => {
+    const { client, calls } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({ type: "workspaces", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "workspace.open": () => ({
+        type: "workspace",
+        data: {
+          id: "w_suite",
+          name: "suite",
+          root: "/srv/product",
+          isGitRepo: true,
+          workspaceFile: "/srv/suite.code-workspace",
+          folders: [
+            { name: "Product", root: "/srv/product", rootHandle: "r_product" },
+            { name: "Docs", root: "/srv/docs", rootHandle: "r_docs" },
+          ],
+        },
+      }),
+      "session.list": () => ({ type: "sessions", data: [] }),
+      "directory.list": () => ({
+        type: "directory",
+        data: {
+          path: "/srv",
+          parent: "/",
+          directories: [],
+          workspaceFiles: [
+            { name: "suite.code-workspace", path: "/srv/suite.code-workspace" },
+          ],
+        },
+      }),
+    });
+    await start(client, hostWith());
+
+    await userEvent.click(
+      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: /suite\.code-workspace/ }),
+    );
+
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "workspace.open")?.payload).toEqual({
+        root: "/srv/suite.code-workspace",
       });
     });
   });
@@ -239,7 +413,10 @@ describe("the first run", () => {
     ) => {
       if (request.type === "workspace.open") throw new Error("no such directory: /nope");
       if (request.type === "directory.list") {
-        return { type: "directory", data: { path: "/nope", parent: "/", directories: [] } };
+        return {
+          type: "directory",
+          data: { path: "/nope", parent: "/", directories: [], workspaceFiles: [] },
+        };
       }
       if (request.type === "agent.list") return { type: "agents", data: [READY_AGENT] };
       if (request.type === "workspace.list") return { type: "workspaces", data: [] };
@@ -247,7 +424,9 @@ describe("the first run", () => {
     };
     await start(client, hostWith());
 
-    await userEvent.click((await screen.findAllByRole("button", { name: "选择项目文件夹…" }))[0]!);
+    await userEvent.click(
+      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+    );
     await userEvent.click(await screen.findByRole("button", { name: "选择当前文件夹" }));
 
     expect(await screen.findByText(/no such directory/)).toBeInTheDocument();
@@ -263,7 +442,7 @@ describe("the first run", () => {
       "agent.list": () => ({ type: "agents", data: [UNCONFIGURED_AGENT] }),
       "workspace.list": () => ({
         type: "workspaces",
-        data: [{ id: "w1", name: "app", root: "/home/me/app", isGitRepo: true }],
+        data: [workspace("w1", "app", "/home/me/app", true)],
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
@@ -296,7 +475,7 @@ describe("the first run", () => {
       "agent.list": () => ({ type: "agents", data: [opencode] }),
       "workspace.list": () => ({
         type: "workspaces",
-        data: [{ id: "w1", name: "app", root: "/home/me/app", isGitRepo: true }],
+        data: [workspace("w1", "app", "/home/me/app", true)],
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
@@ -323,7 +502,7 @@ describe("the first run", () => {
       "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
       "workspace.list": () => ({
         type: "workspaces",
-        data: [{ id: "w1", name: "GeneHub", root: "/home/me/GeneHub", isGitRepo: false }],
+        data: [workspace("w1", "GeneHub", "/home/me/GeneHub", false)],
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
@@ -347,7 +526,7 @@ describe("the first run", () => {
       "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
       "workspace.list": () => ({
         type: "workspaces",
-        data: [{ id: "w1", name: "GeneHub", root: "/home/me/GeneHub", isGitRepo: false }],
+        data: [workspace("w1", "GeneHub", "/home/me/GeneHub", false)],
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
@@ -379,7 +558,7 @@ describe("the first run", () => {
       "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
       "workspace.list": () => ({
         type: "workspaces",
-        data: [{ id: "w1", name: "GeneHub", root: "/home/me/GeneHub", isGitRepo: false }],
+        data: [workspace("w1", "GeneHub", "/home/me/GeneHub", false)],
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
@@ -400,7 +579,7 @@ describe("the first run", () => {
       "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
       "workspace.list": () => ({
         type: "workspaces",
-        data: [{ id: "w1", name: "app", root: "/home/me/app", isGitRepo: true }],
+        data: [workspace("w1", "app", "/home/me/app", true)],
       }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
       "session.list": () => ({

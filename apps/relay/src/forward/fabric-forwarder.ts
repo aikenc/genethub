@@ -318,6 +318,7 @@ export class FabricForwarder {
       streams: new Map(),
       pending: new Map(),
       tombstones: new Map(),
+      lateFrameBudgets: new Map(),
       closed: false,
       strikes: 0,
       send: (frame) => this.deliver(socket, encodeFabricFrame(frame)),
@@ -390,7 +391,7 @@ export class FabricForwarder {
     ) return;
     const seconds = presenceRefreshDelaySeconds(
       peer.presenceLeaseSeconds,
-      config.limits.presenceRefreshMaxSeconds,
+      config.limits.fabricPresenceRefreshMaxSeconds,
     );
     peer.presenceRefresh = setTimeout(() => {
       peer.presenceRefresh = null;
@@ -428,9 +429,8 @@ export class FabricForwarder {
     }
   }
 
-  /** Logged for the same reason the legacy forwarder logs its closes: the
-   * reason exists only on this side, and a peer that is cut off cannot report
-   * anything but "the connection ended". */
+  /** The reason exists only here; a peer cut off before the close handshake
+   * can report nothing more specific than "the connection ended". */
   private closeSocket(socket: WebSocket, code?: number, reason = ""): void {
     if (socket.readyState === socket.CLOSED || socket.readyState === socket.CLOSING) return;
     log.warn("fabric: closing a socket", { code: code ?? null, reason });

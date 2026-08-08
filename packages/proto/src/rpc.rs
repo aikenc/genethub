@@ -1,11 +1,7 @@
-//! The client protocol envelope: requests in, results and pushes out.
-//!
-//! One shape serves all three transports in `daemon.md` §3.1. Only
-//! authentication differs between loopback and forwarded connections. The LAN
-//! wire enum remains only for compatibility; privileged LAN transport is disabled.
+//! Typed RPC operations and event payloads carried inside protocol-v3
+//! Exchanges. This module is a business schema, not a connection envelope.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use ts_rs::TS;
 
 use crate::domain::*;
@@ -14,48 +10,19 @@ use crate::timeline::Attachment;
 
 /// Bumped when a change would break an older client. Clients that see a version
 /// they do not know must refuse to connect rather than guess.
-pub const PROTOCOL_VERSION: u32 = 2;
-/// Keeps an AES-GCM ciphertext plus base64url and JSON envelope below the
-/// four-megabyte WebSocket wire ceiling used by daemon and Relay.
-pub const MAX_AUTHENTICATED_PLAINTEXT_BYTES: usize = 2_900_000;
+pub const PROTOCOL_VERSION: u32 = crate::data::DATA_PLANE_VERSION;
+/// Maximum typed RPC body accepted before it is divided into bounded v3 data
+/// frames.
+pub const MAX_RPC_BODY_BYTES: usize = 2_900_000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum Request {
-    // -- handshake ---------------------------------------------------------
-    #[serde(rename = "hello", rename_all = "camelCase")]
-    Hello {
-        client_name: String,
-        protocol_version: u32,
-        /// Present when the client holds a device credential for this machine.
-        /// Required on forwarded connections: the machine decides admission
-        /// itself, and a relay vouches for nobody.
-        #[serde(default)]
-        device: Option<DeviceAuth>,
-        /// Present for a Hub-issued channel. The opaque capability names the
-        /// one-use secret the target daemon obtained directly from Control;
-        /// Relay sees the name but never the secret or either proof.
-        #[serde(default)]
-        channel: Option<ChannelAuth>,
-        /// Temporary proof for encrypted first-device bootstrap.
-        #[serde(default)]
-        invite: Option<InviteAuth>,
-    },
     /// Returns machine metadata only after the channel key is active, so a
     /// forwarding service cannot read a user's alias or fingerprint.
     #[serde(rename = "connection.identity")]
     ConnectionIdentity,
-    /// Authenticated envelope used after Hello on every non-loopback channel.
-    /// `body` is base64url AES-256-GCM ciphertext. Its plaintext is the exact
-    /// JSON request; the independent HMAC covers this ciphertext and context.
-    #[serde(rename = "authenticated", rename_all = "camelCase")]
-    Authenticated {
-        #[ts(type = "number")]
-        sequence: u64,
-        body: String,
-        mac: String,
-    },
     /// Subscribe to a session's events. `sinceSeq` asks for a replay of
     /// everything after that sequence number.
     #[serde(rename = "subscribe", rename_all = "camelCase")]
@@ -127,6 +94,13 @@ pub enum Request {
         text: String,
         #[serde(default)]
         attachments: Vec<Attachment>,
+        /// Browser-composed, deployment-aware Asset Preview prefix for this
+        /// session's workspace. It is context, not authority: opening a link
+        /// still performs normal target selection, authentication and E2EE.
+        /// The daemon validates the URL shape and turns it into fixed Agent
+        /// guidance; arbitrary client-authored system prompts are never accepted.
+        #[serde(default)]
+        artifact_preview_base_url: Option<String>,
         /// Claims this message as a continuation of a round left open by an
         /// interrupt, rather than a new one. Only interrupts need this: the
         /// daemon auto-stitches approval and guidance continuations on its
@@ -302,12 +276,7 @@ pub enum Request {
     /// Redeems an invite. The only request a stranger may send, and only once
     /// per invite: everything else needs a credential this call hands out.
     #[serde(rename = "device.claim", rename_all = "camelCase")]
-    DeviceClaim {
-        code: String,
-        device_name: String,
-        nonce: String,
-        proof: String,
-    },
+    DeviceClaim { code: String, device_name: String },
     /// Forgets a device. Its live connection drops with it.
     #[serde(rename = "device.revoke", rename_all = "camelCase")]
     DeviceRevoke { device_id: String },
@@ -331,6 +300,9 @@ pub enum Request {
     WorkspaceCreate { root: String, name: String },
     #[serde(rename = "workspace.rename", rename_all = "camelCase")]
     WorkspaceRename { workspace_id: String, name: String },
+    /// Hides a workspace registration while retaining its identity and history.
+    #[serde(rename = "workspace.remove", rename_all = "camelCase")]
+    WorkspaceRemove { workspace_id: String },
     /// Lists folders on the daemon's machine before a workspace exists.
     #[serde(rename = "directory.list", rename_all = "camelCase")]
     DirectoryList {
@@ -347,8 +319,6 @@ pub enum Request {
         #[serde(default)]
         depth: Option<u32>,
     },
-    #[serde(rename = "file.read", rename_all = "camelCase")]
-    FileRead { workspace_id: String, path: String },
     #[serde(rename = "file.write", rename_all = "camelCase")]
     FileWrite {
         workspace_id: String,
@@ -442,7 +412,6 @@ pub enum Reply {
     Workspaces(Vec<WorkspaceInfo>),
     Directory(DirectoryListing),
     FileTree(FileNode),
-    FileContent(FileContent),
     GitStatus(GitStatus),
     #[serde(rename_all = "camelCase")]
     GitDiff {
@@ -467,6 +436,8 @@ pub struct DirectoryListing {
     pub path: String,
     pub parent: Option<String>,
     pub directories: Vec<DirectoryEntry>,
+    /// Openable VS Code workspace definitions in this directory.
+    pub workspace_files: Vec<DirectoryEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -507,27 +478,6 @@ pub struct ProtocolError {
 #[serde(tag = "type", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum ServerFrame {
-    /// Authenticated and encrypted envelope used after Hello. Sequence numbers
-    /// share one strictly increasing stream for every result, event and PTY.
-    #[serde(rename = "authenticated", rename_all = "camelCase")]
-    Authenticated {
-        #[ts(type = "number")]
-        sequence: u64,
-        body: String,
-        mac: String,
-    },
-    /// Answer to a request, correlated by the request's `id`.
-    #[serde(rename = "result", rename_all = "camelCase")]
-    Result {
-        id: String,
-        ok: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        payload: Option<Reply>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        error: Option<ProtocolError>,
-    },
     /// A session event push. `topic` is `session:<id>`.
     #[serde(rename = "event", rename_all = "camelCase")]
     Event {
@@ -580,71 +530,11 @@ pub enum NoticeLevel {
     Error,
 }
 
-/// A request as it arrives on the wire: an envelope id plus the request body.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "index.ts")]
-pub struct ClientEnvelope {
-    pub id: String,
-    #[serde(flatten)]
-    pub request: Request,
-}
-
 impl ServerFrame {
-    pub fn ok(id: impl Into<String>, payload: Reply) -> Self {
-        ServerFrame::Result {
-            id: id.into(),
-            ok: true,
-            payload: Some(payload),
-            error: None,
-        }
-    }
-
-    pub fn err(id: impl Into<String>, code: ErrorCode, message: impl Into<String>) -> Self {
-        ServerFrame::Result {
-            id: id.into(),
-            ok: false,
-            payload: None,
-            error: Some(ProtocolError {
-                code,
-                message: message.into(),
-            }),
-        }
-    }
-
     pub fn event(session_id: &str, event: SequencedEvent) -> Self {
         ServerFrame::Event {
             topic: format!("session:{session_id}"),
             payload: event,
         }
     }
-}
-
-/// Parses an incoming frame, keeping malformed input recoverable.
-///
-/// A parse failure must still be answerable, so the envelope id is extracted
-/// separately: otherwise a client that sends one bad field would hang forever
-/// waiting for a reply that has nowhere to go.
-pub fn parse_envelope(raw: &str) -> Result<ClientEnvelope, (Option<String>, ProtocolError)> {
-    let value: Value = serde_json::from_str(raw).map_err(|e| {
-        (
-            None,
-            ProtocolError {
-                code: ErrorCode::BadRequest,
-                message: format!("malformed JSON: {e}"),
-            },
-        )
-    })?;
-    let id = value
-        .get("id")
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
-    serde_json::from_value(value).map_err(|e| {
-        (
-            id,
-            ProtocolError {
-                code: ErrorCode::BadRequest,
-                message: e.to_string(),
-            },
-        )
-    })
 }

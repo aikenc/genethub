@@ -1,68 +1,94 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-import type { ChannelAuthority, ClientGrant, DaemonGrant } from "../contract/index.js";
+import type {
+  FabricAuthority,
+  FabricEndpointGrant,
+  FabricPresenceState,
+  FabricRevocation,
+  FabricRouteGrant,
+} from "../contract/fabric.js";
 import { isLiteralLoopbackHost } from "../shared/config.js";
-import { log } from "../shared/log.js";
 
 /**
- * The self-hosted mode: a meeting point and nothing else.
+ * Account-free authority for the endpoint-neutral Fabric.
  *
- * There is no control plane to ask, so this asks nobody. A ticket is the
- * rendezvous id itself, and matching two sockets that name the same id is the
- * entire job.
- *
- * That does not make the relay a trust anchor. Admission is decided on the
- * machine, by its authorized-devices list, after the channel exists: the client
- * and the daemon prove themselves to each other over the shared secret they
- * agreed on when they paired (`docs/security-model.md` §4.2). Squatting on
- * someone's slot therefore gets you a connection nobody will talk on.
- *
- * The join token is a different question — not "who are you" but "may you use
- * this relay at all". It applies to machines only: a client can only reach a
- * slot some machine is already holding.
+ * The endpoint and route credentials are only opaque anti-abuse/routing
+ * material. They never authorize a daemon operation: the browser still has to
+ * prove a daemon-issued device or invite secret inside the E2EE peer stream.
  */
-export class RendezvousAuthority implements ChannelAuthority {
-  /**
-   * One process-wide monotonic source is enough: Forwarder fences per machine,
-   * while using a global counter avoids a second unbounded per-slot map in the
-   * deliberately stateless self-hosted authority.
-   */
+export class RendezvousFabricAuthority implements FabricAuthority {
   private connectionGeneration = 0;
+  private readonly onlineNodes = new Set<string>();
 
   constructor(private readonly joinToken: string | null) {}
 
-  async authorizeDaemon(ticket: string): Promise<DaemonGrant | null> {
-    const [presented, id] = split(ticket);
-    if (!id) return null;
-    if (this.joinToken && !sameSecret(presented, this.joinToken)) return null;
+  async authorizeEndpoint(credential: string): Promise<FabricEndpointGrant | null> {
     if (this.connectionGeneration >= Number.MAX_SAFE_INTEGER) return null;
+    const clientSlot = credential.startsWith("client:") ? credential.slice(7) : null;
+    if (clientSlot !== null) {
+      if (!validSlot(clientSlot) || !this.onlineNodes.has(nodeHandle(clientSlot))) return null;
+      this.connectionGeneration += 1;
+      const identity = randomBytes(16).toString("hex");
+      return {
+        endpointHandle: `client:${identity}`,
+        revocationHandle: `client:${identity}`,
+        expiresAt: null,
+        connectionGeneration: this.connectionGeneration,
+        presenceLeaseSeconds: 60,
+      };
+    }
+
+    const [presented, slot] = split(credential);
+    if (!slot || !validSlot(slot)) return null;
+    if (this.joinToken && !sameSecret(presented, this.joinToken)) return null;
     this.connectionGeneration += 1;
     return {
-      machineId: id,
-      daemonId: id,
+      endpointHandle: nodeHandle(slot),
+      revocationHandle: nodeHandle(slot),
+      expiresAt: null,
       connectionGeneration: this.connectionGeneration,
       presenceLeaseSeconds: 60,
     };
   }
 
-  async inspectClient(ticket: string): Promise<ClientGrant | null> {
-    if (!ticket) return null;
-    // There is no account session in rendezvous mode. The slot is the only
-    // stable opaque identity available, and must agree with authorizeClient so
-    // the forwarder cannot switch subjects between peek and spend.
-    return { machineId: ticket, clientId: ticket, channelCapability: "rendezvous" };
+  async authorizeRoute(
+    sourceEndpointHandle: string,
+    routeTicket: string,
+  ): Promise<FabricRouteGrant | null> {
+    const target = nodeHandle(routeTicket);
+    if (
+      !sourceEndpointHandle.startsWith("client:") ||
+      !validSlot(routeTicket) ||
+      !this.onlineNodes.has(target)
+    ) {
+      return null;
+    }
+    return {
+      targetEndpointHandle: target,
+      routeHandle: `route:${randomBytes(16).toString("hex")}`,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    };
   }
 
-  async authorizeClient(ticket: string): Promise<ClientGrant | null> {
-    if (!ticket) return null;
-    // A client that names a slot nobody holds is turned away by the forwarder
-    // itself, which is the only "does this machine exist" check there is.
-    return { machineId: ticket, clientId: ticket, channelCapability: "rendezvous" };
+  async reportEndpointPresence(
+    endpointHandle: string,
+    _connectionGeneration: number,
+    state: FabricPresenceState,
+  ): Promise<void> {
+    if (!endpointHandle.startsWith("node:")) return;
+    if (state === "online") this.onlineNodes.add(endpointHandle);
+    else this.onlineNodes.delete(endpointHandle);
   }
 
-  async reportPresence(): Promise<void> {}
+  onFabricRevoked(_handler: (revocation: FabricRevocation) => void): void {}
+}
 
-  onRevoked(): void {}
+function validSlot(value: string): boolean {
+  return /^[0-9a-f]{32}$/.test(value);
+}
+
+function nodeHandle(slot: string): string {
+  return `node:${slot}`;
 }
 
 /**

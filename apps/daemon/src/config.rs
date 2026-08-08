@@ -157,6 +157,13 @@ pub struct Config {
     /// not something that happens because they installed the app.
     pub lan_enabled: bool,
     pub agents: AgentsConfig,
+    /// Device-local, project-independent filesystem roots.
+    ///
+    /// Projects only reference these opaque handles. Keeping the mapping here
+    /// makes one physical directory keep the same locator when it is opened as
+    /// a folder or appears in any number of `.code-workspace` files.
+    #[serde(default)]
+    pub workspace_roots: Vec<WorkspaceRootEntry>,
     pub workspaces: Vec<WorkspaceEntry>,
     /// Identifies one lifetime of the local workspace catalogue.
     ///
@@ -184,6 +191,7 @@ impl Default for Config {
             port: 0,
             lan_enabled: false,
             agents: AgentsConfig::default(),
+            workspace_roots: Vec::new(),
             workspaces: Vec::new(),
             workspace_catalog_generation: String::new(),
             workspace_catalog_revision: 0,
@@ -236,12 +244,42 @@ pub struct CustomAgent {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRootEntry {
+    pub handle: String,
+    pub root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFolderEntry {
+    pub name: String,
+    pub root: PathBuf,
+    /// Stable device-local identity of `root`. It is independent of every
+    /// project and display label that references the directory.
+    #[serde(default)]
+    pub root_handle: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceEntry {
     pub id: String,
     pub name: String,
+    /// The first folder is deliberately duplicated here as a first-class fact:
+    /// it remains the Agent/session/terminal/git working directory.
     pub root: PathBuf,
+    /// Every filesystem root visible in Explorer and Asset Preview, in order.
+    /// Empty only while loading a pre-multi-root config; startup migrates it.
+    #[serde(default)]
+    pub folders: Vec<WorkspaceFolderEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_file: Option<PathBuf>,
+    /// Hidden from the active registry, but retained so reopening the same
+    /// project restores its id and therefore its on-disk conversation history.
+    #[serde(default)]
+    pub removed: bool,
     /// A revisioned catalogue fact, sampled when the daemon starts or the
     /// workspace is first opened. Keeping it in config prevents a filesystem
     /// change from producing a different Hub snapshot at the same revision.
@@ -263,6 +301,140 @@ impl Config {
     pub fn save(&self, path: &Path) -> Result<()> {
         let body = serde_json::to_string_pretty(self)?;
         save_private(path, body.as_bytes())
+    }
+
+    /// Returns the device-wide locator for one already-canonical directory,
+    /// creating it in this pending configuration snapshot when first seen.
+    pub(crate) fn ensure_workspace_root(&mut self, root: &Path) -> String {
+        if let Some(mapping) = self
+            .workspace_roots
+            .iter()
+            .find(|mapping| mapping.root == root)
+        {
+            return mapping.handle.clone();
+        }
+        let handle = new_workspace_root_handle(
+            self.workspace_roots
+                .iter()
+                .map(|mapping| mapping.handle.as_str()),
+        );
+        self.workspace_roots.push(WorkspaceRootEntry {
+            handle: handle.clone(),
+            root: root.to_path_buf(),
+        });
+        handle
+    }
+
+    /// Rewrites the old one-root representation once, instead of carrying a
+    /// permanent runtime fallback through every filesystem operation.
+    pub fn migrate_workspace_folders(&mut self, path: &Path) -> Result<()> {
+        let mut changed = false;
+        for workspace in &mut self.workspaces {
+            if workspace.folders.is_empty() {
+                workspace.folders.push(WorkspaceFolderEntry {
+                    name: workspace
+                        .root
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| workspace.name.clone()),
+                    root: workspace.root.clone(),
+                    root_handle: String::new(),
+                });
+                changed = true;
+            }
+            if workspace.folders.first().map(|folder| &folder.root) != Some(&workspace.root) {
+                anyhow::bail!(
+                    "workspace {} primary root does not match its first folder",
+                    workspace.id
+                );
+            }
+        }
+        if changed {
+            self.save(path)?;
+        }
+        Ok(())
+    }
+
+    /// Gives every concrete folder one durable, device-local locator.
+    ///
+    /// This is a one-time rewrite for configurations written before roots were
+    /// first-class. Runtime resolution has no alias/path-name fallback after
+    /// startup: every project folder must carry the canonical global handle.
+    pub fn migrate_workspace_roots(&mut self, path: &Path) -> Result<()> {
+        let mut changed = false;
+        let mut handles = std::collections::HashMap::<String, PathBuf>::new();
+        let mut roots = std::collections::HashMap::<PathBuf, String>::new();
+        let mut normalized = Vec::with_capacity(self.workspace_roots.len());
+
+        for mut mapping in std::mem::take(&mut self.workspace_roots) {
+            if !valid_workspace_root_handle(&mapping.handle)
+                || handles
+                    .get(&mapping.handle)
+                    .is_some_and(|root| root != &mapping.root)
+            {
+                mapping.handle = new_workspace_root_handle(handles.keys().map(String::as_str));
+                changed = true;
+            }
+            if let Some(existing) = roots.get(&mapping.root) {
+                if existing != &mapping.handle {
+                    changed = true;
+                }
+                continue;
+            }
+            handles.insert(mapping.handle.clone(), mapping.root.clone());
+            roots.insert(mapping.root.clone(), mapping.handle.clone());
+            normalized.push(mapping);
+        }
+        self.workspace_roots = normalized;
+
+        for workspace in &mut self.workspaces {
+            for folder in &mut workspace.folders {
+                let handle = match roots.get(&folder.root) {
+                    Some(handle) => handle.clone(),
+                    None => {
+                        let handle = new_workspace_root_handle(handles.keys().map(String::as_str));
+                        roots.insert(folder.root.clone(), handle.clone());
+                        handles.insert(handle.clone(), folder.root.clone());
+                        self.workspace_roots.push(WorkspaceRootEntry {
+                            handle: handle.clone(),
+                            root: folder.root.clone(),
+                        });
+                        changed = true;
+                        handle
+                    }
+                };
+                if folder.root_handle != handle {
+                    folder.root_handle = handle;
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            self.save(path)?;
+        }
+        Ok(())
+    }
+
+    /// Repairs malformed local ids without merging distinct project sources.
+    /// A directly opened folder and every `.code-workspace` file are separate
+    /// projects even when their Agent root is the same physical directory.
+    pub fn migrate_workspace_identities(&mut self, path: &Path) -> Result<()> {
+        let mut changed = false;
+        let mut ids = std::collections::HashSet::new();
+        for workspace in &mut self.workspaces {
+            if workspace.id.trim().is_empty() || !ids.insert(workspace.id.clone()) {
+                workspace.id = format!("w_{}", uuid::Uuid::new_v4().simple());
+                ids.insert(workspace.id.clone());
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.workspace_catalog_revision = self.workspace_catalog_revision.saturating_add(1);
+            self.save(path)?;
+        }
+        Ok(())
     }
 
     /// Makes the catalogue generation durable before it is ever uploaded.
@@ -301,6 +473,25 @@ impl Config {
     }
 }
 
+fn valid_workspace_root_handle(handle: &str) -> bool {
+    handle.len() >= 3
+        && handle.len() <= 128
+        && handle.starts_with("r_")
+        && handle
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn new_workspace_root_handle<'a>(existing: impl Iterator<Item = &'a str>) -> String {
+    let existing = existing.collect::<std::collections::HashSet<_>>();
+    loop {
+        let candidate = format!("r_{}", uuid::Uuid::new_v4().simple());
+        if !existing.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+}
+
 /// Identity that must survive restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -331,14 +522,6 @@ pub struct Enrollment {
     pub hub_url: String,
     /// The Hub's id for this machine, shown in the owner's list.
     pub machine_id: String,
-    pub uplink_url: String,
-    /// Endpoint-neutral Fabric address advertised by a v2-capable Hub.
-    ///
-    /// Optional for state written by older Hubs. Merely remembering the
-    /// address does not route incoming Fabric streams into the daemon's local
-    /// RPC; that requires the separate end-to-end capability boundary.
-    #[serde(default)]
-    pub fabric_url: Option<String>,
     pub daemon_id: String,
     /// Presented only to the Hub HTTPS boundary to mint short-lived uplink
     /// admissions. Only its hash is persisted by the Hub, and the reusable
@@ -952,6 +1135,13 @@ mod tests {
             id: "w1".into(),
             name: "demo".into(),
             root: PathBuf::from("/tmp/demo"),
+            folders: vec![WorkspaceFolderEntry {
+                name: "demo".into(),
+                root: PathBuf::from("/tmp/demo"),
+                root_handle: "r_demo".into(),
+            }],
+            workspace_file: None,
+            removed: false,
             is_git_repo: false,
         });
         config.save(&path).unwrap();
@@ -960,6 +1150,141 @@ mod tests {
         assert_eq!(loaded.port, 1234);
         assert_eq!(loaded.workspaces.len(), 1);
         assert_eq!(loaded.workspaces[0].name, "demo");
+    }
+
+    #[test]
+    fn legacy_workspace_roots_are_migrated_once_to_folder_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let root = dir.path().join("project");
+        let mut config = Config::default();
+        config.workspaces.push(WorkspaceEntry {
+            id: "w1".into(),
+            name: "Project".into(),
+            root: root.clone(),
+            folders: Vec::new(),
+            workspace_file: None,
+            removed: false,
+            is_git_repo: false,
+        });
+        config.save(&path).unwrap();
+
+        let mut loaded = Config::load(&path).unwrap();
+        loaded.migrate_workspace_folders(&path).unwrap();
+        loaded.migrate_workspace_roots(&path).unwrap();
+        assert_eq!(loaded.workspaces[0].folders.len(), 1);
+        assert_eq!(loaded.workspaces[0].folders[0].root, root);
+        assert!(loaded.workspaces[0].folders[0]
+            .root_handle
+            .starts_with("r_"));
+
+        let saved = Config::load(&path).unwrap();
+        assert_eq!(saved.workspaces[0].folders.len(), 1);
+        assert_eq!(saved.workspace_roots.len(), 1);
+        assert_eq!(
+            saved.workspaces[0].folders[0].root_handle,
+            saved.workspace_roots[0].handle
+        );
+    }
+
+    #[test]
+    fn folder_and_workspace_projects_keep_distinct_ids_but_share_global_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let root = dir.path().join("product");
+        let docs = dir.path().join("docs");
+        let definition = dir.path().join("suite.code-workspace");
+        let folder = WorkspaceFolderEntry {
+            name: "product".into(),
+            root: root.clone(),
+            root_handle: String::new(),
+        };
+        let mut config = Config {
+            workspaces: vec![
+                WorkspaceEntry {
+                    id: "w_folder".into(),
+                    name: "product".into(),
+                    root: root.clone(),
+                    folders: vec![folder.clone()],
+                    workspace_file: None,
+                    removed: false,
+                    is_git_repo: false,
+                },
+                WorkspaceEntry {
+                    id: "w_suite".into(),
+                    name: "suite".into(),
+                    root: root.clone(),
+                    folders: vec![
+                        WorkspaceFolderEntry {
+                            name: "Product".into(),
+                            root: root.clone(),
+                            root_handle: String::new(),
+                        },
+                        WorkspaceFolderEntry {
+                            name: "Docs".into(),
+                            root: docs,
+                            root_handle: String::new(),
+                        },
+                    ],
+                    workspace_file: Some(definition.clone()),
+                    removed: true,
+                    is_git_repo: false,
+                },
+            ],
+            ..Config::default()
+        };
+
+        config.migrate_workspace_roots(&path).unwrap();
+        config.migrate_workspace_identities(&path).unwrap();
+
+        assert_eq!(config.workspaces.len(), 2);
+        assert_eq!(config.workspaces[0].id, "w_folder");
+        assert_eq!(config.workspaces[1].id, "w_suite");
+        assert_eq!(
+            config.workspaces[0].folders[0].root_handle,
+            config.workspaces[1].folders[0].root_handle
+        );
+        assert_ne!(
+            config.workspaces[0].folders[0].root_handle,
+            config.workspaces[1].folders[1].root_handle
+        );
+        assert_eq!(config.workspace_roots.len(), 2);
+        assert_eq!(config.workspace_catalog_revision, 0);
+        assert_eq!(Config::load(&path).unwrap().workspaces.len(), 2);
+    }
+
+    #[test]
+    fn malformed_root_handles_are_repaired_before_runtime_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let root = dir.path().join("project");
+        let mut config = Config {
+            workspace_roots: vec![WorkspaceRootEntry {
+                handle: "../project".into(),
+                root: root.clone(),
+            }],
+            workspaces: vec![WorkspaceEntry {
+                id: "w_project".into(),
+                name: "project".into(),
+                root: root.clone(),
+                folders: vec![WorkspaceFolderEntry {
+                    name: "project".into(),
+                    root,
+                    root_handle: "../project".into(),
+                }],
+                workspace_file: None,
+                removed: false,
+                is_git_repo: false,
+            }],
+            ..Config::default()
+        };
+
+        config.migrate_workspace_roots(&path).unwrap();
+
+        let handle = &config.workspace_roots[0].handle;
+        assert!(valid_workspace_root_handle(handle));
+        assert_eq!(config.workspaces[0].folders[0].root_handle, *handle);
+        assert!(!handle.contains('/'));
     }
 
     #[test]
@@ -1116,6 +1441,13 @@ mod tests {
             id: "w1".into(),
             name: "project".into(),
             root: project.clone(),
+            folders: vec![WorkspaceFolderEntry {
+                name: "project".into(),
+                root: project.clone(),
+                root_handle: "r_project".into(),
+            }],
+            workspace_file: None,
+            removed: false,
             is_git_repo: false,
         });
 

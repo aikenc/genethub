@@ -1,4 +1,4 @@
-//! Directory listing and file read/write, scoped to a workspace.
+//! Directory listing, exact Preview reads, and writes scoped to a workspace.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -7,11 +7,10 @@ use anyhow::{Context, Result};
 #[cfg(not(unix))]
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
-use genehub_proto::{FileContent, FileNode};
+use genehub_proto::FileNode;
+use genehub_proto::{AssetPreviewKind, AssetPreviewMetadata};
+use sha2::{Digest, Sha256};
 
-/// Beyond this a file is served truncated: the editor cannot usefully show
-/// more, and shipping it wastes the link.
-const MAX_READ_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ENTRIES_PER_DIR: usize = 2000;
 const MAX_TREE_NODES: usize = 10_000;
 
@@ -21,10 +20,32 @@ const MAX_TREE_NODES: usize = 10_000;
 /// `target` with a hundred thousand files, and a client asking for "the tree"
 /// should not be able to stall the daemon.
 pub fn tree(root: &Path, path: &Path, depth: u32) -> Result<FileNode> {
+    tree_with_prefix(root, path, depth, "", None)
+}
+
+/// Builds a tree whose client-visible paths live under a virtual root segment.
+///
+/// The capability root stays the concrete folder. Only the names returned to
+/// the client are prefixed, so a multi-root workspace never turns a virtual
+/// path into ambient filesystem authority.
+pub fn tree_with_prefix(
+    root: &Path,
+    path: &Path,
+    depth: u32,
+    path_prefix: &str,
+    root_name: Option<&str>,
+) -> Result<FileNode> {
     let directory = workspace_dir(root)?;
     let relative = workspace_relative(root, path)?;
     let mut remaining = MAX_TREE_NODES;
-    tree_in(&directory, &relative, depth, &mut remaining)
+    tree_in(
+        &directory,
+        &relative,
+        depth,
+        &mut remaining,
+        path_prefix,
+        root_name,
+    )
 }
 
 fn tree_in(
@@ -32,12 +53,19 @@ fn tree_in(
     relative: &Path,
     depth: u32,
     remaining: &mut usize,
+    path_prefix: &str,
+    root_name: Option<&str>,
 ) -> Result<FileNode> {
     if *remaining == 0 {
         anyhow::bail!("file tree exceeded the node safety limit");
     }
     *remaining -= 1;
-    let display_path = relative.to_string_lossy().replace('\\', "/");
+    let relative_display = relative.to_string_lossy().replace('\\', "/");
+    let display_path = match (path_prefix.is_empty(), relative_display.is_empty()) {
+        (true, _) => relative_display,
+        (false, true) => path_prefix.to_string(),
+        (false, false) => format!("{path_prefix}/{relative_display}"),
+    };
     // `strip_prefix(root)` represents the root itself as an empty path, while
     // capability-relative filesystem APIs spell that directory `.`.
     let capability_path = if relative.as_os_str().is_empty() {
@@ -48,6 +76,7 @@ fn tree_in(
     let name = relative
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
+        .or_else(|| root_name.map(str::to_string))
         .unwrap_or_else(|| ".".to_string());
 
     let metadata = directory
@@ -84,7 +113,14 @@ fn tree_in(
             if is_noise(&entry_path) {
                 continue;
             }
-            match tree_in(directory, &entry_path, depth.saturating_sub(1), remaining) {
+            match tree_in(
+                directory,
+                &entry_path,
+                depth.saturating_sub(1),
+                remaining,
+                path_prefix,
+                None,
+            ) {
                 Ok(node) => entries.push(node),
                 // A file that vanished or cannot be stat'd should not fail the
                 // whole listing.
@@ -113,52 +149,166 @@ fn is_noise(path: &Path) -> bool {
     )
 }
 
-pub fn read(root: &Path, path: &Path) -> Result<FileContent> {
-    let directory = workspace_dir(root)?;
-    let relative = workspace_relative(root, path)?;
-    let file = directory
-        .open(&relative)
-        .with_context(|| format!("reading {}", relative.display()))?;
-    let size = file.metadata()?.len();
-    let mut bytes = Vec::with_capacity(
-        usize::try_from(size)
-            .unwrap_or(MAX_READ_BYTES + 1)
-            .min(MAX_READ_BYTES + 1),
-    );
-    file.into_std()
-        .take((MAX_READ_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    let relative = relative.to_string_lossy().replace('\\', "/");
+#[derive(Debug)]
+pub struct PreviewFile {
+    pub metadata: AssetPreviewMetadata,
+    pub bytes: Vec<u8>,
+}
 
-    if looks_binary(&bytes) {
-        return Ok(FileContent {
-            path: relative,
-            content: format!("Binary file, {size} bytes"),
-            truncated: false,
-            is_text: false,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewFailure {
+    NotFound,
+    Forbidden,
+    Unsupported,
+    TooLarge { source_bytes: u64 },
+    SourceChanged,
+}
+
+impl std::fmt::Display for PreviewFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => formatter.write_str("preview source was not found"),
+            Self::Forbidden => formatter.write_str("preview path is outside its workspace"),
+            Self::Unsupported => formatter.write_str("preview file type is unsupported"),
+            Self::TooLarge { source_bytes } => write!(
+                formatter,
+                "preview source is {source_bytes} bytes, above the {} byte limit",
+                genehub_proto::MAX_PREVIEW_SOURCE_BYTES
+            ),
+            Self::SourceChanged => formatter.write_str("preview source changed while it was read"),
+        }
+    }
+}
+
+impl std::error::Error for PreviewFailure {}
+
+/// Reads one complete regular workspace file or returns a low-cardinality
+/// preview failure. It never truncates, summarizes, probes, transforms, or
+/// follows a stream-like special file.
+pub fn preview(
+    root: &Path,
+    relative_path: &str,
+) -> std::result::Result<PreviewFile, PreviewFailure> {
+    validate_preview_path(relative_path)?;
+    let directory = workspace_dir(root).map_err(|_| PreviewFailure::Forbidden)?;
+    let relative = Path::new(relative_path);
+    let file = directory.open(relative).map_err(map_preview_io)?;
+    let before = file.metadata().map_err(map_preview_io)?;
+    if !before.is_file() {
+        return Err(PreviewFailure::Unsupported);
+    }
+    if before.len() > genehub_proto::MAX_PREVIEW_SOURCE_BYTES as u64 {
+        return Err(PreviewFailure::TooLarge {
+            source_bytes: before.len(),
         });
     }
-
-    let truncated = size > MAX_READ_BYTES as u64 || bytes.len() > MAX_READ_BYTES;
-    let slice = if truncated {
-        // Cut on a character boundary so the result is still valid UTF-8.
-        // A continuation byte is 0b10xxxxxx; back up until the cut lands on the
-        // start of a character.
-        let mut end = bytes.len().min(MAX_READ_BYTES);
-        while end > 0 && end < bytes.len() && (bytes[end] & 0b1100_0000) == 0b1000_0000 {
-            end -= 1;
-        }
-        &bytes[..end]
-    } else {
-        &bytes[..]
-    };
-
-    Ok(FileContent {
-        path: relative,
-        content: String::from_utf8_lossy(slice).to_string(),
-        truncated,
-        is_text: true,
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    file.into_std()
+        .take((genehub_proto::MAX_PREVIEW_SOURCE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(map_preview_io)?;
+    if bytes.len() > genehub_proto::MAX_PREVIEW_SOURCE_BYTES {
+        return Err(PreviewFailure::TooLarge {
+            source_bytes: bytes.len() as u64,
+        });
+    }
+    // A replacement or growth between stat and EOF must not turn the promised
+    // complete file into a prefix. Length catches the portable, meaningful
+    // race; hashing below makes the successful response version exact.
+    if bytes.len() as u64 != before.len() {
+        return Err(PreviewFailure::SourceChanged);
+    }
+    let (kind, media_type) = preview_type(relative, &bytes)?;
+    let digest = Sha256::digest(&bytes);
+    let version = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(PreviewFile {
+        metadata: AssetPreviewMetadata {
+            kind,
+            media_type: media_type.to_string(),
+            source_bytes: bytes.len() as u64,
+            version,
+        },
+        bytes,
     })
+}
+
+pub(crate) fn validate_preview_path(path: &str) -> std::result::Result<(), PreviewFailure> {
+    if path.is_empty()
+        || path.len() > 4096
+        || path.contains('\0')
+        || path.contains('\\')
+        || path.starts_with('/')
+        || path.starts_with("//")
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+        || path
+            .split('/')
+            .any(|part| part.contains(':') || part.ends_with('.') || part.ends_with(' '))
+    {
+        return Err(PreviewFailure::Forbidden);
+    }
+    Ok(())
+}
+
+fn map_preview_io(error: std::io::Error) -> PreviewFailure {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => PreviewFailure::NotFound,
+        std::io::ErrorKind::PermissionDenied => PreviewFailure::Forbidden,
+        _ => PreviewFailure::Unsupported,
+    }
+}
+
+fn preview_type(
+    path: &Path,
+    bytes: &[u8],
+) -> std::result::Result<(AssetPreviewKind, &'static str), PreviewFailure> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let exact = match extension.as_str() {
+        "png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => {
+            Some((AssetPreviewKind::Image, "image/png"))
+        }
+        "jpg" | "jpeg" if bytes.starts_with(b"\xff\xd8\xff") => {
+            Some((AssetPreviewKind::Image, "image/jpeg"))
+        }
+        "gif" if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => {
+            Some((AssetPreviewKind::Image, "image/gif"))
+        }
+        "webp" if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" => {
+            Some((AssetPreviewKind::Image, "image/webp"))
+        }
+        "mp4" if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" => {
+            Some((AssetPreviewKind::Video, "video/mp4"))
+        }
+        "webm" if bytes.starts_with(b"\x1a\x45\xdf\xa3") => {
+            Some((AssetPreviewKind::Video, "video/webm"))
+        }
+        _ => None,
+    };
+    if let Some(found) = exact {
+        return Ok(found);
+    }
+
+    let text = std::str::from_utf8(bytes).map_err(|_| PreviewFailure::Unsupported)?;
+    if text.contains('\0') {
+        return Err(PreviewFailure::Unsupported);
+    }
+    match extension.as_str() {
+        "md" | "markdown" | "mdown" => Ok((AssetPreviewKind::Markdown, "text/markdown")),
+        "html" | "htm" => Ok((AssetPreviewKind::Html, "text/html")),
+        // A text document is a property of its bytes, not of whether this
+        // release happened to know its suffix. The browser infers a language
+        // when it can and safely falls back to escaped plain text when it
+        // cannot; valid UTF-8 without NUL is therefore always previewable.
+        _ => Ok((AssetPreviewKind::Text, "text/plain")),
+    }
 }
 
 pub fn write(root: &Path, path: &Path, content: &str) -> Result<()> {
@@ -222,11 +372,6 @@ fn workspace_relative(root: &Path, path: &Path) -> Result<PathBuf> {
     Ok(relative)
 }
 
-/// A NUL byte in the first block is the same heuristic git uses.
-fn looks_binary(bytes: &[u8]) -> bool {
-    bytes.iter().take(8000).any(|byte| *byte == 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,52 +420,6 @@ mod tests {
     }
 
     #[test]
-    fn text_files_read_back_verbatim() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.txt");
-        std::fs::write(&path, "hello\nworld").unwrap();
-        let content = read(dir.path(), &path).unwrap();
-        assert_eq!(content.content, "hello\nworld");
-        assert!(content.is_text);
-        assert!(!content.truncated);
-        assert_eq!(content.path, "a.txt");
-    }
-
-    #[test]
-    fn binary_files_are_flagged_rather_than_mangled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, [0u8, 1, 2, 3]).unwrap();
-        let content = read(dir.path(), &path).unwrap();
-        assert!(!content.is_text);
-        assert!(content.content.contains("Binary file"));
-    }
-
-    #[test]
-    fn oversized_files_are_truncated_and_say_so() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("big.txt");
-        std::fs::write(&path, "x".repeat(MAX_READ_BYTES + 1000)).unwrap();
-        let content = read(dir.path(), &path).unwrap();
-        assert!(content.truncated);
-        assert_eq!(content.content.len(), MAX_READ_BYTES);
-    }
-
-    /// Truncating mid-character would produce replacement characters at the
-    /// cut, which looks like corruption to the user.
-    #[test]
-    fn truncation_does_not_split_a_multibyte_character() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wide.txt");
-        // Each of these is 3 bytes, so the limit lands mid-character.
-        let text = "中".repeat(MAX_READ_BYTES);
-        std::fs::write(&path, &text).unwrap();
-        let content = read(dir.path(), &path).unwrap();
-        assert!(content.truncated);
-        assert!(!content.content.contains('\u{FFFD}'));
-    }
-
-    #[test]
     fn writing_creates_missing_parent_directories() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a/b/c.txt");
@@ -328,18 +427,114 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hi");
     }
 
+    #[test]
+    fn preview_returns_the_complete_four_megabyte_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = vec![b'x'; genehub_proto::MAX_PREVIEW_SOURCE_BYTES];
+        std::fs::write(dir.path().join("exact.txt"), &bytes).unwrap();
+        let shown = preview(dir.path(), "exact.txt").unwrap();
+        assert_eq!(shown.bytes, bytes);
+        assert_eq!(shown.metadata.kind, AssetPreviewKind::Text);
+        assert_eq!(shown.metadata.source_bytes, 4_194_304);
+
+        std::fs::write(
+            dir.path().join("large.txt"),
+            vec![b'x'; genehub_proto::MAX_PREVIEW_SOURCE_BYTES + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            preview(dir.path(), "large.txt").unwrap_err(),
+            PreviewFailure::TooLarge {
+                source_bytes: 4_194_305
+            }
+        );
+    }
+
+    #[test]
+    fn preview_uses_magic_for_binary_types_and_utf8_for_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("page.md"), "# 结果\n").unwrap();
+        assert_eq!(
+            preview(dir.path(), "page.md").unwrap().metadata.kind,
+            AssetPreviewKind::Markdown
+        );
+        std::fs::write(dir.path().join("page.html"), "<script>ok()</script>").unwrap();
+        assert_eq!(
+            preview(dir.path(), "page.html").unwrap().metadata.kind,
+            AssetPreviewKind::Html
+        );
+        std::fs::write(dir.path().join("fake.png"), b"not a png").unwrap();
+        assert_eq!(
+            preview(dir.path(), "fake.png").unwrap().metadata.kind,
+            AssetPreviewKind::Text
+        );
+        std::fs::write(dir.path().join("real.png"), b"\x89PNG\r\n\x1a\nrest").unwrap();
+        assert_eq!(
+            preview(dir.path(), "real.png").unwrap().metadata.media_type,
+            "image/png"
+        );
+        std::fs::write(
+            dir.path().join("build.custom-language"),
+            "target all:\n\tcompile --safe\n",
+        )
+        .unwrap();
+        assert_eq!(
+            preview(dir.path(), "build.custom-language")
+                .unwrap()
+                .metadata
+                .kind,
+            AssetPreviewKind::Text
+        );
+        std::fs::write(dir.path().join("binary.custom"), b"prefix\0suffix").unwrap();
+        assert_eq!(
+            preview(dir.path(), "binary.custom").unwrap_err(),
+            PreviewFailure::Unsupported
+        );
+        let mut late_nul = vec![b'a'; 9_000];
+        late_nul.push(0);
+        std::fs::write(dir.path().join("late-nul.custom"), late_nul).unwrap();
+        assert_eq!(
+            preview(dir.path(), "late-nul.custom").unwrap_err(),
+            PreviewFailure::Unsupported
+        );
+    }
+
+    #[test]
+    fn preview_rejects_noncanonical_and_platform_escape_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ok.txt"), "ok").unwrap();
+        for path in [
+            "",
+            "/ok.txt",
+            "../ok.txt",
+            "a/../ok.txt",
+            "a//ok.txt",
+            "a\\ok.txt",
+            "C:/ok.txt",
+            "file.txt:secret",
+            "./ok.txt",
+        ] {
+            assert_eq!(
+                preview(dir.path(), path).unwrap_err(),
+                PreviewFailure::Forbidden,
+                "{path:?}"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
-    fn a_symlink_cannot_turn_a_workspace_read_into_an_arbitrary_file_read() {
+    fn preview_does_not_follow_a_symlink_outside_the_workspace() {
         use std::os::unix::fs::symlink;
 
         let workspace = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.txt"), "host secret").unwrap();
         symlink(outside.path(), workspace.path().join("escape")).unwrap();
-
-        let escaped = workspace.path().join("escape/secret.txt");
-        assert!(read(workspace.path(), &escaped).is_err());
+        assert!(matches!(
+            preview(workspace.path(), "escape/secret.txt"),
+            Err(PreviewFailure::Forbidden | PreviewFailure::NotFound | PreviewFailure::Unsupported)
+        ));
     }
 
     #[cfg(unix)]

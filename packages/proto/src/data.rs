@@ -1,0 +1,217 @@
+//! The current endpoint-to-endpoint data-plane contract.
+//!
+//! Business operations are carried by independent logical streams.  This
+//! module owns the small, versioned heads used by those streams; the binary
+//! frame codec itself lives beside each transport implementation and is pinned
+//! by cross-language golden vectors.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use ts_rs::TS;
+
+use crate::rpc::ProtocolError;
+
+/// A clean break from the former connection-wide JSON request protocol.
+pub const DATA_PLANE_VERSION: u32 = 3;
+/// Complete GeneHub record, before the WebSocket or DataChannel wrapper.
+pub const MAX_DATA_FRAME_BYTES: usize = 16 * 1024;
+pub const MAX_EXCHANGE_HEAD_BYTES: usize = 8 * 1024;
+pub const INITIAL_STREAM_WINDOW_BYTES: u32 = 256 * 1024;
+pub const MAX_ACTIVE_DATA_STREAMS: usize = 256;
+/// A finite exchange is deliberately small; indefinite event streams omit a
+/// body length and remain bounded by stream credit instead.
+pub const MAX_FINITE_EXCHANGE_BODY_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_PREVIEW_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+const _: () = assert!(MAX_EXCHANGE_HEAD_BYTES < MAX_DATA_FRAME_BYTES);
+
+/// How a peer proves possession of an end-to-end secret during carrier setup.
+///
+/// Only a capability *name* is present for hosted sessions.  The daemon
+/// redeems that name directly with Control; the Relay never receives the
+/// secret.  Loopback uses the one-use proof delivered by the owner-only shell
+/// as its short-lived PSK.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum PeerAuth {
+    #[serde(rename_all = "camelCase")]
+    Loopback {
+        context: String,
+        nonce: String,
+        proof: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Device {
+        device_id: String,
+        nonce: String,
+        proof: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Hosted {
+        capability_id: String,
+        nonce: String,
+        proof: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Invite {
+        invite_id: String,
+        nonce: String,
+        proof: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PeerHello {
+    pub version: u32,
+    pub client_name: String,
+    pub auth: PeerAuth,
+    /// Capability advertisement only.  Signaling remains encrypted data-plane
+    /// traffic and no RTC address is ever placed in this hello.
+    pub rtc_supported: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PeerWelcome {
+    pub version: u32,
+    pub server_nonce: String,
+    pub proof: String,
+}
+
+/// Non-trickle RTC signaling carried inside an already E2EE Exchange.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RtcNegotiationRequest {
+    pub sdp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RtcNegotiationResponse {
+    pub sdp: String,
+    pub capability_id: String,
+    pub secret: String,
+}
+
+/// The first encrypted record on a client-opened logical stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ExchangeRequestHead {
+    pub version: u32,
+    pub method: String,
+    #[serde(default)]
+    pub metadata: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub body_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ExchangeResponseHead {
+    pub status: u16,
+    #[serde(default)]
+    pub metadata: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub body_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<ProtocolError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkspaceFileSource {
+    pub kind: WorkspaceFileSourceKind,
+    pub workspace_handle: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum WorkspaceFileSourceKind {
+    WorkspaceFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AssetPreviewRequest {
+    pub source: WorkspaceFileSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AssetPreviewKind {
+    Image,
+    Markdown,
+    Text,
+    Html,
+    Video,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AssetPreviewMetadata {
+    pub kind: AssetPreviewKind,
+    pub media_type: String,
+    #[ts(type = "number")]
+    pub source_bytes: u64,
+    /// Stable enough to make a stale viewer response detectable without
+    /// exposing an operating-system path.
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AssetPreviewError {
+    NotFound,
+    Forbidden,
+    Unsupported,
+    TooLarge,
+    SourceChanged,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_source_has_exactly_one_mvp_kind() {
+        let value = serde_json::to_value(AssetPreviewRequest {
+            source: WorkspaceFileSource {
+                kind: WorkspaceFileSourceKind::WorkspaceFile,
+                workspace_handle: "w_one".into(),
+                path: "docs/readme.md".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(value["source"]["kind"], "workspaceFile");
+        assert_eq!(value["source"]["path"], "docs/readme.md");
+    }
+
+    #[test]
+    fn the_wire_limits_stay_small_and_preview_stays_exact() {
+        assert_eq!(MAX_DATA_FRAME_BYTES, 16_384);
+        assert_eq!(MAX_FINITE_EXCHANGE_BODY_BYTES, 4_194_304);
+        assert_eq!(MAX_PREVIEW_SOURCE_BYTES, 4_194_304);
+    }
+}

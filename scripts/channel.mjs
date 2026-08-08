@@ -170,7 +170,7 @@ const TABLE = {
 
   // What the WebView is allowed to dial. Loopback is always there (the local
   // daemon). Released channels also need https/wss: the workbench reaches a
-  // remote machine by opening `wss://…/forward/client?ticket=…` itself — if
+  // remote machine by opening `wss://…/fabric/v2?ticket=…` itself — if
   // CSP lists only loopback, hub.connect succeeds, the ticket is never
   // redeemed, and the UI sits on 「已断开」while burning tickets in a loop.
   // Wide `https: wss:` (not a pinned host) so a user who pairs with their own

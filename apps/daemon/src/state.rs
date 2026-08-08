@@ -104,6 +104,9 @@ impl AppState {
         paths.ensure()?;
         let mut config = Config::load(&paths.config_file())?;
         config.ensure_workspace_catalog_generation(&paths.config_file())?;
+        config.migrate_workspace_folders(&paths.config_file())?;
+        config.migrate_workspace_roots(&paths.config_file())?;
+        config.migrate_workspace_identities(&paths.config_file())?;
         config.refresh_workspace_catalog_facts(&paths.config_file())?;
         let machine = MachineState::load_or_create(&paths.state_file())?;
         let devices = Devices::load(paths.devices_file());
@@ -431,8 +434,6 @@ mod machine_state_tests {
         let enrollment = Enrollment {
             hub_url: "https://hub.example".into(),
             machine_id: "mch_test".into(),
-            uplink_url: "wss://relay.example/forward/daemon".into(),
-            fabric_url: Some("wss://relay.example/fabric/v2".into()),
             daemon_id: "dmn_test".into(),
             secret: "secret".into(),
             workspace_catalog_generation: Some("wcg_test".into()),

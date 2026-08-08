@@ -222,7 +222,7 @@ impl Journey {
 
         let paths = Paths::new(&data_dir);
         let daemon = Daemon::start(paths).await.context("starting the daemon")?;
-        let client = Client::connect(&daemon.websocket_url())
+        let client = Client::connect_loopback(&daemon)
             .await
             .context("connecting to the daemon")?;
         client.hello("journey").await?;
@@ -272,7 +272,7 @@ impl Journey {
         let daemon = Daemon::start(Paths::new(&self.data_dir))
             .await
             .context("restarting the daemon")?;
-        let client = Client::connect(&daemon.websocket_url())
+        let client = Client::connect_loopback(&daemon)
             .await
             .context("reconnecting after the restart")?;
         client.hello("journey").await?;
@@ -344,6 +344,7 @@ impl Journey {
                 session_id: session_id.to_string(),
                 text: text.to_string(),
                 attachments: vec![],
+                artifact_preview_base_url: None,
                 continues_round: continues_round.map(str::to_string),
             })
             .await?;

@@ -9,6 +9,7 @@ import type { Target } from "./host";
 import { LogsPanel } from "./logs/LogsPanel";
 import { Client, type ProtocolDial } from "./protocol/client";
 import { SettingsPanel } from "./settings/SettingsPanel";
+import { readRtcEnabled } from "./settings/rtc";
 import { Composer, type ComposerPhase } from "./session/Composer";
 import { PermissionCard } from "./session/Permission";
 import { TimelineView } from "./session/TimelineView";
@@ -23,6 +24,7 @@ import { useTheme } from "./theme/store";
 import { TerminalPanel } from "./terminal/TerminalPanel";
 import { UpdateToast } from "./updates/UpdateToast";
 import { OpenProject } from "./workspace/OpenProject";
+import { WorkspaceIcon } from "./workspace/WorkspaceIcon";
 
 /**
  * Both defaults live out here, and they have to.
@@ -41,7 +43,9 @@ const openConnection = (
     redial,
     credential: endpoint.credential,
     channelCredential: endpoint.channelCredential,
+    fabricRouteTicket: endpoint.fabricRouteTicket,
     localServerProof: endpoint.localServerProof,
+    rtcEnabled: readRtcEnabled(),
   });
 
 /**
@@ -580,6 +584,9 @@ function dialOf(endpoint: Endpoint): ProtocolDial {
     ...(endpoint.channelCredential
       ? { channelCredential: endpoint.channelCredential }
       : {}),
+    ...(endpoint.fabricRouteTicket
+      ? { fabricRouteTicket: endpoint.fabricRouteTicket }
+      : {}),
     ...(endpoint.localServerProof
       ? { localServerProof: endpoint.localServerProof }
       : {}),
@@ -672,7 +679,10 @@ function FirstRun({
 
   return (
     <Splash>
-      <p className="text-sm">{workspace.name} 已就绪。</p>
+      <p className="flex items-center gap-1.5 text-sm">
+        <WorkspaceIcon workspace={workspace} />
+        <span>{workspace.name} 已就绪。</span>
+      </p>
       <p className="mb-3 text-xs text-muted">开一个会话，直接说你想做什么。</p>
       <button
         type="button"

@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, Mutex};
 use crate::config::{MachineState, Paths, Rendezvous};
 use crate::devices::rendezvous_id;
 use crate::state::AppState;
-use crate::transport::uplink::{Admission, Uplink};
+use crate::transport::fabric::FabricUplink;
 
 pub struct Remote {
     attached: Mutex<Option<Attached>>,
@@ -28,7 +28,7 @@ pub struct Remote {
 
 struct Attached {
     config: Rendezvous,
-    uplink: Uplink,
+    uplink: FabricUplink,
 }
 
 pub type SharedRemote = Arc<Remote>;
@@ -152,34 +152,42 @@ fn dial(
     pty: &broadcast::Sender<ServerFrame>,
     config: &Rendezvous,
     machine: &MachineState,
-) -> Uplink {
+) -> FabricUplink {
     let id = rendezvous_id(&machine.machine_id, &machine.secret);
     let ticket = match &config.join_token {
         Some(token) if !token.is_empty() => format!("{token}.{id}"),
         _ => id.clone(),
     };
-    Uplink::start(
+    let _ = pty;
+    FabricUplink::start_rendezvous(
         state.clone(),
-        pty.clone(),
-        daemon_url(&config.relay_url).unwrap_or_default(),
-        ticket,
-        // Nobody vouched for the clients arriving here, so each one has to
-        // present a credential this machine issued.
-        Admission::DeviceRequired,
+        daemon_url(&config.relay_url, &ticket).unwrap_or_default(),
     )
 }
 
 /// Where the machine hangs its uplink.
-pub fn daemon_url(relay_url: &str) -> Result<String> {
-    Ok(format!("{}/forward/daemon", websocket_base(relay_url)?))
+pub fn daemon_url(relay_url: &str, ticket: &str) -> Result<String> {
+    fabric_url(relay_url, ticket, None)
 }
 
 /// Where a client goes to meet this machine.
 pub fn client_url(relay_url: &str, rendezvous: &str) -> Result<String> {
-    Ok(format!(
-        "{}/forward/client?ticket={rendezvous}",
-        websocket_base(relay_url)?
-    ))
+    fabric_url(relay_url, &format!("client:{rendezvous}"), Some(rendezvous))
+}
+
+fn fabric_url(relay_url: &str, ticket: &str, route: Option<&str>) -> Result<String> {
+    if ticket.is_empty() || ticket.len() > 1024 || route.is_some_and(|value| value.is_empty()) {
+        return Err(anyhow!("invalid rendezvous Fabric ticket"));
+    }
+    let mut url = reqwest::Url::parse(&format!("{}/fabric/v2", websocket_base(relay_url)?))?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("ticket", ticket);
+        if let Some(route) = route {
+            query.append_pair("route", route);
+        }
+    }
+    Ok(url.to_string())
 }
 
 /// Accepts what a human would type. `https://relay.example.com` and
@@ -242,28 +250,28 @@ mod tests {
     #[test]
     fn a_bare_host_is_assumed_to_be_encrypted() {
         assert_eq!(
-            daemon_url("relay.example.com").unwrap(),
-            "wss://relay.example.com/forward/daemon"
+            daemon_url("relay.example.com", "slot").unwrap(),
+            "wss://relay.example.com/fabric/v2?ticket=slot"
         );
     }
 
     #[test]
     fn loopback_http_and_public_https_are_accepted_and_converted() {
         assert_eq!(
-            daemon_url("http://127.0.0.1:8787").unwrap(),
-            "ws://127.0.0.1:8787/forward/daemon"
+            daemon_url("http://127.0.0.1:8787", "slot").unwrap(),
+            "ws://127.0.0.1:8787/fabric/v2?ticket=slot"
         );
         assert_eq!(
-            daemon_url("https://relay.example.com/").unwrap(),
-            "wss://relay.example.com/forward/daemon"
+            daemon_url("https://relay.example.com/", "slot").unwrap(),
+            "wss://relay.example.com/fabric/v2?ticket=slot"
         );
         assert_eq!(
-            daemon_url("http://[::1]:8787").unwrap(),
-            "ws://[::1]:8787/forward/daemon"
+            daemon_url("http://[::1]:8787", "slot").unwrap(),
+            "ws://[::1]:8787/fabric/v2?ticket=slot"
         );
         assert_eq!(
-            daemon_url("http://127.42.0.9:8787").unwrap(),
-            "ws://127.42.0.9:8787/forward/daemon"
+            daemon_url("http://127.42.0.9:8787", "slot").unwrap(),
+            "ws://127.42.0.9:8787/fabric/v2?ticket=slot"
         );
     }
 
@@ -280,7 +288,10 @@ mod tests {
             // trust decision: its answer can be rebound after validation.
             "http://loopback.attacker.test:8787",
         ] {
-            assert!(daemon_url(address).is_err(), "{address} was accepted");
+            assert!(
+                daemon_url(address, "slot").is_err(),
+                "{address} was accepted"
+            );
         }
     }
 
@@ -291,7 +302,10 @@ mod tests {
             "wss://relay.example.com?token=secret",
             "wss://relay.example.com/#credential",
         ] {
-            assert!(daemon_url(address).is_err(), "{address} was accepted");
+            assert!(
+                daemon_url(address, "slot").is_err(),
+                "{address} was accepted"
+            );
         }
     }
 
@@ -325,13 +339,13 @@ mod tests {
     fn the_client_url_carries_the_rendezvous_as_its_ticket() {
         assert_eq!(
             client_url("ws://127.0.0.1:8787", "abc123").unwrap(),
-            "ws://127.0.0.1:8787/forward/client?ticket=abc123"
+            "ws://127.0.0.1:8787/fabric/v2?ticket=client%3Aabc123&route=abc123"
         );
     }
 
     #[test]
     fn an_address_that_cannot_be_dialed_is_refused_rather_than_guessed_at() {
-        assert!(daemon_url("").is_err());
-        assert!(daemon_url("ftp://relay.example.com").is_err());
+        assert!(daemon_url("", "slot").is_err());
+        assert!(daemon_url("ftp://relay.example.com", "slot").is_err());
     }
 }

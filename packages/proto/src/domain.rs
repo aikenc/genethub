@@ -125,11 +125,29 @@ pub struct AgentInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
+pub struct WorkspaceFolderInfo {
+    /// Explorer label from `.code-workspace#folders[].name`, or the directory name.
+    pub name: String,
+    /// Absolute path on the owning device. It never leaves the E2EE application channel.
+    pub root: String,
+    /// Stable device-local locator for this physical root. Display names and
+    /// project membership never participate in resource identity.
+    pub root_handle: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
 pub struct WorkspaceInfo {
     pub id: String,
     pub name: String,
+    /// The first folder and Agent working directory.
     pub root: String,
     pub is_git_repo: bool,
+    pub folders: Vec<WorkspaceFolderInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_file: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -358,23 +376,14 @@ pub struct FileNode {
     /// Workspace-relative, always forward-slashed so clients need no per-OS logic.
     pub path: String,
     pub is_dir: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     #[ts(type = "number")]
     pub size: Option<u64>,
     /// Absent means "not expanded yet" rather than "empty".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub children: Option<Vec<FileNode>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct FileContent {
-    pub path: String,
-    pub content: String,
-    pub truncated: bool,
-    /// False when the file looked binary; `content` is then a placeholder.
-    pub is_text: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -429,17 +438,9 @@ pub struct HelloResult {
     pub fingerprint: String,
     pub transport: TransportKind,
     pub machine_name: String,
-    /// The machine's half of mutual authentication. For remote channels this
-    /// proves the device/capability secret and is paired with `server_nonce`;
-    /// for loopback it is a domain-separated, one-use listener proof delivered
-    /// to the client out-of-band and has no `server_nonce`.
-    #[ts(optional)]
-    pub proof: Option<String>,
-    /// The daemon's fresh half of the channel transcript. Present whenever
-    /// `proof` is present and required to derive this connection's key.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub server_nonce: Option<String>,
+    /// Advertised inside the encrypted data plane. The viewer's local RTC
+    /// preference still decides whether negotiation is attempted.
+    pub rtc_supported: bool,
 }
 
 /// Whether a newer build has been published, and where a person gets it.
@@ -673,6 +674,8 @@ pub struct HubMachine {
     /// The Hub's id, which is also what `HubStatus::Paired` reports for this
     /// machine — so a client can tell which entry is the one it is sitting on.
     pub id: String,
+    /// Stable daemon-owned handle used by Preview locators across clients.
+    pub device_handle: String,
     pub name: String,
     pub online: bool,
     pub fingerprint: String,
@@ -695,6 +698,9 @@ pub struct HubTicket {
     pub channel_capability: String,
     /// Per-connection E2E secret. Never placed in a URL or Relay API.
     pub channel_secret: String,
+    /// One-shot outer Fabric route. It contains no workspace/path/business data.
+    pub fabric_route_ticket: String,
+    pub fabric_route_expires_at: String,
     /// The target machine's key fingerprint, learned from the Hub rather than
     /// from the connection — which is what makes comparing the two worth
     /// anything.
@@ -758,8 +764,6 @@ pub struct DeviceCredential {
     pub secret: String,
     pub machine_name: String,
     pub fingerprint: String,
-    /// The machine's half of the mutual proof, over the nonce the client sent.
-    pub proof: String,
 }
 
 /// Whether this machine is reachable through a rendezvous relay.
@@ -788,17 +792,6 @@ pub struct DeviceAuth {
     pub proof: String,
 }
 
-/// Proof for a Control-issued per-channel secret.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct ChannelAuth {
-    /// Opaque, one-use name carried in OPEN. It is context, not a credential.
-    pub capability_id: String,
-    pub nonce: String,
-    pub proof: String,
-}
-
 /// Proof of the PSK carried in the fragment half of a pairing link.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -807,4 +800,29 @@ pub struct InviteAuth {
     pub invite_id: String,
     pub nonce: String,
     pub proof: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapsed_file_tree_fields_are_absent_instead_of_null() {
+        let node = FileNode {
+            name: "docs".into(),
+            path: "docs".into(),
+            is_dir: true,
+            size: None,
+            children: None,
+        };
+        let wire = serde_json::to_value(node).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "name": "docs",
+                "path": "docs",
+                "isDir": true,
+            })
+        );
+    }
 }

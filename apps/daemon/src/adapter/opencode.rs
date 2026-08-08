@@ -143,6 +143,7 @@ impl AgentAdapter for OpenCodeAdapter {
             base,
             remote_session,
             model: Mutex::new(config.model_id.clone()),
+            additional_system_prompt: config.additional_system_prompt.clone(),
             events,
             turn,
             child: Mutex::new(Some(child)),
@@ -181,6 +182,7 @@ struct OpenCodeSession {
     base: String,
     remote_session: String,
     model: Mutex<Option<String>>,
+    additional_system_prompt: Option<String>,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
     child: Mutex<Option<Child>>,
@@ -206,12 +208,12 @@ impl AgentSession for OpenCodeSession {
             started_at_ms: 0,
         });
 
-        let mut body = json!({ "parts": message_parts(&input) });
-        if let Some(model) = self.model.lock().await.clone() {
-            if let Some((provider, id)) = model.split_once('/') {
-                body["model"] = json!({ "providerID": provider, "modelID": id });
-            }
-        }
+        let model = self.model.lock().await.clone();
+        let body = message_body(
+            &input,
+            model.as_deref(),
+            self.additional_system_prompt.as_deref(),
+        );
 
         let url = format!("{}/session/{}/message", self.base, self.remote_session);
         let http = self.http.clone();
@@ -694,6 +696,19 @@ fn message_parts(input: &PromptInput) -> Vec<Value> {
     parts
 }
 
+fn message_body(input: &PromptInput, model: Option<&str>, system: Option<&str>) -> Value {
+    let mut body = json!({ "parts": message_parts(input) });
+    if let Some(prompt) = system.filter(|value| !value.trim().is_empty()) {
+        // Native OpenCode message API field: higher-priority context kept
+        // separate from the user's text and refreshed on every turn.
+        body["system"] = json!(prompt);
+    }
+    if let Some((provider, id)) = model.and_then(|value| value.split_once('/')) {
+        body["model"] = json!({ "providerID": provider, "modelID": id });
+    }
+    body
+}
+
 /// Replays the finished message, so nothing the event stream missed is lost.
 fn reconcile(
     settled: &Value,
@@ -907,6 +922,25 @@ mod tests {
                         "url": "data:image/png;base64,Zm9v" }),
             ]
         );
+    }
+
+    #[test]
+    fn artifact_guidance_uses_the_native_system_field() {
+        let input = PromptInput {
+            text: "生成报告".into(),
+            attachments: vec![],
+        };
+        let body = message_body(
+            &input,
+            Some("openai/gpt-5"),
+            Some("Use https://app.example/assets/preview/v2/device/workspace/r_root/"),
+        );
+        assert_eq!(
+            body["system"],
+            "Use https://app.example/assets/preview/v2/device/workspace/r_root/"
+        );
+        assert_eq!(body["parts"][0]["text"], "生成报告");
+        assert_eq!(body["model"]["providerID"], "openai");
     }
 
     /// Attachments with no inline payload (a bare path) are not forwarded —

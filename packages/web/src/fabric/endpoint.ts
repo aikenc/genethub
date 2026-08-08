@@ -183,6 +183,7 @@ export class FabricStream {
   private readonly completion = deferred<FabricStreamResult>();
   private readonly dataHandlers = new Set<DataHandler>();
   private readonly finishHandlers = new Set<FinishHandler>();
+  private readonly creditWaiters = new Set<ReturnType<typeof deferred<void>>>();
 
   readonly accepted = this.acceptance.promise;
   readonly done = this.completion.promise;
@@ -223,6 +224,26 @@ export class FabricStream {
   /** Sends one opaque DATA record with a stream-local monotonic sequence. */
   send(payload: Uint8Array): void {
     this.endpoint.sendData(this, payload);
+  }
+
+  /** Waits only for this stream's credit; other Fabric operations keep moving. */
+  async sendAsync(payload: Uint8Array): Promise<void> {
+    if (payload.byteLength === 0 || BigInt(payload.byteLength) > this.inboundWindow) {
+      throw new FabricStateError("Fabric DATA must fit the negotiated stream window");
+    }
+    while (BigInt(payload.byteLength) > this.outboundCredit) {
+      if (!this.canSend() || this.completed) {
+        throw new FabricStateError("Fabric stream closed while waiting for credit");
+      }
+      const waiter = deferred<void>();
+      this.creditWaiters.add(waiter);
+      try {
+        await waiter.promise;
+      } finally {
+        this.creditWaiters.delete(waiter);
+      }
+    }
+    this.send(payload);
   }
 
   /** Half-closes this direction. The peer may continue sending until its FIN. */
@@ -279,6 +300,7 @@ export class FabricStream {
       return false;
     }
     this.outboundCredit += credit;
+    for (const waiter of this.creditWaiters) waiter.resolve();
     return true;
   }
 
@@ -384,6 +406,9 @@ export class FabricStream {
     if (this.completed) return;
     this.completed = true;
     this.phase_ = "closed";
+    const error = new FabricStateError("Fabric stream closed");
+    for (const waiter of this.creditWaiters) waiter.reject(error);
+    this.creditWaiters.clear();
     this.completion.resolve(result);
   }
 }
@@ -711,10 +736,14 @@ export class FabricEndpoint {
       };
       socket.onmessage = (event) => this.enqueueMessage(socket, epoch, event.data);
       socket.onclose = (event) => {
+        // Browser close events always carry these fields. Small embedders and
+        // test sockets are allowed to report an unclean close without one.
+        const code = event?.code ?? 1006;
+        const reason = event?.reason ?? "";
         const error = new FabricConnectionError(
-          closeMessage(event.code, event.reason),
-          event.code,
-          event.reason,
+          closeMessage(code, reason),
+          code,
+          reason,
         );
         this.disconnect(epoch, error);
         if (!opened) rejectOnce(error);

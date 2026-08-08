@@ -8,18 +8,17 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{anyhow, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 const HANDSHAKE_DOMAIN: &[u8] = b"genehub-channel-handshake-v1";
 const KEY_DOMAIN: &[u8] = b"genehub-channel-key-v1";
-const FRAME_DOMAIN: &[u8] = b"genehub-channel-frame-v1";
+const DATA_RECORD_DOMAIN: &[u8] = b"genehub-data-record-v1";
+const DATA_RECORD_MAGIC: [u8; 2] = *b"GH";
+const DATA_RECORD_HEADER_BYTES: usize = 12;
 
 #[derive(Debug, Clone)]
 pub struct SessionKey {
-    mac_key: [u8; 32],
     encryption_key: [u8; 32],
     context: String,
 }
@@ -74,18 +73,7 @@ pub fn derive_key(
     client_nonce: &str,
     server_nonce: &str,
 ) -> SessionKey {
-    let mac_key = authenticate_bytes(
-        secret.as_bytes(),
-        KEY_DOMAIN,
-        &[
-            b"authentication",
-            context.as_bytes(),
-            client_nonce.as_bytes(),
-            server_nonce.as_bytes(),
-        ],
-    );
     SessionKey {
-        mac_key,
         encryption_key: authenticate_bytes(
             secret.as_bytes(),
             KEY_DOMAIN,
@@ -100,91 +88,83 @@ pub fn derive_key(
     }
 }
 
-pub fn frame_mac(
+/// One bounded binary AEAD record used by every protocol-v3 carrier.
+pub fn seal_data_record(
     key: &SessionKey,
     direction: Direction,
     sequence: u64,
-    ciphertext: &str,
-) -> String {
-    authenticate(
-        &key.mac_key,
-        FRAME_DOMAIN,
-        &[
-            &genehub_proto::PROTOCOL_VERSION.to_be_bytes(),
-            key.context.as_bytes(),
-            direction.label(),
-            &sequence.to_be_bytes(),
-            ciphertext.as_bytes(),
-        ],
-    )
-}
-
-pub fn seal_frame(
-    key: &SessionKey,
-    direction: Direction,
-    sequence: u64,
-    plaintext: &str,
-) -> Result<(String, String)> {
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    if sequence == 0
+        || plaintext.len() + DATA_RECORD_HEADER_BYTES + 16 > genehub_proto::MAX_DATA_FRAME_BYTES
+    {
+        return Err(anyhow!("invalid secure data record size or sequence"));
+    }
     let cipher = Aes256Gcm::new_from_slice(&key.encryption_key)
         .map_err(|_| anyhow!("invalid channel encryption key"))?;
-    let aad = associated_data(key, direction, sequence);
+    let aad = data_record_associated_data(key, direction, sequence);
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce(direction, sequence)),
+            Nonce::from_slice(&data_record_nonce(direction, sequence)),
             Payload {
-                msg: plaintext.as_bytes(),
+                msg: plaintext,
                 aad: &aad,
             },
         )
-        .map_err(|_| anyhow!("channel encryption failed"))?;
-    let ciphertext = URL_SAFE_NO_PAD.encode(ciphertext);
-    let mac = frame_mac(key, direction, sequence, &ciphertext);
-    Ok((ciphertext, mac))
+        .map_err(|_| anyhow!("data record encryption failed"))?;
+    let mut wire = Vec::with_capacity(DATA_RECORD_HEADER_BYTES + ciphertext.len());
+    wire.extend_from_slice(&DATA_RECORD_MAGIC);
+    wire.push(genehub_proto::DATA_PLANE_VERSION as u8);
+    wire.push(0);
+    wire.extend_from_slice(&sequence.to_be_bytes());
+    wire.extend_from_slice(&ciphertext);
+    Ok(wire)
 }
 
-pub fn open_frame(
+pub fn open_data_record(
     key: &SessionKey,
     direction: Direction,
-    sequence: u64,
-    ciphertext: &str,
-    presented: &str,
-) -> Result<String> {
-    let expected = frame_mac(key, direction, sequence, ciphertext);
-    if !constant_time_hex_eq(&expected, presented) {
-        return Err(anyhow!("channel message authentication failed"));
+    expected_sequence: u64,
+    wire: &[u8],
+) -> Result<Vec<u8>> {
+    if expected_sequence == 0
+        || wire.len() < DATA_RECORD_HEADER_BYTES + 16
+        || wire.len() > genehub_proto::MAX_DATA_FRAME_BYTES
+        || wire[..2] != DATA_RECORD_MAGIC
+        || wire[2] != genehub_proto::DATA_PLANE_VERSION as u8
+        || wire[3] != 0
+        || u64::from_be_bytes(wire[4..12].try_into().unwrap()) != expected_sequence
+    {
+        return Err(anyhow!("invalid secure data record header"));
     }
-    let ciphertext = URL_SAFE_NO_PAD
-        .decode(ciphertext)
-        .map_err(|_| anyhow!("channel ciphertext is not valid base64url"))?;
     let cipher = Aes256Gcm::new_from_slice(&key.encryption_key)
         .map_err(|_| anyhow!("invalid channel encryption key"))?;
-    let aad = associated_data(key, direction, sequence);
-    let plaintext = cipher
+    let aad = data_record_associated_data(key, direction, expected_sequence);
+    cipher
         .decrypt(
-            Nonce::from_slice(&nonce(direction, sequence)),
+            Nonce::from_slice(&data_record_nonce(direction, expected_sequence)),
             Payload {
-                msg: &ciphertext,
+                msg: &wire[DATA_RECORD_HEADER_BYTES..],
                 aad: &aad,
             },
         )
-        .map_err(|_| anyhow!("channel ciphertext authentication failed"))?;
-    String::from_utf8(plaintext).map_err(|_| anyhow!("channel plaintext is not UTF-8"))
+        .map_err(|_| anyhow!("data record authentication failed"))
 }
 
-fn nonce(direction: Direction, sequence: u64) -> [u8; 12] {
+fn data_record_nonce(direction: Direction, sequence: u64) -> [u8; 12] {
     let mut nonce = [0u8; 12];
     nonce[..4].copy_from_slice(match direction {
-        Direction::ClientToDaemon => b"GHCD",
-        Direction::DaemonToClient => b"GHDC",
+        Direction::ClientToDaemon => b"G3CD",
+        Direction::DaemonToClient => b"G3DC",
     });
     nonce[4..].copy_from_slice(&sequence.to_be_bytes());
     nonce
 }
 
-fn associated_data(key: &SessionKey, direction: Direction, sequence: u64) -> Vec<u8> {
+fn data_record_associated_data(key: &SessionKey, direction: Direction, sequence: u64) -> Vec<u8> {
     let mut aad = Vec::new();
-    append_field(&mut aad, FRAME_DOMAIN);
-    append_field(&mut aad, &genehub_proto::PROTOCOL_VERSION.to_be_bytes());
+    append_field(&mut aad, DATA_RECORD_DOMAIN);
+    append_field(&mut aad, &genehub_proto::DATA_PLANE_VERSION.to_be_bytes());
     append_field(&mut aad, key.context.as_bytes());
     append_field(&mut aad, direction.label());
     append_field(&mut aad, &sequence.to_be_bytes());
@@ -244,21 +224,17 @@ mod tests {
     const VECTOR_CONTEXT: &str = "hosted:cap_golden";
     const VECTOR_CLIENT_NONCE: &str = "00112233445566778899aabbccddeeff";
     const VECTOR_SERVER_NONCE: &str = "ffeeddccbbaa99887766554433221100";
-    const VECTOR_PLAINTEXT: &str = r#"{"id":"vector","type":"connection.identity"}"#;
 
     #[test]
-    fn channel_and_direction_are_part_of_every_mac() {
-        let one = derive_key("secret", "hosted:one", "client", "server");
-        let other = derive_key("secret", "hosted:other", "client", "server");
-        let (ciphertext, mac) = seal_frame(&one, Direction::ClientToDaemon, 1, "payload").unwrap();
+    fn binary_data_records_are_bounded_authenticated_and_sequenced() {
+        let key = derive_key("secret", "hosted:one", "client", "server");
+        let wire = seal_data_record(&key, Direction::DaemonToClient, 1, b"binary\0body").unwrap();
         assert_eq!(
-            open_frame(&one, Direction::ClientToDaemon, 1, &ciphertext, &mac).unwrap(),
-            "payload"
+            open_data_record(&key, Direction::DaemonToClient, 1, &wire).unwrap(),
+            b"binary\0body"
         );
-        assert!(open_frame(&one, Direction::DaemonToClient, 1, &ciphertext, &mac).is_err());
-        assert!(open_frame(&other, Direction::ClientToDaemon, 1, &ciphertext, &mac).is_err());
-        assert!(open_frame(&one, Direction::ClientToDaemon, 2, &ciphertext, &mac).is_err());
-        assert!(open_frame(&one, Direction::ClientToDaemon, 1, "changed", &mac).is_err());
+        assert!(open_data_record(&key, Direction::ClientToDaemon, 1, &wire).is_err());
+        assert!(open_data_record(&key, Direction::DaemonToClient, 2, &wire).is_err());
     }
 
     /// Mirrored byte-for-byte in packages/web/src/devices/proof.test.ts.
@@ -266,7 +242,7 @@ mod tests {
     /// Round trips inside either implementation cannot detect a length prefix,
     /// protocol version, nonce layout or AAD field drifting on only one side.
     #[test]
-    fn matches_the_web_channel_v2_golden_vectors() {
+    fn matches_the_web_protocol_v3_handshake_and_key_vectors() {
         assert_eq!(
             client_proof(VECTOR_SECRET, VECTOR_CONTEXT, VECTOR_CLIENT_NONCE),
             "2a0958501e684eb33817ddca6c2346e3a5f0d683b2c821666c0b045a5afe801b"
@@ -288,33 +264,12 @@ mod tests {
             VECTOR_SERVER_NONCE,
         );
         assert_eq!(
-            hex(&key.mac_key),
-            "71c25c4fdb1e9bb99d16a847a5c374e71024e40cddea2b9c6a45d7df125d4a7a"
-        );
-        assert_eq!(
             hex(&key.encryption_key),
             "ff8270f2ec546267347aaccd0178af62830df51be490248c916969f6ac43a550"
         );
-
-        for (direction, expected_body, expected_mac) in [
-            (
-                Direction::ClientToDaemon,
-                "mQ-ImSzrzMxYwp4U9arFZahyEjdPYdDAZ0fdvD0JbtoauaBNRGISBpoJWVMNNACBOMagpAVdy9Tft2yk",
-                "d3011fb60bb148fc93edef330ce2b92cf6829ce31d5e72a7712157d5ad520633",
-            ),
-            (
-                Direction::DaemonToClient,
-                "ZockPFxM1fAFyOyk90K1zciLolBzZaASZncJirI8Wc6bsVHvyeUTszofYf7tFkiFKbSeyyVjb0EtbKz1",
-                "4a2ab0f8cbe9651d20bd4a248b5a4eaa6626e6e509983ecefe900bfa5dfccb5a",
-            ),
-        ] {
-            let (body, mac) = seal_frame(&key, direction, 7, VECTOR_PLAINTEXT).unwrap();
-            assert_eq!(body, expected_body);
-            assert_eq!(mac, expected_mac);
-            assert_eq!(
-                open_frame(&key, direction, 7, expected_body, expected_mac).unwrap(),
-                VECTOR_PLAINTEXT,
-            );
-        }
+        assert_eq!(
+            hex(&seal_data_record(&key, Direction::ClientToDaemon, 7, b"binary\0body",).unwrap(),),
+            "47480300000000000000000778bfb3552d1c1a17eac4131325b976445893ce649d9c4361da402a"
+        );
     }
 }

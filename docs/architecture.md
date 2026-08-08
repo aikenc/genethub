@@ -11,15 +11,16 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
 ```
      浏览器 / 桌面 / 手机  ← 同一份工作台前端
               │
-              │  统一会话协议（本仓 packages/proto 定义），连接与机器解耦：
-              │   ① 同机 127.0.0.1  桌面壳连本机 daemon
-              │   ② 跨设备统一 relay（包括同一 Wi-Fi）
+              │  protocol-v3 DataEndpoint（本仓 packages/proto 定义）：
+              │   ① 同机 127.0.0.1 WebSocket
+              │   ② 跨设备 /fabric/v2 E2EE baseline
+              │   ③ 网络允许时 WebRTC DataChannel direct
               ▼
         ┌──────────┐         出站 WS        ┌───────────┐
-        │  daemon  │ ─────────────────────► │   relay   │
+        │  daemon  │ ─── /fabric/v2 ──────► │   relay   │
         │ （你的机器）│                        │ 只搬字节   │
         └────┬─────┘                        └─────┬─────┘
-             │  Adapter 层（每种 agent 一个）        │ 三个问题（HTTP 契约）
+             │  Adapter 层（每种 agent 一个）        │ 四个 Fabric authority 操作
              ├─ genet    自研内置 agent              ▼
              ├─ acp      一份适配覆盖一批 CLI    ┌──────────────┐
              ├─ opencode 本地 HTTP + SSE        │  控制面       │
@@ -51,7 +52,7 @@ daemon 业务代码里不允许出现 `if agent == "genet"`。具体 agent 的�
 
 ### B4. relay 不理解它搬运的东西
 
-relay 只认帧头里的路由信息，不 parse payload，不落库，不做鉴权决策。它有权知道的只有"谁连了谁"，这一点写在 [security-model.md](./security-model.md) 里，并由 CI 里的静态检查守住（§6.4）。
+relay 只认 Fabric 帧头与 opaque endpoint/route admission，不 parse E2EE payload，不落库，不做业务鉴权。它有权知道连接元数据和 outer stream 路由，不知道内部 logical stream、method、workspace/path 或内容；这一点写在 [security-model.md](./security-model.md) 里，并由 CI 静态检查守住（§6.4）。
 
 ---
 
@@ -172,7 +173,7 @@ enum ToolCallDetail {                // 决定前端用哪个渲染器
 | **agent**（Rust，本仓） | 与模型对话、跑工具、技能装载 | 会话持久化、对外协议 |
 | **relay**（Node，本仓） | 两端之间搬字节；在线表；背压与限额 | 看 payload、存任何东西、决定谁能连 |
 | **workbench**（前端，本仓） | 会话、项目、文件、终端、**自己的设备管理** | 账号体系本身 |
-| **控制面**（本仓之外，只在托管部署里） | 身份 | 准入决策、出现在本仓代码里 |
+| **控制面**（本仓之外，只在托管部署里） | 账号、机器目录、Fabric endpoint/route/peer capability 准入、presence/revocation | 解析或转发业务 payload |
 
 **谁能连你的机器，由 daemon 自己判断。** 它本地有一份已授权设备列表，撤销即时生效。自建部署因此完全不需要控制面：relay + 静态工作台两个东西就够（[self-hosting.md](./self-hosting.md)）。
 
@@ -184,35 +185,35 @@ enum ToolCallDetail {                // 决定前端用哪个渲染器
 
 ### 6.1 为什么需要 relay
 
-你的机器在 NAT 后面，没有公网入口。要让手机或另一台浏览器访问它，必须有一个双方都能连到的汇合点。这是硬需求。
+你的机器在 NAT 后面，没有稳定公网入口。WebRTC 也需要 signaling，而且在严格 NAT、企业网络或 UDP 被禁时会失败。因此跨设备始终先建立 WSS Fabric baseline；网络允许时再升级为 RTC direct。
 
-### 6.2 relay 为什么不做鉴权
+### 6.2 Relay 只做 opaque admission，不做业务鉴权
 
-**最终通道认证在 daemon 完成**：relay 不持有通道密钥，也不解释业务请求。自建配对由 daemon 本地设备表决定；托管形态还由 Control 核验账号、机器、来源会话与短期租约，daemon 再用从 Control 兑换的通道 secret 完成双向证明。坏的 Relay 单独只能观察元数据、延迟、丢弃或重放密文；重放会被严格序号拒绝。
+Relay 必须防止任何人无限占用 endpoint/route，所以会向 authority 核验短期 opaque ticket；但**最终 peer 身份与 workspace/path 权限在 daemon 完成**。Relay 不持有 peer secret，也不解释 protocol-v3 record。
 
-两种部署形态因此只差一步：
+两种部署使用同一个 FabricCore，只替换 authority：
 
 | 形态 | relay | 客户端凭什么被放行 |
 |------|-------|------------------|
-| 自建 | 纯汇合，按 id 撮合两条 socket | 配对时拿到的设备凭证，daemon 查本地列表 |
-| 托管 | 拿票据问控制面 | 同上；控制面额外转达一句"这设备属于账号 A"，daemon 据此自动签发 |
+| 自建 | rendezvous authority 按稳定 slot 路由，无数据库 | 配对时取得的 device/invite secret，daemon 查本地设备表 |
+| 托管 | Control 核验 endpoint/route ticket，维护 presence/revocation | Control 发行短期 peer secret，daemon 兑换后完成双向 proof，并继承 route workspace scope |
 
-准入实现只有一套。控制面是身份声明的转达者，不是判断者——它宕机或被攻破都影响不到已授权设备（[security-model.md](./security-model.md) §4）。
+坏的 Relay 单独只能观察元数据、延迟、丢弃或重放密文；严格方向 sequence 与 AES-GCM tag 会拒绝重放和篡改。托管 Control 生成 peer secret，因此它仍在信任边界中，平台不是零知识（[security-model.md](./security-model.md) §1.1）。
 
-### 6.3 契约：relay 只能问三个问题（托管形态）
+### 6.3 契约：Relay 只能问 Fabric 的四件事
 
 ```ts
-interface ChannelAuthority {
-  authorizeDaemon(ticket): Promise<DaemonGrant | null>;   // 机器出站登记
-  authorizeClient(ticket): Promise<ClientGrant | null>;   // 客户端接入某台机器
-  reportPresence(machineId, state): Promise<void>;        // 在线状态回报
-  onRevoked(handler): void;                               // 订阅撤销
+interface FabricAuthority {
+  authorizeEndpoint(credential): Promise<FabricEndpointGrant | null>
+  authorizeRoute(sourceEndpointHandle, routeTicket): Promise<FabricRouteGrant | null>
+  reportEndpointPresence(endpointHandle, generation, state): Promise<void>
+  onFabricRevoked(handler): void
 }
 ```
 
-线上形态是四个 HTTP 端点，定义在 `apps/relay/src/contract/wire.ts`，那是**跨仓库唯一契约**。撤销走 relay 主动订阅的 SSE 流而非控制面回调：这样控制面永远不需要能连上 relay，家里那台自建 relay 也就不必有公网入口。
+线上 wire 定义在 `apps/relay/src/contract/fabric-wire.ts`，并在 Cloud 仓镜像。所有字段都是 opaque handle、expiry、lease 和 generation，没有 account、machine、workspace 或业务 method。撤销走 Relay 主动订阅的 SSE 流；失去初始同步或中途断开时 Relay fail-closed。
 
-面越小越好——每加一个方法，都是又一个"relay 知道了它本不该知道的事"的机会。小到自建模式下这个接口有一个什么都不问的实现：ticket 就是 rendezvous id，转发层一行代码都不用改。
+自建 `RendezvousFabricAuthority` 在内存里实现同一接口，ticket 是 join token/slot；转发状态机不分 hosted/self-hosted。
 
 ### 6.4 怎么保证 relay 保持无知
 
@@ -226,15 +227,17 @@ interface ChannelAuthority {
 
 ### 6.5 加密的现状，说实话
 
-**当前实现：** 转发通道先做 v2 双向 HMAC 证明，再以独立方向密钥、严格序号、AES-256-GCM 与独立 HMAC 封装所有业务帧。Relay 能看到 IP、连接时序、长度、channel id 和初始证明材料，但拿不到 secret，不能读取或伪造业务内容。首次配对的设备名与新凭证也在证明完成后加密传输。
+**当前实现：** 每个 routed peer carrier 先做 protocol-v3 PSK 双向 HMAC proof，再派生本次 peer-link AES-256-GCM key。每个 record 绑定 version、credential context、方向和严格 sequence；AES-GCM 同时提供加密与认证，HMAC 只用于 handshake/key derivation。Relay 能看到 IP、连接时序、长度、outer stream 和初始有界 `PeerHello`，但拿不到 secret，不能读取或伪造 Exchange 内容。
 
-**这仍不等于“整个平台零知识”。** 托管 Control 生成 channel secret，分别返回给浏览器并供 daemon 兑换，因此平台运营方技术上知道该会话密钥；托管前端也处在浏览器凭证的信任路径里。当前协议还是对称 PSK，没有公钥握手与前向保密。若要让 Control/前端也无法读取或主动仿冒，仍需路线图 M4 的独立公钥握手、可验证客户端与密钥轮换。
+**这仍不等于“整个平台零知识”。** 托管 Control 生成 peer secret，分别返回给浏览器并供 daemon 兑换，因此平台运营方技术上知道该 secret；托管前端也处在浏览器凭证的信任路径里。当前协议是对称 PSK，没有公钥握手与前向保密。
 
 所以可以说“Relay 单独不具备业务内容密钥、数据面不解析也不落库”，不能扩大成“Hub/平台技术上无法查看或控制”。
 
-### 6.6 只有同机 loopback 绕过 relay
+### 6.6 baseline 与 direct
 
-桌面壳内的 WebView 可以直连同一台机器的 `127.0.0.1`。任何跨设备连接——即使两台设备在同一 Wi-Fi——也统一经过 relay；当前没有 WebRTC、P2P、内网地址探测或 direct fallback。客户端只选择工作空间/能力，不选择物理机器连接。
+桌面壳内的 WebView 直连同一台机器的 `127.0.0.1`。跨设备先走 `/fabric/v2` baseline，再通过加密的 `rtc.negotiate` Exchange 协商 ordered reliable DataChannel。RTC connected 后新 logical streams 优先 direct；RTC 失败或关闭时 baseline 继续承载同一 v3 协议。没有 TURN、live migration 或自动重放。
+
+完整数据面见 [e2ee-data-plane.md](./e2ee-data-plane.md)，Relay 实现边界见 [relay.md](./relay.md)。
 
 ---
 

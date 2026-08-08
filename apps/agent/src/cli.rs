@@ -7,6 +7,8 @@ pub struct Args {
     pub thinking: Option<String>,
     pub session: Option<String>,
     pub no_session: bool,
+    /// Repeatable product/host guidance appended to the built-in system prompt.
+    pub add_system_prompt: Vec<String>,
     /// Accepted and ignored; refusing to start would break the daemon.
     pub ignored: Vec<String>,
 }
@@ -32,6 +34,7 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
             "--model" => args.model = Some(value("--model")?),
             "--thinking" => args.thinking = Some(value("--thinking")?),
             "--session" => args.session = Some(value("--session")?),
+            "--add-system-prompt" => args.add_system_prompt.push(value("--add-system-prompt")?),
             "--no-session" => args.no_session = true,
             "--mcp-config" | "--extension" => {
                 let value = value(&flag)?;
@@ -63,11 +66,14 @@ mod tests {
             "high",
             "--session",
             "/tmp/s.jsonl",
+            "--add-system-prompt",
+            "link artifacts through Preview",
         ]);
         assert_eq!(args.mode.as_deref(), Some("rpc"));
         assert_eq!(args.model.as_deref(), Some("anthropic/claude-sonnet-4"));
         assert_eq!(args.thinking.as_deref(), Some("high"));
         assert_eq!(args.session.as_deref(), Some("/tmp/s.jsonl"));
+        assert_eq!(args.add_system_prompt, ["link artifacts through Preview"]);
         assert!(!args.no_session);
     }
 
@@ -96,5 +102,16 @@ mod tests {
     fn missing_value_is_reported() {
         let err = parse(vec!["--model".to_string()]).unwrap_err();
         assert!(err.contains("--model"));
+    }
+
+    #[test]
+    fn additional_system_prompts_are_repeatable() {
+        let args = parse_str(&[
+            "--mode=rpc",
+            "--add-system-prompt=first",
+            "--add-system-prompt",
+            "second",
+        ]);
+        assert_eq!(args.add_system_prompt, ["first", "second"]);
     }
 }

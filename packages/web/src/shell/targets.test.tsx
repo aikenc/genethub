@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import { rememberMachine } from "../devices/machines";
 import { browserHost, desktopHost, type Endpoint, type Host } from "../host";
-import { socketQueue } from "../protocol/fake-socket";
+import { socketQueue, TEST_PEER_SECRET } from "../protocol/fake-socket";
 import type { ProtocolDial } from "../protocol/client";
 import { useWorkbench } from "../session/store";
 
@@ -19,7 +19,8 @@ import { useWorkbench } from "../session/store";
  * driveable because the daemon on this one restarted.
  */
 
-const REMOTE = "wss://relay.example.com/forward/client?rendezvous=abc";
+const REMOTE =
+  "wss://relay.example.com/fabric/v2?ticket=client%3Aabc&route=abc";
 
 const paired = (machineId: string, name: string, endpoint = REMOTE) =>
   rememberMachine({
@@ -78,6 +79,10 @@ describe("what a shell says it can drive", () => {
             url: "ws://127.0.0.1:42123/ws?challenge=fresh&pid=42&expiresAt=1&proof=proof",
             machineId: "m_here",
             fingerprint: "AB-CD",
+            pid: 42,
+            challenge: "c".repeat(64),
+            expiresAt: Math.ceil(Date.now() / 1000) + 30,
+            serverProof: TEST_PEER_SECRET,
           })),
         },
       },
@@ -86,9 +91,16 @@ describe("what a shell says it can drive", () => {
     paired("m_far", "工作机");
 
     expect(await desktopHost().targets!()).toEqual([
-      { id: "local", label: "这台电脑", kind: "local", online: true },
+      {
+        id: "local",
+        deviceHandle: "m_here",
+        label: "这台电脑",
+        kind: "local",
+        online: true,
+      },
       {
         id: "m_far",
+        deviceHandle: "m_far",
         label: "工作机",
         kind: "remote",
         fingerprint: "AAAA-BBBB",
@@ -149,6 +161,10 @@ describe("the machines the account knows about", () => {
             url: "ws://127.0.0.1:42123/ws?challenge=fresh&pid=42&expiresAt=1&proof=proof",
             machineId: "m_here",
             fingerprint: "AB-CD",
+            pid: 42,
+            challenge: "c".repeat(64),
+            expiresAt: Math.ceil(Date.now() / 1000) + 30,
+            serverProof: TEST_PEER_SECRET,
           })),
         },
       },
@@ -177,9 +193,21 @@ describe("the machines the account knows about", () => {
     socket.reply(socket.lastOf(type).id, reply);
   };
 
+  const accountQueue = () =>
+    socketQueue({
+      secret: TEST_PEER_SECRET,
+      identity: {
+        machineId: "m_here",
+        fingerprint: "AB-CD",
+        machineName: "这台电脑",
+        transport: "loopback",
+        rtcSupported: false,
+      },
+    });
+
   it("lists them under this computer, without listing this computer twice", async () => {
     daemonUp();
-    const queue = socketQueue();
+    const queue = accountQueue();
     const listed = desktopHost(queue.factory).targets!();
 
     await answer(queue, 0, "hub.machines", {
@@ -189,12 +217,14 @@ describe("the machines the account knows about", () => {
         // and a second one would reach the daemon underfoot through a relay.
         {
           id: "mch_here",
+          deviceHandle: "m_here",
           name: "这台电脑",
           online: true,
           fingerprint: "AB-CD",
         },
         {
           id: "mch_far",
+          deviceHandle: "m_far",
           name: "公司台式机",
           online: false,
           fingerprint: "EF-GH",
@@ -203,9 +233,16 @@ describe("the machines the account knows about", () => {
     });
 
     expect(await listed).toEqual([
-      { id: "local", label: "这台电脑", kind: "local", online: true },
+      {
+        id: "local",
+        deviceHandle: "m_here",
+        label: "这台电脑",
+        kind: "local",
+        online: true,
+      },
       {
         id: "mch_far",
+        deviceHandle: "m_far",
         label: "公司台式机",
         kind: "remote",
         online: false,
@@ -217,7 +254,7 @@ describe("the machines the account knows about", () => {
   it("does not repeat a machine this browser also paired with by hand", async () => {
     daemonUp();
     paired("m_far", "工作机");
-    const queue = socketQueue();
+    const queue = accountQueue();
     const listed = desktopHost(queue.factory).targets!();
 
     await answer(queue, 0, "hub.machines", {
@@ -228,6 +265,7 @@ describe("the machines the account knows about", () => {
       data: [
         {
           id: "mch_far",
+          deviceHandle: "m_far",
           name: "工作机（账号）",
           online: true,
           fingerprint: "AAAA-BBBB",
@@ -243,7 +281,7 @@ describe("the machines the account knows about", () => {
 
   it("still shows this computer when the Hub cannot be reached", async () => {
     daemonUp();
-    const queue = socketQueue();
+    const queue = accountQueue();
     const listed = desktopHost(queue.factory).targets!();
 
     await vi.waitFor(() => expect(queue.sockets.length).toBeGreaterThan(0));
@@ -252,13 +290,19 @@ describe("the machines the account knows about", () => {
     // The local row is the one that still works with the network down. Burying
     // it under an error about an account server would be the wrong trade.
     expect(await listed).toEqual([
-      { id: "local", label: "这台电脑", kind: "local", online: true },
+      {
+        id: "local",
+        deviceHandle: "m_here",
+        label: "这台电脑",
+        kind: "local",
+        online: true,
+      },
     ]);
   });
 
   it("mints the ticket through the local daemon, so switching survives the far end dropping", async () => {
     daemonUp();
-    const queue = socketQueue();
+    const queue = accountQueue();
     const opening = desktopHost(queue.factory).openTarget!("mch_far");
 
     // One short-lived connection carries both asks (ticket + label). A second
@@ -277,6 +321,8 @@ describe("the machines the account knows about", () => {
         fingerprint: "EF-GH",
         channelCapability: "cap_test",
         channelSecret: "secret_test",
+        fabricRouteTicket: "route_test",
+        fabricRouteExpiresAt: "2099-01-01T00:00:00Z",
       },
     });
     await vi.waitFor(() => socket.lastOf("hub.machines"));
@@ -285,6 +331,7 @@ describe("the machines the account knows about", () => {
       data: [
         {
           id: "mch_far",
+          deviceHandle: "m_far",
           name: "公司台式机",
           online: true,
           fingerprint: "EF-GH",
@@ -298,6 +345,7 @@ describe("the machines the account knows about", () => {
       label: "公司台式机",
       fingerprint: "EF-GH",
       channelCredential: { capabilityId: "cap_test", secret: "secret_test" },
+      fabricRouteTicket: "route_test",
     });
     // Dialled the machine underfoot, not the one being switched to: the far end
     // is exactly what may be unreachable when a reconnect needs a fresh ticket.

@@ -406,7 +406,6 @@ fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Workspaces(_) => "workspaces",
         Reply::Directory(_) => "directory",
         Reply::FileTree(_) => "file tree",
-        Reply::FileContent(_) => "file content",
         Reply::GitStatus(_) => "git status",
         Reply::GitDiff { .. } => "git diff",
         Reply::GitCommit { .. } => "git commit",
@@ -534,13 +533,12 @@ mod tests {
     fn context_is_explicitly_local_and_never_invents_a_workspace() {
         let data = context_data(&HelloResult {
             daemon_version: "1.2.3".into(),
-            protocol_version: 1,
+            protocol_version: genehub_proto::DATA_PLANE_VERSION,
             machine_id: "m_local".into(),
             fingerprint: "AA-BB".into(),
             transport: TransportKind::Loopback,
             machine_name: "desk".into(),
-            proof: None,
-            server_nonce: None,
+            rtc_supported: true,
         });
 
         assert_eq!(data["source"], "localDaemon");

@@ -73,6 +73,7 @@ fn every_command_the_workbench_calls_exists_here() {
         "open_window",
         "open_logs",
         "pick_directory",
+        "pick_workspace_file",
         "app_version",
         "window_minimize",
         "window_toggle_maximize",

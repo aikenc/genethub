@@ -15,5 +15,7 @@ export { App } from "./App";
 export { detectHost, browserHost, desktopHost, LOCAL_TARGET } from "./host";
 export type { Endpoint, Host, Notification, Target } from "./host";
 export { Client } from "./protocol/client";
+export { AssetPreviewPage } from "./preview/AssetPreviewPage";
+export { assetPreviewUrl, parseAssetPreviewPath } from "./preview/url";
 export { useWorkbench } from "./session/store";
 export type { ExtraTab } from "./shell/tabs";

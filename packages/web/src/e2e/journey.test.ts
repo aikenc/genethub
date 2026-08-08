@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -55,18 +56,26 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
     let homeDir: string;
     let workspaceDir: string;
     let workspaceId: string;
+    let workspaceRootHandle: string;
 
     beforeAll(async () => {
       model = await startMockModel();
       dataDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-data-"));
       homeDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-home-"));
       workspaceDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-work-"));
+      mkdirSync(path.join(workspaceDir, "docs"));
+      mkdirSync(path.join(workspaceDir, "docs", "nested"));
       writeFileSync(path.join(workspaceDir, "notes.md"), "hello\n");
+      writeFileSync(
+        path.join(workspaceDir, "docs", "nested", "deep.md"),
+        "# recursive\n",
+      );
 
       const started = await startDaemon(dataDir, path.join(homeDir, "GeneHub"));
       daemon = started.process;
       client = new Client({
         url: started.url,
+        localServerProof: started.localServerProof,
         socketFactory: (url) => new WebSocket(url) as unknown as WebSocketLike,
         clientName: "e2e",
       });
@@ -95,6 +104,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
       if (workspace?.type !== "workspace")
         throw new Error("the workspace would not open");
       workspaceId = workspace.data.id;
+      workspaceRootHandle = workspace.data.folders[0]!.rootHandle;
     }, 30_000);
 
     afterAll(async () => {
@@ -175,11 +185,15 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           sessionId: session.data.id,
           text: "看看 notes.md",
           attachments: [],
+          artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
       });
 
-      await waitFor(() => assistantText(timeline).includes("读完了"), 20_000);
+      await waitFor(
+        () => assistantText(timeline).includes("读完了") && timeline.status === "idle",
+        20_000,
+      );
       expect(timeline.status).toBe("idle");
       expect(timeline.lastError).toBeNull();
     }, 30_000);
@@ -222,6 +236,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           sessionId: session.data.id,
           text: "写个 result.txt",
           attachments: [],
+          artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
       });
@@ -289,6 +304,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
               sessionId: session.data.id,
               text: "说点什么",
               attachments: [],
+              artifactPreviewBaseUrl: null,
               continuesRound: null,
             },
           });
@@ -330,15 +346,22 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
         expect(tree.data.children?.map((child) => child.name)).toContain(
           "notes.md",
         );
+        expect(
+          tree.data.children?.find((child) => child.name === "docs")?.children,
+        ).toBeUndefined();
       }
 
-      const read = await client.call({
-        type: "file.read",
-        payload: { workspaceId, path: "notes.md" },
-      });
-      expect(read?.type === "fileContent" && read.data.content).toContain(
-        "hello",
+      const preview = await client.preview(
+        workspaceId,
+        `${workspaceRootHandle}/notes.md`,
       );
+      expect(preview.metadata.kind).toBe("markdown");
+      expect(new TextDecoder().decode(preview.bytes)).toContain("hello");
+      const recursive = await client.preview(
+        workspaceId,
+        `${workspaceRootHandle}/docs/nested/deep.md`,
+      );
+      expect(new TextDecoder().decode(recursive.bytes)).toContain("recursive");
 
       const terminal = await client.call({
         type: "pty.open",
@@ -363,6 +386,110 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           payload: { ptyId: terminal.data.ptyId },
         });
       }
+    }, 20_000);
+
+    it("opens a multi-root workspace and previews a file from either root", async () => {
+      const docs = path.join(homeDir, "suite-docs");
+      mkdirSync(docs);
+      writeFileSync(path.join(docs, "guide.custom-text"), "section: preview\n");
+      const definition = path.join(homeDir, "suite.code-workspace");
+      writeFileSync(
+        definition,
+        JSON.stringify({
+          folders: [
+            { name: "Product", path: workspaceDir },
+            { name: "Docs", path: docs },
+          ],
+        }),
+      );
+
+      const opened = await client.call({
+        type: "workspace.open",
+        payload: { root: definition },
+      });
+      expect(opened?.type).toBe("workspace");
+      if (opened?.type !== "workspace") return;
+      // Opening sources are distinct projects, while their shared physical
+      // directory keeps one device-wide resource locator.
+      expect(opened.data.id).not.toBe(workspaceId);
+      expect(opened.data.root).toBe(realpathSync(workspaceDir));
+      expect(opened.data.folders[0]?.rootHandle).toBe(workspaceRootHandle);
+      const productHandle = opened.data.folders[0]!.rootHandle;
+      const docsHandle = opened.data.folders[1]!.rootHandle;
+      expect(docsHandle).not.toBe(productHandle);
+
+      const root = await client.call({
+        type: "file.tree",
+        payload: { workspaceId: opened.data.id, path: null, depth: 1 },
+      });
+      expect(root?.type).toBe("fileTree");
+      if (root?.type !== "fileTree") return;
+      expect(root.data.children?.map((node) => node.path)).toEqual([
+        productHandle,
+        docsHandle,
+      ]);
+      expect(root.data.children?.[0]?.children).toBeUndefined();
+
+      const preview = await client.preview(
+        opened.data.id,
+        `${docsHandle}/guide.custom-text`,
+      );
+      expect(preview.metadata.kind).toBe("text");
+      expect(new TextDecoder().decode(preview.bytes)).toContain("section: preview");
+      await expect(
+        client.preview(workspaceId, `${docsHandle}/guide.custom-text`),
+      ).rejects.toMatchObject({ detail: "forbidden", status: 403 });
+
+      const write = await client.call({
+        type: "file.write",
+        payload: {
+          workspaceId: opened.data.id,
+          path: `${docsHandle}/generated.json`,
+          content: '{"multiRoot":true}\n',
+        },
+      });
+      expect(write?.type).toBe("ack");
+      expect(readFileSync(path.join(docs, "generated.json"), "utf8")).toBe(
+        '{"multiRoot":true}\n',
+      );
+
+      const sessionsBefore = await client.call({
+        type: "session.list",
+        payload: { workspaceId, includeArchived: true },
+      });
+      expect(sessionsBefore?.type).toBe("sessions");
+      if (sessionsBefore?.type !== "sessions") return;
+      expect(sessionsBefore.data.length).toBeGreaterThan(0);
+
+      const removed = await client.call({
+        type: "workspace.remove",
+        payload: { workspaceId },
+      });
+      expect(removed?.type).toBe("workspaces");
+      if (removed?.type !== "workspaces") return;
+      expect(removed.data.some((workspace) => workspace.id === workspaceId)).toBe(
+        false,
+      );
+
+      const sessionsWhileRemoved = await client.call({
+        type: "session.list",
+        payload: { workspaceId, includeArchived: true },
+      });
+      expect(sessionsWhileRemoved).toEqual({ type: "sessions", data: [] });
+
+      const reopened = await client.call({
+        type: "workspace.open",
+        payload: { root: workspaceDir },
+      });
+      expect(reopened?.type).toBe("workspace");
+      if (reopened?.type !== "workspace") return;
+      expect(reopened.data.id).toBe(workspaceId);
+
+      const sessionsAfter = await client.call({
+        type: "session.list",
+        payload: { workspaceId, includeArchived: true },
+      });
+      expect(sessionsAfter).toEqual(sessionsBefore);
     }, 20_000);
   },
 );
@@ -481,7 +608,18 @@ async function startMockModel(): Promise<MockModel> {
 function startDaemon(
   dataDir: string,
   defaultWorkspace: string,
-): Promise<{ process: ChildProcess; url: string }> {
+): Promise<{
+  process: ChildProcess;
+  url: string;
+  localServerProof: {
+    proof: string;
+    challenge: string;
+    pid: number;
+    machineId: string;
+    fingerprint: string;
+    expiresAt: number;
+  };
+}> {
   return new Promise((resolve, reject) => {
     const child = spawn(DAEMON, ["daemon", "run"], {
       env: {
@@ -504,10 +642,25 @@ function startDaemon(
     );
     child.stdout?.on("data", (chunk: Buffer) => {
       for (const line of chunk.toString().split("\n").filter(Boolean)) {
-        const frame = JSON.parse(line) as { event: string; url: string };
+        const frame = JSON.parse(line) as {
+          event: string;
+          url: string;
+          serverProof: string;
+          admission: {
+            challenge: string;
+            pid: number;
+            machineId: string;
+            fingerprint: string;
+            expiresAt: number;
+          };
+        };
         if (frame.event !== "listening") continue;
         clearTimeout(timer);
-        resolve({ process: child, url: frame.url });
+        resolve({
+          process: child,
+          url: frame.url,
+          localServerProof: { proof: frame.serverProof, ...frame.admission },
+        });
       }
     });
   });

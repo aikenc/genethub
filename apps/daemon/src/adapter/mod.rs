@@ -37,6 +37,10 @@ pub struct SessionConfig {
     /// the same reason the model is: the process only starts on the first prompt,
     /// so a level chosen before that would otherwise be recorded and dropped.
     pub effort_id: Option<String>,
+    /// Product-owned context added without changing the user's message. Each
+    /// adapter maps it to its strongest available native system/developer
+    /// instruction mechanism; ACP has a documented lower-priority fallback.
+    pub additional_system_prompt: Option<String>,
     /// Where the adapter may keep agent-private state for this session.
     pub scratch_dir: PathBuf,
     /// Provider credentials, keyed by provider id.
@@ -268,6 +272,19 @@ pub fn without_a_window(command: &mut tokio::process::Command) {
     let _ = command;
 }
 
+/// Adds product-owned system context to a CLI without shell interpolation.
+/// Claude and the built-in Agent use different native flag names but share the
+/// same argument boundary and multiline-value safety.
+pub(super) fn append_system_prompt_arg(
+    command: &mut tokio::process::Command,
+    flag: &str,
+    prompt: Option<&str>,
+) {
+    if let Some(prompt) = prompt.filter(|value| !value.trim().is_empty()) {
+        command.arg(flag).arg(prompt);
+    }
+}
+
 /// Ends a child and everything it started.
 ///
 /// On Windows an npm-installed CLI is a `.cmd` shim, so the process we hold is
@@ -399,5 +416,27 @@ mod tests {
     #[test]
     fn a_binary_that_is_not_installed_resolves_to_none() {
         assert!(find_executable("genehub-definitely-not-installed").is_none());
+    }
+
+    #[test]
+    fn multiline_system_context_is_one_literal_cli_argument() {
+        let mut command = tokio::process::Command::new("agent");
+        append_system_prompt_arg(
+            &mut command,
+            "--append-system-prompt",
+            Some("first line\nhttps://app.example/assets/preview/v2/d/w/r_root/"),
+        );
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--append-system-prompt",
+                "first line\nhttps://app.example/assets/preview/v2/d/w/r_root/",
+            ]
+        );
     }
 }

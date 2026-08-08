@@ -200,6 +200,11 @@ impl AgentAdapter for GenetAdapter {
         if let Some(level) = config.effort_id.as_ref().or(config.mode_id.as_ref()) {
             command.arg("--thinking").arg(level);
         }
+        super::append_system_prompt_arg(
+            &mut command,
+            "--add-system-prompt",
+            config.additional_system_prompt.as_deref(),
+        );
 
         let mut child = command
             .spawn()

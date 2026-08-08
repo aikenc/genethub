@@ -14,7 +14,7 @@ import {
   AuthorityHttpError,
   isDefinitiveAuthorityError,
 } from "../src/shared/authority-error.js";
-import { connect, FakeAuthority } from "./harness.js";
+import { connect } from "./harness.js";
 
 async function within<T>(promise: Promise<T>, timeoutMs = 1_000): Promise<T> {
   let timer!: NodeJS.Timeout;
@@ -569,7 +569,6 @@ describe("the opaque Fabric authority contract", () => {
     const relay = await startRelay({
       port: 0,
       host: "127.0.0.1",
-      authority: new FakeAuthority(),
       fabricAuthority: remote,
     });
     let resolved = false;

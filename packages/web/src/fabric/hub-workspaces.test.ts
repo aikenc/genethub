@@ -121,6 +121,8 @@ function route(workspaceId: string) {
     operationExpiresAt: "2099-01-01T00:05:00.000Z",
     placementRevision: 4,
     targetFingerprint: `fp:${workspaceId}`,
+    peerCapability: `fpc:${workspaceId}`,
+    peerSecret: `secret:${workspaceId}`,
   };
 }
 

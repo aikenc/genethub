@@ -53,6 +53,10 @@ struct Live {
     replay: Mutex<VecDeque<SequencedEvent>>,
     events: broadcast::Sender<SequencedEvent>,
     agent: Mutex<Option<Box<dyn AgentSession>>>,
+    /// Deployment-aware context supplied by the authenticated UI. It is kept
+    /// for an in-process Agent restart but not persisted: the next browser send
+    /// recomposes domain/channel/workspace from its actual address.
+    additional_system_prompt: Mutex<Option<String>>,
     pending_permissions: Mutex<Vec<PermissionRequest>>,
     /// Item ids settled during the current turn, flushed to disk when it ends.
     turn_items: Mutex<Vec<String>>,
@@ -651,9 +655,15 @@ impl SessionManager {
         text: String,
         attachments: Vec<Attachment>,
         providers: &ProviderMap,
+        artifact_preview_base_url: Option<String>,
         continues_round: Option<String>,
     ) -> Result<String> {
         let live = self.live(session_id).await?;
+        let workspace_id = live.meta.lock().await.workspace_id.clone();
+        let additional_system_prompt = artifact_preview_base_url
+            .as_deref()
+            .map(|base_url| super::artifact_links::system_prompt(base_url, &workspace_id))
+            .transpose()?;
         {
             let mut status = live.status.lock().await;
             if matches!(*status, SessionStatus::Running | SessionStatus::Waiting) {
@@ -680,6 +690,7 @@ impl SessionManager {
                 text,
                 attachments,
                 providers,
+                additional_system_prompt,
                 continues_round,
             )
             .await;
@@ -696,6 +707,9 @@ impl SessionManager {
         started
     }
 
+    // These are the already-separated protocol fields for one handoff; wrapping
+    // them again would add a second request shape inside the session manager.
+    #[allow(clippy::too_many_arguments)]
     async fn start_turn(
         &self,
         live: &Arc<Live>,
@@ -703,8 +717,15 @@ impl SessionManager {
         text: String,
         attachments: Vec<Attachment>,
         providers: &ProviderMap,
+        additional_system_prompt: Option<String>,
         continues_round: Option<String>,
     ) -> Result<String> {
+        // The process is lazy, so this is still before any Agent sees the first
+        // turn. A running Agent retains the exact prefix it started with; if it
+        // has to restart later, the newest validated browser context wins.
+        if live.agent.lock().await.is_none() {
+            *live.additional_system_prompt.lock().await = additional_system_prompt;
+        }
         self.ensure_started(live, providers).await?;
 
         // Record the prompt before handing it over: if the agent dies on the
@@ -827,12 +848,14 @@ impl SessionManager {
         }
 
         let scratch = self.store.make_scratch_dir(&meta.workspace_id, &meta.id)?;
+        let additional_system_prompt = live.additional_system_prompt.lock().await.clone();
         let config = |resume: Option<PersistHandle>| SessionConfig {
             session_id: meta.id.clone(),
             cwd: meta.cwd.clone(),
             model_id: meta.model_id.clone(),
             mode_id: mode_override.clone().or_else(|| meta.mode_id.clone()),
             effort_id: meta.effort_id.clone(),
+            additional_system_prompt: additional_system_prompt.clone(),
             scratch_dir: scratch.clone(),
             providers: providers.clone(),
             resume,
@@ -1272,6 +1295,7 @@ impl Live {
             replay: Mutex::new(VecDeque::new()),
             events,
             agent: Mutex::new(None),
+            additional_system_prompt: Mutex::new(None),
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             turn_items: Mutex::new(Vec::new()),
             open_trunk_items: Mutex::new(Vec::new()),
@@ -2427,6 +2451,8 @@ mod tests {
     /// or a project copied to a machine that never had those threads.
     struct Amnesiac;
 
+    struct ContextRecorder(Arc<std::sync::Mutex<Option<String>>>);
+
     struct Blank(tokio::sync::broadcast::Sender<SessionEvent>);
 
     #[async_trait::async_trait]
@@ -2471,6 +2497,34 @@ mod tests {
             if config.resume.is_some() {
                 return Err(anyhow!("no such thread"));
             }
+            Ok(Box::new(Blank(tokio::sync::broadcast::channel(8).0)))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::adapter::AgentAdapter for ContextRecorder {
+        fn id(&self) -> &str {
+            "recorder"
+        }
+
+        fn label(&self) -> &str {
+            "Recorder"
+        }
+
+        fn capabilities(&self) -> genehub_proto::Capabilities {
+            genehub_proto::Capabilities::default()
+        }
+
+        async fn probe(&self) -> genehub_proto::ProbeState {
+            genehub_proto::ProbeState::Ready
+        }
+
+        async fn catalog(&self, _providers: &ProviderMap) -> genehub_proto::Catalog {
+            genehub_proto::Catalog::default()
+        }
+
+        async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
+            *self.0.lock().unwrap() = config.additional_system_prompt;
             Ok(Box::new(Blank(tokio::sync::broadcast::channel(8).0)))
         }
     }
@@ -2552,6 +2606,45 @@ mod tests {
             None,
             "a handle that just failed to resume names a thread that is gone"
         );
+    }
+
+    #[tokio::test]
+    async fn browser_preview_context_reaches_the_adapter_as_fixed_system_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ContextRecorder(
+                captured.clone(),
+            ))])),
+            16,
+        );
+        sessions
+            .store
+            .save_meta(&SessionMeta {
+                agent_id: "recorder".into(),
+                ..meta()
+            })
+            .unwrap();
+        let base = "https://app.example/relay-dev-2/assets/preview/v2/m_device/w1/r_project/";
+
+        sessions
+            .send(
+                "s1",
+                "生成报告".into(),
+                vec![],
+                &ProviderMap::new(),
+                Some(base.into()),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let prompt = captured.lock().unwrap().clone().unwrap();
+        assert!(prompt.contains(base));
+        assert!(prompt.contains("workspace-relative"));
+        assert!(!prompt.contains("生成报告"));
+        sessions.shutdown().await;
     }
 
     /// A `Live` with its own throwaway store. The directory handle comes back
@@ -3761,7 +3854,9 @@ mod tests {
         let sessions = manager(root);
         sessions.store.save_meta(&meta()).unwrap();
         let live = sessions.live("s1").await.unwrap();
-        let (events, _) = broadcast::channel(64);
+        // Match the production adapter buffer: pagination tests deliberately
+        // send more than 64 events and are not overflow tests.
+        let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let turn_ids = Arc::new(AtomicU64::new(0));
         *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
             events.clone(),
@@ -3820,7 +3915,7 @@ mod tests {
         let mut seen = live.events.subscribe();
 
         sessions
-            .send("s1", "hello".into(), vec![], &providers, None)
+            .send("s1", "hello".into(), vec![], &providers, None, None)
             .await
             .expect("accepted");
 
@@ -3869,7 +3964,7 @@ mod tests {
         let mut seen = live.events.subscribe();
 
         sessions
-            .send("s1", "hello".into(), vec![], &providers, None)
+            .send("s1", "hello".into(), vec![], &providers, None, None)
             .await
             .expect_err("the handover failed");
 
@@ -3887,7 +3982,7 @@ mod tests {
         let providers = ProviderMap::new();
 
         let turn_id = sessions
-            .send("s1", "hello".into(), vec![], &providers, None)
+            .send("s1", "hello".into(), vec![], &providers, None, None)
             .await
             .expect("accepted");
         events
@@ -3965,7 +4060,14 @@ mod tests {
         let providers = ProviderMap::new();
 
         let turn_id = sessions
-            .send("s1", "do a bunch of stuff".into(), vec![], &providers, None)
+            .send(
+                "s1",
+                "do a bunch of stuff".into(),
+                vec![],
+                &providers,
+                None,
+                None,
+            )
             .await
             .expect("accepted");
         events
@@ -4001,7 +4103,19 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        eventually("persisted the narrated trunk", async || {
+            let Ok(chat) = sessions.store.load_chat("w1", "s1") else {
+                return false;
+            };
+            let Ok(trunks) = sessions.store.load_trunk_index("w1", "s1", 0) else {
+                return false;
+            };
+            chat.rounds
+                .first()
+                .is_some_and(|round| round.trunk_count == 1)
+                && trunks.len() == 1
+        })
+        .await;
 
         let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         assert_eq!(rounds.len(), 1, "one settled round must be ledgered");
@@ -4032,7 +4146,14 @@ mod tests {
         let providers = ProviderMap::new();
 
         let turn_id = sessions
-            .send("s1", "run a lot of tools".into(), vec![], &providers, None)
+            .send(
+                "s1",
+                "run a lot of tools".into(),
+                vec![],
+                &providers,
+                None,
+                None,
+            )
             .await
             .expect("accepted");
         events
@@ -4059,7 +4180,19 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        eventually("persisted both paginated trunks", async || {
+            let Ok(chat) = sessions.store.load_chat("w1", "s1") else {
+                return false;
+            };
+            let Ok(trunks) = sessions.store.load_trunk_index("w1", "s1", 0) else {
+                return false;
+            };
+            chat.rounds
+                .first()
+                .is_some_and(|round| round.trunk_count == 2)
+                && trunks.len() == 2
+        })
+        .await;
 
         let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         let trunks = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
@@ -4081,7 +4214,7 @@ mod tests {
         let (sessions, events, _) = wired(dir.path()).await;
         let providers = ProviderMap::new();
         let turn_id = sessions
-            .send("s1", "inspect".into(), vec![], &providers, None)
+            .send("s1", "inspect".into(), vec![], &providers, None, None)
             .await
             .unwrap();
         events
@@ -4118,7 +4251,23 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        eventually("persisted the expanded trunk and its blob", async || {
+            let Ok(index) = sessions.store.load_trunk_index("w1", "s1", 0) else {
+                return false;
+            };
+            let Some(summary) = index.last() else {
+                return false;
+            };
+            let Ok(trunk) = sessions.store.load_trunk("w1", "s1", 0, summary) else {
+                return false;
+            };
+            trunk
+                .batches
+                .iter()
+                .flat_map(|batch| &batch.blobs)
+                .any(|blob| blob.blob.is_some())
+        })
+        .await;
 
         let (snapshot, replayed, reset, _) = sessions.subscribe("s1", Some(0), true).await.unwrap();
         assert!(reset);
@@ -4228,7 +4377,7 @@ mod tests {
         let providers = ProviderMap::new();
 
         let first_turn = sessions
-            .send("s1", "do the thing".into(), vec![], &providers, None)
+            .send("s1", "do the thing".into(), vec![], &providers, None, None)
             .await
             .expect("accepted");
         events
@@ -4352,7 +4501,7 @@ mod tests {
         let providers = ProviderMap::new();
 
         let turn_id = sessions
-            .send("s1", "do the thing".into(), vec![], &providers, None)
+            .send("s1", "do the thing".into(), vec![], &providers, None, None)
             .await
             .expect("accepted");
         events
@@ -4407,7 +4556,7 @@ mod tests {
         let providers = ProviderMap::new();
 
         let first_turn = sessions
-            .send("s1", "count to 500".into(), vec![], &providers, None)
+            .send("s1", "count to 500".into(), vec![], &providers, None, None)
             .await
             .expect("accepted");
         events
@@ -4447,6 +4596,7 @@ mod tests {
                 "continue".into(),
                 vec![],
                 &providers,
+                None,
                 Some(dangling_round_id.clone()),
             )
             .await
@@ -4482,7 +4632,7 @@ mod tests {
         let providers = ProviderMap::new();
 
         let first_turn = sessions
-            .send("s1", "count to 500".into(), vec![], &providers, None)
+            .send("s1", "count to 500".into(), vec![], &providers, None, None)
             .await
             .expect("accepted");
         events
@@ -4512,7 +4662,14 @@ mod tests {
             .clone();
 
         let second_turn = sessions
-            .send("s1", "what's the weather".into(), vec![], &providers, None)
+            .send(
+                "s1",
+                "what's the weather".into(),
+                vec![],
+                &providers,
+                None,
+                None,
+            )
             .await
             .expect("accepted");
 
@@ -4553,7 +4710,7 @@ mod tests {
         let live = sessions.live("s1").await.unwrap();
 
         let turn_id = sessions
-            .send("s1", "hello".into(), vec![], &providers, None)
+            .send("s1", "hello".into(), vec![], &providers, None, None)
             .await
             .expect("accepted");
         events

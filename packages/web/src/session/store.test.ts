@@ -558,6 +558,50 @@ describe("an action the user asked for that fails", () => {
     expect(useWorkbench.getState().notice).toBeNull();
   });
 
+  it("sends deployment-aware artifact link context without changing the user text", async () => {
+    const calls: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+    const client = {
+      call: async (request: { type: string; payload?: Record<string, unknown> }) => {
+        calls.push(request);
+        return undefined;
+      },
+      identity: { machineId: "m_device" },
+      subscribe: async () => ({ snapshot: { seq: 0, items: [], summary: SESSION }, replayed: [], reset: false }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      activeSessionId: "s1",
+      activeWorkspaceId: "w1",
+      sessions: [SESSION],
+      workspaces: [{
+        id: "w1",
+        name: "suite",
+        root: "/srv/product",
+        isGitRepo: true,
+        workspaceFile: "/srv/suite.code-workspace",
+        folders: [
+          { name: "Product", root: "/srv/product", rootHandle: "r_product" },
+          { name: "Docs", root: "/srv/docs", rootHandle: "r_docs" },
+        ],
+      }],
+    });
+
+    await useWorkbench.getState().send("生成报告");
+
+    expect(calls).toContainEqual({
+      type: "session.send",
+      payload: {
+        sessionId: "s1",
+        text: "生成报告",
+        attachments: [],
+        artifactPreviewBaseUrl:
+          "http://localhost:3000/assets/preview/v2/m_device/w1/r_product/",
+        continuesRound: null,
+      },
+    });
+  });
+
   it("reports a session that could not be opened, rather than staying empty", async () => {
     useWorkbench.setState({
       client: refusingClient("no adapter registered for 'codex'"),
@@ -1017,7 +1061,13 @@ describe("returning after a disconnection", () => {
 
 describe("renaming a workspace", () => {
   it("uses the name returned by the machine", async () => {
-    const workspace = { id: "w1", name: "project", root: "/tmp/project", isGitRepo: false };
+    const workspace = {
+      id: "w1",
+      name: "project",
+      root: "/tmp/project",
+      isGitRepo: false,
+      folders: [{ name: "project", root: "/tmp/project", rootHandle: "r_project" }],
+    };
     const client = {
       call: async (request: { type: string }) =>
         request.type === "workspace.rename"
@@ -1029,5 +1079,59 @@ describe("renaming a workspace", () => {
     await useWorkbench.getState().renameWorkspace("w1", "  核心项目  ");
 
     expect(useWorkbench.getState().workspaces[0]?.name).toBe("核心项目");
+  });
+});
+
+describe("removing a workspace registration", () => {
+  it("drops its local navigation state while keeping another workspace intact", async () => {
+    const first = {
+      id: "w1",
+      name: "first",
+      root: "/tmp/first",
+      isGitRepo: false,
+      folders: [{ name: "first", root: "/tmp/first", rootHandle: "r_first" }],
+    };
+    const second = {
+      id: "w2",
+      name: "second",
+      root: "/tmp/second",
+      isGitRepo: false,
+      folders: [{ name: "second", root: "/tmp/second", rootHandle: "r_second" }],
+    };
+    const other = { ...SESSION, id: "s2", workspaceId: "w2" };
+    const unsubscribe = vi.fn(async () => {});
+    const client = {
+      unsubscribe,
+      call: async (request: { type: string }) => {
+        if (request.type === "workspace.remove") {
+          return { type: "workspaces", data: [second] };
+        }
+        if (request.type === "session.list") {
+          return { type: "sessions", data: [other] };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      workspaces: [first, second],
+      activeWorkspaceId: "w2",
+      sessions: [SESSION, other],
+      activeSessionId: "s2",
+      tabs: [
+        { id: "chat:s1", kind: "chat", title: "first", sessionId: "s1" },
+        { id: "chat:s2", kind: "chat", title: "second", sessionId: "s2" },
+      ],
+      activeTabId: "chat:s2",
+      subscribedSessionIds: ["s1", "s2"],
+    });
+
+    await useWorkbench.getState().removeWorkspace("w1");
+
+    expect(useWorkbench.getState().workspaces).toEqual([second]);
+    expect(useWorkbench.getState().sessions).toEqual([other]);
+    expect(useWorkbench.getState().tabs.map((tab) => tab.id)).toEqual(["chat:s2"]);
+    expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
+    expect(unsubscribe).toHaveBeenCalledWith("s1");
   });
 });

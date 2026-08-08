@@ -11,8 +11,8 @@ export function ToolCallView({
 }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  // The daemon is authoritative, but keep the same bound when this newer web
-  // app reconnects to an older daemon or renders a legacy in-memory fixture.
+  // The daemon is authoritative, but the renderer keeps the same bound for
+  // persisted data and in-memory fixtures as a final presentation boundary.
   const output = boundedOutput(toolOutput(detail));
   const summary = oneLine(summarize(detail), 64);
 

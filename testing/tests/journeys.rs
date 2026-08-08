@@ -1044,8 +1044,9 @@ async fn changes_made_by_the_agent_show_up_in_git_and_can_be_committed() {
 }
 
 #[tokio::test]
-async fn files_can_be_browsed_read_and_edited_through_the_workspace() {
+async fn files_can_be_browsed_and_edited_through_the_workspace() {
     let journey = Journey::start().await.expect("journey starts");
+    let root_handle = &journey.workspace.folders[0].root_handle;
     journey.write_file("src/main.rs", "fn main() {}").unwrap();
     journey.write_file("README.md", "# hi").unwrap();
 
@@ -1067,26 +1068,11 @@ async fn files_can_be_browsed_read_and_edited_through_the_workspace() {
         .iter()
         .any(|node| node.name == "src" && node.is_dir));
 
-    let content = match journey
-        .client
-        .call(Request::FileRead {
-            workspace_id: journey.workspace.id.clone(),
-            path: "src/main.rs".into(),
-        })
-        .await
-        .unwrap()
-    {
-        Reply::FileContent(content) => content,
-        other => panic!("unexpected {other:?}"),
-    };
-    assert_eq!(content.content, "fn main() {}");
-    assert!(content.is_text);
-
     journey
         .client
         .call(Request::FileWrite {
             workspace_id: journey.workspace.id.clone(),
-            path: "src/main.rs".into(),
+            path: format!("{root_handle}/src/main.rs"),
             content: "fn main() { println!(\"edited\"); }".into(),
         })
         .await
@@ -1097,27 +1083,21 @@ async fn files_can_be_browsed_read_and_edited_through_the_workspace() {
 }
 
 #[tokio::test]
-async fn reads_and_writes_outside_the_workspace_are_refused() {
+async fn writes_outside_the_workspace_are_refused() {
     let journey = Journey::start().await.expect("journey starts");
+    let root_handle = &journey.workspace.folders[0].root_handle;
 
-    for path in ["../escape.txt", "/etc/passwd", "src/../../escape.txt"] {
-        let error = journey
-            .client
-            .expect_error(Request::FileRead {
-                workspace_id: journey.workspace.id.clone(),
-                path: path.into(),
-            })
-            .await;
-        assert!(
-            error.contains("Forbidden"),
-            "{path} should be refused as forbidden, got: {error}"
-        );
-
+    for path in [
+        format!("{root_handle}/../escape.txt"),
+        "/etc/passwd".into(),
+        format!("{root_handle}/src/../../escape.txt"),
+        "r_not_a_member/file.txt".into(),
+    ] {
         let error = journey
             .client
             .expect_error(Request::FileWrite {
                 workspace_id: journey.workspace.id.clone(),
-                path: path.into(),
+                path: path.clone(),
                 content: "owned".into(),
             })
             .await;
@@ -1312,7 +1292,7 @@ async fn reconnecting_replays_the_gap_without_losing_or_repeating_events() {
     assert!(first.completed());
 
     // Reconnect from the very beginning and compare what comes back.
-    let reconnected = genehub_testing::Client::connect(&journey.daemon().websocket_url())
+    let reconnected = genehub_testing::Client::connect_loopback(journey.daemon())
         .await
         .expect("second connection");
     reconnected.hello("journey-2").await.expect("handshake");
@@ -1371,7 +1351,7 @@ async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
     journey.send(&session, "Talk.").await.expect("accepted");
     journey.client.drain_turn().await.expect("the turn ends");
 
-    let reconnected = genehub_testing::Client::connect(&journey.daemon().websocket_url())
+    let reconnected = genehub_testing::Client::connect_loopback(journey.daemon())
         .await
         .expect("second connection");
     reconnected.hello("journey-2").await.expect("handshake");
@@ -1915,7 +1895,7 @@ async fn a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns() 
 
     // The client that is actually watching, so its disappearance is the real
     // thing rather than a description of one.
-    let watching = genehub_testing::Client::connect(&journey.daemon().websocket_url())
+    let watching = genehub_testing::Client::connect_loopback(journey.daemon())
         .await
         .expect("a watching client");
     watching.hello("journey-2").await.expect("handshake");
@@ -1944,7 +1924,7 @@ async fn a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns() 
     let rest = journey.client.drain_turn().await.expect("the turn ends");
     assert!(rest.completed(), "saw {:?}", rest.failure());
 
-    let returning = genehub_testing::Client::connect(&journey.daemon().websocket_url())
+    let returning = genehub_testing::Client::connect_loopback(journey.daemon())
         .await
         .expect("reconnecting");
     returning.hello("journey-3").await.expect("handshake");
@@ -1995,7 +1975,7 @@ async fn a_second_client_sees_the_same_session_as_the_first() {
 
     let session = journey.session("genet").await.expect("session opens");
 
-    let second = genehub_testing::Client::connect(&journey.daemon().websocket_url())
+    let second = genehub_testing::Client::connect_loopback(journey.daemon())
         .await
         .expect("second connection");
     second.hello("journey-2").await.expect("handshake");
@@ -2031,52 +2011,11 @@ async fn a_second_client_sees_the_same_session_as_the_first() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_connection_must_say_hello_before_anything_else() {
-    let journey = Journey::start().await.expect("journey starts");
-    let bare = genehub_testing::Client::connect(&journey.daemon().websocket_url())
-        .await
-        .expect("connection");
-
-    let error = bare.expect_error(Request::AgentList).await;
-    assert!(error.contains("Unauthorized"), "got: {error}");
-
-    bare.hello("late").await.expect("hello still works");
-    bare.call(Request::AgentList)
-        .await
-        .expect("and then it does");
-
-    bare.close().await;
-    journey.finish().await;
-}
-
-#[tokio::test]
-async fn a_client_speaking_another_protocol_version_is_turned_away() {
-    let journey = Journey::start().await.expect("journey starts");
-    let stranger = genehub_testing::Client::connect(&journey.daemon().websocket_url())
-        .await
-        .expect("connection");
-
-    let error = stranger
-        .expect_error(Request::Hello {
-            client_name: "from the future".into(),
-            protocol_version: 999,
-            device: None,
-            channel: None,
-            invite: None,
-        })
-        .await;
-    assert!(error.contains("ProtocolVersion"), "got: {error}");
-
-    stranger.close().await;
-    journey.finish().await;
-}
-
-#[tokio::test]
 async fn a_connection_without_the_token_is_rejected_outright() {
     let journey = Journey::start().await.expect("journey starts");
     let url = format!("ws://127.0.0.1:{}/ws?token=wrong", journey.daemon().port);
     assert!(
-        genehub_testing::Client::connect(&url).await.is_err(),
+        tokio_tungstenite::connect_async(&url).await.is_err(),
         "the loopback port still needs its token"
     );
     journey.finish().await;
@@ -2087,7 +2026,7 @@ async fn a_connection_without_the_token_is_rejected_outright() {
 #[tokio::test]
 async fn a_malformed_frame_gets_an_error_rather_than_silence() {
     let journey = Journey::start().await.expect("journey starts");
-    let client = genehub_testing::Client::connect(&journey.daemon().websocket_url())
+    let client = genehub_testing::Client::connect_loopback(journey.daemon())
         .await
         .expect("connection");
     client.hello("sloppy").await.expect("handshake");
@@ -2114,6 +2053,7 @@ async fn an_empty_prompt_is_refused_before_it_reaches_the_model() {
             session_id: session,
             text: "   ".into(),
             attachments: vec![],
+            artifact_preview_base_url: None,
             continues_round: None,
         })
         .await;

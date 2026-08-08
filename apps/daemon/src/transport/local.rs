@@ -1,5 +1,6 @@
 //! The loopback listener: HTTP for health, WebSocket for the protocol. The
-//! legacy LAN configuration is retained only so startup can reject it clearly.
+//! removed plaintext LAN configuration is retained only so startup can reject
+//! it clearly; it never selects an alternate transport.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -19,14 +20,16 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::sync::{broadcast, mpsc};
 
-use super::uplink::Admission;
-use super::{auth, session};
+use super::admission::Admission;
+use super::auth;
+use crate::dataplane::{endpoint, handshake};
 use crate::pty::PtyMessage;
 use crate::router;
 use crate::state::Shared;
 
-const MAX_WS_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_WS_MESSAGE_BYTES: usize = genehub_proto::MAX_DATA_FRAME_BYTES;
 const WS_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const WS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const WS_ADMISSION_LIFETIME_SECS: u64 = 15;
 const MAX_USED_CONTROL_ADMISSIONS: usize = 1024;
 
@@ -77,13 +80,17 @@ pub async fn serve(state: Shared, pty_tx: PtyFanout) -> Result<Listener> {
     }
     let bind: IpAddr = "127.0.0.1".parse().unwrap();
 
+    // Tests can construct AppState without going through Daemon::start. Keep
+    // the event source on Shared so every transport feeds the same data-plane
+    // event stream.
+    let _ = state.fanout.set(pty_tx);
+
     let app = Router::new()
         .route("/health", get(health))
         .route("/shutdown", axum::routing::post(shutdown))
         .route("/ws", get(upgrade))
         .with_state(Context_ {
             state: state.clone(),
-            pty: pty_tx,
             used_control_admissions: Arc::new(std::sync::Mutex::new(HashMap::new())),
         });
 
@@ -109,7 +116,6 @@ pub async fn serve(state: Shared, pty_tx: PtyFanout) -> Result<Listener> {
 #[derive(Clone)]
 struct Context_ {
     state: Shared,
-    pty: PtyFanout,
     used_control_admissions: Arc<std::sync::Mutex<HashMap<String, u64>>>,
 }
 
@@ -449,59 +455,79 @@ fn unix_seconds() -> u64 {
         .as_secs()
 }
 
-async fn connection(socket: WebSocket, context: Context_, remote: IpAddr, server_proof: String) {
-    let (mut sink, mut stream) = socket.split();
-    let (outbound, mut outbound_rx) = session::outbound_channel(Arc::new(
-        tokio::sync::Semaphore::new(session::MAX_BUFFERED_OUTBOUND_BYTES),
-    ));
-    let (inbound, inbound_rx) =
-        mpsc::channel::<session::InboundFrame>(session::SESSION_QUEUE_CAPACITY);
+async fn connection(
+    mut socket: WebSocket,
+    context: Context_,
+    remote: IpAddr,
+    server_proof: String,
+) {
+    // The first and only plaintext application message is the bounded mutual
+    // handshake. Identity and every business byte are sent after E2EE starts.
+    let hello = match tokio::time::timeout(WS_HANDSHAKE_TIMEOUT, socket.next()).await {
+        Ok(Some(Ok(Message::Binary(bytes)))) => bytes,
+        _ => return,
+    };
+    let accepted = match handshake::accept(
+        &context.state,
+        router::transport_for(Some(remote)),
+        Admission::Loopback { server_proof },
+        &hello,
+        None,
+        None,
+    ) {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            tracing::debug!(%error, "local data-plane handshake rejected");
+            return;
+        }
+    };
+    let welcome = match serde_json::to_vec(&accepted.welcome) {
+        Ok(welcome) => welcome,
+        Err(_) => return,
+    };
+    if !matches!(
+        tokio::time::timeout(
+            WS_WRITE_TIMEOUT,
+            socket.send(Message::Binary(welcome.into())),
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
+        return;
+    }
 
-    // One writer task owns the sink, so handlers and event pumps can all send
-    // without contending for it.
+    let (mut sink, mut stream) = socket.split();
+    let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
     let mut writer = tokio::spawn(async move {
-        while let Some(frame) = outbound_rx.recv().await {
+        while let Some(record) = outbound.recv().await {
             if !matches!(
-                tokio::time::timeout(
-                    WS_WRITE_TIMEOUT,
-                    sink.send(Message::Text(frame.text.into())),
-                )
-                .await,
+                tokio::time::timeout(WS_WRITE_TIMEOUT, sink.send(Message::Binary(record.into())),)
+                    .await,
                 Ok(Ok(()))
             ) {
                 break;
             }
         }
     });
-
-    let mut loop_task = tokio::spawn(session::drive(
-        context.state.clone(),
-        router::transport_for(Some(remote)),
-        // A one-use proof of the owner-only endpoint secret was checked during
-        // the upgrade; the reusable secret itself never crossed the socket.
-        Admission::Loopback { server_proof },
-        session::Channels {
-            inbound: inbound_rx,
-            outbound,
-            pty: context.pty.subscribe(),
-        },
+    let mut endpoint = tokio::spawn(endpoint::serve(
+        context.state,
+        accepted.key,
+        accepted.access,
+        carrier,
     ));
-
-    let reader = async {
+    let reader = async move {
         while let Some(Ok(message)) = stream.next().await {
             match message {
-                Message::Text(text) => {
-                    if inbound
-                        .try_send(session::InboundFrame::unmetered(text.to_string()))
-                        .is_err()
-                    {
+                Message::Binary(record) if record.len() <= MAX_WS_MESSAGE_BYTES => {
+                    if inbound.send(record.to_vec()).await.is_err() {
                         break;
                     }
                 }
                 Message::Close(_) => break,
-                // Ping and pong are handled by the transport; binary frames are not
-                // part of this protocol.
-                _ => continue,
+                // WebSocket ping/pong stays transport-local. Text and oversized
+                // binary messages are never part of protocol v3.
+                Message::Ping(_) | Message::Pong(_) => continue,
+                _ => break,
             }
         }
     };
@@ -509,13 +535,10 @@ async fn connection(socket: WebSocket, context: Context_, remote: IpAddr, server
 
     tokio::select! {
         _ = &mut reader => {},
-        _ = &mut loop_task => {},
+        _ = &mut endpoint => {},
         _ = &mut writer => {},
     }
-    // A WebSocket connection is one lifecycle. Failure or completion of any
-    // reader/writer/session component cancels the other two so no half-open
-    // privileged session survives a stalled peer.
-    loop_task.abort();
+    endpoint.abort();
     writer.abort();
 }
 
@@ -638,34 +661,40 @@ mod tests {
         );
         let url = admission.url.clone();
         let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let client_nonce = "11".repeat(16);
+        let hello = genehub_proto::PeerHello {
+            version: genehub_proto::DATA_PLANE_VERSION,
+            client_name: "test".into(),
+            auth: genehub_proto::PeerAuth::Loopback {
+                context: "loopback".into(),
+                nonce: client_nonce.clone(),
+                proof: crate::channel_auth::client_proof(
+                    &admission.server_proof,
+                    "loopback",
+                    &client_nonce,
+                ),
+            },
+            rtc_supported: false,
+        };
         socket
-            .send(tokio_tungstenite::tungstenite::Message::Text(
-                serde_json::json!({
-                    "id": "hello",
-                    "type": "hello",
-                    "payload": {
-                        "clientName": "test",
-                        "protocolVersion": genehub_proto::PROTOCOL_VERSION
-                    }
-                })
-                .to_string(),
+            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                serde_json::to_vec(&hello).unwrap(),
             ))
             .await
             .unwrap();
         let reply = socket.next().await.unwrap().unwrap();
-        let text = reply.into_text().unwrap();
-        let frame: genehub_proto::ServerFrame = serde_json::from_str(&text).unwrap();
-        assert!(matches!(
-            frame,
-            genehub_proto::ServerFrame::Result {
-                payload: Some(genehub_proto::Reply::Hello(genehub_proto::HelloResult {
-                    proof: Some(ref proof),
-                    server_nonce: None,
-                    ..
-                })),
-                ..
-            } if auth::token_matches(&admission.server_proof, proof)
-        ));
+        let welcome: genehub_proto::PeerWelcome =
+            serde_json::from_slice(&reply.into_data()).unwrap();
+        crate::channel_auth::verify_proof(
+            &crate::channel_auth::server_proof(
+                &admission.server_proof,
+                "loopback",
+                &client_nonce,
+                &welcome.server_nonce,
+            ),
+            &welcome.proof,
+        )
+        .unwrap();
         drop(socket);
         assert!(
             tokio_tungstenite::connect_async(&url).await.is_err(),

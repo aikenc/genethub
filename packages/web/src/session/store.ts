@@ -3,7 +3,6 @@ import type {
   Attachment,
   DeviceInfo,
   DeviceInvite,
-  FileContent,
   FileNode,
   GitStatus,
   HubClaim,
@@ -26,6 +25,7 @@ import type { Host } from "../host";
 import type { Client, ConnectionState } from "../protocol/client";
 import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
+import { assetPreviewBaseUrl } from "../preview/url";
 import {
   applySequenced,
   emptyTimeline,
@@ -150,7 +150,6 @@ interface WorkbenchState {
   devices: DeviceInfo[];
   remote: RemoteAccess | null;
   tree: FileNode | null;
-  file: FileContent | null;
   git: GitStatus | null;
   diff: string | null;
   settings: Settings | null;
@@ -187,9 +186,9 @@ interface WorkbenchState {
   selectWorkspace(workspaceId: string): Promise<void>;
   /** Changes a workspace's display name without moving its directory. */
   renameWorkspace(workspaceId: string, name: string): Promise<void>;
+  /** Hides a workspace registration without deleting files or conversations. */
+  removeWorkspace(workspaceId: string): Promise<void>;
   loadTree(path?: string): Promise<void>;
-  openFile(path: string): Promise<void>;
-  saveFile(content: string): Promise<void>;
   refreshGit(): Promise<void>;
   loadDiff(path?: string): Promise<void>;
   commit(message: string, paths?: string[]): Promise<void>;
@@ -463,7 +462,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   devices: [],
   remote: null,
   tree: null,
-  file: null,
   git: null,
   diff: null,
   settings: null,
@@ -584,6 +582,58 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set((state) => ({
       workspaces: upsertBy(state.workspaces, reply.data, (workspace) => workspace.id),
     }));
+  },
+
+  async removeWorkspace(workspaceId) {
+    const client = require_(get().client);
+    const before = get();
+    const removedSessionIds = new Set(
+      before.sessions
+        .filter((session) => session.workspaceId === workspaceId)
+        .map((session) => session.id),
+    );
+    const removedTabs = before.tabs.filter(
+      (tab) =>
+        (tab.sessionId && removedSessionIds.has(tab.sessionId)) ||
+        (tab.id === DRAFT_TAB && before.draft?.workspaceId === workspaceId),
+    );
+    const reply = await asked(set, () =>
+      client.call({ type: "workspace.remove", payload: { workspaceId } }),
+    );
+    if (reply?.type !== "workspaces") return;
+
+    discardSubscriptions(client, removedTabs);
+    const removedWasActive =
+      before.activeWorkspaceId === workspaceId ||
+      (before.activeSessionId ? removedSessionIds.has(before.activeSessionId) : false) ||
+      before.draft?.workspaceId === workspaceId;
+    const nextWorkspaceId = removedWasActive
+      ? (reply.data[0]?.id ?? null)
+      : before.activeWorkspaceId;
+    set((state) => {
+      const tabs = state.tabs.filter((tab) => !removedTabs.some((removed) => removed.id === tab.id));
+      const activeTabId = tabs.some((tab) => tab.id === state.activeTabId)
+        ? state.activeTabId
+        : (tabs.at(-1)?.id ?? null);
+      return {
+        workspaces: reply.data,
+        activeWorkspaceId: nextWorkspaceId,
+        activeSessionId: removedWasActive ? null : state.activeSessionId,
+        draft: state.draft?.workspaceId === workspaceId ? null : state.draft,
+        tabs,
+        activeTabId,
+        timeline: removedWasActive ? emptyTimeline() : state.timeline,
+        sessionTimelines: omitMany(state.sessionTimelines, [...removedSessionIds]),
+        subscribedSessionIds: state.subscribedSessionIds.filter(
+          (id) => !removedSessionIds.has(id),
+        ),
+        tree: removedWasActive ? null : state.tree,
+        git: removedWasActive ? null : state.git,
+        diff: removedWasActive ? null : state.diff,
+      };
+    });
+    await loadSessions(client, set);
+    if (removedWasActive && nextWorkspaceId) await land(get);
   },
 
   newSession(workspaceId, agentId) {
@@ -960,12 +1010,27 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
 
     try {
+      const state = get();
+      const deviceHandle = state.client?.identity?.machineId;
+      const workspaceId = currentWorkspace(state);
+      const workspace = state.workspaces.find((entry) => entry.id === workspaceId);
+      const primaryRootHandle = workspace?.folders?.[0]?.rootHandle;
+      const artifactPreviewBaseUrl =
+        deviceHandle && workspaceId && primaryRootHandle
+          ? assetPreviewBaseUrl(deviceHandle, workspaceId, primaryRootHandle)
+          : null;
       await require_(get().client).call({
         type: "session.send",
         // Continuing a round after an interrupt is not wired into the UI
         // yet — every message from here is a fresh round until it is
         // (docs/agent-analysis-substrate-proposal.md §3.2).
-        payload: { sessionId, text, attachments, continuesRound: null },
+        payload: {
+          sessionId,
+          text,
+          attachments,
+          artifactPreviewBaseUrl,
+          continuesRound: null,
+        },
       });
       // The daemon publishes the user message before it answers this call, and
       // replies and events share one socket in arrival order, so the real item
@@ -1111,25 +1176,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set((state) => ({
       tree: path && state.tree ? graft(state.tree, path, reply.data) : reply.data,
     }));
-  },
-
-  async openFile(path) {
-    const client = require_(get().client);
-    const workspaceId = currentWorkspace(get());
-    if (!workspaceId) return;
-    const reply = await client.call({ type: "file.read", payload: { workspaceId, path } });
-    if (reply?.type === "fileContent") set({ file: reply.data });
-  },
-
-  async saveFile(content) {
-    const client = require_(get().client);
-    const workspaceId = currentWorkspace(get());
-    const open = get().file;
-    if (!workspaceId || !open) return;
-    await client.call({ type: "file.write", payload: { workspaceId, path: open.path, content } });
-    set({ file: { ...open, content } });
-    // Saving is the most common way the change list stops being accurate.
-    await get().refreshGit();
   },
 
   async refreshGit() {

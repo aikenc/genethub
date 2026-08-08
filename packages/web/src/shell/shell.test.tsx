@@ -24,6 +24,7 @@ const workspace = (id: string, name: string): WorkspaceInfo => ({
   name,
   root: `/home/me/${name}`,
   isGitRepo: true,
+  folders: [{ name, root: "/home/me/" + name, rootHandle: `r_${id}` }],
 });
 
 const session = (id: string, workspaceId: string, title: string, running = false): SessionSummary => ({
@@ -82,6 +83,7 @@ beforeEach(() => {
     newSession: vi.fn(),
     renameSession: vi.fn(async () => {}),
     renameWorkspace: vi.fn(async () => {}),
+    removeWorkspace: vi.fn(async () => {}),
     deleteSession: vi.fn(async () => {}),
   });
 });
@@ -161,7 +163,7 @@ describe("the left edge", () => {
 
   it("renames a workspace in place", async () => {
     sidebar();
-    await userEvent.click(screen.getByRole("button", { name: "genethub 的目录操作" }));
+    await userEvent.click(screen.getByRole("button", { name: "genethub 的工作区操作" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
     const field = screen.getByLabelText("工作区名称");
     await userEvent.clear(field);
@@ -179,13 +181,34 @@ describe("the left edge", () => {
         onNavigate={() => {}}
       />,
     );
-    await userEvent.click(screen.getByRole("button", { name: "genethub 的目录操作" }));
+    await userEvent.click(screen.getByRole("button", { name: "genethub 的工作区操作" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "详情" }));
 
-    const details = screen.getByText("目录详情").parentElement?.parentElement;
+    const details = screen.getByText("工作区详情").parentElement?.parentElement;
     expect(details).toHaveTextContent("名称genethub");
-    expect(details).toHaveTextContent("完整路径/home/me/genethub");
+    expect(details).toHaveTextContent("Agent 目录/home/me/genethub");
     expect(details).toHaveTextContent("所属设备开发工作站");
+  });
+
+  it("distinguishes folders from saved workspaces and removes only after confirmation", async () => {
+    const saved = {
+      ...workspace("w2", "paseo"),
+      workspaceFile: "/home/me/paseo.code-workspace",
+    };
+    useWorkbench.setState((state) => ({
+      workspaces: [state.workspaces[0]!, saved, state.workspaces[2]!],
+    }));
+    const tree = sidebar();
+    expect(tree.querySelectorAll('[data-project-icon="folder"]')).toHaveLength(2);
+    expect(tree.querySelectorAll('[data-project-icon="workspace"]')).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "demo 的工作区操作" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "从列表移除" }));
+    expect(screen.getByText(/文件和会话不会删除/)).toBeInTheDocument();
+    expect(useWorkbench.getState().removeWorkspace).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "确认移除" }));
+    expect(useWorkbench.getState().removeWorkspace).toHaveBeenCalledWith("w3");
   });
 
   it("reaches into folded projects when searching, or the search finds nothing", async () => {

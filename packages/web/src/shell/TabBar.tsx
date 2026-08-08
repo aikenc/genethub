@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import { useWorkbench } from "../session/store";
+import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 
 /**
@@ -10,7 +11,7 @@ import { SessionStatusIcon } from "./SessionStatusIcon";
  * not close the chat tab, and closing a tab removes it from the strip.
  */
 export function TabBar({ onOpenTools = () => {} }: { onOpenTools?(): void }) {
-  const { tabs, sessions, activeTabId, activateTab, closeTab, workspaceName } = useTabBar();
+  const { tabs, sessions, activeTabId, activateTab, closeTab, workspace } = useTabBar();
   const strip = useWheelPannedStrip();
 
   return (
@@ -73,8 +74,9 @@ export function TabBar({ onOpenTools = () => {} }: { onOpenTools?(): void }) {
           );
         })}
         {tabs.length === 0 ? (
-          <div className="flex items-center px-3 text-xs text-faint">
-            {workspaceName ?? "工作台"}
+          <div className="flex items-center gap-1.5 px-3 text-xs text-faint">
+            {workspace ? <WorkspaceIcon workspace={workspace} /> : null}
+            {workspace?.name ?? "工作台"}
           </div>
         ) : null}
       </div>
@@ -137,14 +139,14 @@ function useTabBar() {
   const closeTab = useWorkbench((state) => state.closeTab);
   const workspaces = useWorkbench((state) => state.workspaces);
   const activeWorkspaceId = useWorkbench((state) => state.activeWorkspaceId);
-  const workspaceName =
-    workspaces.find((entry) => entry.id === activeWorkspaceId)?.name ?? workspaces[0]?.name;
+  const workspace =
+    workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
   return {
     tabs,
     sessions,
     activeTabId,
     activateTab,
     closeTab,
-    workspaceName,
+    workspace,
   };
 }

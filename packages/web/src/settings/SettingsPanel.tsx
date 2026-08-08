@@ -5,8 +5,10 @@ import { BUILD } from "../build";
 import { CHANNEL } from "../channel";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
+import type { RtcState } from "../protocol/client";
 import { useWorkbench } from "../session/store";
 import { THEME_OPTIONS, useTheme } from "../theme/store";
+import { readRtcEnabled, writeRtcEnabled } from "./rtc";
 
 /**
  * The providers offered before anything is configured.
@@ -54,6 +56,8 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
       <Machine identity={client?.identity ?? null} expected={endpoint?.fingerprint} />
 
       <Appearance />
+
+      <RtcConnection />
 
       <section>
         <h2 className="mb-2 text-sm font-medium">模型密钥</h2>
@@ -115,6 +119,69 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
       <Version host={host} endpoint={endpoint} daemonVersion={client?.identity?.daemonVersion} />
     </div>
   );
+}
+
+function RtcConnection() {
+  const client = useWorkbench((state) => state.client);
+  const [enabled, setEnabled] = useState(readRtcEnabled);
+  const [state, setState] = useState<RtcState>(() => client?.rtcState ?? "standby");
+
+  useEffect(() => {
+    setState(client?.rtcState ?? (enabled ? "standby" : "disabled"));
+    return client?.onRtcStateChange?.(setState);
+  }, [client, enabled]);
+
+  const change = (next: boolean) => {
+    setEnabled(next);
+    writeRtcEnabled(next);
+    client?.setRtcEnabled?.(next);
+    if (!client) setState(next ? "standby" : "disabled");
+  };
+
+  return (
+    <section>
+      <h2 className="mb-2 text-sm font-medium">点对点连接</h2>
+      <div className="flex items-center gap-3 rounded bg-surface px-3 py-2 text-xs">
+        <div className="min-w-0 flex-1">
+          <p>优先使用 WebRTC 直连</p>
+          <p className="mt-0.5 text-faint" data-testid="rtc-status">
+            {rtcLabel(state, client?.identity?.transport)}
+          </p>
+        </div>
+        <label className="inline-flex shrink-0 items-center gap-2">
+          <span className="sr-only">WebRTC 直连</span>
+          <input
+            type="checkbox"
+            role="switch"
+            aria-label="WebRTC 直连"
+            checked={enabled}
+            onChange={(event) => change(event.currentTarget.checked)}
+          />
+          <span>{enabled ? "开" : "关"}</span>
+        </label>
+      </div>
+      <p className="mt-1.5 text-[11px] text-faint">
+        关闭后继续使用端到端加密的基础连接；开关只保存在当前浏览器。
+      </p>
+    </section>
+  );
+}
+
+function rtcLabel(state: RtcState, transport?: string): string {
+  switch (state) {
+    case "disabled":
+      return "已关闭";
+    case "unavailable":
+      return "当前客户端或 daemon 不支持 RTC";
+    case "standby":
+      return transport === "loopback" ? "当前是本机直连，无需 RTC" : "等待可升级的远程连接";
+    case "connecting":
+      return "正在建立 RTC 直连…";
+    case "connected":
+      return "RTC 已直连；新请求会走点对点通道";
+    case "failed":
+      return "RTC 直连失败；当前仍使用端到端加密基础连接";
+  }
 }
 
 /**

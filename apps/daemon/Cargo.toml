@@ -15,11 +15,13 @@ genehub-proto = { path = "../../packages/proto" }
 anyhow.workspace = true
 aes-gcm.workspace = true
 base64.workspace = true
+bytes = "1"
 chrono.workspace = true
 futures-util.workspace = true
 fs2.workspace = true
 hmac.workspace = true
 ignore.workspace = true
+json5.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -38,6 +40,7 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+webrtc = "0.17.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

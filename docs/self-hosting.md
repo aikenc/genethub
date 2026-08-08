@@ -1,155 +1,162 @@
 # 自己部署
 
-先说清楚一件事：**大多数人不需要部署任何东西。**
+大多数人不需要自建。自建适合“让手机或另一台电脑，经公网连接自己的 daemon，但不需要账号系统”的场景。
 
-| 你想做的事 | 需要跑什么 |
-|-----------|-----------|
-| 在 Windows/macOS 电脑前用 | 装桌面端；Linux 使用 CLI/daemon + 浏览器工作台 |
-| 同一个 Wi-Fi 下用手机连电脑 | 同上；另一设备仍走你自建的 WSS relay，不开放明文 LAN bearer |
-| 人在外面连家里的电脑 | 一个 relay，加一份静态工作台。**没有数据库，没有账号系统** |
+```text
+资源电脑 daemon ──出站 WSS /fabric/v2──┐
+                                       ├─ 无状态 rendezvous Relay
+手机/另一台浏览器 ──WSS /fabric/v2─────┘
+         ▲
+         └─ 任意 HTTPS 静态托管的同一份工作台
+```
 
-只有第三种情况才有本文。
+跨设备不开放 daemon 的明文 LAN bearer。Relay 只做 endpoint-neutral Fabric 路由；最终授权由 daemon 本地的配对设备表完成。没有数据库、账号服务或云端文件缓存。
 
-Linux 不提供桌面壳；无论有没有图形界面，都安装 CLI/daemon（服务器、VM 同样适用）：
+## 1. 安装 daemon
+
+Windows/macOS 使用桌面端。Linux、服务器和 VM 安装 CLI/daemon：
 
 ```bash
 curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL https://genehub.dev/install.sh | sh
 genet daemon run
 ```
 
-脚本会校验 `SHA256SUMS`，对不上就拒绝安装，不会给你留一个半截的二进制。发布的 Linux 二进制是 musl 静态链接的，不要求宿主机有多新的 glibc。装完的 daemon 和 Windows/macOS 桌面端里那个是同一个，下面的配对步骤完全一样。
+安装脚本校验发布的 `SHA256SUMS`。当前不自动升级；校验和能发现传输损坏，但不能替代独立签名根。
 
-当前不提供自动升级：`genet update` 会明确返回 `unsupported`，daemon 和桌面壳也不会下载或执行安装包。原因是发布包旁边的 `SHA256SUMS` 只能发现损坏；在发布主机或流水线被攻破时，它不能认证同处发布的二进制。请从官方发布页手动下载，并通过独立可信渠道核对校验值；待项目引入独立签名根后再开放自动升级。
-
----
-
-## 1. 自建形态：两个东西
-
-```
-你的电脑（daemon）  ──出站 WS──►  relay  ◄──WS──  手机 / 另一台电脑的浏览器
-                                   ▲
-                              静态工作台（随便什么托管）
-```
-
-relay 是纯汇合点：按一个 rendezvous id 把两条 socket 接起来，不查目录、不落库、重启即空。
-
-**谁能连你的机器，由你的机器自己判断**，不由 relay，也不由任何服务端。daemon 本地有一份已授权设备列表，形态就是 `authorized_keys`：设备名、首次接入时间、最后活跃时间。撤销就是删一行，删完那条连接立刻断。
-
-所以自建不需要控制面，也不需要账号——**授权靠配对**。
-
----
-
-## 2. 跑一个 relay
+## 2. 启动 rendezvous Relay
 
 ```bash
 cd apps/relay
-npm install && npm run build
+npm install
+npm run build
 
 RELAY_MODE=rendezvous \
-RELAY_PORT=8080 \
 RELAY_HOST=0.0.0.0 \
+RELAY_PORT=8080 \
 RELAY_JOIN_TOKEN="$(openssl rand -hex 32)" \
 npm start
 ```
 
+关键配置：
+
 | 环境变量 | 默认 | 说明 |
-|---------|------|------|
-| `RELAY_MODE` | `control` | `rendezvous` 是自建模式；`control` 是问控制面的模式 |
-| `RELAY_PORT` | 8787 | 监听端口 |
-| `RELAY_HOST` | 127.0.0.1 | 对外提供服务时设成 `0.0.0.0` |
-| `RELAY_JOIN_TOKEN` | 字面 loopback IP 上不需要 | 机器挂上来时要出示。**绑非 loopback 地址时必须配置 32–256 个 base64url/hex 随机字符**（如 `openssl rand -hex 32`）；`localhost` 也不享受例外，避免名称解析把监听带到非 loopback；缺失或弱 token 会拒绝启动 |
-| `RELAY_MAX_DAEMONS` | 5000 | 在线机器上限 |
-| `RELAY_MAX_LEGACY_GENERATION_FENCES` | 100000 | Legacy 机器 admission 代际防重放记录上限；达到上限后只拒绝此前未见过的新机器，已有机器仍可用更高代际重连；记录不会因断线或 Control 抖动被清掉 |
-| `RELAY_MAX_CLIENTS_PER_MACHINE` | 8 | 单机客户端上限 |
-| `RELAY_MAX_BUFFERED_BYTES` | 8 MiB | 单连接缓冲上限，超了就断这一个慢读者 |
-| `RELAY_MAX_OUTBOUND_QUEUED_BYTES` | 64 MiB | 全 Relay（Legacy + Fabric）等待发送回调的总预算；超限只断触发方 |
-| `RELAY_MAX_FRAME_BYTES` | 4 MiB | 单帧上限 |
-| `RELAY_HEARTBEAT` | 30s | 心跳间隔 |
+|---|---|---|
+| `RELAY_MODE` | `control` | 自建必须设为 `rendezvous` |
+| `RELAY_HOST` | `0.0.0.0` | literal loopback 以外的监听必须有强 join token |
+| `RELAY_PORT` | `8788` | 示例使用 8080 |
+| `RELAY_JOIN_TOKEN` | 无 | 非 literal loopback 必须为 32–256 个 base64url/hex 随机字符；`localhost` 不算安全例外 |
+| `RELAY_MAX_FABRIC_ENDPOINTS` | 10000 | 所有 endpoint 总上限 |
+| `RELAY_MAX_FABRIC_STREAMS_PER_ENDPOINT` | 256 | 单 endpoint outer streams |
+| `RELAY_MAX_FABRIC_STREAMS` | 100000 | 全进程 outer streams |
+| `RELAY_MAX_BUFFERED_BYTES` | 8 MiB | 单慢读 socket 发送预算 |
+| `RELAY_MAX_OUTBOUND_QUEUED_BYTES` | 64 MiB | 全进程发送预算 |
+| `RELAY_MAX_FRAME_BYTES` | 4 MiB | Relay 通用 frame 防护上限；当前 v3 peer record 仍限制为 16 KiB |
+| `RELAY_HEARTBEAT` | 30 s | socket heartbeat |
 
-join token 只有机器挂上行连接时要出示，客户端不需要。原因很简单：客户端只能连到一个已经存在的机器槽位，白吃流量得先占一个槽位。
+join token 只让 daemon 占用 node slot，不授予文件或业务权限。client 只能接入一个当前 online 的 slot，随后仍必须在 E2EE peer handshake 中证明 daemon 签发的 device/invite secret。
 
-前面放一个终止 TLS 的反向代理，并且**允许 WebSocket 升级**。这是最常见的踩坑点：默认配置的代理会把 `Upgrade` 头吃掉，表现为连接总是立刻断开。Caddy 不需要额外配置：
+公网前面必须有 TLS reverse proxy，并允许 WebSocket upgrade：
 
-```
+```caddyfile
 relay.example.com {
     reverse_proxy 127.0.0.1:8080
 }
 ```
 
-顺带一提，推荐 Caddy 还有第二个理由：扫码需要 `getUserMedia`，而浏览器只在 HTTPS 下给这个权限。自动 TLS 一行配置就解决了。没有 HTTPS 也能用，只是得手动打开链接而不是扫码。
+daemon 会拒绝非 literal loopback 的 `ws://` Relay URL。公网必须使用 `https://relay.example.com` 配置，实际数据连接转换为 `wss://.../fabric/v2`。
 
-relay 不需要公网入口以外的任何东西：不用数据库，不用持久卷，重启即空。
+不要记录完整 query string：browser endpoint ticket 位于 `/fabric/v2?ticket=...`，虽然短期或由自建 slot 派生，仍应在 proxy/access log 中脱敏。
 
----
+Relay 不需要持久卷，重启即清空在线 endpoint/route；daemon 会自动重新挂接。
 
-## 3. 工作台
+更多运行时限额和信任边界见 [relay.md](./relay.md)。
+
+## 3. 托管静态工作台
 
 ```bash
-cd packages/web && npm install && npm run build   # 产物在 dist/
+cd packages/web
+npm install
+npm run build
 ```
 
-一堆静态文件，随便什么静态托管都行。托管它的那台机器上**不要跑 daemon**（[security-model.md](./security-model.md) §6）。
+`dist/` 是静态文件，可以放在任意 HTTPS 静态托管。SPA host 必须把不存在的前端路径回退到 `index.html`，因为 Preview 使用真实 deep link：
 
----
-
-## 4. 把设备配对给机器
-
-1. 在机器上打开工作台（桌面端就是 App 窗口），进「设备」，填上你的 relay 地址与 join token，点「开启远程访问」。
-2. 点「添加设备」，机器出示一个一次性链接和二维码。
-3. 在手机或另一台电脑上扫码，或者把链接复制过去打开。
-4. 那台设备换到一份长期凭证并存在本地，之后直接连，不用再配对。
-
-关于这条链路的三个事实：
-
-| 事实 | 说明 |
-|------|------|
-| 链接是**一次机会**，不是钥匙 | 一次性、15 分钟过期。用掉之后再拿到它也没用 |
-| 凭证本身不过线 | 连接时双方各用配对时的共享秘密证明一次，秘密不发送。抢占 rendezvous 槽位的人答不出来 |
-| 机器列表存在客户端 | "我配对过哪些机器"是浏览器本地的记录。换个浏览器就得再配对一次——十秒钟的事，比把凭证明文导出安全 |
-
-一人多设备就是每台设备各配对一次。团队共用一个 relay 也是同样的做法：成员各自把自己的电脑配对给自己的设备，relay 不知道谁是谁。
-
-### 多台机器怎么切
-
-配对过的机器都进同一个目标切换器，**本机也在里面**，就是延迟最低、断网也还在的那一项。桌面端不是"只能看本机"：装了 App 的那台电脑上，一样能切到你配对过的另一台。
-
-切换器里换一台，工作台的项目树和会话就换成那台的——工作空间存在各自的机器上，不存在一份跨机的总目录，界面也就不会假装有一份。
-
-配对了 Hub 之后还多一份来源：Hub 那边记着的机器名单。App 不自己去问，它问脚下这个 daemon（`hub.machines`），由 daemon 拿上行凭证去问 Hub；切过去时票据也是 daemon 铸的（`hub.connect`）。你自己的 Hub 只要实现这两个端点就同样能用：
-
-```
-GET  /api/machines/{daemonId}/directory   Authorization: Bearer <长期 enrollment secret>
-POST /api/machines/{daemonId}/tickets     Authorization: Bearer <长期 enrollment secret>
+```text
+/assets/preview/v2/<deviceHandle>/<projectHandle>/<rootHandle>/<relative-path>
 ```
 
-没有 Hub 的机器答一个空列表，切换器里就只有本地那些，一切照常。
+如果部署在子路径，构建时设置正确的 Vite base；Preview builder/parser 会保留该 base。静态 host 不需要安装 daemon，也不代理文件内容。
 
-绕这一圈不是为了好看：这样 App 里就不必装任何账号相关的代码，官方发的安装包和你自己编译出来的是同一份东西。
+建议静态工作台与 Relay 分开部署。至少设置 CSP、`frame-ancestors 'none'` 和 HTTPS；工作台自身位于浏览器凭证信任路径中，不要加载第三方脚本。普通页面应保持 `script-src 'self'`。只有 `/assets/preview/v2/*` 的独立 Preview 文档需要允许 `unsafe-inline`/HTTPS script 与 HTTPS/WSS connect，因为 `srcdoc` 会继承父文档 CSP；它仍必须保持 `frame-ancestors 'none'`，并由代码中的 opaque-origin iframe sandbox 再隔离活动 HTML。不要把这条放宽后的策略全站复用。
 
----
+## 4. 开启远程访问与配对
 
-## 5. 自建与托管版的差别
+1. 在资源电脑的工作台进入「设备」，填写 Relay HTTPS 地址和 join token，开启远程访问。
+2. daemon 根据自己的 machine secret 派生稳定、不可猜的 32-hex rendezvous slot，并维持一条 `/fabric/v2` uplink。
+3. 点「添加设备」，daemon 生成一次性、限时配对链接/二维码。
+4. 在手机或另一台电脑浏览器打开链接；双方完成 invite PSK 双向证明。
+5. daemon 在加密的 `device.claim` response 中返回长期 device credential；浏览器只保存在自己的本地 roster。
 
-诚实列一下，自建拿不到的：
+配对链接是一次机会，不是长期钥匙。长期 secret 不在连接中直接发送；每次连接用新 nonce + HMAC proof 证明持有它，再派生本次 AES-GCM session key。
+
+每个浏览器 profile 独立配对。撤销某个 device 会让对应在线 peer endpoint 立即断开，其他设备不受影响。
+
+## 5. 同一 Preview 链接跨设备打开
+
+文件链接的形态是：
+
+```text
+https://workbench.example/assets/preview/v2/
+  <deviceHandle>/<projectHandle>/<rootHandle>/docs/result.md
+```
+
+URL 明文保留设备、workspace 和相对路径，便于 Agent 输出可点击文档链接。它不是 capability：
+
+- 已配对电脑或手机打开同一 URL 后，从自己的 roster 找到 `deviceHandle`，重新连接对应 rendezvous slot，并用自己的 device credential 完成 E2EE。
+- 未配对浏览器只会得到“尚未获准连接资源所在设备”，不会因为知道 URL 而读取文件。
+- 查看设备不需要 daemon；资源所在电脑的 daemon 必须在线。
+- daemon 先检查项目是否包含 URL 中的全局 rootHandle，再按递归相对路径读取完整文件；超过 4 MiB 或类型不支持会直接拒绝。
+- `asset.preview` request、MIME 与 bytes 都在 v3 E2EE record 内，Fabric Relay 看不到；但浏览器首先请求的 Preview URL locator 是普通 HTTPS path，静态站点/反向代理会看到它。若不希望写入日志，应在 edge 对 `/assets/preview/v2/*` 关闭或脱敏 access log。
+
+同一个 URL 的“相同”包括 workbench origin。如果你有多个静态域名，需要由产品层选择 canonical origin；MVP 不做跨 origin credential 同步。
+
+## 6. WebRTC
+
+跨设备先建立 WSS Fabric baseline，再在该 E2EE link 中协商 WebRTC DataChannel。成功后新请求（包括 Preview）优先点对点传输；失败时仍走 E2EE Relay baseline。
+
+MVP 只有公共 STUN、没有 TURN，所以严格 NAT、企业防火墙或 UDP 被禁时 RTC 可能显示 `failed`。设置中可查看状态和关闭 RTC。关闭 RTC 不会关闭 baseline，也不会降低业务层 E2EE。
+
+RTC direct 只减少数据绕行，不能替代静态工作台、配对或 Relay baseline signaling/presence。
+
+## 7. Relay 能看到什么
+
+- 能看到：IP、连接时间、opaque endpoint/route/outer stream handle、frame 长度与时序。
+- Fabric OPEN 中的初始 peer hello 被当 opaque bytes 转发；Relay 实现不解析，但恶意 Relay可查看其中的版本、通用 client label、RTC capability、credential/invite selector、nonce 和 proof。
+- 看不到：配对/hosted secret、派生 key，以及握手后的 method、workspace/path、MIME、RPC、Preview bytes、事件和 PTY 内容。
+- 无法伪造：AES-256-GCM record 绑定 credential context、方向和严格 sequence；重放或篡改会 fail-close。
+
+AES-GCM 已提供密文完整性；HMAC 用于双向握手和 key derivation，不是每个 record 的第二层 MAC。当前 PSK 模型没有前向保密。
+
+## 8. 自建与托管差异
 
 | 能力 | 自建 | 托管 |
-|------|------|------|
-| 远程连自己的电脑 | 有 | 有 |
-| 一人多设备、逐个撤销 | 有 | 有 |
-| 团队共用一个 relay | 有 | 有 |
-| 新设备免逐台配对 | 无，每台都要配一次 | 有 |
-| 换设备身份延续 | 无 | 有 |
+|---|---|---|
+| 远程连接自己的 daemon | 有 | 有 |
+| 多设备分别配对、撤销 | 有 | 有 |
+| 同一 Preview URL 在已授权设备打开 | 有 | 有 |
+| RTC direct（网络允许时） | 有 | 有 |
+| 账号机器目录 | 无，本地 roster | 有 |
+| 新浏览器通过账号找设备 | 无，需配对 | 有 |
+| Relay/Control 数据库 | 无 | Control 有账号与 admission 状态；Relay 仍无业务存储 |
 
-如果这两条对你不重要——多数个人用户不重要——自建是完整的。
+自建的授权模型是完整的，只是没有账号带来的设备目录和身份同步。
 
-还有一条不在表里，因为它不是"拿不到"，而是"要不要"：有人点「检查更新」时，daemon 会去 GitHub releases 上取一个 `latest.json`。这是它唯一一处跟本仓库之外的地方说话、又跟 relay 无关的地方。不想要就把 `<data>/config.json` 里的 `updateManifestUrl` 留空，从此一次都不发；想指向自己发的版本，就填自己的地址（细节见 [daemon.md](./daemon.md) §7）。
+## 9. 最小运维检查
 
----
-
-## 6. 你的 relay 能看到什么
-
-- **能看到**：谁连了谁、什么时候、多少字节、连接持续多久。
-- **能看到**：IP、连接时序、帧长度、rendezvous/channel id，以及初始 invite id、nonce、proof。
-- **看不到**：通过双向证明后的业务内容。它们使用配对 PSK 派生的方向密钥，以 AES-256-GCM + HMAC 和严格序号封装；relay 不持有 PSK，也不解析、不落库。
-
-配对时设备名和新签发的长期凭证也只在 proof 通过后以加密帧返回，不再以明文经过 relay。当前协议仍是对称 PSK，没有公钥握手与前向保密；自建静态工作台与 relay 都由你控制，不涉及托管 Control 生成会话 secret 的额外信任边界。
+- `GET /api/health` 返回 `status: ok`；`GET /api/ready` 返回 200。
+- reverse proxy 允许 `/fabric/v2` WebSocket upgrade。
+- daemon 只配置 `https://` Relay URL，uplink 状态在线。
+- browser 完成一次配对，目标列表能看到资源电脑。
+- 打开一个不超过 4 MiB 的 `.md` Preview 链接，另一已配对浏览器打开同一链接得到相同内容。
+- 设置中 RTC 至少给出明确状态；RTC `failed` 时 Preview 仍可经 baseline 成功。
+- 撤销 browser device 后，它的 live connection 和 Preview 立即失效。

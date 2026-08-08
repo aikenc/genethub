@@ -61,6 +61,8 @@ cd apps/desktop && ./scripts/bundle.mjs                 # Windows/macOS 桌面�
 | [desktop-client.md](./docs/desktop-client.md) | 桌面端：安装、托盘、后台、体积预算 |
 | [security-model.md](./docs/security-model.md) | 信任边界、凭证与撤销、加密现状 |
 | [self-hosting.md](./docs/self-hosting.md) | 自建：全部自己跑，或只跑 relay |
+| [e2ee-data-plane.md](./docs/e2ee-data-plane.md) | protocol v3：logical streams、E2EE、Fabric baseline 与 WebRTC direct |
+| [assets-quick-preview.md](./docs/assets-quick-preview.md) | workspace-relative、≤4 MiB、完整 Markdown 与 Agent 产物链接的轻量 Preview |
 | [tech-stack.md](./docs/tech-stack.md) | 技术选型与部署拓扑 |
 | [testing.md](./docs/testing.md) | 测试矩阵：跨部件集成与真实模型 E2E |
 | [roadmap.md](./docs/roadmap.md) | MVP → 多 agent → 协作 → 端到端加密 |
@@ -73,9 +75,10 @@ cd apps/desktop && ./scripts/bundle.mjs                 # Windows/macOS 桌面�
 | 多 agent | agent 是插件；内核不认识任何具体 agent，MVP 就要跑通两种形状 |
 | 客户端协议 | 自有归一化模型，不让任何 agent 的线格式外泄成产品协议 |
 | 前端 | 一份产物跑四个宿主，宿主差异收敛在 `packages/web/src/host/` |
-| 转发 | relay 独立成服务，不解析 payload、不落库、可自建 |
-| 身份 | 本仓不需要账号：准入由每台机器自己判，配对时发一份设备凭证。relay 只按 id 撮合两条连接 |
-| 加密现状 | 转发通道完成 v2 双向 PSK 证明后，业务帧使用 AES-256-GCM + 独立 HMAC；Relay 只见路由元数据与密文。托管 Control 会生成通道密钥，尚不具备公钥握手、前向保密或“整个平台零知识”，见 [security-model.md](./docs/security-model.md) |
+| 转发 | Relay 只有 endpoint-neutral `/fabric/v2`，不解析 E2EE payload、不落库、可自建 |
+| 身份 | 自建最终准入由每台 daemon 的配对设备表判断；托管 Control 只发行短期 opaque Fabric/peer admission |
+| 连接 | 每个主动请求使用独立 logical stream；跨设备先走 E2EE Fabric baseline，网络允许时新请求优先 WebRTC direct |
+| 加密现状 | protocol v3 完成 PSK 双向 proof 后，业务 record 使用带严格方向序号与 AAD 的 AES-256-GCM；HMAC 用于握手/派生。Relay 只见路由和流量元数据及初始有界 peer hello。托管 Control 生成 peer secret，尚无公钥握手、前向保密或“整个平台零知识”，见 [security-model.md](./docs/security-model.md) |
 | 安装包 | 下载 ≤ 80MB，安装后 ≤ 200MB，PC 端不依赖 Node 运行时 |
 
 ## 代码

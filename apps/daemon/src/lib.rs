@@ -7,6 +7,7 @@ pub mod adapter;
 pub mod channel;
 pub mod channel_auth;
 pub mod config;
+pub mod dataplane;
 pub mod devices;
 pub mod files;
 pub mod git;

@@ -1,0 +1,150 @@
+const PREVIEW_PATH = "assets/preview/v2/";
+
+export interface AssetPreviewLocation {
+  deviceHandle: string;
+  workspaceHandle: string;
+  path: string;
+}
+
+/** Stable locator shared by Files, Agent output and chat rendering. */
+export function assetPreviewUrl(
+  deviceHandle: string,
+  workspaceHandle: string,
+  path: string,
+  origin = typeof location === "undefined" ? "" : location.origin,
+  basePath = previewBasePath(),
+): string {
+  const relative = previewPath(path);
+  const pathname = `${assetPreviewBasePath(deviceHandle, workspaceHandle, basePath)}${relative
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/")}`;
+  return origin ? new URL(pathname, origin).toString() : pathname;
+}
+
+/**
+ * Exact deployment/device/project/root prefix Agents append artifact paths to.
+ *
+ * It deliberately contains no placeholder path: the daemon validates this
+ * structured prefix before turning it into fixed system guidance, and Agents
+ * only ever append a workspace-relative path.
+ */
+export function assetPreviewBaseUrl(
+  deviceHandle: string,
+  workspaceHandle: string,
+  rootHandle: string,
+  origin = typeof location === "undefined" ? "" : location.origin,
+  basePath = previewBasePath(),
+): string {
+  const base = assetPreviewBasePath(deviceHandle, workspaceHandle, basePath);
+  const pathname =
+    base + encodeURIComponent(locatorSegment(rootHandle, "root handle")) + "/";
+  return origin ? new URL(pathname, origin).toString() : pathname;
+}
+
+function assetPreviewBasePath(
+  deviceHandle: string,
+  workspaceHandle: string,
+  basePath: string,
+): string {
+  const device = locatorSegment(deviceHandle, "device handle");
+  const workspace = locatorSegment(workspaceHandle, "workspace handle");
+  return `${previewPrefix(basePath)}${encodeURIComponent(device)}/${encodeURIComponent(workspace)}/`;
+}
+
+export function parseAssetPreviewPath(
+  pathname: string,
+  basePath = previewBasePath(),
+): AssetPreviewLocation | null {
+  const prefix = previewPrefix(basePath);
+  if (!pathname.startsWith(prefix)) return null;
+  const raw = pathname.slice(prefix.length).split("/");
+  // device, project, root handle, then at least one recursive file segment.
+  if (raw.length < 4) return null;
+  try {
+    const deviceHandle = decodeCanonical(raw[0]!, "device handle");
+    const workspaceHandle = decodeCanonical(raw[1]!, "workspace handle");
+    const path = raw
+      .slice(2)
+      .map((part) => {
+        const decoded = decodeCanonical(part, "path segment");
+        if (decoded.includes("/")) throw new TypeError("encoded path separator");
+        return decoded;
+      })
+      .join("/");
+    return {
+      deviceHandle: locatorSegment(deviceHandle, "device handle"),
+      workspaceHandle: locatorSegment(workspaceHandle, "workspace handle"),
+      path: previewPath(path),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Vite replaces this for each embedding build, including Cloud subpaths. */
+function previewBasePath(): string {
+  const configured = import.meta.env.BASE_URL || "/";
+  // The standalone/Tauri bundle deliberately uses `./`; portable HTTP links
+  // are rooted at the origin in that build. Cloud supplies an absolute base.
+  return configured.startsWith("/") ? configured : "/";
+}
+
+function previewPrefix(basePath: string): string {
+  if (!basePath.startsWith("/") || basePath.startsWith("//")) {
+    throw new TypeError("preview base path must be site-relative");
+  }
+  const base = basePath === "/" ? "/" : `${basePath.replace(/\/+$/, "")}/`;
+  return `${base}${PREVIEW_PATH}`;
+}
+
+export function previewPath(value: string): string {
+  const parts = value.split("/");
+  if (
+    !value ||
+    new TextEncoder().encode(value).byteLength > 4096 ||
+    value.startsWith("/") ||
+    value.includes("\\") ||
+    value.includes("\0") ||
+    parts.length < 2 ||
+    parts.some(
+      (part) =>
+        !part ||
+        part === "." ||
+        part === ".." ||
+        part.includes(":") ||
+        part.endsWith(".") ||
+        part.endsWith(" "),
+    )
+  ) {
+    throw new TypeError("preview path must be a canonical root-qualified file path");
+  }
+  locatorSegment(parts[0]!, "root handle");
+  return value;
+}
+
+function locatorSegment(value: string, name: string): string {
+  if (
+    !value ||
+    value.length > 256 ||
+    value === "." ||
+    value === ".." ||
+    /[\0/\\:#?]/.test(value) ||
+    value.endsWith(".") ||
+    value.endsWith(" ")
+  ) {
+    throw new TypeError(`invalid ${name}`);
+  }
+  return value;
+}
+
+function decodeCanonical(raw: string, name: string): string {
+  if (!raw) throw new TypeError(`empty ${name}`);
+  const value = decodeURIComponent(raw);
+  // URL percent escapes are case-insensitive. Everything else must round-trip
+  // exactly so a locator never has two path-boundary interpretations.
+  if (encodeURIComponent(value).toUpperCase() !== raw.toUpperCase()) {
+    throw new TypeError(`non-canonical ${name}`);
+  }
+  return value;
+}

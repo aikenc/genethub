@@ -202,6 +202,13 @@ fn with_thread_policy(mut params: Value, mode: &Mode) -> Value {
     params
 }
 
+fn with_developer_instructions(mut params: Value, prompt: Option<&str>) -> Value {
+    if let Some(prompt) = prompt.filter(|value| !value.trim().is_empty()) {
+        params["developerInstructions"] = json!(prompt);
+    }
+    params
+}
+
 #[derive(Default)]
 pub struct CodexAdapter {
     /// What the CLI answered when asked for its model table, read once per
@@ -732,7 +739,8 @@ impl CodexSession {
         self.notify("initialized", json!({})).await?;
 
         if let Some(thread_id) = resume_thread_id(&config.resume) {
-            self.reopen(&thread_id).await?;
+            self.reopen(&thread_id, config.additional_system_prompt.as_deref())
+                .await?;
             *self.thread.lock().expect("the thread id is never poisoned") = Some(thread_id);
             return Ok(());
         }
@@ -742,6 +750,7 @@ impl CodexSession {
         if let Some(model) = self.model.lock().await.clone() {
             params["model"] = json!(model);
         }
+        params = with_developer_instructions(params, config.additional_system_prompt.as_deref());
         let started = self.call("thread/start", params).await?;
         let thread = started
             .get("thread")
@@ -757,26 +766,25 @@ impl CodexSession {
     /// Archived threads are unarchived once and tried again: Codex archives on
     /// its own schedule, and a session the user is still looking at is not
     /// something we should refuse just because it was tidied away.
-    async fn reopen(&self, thread_id: &str) -> Result<()> {
+    async fn reopen(&self, thread_id: &str, additional_system_prompt: Option<&str>) -> Result<()> {
         let mode = mode_named(self.mode.lock().await.as_str());
-        match self
-            .call(
-                "thread/resume",
+        let resume_params = || {
+            with_developer_instructions(
                 with_thread_policy(json!({ "threadId": thread_id }), mode),
+                additional_system_prompt,
             )
-            .await
-        {
+        };
+        match self.call("thread/resume", resume_params()).await {
             Ok(_) => Ok(()),
             Err(error) if archived_thread(&error.to_string(), thread_id) => {
                 self.call("thread/unarchive", json!({ "threadId": thread_id }))
                     .await
                     .with_context(|| format!("unarchiving Codex thread {thread_id}"))?;
-                self.call(
-                    "thread/resume",
-                    with_thread_policy(json!({ "threadId": thread_id }), mode),
-                )
-                .await
-                .with_context(|| format!("resuming Codex thread {thread_id} after unarchive"))?;
+                self.call("thread/resume", resume_params())
+                    .await
+                    .with_context(|| {
+                        format!("resuming Codex thread {thread_id} after unarchive")
+                    })?;
                 Ok(())
             }
             Err(error) => Err(error).with_context(|| format!("resuming Codex thread {thread_id}")),
@@ -2815,6 +2823,21 @@ mod tests {
         let explicit = with_thread_policy(json!({}), mode_named("read-only"));
         assert_eq!(explicit["approvalPolicy"], "on-request");
         assert_eq!(explicit["sandbox"], "read-only");
+    }
+
+    #[test]
+    fn artifact_guidance_uses_codex_developer_instructions() {
+        let params = with_developer_instructions(
+            json!({ "cwd": "/tmp/workspace" }),
+            Some("Use https://app.example/assets/preview/v2/device/workspace/r_root/"),
+        );
+        assert_eq!(
+            params["developerInstructions"],
+            "Use https://app.example/assets/preview/v2/device/workspace/r_root/"
+        );
+        assert!(with_developer_instructions(json!({}), None)
+            .get("developerInstructions")
+            .is_none());
     }
 
     #[test]

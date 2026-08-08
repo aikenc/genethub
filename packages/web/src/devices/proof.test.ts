@@ -4,37 +4,16 @@ import {
   channelClientProof,
   channelServerProof,
   deriveChannelSessionKey,
-  openChannelFrame,
-  sealChannelFrame,
-  type ChannelDirection,
 } from "./proof";
+import { openDataRecord, sealDataRecord } from "../dataplane/secure";
 
 const SECRET = "0123456789abcdef".repeat(4);
 const CONTEXT = "hosted:cap_golden";
 const CLIENT_NONCE = "00112233445566778899aabbccddeeff";
 const SERVER_NONCE = "ffeeddccbbaa99887766554433221100";
-const PLAINTEXT = '{"id":"vector","type":"connection.identity"}';
-
-const DIRECTIONS: Array<{
-  direction: ChannelDirection;
-  body: string;
-  mac: string;
-}> = [
-  {
-    direction: "client-to-daemon",
-    body: "mQ-ImSzrzMxYwp4U9arFZahyEjdPYdDAZ0fdvD0JbtoauaBNRGISBpoJWVMNNACBOMagpAVdy9Tft2yk",
-    mac: "d3011fb60bb148fc93edef330ce2b92cf6829ce31d5e72a7712157d5ad520633",
-  },
-  {
-    direction: "daemon-to-client",
-    body: "ZockPFxM1fAFyOyk90K1zciLolBzZaASZncJirI8Wc6bsVHvyeUTszofYf7tFkiFKbSeyyVjb0EtbKz1",
-    mac: "4a2ab0f8cbe9651d20bd4a248b5a4eaa6626e6e509983ecefe900bfa5dfccb5a",
-  },
-];
-
-describe("the channel v2 cross-language wire", () => {
+describe("the protocol-v3 cross-language E2EE wire", () => {
   /** Mirrored byte-for-byte in apps/daemon/src/channel_auth.rs. */
-  it("matches the Rust handshake, ciphertext and MAC golden vectors", async () => {
+  it("matches the Rust handshake and binary record golden vectors", async () => {
     expect(await channelClientProof(SECRET, CONTEXT, CLIENT_NONCE)).toBe(
       "2a0958501e684eb33817ddca6c2346e3a5f0d683b2c821666c0b045a5afe801b",
     );
@@ -48,20 +27,17 @@ describe("the channel v2 cross-language wire", () => {
       CLIENT_NONCE,
       SERVER_NONCE,
     );
-    for (const vector of DIRECTIONS) {
-      expect(await sealChannelFrame(key, vector.direction, 7, PLAINTEXT)).toEqual({
-        body: vector.body,
-        mac: vector.mac,
-      });
-      expect(
-        await openChannelFrame(
-          key,
-          vector.direction,
-          7,
-          vector.body,
-          vector.mac,
-        ),
-      ).toBe(PLAINTEXT);
-    }
+    const plaintext = new TextEncoder().encode("binary\0body");
+    const wire = await sealDataRecord(key, "client-to-daemon", 7, plaintext);
+    expect(hex(wire)).toBe(
+      "47480300000000000000000778bfb3552d1c1a17eac4131325b976445893ce649d9c4361da402a",
+    );
+    expect(hex(await openDataRecord(key, "client-to-daemon", 7, wire))).toBe(
+      hex(plaintext),
+    );
   });
 });
+
+function hex(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
