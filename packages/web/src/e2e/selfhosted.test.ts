@@ -187,24 +187,26 @@ describe.skipIf(
       throw new Error("the machine offered no preview workspace");
     }
     const workspace = workspaces.data[0].id;
+    const rootHandle = workspaces.data[0].folders[0]!.rootHandle;
+    const locator = `${rootHandle}/${relative}`;
     const device = first.identity?.machineId;
     if (!device) throw new Error("the preview peer returned no device handle");
     const url = assetPreviewUrl(
       device,
       workspace,
-      relative,
+      locator,
       "https://viewer.example",
     );
     expect(parseAssetPreviewPath(new URL(url).pathname)).toEqual({
       deviceHandle: device,
       workspaceHandle: workspace,
-      path: relative,
+      path: locator,
     });
 
     const second = await pairedClient("预览浏览器二");
     const [one, two] = await Promise.all([
-      first.preview(workspace, relative),
-      second.preview(workspace, relative),
+      first.preview(workspace, locator),
+      second.preview(workspace, locator),
     ]);
     for (const preview of [one, two]) {
       expect(preview.metadata.kind).toBe("markdown");

@@ -764,9 +764,10 @@ name: string,
  */
 root: string, 
 /**
- * Empty for a plain folder workspace; otherwise the first virtual path segment.
+ * Stable device-local locator for this physical root. Display names and
+ * project membership never participate in resource identity.
  */
-pathPrefix: string, };
+rootHandle: string, };
 
 export type WorkspaceInfo = { id: string, name: string, 
 /**

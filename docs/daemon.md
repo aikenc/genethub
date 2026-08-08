@@ -154,9 +154,11 @@ DataEndpoint method 只有四个：
 
 ### 4.2 工作区与默认工作目录
 
-已登记的工作区存在 `<data>/config.json`。第一个目录是稳定身份锚点，也是 Agent、会话、终端和 Git 的根；`.code-workspace` 只在这个身份上增加多根文件视图。直接打开第一个目录与打开以它为首根的 workspace 文件会复用同一个 id，不会让两个 workspace id 同时争用一份 `.genethub/` 会话目录。切换两种视图也不会覆盖用户改过的名字。
+已登记项目与 device-local root mapping 都存在 `<data>/config.json`。直接打开 folder 与打开 `.code-workspace` 是不同项目来源，因此使用不同、可恢复的项目 id；同一 canonical directory 则复用一个项目无关的随机 `rootHandle`。项目只声明 root 成员关系，folder label 只负责显示，文件路径统一为 `<rootHandle>/<relative-path>`。第一个目录仍是 Agent、会话、终端和 Git 的根。
 
-`workspace.remove` 只把登记项标成隐藏并从当前会话存储索引卸载，绝不删除项目文件或 `.genethub/`。重新打开同一个首根会复用原 id，会话随即重新可见。运行中或等待交互的会话必须先结束，避免移除动作截断正在写入的历史。旧配置若已有同首根的重复项，启动迁移保留较早的 id、优先保留多根视图，并合并为一个登记项。
+多个项目可以共享第一个物理目录，但不会为 `.genethub/` 重复争锁：session home 的 kernel lock 按真实目录唯一。会话 meta 不持久化本机随机 workspace id，而是保存同一 session home 内稳定的 project key；folder key 可被另一安装直接采用，workspace 文件 key 由其 canonical source 派生，因此两种项目视图不会互相冒充会话。
+
+`workspace.remove` 只把登记项标成隐藏并从当前会话存储索引卸载，绝不删除项目文件或 `.genethub/`。重新打开同一 folder source 或同一 `.code-workspace` source 会复用各自原 id，会话随即重新可见。运行中或等待交互的会话必须先结束，避免移除动作截断正在写入的历史。旧配置在启动时一次性补齐全局 rootHandle；运行时没有 folder-prefix fallback。
 
 **新机器一定有一个可用的工作区。** 从没用过的机器上，daemon 启动时会在用户 home 下建一个 `GeneHub/` 并登记为工作区。没有这一步，新装用户能做的第一件事就是被拒绝：没有工作区就没有会话，于是第一屏是一个文件选择器，挡在他还没见过的产品前面。
 

@@ -296,14 +296,14 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
   it("streams exact Preview bytes and preserves typed failures", async () => {
     const { client, socket } = await connected();
     const bytes = new TextEncoder().encode("# hello");
-    const preview = client.preview("workspace-1", "docs/readme.md");
+    const preview = client.preview("workspace-1", "r_project/docs/readme.md");
     await waitFor(() => socket.sent.some((message) => message.type === "asset.preview"));
     const exchange = socket.lastOf("asset.preview");
     expect(exchange.payload).toEqual({
       source: {
         kind: "workspaceFile",
         workspaceHandle: "workspace-1",
-        path: "docs/readme.md",
+        path: "r_project/docs/readme.md",
       },
     });
     socket.respondExchange(exchange.id, 200, {
@@ -314,7 +314,7 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
     }, bytes);
     expect(Array.from((await preview).bytes)).toEqual(Array.from(bytes));
 
-    const missing = client.preview("workspace-1", "gone.png");
+    const missing = client.preview("workspace-1", "r_project/gone.png");
     await waitFor(() => socket.lastOf("asset.preview").id !== exchange.id);
     socket.respondExchange(socket.lastOf("asset.preview").id, 404, {
       error: "notFound",

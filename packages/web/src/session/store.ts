@@ -1014,10 +1014,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       const deviceHandle = state.client?.identity?.machineId;
       const workspaceId = currentWorkspace(state);
       const workspace = state.workspaces.find((entry) => entry.id === workspaceId);
-      const primaryFolder = workspace?.folders?.[0]?.pathPrefix ?? "";
+      const primaryRootHandle = workspace?.folders?.[0]?.rootHandle;
       const artifactPreviewBaseUrl =
-        deviceHandle && workspaceId
-          ? assetPreviewBaseUrl(deviceHandle, workspaceId, primaryFolder)
+        deviceHandle && workspaceId && primaryRootHandle
+          ? assetPreviewBaseUrl(deviceHandle, workspaceId, primaryRootHandle)
           : null;
       await require_(get().client).call({
         type: "session.send",

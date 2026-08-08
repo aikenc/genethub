@@ -53,7 +53,7 @@ function install(client: Client) {
       name: "demo",
       root: "/tmp/demo",
       isGitRepo: true,
-      folders: [{ name: "demo", root: "/tmp/demo", pathPrefix: "" }],
+      folders: [{ name: "demo", root: "/tmp/demo", rootHandle: "r_demo" }],
     }],
     sessions: [],
     activeWorkspaceId: "w1",
@@ -156,9 +156,9 @@ describe("the files panel", () => {
         type: "fileTree",
         data: {
           name: "demo",
-          path: "",
+          path: "r_demo",
           isDir: true,
-          children: [{ name: "notes.md", path: "notes.md", isDir: false }],
+          children: [{ name: "notes.md", path: "r_demo/notes.md", isDir: false }],
         },
       }),
     });
@@ -168,7 +168,7 @@ describe("the files panel", () => {
     const entry = await screen.findByText("notes.md");
     await userEvent.click(entry);
     expect(opened).toHaveBeenCalledWith(
-      "http://localhost:3000/assets/preview/v1/m_device/w1/notes.md",
+      "http://localhost:3000/assets/preview/v2/m_device/w1/r_demo/notes.md",
       "_blank",
       "noopener,noreferrer",
     );
@@ -183,9 +183,9 @@ describe("the files panel", () => {
         type: "fileTree",
         data: {
           name: "demo",
-          path: "",
+          path: "r_demo",
           isDir: true,
-          children: [{ name: "notes.md", path: "notes.md", isDir: false }],
+          children: [{ name: "notes.md", path: "r_demo/notes.md", isDir: false }],
         },
       }),
     });
@@ -201,27 +201,27 @@ describe("the files panel", () => {
     const opened = vi.spyOn(window, "open").mockImplementation(() => null);
     const { client, calls } = stubDaemon({
       "file.tree": (payload: { path?: string | null }) =>
-        payload.path === "docs"
+        payload.path === "r_demo/docs"
           ? {
               type: "fileTree",
               data: {
                 name: "docs",
-                path: "docs",
+                path: "r_demo/docs",
                 isDir: true,
-                children: [{ name: "guide.md", path: "docs/guide.md", isDir: false }],
+                children: [{ name: "guide.md", path: "r_demo/docs/guide.md", isDir: false }],
               },
             }
           : {
               type: "fileTree",
               data: {
                 name: "demo",
-                path: "",
+                path: "r_demo",
                 isDir: true,
                 // This is the exact shape older Rust daemons emitted for None.
                 // Clicking it must not call null.map() and unmount the page.
                 children: [{
                   name: "docs",
-                  path: "docs",
+                  path: "r_demo/docs",
                   isDir: true,
                   children: null as never,
                 }],
@@ -237,7 +237,7 @@ describe("the files panel", () => {
     expect(opened).not.toHaveBeenCalled();
     expect(calls).toContainEqual({
       type: "file.tree",
-      payload: { workspaceId: "w1", path: "docs", depth: 1 },
+      payload: { workspaceId: "w1", path: "r_demo/docs", depth: 1 },
     });
     expect(screen.getByText(/单个文件上限 4 MiB/)).toBeInTheDocument();
   });
@@ -251,10 +251,10 @@ describe("the files panel", () => {
           type: "fileTree",
           data: {
             name: "demo",
-            path: "",
+            path: "r_demo",
             isDir: true,
             children: [
-              { name: roots === 1 ? "before.md" : "after.md", path: roots === 1 ? "before.md" : "after.md", isDir: false },
+              { name: roots === 1 ? "before.md" : "after.md", path: roots === 1 ? "r_demo/before.md" : "r_demo/after.md", isDir: false },
             ],
           },
         };

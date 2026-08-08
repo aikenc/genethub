@@ -625,7 +625,7 @@ function WorkspaceRow({
           {(workspace.folders?.length ? workspace.folders : [{
             name: workspace.name,
             root: workspace.root,
-            pathPrefix: "",
+            rootHandle: "",
           }]).map((folder, index) => (
             <Detail
               key={folder.root}

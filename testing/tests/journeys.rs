@@ -1046,6 +1046,7 @@ async fn changes_made_by_the_agent_show_up_in_git_and_can_be_committed() {
 #[tokio::test]
 async fn files_can_be_browsed_and_edited_through_the_workspace() {
     let journey = Journey::start().await.expect("journey starts");
+    let root_handle = &journey.workspace.folders[0].root_handle;
     journey.write_file("src/main.rs", "fn main() {}").unwrap();
     journey.write_file("README.md", "# hi").unwrap();
 
@@ -1071,7 +1072,7 @@ async fn files_can_be_browsed_and_edited_through_the_workspace() {
         .client
         .call(Request::FileWrite {
             workspace_id: journey.workspace.id.clone(),
-            path: "src/main.rs".into(),
+            path: format!("{root_handle}/src/main.rs"),
             content: "fn main() { println!(\"edited\"); }".into(),
         })
         .await
@@ -1084,13 +1085,19 @@ async fn files_can_be_browsed_and_edited_through_the_workspace() {
 #[tokio::test]
 async fn writes_outside_the_workspace_are_refused() {
     let journey = Journey::start().await.expect("journey starts");
+    let root_handle = &journey.workspace.folders[0].root_handle;
 
-    for path in ["../escape.txt", "/etc/passwd", "src/../../escape.txt"] {
+    for path in [
+        format!("{root_handle}/../escape.txt"),
+        "/etc/passwd".into(),
+        format!("{root_handle}/src/../../escape.txt"),
+        "r_not_a_member/file.txt".into(),
+    ] {
         let error = journey
             .client
             .expect_error(Request::FileWrite {
                 workspace_id: journey.workspace.id.clone(),
-                path: path.into(),
+                path: path.clone(),
                 content: "owned".into(),
             })
             .await;

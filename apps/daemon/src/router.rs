@@ -59,7 +59,11 @@ fn failed(error: anyhow::Error) -> Handled {
     let message = format!("{error:#}");
     let code = if message.contains("Asset Preview base URL") {
         ErrorCode::BadRequest
-    } else if message.contains("escapes the workspace") {
+    } else if message.contains("escapes the workspace")
+        || message.contains("not a member of this workspace")
+        || message.contains("workspace path is not canonical")
+        || message.contains("must name its root handle")
+    {
         ErrorCode::Forbidden
     } else if message.contains("already running") {
         ErrorCode::Conflict
@@ -755,10 +759,16 @@ mod tests {
 
     #[test]
     fn workspace_escapes_are_reported_as_forbidden_not_internal() {
-        let handled = failed(anyhow::anyhow!("path escapes the workspace"));
-        match handled.reply {
-            Err(error) => assert_eq!(error.code, ErrorCode::Forbidden),
-            Ok(_) => panic!("expected an error"),
+        for message in [
+            "path escapes the workspace",
+            "root handle is not a member of this workspace",
+            "a workspace resource path must name its root handle",
+        ] {
+            let handled = failed(anyhow::anyhow!(message));
+            match handled.reply {
+                Err(error) => assert_eq!(error.code, ErrorCode::Forbidden),
+                Ok(_) => panic!("expected an error"),
+            }
         }
     }
 

@@ -2626,7 +2626,7 @@ mod tests {
                 ..meta()
             })
             .unwrap();
-        let base = "https://app.example/relay-dev-2/assets/preview/v1/m_device/w1/";
+        let base = "https://app.example/relay-dev-2/assets/preview/v2/m_device/w1/r_project/";
 
         sessions
             .send(

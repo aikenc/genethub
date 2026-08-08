@@ -581,8 +581,8 @@ describe("an action the user asked for that fails", () => {
         isGitRepo: true,
         workspaceFile: "/srv/suite.code-workspace",
         folders: [
-          { name: "Product", root: "/srv/product", pathPrefix: "Product" },
-          { name: "Docs", root: "/srv/docs", pathPrefix: "Docs" },
+          { name: "Product", root: "/srv/product", rootHandle: "r_product" },
+          { name: "Docs", root: "/srv/docs", rootHandle: "r_docs" },
         ],
       }],
     });
@@ -596,7 +596,7 @@ describe("an action the user asked for that fails", () => {
         text: "生成报告",
         attachments: [],
         artifactPreviewBaseUrl:
-          "http://localhost:3000/assets/preview/v1/m_device/w1/Product/",
+          "http://localhost:3000/assets/preview/v2/m_device/w1/r_product/",
         continuesRound: null,
       },
     });
@@ -1066,7 +1066,7 @@ describe("renaming a workspace", () => {
       name: "project",
       root: "/tmp/project",
       isGitRepo: false,
-      folders: [{ name: "project", root: "/tmp/project", pathPrefix: "" }],
+      folders: [{ name: "project", root: "/tmp/project", rootHandle: "r_project" }],
     };
     const client = {
       call: async (request: { type: string }) =>
@@ -1089,14 +1089,14 @@ describe("removing a workspace registration", () => {
       name: "first",
       root: "/tmp/first",
       isGitRepo: false,
-      folders: [{ name: "first", root: "/tmp/first", pathPrefix: "" }],
+      folders: [{ name: "first", root: "/tmp/first", rootHandle: "r_first" }],
     };
     const second = {
       id: "w2",
       name: "second",
       root: "/tmp/second",
       isGitRepo: false,
-      folders: [{ name: "second", root: "/tmp/second", pathPrefix: "" }],
+      folders: [{ name: "second", root: "/tmp/second", rootHandle: "r_second" }],
     };
     const other = { ...SESSION, id: "s2", workspaceId: "w2" };
     const unsubscribe = vi.fn(async () => {});

@@ -130,8 +130,9 @@ pub struct WorkspaceFolderInfo {
     pub name: String,
     /// Absolute path on the owning device. It never leaves the E2EE application channel.
     pub root: String,
-    /// Empty for a plain folder workspace; otherwise the first virtual path segment.
-    pub path_prefix: String,
+    /// Stable device-local locator for this physical root. Display names and
+    /// project membership never participate in resource identity.
+    pub root_handle: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

@@ -80,7 +80,7 @@ agent 选择器、模型选择器、思考档位、权限模式。**按 `Capabil
 
 两种形态，区别不是装饰性的：桌面端 daemon 就在本机，提供原生“打开项目文件夹”和“打开工作区”选择器；浏览器连的是另一台机器，本地没有东西可浏览，于是通过 E2EE `directory.list` 浏览**那台机器上**的子目录和 `.code-workspace` 文件。打开入口优先从当前选中项目的首根开始；没有当前项目时，使用该浏览器为这台目标设备记住的最后目录，再失败才回到 daemon 的 home。记忆按设备指纹/配对身份隔离，不保存 Relay URL 或临时票据。目录/定义不存在或无效时自动尝试下一级安全回退，并把最终错误显示出来，而不是静悄悄什么都不发生。
 
-`.code-workspace` 采用 VS Code 的多根体验子集：Explorer 以 folder name 显示多个顶层目录，文件和 Preview 路径以唯一 folder prefix 消歧；Agent、会话、终端和 Git 仍以第一个目录为工作区。第一根因此也是项目身份：同根目录与 workspace 文件不会重复登记；若 workspace 文件后来真的换了第一根，则建立新身份，而不是把旧根里的会话历史悄悄“搬走”。这样扩展的是查看/链接命名空间，不把现有 Agent 生命周期改造成多 cwd。
+`.code-workspace` 采用 VS Code 的多根体验子集：Explorer 以 `folders[].name` 显示多个顶层目录，但显示名从不参与文件或 Preview 寻址。直接打开 folder 与打开 `.code-workspace` 是不同项目身份；每个真实目录由 daemon 级随机 `rootHandle` 统一映射，同一 canonical directory 跨项目复用。节点路径统一是 `<rootHandle>/<relative-path>`，所以改 label、重名或调整顺序不会改变历史链接。Agent、会话、终端和 Git 仍以第一个目录为工作区，不把现有 Agent 生命周期改造成多 cwd。
 
 ### 2.3.1 第一次打开
 

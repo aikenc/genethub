@@ -24,7 +24,7 @@ const workspace = (id: string, name: string): WorkspaceInfo => ({
   name,
   root: `/home/me/${name}`,
   isGitRepo: true,
-  folders: [{ name, root: "/home/me/" + name, pathPrefix: "" }],
+  folders: [{ name, root: "/home/me/" + name, rootHandle: `r_${id}` }],
 });
 
 const session = (id: string, workspaceId: string, title: string, running = false): SessionSummary => ({
