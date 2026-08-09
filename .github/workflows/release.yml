@@ -475,10 +475,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Only this run's release outputs belong in the release. The `verify`
+      # reusable CI runs in the same run id and uploads open-ci-bins /
+      # open-ci-relay-dist; an unfiltered merge-multiple download pulled those
+      # in too, and sha256sum then failed on their directories.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
+          name: windows-setup
           path: dist
-          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-tarball
+          path: dist
       - run: ls -la dist
       # A fixed address for "what is the newest version", so the app's 检查更新
       # has something to ask that is not the GitHub API: 60 requests an hour is
