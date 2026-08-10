@@ -85,8 +85,12 @@ export function PreviewFloat({
     setMode("float");
   };
 
-  const chromeBtn =
-    "flex h-5 w-5 shrink-0 items-center justify-center rounded text-sm leading-none text-muted hover:bg-raised hover:text-fg";
+  /** Large float chrome; small/mid use tighter hit targets so the title fits. */
+  const chromeBtnLarge =
+    "flex h-5 w-5 shrink-0 items-center justify-center rounded text-xs leading-none text-muted hover:bg-raised hover:text-fg";
+  const chromeBtnCompact =
+    "flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm text-[10px] leading-none text-muted hover:bg-raised hover:text-fg";
+  const chromeBtn = largeFloatChrome ? chromeBtnLarge : chromeBtnCompact;
   const expandedActionBtn =
     "shrink-0 rounded border border-line bg-surface px-2 py-0.5 text-[11px] leading-none text-fg shadow-sm hover:bg-raised active:bg-raised";
 
@@ -236,12 +240,23 @@ export function PreviewFloat({
         style={
           expanded
             ? undefined
-            : { top: pos.y, left: pos.x, width: floatW, height: floatH }
+            : {
+                top: pos.y,
+                left: pos.x,
+                width: floatW,
+                height: floatH,
+                // Small/mid: block content pan/scroll so it does not fight float drag.
+                ...(!contentInteractive ? { touchAction: "none" as const } : {}),
+              }
         }
         onPointerDown={expanded || contentInteractive ? undefined : beginDrag}
         onPointerMove={expanded || contentInteractive ? undefined : onDragMove}
         onPointerUp={expanded || contentInteractive ? undefined : onDragUp}
         onPointerCancel={expanded || contentInteractive ? undefined : onDragUp}
+        onWheel={(event) => {
+          if (expanded || contentInteractive) return;
+          event.preventDefault();
+        }}
         onClick={() => {
           if (expanded || contentInteractive) return;
           scheduleCycle();
@@ -302,12 +317,12 @@ export function PreviewFloat({
           </header>
         ) : (
           <header
-            className={`flex shrink-0 items-center gap-0.5 border-b border-line px-0.5 ${
+            className={`flex shrink-0 items-center border-b border-line ${
               largeFloatChrome
-                ? "h-[1.725rem] cursor-grab active:cursor-grabbing"
+                ? "h-[1.725rem] cursor-grab gap-0.5 px-0.5 active:cursor-grabbing"
                 : midFloatChrome
-                  ? "h-6"
-                  : "h-5"
+                  ? "h-5 gap-0 px-0"
+                  : "h-4 gap-0 px-0"
             }`}
             onPointerDown={contentInteractive ? beginDrag : undefined}
             onPointerMove={contentInteractive ? onDragMove : undefined}
@@ -337,13 +352,15 @@ export function PreviewFloat({
               }}
               onPointerDown={(event) => event.stopPropagation()}
             >
-              ▢
+              <MaximizeIcon compact={!largeFloatChrome} />
             </button>
             <span
               className={`min-w-0 flex-1 truncate text-muted ${
-                largeFloatChrome || midFloatChrome
-                  ? "text-[11px] leading-none"
-                  : "text-[10px] leading-none"
+                largeFloatChrome
+                  ? "px-0.5 text-[11px] leading-none"
+                  : midFloatChrome
+                    ? "px-px text-[10px] leading-none"
+                    : "px-px text-[9px] leading-none"
               }`}
             >
               {title}
@@ -378,12 +395,18 @@ export function PreviewFloat({
             </button>
           </header>
         )}
-        <div className="relative min-h-0 flex-1 overflow-hidden bg-bg">
+        <div
+          className={`relative min-h-0 flex-1 overflow-hidden bg-bg ${
+            !expanded && !contentInteractive ? "touch-none overscroll-none" : ""
+          }`}
+        >
           <div
             className={
               expanded
                 ? "flex h-full min-h-0 flex-col"
-                : `${contentInteractive ? "" : "pointer-events-none "}absolute left-0 top-0 origin-top-left`
+                : `${
+                    contentInteractive ? "" : "pointer-events-none touch-none "
+                  }absolute left-0 top-0 origin-top-left overflow-hidden`
             }
             style={
               expanded
@@ -482,6 +505,23 @@ function InfoIcon() {
         stroke="currentColor"
         strokeWidth="1.25"
         strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function MaximizeIcon({ compact }: { compact?: boolean }) {
+  const size = compact ? 8 : 11;
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" fill="none" aria-hidden="true">
+      <rect
+        x="1.5"
+        y="1.5"
+        width="9"
+        height="9"
+        rx="1"
+        stroke="currentColor"
+        strokeWidth="1.2"
       />
     </svg>
   );
