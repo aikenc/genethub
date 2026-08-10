@@ -20,10 +20,12 @@ const SIZE_FACTORS = [0.75, 1.5, 3] as const;
 const EDGE = 8;
 const SNAP = 28;
 const THUMB_SCALE = 0.14;
+const CLICK_DELAY_MS = 280;
 
 /**
  * WeChat-style Preview: fullscreen by default; minimize to a free-position
- * float with three double-click sizes, edge snap, and live thumbnail.
+ * float. Single-click cycles float size; double-click maximizes. The preview
+ * document stays mounted across mode changes so Fabric reload is avoided.
  */
 export function PreviewFloat({
   source,
@@ -52,6 +54,7 @@ export function PreviewFloat({
     moved: boolean;
   } | null>(null);
   const skipClick = useRef(false);
+  const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const externalUrl = assetPreviewUrl(
     source.deviceHandle,
@@ -63,15 +66,21 @@ export function PreviewFloat({
   const factor = SIZE_FACTORS[sizeLevel] ?? SIZE_FACTORS[0];
   const floatW = Math.round(BASE_W * factor);
   const floatH = Math.round(BASE_H * factor);
+  const expanded = mode === "expanded";
   const contentInteractive = mode === "float" && sizeLevel === SIZE_FACTORS.length - 1;
+  const showFloatClose = mode === "float" && sizeLevel >= 1;
 
   useEffect(() => {
     setMode("expanded");
     setSizeLevel(0);
     setInfoOpen(false);
-    // Meta is refreshed by AssetPreviewPage via onMetaChange; clearing it here
-    // races the child's layout/effect and wipes the first title/info payload.
   }, [source.path, source.workspaceHandle, source.deviceHandle]);
+
+  useEffect(() => {
+    return () => {
+      if (clickTimer.current) clearTimeout(clickTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -156,7 +165,26 @@ export function PreviewFloat({
       setPos((current) => clampPos(current.x, current.y, nextW, nextH));
       return next;
     });
-    skipClick.current = true;
+  };
+
+  const maximize = () => {
+    if (clickTimer.current) {
+      clearTimeout(clickTimer.current);
+      clickTimer.current = null;
+    }
+    setMode("expanded");
+  };
+
+  const scheduleCycle = () => {
+    if (skipClick.current) {
+      skipClick.current = false;
+      return;
+    }
+    if (clickTimer.current) clearTimeout(clickTimer.current);
+    clickTimer.current = setTimeout(() => {
+      clickTimer.current = null;
+      cycleSize();
+    }, CLICK_DELAY_MS);
   };
 
   const preview = client ? (
@@ -173,54 +201,99 @@ export function PreviewFloat({
     </p>
   );
 
-  const infoButton = (
-    <button
-      type="button"
-      aria-label="查看预览信息"
-      title="查看预览信息"
-      className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg"
-      onClick={(event) => {
-        event.stopPropagation();
-        setInfoOpen(true);
-      }}
-    >
-      <InfoIcon />
-    </button>
-  );
-
-  if (mode === "float") {
-    return (
-      <>
-        <div
-          role="button"
-          aria-label={contentInteractive ? `预览 ${title}` : `展开预览 ${title}`}
-          tabIndex={0}
-          className="fixed z-40 flex flex-col overflow-hidden rounded-xl border border-line bg-surface text-fg shadow-lg"
-          style={{ top: pos.y, left: pos.x, width: floatW, height: floatH }}
-          onPointerDown={contentInteractive ? undefined : beginDrag}
-          onPointerMove={contentInteractive ? undefined : onDragMove}
-          onPointerUp={contentInteractive ? undefined : onDragUp}
-          onPointerCancel={contentInteractive ? undefined : onDragUp}
-          onDoubleClick={(event) => {
+  return (
+    <>
+      <div
+        role={expanded ? "dialog" : "button"}
+        aria-modal={expanded ? true : undefined}
+        aria-label={expanded ? "文件预览" : `预览浮窗 ${title}`}
+        tabIndex={expanded ? undefined : 0}
+        className={
+          expanded
+            ? "fixed inset-0 z-40 flex flex-col bg-bg text-fg"
+            : "fixed z-40 flex flex-col overflow-hidden rounded-xl border border-line bg-surface text-fg shadow-lg"
+        }
+        style={
+          expanded
+            ? undefined
+            : { top: pos.y, left: pos.x, width: floatW, height: floatH }
+        }
+        onPointerDown={expanded || contentInteractive ? undefined : beginDrag}
+        onPointerMove={expanded || contentInteractive ? undefined : onDragMove}
+        onPointerUp={expanded || contentInteractive ? undefined : onDragUp}
+        onPointerCancel={expanded || contentInteractive ? undefined : onDragUp}
+        onClick={() => {
+          if (expanded || contentInteractive) return;
+          scheduleCycle();
+        }}
+        onDoubleClick={(event) => {
+          if (expanded) return;
+          event.preventDefault();
+          event.stopPropagation();
+          maximize();
+        }}
+        onKeyDown={(event) => {
+          if (expanded) return;
+          if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
-            event.stopPropagation();
-            cycleSize();
-          }}
-          onClick={() => {
-            if (contentInteractive) return;
-            if (skipClick.current) {
-              skipClick.current = false;
-              return;
-            }
-            setMode("expanded");
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              if (!contentInteractive) setMode("expanded");
-            }
-          }}
-        >
+            maximize();
+          }
+        }}
+      >
+        {expanded ? (
+          <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line px-3 py-2">
+            <button
+              type="button"
+              aria-label="查看预览信息"
+              title="查看预览信息"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg"
+              onClick={() => setInfoOpen(true)}
+            >
+              <InfoIcon />
+            </button>
+            <span className="min-w-0 flex-1 truncate font-mono text-xs">{source.path}</span>
+            <button
+              type="button"
+              className="shrink-0 rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-fg"
+              onClick={() => {
+                setSizeLevel(0);
+                setPos((current) =>
+                  clampPos(
+                    current.x,
+                    current.y,
+                    Math.round(BASE_W * SIZE_FACTORS[0]),
+                    Math.round(BASE_H * SIZE_FACTORS[0]),
+                  ),
+                );
+                setMode("float");
+              }}
+            >
+              最小化
+            </button>
+            <button
+              type="button"
+              className="shrink-0 rounded px-2 py-1 text-xs text-accent hover:bg-raised"
+              onClick={() => {
+                window.dispatchEvent(
+                  new CustomEvent("genehub:preview-open", {
+                    detail: { path: source.path, url: externalUrl },
+                  }),
+                );
+                window.open(externalUrl, "_blank", "noopener,noreferrer");
+              }}
+            >
+              新窗口打开
+            </button>
+            <button
+              type="button"
+              aria-label="关闭预览"
+              className="shrink-0 rounded px-2 py-1 text-lg leading-none text-muted hover:bg-raised hover:text-fg"
+              onClick={onClose}
+            >
+              ×
+            </button>
+          </header>
+        ) : (
           <header
             className={`flex shrink-0 items-center gap-1 border-b border-line px-1.5 py-1 ${
               contentInteractive ? "cursor-grab active:cursor-grabbing" : ""
@@ -229,102 +302,56 @@ export function PreviewFloat({
             onPointerMove={contentInteractive ? onDragMove : undefined}
             onPointerUp={contentInteractive ? onDragUp : undefined}
             onPointerCancel={contentInteractive ? onDragUp : undefined}
+            onClick={(event) => {
+              if (!contentInteractive) return;
+              event.stopPropagation();
+              scheduleCycle();
+            }}
             onDoubleClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              cycleSize();
+              maximize();
             }}
           >
             <span className="min-w-0 flex-1 truncate text-[10px] leading-tight text-muted">
               {title}
             </span>
+            {showFloatClose ? (
+              <button
+                type="button"
+                aria-label="关闭预览"
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-sm leading-none text-muted hover:bg-raised hover:text-fg"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onClose();
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                ×
+              </button>
+            ) : null}
           </header>
-          <div className="relative min-h-0 flex-1 overflow-hidden bg-bg">
-            <div
-              className={
-                contentInteractive
-                  ? "flex h-full min-h-0 flex-col"
-                  : "pointer-events-none absolute left-0 top-0 origin-top-left"
-              }
-              style={
-                contentInteractive
-                  ? undefined
-                  : {
-                      width: `${(100 / THUMB_SCALE).toFixed(2)}%`,
-                      height: `${(100 / THUMB_SCALE).toFixed(2)}%`,
-                      transform: `scale(${THUMB_SCALE})`,
-                    }
-              }
-            >
-              {preview}
-            </div>
+        )}
+        <div className="relative min-h-0 flex-1 overflow-hidden bg-bg">
+          <div
+            className={
+              expanded || contentInteractive
+                ? "flex h-full min-h-0 flex-col"
+                : "pointer-events-none absolute left-0 top-0 origin-top-left"
+            }
+            style={
+              expanded || contentInteractive
+                ? undefined
+                : {
+                    width: `${(100 / THUMB_SCALE).toFixed(2)}%`,
+                    height: `${(100 / THUMB_SCALE).toFixed(2)}%`,
+                    transform: `scale(${THUMB_SCALE})`,
+                  }
+            }
+          >
+            {preview}
           </div>
         </div>
-        {infoOpen ? (
-          <PreviewInfoDialog
-            path={source.path}
-            title={title}
-            meta={meta}
-            onClose={() => setInfoOpen(false)}
-          />
-        ) : null}
-      </>
-    );
-  }
-
-  return (
-    <>
-      <div
-        className="fixed inset-0 z-40 flex flex-col bg-bg text-fg"
-        role="dialog"
-        aria-modal="true"
-        aria-label="文件预览"
-      >
-        <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line px-3 py-2">
-          {infoButton}
-          <span className="min-w-0 flex-1 truncate font-mono text-xs">{source.path}</span>
-          <button
-            type="button"
-            className="shrink-0 rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-fg"
-            onClick={() => {
-              setSizeLevel(0);
-              setPos((current) =>
-                clampPos(
-                  current.x,
-                  current.y,
-                  Math.round(BASE_W * SIZE_FACTORS[0]),
-                  Math.round(BASE_H * SIZE_FACTORS[0]),
-                ),
-              );
-              setMode("float");
-            }}
-          >
-            最小化
-          </button>
-          <button
-            type="button"
-            className="shrink-0 rounded px-2 py-1 text-xs text-accent hover:bg-raised"
-            onClick={() => {
-              window.dispatchEvent(
-                new CustomEvent("genehub:preview-open", {
-                  detail: { path: source.path, url: externalUrl },
-                }),
-              );
-              window.open(externalUrl, "_blank", "noopener,noreferrer");
-            }}
-          >
-            新窗口打开
-          </button>
-          <button
-            type="button"
-            aria-label="关闭预览"
-            className="shrink-0 rounded px-2 py-1 text-lg leading-none text-muted hover:bg-raised hover:text-fg"
-            onClick={onClose}
-          >
-            ×
-          </button>
-        </header>
-        <div className="min-h-0 flex-1">{preview}</div>
       </div>
       {infoOpen ? (
         <PreviewInfoDialog

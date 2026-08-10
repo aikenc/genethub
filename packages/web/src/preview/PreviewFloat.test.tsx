@@ -1,16 +1,23 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { useLayoutEffect } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useLayoutEffect, useRef } from "react";
 
 import type { Host } from "../host";
 import { PreviewFloat } from "./PreviewFloat";
+
+const mountCount = { current: 0 };
 
 vi.mock("./AssetPreviewPage", () => ({
   AssetPreviewPage: (props: {
     client?: unknown;
     onMetaChange?: (meta: { documentTitle: string | null; infoLines: string[] }) => void;
   }) => {
+    const counted = useRef(false);
+    if (!counted.current) {
+      counted.current = true;
+      mountCount.current += 1;
+    }
     useLayoutEffect(() => {
       props.onMetaChange?.({
         documentTitle: "Cursor Demo Title",
@@ -27,13 +34,19 @@ vi.mock("../session/store", () => ({
 }));
 
 describe("PreviewFloat", () => {
+  beforeEach(() => {
+    mountCount.current = 0;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
-  it("opens fullscreen, shows info dialog, and minimizes to a free float", async () => {
-    const user = userEvent.setup();
+  it("opens fullscreen, shows info dialog, and keeps preview mounted across minimize", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const onClose = vi.fn();
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
     const host = { kind: "browser" } as Host;
@@ -51,6 +64,7 @@ describe("PreviewFloat", () => {
     );
 
     expect(screen.getByTestId("preview-body")).toBeInTheDocument();
+    expect(mountCount.current).toBe(1);
     expect(screen.getByRole("dialog", { name: "文件预览" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "查看预览信息" }));
@@ -60,16 +74,59 @@ describe("PreviewFloat", () => {
 
     await user.click(screen.getByRole("button", { name: "最小化" }));
     expect(
-      await screen.findByRole("button", { name: "展开预览 Cursor Demo Title" }),
+      await screen.findByRole("button", { name: "预览浮窗 Cursor Demo Title" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Cursor Demo Title")).toBeInTheDocument();
+    expect(mountCount.current).toBe(1);
 
-    await user.click(screen.getByRole("button", { name: "展开预览 Cursor Demo Title" }));
+    await user.dblClick(screen.getByRole("button", { name: "预览浮窗 Cursor Demo Title" }));
     expect(screen.getByRole("dialog", { name: "文件预览" })).toBeInTheDocument();
+    expect(mountCount.current).toBe(1);
 
     await user.click(screen.getByRole("button", { name: "新窗口打开" }));
     expect(open).toHaveBeenCalled();
     expect(String(open.mock.calls[0]?.[0])).toContain("/assets/preview/v2/");
+
+    await user.click(screen.getByRole("button", { name: "关闭预览" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("cycles float size on single click and shows close on mid/large", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const onClose = vi.fn();
+    const host = { kind: "browser" } as Host;
+
+    render(
+      <PreviewFloat
+        source={{
+          deviceHandle: "m_demo",
+          workspaceHandle: "w_demo",
+          path: "r_root/demos/index.html",
+        }}
+        host={host}
+        onClose={onClose}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "最小化" }));
+    const float = await screen.findByRole("button", { name: "预览浮窗 Cursor Demo Title" });
+    expect(screen.queryByRole("button", { name: "关闭预览" })).not.toBeInTheDocument();
+
+    // small → mid
+    await user.click(float);
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
+    expect(float.style.width).toBe("108px");
+
+    // mid → large
+    await user.click(float);
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(float.style.width).toBe("216px");
+    expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "关闭预览" }));
     expect(onClose).toHaveBeenCalled();
