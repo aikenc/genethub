@@ -233,7 +233,7 @@ Agent 不必输出部署相关的 Preview prefix。聊天与文档 Preview 共�
 - 已是 `/assets/preview/v2/...` 的旧链接（保留 path，重绑当前 device/project）
 - Markdown 图片的相对/绝对本地路径：经 `asset.preview` 鉴权加载为 blob，外链图片仍阻断
 
-`session.send` 的 `artifactPreviewBaseUrl` 仍保留在协议中以兼容旧客户端，但当前工作台始终传 `null`，daemon 不再把它注入 adapter system prompt。
+`session.send` 的 `artifactPreviewBaseUrl` 仍保留在协议中以兼容旧客户端，但当前工作台始终传 `null`，daemon **不会**把它拼成部署相关 Preview 前缀注入 adapter。daemon 会注入一段与部署无关的路径链接指引：要求 Agent 输出工作区相对文件路径（Markdown 链接或裸路径）、禁止只给目录，并强调 H5/静态站必须落到入口 `.html`（通常是 `index.html`），同时列出 Preview 支持的文件种类。
 
 HTML 预览在 Viewer 内对入口文件做静态依赖 Blob 重映射（`link`/`script`/`img` 等相对引用与 CSS `url()`）；CSP 允许 `blob:` 的 script/style/font。动态 `fetch`/import、根路径 `/...` 与 WebRoot HTTP origin 仍不在本版本内。
 
@@ -252,7 +252,7 @@ HTML 预览在 Viewer 内对入口文件做静态依赖 Blob 重映射（`link`/
 - 长 Markdown 可滚动，GFM/inline code/fenced code 高亮和安全 Mermaid 流程图可用。
 - 任意有效 UTF-8 无 NUL 文件可读；已知源码/配置/构建格式按路径着色，未知文本自动识别或安全退化为转义纯文本。
 - 聊天/文档 Markdown 把相对路径、绝对路径和旧 Preview URL 解析为当前绑定；外链图片仍阻断，本地图片经鉴权 blob 显示。
-- `session.send` 不再注入 Preview URL system prompt。
+- `session.send` 不注入部署相关 Preview URL 前缀；会注入路径链接指引（含 HTML 入口与支持类型）。
 - allowlist、UTF-8、magic、普通文件和 symlink escape 均有 daemon 测试。
 - 成功 response 精确校验三处长度；取消、超时和页面关闭能释放 stream/client/Blob。
 - HTML script 可运行，静态相对 CSS/JS/图片可经 Blob 重映射加载，网络策略可见，父页面同源权限不可得；动态加载与根路径站点仍不可用。
