@@ -1,14 +1,24 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useLayoutEffect } from "react";
 
 import type { Host } from "../host";
 import { PreviewFloat } from "./PreviewFloat";
 
 vi.mock("./AssetPreviewPage", () => ({
-  AssetPreviewPage: (props: { client?: unknown }) => (
-    <div data-testid="preview-body">preview body{props.client ? " shared" : ""}</div>
-  ),
+  AssetPreviewPage: (props: {
+    client?: unknown;
+    onMetaChange?: (meta: { documentTitle: string | null; infoLines: string[] }) => void;
+  }) => {
+    useLayoutEffect(() => {
+      props.onMetaChange?.({
+        documentTitle: "Cursor Demo Title",
+        infoLines: ["静态多文件（内联）", "网络已开启"],
+      });
+    }, [props.onMetaChange]);
+    return <div data-testid="preview-body">preview body{props.client ? " shared" : ""}</div>;
+  },
 }));
 
 vi.mock("../session/store", () => ({
@@ -22,7 +32,7 @@ describe("PreviewFloat", () => {
     vi.restoreAllMocks();
   });
 
-  it("opens fullscreen and can minimize to a dockable bubble", async () => {
+  it("opens fullscreen, shows info dialog, and minimizes to a free float", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
@@ -43,11 +53,18 @@ describe("PreviewFloat", () => {
     expect(screen.getByTestId("preview-body")).toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "文件预览" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "最小化" }));
-    expect(screen.getByRole("button", { name: "展开预览 index.html" })).toBeInTheDocument();
-    expect(screen.getByTestId("preview-body")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看预览信息" }));
+    expect(screen.getByRole("dialog", { name: "预览信息" })).toBeInTheDocument();
+    expect(screen.getByText("静态多文件（内联）")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "关闭信息" }));
 
-    await user.click(screen.getByRole("button", { name: "展开预览 index.html" }));
+    await user.click(screen.getByRole("button", { name: "最小化" }));
+    expect(
+      await screen.findByRole("button", { name: "展开预览 Cursor Demo Title" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Cursor Demo Title")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "展开预览 Cursor Demo Title" }));
     expect(screen.getByRole("dialog", { name: "文件预览" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "新窗口打开" }));
