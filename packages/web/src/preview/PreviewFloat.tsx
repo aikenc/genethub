@@ -19,7 +19,10 @@ const BASE_H = 88;
 const SIZE_FACTORS = [0.75, 1.5, 3] as const;
 const EDGE = 8;
 const SNAP = 28;
+/** Visual scale of the preview document inside every float size. */
 const THUMB_SCALE = 0.14;
+/** Compact chrome for mid/large floats (mobile title bars were too tall). */
+const FLOAT_CHROME_SCALE = 0.6;
 const CLICK_DELAY_MS = 280;
 
 /**
@@ -67,8 +70,10 @@ export function PreviewFloat({
   const floatW = Math.round(BASE_W * factor);
   const floatH = Math.round(BASE_H * factor);
   const expanded = mode === "expanded";
+  /** Large float: same thumb scale as mid, but content accepts input. */
   const contentInteractive = mode === "float" && sizeLevel === SIZE_FACTORS.length - 1;
   const showFloatClose = mode === "float" && sizeLevel >= 1;
+  const compactFloatChrome = mode === "float" && sizeLevel >= 1;
 
   useEffect(() => {
     setMode("expanded");
@@ -294,53 +299,71 @@ export function PreviewFloat({
             </button>
           </header>
         ) : (
-          <header
-            className={`flex shrink-0 items-center gap-1 border-b border-line px-1.5 py-1 ${
-              contentInteractive ? "cursor-grab active:cursor-grabbing" : ""
-            }`}
-            onPointerDown={contentInteractive ? beginDrag : undefined}
-            onPointerMove={contentInteractive ? onDragMove : undefined}
-            onPointerUp={contentInteractive ? onDragUp : undefined}
-            onPointerCancel={contentInteractive ? onDragUp : undefined}
-            onClick={(event) => {
-              if (!contentInteractive) return;
-              event.stopPropagation();
-              scheduleCycle();
-            }}
-            onDoubleClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              maximize();
-            }}
+          <div
+            className="shrink-0 overflow-hidden border-b border-line"
+            style={
+              compactFloatChrome
+                ? { height: `${FLOAT_CHROME_SCALE * 1.5}rem` }
+                : undefined
+            }
           >
-            <span className="min-w-0 flex-1 truncate text-[10px] leading-tight text-muted">
-              {title}
-            </span>
-            {showFloatClose ? (
-              <button
-                type="button"
-                aria-label="关闭预览"
-                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-sm leading-none text-muted hover:bg-raised hover:text-fg"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onClose();
-                }}
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                ×
-              </button>
-            ) : null}
-          </header>
+            <header
+              className={`flex items-center gap-1 px-1.5 py-1 ${
+                contentInteractive ? "cursor-grab active:cursor-grabbing" : ""
+              }`}
+              style={
+                compactFloatChrome
+                  ? {
+                      width: `${(100 / FLOAT_CHROME_SCALE).toFixed(2)}%`,
+                      transform: `scale(${FLOAT_CHROME_SCALE})`,
+                      transformOrigin: "top left",
+                    }
+                  : undefined
+              }
+              onPointerDown={contentInteractive ? beginDrag : undefined}
+              onPointerMove={contentInteractive ? onDragMove : undefined}
+              onPointerUp={contentInteractive ? onDragUp : undefined}
+              onPointerCancel={contentInteractive ? onDragUp : undefined}
+              onClick={(event) => {
+                if (!contentInteractive) return;
+                event.stopPropagation();
+                scheduleCycle();
+              }}
+              onDoubleClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                maximize();
+              }}
+            >
+              <span className="min-w-0 flex-1 truncate text-[10px] leading-tight text-muted">
+                {title}
+              </span>
+              {showFloatClose ? (
+                <button
+                  type="button"
+                  aria-label="关闭预览"
+                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-sm leading-none text-muted hover:bg-raised hover:text-fg"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onClose();
+                  }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                >
+                  ×
+                </button>
+              ) : null}
+            </header>
+          </div>
         )}
         <div className="relative min-h-0 flex-1 overflow-hidden bg-bg">
           <div
             className={
-              expanded || contentInteractive
+              expanded
                 ? "flex h-full min-h-0 flex-col"
-                : "pointer-events-none absolute left-0 top-0 origin-top-left"
+                : `${contentInteractive ? "" : "pointer-events-none "}absolute left-0 top-0 origin-top-left`
             }
             style={
-              expanded || contentInteractive
+              expanded
                 ? undefined
                 : {
                     width: `${(100 / THUMB_SCALE).toFixed(2)}%`,

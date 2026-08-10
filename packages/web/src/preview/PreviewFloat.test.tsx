@@ -120,13 +120,15 @@ describe("PreviewFloat", () => {
     expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
     expect(float.style.width).toBe("108px");
 
-    // mid → large
+    // mid → large: window grows, content keeps the same thumb scale
     await user.click(float);
     await act(async () => {
       vi.advanceTimersByTime(300);
     });
     expect(float.style.width).toBe("216px");
     expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
+    const previewShell = screen.getByTestId("preview-body").parentElement;
+    expect(previewShell?.style.transform).toContain("scale(0.14)");
 
     await user.click(screen.getByRole("button", { name: "关闭预览" }));
     expect(onClose).toHaveBeenCalled();
