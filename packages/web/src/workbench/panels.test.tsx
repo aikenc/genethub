@@ -76,6 +76,7 @@ beforeEach(() => {
     update: null,
     updating: false,
     download: { state: "idle" },
+    previewFloat: null,
   });
 });
 
@@ -149,8 +150,7 @@ describe("the log panel", () => {
 });
 
 describe("the files panel", () => {
-  it("opens a stable workspace-relative Preview URL in its own page", async () => {
-    const opened = vi.spyOn(window, "open").mockImplementation(() => null);
+  it("opens a file in the workbench Preview float", async () => {
     const { client, calls } = stubDaemon({
       "file.tree": () => ({
         type: "fileTree",
@@ -167,17 +167,16 @@ describe("the files panel", () => {
     render(<FilesPanel />);
     const entry = await screen.findByText("notes.md");
     await userEvent.click(entry);
-    expect(opened).toHaveBeenCalledWith(
-      "http://localhost:3000/assets/preview/v2/m_device/w1/r_demo/notes.md",
-      "_blank",
-      "noopener,noreferrer",
-    );
+    expect(useWorkbench.getState().previewFloat).toEqual({
+      deviceHandle: "m_device",
+      workspaceHandle: "w1",
+      path: "r_demo/notes.md",
+    });
     expect(calls.some((call) => call.type === "file.tree")).toBe(true);
     expect(calls.some((call) => call.type === "file.write")).toBe(false);
   });
 
   it("does not load file bytes into the workbench store", async () => {
-    const opened = vi.spyOn(window, "open").mockImplementation(() => null);
     const { client } = stubDaemon({
       "file.tree": () => ({
         type: "fileTree",
@@ -193,7 +192,7 @@ describe("the files panel", () => {
 
     render(<FilesPanel />);
     await userEvent.click(await screen.findByText("notes.md"));
-    expect(opened).toHaveBeenCalledTimes(1);
+    expect(useWorkbench.getState().previewFloat?.path).toBe("r_demo/notes.md");
     expect(screen.queryByRole("textbox")).toBeNull();
   });
 

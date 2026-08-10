@@ -3,6 +3,9 @@ import { useCallback, useMemo } from "react";
 import type { MarkdownArtifactProps } from "./Markdown";
 import { useWorkbench } from "./store";
 
+/** Stable empty snapshot so zustand selectors do not infinite-loop on miss. */
+const NO_FOLDERS: MarkdownArtifactProps["folders"] = [];
+
 /** Workspace binding for chat Markdown path rewrite and authenticated images. */
 export function useSessionArtifact(): MarkdownArtifactProps | null {
   const client = useWorkbench((state) => state.client);
@@ -15,7 +18,7 @@ export function useSessionArtifact(): MarkdownArtifactProps | null {
   });
   const folders = useWorkbench((state) => {
     const workspace = state.workspaces.find((entry) => entry.id === workspaceHandle);
-    return workspace?.folders ?? [];
+    return workspace?.folders ?? NO_FOLDERS;
   });
 
   const loadPreview = useCallback(
