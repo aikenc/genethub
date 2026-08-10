@@ -17,9 +17,12 @@ type ViewState =
 export function AssetPreviewPage({
   source,
   host = detectHost(),
+  chrome = "page",
 }: {
   source: AssetPreviewLocation;
   host?: Host;
+  /** `embedded` omits page chrome when hosted inside the workbench float. */
+  chrome?: "page" | "embedded";
 }) {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
 
@@ -89,12 +92,14 @@ export function AssetPreviewPage({
 
   return (
     <main className="flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg">
-      <header className="flex min-h-11 shrink-0 items-center gap-3 border-b border-line px-4 py-2">
-        <span className="min-w-0 truncate font-mono text-xs">{source.path}</span>
-        <span className="ml-auto shrink-0 text-[11px] text-faint">
-          {source.workspaceHandle}
-        </span>
-      </header>
+      {chrome === "page" ? (
+        <header className="flex min-h-11 shrink-0 items-center gap-3 border-b border-line px-4 py-2">
+          <span className="min-w-0 truncate font-mono text-xs">{source.path}</span>
+          <span className="ml-auto shrink-0 text-[11px] text-faint">
+            {source.workspaceHandle}
+          </span>
+        </header>
+      ) : null}
       {state.kind === "loading" ? (
         <p role="status" className="m-auto text-sm text-muted">正在安全读取文件…</p>
       ) : state.kind === "error" ? (

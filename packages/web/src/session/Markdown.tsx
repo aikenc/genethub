@@ -54,6 +54,7 @@ import {
   resolveArtifactRef,
   type ArtifactResolveContext,
 } from "../preview/resolveArtifactRef";
+import { useWorkbench } from "./store";
 
 const HIGHLIGHT_BYTES = 256 * 1024;
 const MERMAID_BYTES = 128 * 1024;
@@ -258,6 +259,7 @@ export const Markdown = memo(function Markdown({
   variant?: MarkdownVariant;
   artifact?: MarkdownArtifactProps | null;
 }) {
+  const openPreviewFloat = useWorkbench((state) => state.openPreviewFloat);
   return (
     <div
       className={`gh-markdown gh-markdown-${variant} break-words text-fg`}
@@ -285,6 +287,27 @@ export const Markdown = memo(function Markdown({
             const resolved = resolveArtifactRef(href, artifact);
             if (resolved.kind === "blocked") {
               return <span className="gh-blocked-link">{children}</span>;
+            }
+            if (
+              resolved.kind === "preview" &&
+              artifact?.deviceHandle &&
+              artifact.workspaceHandle
+            ) {
+              return (
+                <a
+                  href={resolved.href}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    openPreviewFloat({
+                      deviceHandle: artifact.deviceHandle,
+                      workspaceHandle: artifact.workspaceHandle,
+                      path: resolved.path,
+                    });
+                  }}
+                >
+                  {children}
+                </a>
+              );
             }
             return (
               <a href={resolved.href} target="_blank" rel="noreferrer noopener">

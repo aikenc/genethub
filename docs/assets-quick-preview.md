@@ -13,7 +13,7 @@ Asset Preview 是给人和 Agent 快速打开 workspace 文件的轻量查看器
 - 只返回完整原文件。源文件 `<= 4 MiB` 才成功，超过直接提示无法预览。
 - 支持图片、Markdown、任意有效 UTF-8 且不含 NUL 的文本、单文件 HTML、MP4/WebM 小视频；已知源码/配置格式尽可能语法着色。
 - HTML 可运行 inline/HTTPS script 并访问 HTTPS/WSS 网络，但位于无同源权限的 sandbox iframe 中，不能取得工作台权限。
-- 点击文件在独立页面打开。HTML 支持静态多文件（Blob 重映射）；浮窗 iframe 与真 WebRoot HTTP origin 留到后续。
+- 点击文件默认在工作台浮窗打开（浮窗可「新窗口打开」深链页）。HTML 支持静态多文件（Blob 重映射）；真 WebRoot HTTP origin 仍不在本版本内。
 - `file.read` 已删除，文件查看器统一使用 Preview；写文件仍是独立业务能力。
 
 v4 明确不做缩略图、摘要、截断、转码、poster、probe、Range、缓存、上传 bytes、HTTP URL、Git object、多文件 HTML 目录映射、Service Worker 或 daemon HTTPS。Agent artifact 仍是 workspace 普通文件；本版本只让 Agent 按统一 locator 输出链接，没有新增 artifact 存储。
@@ -173,7 +173,7 @@ flowchart LR
 
 `mermaid` fence 按需加载独立 bundle，普通 Markdown 不加载它。输入最多 128 KiB，`securityLevel=strict` 且禁用 HTML label；输出再次移除 script、foreignObject、image、link 与事件属性，最后作为 Blob SVG `<img>` 显示，而不是把活动 SVG 注入工作台 DOM。Markdown 作者声明图片不会自动联网；普通链接只在用户点击后以独立 tab 和 `noopener/noreferrer` 打开。
 
-Preview 页根容器显式占满固定的 `body/#root`，只有正文 pane 使用 `overflow-y:auto`，因此长文档在手机和桌面都可滚动，工作台 chrome 不参与滚动。
+工作台浮窗与深链 Preview 页根容器都占满各自视口，只有正文 pane 使用 `overflow-y:auto`，因此长文档在手机和桌面都可滚动。反馈只在工作台入口收集，浮窗内预览 iframe 的错误经 postMessage 汇入同一诊断包；「新窗口打开」的深链页不参与反馈。
 
 ### 活动单文件 HTML
 
