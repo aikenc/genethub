@@ -111,12 +111,12 @@ describe("PreviewFloat", () => {
 
     await user.click(screen.getByRole("button", { name: "最小化" }));
     const float = await screen.findByRole("button", { name: "预览浮窗 Cursor Demo Title" });
-    expect(float.style.width).toBe("72px");
+    expect(float.style.width).toBe("80px");
     expect(screen.getByRole("button", { name: "最大化预览" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "最小化浮窗" })).not.toBeInTheDocument();
-    // Small chrome is icon-only: title stays in aria-label, not the header text node.
-    expect(screen.queryByText("Cursor Demo Title")).not.toBeInTheDocument();
+    // Small chrome keeps a short title between maximize and close.
+    expect(screen.getByText("Cursor Demo Title")).toBeInTheDocument();
     expect(screen.getByTestId("preview-content-shield")).toBeInTheDocument();
 
     // small → mid via whole-float click
@@ -124,7 +124,7 @@ describe("PreviewFloat", () => {
     await act(async () => {
       vi.advanceTimersByTime(300);
     });
-    expect(float.style.width).toBe("108px");
+    expect(float.style.width).toBe("120px");
     expect(screen.getByRole("button", { name: "最大化预览" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
     expect(screen.getByText("Cursor Demo Title")).toBeInTheDocument();
@@ -135,7 +135,7 @@ describe("PreviewFloat", () => {
     await act(async () => {
       vi.advanceTimersByTime(300);
     });
-    expect(float.style.width).toBe("216px");
+    expect(float.style.width).toBe("240px");
     expect(screen.getByRole("button", { name: "最大化预览" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "最小化浮窗" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
@@ -144,8 +144,13 @@ describe("PreviewFloat", () => {
     expect(previewShell?.style.transform).toContain("scale(0.14)");
     expect(previewShell?.className).not.toContain("pointer-events-none");
 
+    // Large title bar is drag-only; shrink only via the minimize control (avoids
+    // desktop mouseup synthesizing a click that used to collapse the float).
+    await user.click(screen.getByText("Cursor Demo Title"));
+    expect(float.style.width).toBe("240px");
+
     await user.click(screen.getByRole("button", { name: "最小化浮窗" }));
-    expect(float.style.width).toBe("72px");
+    expect(float.style.width).toBe("80px");
     expect(screen.queryByRole("button", { name: "最小化浮窗" })).not.toBeInTheDocument();
     expect(screen.getByTestId("preview-content-shield")).toBeInTheDocument();
 
