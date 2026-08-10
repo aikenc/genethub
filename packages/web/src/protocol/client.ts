@@ -38,6 +38,15 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 
 /** A carrier that dies before this point is flapping, not a healthy recovery. */
 const STABLE_AFTER_MS = 30_000;
+/**
+ * How often an idle ready connection is asked to prove it is still alive.
+ * Mobile browsers — iOS Safari above all — suspend the page and let the
+ * carrier die without ever firing close, so without this the workbench only
+ * learns the connection is gone when the next user request times out.
+ */
+const HEARTBEAT_MS = 25_000;
+/** A heartbeat that takes this long is a dead carrier, not a slow peer. */
+const HEARTBEAT_TIMEOUT_MS = 10_000;
 
 export interface HostedChannelCredential {
   capabilityId: string;
@@ -96,6 +105,10 @@ export interface ClientOptions {
   maxPendingRequests?: number;
   maxPendingBytes?: number;
   maxQueueAgeMs?: number;
+  /** Idle liveness probe cadence; 0 disables it. Defaults to 25s. */
+  heartbeatMs?: number;
+  /** Deadline for a single liveness probe. Defaults to 10s. */
+  heartbeatTimeoutMs?: number;
   now?: () => number;
   onError?: (error: unknown) => void;
 }
@@ -213,6 +226,9 @@ export class Client {
   private redialAbort: AbortController | null = null;
   private redialGeneration = 0;
   private redialing = false;
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatInFlight = false;
+  private lifecycleCleanup: (() => void) | null = null;
   private lastClose: CloseReason | undefined;
   private rtcEnabled: boolean;
   private rtcState_: RtcState;
@@ -283,6 +299,7 @@ export class Client {
 
   connect(): void {
     if (this.stopped || this.socket || this.fabricLink || this.dialingTransport || this.redialing) return;
+    this.attachLifecycle();
     this.clearRetryTimer();
     if (this.attempt === 0 || !this.options.redial) {
       this.dial({
@@ -304,6 +321,7 @@ export class Client {
     this.redialAbort = null;
     this.redialing = false;
     this.clearTimers();
+    this.detachLifecycle();
     const endpoint = this.endpoint;
     const socket = this.socket;
     const fabricLink = this.fabricLink;
@@ -617,6 +635,7 @@ export class Client {
       this.attempt = 0;
     }, STABLE_AFTER_MS);
     this.setState("ready");
+    this.scheduleHeartbeat();
     this.flushQueue(endpoint, epoch);
     void this.runEvents(endpoint, epoch);
     void this.resubscribe();
@@ -683,14 +702,19 @@ export class Client {
       });
   }
 
-  private async rpc(endpoint: DataEndpoint, request: Request): Promise<Reply | undefined> {
+  private async rpc(
+    endpoint: DataEndpoint,
+    request: Request,
+    timeoutMs?: number,
+  ): Promise<Reply | undefined> {
+    const budget = timeoutMs ?? this.options.requestTimeoutMs ?? 60_000;
     const body = encoder.encode(JSON.stringify(request));
     const stream = endpoint.open({
       version: DATA_PLANE_VERSION,
       method: "rpc",
       metadata: null,
       bodyLength: body.byteLength,
-      timeoutMs: this.options.requestTimeoutMs ?? 60_000,
+      timeoutMs: budget,
     });
     const operation = (async () => {
       if (body.byteLength > 0) await stream.write(body);
@@ -712,7 +736,7 @@ export class Client {
     })();
     return withTimeout(
       operation,
-      this.options.requestTimeoutMs ?? 60_000,
+      budget,
       "the daemon did not answer the request before its deadline",
       () => stream.reset(DataReset.Timeout),
     );
@@ -878,6 +902,7 @@ export class Client {
     }
     this.clearConnectTimer();
     this.clearStableTimer();
+    this.clearHeartbeat();
     this.endpoint = null;
     this.socket = null;
     this.fabricLink = null;
@@ -961,6 +986,108 @@ export class Client {
       this.retryTimer = null;
       this.connect();
     }, delay);
+  }
+
+  private scheduleHeartbeat(): void {
+    this.clearHeartbeat();
+    const interval = this.options.heartbeatMs ?? HEARTBEAT_MS;
+    if (interval <= 0) return;
+    this.heartbeatTimer = setTimeout(() => {
+      this.heartbeatTimer = null;
+      void this.heartbeat();
+    }, interval);
+  }
+
+  private clearHeartbeat(): void {
+    if (this.heartbeatTimer !== null) clearTimeout(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+
+  /**
+   * One cheap authenticated round trip. A suspended-then-resumed page keeps
+   * its JavaScript state but loses the carrier underneath it, often without a
+   * close frame; this is the only way that loss is noticed while the page is
+   * otherwise idle.
+   */
+  private async heartbeat(): Promise<void> {
+    if (this.heartbeatInFlight) return;
+    if (this.stopped || this.state !== "ready") return;
+    const epoch = this.epoch;
+    const endpoint = this.requestEndpoint();
+    if (!epoch || !endpoint) return;
+    this.heartbeatInFlight = true;
+    try {
+      await this.rpc(
+        endpoint,
+        { type: "connection.identity" },
+        this.options.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS,
+      );
+      if (this.epoch === epoch && this.state === "ready" && !this.stopped) {
+        this.scheduleHeartbeat();
+      }
+    } catch (error) {
+      if (this.epoch !== epoch || this.stopped) return;
+      this.report(error);
+      this.dropCurrentTransport(epoch, { reason: "heartbeat 超时，连接已不可达" });
+    } finally {
+      this.heartbeatInFlight = false;
+    }
+  }
+
+  private dropCurrentTransport(epoch: symbol, close?: CloseReason): void {
+    const socket = this.socket;
+    if (socket && this.epoch === epoch) {
+      this.dropSocket(socket, epoch);
+      return;
+    }
+    const link = this.fabricLink;
+    if (link && this.epoch === epoch) {
+      link.close();
+      this.droppedTransport(epoch, close);
+    }
+  }
+
+  /**
+   * Browsers tell us directly when the page comes back from suspension or the
+   * radio comes back: the right response is an immediate liveness check or
+   * redial, not whatever remained of a backoff schedule computed before sleep.
+   */
+  private attachLifecycle(): void {
+    if (this.lifecycleCleanup) return;
+    const cleanups: Array<() => void> = [];
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      const onVisible = () => {
+        if (document.visibilityState === "visible") this.revive();
+      };
+      document.addEventListener("visibilitychange", onVisible);
+      cleanups.push(() => document.removeEventListener("visibilitychange", onVisible));
+    }
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      const onOnline = () => this.revive();
+      window.addEventListener("online", onOnline);
+      cleanups.push(() => window.removeEventListener("online", onOnline));
+    }
+    this.lifecycleCleanup = () => {
+      for (const cleanup of cleanups) cleanup();
+    };
+  }
+
+  private detachLifecycle(): void {
+    this.lifecycleCleanup?.();
+    this.lifecycleCleanup = null;
+  }
+
+  private revive(): void {
+    if (this.stopped) return;
+    if (this.state === "reconnecting") {
+      this.clearRetryTimer();
+      this.connect();
+      return;
+    }
+    if (this.state === "ready" && !this.heartbeatInFlight) {
+      this.clearHeartbeat();
+      void this.heartbeat();
+    }
   }
 
   private requireReadyEndpoint(): DataEndpoint {

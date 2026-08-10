@@ -64,8 +64,15 @@ export class FakeSocket implements WebSocketLike {
   private readonly streams = new Map<string, DataStream>();
   private recordHandler: ((record: Uint8Array) => void) | null = null;
   private readonly carrierCloseHandlers = new Set<(reason?: unknown) => void>();
+  /** A suspended page's carrier: records arrive, nothing ever answers. */
+  private silent = false;
 
   constructor(private readonly options: FakePeerOptions = {}) {}
+
+  /** Stops answering RPCs without closing, the way a frozen carrier does. */
+  silence(): void {
+    this.silent = true;
+  }
 
   send(data: string | ArrayBuffer | ArrayBufferView | Blob): void {
     const bytes = immediateBytes(data);
@@ -248,6 +255,7 @@ export class FakeSocket implements WebSocketLike {
           : { payload: request.payload as unknown as Record<string, unknown> }),
       });
       this.streams.set(id, stream);
+      if (this.silent) return;
       if (request.type === "connection.identity" && this.options.autoIdentity !== false) {
         this.reply(id, {
           type: "hello",

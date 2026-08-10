@@ -1,6 +1,9 @@
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { isolatedHtml } from "./AssetPreviewPage";
+import type { AssetPreviewMetadata } from "@genehub/proto";
+
+import { HtmlDocument, isolatedHtml } from "./AssetPreviewPage";
 
 describe("active single-file HTML Preview", () => {
   it("keeps scripts but replaces document-controlled origin and network policy", () => {
@@ -30,5 +33,30 @@ describe("active single-file HTML Preview", () => {
     );
     expect(bridge?.textContent).toContain('source: "genehub-preview-diag"');
     expect(bridge?.textContent).toContain("securitypolicyviolation");
+  });
+
+  it("pins the iframe to a fixed box so iOS WebKit cannot stretch it to content height", async () => {
+    const bytes = new TextEncoder().encode(
+      "<!doctype html><html><head><title>t</title></head><body>hello</body></html>",
+    );
+    const metadata = {
+      kind: "html",
+      mediaType: "text/html",
+      sourceBytes: bytes.byteLength,
+    } as AssetPreviewMetadata;
+    render(
+      <HtmlDocument
+        bytes={bytes}
+        metadata={metadata}
+        entryPath="r_root/index.html"
+        fetchAsset={async () => null}
+      />,
+    );
+
+    const frame = await screen.findByTitle("HTML 文件预览");
+    expect(frame.className).toContain("absolute");
+    expect(frame.className).toContain("inset-0");
+    expect(frame.parentElement?.className).toContain("relative");
+    expect(frame.parentElement?.className).toContain("overflow-hidden");
   });
 });

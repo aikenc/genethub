@@ -183,6 +183,52 @@ describe("the v3 peer connection", () => {
     expect(attempts).toEqual([0, 1]);
     client.close();
   });
+
+  it("notices a silently dead carrier through the heartbeat and reconnects", async () => {
+    const { client, queue } = await connected({
+      heartbeatMs: 20,
+      heartbeatTimeoutMs: 40,
+      backoffMs: () => 0,
+    });
+
+    // The page was suspended and the carrier died without a close frame: the
+    // socket still looks open, it just never answers again.
+    queue.latest().silence();
+    await waitFor(() => client.connectionState === "reconnecting", 500);
+    await waitFor(() => queue.sockets.length === 2, 500);
+
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"), 500);
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready", 500);
+    client.close();
+  });
+
+  it("keeps a healthy carrier ready across heartbeat probes", async () => {
+    const { client, socket } = await connected({ heartbeatMs: 15 });
+    await waitFor(
+      () =>
+        socket.sent.filter((message) => message.type === "connection.identity").length >= 3,
+      500,
+    );
+    expect(client.connectionState).toBe("ready");
+    client.close();
+  });
+
+  it("reconnects immediately when the page returns while reconnecting", async () => {
+    const { client, queue } = await connected({ backoffMs: () => 3_600_000 });
+    queue.latest().close(1006, "lost");
+    await waitFor(() => client.connectionState === "reconnecting");
+    expect(queue.sockets.length).toBe(1);
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => queue.sockets.length === 2);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+    client.close();
+  });
 });
 
 describe("RPC exchanges are independent logical streams", () => {

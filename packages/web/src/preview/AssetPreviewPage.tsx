@@ -281,7 +281,8 @@ function BlobDocument({
   );
 }
 
-function HtmlDocument({
+/** Exported for tests. */
+export function HtmlDocument({
   bytes,
   metadata,
   entryPath,
@@ -374,14 +375,20 @@ function HtmlDocument({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {srcDoc ? (
-        <iframe
-          title="HTML 文件预览"
-          sandbox="allow-scripts"
-          referrerPolicy="no-referrer"
-          allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'; usb 'none'; serial 'none'; display-capture 'none'; fullscreen 'none'; presentation 'none'"
-          srcDoc={srcDoc}
-          className="min-h-0 flex-1 border-0 bg-white"
-        />
+        // iOS WebKit stretches a srcDoc iframe to its content height, ignoring
+        // flex sizing; the page then scrolls under the reader's finger and
+        // 100vh content stops meaning the viewport. Pinning the iframe to an
+        // absolutely-sized box is the only reliable constraint.
+        <div className="relative min-h-0 flex-1 overflow-hidden">
+          <iframe
+            title="HTML 文件预览"
+            sandbox="allow-scripts"
+            referrerPolicy="no-referrer"
+            allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'; usb 'none'; serial 'none'; display-capture 'none'; fullscreen 'none'; presentation 'none'"
+            srcDoc={srcDoc}
+            className="absolute inset-0 h-full w-full border-0 bg-white"
+          />
+        </div>
       ) : (
         <p role="status" className="m-auto text-sm text-muted">
           正在准备 HTML 预览…
