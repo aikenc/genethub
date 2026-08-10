@@ -21,6 +21,13 @@ describe("remapHtmlSite", () => {
   });
 
   it("rewrites relative css and script tags to blob URLs", async () => {
+    const blobTypes: string[] = [];
+    const createObjectURL = URL.createObjectURL;
+    URL.createObjectURL = ((blob: Blob) => {
+      blobTypes.push(blob.type);
+      return createObjectURL(blob);
+    }) as typeof URL.createObjectURL;
+
     const fetchAsset = vi.fn(async (path: string) => {
       if (path === "r_demo/app.css") {
         return { bytes: new TextEncoder().encode("body{color:red}"), mediaType: "text/plain" };
@@ -28,6 +35,12 @@ describe("remapHtmlSite", () => {
       if (path === "r_demo/app.js") {
         return {
           bytes: new TextEncoder().encode("globalThis.ok=true"),
+          mediaType: "text/plain",
+        };
+      }
+      if (path === "r_demo/mark.svg") {
+        return {
+          bytes: new TextEncoder().encode("<svg xmlns='http://www.w3.org/2000/svg'/>"),
           mediaType: "text/plain",
         };
       }
@@ -39,15 +52,17 @@ describe("remapHtmlSite", () => {
       html: `<!doctype html><html><head>
         <link rel="stylesheet" href="./app.css">
         <script src="./app.js"></script>
-      </head><body>hi</body></html>`,
+      </head><body><img src="./mark.svg"></body></html>`,
       fetchAsset,
     });
 
     expect(fetchAsset).toHaveBeenCalledWith("r_demo/app.css");
     expect(fetchAsset).toHaveBeenCalledWith("r_demo/app.js");
+    expect(fetchAsset).toHaveBeenCalledWith("r_demo/mark.svg");
     expect(result.html).toContain('href="blob:');
     expect(result.html).toContain('src="blob:');
-    expect(result.blobUrls).toHaveLength(2);
+    expect(result.blobUrls).toHaveLength(3);
+    expect(blobTypes).toEqual(["text/css", "text/javascript", "image/svg+xml"]);
     for (const url of result.blobUrls) URL.revokeObjectURL(url);
   });
 
