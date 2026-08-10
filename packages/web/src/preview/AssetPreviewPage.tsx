@@ -27,6 +27,13 @@ export function AssetPreviewPage({
     let cancelled = false;
     let owned: Client | null = null;
     setState({ kind: "loading" });
+    emitPreviewDiagnostic("log", {
+      topic: "preview-load",
+      path: source.path,
+      workspaceHandle: source.workspaceHandle,
+      deviceHandle: source.deviceHandle,
+      phase: "start",
+    });
     void (async () => {
       try {
         const endpoint =
@@ -43,14 +50,27 @@ export function AssetPreviewPage({
           owned.close();
           return;
         }
+        emitPreviewDiagnostic("log", {
+          topic: "preview-load",
+          path: source.path,
+          kind: result.metadata.kind,
+          sourceBytes: result.metadata.sourceBytes,
+          phase: "ready",
+        });
         setState({ kind: "ready", result, client: owned });
         owned = null;
       } catch (error) {
         owned?.close();
         if (!cancelled) {
+          const message = error instanceof Error ? error.message : "无法预览这个文件";
+          emitPreviewDiagnostic("error", {
+            message,
+            path: source.path,
+            phase: "load-failed",
+          });
           setState({
             kind: "error",
-            message: error instanceof Error ? error.message : "无法预览这个文件",
+            message,
           });
         }
       }
@@ -220,20 +240,39 @@ function HtmlDocument({
           for (const url of blobUrls) URL.revokeObjectURL(url);
           return;
         }
-        setSrcDoc(isolatedHtml(remapped.html));
-        setStatus(
+        const statusText =
           remapped.warnings.length > 0
             ? `静态多文件 · 动态加载不可用 · 网络已开启 · ${metadata.sourceBytes} bytes · ${remapped.warnings.length} 个资源未加载`
-            : `静态多文件 · 动态加载不可用 · 网络已开启 · ${metadata.sourceBytes} bytes`,
-        );
+            : `静态多文件 · 动态加载不可用 · 网络已开启 · ${metadata.sourceBytes} bytes`;
+        setSrcDoc(isolatedHtml(remapped.html));
+        setStatus(statusText);
+        emitPreviewDiagnostic("log", {
+          topic: "html-site",
+          path: entryPath,
+          warnings: remapped.warnings.length,
+          blobUrls: remapped.blobUrls.length,
+          status: statusText.slice(0, 500),
+          phase: "remapped",
+        });
+        for (const warning of remapped.warnings.slice(0, 20)) {
+          emitPreviewDiagnostic("resource", {
+            path: entryPath,
+            message: warning.slice(0, 500),
+            phase: "remap-warning",
+          });
+        }
       } catch (error) {
         if (!cancelled) {
+          const message = error instanceof Error ? error.message : "资源解析失败";
           setSrcDoc(isolatedHtml(decodeText(bytes)));
           setStatus(
-            `单文件回退 · 网络已开启 · ${metadata.sourceBytes} bytes · ${
-              error instanceof Error ? error.message : "资源解析失败"
-            }`,
+            `单文件回退 · 网络已开启 · ${metadata.sourceBytes} bytes · ${message}`,
           );
+          emitPreviewDiagnostic("error", {
+            path: entryPath,
+            message,
+            phase: "remap-fallback",
+          });
         }
       }
     })();
@@ -297,7 +336,76 @@ export function isolatedHtml(source: string): string {
   base.href = "https://preview.invalid/";
   document_.head.prepend(base);
   document_.head.prepend(policy);
+  // Opaque sandboxed iframe consoles never reach the parent recorder. Bridge
+  // load/CSP/script failures out via postMessage so feedback can see them.
+  const bridge = document_.createElement("script");
+  bridge.textContent = PREVIEW_DIAG_BRIDGE;
+  document_.documentElement.appendChild(bridge);
   return `<!doctype html>\n${document_.documentElement.outerHTML}`;
+}
+
+/** Keep in sync with console/src/diagnostics.ts PREVIEW_MESSAGE_SOURCE. */
+const PREVIEW_DIAG_SOURCE = "genehub-preview-diag";
+
+const PREVIEW_DIAG_BRIDGE = `(function(){
+  function send(kind, detail){
+    try {
+      parent.postMessage({ source: ${JSON.stringify(PREVIEW_DIAG_SOURCE)}, kind: kind, detail: detail || {} }, "*");
+    } catch (e) {}
+  }
+  window.addEventListener("error", function(e){
+    var t = e.target;
+    if (t && t !== window && t.tagName) {
+      send("resource", {
+        tag: String(t.tagName).toLowerCase(),
+        src: String(t.currentSrc || t.src || t.href || "").slice(0, 500),
+        message: "resource load failed"
+      });
+      return;
+    }
+    send("error", {
+      message: String(e.message || "error").slice(0, 500),
+      source: String(e.filename || "").slice(0, 500),
+      line: e.lineno || 0,
+      column: e.colno || 0
+    });
+  }, true);
+  window.addEventListener("unhandledrejection", function(e){
+    var reason = e.reason;
+    send("error", {
+      message: String(reason && reason.message ? reason.message : reason).slice(0, 500)
+    });
+  });
+  window.addEventListener("securitypolicyviolation", function(e){
+    send("csp", {
+      violatedDirective: String(e.violatedDirective || "").slice(0, 200),
+      effectiveDirective: String(e.effectiveDirective || "").slice(0, 200),
+      blockedURI: String(e.blockedURI || "").slice(0, 500),
+      disposition: String(e.disposition || ""),
+      sample: String(e.sample || "").slice(0, 200)
+    });
+  });
+  ["warn", "error"].forEach(function(level){
+    var original = console[level].bind(console);
+    console[level] = function(){
+      var text = Array.prototype.slice.call(arguments).map(function(arg){
+        return typeof arg === "string" ? arg : (function(){ try { return JSON.stringify(arg); } catch (e) { return String(arg); } })();
+      }).join(" ").slice(0, 500);
+      send("console", { level: level, text: text });
+      return original.apply(console, arguments);
+    };
+  });
+  send("log", { topic: "html-preview-iframe", phase: "bridge-ready" });
+})();`;
+
+function emitPreviewDiagnostic(
+  kind: string,
+  detail: Record<string, string | number | boolean | null>,
+): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent("genehub:preview-diagnostic", { detail: { kind, detail } }),
+  );
 }
 
 async function endpointForDevice(host: Host, machineId: string): Promise<Endpoint | null> {
