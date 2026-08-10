@@ -25,7 +25,6 @@ import type { Host } from "../host";
 import type { Client, ConnectionState } from "../protocol/client";
 import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
-import { assetPreviewBaseUrl } from "../preview/url";
 import {
   applySequenced,
   emptyTimeline,
@@ -1010,15 +1009,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
 
     try {
-      const state = get();
-      const deviceHandle = state.client?.identity?.machineId;
-      const workspaceId = currentWorkspace(state);
-      const workspace = state.workspaces.find((entry) => entry.id === workspaceId);
-      const primaryRootHandle = workspace?.folders?.[0]?.rootHandle;
-      const artifactPreviewBaseUrl =
-        deviceHandle && workspaceId && primaryRootHandle
-          ? assetPreviewBaseUrl(deviceHandle, workspaceId, primaryRootHandle)
-          : null;
+      // Artifact Preview URLs are bound at chat/document render time from the
+      // current workspace roots. Agents may emit relative or absolute paths;
+      // the workbench no longer teaches a deployment-specific Preview prefix.
       await require_(get().client).call({
         type: "session.send",
         // Continuing a round after an interrupt is not wired into the UI
@@ -1028,7 +1021,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           sessionId,
           text,
           attachments,
-          artifactPreviewBaseUrl,
+          artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
       });

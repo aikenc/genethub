@@ -448,11 +448,9 @@ export type Request = { "type": "connection.identity" } | { "type": "subscribe",
  */
 expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
 /**
- * Browser-composed, deployment-aware Asset Preview prefix for this
- * session's workspace. It is context, not authority: opening a link
- * still performs normal target selection, authentication and E2EE.
- * The daemon validates the URL shape and turns it into fixed Agent
- * guidance; arbitrary client-authored system prompts are never accepted.
+ * Deprecated wire field. Current clients always send `null`; Preview
+ * locators are rebound in the workbench from relative/absolute paths.
+ * Kept so older clients remain deserializable.
  */
 artifactPreviewBaseUrl: string | null, 
 /**

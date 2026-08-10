@@ -659,11 +659,11 @@ impl SessionManager {
         continues_round: Option<String>,
     ) -> Result<String> {
         let live = self.live(session_id).await?;
-        let workspace_id = live.meta.lock().await.workspace_id.clone();
-        let additional_system_prompt = artifact_preview_base_url
-            .as_deref()
-            .map(|base_url| super::artifact_links::system_prompt(base_url, &workspace_id))
-            .transpose()?;
+        // Preview locators are rebound in the workbench Markdown renderer from
+        // relative/absolute workspace paths. A deployment-specific URL prefix
+        // must not be injected into Agent system prompts.
+        let _ = artifact_preview_base_url;
+        let additional_system_prompt = None;
         {
             let mut status = live.status.lock().await;
             if matches!(*status, SessionStatus::Running | SessionStatus::Waiting) {
@@ -2609,7 +2609,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_preview_context_reaches_the_adapter_as_fixed_system_guidance() {
+    async fn browser_preview_context_is_not_injected_into_adapter_system_prompt() {
         let dir = tempfile::tempdir().unwrap();
         let captured = Arc::new(std::sync::Mutex::new(None));
         let sessions = SessionManager::new(
@@ -2640,10 +2640,9 @@ mod tests {
             .await
             .unwrap();
 
-        let prompt = captured.lock().unwrap().clone().unwrap();
-        assert!(prompt.contains(base));
-        assert!(prompt.contains("workspace-relative"));
-        assert!(!prompt.contains("生成报告"));
+        // Preview locators are rebound in the workbench; a deployment-bound
+        // prefix must not become Agent system guidance.
+        assert!(captured.lock().unwrap().clone().is_none());
         sessions.shutdown().await;
     }
 

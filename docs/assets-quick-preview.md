@@ -1,6 +1,6 @@
 # 轻量 Asset Preview v4
 
-> 状态：v4 已实现。它保持单文件、4 MiB 与 E2EE 边界，在 v3 上把项目身份与物理 root 身份彻底拆开：folder 和 `.code-workspace` 是不同项目，资源路径使用 daemon 级稳定 root handle。底层连接仍是 [E2EE Data Plane v3](./e2ee-data-plane.md)。多文件 WebRoot、大文件和公开 Assets Gateway 仍不在本版本内。
+> 状态：v4.1。在 v4 单文件 Preview 与 E2EE 边界上，聊天/文档 Markdown 于渲染期绑定 Preview URL（不再向 Agent 注入部署前缀），HTML Viewer 对静态相对资源做 Blob 重映射。真 WebRoot HTTP origin、大文件和公开 Assets Gateway 仍不在本版本内。
 
 ## 1. 产品结论
 
@@ -13,7 +13,7 @@ Asset Preview 是给人和 Agent 快速打开 workspace 文件的轻量查看器
 - 只返回完整原文件。源文件 `<= 4 MiB` 才成功，超过直接提示无法预览。
 - 支持图片、Markdown、任意有效 UTF-8 且不含 NUL 的文本、单文件 HTML、MP4/WebM 小视频；已知源码/配置格式尽可能语法着色。
 - HTML 可运行 inline/HTTPS script 并访问 HTTPS/WSS 网络，但位于无同源权限的 sandbox iframe 中，不能取得工作台权限。
-- 点击文件在独立页面打开。浮窗 iframe、WebRoot 和多文件 HTML 留到后续。
+- 点击文件在独立页面打开。HTML 支持静态多文件（Blob 重映射）；浮窗 iframe 与真 WebRoot HTTP origin 留到后续。
 - `file.read` 已删除，文件查看器统一使用 Preview；写文件仍是独立业务能力。
 
 v4 明确不做缩略图、摘要、截断、转码、poster、probe、Range、缓存、上传 bytes、HTTP URL、Git object、多文件 HTML 目录映射、Service Worker 或 daemon HTTPS。Agent artifact 仍是 workspace 普通文件；本版本只让 Agent 按统一 locator 输出链接，没有新增 artifact 存储。
@@ -226,25 +226,16 @@ FilesPanel 把目录和文件交互彻底分开：文件才打开 Preview，目�
 
 打开项目入口同时接受普通目录和 `.code-workspace`。远端目录浏览器列出子目录及当前目录中的 workspace 文件；桌面原生壳提供相邻的“打开项目文件夹”和“打开工作区”动作。两种来源即使第一根相同也拥有独立项目 ID；多根 Explorer 顶层仍显示各 `folders[].name`，但节点 path 始终带全局 `rootHandle`。daemon 在每次 tree/write/preview 时重新验证项目成员关系并解析到 capability root，label、排序和重名不参与寻址。
 
-浏览器在每次 `session.send` 中附带结构化 `artifactPreviewBaseUrl`：
+Agent 不必输出部署相关的 Preview prefix。聊天与文档 Preview 共用 Markdown 渲染器，在展示时把下列引用解析为当前 device/project/root 的 Preview URL：
 
-```text
-https://<当前域名>/<当前渠道>/assets/preview/v2/<device>/<project>/<first-root-handle>/
-```
+- 相对 Agent cwd（第一根）的路径，例如 `reports/a.md`
+- 落在已注册 root 下的绝对文件系统路径
+- 已是 `/assets/preview/v2/...` 的旧链接（保留 path，重绑当前 device/project）
+- Markdown 图片的相对/绝对本地路径：经 `asset.preview` 鉴权加载为 blob，外链图片仍阻断
 
-这是上下文，不是 capability。daemon 只接受 canonical HTTP(S)、无 userinfo/query/fragment、精确包含 device/project/root，且 project 与当前 session 一致的 Preview prefix；它生成产品固定的路径规范提示，客户端不能直接传任意 system prompt。浏览器把第一个 rootHandle 预先放进 base URL，因此 Agent 仍只追加相对其 cwd 的路径。提示要求逐 segment percent-encode，并只链接已存在、类型受支持且不超过 4 MiB 的普通文件。
+`session.send` 的 `artifactPreviewBaseUrl` 仍保留在协议中以兼容旧客户端，但当前工作台始终传 `null`，daemon 不再把它注入 adapter system prompt。
 
-`SessionConfig.additional_system_prompt` 是唯一 adapter 边界：
-
-| Adapter | 注入方式 |
-|---|---|
-| Genet Agent | `--add-system-prompt`，进入真实 provider system prompt |
-| Claude Code | `--append-system-prompt` |
-| Codex app-server | `developerInstructions`（start/resume） |
-| OpenCode | `/session/:id/message` 的原生 `system` 字段 |
-| ACP（Cursor/自定义） | ACP 没有标准 system 字段；adapter 每回合放一个有界、明确标记且不写入 GeneHub 时间线的前置 context block |
-
-域名、deployment channel、device 和 workspace 全由当前浏览器 builder 动态组装，daemon/Agent 不猜 Cloud 地址，也不把 Relay 内部地址写入提示。链接复制到另一台已授权电脑或手机后，仍按第 3 节重新鉴权并建立 E2EE stream。
+HTML 预览在 Viewer 内对入口文件做静态依赖 Blob 重映射（`link`/`script`/`img` 等相对引用与 CSS `url()`）；CSP 允许 `blob:` 的 script/style/font。动态 `fetch`/import、根路径 `/...` 与 WebRoot HTTP origin 仍不在本版本内。
 
 ## 11. 验收
 
@@ -257,11 +248,12 @@ https://<当前域名>/<当前渠道>/assets/preview/v2/<device>/<project>/<firs
 - 真实 wire 的折叠目录字段缺失；旧端的 `children:null` 也只触发展开请求，不会卸载页面。
 - `.code-workspace` 的注释、尾逗号、相对/绝对本地 path、folder name 和重复显示名称可用；URI root、重复目录、越界路径、超量定义明确拒绝。
 - folder 与 `.code-workspace` 项目 ID 独立；同一 canonical directory 跨项目复用全局 rootHandle。改 label、调顺序不会改变资源 locator。
-- 多根 tree/write/Preview 都按 `rootHandle` 到达正确 capability root；Agent/session/terminal/Git cwd 仍是第一根，Agent Preview base 已包含第一根 handle。
+- 多根 tree/write/Preview 都按 `rootHandle` 到达正确 capability root；Agent/session/terminal/Git cwd 仍是第一根。
 - 长 Markdown 可滚动，GFM/inline code/fenced code 高亮和安全 Mermaid 流程图可用。
 - 任意有效 UTF-8 无 NUL 文件可读；已知源码/配置/构建格式按路径着色，未知文本自动识别或安全退化为转义纯文本。
-- `session.send` 的 Preview prefix 包含当前 origin、deployment channel、device、project 与首个 rootHandle；daemon 拒绝 active/ambiguous URL，所有已注册 adapter 都收到同一产品规范。
+- 聊天/文档 Markdown 把相对路径、绝对路径和旧 Preview URL 解析为当前绑定；外链图片仍阻断，本地图片经鉴权 blob 显示。
+- `session.send` 不再注入 Preview URL system prompt。
 - allowlist、UTF-8、magic、普通文件和 symlink escape 均有 daemon 测试。
 - 成功 response 精确校验三处长度；取消、超时和页面关闭能释放 stream/client/Blob。
-- HTML script 可运行，网络策略可见，父页面同源权限不可得，相对 workspace 资源不可解析。
+- HTML script 可运行，静态相对 CSS/JS/图片可经 Blob 重映射加载，网络策略可见，父页面同源权限不可得；动态加载与根路径站点仍不可用。
 - `file.read`、`FileContent` 和旧查看器没有运行路径或 fallback。

@@ -558,7 +558,7 @@ describe("an action the user asked for that fails", () => {
     expect(useWorkbench.getState().notice).toBeNull();
   });
 
-  it("sends deployment-aware artifact link context without changing the user text", async () => {
+  it("does not teach Agents a deployment-bound Preview URL prefix", async () => {
     const calls: Array<{ type: string; payload?: Record<string, unknown> }> = [];
     const client = {
       call: async (request: { type: string; payload?: Record<string, unknown> }) => {
@@ -595,8 +595,7 @@ describe("an action the user asked for that fails", () => {
         sessionId: "s1",
         text: "生成报告",
         attachments: [],
-        artifactPreviewBaseUrl:
-          "http://localhost:3000/assets/preview/v2/m_device/w1/r_product/",
+        artifactPreviewBaseUrl: null,
         continuesRound: null,
       },
     });
