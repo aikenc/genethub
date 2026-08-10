@@ -1,15 +1,22 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 
 import type { Host } from "../host";
-import { useWorkbench } from "../session/store";
-import type { PreviewFloatTarget } from "../session/store";
+import { useWorkbench, type PreviewFloatTarget } from "../session/store";
 import { AssetPreviewPage } from "./AssetPreviewPage";
 import { assetPreviewUrl } from "./url";
 
+type Mode = "expanded" | "minimized";
+type Dock = "left" | "right";
+
+const BUBBLE_W = 72;
+const BUBBLE_H = 88;
+const EDGE = 8;
+const THUMB_SCALE = 0.14;
+
 /**
- * Default Preview surface inside the workbench so feedback stays on one page.
- * A separate browser tab is available from the chrome, but is not the product
- * path for filing reports.
+ * WeChat-style Preview: fullscreen by default; minimize to a draggable,
+ * edge-docked bubble with a scaled-down live thumbnail. Feedback stays on the
+ * workbench — this surface never leaves the page.
  */
 export function PreviewFloat({
   source,
@@ -21,19 +28,38 @@ export function PreviewFloat({
   onClose(): void;
 }) {
   const client = useWorkbench((state) => state.client);
+  const [mode, setMode] = useState<Mode>("expanded");
+  const [dock, setDock] = useState<Dock>("right");
+  const [offsetY, setOffsetY] = useState(() => Math.round(window.innerHeight * 0.35));
+  const drag = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originY: number;
+    moved: boolean;
+  } | null>(null);
+  const skipClick = useRef(false);
+
   const externalUrl = assetPreviewUrl(
     source.deviceHandle,
     source.workspaceHandle,
     source.path,
   );
+  const title = useMemo(() => basename(source.path), [source.path]);
+
+  useEffect(() => {
+    setMode("expanded");
+  }, [source.path, source.workspaceHandle, source.deviceHandle]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape") return;
+      if (mode === "expanded") setMode("minimized");
+      else onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [mode, onClose]);
 
   useEffect(() => {
     window.dispatchEvent(
@@ -44,28 +70,111 @@ export function PreviewFloat({
             topic: "preview-float",
             path: source.path,
             workspaceHandle: source.workspaceHandle,
-            phase: "open",
+            phase: mode === "expanded" ? "open" : "minimized",
           },
         },
       }),
     );
-  }, [source.path, source.workspaceHandle]);
+  }, [mode, source.path, source.workspaceHandle]);
+
+  const clampY = (y: number) =>
+    Math.min(Math.max(EDGE, y), Math.max(EDGE, window.innerHeight - BUBBLE_H - EDGE));
+
+  const onBubblePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (mode !== "minimized") return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    drag.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originY: offsetY,
+      moved: false,
+    };
+  };
+
+  const onBubblePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const state = drag.current;
+    if (!state || state.pointerId !== event.pointerId) return;
+    const dx = event.clientX - state.startX;
+    const dy = event.clientY - state.startY;
+    if (Math.hypot(dx, dy) > 4) state.moved = true;
+    setOffsetY(clampY(state.originY + dy));
+  };
+
+  const onBubblePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const state = drag.current;
+    if (!state || state.pointerId !== event.pointerId) return;
+    drag.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    setDock(event.clientX < window.innerWidth / 2 ? "left" : "right");
+    setOffsetY((current) => clampY(current));
+    if (state.moved) skipClick.current = true;
+    else setMode("expanded");
+  };
+
+  const preview = client ? (
+    <AssetPreviewPage source={source} host={host} chrome="embedded" client={client} />
+  ) : (
+    <p role="status" className="m-auto p-6 text-center text-sm text-muted">
+      尚未连接到设备，无法预览
+    </p>
+  );
+
+  const minimized = mode === "minimized";
 
   return (
     <div
-      className="fixed inset-0 z-40 flex items-stretch justify-center bg-black/45 p-0 sm:items-center sm:p-4"
-      role="presentation"
-      onClick={onClose}
+      role={minimized ? "button" : "dialog"}
+      aria-modal={minimized ? undefined : true}
+      aria-label={minimized ? `展开预览 ${title}` : "文件预览"}
+      tabIndex={minimized ? 0 : undefined}
+      className={
+        minimized
+          ? "fixed z-40 flex flex-col overflow-hidden rounded-xl border border-line bg-surface text-fg shadow-lg"
+          : "fixed inset-0 z-40 flex flex-col bg-bg text-fg"
+      }
+      style={
+        minimized
+          ? {
+              top: offsetY,
+              width: BUBBLE_W,
+              height: BUBBLE_H,
+              ...(dock === "left" ? { left: EDGE } : { right: EDGE }),
+            }
+          : undefined
+      }
+      onPointerDown={onBubblePointerDown}
+      onPointerMove={onBubblePointerMove}
+      onPointerUp={onBubblePointerUp}
+      onPointerCancel={onBubblePointerUp}
+      onClick={() => {
+        if (mode !== "minimized") return;
+        if (skipClick.current) {
+          skipClick.current = false;
+          return;
+        }
+        setMode("expanded");
+      }}
+      onKeyDown={(event) => {
+        if (mode !== "minimized") return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          setMode("expanded");
+        }
+      }}
     >
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-label="文件预览"
-        className="flex h-full w-full max-w-5xl flex-col overflow-hidden bg-bg text-fg shadow-2xl sm:h-[min(88vh,52rem)] sm:rounded-xl sm:border sm:border-line"
-        onClick={(event) => event.stopPropagation()}
-      >
+      {minimized ? (
+        <span className="truncate px-1.5 pt-1 text-[10px] leading-tight text-muted">{title}</span>
+      ) : (
         <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line px-3 py-2">
           <span className="min-w-0 flex-1 truncate font-mono text-xs">{source.path}</span>
+          <button
+            type="button"
+            className="shrink-0 rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-fg"
+            onClick={() => setMode("minimized")}
+          >
+            最小化
+          </button>
           <button
             type="button"
             className="shrink-0 rounded px-2 py-1 text-xs text-accent hover:bg-raised"
@@ -89,21 +198,32 @@ export function PreviewFloat({
             ×
           </button>
         </header>
-        <div className="min-h-0 flex-1">
-          {client ? (
-            <AssetPreviewPage
-              source={source}
-              host={host}
-              chrome="embedded"
-              client={client}
-            />
-          ) : (
-            <p role="status" className="m-auto p-6 text-center text-sm text-muted">
-              尚未连接到设备，无法预览
-            </p>
-          )}
+      )}
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-bg">
+        <div
+          className={
+            minimized
+              ? "pointer-events-none absolute left-0 top-0 origin-top-left"
+              : "flex h-full min-h-0 flex-col"
+          }
+          style={
+            minimized
+              ? {
+                  width: `${(100 / THUMB_SCALE).toFixed(2)}%`,
+                  height: `${(100 / THUMB_SCALE).toFixed(2)}%`,
+                  transform: `scale(${THUMB_SCALE})`,
+                }
+              : undefined
+          }
+        >
+          {preview}
         </div>
-      </section>
+      </div>
     </div>
   );
+}
+
+function basename(path: string): string {
+  const parts = path.split("/");
+  return parts[parts.length - 1] || path;
 }

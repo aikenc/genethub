@@ -7,9 +7,7 @@ import { PreviewFloat } from "./PreviewFloat";
 
 vi.mock("./AssetPreviewPage", () => ({
   AssetPreviewPage: (props: { client?: unknown }) => (
-    <div data-testid="preview-body">
-      preview body{props.client ? " shared" : ""}
-    </div>
+    <div data-testid="preview-body">preview body{props.client ? " shared" : ""}</div>
   ),
 }));
 
@@ -24,7 +22,7 @@ describe("PreviewFloat", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows open-in-new-window and close controls without leaving the workbench", async () => {
+  it("opens fullscreen and can minimize to a dockable bubble", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
@@ -43,7 +41,14 @@ describe("PreviewFloat", () => {
     );
 
     expect(screen.getByTestId("preview-body")).toBeInTheDocument();
-    expect(screen.getByText("r_root/demos/index.html")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "文件预览" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "最小化" }));
+    expect(screen.getByRole("button", { name: "展开预览 index.html" })).toBeInTheDocument();
+    expect(screen.getByTestId("preview-body")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "展开预览 index.html" }));
+    expect(screen.getByRole("dialog", { name: "文件预览" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "新窗口打开" }));
     expect(open).toHaveBeenCalled();

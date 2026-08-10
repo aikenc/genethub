@@ -13,7 +13,7 @@ Asset Preview 是给人和 Agent 快速打开 workspace 文件的轻量查看器
 - 只返回完整原文件。源文件 `<= 4 MiB` 才成功，超过直接提示无法预览。
 - 支持图片、Markdown、任意有效 UTF-8 且不含 NUL 的文本、单文件 HTML、MP4/WebM 小视频；已知源码/配置格式尽可能语法着色。
 - HTML 可运行 inline/HTTPS script 并访问 HTTPS/WSS 网络，但位于无同源权限的 sandbox iframe 中，不能取得工作台权限。
-- 点击文件默认在工作台浮窗打开（浮窗可「新窗口打开」深链页）。HTML 支持静态多文件（Blob 重映射）；真 WebRoot HTTP origin 仍不在本版本内。
+- 点击文件默认全屏预览，可最小化成可拖动、靠边停靠的微信式浮窗；浮窗可「新窗口打开」深链页。HTML 静态多文件通过内联 CSS/JS 与 data: 媒体嵌入（避免沙箱 iframe 无法使用父页 blob:）；真 WebRoot HTTP origin 仍不在本版本内。
 - `file.read` 已删除，文件查看器统一使用 Preview；写文件仍是独立业务能力。
 
 v4 明确不做缩略图、摘要、截断、转码、poster、probe、Range、缓存、上传 bytes、HTTP URL、Git object、多文件 HTML 目录映射、Service Worker 或 daemon HTTPS。Agent artifact 仍是 workspace 普通文件；本版本只让 Agent 按统一 locator 输出链接，没有新增 artifact 存储。
