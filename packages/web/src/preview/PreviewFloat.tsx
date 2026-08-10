@@ -13,10 +13,10 @@ import { assetPreviewUrl } from "./url";
 
 type Mode = "expanded" | "float";
 
-/** Base before the 0.75 shrink; levels are 0.75× / 1.5× / 3× this box. */
+/** Base box; levels are 1× / 1.5× / 3× (small must fit maximize+close). */
 const BASE_W = 72;
 const BASE_H = 88;
-const SIZE_FACTORS = [0.75, 1.5, 3] as const;
+const SIZE_FACTORS = [1, 1.5, 3] as const;
 const EDGE = 8;
 const SNAP = 28;
 /** Visual scale of the preview document inside every float size. */
@@ -70,8 +70,11 @@ export function PreviewFloat({
   const expanded = mode === "expanded";
   /** Only the large float accepts content input; small/mid are click-to-cycle. */
   const contentInteractive = mode === "float" && sizeLevel === SIZE_FACTORS.length - 1;
+  const smallFloatChrome = mode === "float" && sizeLevel === 0;
   const midFloatChrome = mode === "float" && sizeLevel === 1;
   const largeFloatChrome = contentInteractive;
+  const blockContentGestures = mode === "float" && !contentInteractive;
+  const contentShieldRef = useRef<HTMLDivElement | null>(null);
 
   const shrinkToSmallFloat = () => {
     if (clickTimer.current) {
@@ -85,12 +88,18 @@ export function PreviewFloat({
     setMode("float");
   };
 
-  /** Large float chrome; small/mid use tighter hit targets so the title fits. */
+  /** Large float chrome; mid keeps a readable title; small is icon-only. */
   const chromeBtnLarge =
     "flex h-5 w-5 shrink-0 items-center justify-center rounded text-xs leading-none text-muted hover:bg-raised hover:text-fg";
-  const chromeBtnCompact =
-    "flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm text-[10px] leading-none text-muted hover:bg-raised hover:text-fg";
-  const chromeBtn = largeFloatChrome ? chromeBtnLarge : chromeBtnCompact;
+  const chromeBtnMid =
+    "flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-[11px] leading-none text-muted hover:bg-raised hover:text-fg";
+  const chromeBtnSmall =
+    "flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-[11px] leading-none text-muted hover:bg-raised hover:text-fg";
+  const chromeBtn = largeFloatChrome
+    ? chromeBtnLarge
+    : midFloatChrome
+      ? chromeBtnMid
+      : chromeBtnSmall;
   const expandedActionBtn =
     "shrink-0 rounded border border-line bg-surface px-2 py-0.5 text-[11px] leading-none text-fg shadow-sm hover:bg-raised active:bg-raised";
 
@@ -105,6 +114,18 @@ export function PreviewFloat({
       if (clickTimer.current) clearTimeout(clickTimer.current);
     };
   }, []);
+
+  // iOS WebKit still delivers pan gestures into nested iframes even when the
+  // scaled preview has pointer-events:none. Capture touchmove on a shield.
+  useEffect(() => {
+    const shield = contentShieldRef.current;
+    if (!shield || !blockContentGestures) return;
+    const block = (event: TouchEvent) => {
+      event.preventDefault();
+    };
+    shield.addEventListener("touchmove", block, { passive: false });
+    return () => shield.removeEventListener("touchmove", block);
+  }, [blockContentGestures, mode, sizeLevel]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -246,7 +267,7 @@ export function PreviewFloat({
                 width: floatW,
                 height: floatH,
                 // Small/mid: block content pan/scroll so it does not fight float drag.
-                ...(!contentInteractive ? { touchAction: "none" as const } : {}),
+                ...(blockContentGestures ? { touchAction: "none" as const } : {}),
               }
         }
         onPointerDown={expanded || contentInteractive ? undefined : beginDrag}
@@ -254,7 +275,7 @@ export function PreviewFloat({
         onPointerUp={expanded || contentInteractive ? undefined : onDragUp}
         onPointerCancel={expanded || contentInteractive ? undefined : onDragUp}
         onWheel={(event) => {
-          if (expanded || contentInteractive) return;
+          if (!blockContentGestures) return;
           event.preventDefault();
         }}
         onClick={() => {
@@ -317,12 +338,12 @@ export function PreviewFloat({
           </header>
         ) : (
           <header
-            className={`flex shrink-0 items-center border-b border-line ${
+            className={`relative z-20 flex shrink-0 items-center border-b border-line ${
               largeFloatChrome
                 ? "h-[1.725rem] cursor-grab gap-0.5 px-0.5 active:cursor-grabbing"
                 : midFloatChrome
-                  ? "h-5 gap-0 px-0"
-                  : "h-4 gap-0 px-0"
+                  ? "h-5 justify-start gap-0 px-0"
+                  : "h-5 justify-between gap-0 px-0.5"
             }`}
             onPointerDown={contentInteractive ? beginDrag : undefined}
             onPointerMove={contentInteractive ? onDragMove : undefined}
@@ -354,17 +375,17 @@ export function PreviewFloat({
             >
               <MaximizeIcon compact={!largeFloatChrome} />
             </button>
-            <span
-              className={`min-w-0 flex-1 truncate text-muted ${
-                largeFloatChrome
-                  ? "px-0.5 text-[11px] leading-none"
-                  : midFloatChrome
-                    ? "px-px text-[10px] leading-none"
-                    : "px-px text-[9px] leading-none"
-              }`}
-            >
-              {title}
-            </span>
+            {smallFloatChrome ? null : (
+              <span
+                className={`min-w-0 flex-1 truncate text-muted ${
+                  largeFloatChrome
+                    ? "px-0.5 text-[11px] leading-none"
+                    : "px-0.5 text-[11px] leading-none"
+                }`}
+              >
+                {title}
+              </span>
+            )}
             {largeFloatChrome ? (
               <button
                 type="button"
@@ -397,7 +418,7 @@ export function PreviewFloat({
         )}
         <div
           className={`relative min-h-0 flex-1 overflow-hidden bg-bg ${
-            !expanded && !contentInteractive ? "touch-none overscroll-none" : ""
+            blockContentGestures ? "touch-none overscroll-none" : ""
           }`}
         >
           <div
@@ -420,6 +441,14 @@ export function PreviewFloat({
           >
             {preview}
           </div>
+          {blockContentGestures ? (
+            <div
+              ref={contentShieldRef}
+              data-testid="preview-content-shield"
+              className="absolute inset-0 z-10 touch-none"
+              aria-hidden="true"
+            />
+          ) : null}
         </div>
       </div>
       {infoOpen ? (
