@@ -7,21 +7,18 @@ export type SiteAssetFetch = (
 const DEFAULT_MAX_FILES = 32;
 const DEFAULT_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 
-const ATTR_SELECTORS: Array<{ selector: string; attr: string }> = [
-  { selector: "link[href]", attr: "href" },
-  { selector: "script[src]", attr: "src" },
-  { selector: "img[src]", attr: "src" },
-  { selector: "source[src]", attr: "src" },
-  { selector: "video[src]", attr: "src" },
-  { selector: "audio[src]", attr: "src" },
-  { selector: "image[href]", attr: "href" },
-  { selector: "use[href]", attr: "href" },
-];
+type CachedAsset =
+  | { kind: "css"; text: string }
+  | { kind: "js"; text: string }
+  | { kind: "data"; url: string };
 
 /**
- * Rewrite static relative assets in an HTML document to blob: URLs fetched
- * through authenticated Preview. Dynamic fetch/import and root-absolute paths
- * are intentionally left unresolved.
+ * Rewrite static relative assets in an HTML document for sandboxed srcdoc.
+ *
+ * Parent-created blob: URLs are unusable inside an opaque-origin iframe
+ * (`sandbox="allow-scripts"` without allow-same-origin). Inline CSS/JS and
+ * data: URLs for media instead. Dynamic fetch/import and root-absolute paths
+ * stay unresolved.
  */
 export async function remapHtmlSite(options: {
   entryPath: string;
@@ -34,29 +31,12 @@ export async function remapHtmlSite(options: {
   const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
   const entry = previewPath(options.entryPath);
   const document_ = new DOMParser().parseFromString(options.html, "text/html");
-  const blobUrls: string[] = [];
   const warnings: string[] = [];
-  const cache = new Map<string, string>();
+  const cache = new Map<string, CachedAsset>();
   let files = 0;
   let totalBytes = 0;
 
-  const resolve = async (raw: string | null, basePath: string): Promise<string | null> => {
-    if (!raw) return null;
-    const trimmed = raw.trim();
-    if (
-      !trimmed ||
-      trimmed.startsWith("#") ||
-      /^(https?:|data:|blob:|javascript:|mailto:)/i.test(trimmed) ||
-      trimmed.startsWith("//") ||
-      trimmed.startsWith("/")
-    ) {
-      return null;
-    }
-    const target = joinAgainstEntry(basePath, trimmed);
-    if (!target) {
-      warnings.push(`skipped ${trimmed}`);
-      return null;
-    }
+  const loadAsset = async (target: string): Promise<CachedAsset | null> => {
     const hit = cache.get(target);
     if (hit) return hit;
     if (files >= maxFiles) {
@@ -74,28 +54,95 @@ export async function remapHtmlSite(options: {
     }
     files += 1;
     totalBytes += loaded.bytes.byteLength;
-    // Daemon often labels UTF-8 assets as text/plain; browsers refuse stylesheet /
-    // classic script / SVG <img> blobs unless the Blob MIME matches the role.
-    let mediaType = resolveMediaType(target, loaded.mediaType);
-    let bytes = loaded.bytes;
+    const mediaType = resolveMediaType(target, loaded.mediaType);
+    let asset: CachedAsset;
     if (mediaType === "text/css" || target.toLowerCase().endsWith(".css")) {
-      const cssText = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-      const rewritten = await rewriteCssUrls(cssText, target, resolve);
-      bytes = new TextEncoder().encode(rewritten);
-      mediaType = "text/css";
+      const cssText = new TextDecoder("utf-8", { fatal: false }).decode(loaded.bytes);
+      const rewritten = await rewriteCssUrls(cssText, target, resolveDataUrl);
+      asset = { kind: "css", text: rewritten };
+    } else if (
+      mediaType === "text/javascript" ||
+      target.toLowerCase().endsWith(".js") ||
+      target.toLowerCase().endsWith(".mjs")
+    ) {
+      asset = {
+        kind: "js",
+        text: new TextDecoder("utf-8", { fatal: false }).decode(loaded.bytes),
+      };
+    } else {
+      asset = { kind: "data", url: toDataUrl(loaded.bytes, mediaType) };
     }
-    const url = URL.createObjectURL(
-      new Blob([bytes.slice().buffer as ArrayBuffer], { type: mediaType }),
-    );
-    blobUrls.push(url);
-    cache.set(target, url);
-    return url;
+    cache.set(target, asset);
+    return asset;
   };
 
-  for (const { selector, attr } of ATTR_SELECTORS) {
+  const resolveDataUrl = async (
+    raw: string | null,
+    basePath: string,
+  ): Promise<string | null> => {
+    const target = resolveTarget(raw, basePath, warnings);
+    if (!target) return null;
+    const asset = await loadAsset(target);
+    if (!asset) return null;
+    if (asset.kind === "data") return asset.url;
+    if (asset.kind === "css") {
+      return toDataUrl(new TextEncoder().encode(asset.text), "text/css");
+    }
+    return toDataUrl(new TextEncoder().encode(asset.text), "text/javascript");
+  };
+
+  for (const node of Array.from(document_.querySelectorAll("link[href]"))) {
+    const rel = (node.getAttribute("rel") ?? "").toLowerCase();
+    const href = node.getAttribute("href");
+    if (rel.includes("stylesheet")) {
+      const target = resolveTarget(href, entry, warnings);
+      if (!target) continue;
+      const asset = await loadAsset(target);
+      if (!asset || asset.kind !== "css") {
+        if (asset) warnings.push(`expected css at ${target}`);
+        continue;
+      }
+      const style = document_.createElement("style");
+      style.textContent = asset.text;
+      node.replaceWith(style);
+      continue;
+    }
+    // Icons / prefetch: best-effort data URL rewrite.
+    const next = await resolveDataUrl(href, entry);
+    if (next) node.setAttribute("href", next);
+  }
+
+  for (const node of Array.from(document_.querySelectorAll("script[src]"))) {
+    if (node.getAttribute("type")?.toLowerCase() === "module") {
+      warnings.push(`module script left unresolved: ${node.getAttribute("src") ?? ""}`);
+      continue;
+    }
+    const target = resolveTarget(node.getAttribute("src"), entry, warnings);
+    if (!target) continue;
+    const asset = await loadAsset(target);
+    if (!asset || asset.kind !== "js") {
+      if (asset) warnings.push(`expected js at ${target}`);
+      continue;
+    }
+    const script = document_.createElement("script");
+    for (const name of Array.from(node.attributes)) {
+      if (name.name === "src") continue;
+      script.setAttribute(name.name, name.value);
+    }
+    script.textContent = asset.text;
+    node.replaceWith(script);
+  }
+
+  for (const { selector, attr } of [
+    { selector: "img[src]", attr: "src" },
+    { selector: "source[src]", attr: "src" },
+    { selector: "video[src]", attr: "src" },
+    { selector: "audio[src]", attr: "src" },
+    { selector: "image[href]", attr: "href" },
+    { selector: "use[href]", attr: "href" },
+  ] as const) {
     for (const node of Array.from(document_.querySelectorAll(selector))) {
-      const current = node.getAttribute(attr);
-      const next = await resolve(current, entry);
+      const next = await resolveDataUrl(node.getAttribute(attr), entry);
       if (next) node.setAttribute(attr, next);
     }
   }
@@ -103,14 +150,38 @@ export async function remapHtmlSite(options: {
   for (const node of Array.from(document_.querySelectorAll("style"))) {
     const cssText = node.textContent ?? "";
     if (!cssText.includes("url(") && !cssText.includes("@import")) continue;
-    node.textContent = await rewriteCssUrls(cssText, entry, resolve);
+    node.textContent = await rewriteCssUrls(cssText, entry, resolveDataUrl);
   }
 
   return {
     html: `<!doctype html>\n${document_.documentElement.outerHTML}`,
-    blobUrls,
+    blobUrls: [],
     warnings,
   };
+}
+
+function resolveTarget(
+  raw: string | null,
+  basePath: string,
+  warnings: string[],
+): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith("#") ||
+    /^(https?:|data:|blob:|javascript:|mailto:)/i.test(trimmed) ||
+    trimmed.startsWith("//") ||
+    trimmed.startsWith("/")
+  ) {
+    return null;
+  }
+  const target = joinAgainstEntry(basePath, trimmed);
+  if (!target) {
+    warnings.push(`skipped ${trimmed}`);
+    return null;
+  }
+  return target;
 }
 
 async function rewriteCssUrls(
@@ -175,4 +246,13 @@ function mimeFor(path: string): string {
   if (lower.endsWith(".woff")) return "font/woff";
   if (lower.endsWith(".ttf")) return "font/ttf";
   return "application/octet-stream";
+}
+
+function toDataUrl(bytes: Uint8Array, mediaType: string): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return `data:${mediaType};base64,${btoa(binary)}`;
 }

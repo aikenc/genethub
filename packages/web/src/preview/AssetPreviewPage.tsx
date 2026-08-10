@@ -260,8 +260,8 @@ function HtmlDocument({
         }
         const statusText =
           remapped.warnings.length > 0
-            ? `静态多文件 · 动态加载不可用 · 网络已开启 · ${metadata.sourceBytes} bytes · ${remapped.warnings.length} 个资源未加载`
-            : `静态多文件 · 动态加载不可用 · 网络已开启 · ${metadata.sourceBytes} bytes`;
+            ? `静态多文件（内联） · 动态加载不可用 · 网络已开启 · ${metadata.sourceBytes} bytes · ${remapped.warnings.length} 个资源未加载`
+            : `静态多文件（内联） · 动态加载不可用 · 网络已开启 · ${metadata.sourceBytes} bytes`;
         setSrcDoc(isolatedHtml(remapped.html));
         setStatus(statusText);
         emitPreviewDiagnostic("log", {
@@ -337,11 +337,11 @@ export function isolatedHtml(source: string): string {
   policy.httpEquiv = "Content-Security-Policy";
   policy.content = [
     "default-src 'none'",
-    "script-src 'unsafe-inline' https: blob:",
-    "style-src 'unsafe-inline' https: blob:",
-    "img-src data: blob: https:",
-    "media-src data: blob: https:",
-    "font-src data: blob: https:",
+    "script-src 'unsafe-inline' https: data:",
+    "style-src 'unsafe-inline' https: data:",
+    "img-src data: https:",
+    "media-src data: https:",
+    "font-src data: https:",
     "connect-src https: wss:",
     "object-src 'none'",
     "frame-src 'none'",

@@ -4,30 +4,16 @@ import { remapHtmlSite } from "./htmlSite";
 
 describe("remapHtmlSite", () => {
   beforeEach(() => {
-    let seq = 0;
     Object.defineProperty(URL, "createObjectURL", {
       configurable: true,
       writable: true,
-      value: () => `blob:https://local.test/${seq++}`,
-    });
-    Object.defineProperty(URL, "revokeObjectURL", {
-      configurable: true,
-      writable: true,
-      value: () => {},
+      value: () => {
+        throw new Error("blob URLs must not be used for sandboxed srcdoc sites");
+      },
     });
   });
-  afterEach(() => {
-    // jsdom may not define these; leave harmless stubs in place for later tests.
-  });
 
-  it("rewrites relative css and script tags to blob URLs", async () => {
-    const blobTypes: string[] = [];
-    const createObjectURL = URL.createObjectURL;
-    URL.createObjectURL = ((blob: Blob) => {
-      blobTypes.push(blob.type);
-      return createObjectURL(blob);
-    }) as typeof URL.createObjectURL;
-
+  it("inlines relative css/js and data-URLs images for opaque iframes", async () => {
     const fetchAsset = vi.fn(async (path: string) => {
       if (path === "r_demo/app.css") {
         return { bytes: new TextEncoder().encode("body{color:red}"), mediaType: "text/plain" };
@@ -59,11 +45,11 @@ describe("remapHtmlSite", () => {
     expect(fetchAsset).toHaveBeenCalledWith("r_demo/app.css");
     expect(fetchAsset).toHaveBeenCalledWith("r_demo/app.js");
     expect(fetchAsset).toHaveBeenCalledWith("r_demo/mark.svg");
-    expect(result.html).toContain('href="blob:');
-    expect(result.html).toContain('src="blob:');
-    expect(result.blobUrls).toHaveLength(3);
-    expect(blobTypes).toEqual(["text/css", "text/javascript", "image/svg+xml"]);
-    for (const url of result.blobUrls) URL.revokeObjectURL(url);
+    expect(result.html).toContain("<style>body{color:red}</style>");
+    expect(result.html).toContain("<script>globalThis.ok=true</script>");
+    expect(result.html).toContain('src="data:image/svg+xml;base64,');
+    expect(result.html).not.toContain("blob:");
+    expect(result.blobUrls).toHaveLength(0);
   });
 
   it("does not rewrite root-absolute or remote assets", async () => {

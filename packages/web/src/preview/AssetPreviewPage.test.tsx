@@ -19,9 +19,9 @@ describe("active single-file HTML Preview", () => {
       .querySelector('meta[http-equiv="Content-Security-Policy"]')
       ?.getAttribute("content");
     expect(policy).toContain("connect-src https: wss:");
-    expect(policy).toContain("script-src 'unsafe-inline' https: blob:");
-    expect(policy).toContain("style-src 'unsafe-inline' https: blob:");
-    expect(policy).toContain("font-src data: blob: https:");
+    expect(policy).toContain("script-src 'unsafe-inline' https: data:");
+    expect(policy).toContain("style-src 'unsafe-inline' https: data:");
+    expect(policy).toContain("font-src data: https:");
     expect(policy).toContain("object-src 'none'");
     expect(policy).toContain("form-action 'none'");
     expect(policy).not.toContain("default-src *");
