@@ -111,9 +111,13 @@ describe("PreviewFloat", () => {
 
     await user.click(screen.getByRole("button", { name: "最小化" }));
     const float = await screen.findByRole("button", { name: "预览浮窗 Cursor Demo Title" });
+    expect(float.style.width).toBe("72px");
     expect(screen.getByRole("button", { name: "最大化预览" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "最小化浮窗" })).not.toBeInTheDocument();
+    // Small chrome is icon-only: title stays in aria-label, not the header text node.
+    expect(screen.queryByText("Cursor Demo Title")).not.toBeInTheDocument();
+    expect(screen.getByTestId("preview-content-shield")).toBeInTheDocument();
 
     // small → mid via whole-float click
     await user.click(float);
@@ -123,6 +127,8 @@ describe("PreviewFloat", () => {
     expect(float.style.width).toBe("108px");
     expect(screen.getByRole("button", { name: "最大化预览" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
+    expect(screen.getByText("Cursor Demo Title")).toBeInTheDocument();
+    expect(screen.getByTestId("preview-content-shield")).toBeInTheDocument();
 
     // mid → large
     await user.click(float);
@@ -133,13 +139,15 @@ describe("PreviewFloat", () => {
     expect(screen.getByRole("button", { name: "最大化预览" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "最小化浮窗" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
+    expect(screen.queryByTestId("preview-content-shield")).not.toBeInTheDocument();
     const previewShell = screen.getByTestId("preview-body").parentElement;
     expect(previewShell?.style.transform).toContain("scale(0.14)");
     expect(previewShell?.className).not.toContain("pointer-events-none");
 
     await user.click(screen.getByRole("button", { name: "最小化浮窗" }));
-    expect(float.style.width).toBe("54px");
+    expect(float.style.width).toBe("72px");
     expect(screen.queryByRole("button", { name: "最小化浮窗" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("preview-content-shield")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "关闭预览" }));
     expect(onClose).toHaveBeenCalled();
