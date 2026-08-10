@@ -6,7 +6,16 @@ import type { Host } from "../host";
 import { PreviewFloat } from "./PreviewFloat";
 
 vi.mock("./AssetPreviewPage", () => ({
-  AssetPreviewPage: () => <div data-testid="preview-body">preview body</div>,
+  AssetPreviewPage: (props: { client?: unknown }) => (
+    <div data-testid="preview-body">
+      preview body{props.client ? " shared" : ""}
+    </div>
+  ),
+}));
+
+vi.mock("../session/store", () => ({
+  useWorkbench: (select: (state: { client: { identity: { machineId: string } } }) => unknown) =>
+    select({ client: { identity: { machineId: "m_demo" } } }),
 }));
 
 describe("PreviewFloat", () => {

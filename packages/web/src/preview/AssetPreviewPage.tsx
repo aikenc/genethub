@@ -18,11 +18,18 @@ export function AssetPreviewPage({
   source,
   host = detectHost(),
   chrome = "page",
+  client: sharedClient = null,
 }: {
   source: AssetPreviewLocation;
   host?: Host;
   /** `embedded` omits page chrome when hosted inside the workbench float. */
   chrome?: "page" | "embedded";
+  /**
+   * Workbench float must reuse the live Client. Opening a second Fabric
+   * session here closes the workbench socket and, under reconnect, storms the
+   * control plane ("too many connection attempts").
+   */
+  client?: Client | null;
 }) {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
 
@@ -36,21 +43,31 @@ export function AssetPreviewPage({
       workspaceHandle: source.workspaceHandle,
       deviceHandle: source.deviceHandle,
       phase: "start",
+      shared: Boolean(sharedClient),
     });
     void (async () => {
       try {
-        const endpoint =
-          (await endpointForDevice(host, source.deviceHandle)) ??
-          (await host.endpoint());
-        if (!endpoint) throw new Error("这台浏览器尚未获准连接资源所在的设备");
-        owned = connect(endpoint, host, source.deviceHandle);
-        await ready(owned);
-        if (owned.identity?.machineId !== source.deviceHandle) {
-          throw new Error("链接指向的设备与当前连接不一致");
+        let active: Client;
+        if (sharedClient) {
+          if (sharedClient.identity?.machineId !== source.deviceHandle) {
+            throw new Error("当前连接的设备与预览目标不一致");
+          }
+          active = sharedClient;
+        } else {
+          const endpoint =
+            (await endpointForDevice(host, source.deviceHandle)) ??
+            (await host.endpoint());
+          if (!endpoint) throw new Error("这台浏览器尚未获准连接资源所在的设备");
+          owned = connect(endpoint, host, source.deviceHandle);
+          await ready(owned);
+          if (owned.identity?.machineId !== source.deviceHandle) {
+            throw new Error("链接指向的设备与当前连接不一致");
+          }
+          active = owned;
         }
-        const result = await owned.preview(source.workspaceHandle, source.path);
+        const result = await active.preview(source.workspaceHandle, source.path);
         if (cancelled) {
-          owned.close();
+          owned?.close();
           return;
         }
         emitPreviewDiagnostic("log", {
@@ -59,9 +76,11 @@ export function AssetPreviewPage({
           kind: result.metadata.kind,
           sourceBytes: result.metadata.sourceBytes,
           phase: "ready",
+          shared: Boolean(sharedClient),
         });
-        setState({ kind: "ready", result, client: owned });
-        owned = null;
+        setState({ kind: "ready", result, client: active });
+        // Dialed clients stay in `owned` so effect cleanup closes them. Shared
+        // workbench clients must never be closed from Preview.
       } catch (error) {
         owned?.close();
         if (!cancelled) {
@@ -82,13 +101,7 @@ export function AssetPreviewPage({
       cancelled = true;
       owned?.close();
     };
-  }, [host, source.deviceHandle, source.path, source.workspaceHandle]);
-
-  useEffect(() => {
-    if (state.kind !== "ready") return;
-    const client = state.client;
-    return () => client.close();
-  }, [state]);
+  }, [host, sharedClient, source.deviceHandle, source.path, source.workspaceHandle]);
 
   return (
     <main className="flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg">

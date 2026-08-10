@@ -1,9 +1,10 @@
 import { useEffect } from "react";
 
 import type { Host } from "../host";
+import { useWorkbench } from "../session/store";
+import type { PreviewFloatTarget } from "../session/store";
 import { AssetPreviewPage } from "./AssetPreviewPage";
 import { assetPreviewUrl } from "./url";
-import type { PreviewFloatTarget } from "../session/store";
 
 /**
  * Default Preview surface inside the workbench so feedback stays on one page.
@@ -19,6 +20,7 @@ export function PreviewFloat({
   host: Host;
   onClose(): void;
 }) {
+  const client = useWorkbench((state) => state.client);
   const externalUrl = assetPreviewUrl(
     source.deviceHandle,
     source.workspaceHandle,
@@ -88,7 +90,18 @@ export function PreviewFloat({
           </button>
         </header>
         <div className="min-h-0 flex-1">
-          <AssetPreviewPage source={source} host={host} chrome="embedded" />
+          {client ? (
+            <AssetPreviewPage
+              source={source}
+              host={host}
+              chrome="embedded"
+              client={client}
+            />
+          ) : (
+            <p role="status" className="m-auto p-6 text-center text-sm text-muted">
+              尚未连接到设备，无法预览
+            </p>
+          )}
         </div>
       </section>
     </div>
