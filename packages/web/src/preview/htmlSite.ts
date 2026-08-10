@@ -74,16 +74,18 @@ export async function remapHtmlSite(options: {
     }
     files += 1;
     totalBytes += loaded.bytes.byteLength;
-    let mediaType = loaded.mediaType;
+    // Daemon often labels UTF-8 assets as text/plain; browsers refuse stylesheet /
+    // classic script / SVG <img> blobs unless the Blob MIME matches the role.
+    let mediaType = resolveMediaType(target, loaded.mediaType);
     let bytes = loaded.bytes;
-    if (mediaType === "text/css" || target.endsWith(".css")) {
+    if (mediaType === "text/css" || target.toLowerCase().endsWith(".css")) {
       const cssText = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
       const rewritten = await rewriteCssUrls(cssText, target, resolve);
       bytes = new TextEncoder().encode(rewritten);
       mediaType = "text/css";
     }
     const url = URL.createObjectURL(
-      new Blob([bytes.slice().buffer as ArrayBuffer], { type: mediaType || mimeFor(target) }),
+      new Blob([bytes.slice().buffer as ArrayBuffer], { type: mediaType }),
     );
     blobUrls.push(url);
     cache.set(target, url);
@@ -151,6 +153,13 @@ function joinAgainstEntry(entryPath: string, relative: string): string | null {
   } catch {
     return null;
   }
+}
+
+function resolveMediaType(path: string, reported: string | undefined): string {
+  const byExt = mimeFor(path);
+  if (byExt !== "application/octet-stream") return byExt;
+  if (reported && reported.trim()) return reported;
+  return byExt;
 }
 
 function mimeFor(path: string): string {
