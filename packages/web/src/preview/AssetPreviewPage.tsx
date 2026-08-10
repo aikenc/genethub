@@ -14,11 +14,17 @@ type ViewState =
   | { kind: "ready"; result: AssetPreviewResult; client: Client }
   | { kind: "error"; message: string };
 
+export type PreviewMeta = {
+  documentTitle: string | null;
+  infoLines: string[];
+};
+
 export function AssetPreviewPage({
   source,
   host = detectHost(),
   chrome = "page",
   client: sharedClient = null,
+  onMetaChange,
 }: {
   source: AssetPreviewLocation;
   host?: Host;
@@ -30,8 +36,24 @@ export function AssetPreviewPage({
    * control plane ("too many connection attempts").
    */
   client?: Client | null;
+  onMetaChange?: (meta: PreviewMeta | null) => void;
 }) {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
+  const [pageInfoOpen, setPageInfoOpen] = useState(false);
+  const [meta, setMeta] = useState<PreviewMeta | null>(null);
+
+  const reportMeta = useCallback(
+    (next: PreviewMeta | null) => {
+      setMeta(next);
+      onMetaChange?.(next);
+    },
+    [onMetaChange],
+  );
+
+  useEffect(() => {
+    reportMeta(null);
+    setPageInfoOpen(false);
+  }, [source.path, source.workspaceHandle, source.deviceHandle, reportMeta]);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,11 +128,18 @@ export function AssetPreviewPage({
   return (
     <main className="flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg">
       {chrome === "page" ? (
-        <header className="flex min-h-11 shrink-0 items-center gap-3 border-b border-line px-4 py-2">
-          <span className="min-w-0 truncate font-mono text-xs">{source.path}</span>
-          <span className="ml-auto shrink-0 text-[11px] text-faint">
-            {source.workspaceHandle}
-          </span>
+        <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line px-4 py-2">
+          <button
+            type="button"
+            aria-label="查看预览信息"
+            title="查看预览信息"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg"
+            onClick={() => setPageInfoOpen(true)}
+          >
+            <PageInfoIcon />
+          </button>
+          <span className="min-w-0 flex-1 truncate font-mono text-xs">{source.path}</span>
+          <span className="shrink-0 text-[11px] text-faint">{source.workspaceHandle}</span>
         </header>
       ) : null}
       {state.kind === "loading" ? (
@@ -127,8 +156,17 @@ export function AssetPreviewPage({
           deviceHandle={source.deviceHandle}
           workspaceHandle={source.workspaceHandle}
           client={state.client}
+          onMetaChange={reportMeta}
         />
       )}
+      {chrome === "page" && pageInfoOpen ? (
+        <EmbeddedInfoDialog
+          path={source.path}
+          title={meta?.documentTitle?.trim() || basenamePath(source.path)}
+          lines={meta?.infoLines ?? ["预览信息尚未就绪，请稍候再打开。"]}
+          onClose={() => setPageInfoOpen(false)}
+        />
+      ) : null}
     </main>
   );
 }
@@ -139,12 +177,14 @@ function PreviewDocument({
   deviceHandle,
   workspaceHandle,
   client,
+  onMetaChange,
 }: {
   result: AssetPreviewResult;
   path: string;
   deviceHandle: string;
   workspaceHandle: string;
   client: Client;
+  onMetaChange?: (meta: PreviewMeta | null) => void;
 }) {
   const { metadata, bytes } = result;
   const rootHandle = path.split("/")[0] ?? "";
@@ -159,6 +199,19 @@ function PreviewDocument({
     },
     [client, workspaceHandle],
   );
+
+  useEffect(() => {
+    if (metadata.kind === "html") return;
+    onMetaChange?.({
+      documentTitle: null,
+      infoLines: [
+        `类型：${metadata.kind}`,
+        `媒体类型：${metadata.mediaType}`,
+        `大小：${metadata.sourceBytes} bytes`,
+        "单文件预览（无静态站点重写）",
+      ],
+    });
+  }, [metadata, onMetaChange]);
 
   if (metadata.kind === "markdown") {
     return (
@@ -195,6 +248,7 @@ function PreviewDocument({
         metadata={metadata}
         entryPath={path}
         fetchAsset={loadPreview}
+        onMetaChange={onMetaChange}
       />
     );
   }
@@ -232,25 +286,31 @@ function HtmlDocument({
   metadata,
   entryPath,
   fetchAsset,
+  onMetaChange,
 }: {
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
   entryPath: string;
   fetchAsset: (path: string) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
+  onMetaChange?: (meta: PreviewMeta | null) => void;
 }) {
   const [srcDoc, setSrcDoc] = useState<string | null>(null);
-  const [status, setStatus] = useState("正在解析静态资源…");
 
   useEffect(() => {
     let cancelled = false;
     const blobUrls: string[] = [];
     setSrcDoc(null);
-    setStatus("正在解析静态资源…");
+    onMetaChange?.({
+      documentTitle: extractHtmlTitle(decodeText(bytes)),
+      infoLines: ["正在解析静态资源…"],
+    });
     void (async () => {
+      const sourceHtml = decodeText(bytes);
+      const documentTitle = extractHtmlTitle(sourceHtml);
       try {
         const remapped = await remapHtmlSite({
           entryPath,
-          html: decodeText(bytes),
+          html: sourceHtml,
           fetchAsset,
         });
         blobUrls.push(...remapped.blobUrls);
@@ -258,18 +318,23 @@ function HtmlDocument({
           for (const url of blobUrls) URL.revokeObjectURL(url);
           return;
         }
-        const statusText =
+        const infoLines = [
+          "模式：静态多文件（内联 CSS/JS，媒体 data:）",
+          "动态加载（fetch / import）不可用",
+          "网络：已开启（https / wss）",
+          `源文件大小：${metadata.sourceBytes} bytes`,
           remapped.warnings.length > 0
-            ? `静态多文件（内联） · 动态加载不可用 · 网络已开启 · ${metadata.sourceBytes} bytes · ${remapped.warnings.length} 个资源未加载`
-            : `静态多文件（内联） · 动态加载不可用 · 网络已开启 · ${metadata.sourceBytes} bytes`;
+            ? `未加载资源：${remapped.warnings.length} 个`
+            : "未加载资源：0",
+          ...remapped.warnings.slice(0, 40).map((warning) => `· ${warning}`),
+        ];
         setSrcDoc(isolatedHtml(remapped.html));
-        setStatus(statusText);
+        onMetaChange?.({ documentTitle, infoLines });
         emitPreviewDiagnostic("log", {
           topic: "html-site",
           path: entryPath,
           warnings: remapped.warnings.length,
-          blobUrls: remapped.blobUrls.length,
-          status: statusText.slice(0, 500),
+          status: infoLines.join(" · ").slice(0, 500),
           phase: "remapped",
         });
         for (const warning of remapped.warnings.slice(0, 20)) {
@@ -282,10 +347,16 @@ function HtmlDocument({
       } catch (error) {
         if (!cancelled) {
           const message = error instanceof Error ? error.message : "资源解析失败";
-          setSrcDoc(isolatedHtml(decodeText(bytes)));
-          setStatus(
-            `单文件回退 · 网络已开启 · ${metadata.sourceBytes} bytes · ${message}`,
-          );
+          setSrcDoc(isolatedHtml(sourceHtml));
+          onMetaChange?.({
+            documentTitle,
+            infoLines: [
+              "模式：单文件回退",
+              "网络：已开启（https / wss）",
+              `源文件大小：${metadata.sourceBytes} bytes`,
+              `说明：${message}`,
+            ],
+          });
           emitPreviewDiagnostic("error", {
             path: entryPath,
             message,
@@ -298,13 +369,10 @@ function HtmlDocument({
       cancelled = true;
       for (const url of blobUrls) URL.revokeObjectURL(url);
     };
-  }, [bytes, entryPath, fetchAsset, metadata.sourceBytes]);
+  }, [bytes, entryPath, fetchAsset, metadata.sourceBytes, onMetaChange]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <p className="border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-center text-[11px] text-amber-700 dark:text-amber-300">
-        {status}
-      </p>
       {srcDoc ? (
         <iframe
           title="HTML 文件预览"
@@ -320,6 +388,93 @@ function HtmlDocument({
         </p>
       )}
     </div>
+  );
+}
+
+function extractHtmlTitle(html: string): string | null {
+  const title = new DOMParser()
+    .parseFromString(html, "text/html")
+    .querySelector("title")
+    ?.textContent?.replace(/\s+/g, " ")
+    .trim();
+  return title || null;
+}
+
+function basenamePath(path: string): string {
+  const parts = path.split("/");
+  return parts[parts.length - 1] || path;
+}
+
+function EmbeddedInfoDialog({
+  path,
+  title,
+  lines,
+  onClose,
+}: {
+  path: string;
+  title: string;
+  lines: string[];
+  onClose(): void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
+      role="presentation"
+      onClick={onClose}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-label="预览信息"
+        className="flex max-h-[min(80vh,36rem)] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-line bg-surface text-fg shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center gap-2 border-b border-line px-4 py-3">
+          <h2 className="min-w-0 flex-1 truncate text-sm font-medium">预览信息</h2>
+          <button
+            type="button"
+            aria-label="关闭信息"
+            className="rounded px-2 text-lg leading-none text-muted hover:bg-raised"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </header>
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm">
+          <dl className="space-y-2 text-xs">
+            <div>
+              <dt className="text-faint">标题</dt>
+              <dd className="break-words text-fg">{title}</dd>
+            </div>
+            <div>
+              <dt className="text-faint">路径</dt>
+              <dd className="break-all font-mono text-fg">{path}</dd>
+            </div>
+          </dl>
+          <ul className="mt-4 list-disc space-y-2 pl-5 text-xs leading-relaxed text-muted">
+            {lines.map((line) => (
+              <li key={line} className="break-words">
+                {line}
+              </li>
+            ))}
+          </ul>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function PageInfoIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.25" />
+      <path
+        d="M8 7v4.5M8 5.25h.01"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 
