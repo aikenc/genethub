@@ -25,5 +25,10 @@ describe("active single-file HTML Preview", () => {
     expect(policy).toContain("object-src 'none'");
     expect(policy).toContain("form-action 'none'");
     expect(policy).not.toContain("default-src *");
+    const bridge = Array.from(parsed.querySelectorAll("script")).find((node) =>
+      (node.textContent ?? "").includes("genehub-preview-diag"),
+    );
+    expect(bridge?.textContent).toContain('source: "genehub-preview-diag"');
+    expect(bridge?.textContent).toContain("securitypolicyviolation");
   });
 });

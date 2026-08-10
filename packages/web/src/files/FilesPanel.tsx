@@ -52,6 +52,9 @@ export function FilesPanel() {
     if (!deviceHandle || !activeWorkspaceId) return;
     setSelected(path);
     const url = assetPreviewUrl(deviceHandle, activeWorkspaceId, path);
+    window.dispatchEvent(
+      new CustomEvent("genehub:preview-open", { detail: { path, url } }),
+    );
     window.open(url, "_blank", "noopener,noreferrer");
   };
 
