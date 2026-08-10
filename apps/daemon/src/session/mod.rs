@@ -1,3 +1,4 @@
+pub mod artifact_links;
 pub mod manager;
 pub mod overview;
 pub mod rounds;

@@ -661,9 +661,10 @@ impl SessionManager {
         let live = self.live(session_id).await?;
         // Preview locators are rebound in the workbench Markdown renderer from
         // relative/absolute workspace paths. A deployment-specific URL prefix
-        // must not be injected into Agent system prompts.
+        // must not be injected into Agent system prompts — only path-linking
+        // rules (HTML entry file, supported kinds, no directory links).
         let _ = artifact_preview_base_url;
-        let additional_system_prompt = None;
+        let additional_system_prompt = Some(super::artifact_links::guidance().to_string());
         {
             let mut status = live.status.lock().await;
             if matches!(*status, SessionStatus::Running | SessionStatus::Waiting) {
@@ -2609,7 +2610,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_preview_context_is_not_injected_into_adapter_system_prompt() {
+    async fn browser_preview_url_prefix_is_not_injected_but_path_guidance_is() {
         let dir = tempfile::tempdir().unwrap();
         let captured = Arc::new(std::sync::Mutex::new(None));
         let sessions = SessionManager::new(
@@ -2640,9 +2641,16 @@ mod tests {
             .await
             .unwrap();
 
-        // Preview locators are rebound in the workbench; a deployment-bound
-        // prefix must not become Agent system guidance.
-        assert!(captured.lock().unwrap().clone().is_none());
+        let prompt = captured.lock().unwrap().clone();
+        let prompt = prompt.expect("path-linking guidance should reach the adapter");
+        assert!(
+            !prompt.contains(base),
+            "deployment-bound Preview prefixes must not become Agent system guidance"
+        );
+        assert!(
+            prompt.contains("index.html") && prompt.contains("Never link a directory"),
+            "Agents still need file-path linking rules, especially HTML entry files"
+        );
         sessions.shutdown().await;
     }
 

@@ -1036,8 +1036,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
     try {
       // Artifact Preview URLs are bound at chat/document render time from the
-      // current workspace roots. Agents may emit relative or absolute paths;
-      // the workbench no longer teaches a deployment-specific Preview prefix.
+      // current workspace roots. Agents emit relative/absolute file paths; the
+      // daemon teaches path-linking rules (not a deployment-specific prefix).
       await require_(get().client).call({
         type: "session.send",
         // Continuing a round after an interrupt is not wired into the UI
