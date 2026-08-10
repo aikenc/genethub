@@ -15,6 +15,7 @@ import { attachmentPreviewUrl } from "./attachments";
 import { useWorkbench } from "./store";
 import type { PendingMessage, TimelineState } from "./timeline";
 import { ToolCallView } from "./ToolCall";
+import { useSessionArtifact } from "./useSessionArtifact";
 
 /**
  * How long a send may stay silent before the wait is named.
@@ -269,7 +270,7 @@ function Item({ item }: { item: TimelineItem }) {
     case "assistantMessage":
       return (
         <div data-testid="assistant-message">
-          <Markdown text={item.text} />
+          <SessionMarkdown text={item.text} />
         </div>
       );
 
@@ -557,7 +558,7 @@ function BatchContent({
     <div className="space-y-1 px-2 pb-2">
       {monologue ? (
         <div className="px-1 py-1 text-sm" data-testid="batch-monologue">
-          <Markdown text={monologue} />
+          <SessionMarkdown text={monologue} />
         </div>
       ) : null}
       {batch.blobs.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
@@ -902,9 +903,14 @@ function Reasoning({ text }: { text: string }) {
       </button>
       {open ? (
         <div className="mt-1">
-          <Markdown text={text} />
+          <SessionMarkdown text={text} />
         </div>
       ) : null}
     </div>
   );
+}
+
+function SessionMarkdown({ text }: { text: string }) {
+  const artifact = useSessionArtifact();
+  return <Markdown text={text} artifact={artifact} />;
 }

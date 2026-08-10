@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { AssetPreviewMetadata } from "@genehub/proto";
 
@@ -6,11 +6,12 @@ import { detectHost, type Endpoint, type Host } from "../host";
 import { Client, type AssetPreviewResult, type ProtocolDial } from "../protocol/client";
 import { HighlightedCode, languageForPath, Markdown } from "../session/Markdown";
 import { readRtcEnabled } from "../settings/rtc";
+import { remapHtmlSite } from "./htmlSite";
 import type { AssetPreviewLocation } from "./url";
 
 type ViewState =
   | { kind: "loading" }
-  | { kind: "ready"; result: AssetPreviewResult }
+  | { kind: "ready"; result: AssetPreviewResult; client: Client }
   | { kind: "error"; message: string };
 
 export function AssetPreviewPage({
@@ -24,7 +25,7 @@ export function AssetPreviewPage({
 
   useEffect(() => {
     let cancelled = false;
-    let client: Client | null = null;
+    let owned: Client | null = null;
     setState({ kind: "loading" });
     void (async () => {
       try {
@@ -32,14 +33,20 @@ export function AssetPreviewPage({
           (await endpointForDevice(host, source.deviceHandle)) ??
           (await host.endpoint());
         if (!endpoint) throw new Error("这台浏览器尚未获准连接资源所在的设备");
-        client = connect(endpoint, host, source.deviceHandle);
-        await ready(client);
-        if (client.identity?.machineId !== source.deviceHandle) {
+        owned = connect(endpoint, host, source.deviceHandle);
+        await ready(owned);
+        if (owned.identity?.machineId !== source.deviceHandle) {
           throw new Error("链接指向的设备与当前连接不一致");
         }
-        const result = await client.preview(source.workspaceHandle, source.path);
-        if (!cancelled) setState({ kind: "ready", result });
+        const result = await owned.preview(source.workspaceHandle, source.path);
+        if (cancelled) {
+          owned.close();
+          return;
+        }
+        setState({ kind: "ready", result, client: owned });
+        owned = null;
       } catch (error) {
+        owned?.close();
         if (!cancelled) {
           setState({
             kind: "error",
@@ -50,9 +57,15 @@ export function AssetPreviewPage({
     })();
     return () => {
       cancelled = true;
-      client?.close();
+      owned?.close();
     };
   }, [host, source.deviceHandle, source.path, source.workspaceHandle]);
+
+  useEffect(() => {
+    if (state.kind !== "ready") return;
+    const client = state.client;
+    return () => client.close();
+  }, [state]);
 
   return (
     <main className="flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg">
@@ -70,7 +83,13 @@ export function AssetPreviewPage({
           <p className="mt-2 text-xs text-muted">{state.message}</p>
         </section>
       ) : (
-        <PreviewDocument result={state.result} path={source.path} />
+        <PreviewDocument
+          result={state.result}
+          path={source.path}
+          deviceHandle={source.deviceHandle}
+          workspaceHandle={source.workspaceHandle}
+          client={state.client}
+        />
       )}
     </main>
   );
@@ -79,16 +98,45 @@ export function AssetPreviewPage({
 function PreviewDocument({
   result,
   path,
+  deviceHandle,
+  workspaceHandle,
+  client,
 }: {
   result: AssetPreviewResult;
   path: string;
+  deviceHandle: string;
+  workspaceHandle: string;
+  client: Client;
 }) {
   const { metadata, bytes } = result;
+  const rootHandle = path.split("/")[0] ?? "";
+  const loadPreview = useCallback(
+    async (assetPath: string) => {
+      try {
+        const loaded = await client.preview(workspaceHandle, assetPath);
+        return { bytes: loaded.bytes, mediaType: loaded.metadata.mediaType };
+      } catch {
+        return null;
+      }
+    },
+    [client, workspaceHandle],
+  );
+
   if (metadata.kind === "markdown") {
     return (
       <article className="min-h-0 w-full flex-1 overflow-y-auto overscroll-contain touch-pan-y">
         <div className="mx-auto max-w-4xl px-5 py-6 sm:px-8 sm:py-10">
-          <Markdown text={decodeText(bytes)} variant="document" />
+          <Markdown
+            text={decodeText(bytes)}
+            variant="document"
+            artifact={{
+              deviceHandle,
+              workspaceHandle,
+              folders: [{ root: "", rootHandle }],
+              documentPath: path,
+              loadPreview,
+            }}
+          />
         </div>
       </article>
     );
@@ -103,7 +151,14 @@ function PreviewDocument({
     );
   }
   if (metadata.kind === "html") {
-    return <HtmlDocument bytes={bytes} metadata={metadata} />;
+    return (
+      <HtmlDocument
+        bytes={bytes}
+        metadata={metadata}
+        entryPath={path}
+        fetchAsset={loadPreview}
+      />
+    );
   }
   return <BlobDocument bytes={bytes} metadata={metadata} />;
 }
@@ -137,24 +192,76 @@ function BlobDocument({
 function HtmlDocument({
   bytes,
   metadata,
+  entryPath,
+  fetchAsset,
 }: {
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
+  entryPath: string;
+  fetchAsset: (path: string) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
 }) {
-  const srcDoc = useMemo(() => isolatedHtml(decodeText(bytes)), [bytes]);
+  const [srcDoc, setSrcDoc] = useState<string | null>(null);
+  const [status, setStatus] = useState("正在解析静态资源…");
+
+  useEffect(() => {
+    let cancelled = false;
+    const blobUrls: string[] = [];
+    setSrcDoc(null);
+    setStatus("正在解析静态资源…");
+    void (async () => {
+      try {
+        const remapped = await remapHtmlSite({
+          entryPath,
+          html: decodeText(bytes),
+          fetchAsset,
+        });
+        blobUrls.push(...remapped.blobUrls);
+        if (cancelled) {
+          for (const url of blobUrls) URL.revokeObjectURL(url);
+          return;
+        }
+        setSrcDoc(isolatedHtml(remapped.html));
+        setStatus(
+          remapped.warnings.length > 0
+            ? `静态多文件 · 动态加载不可用 · 网络已开启 · ${metadata.sourceBytes} bytes · ${remapped.warnings.length} 个资源未加载`
+            : `静态多文件 · 动态加载不可用 · 网络已开启 · ${metadata.sourceBytes} bytes`,
+        );
+      } catch (error) {
+        if (!cancelled) {
+          setSrcDoc(isolatedHtml(decodeText(bytes)));
+          setStatus(
+            `单文件回退 · 网络已开启 · ${metadata.sourceBytes} bytes · ${
+              error instanceof Error ? error.message : "资源解析失败"
+            }`,
+          );
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      for (const url of blobUrls) URL.revokeObjectURL(url);
+    };
+  }, [bytes, entryPath, fetchAsset, metadata.sourceBytes]);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <p className="border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-center text-[11px] text-amber-700 dark:text-amber-300">
-        活动 HTML · 网络已开启 · {metadata.sourceBytes} bytes
+        {status}
       </p>
-      <iframe
-        title="HTML 文件预览"
-        sandbox="allow-scripts"
-        referrerPolicy="no-referrer"
-        allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'; usb 'none'; serial 'none'; display-capture 'none'; fullscreen 'none'; presentation 'none'"
-        srcDoc={srcDoc}
-        className="min-h-0 flex-1 border-0 bg-white"
-      />
+      {srcDoc ? (
+        <iframe
+          title="HTML 文件预览"
+          sandbox="allow-scripts"
+          referrerPolicy="no-referrer"
+          allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'; usb 'none'; serial 'none'; display-capture 'none'; fullscreen 'none'; presentation 'none'"
+          srcDoc={srcDoc}
+          className="min-h-0 flex-1 border-0 bg-white"
+        />
+      ) : (
+        <p role="status" className="m-auto text-sm text-muted">
+          正在准备 HTML 预览…
+        </p>
+      )}
     </div>
   );
 }
@@ -173,11 +280,11 @@ export function isolatedHtml(source: string): string {
   policy.httpEquiv = "Content-Security-Policy";
   policy.content = [
     "default-src 'none'",
-    "script-src 'unsafe-inline' https:",
-    "style-src 'unsafe-inline' https:",
+    "script-src 'unsafe-inline' https: blob:",
+    "style-src 'unsafe-inline' https: blob:",
     "img-src data: blob: https:",
     "media-src data: blob: https:",
-    "font-src data: https:",
+    "font-src data: blob: https:",
     "connect-src https: wss:",
     "object-src 'none'",
     "frame-src 'none'",
