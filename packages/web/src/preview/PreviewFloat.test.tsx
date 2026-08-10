@@ -45,7 +45,7 @@ describe("PreviewFloat", () => {
     vi.restoreAllMocks();
   });
 
-  it("opens fullscreen, shows info dialog, and keeps preview mounted across minimize", async () => {
+  it("opens fullscreen with title chrome and keeps preview mounted across minimize", async () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const onClose = vi.fn();
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
@@ -66,6 +66,8 @@ describe("PreviewFloat", () => {
     expect(screen.getByTestId("preview-body")).toBeInTheDocument();
     expect(mountCount.current).toBe(1);
     expect(screen.getByRole("dialog", { name: "文件预览" })).toBeInTheDocument();
+    expect(screen.getByText("Cursor Demo Title")).toBeInTheDocument();
+    expect(screen.queryByText("r_root/demos/index.html")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "查看预览信息" }));
     expect(screen.getByRole("dialog", { name: "预览信息" })).toBeInTheDocument();
@@ -76,10 +78,9 @@ describe("PreviewFloat", () => {
     expect(
       await screen.findByRole("button", { name: "预览浮窗 Cursor Demo Title" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Cursor Demo Title")).toBeInTheDocument();
     expect(mountCount.current).toBe(1);
 
-    await user.dblClick(screen.getByRole("button", { name: "预览浮窗 Cursor Demo Title" }));
+    await user.click(screen.getByRole("button", { name: "最大化预览" }));
     expect(screen.getByRole("dialog", { name: "文件预览" })).toBeInTheDocument();
     expect(mountCount.current).toBe(1);
 
@@ -91,7 +92,7 @@ describe("PreviewFloat", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("cycles float size on single click and shows close on mid/large", async () => {
+  it("keeps maximize/close on every float size and only large is content-interactive", async () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const onClose = vi.fn();
     const host = { kind: "browser" } as Host;
@@ -110,24 +111,28 @@ describe("PreviewFloat", () => {
 
     await user.click(screen.getByRole("button", { name: "最小化" }));
     const float = await screen.findByRole("button", { name: "预览浮窗 Cursor Demo Title" });
-    expect(screen.queryByRole("button", { name: "关闭预览" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "最大化预览" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "最小化浮窗" })).not.toBeInTheDocument();
 
-    // small → mid
+    // small → mid via whole-float click
     await user.click(float);
     await act(async () => {
       vi.advanceTimersByTime(300);
     });
-    expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
     expect(float.style.width).toBe("108px");
+    expect(screen.getByRole("button", { name: "最大化预览" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
 
-    // mid → large: interactive chrome with minimize; content keeps thumb scale
+    // mid → large
     await user.click(float);
     await act(async () => {
       vi.advanceTimersByTime(300);
     });
     expect(float.style.width).toBe("216px");
-    expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "最大化预览" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "最小化浮窗" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
     const previewShell = screen.getByTestId("preview-body").parentElement;
     expect(previewShell?.style.transform).toContain("scale(0.14)");
     expect(previewShell?.className).not.toContain("pointer-events-none");
@@ -135,5 +140,8 @@ describe("PreviewFloat", () => {
     await user.click(screen.getByRole("button", { name: "最小化浮窗" }));
     expect(float.style.width).toBe("54px");
     expect(screen.queryByRole("button", { name: "最小化浮窗" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "关闭预览" }));
+    expect(onClose).toHaveBeenCalled();
   });
 });

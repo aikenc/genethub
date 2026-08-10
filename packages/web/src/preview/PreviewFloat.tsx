@@ -70,17 +70,25 @@ export function PreviewFloat({
   const expanded = mode === "expanded";
   /** Only the large float accepts content input; small/mid are click-to-cycle. */
   const contentInteractive = mode === "float" && sizeLevel === SIZE_FACTORS.length - 1;
-  const showFloatClose = mode === "float" && sizeLevel >= 1;
   const midFloatChrome = mode === "float" && sizeLevel === 1;
   const largeFloatChrome = contentInteractive;
 
   const shrinkToSmallFloat = () => {
+    if (clickTimer.current) {
+      clearTimeout(clickTimer.current);
+      clickTimer.current = null;
+    }
     const nextW = Math.round(BASE_W * SIZE_FACTORS[0]);
     const nextH = Math.round(BASE_H * SIZE_FACTORS[0]);
     setSizeLevel(0);
     setPos((current) => clampPos(current.x, current.y, nextW, nextH));
     setMode("float");
   };
+
+  const chromeBtn =
+    "flex h-5 w-5 shrink-0 items-center justify-center rounded text-sm leading-none text-muted hover:bg-raised hover:text-fg";
+  const expandedActionBtn =
+    "shrink-0 rounded border border-line bg-surface px-2 py-0.5 text-[11px] leading-none text-fg shadow-sm hover:bg-raised active:bg-raised";
 
   useEffect(() => {
     setMode("expanded");
@@ -258,24 +266,20 @@ export function PreviewFloat({
               type="button"
               aria-label="查看预览信息"
               title="查看预览信息"
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-line bg-surface text-muted hover:bg-raised hover:text-fg"
               onClick={() => setInfoOpen(true)}
             >
               <InfoIcon />
             </button>
-            <span className="min-w-0 flex-1 truncate font-mono text-[11px] leading-none">
-              {source.path}
+            <span className="min-w-0 flex-1 truncate text-[11px] leading-none text-fg">
+              {title}
             </span>
-            <button
-              type="button"
-              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] leading-none text-muted hover:bg-raised hover:text-fg"
-              onClick={shrinkToSmallFloat}
-            >
+            <button type="button" className={expandedActionBtn} onClick={shrinkToSmallFloat}>
               最小化
             </button>
             <button
               type="button"
-              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] leading-none text-accent hover:bg-raised"
+              className={`${expandedActionBtn} text-accent`}
               onClick={() => {
                 window.dispatchEvent(
                   new CustomEvent("genehub:preview-open", {
@@ -290,7 +294,7 @@ export function PreviewFloat({
             <button
               type="button"
               aria-label="关闭预览"
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-base leading-none text-muted hover:bg-raised hover:text-fg"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-line bg-surface text-base leading-none text-muted hover:bg-raised hover:text-fg"
               onClick={onClose}
             >
               ×
@@ -298,21 +302,23 @@ export function PreviewFloat({
           </header>
         ) : (
           <header
-            className={`flex shrink-0 items-center gap-1 border-b border-line px-1 ${
+            className={`flex shrink-0 items-center gap-0.5 border-b border-line px-0.5 ${
               largeFloatChrome
                 ? "h-[1.725rem] cursor-grab active:cursor-grabbing"
                 : midFloatChrome
                   ? "h-6"
-                  : "py-1"
+                  : "h-5"
             }`}
             onPointerDown={contentInteractive ? beginDrag : undefined}
             onPointerMove={contentInteractive ? onDragMove : undefined}
             onPointerUp={contentInteractive ? onDragUp : undefined}
             onPointerCancel={contentInteractive ? onDragUp : undefined}
             onClick={(event) => {
+              // Large: title-bar click minimizes. Small/mid: let the click bubble
+              // so the whole float still cycles size.
               if (!contentInteractive) return;
               event.stopPropagation();
-              scheduleCycle();
+              shrinkToSmallFloat();
             }}
             onDoubleClick={(event) => {
               event.preventDefault();
@@ -320,12 +326,34 @@ export function PreviewFloat({
               maximize();
             }}
           >
+            <button
+              type="button"
+              aria-label="最大化预览"
+              title="最大化"
+              className={chromeBtn}
+              onClick={(event) => {
+                event.stopPropagation();
+                maximize();
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              ▢
+            </button>
+            <span
+              className={`min-w-0 flex-1 truncate text-muted ${
+                largeFloatChrome || midFloatChrome
+                  ? "text-[11px] leading-none"
+                  : "text-[10px] leading-none"
+              }`}
+            >
+              {title}
+            </span>
             {largeFloatChrome ? (
               <button
                 type="button"
                 aria-label="最小化浮窗"
                 title="最小化"
-                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-sm leading-none text-muted hover:bg-raised hover:text-fg"
+                className={chromeBtn}
                 onClick={(event) => {
                   event.stopPropagation();
                   shrinkToSmallFloat();
@@ -335,29 +363,19 @@ export function PreviewFloat({
                 −
               </button>
             ) : null}
-            <span
-              className={`min-w-0 flex-1 truncate text-muted ${
-                largeFloatChrome || midFloatChrome
-                  ? "text-[11px] leading-none"
-                  : "text-[10px] leading-tight"
-              }`}
+            <button
+              type="button"
+              aria-label="关闭预览"
+              title="关闭"
+              className={chromeBtn}
+              onClick={(event) => {
+                event.stopPropagation();
+                onClose();
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
             >
-              {title}
-            </span>
-            {showFloatClose ? (
-              <button
-                type="button"
-                aria-label="关闭预览"
-                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-base leading-none text-muted hover:bg-raised hover:text-fg"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onClose();
-                }}
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                ×
-              </button>
-            ) : null}
+              ×
+            </button>
           </header>
         )}
         <div className="relative min-h-0 flex-1 overflow-hidden bg-bg">
