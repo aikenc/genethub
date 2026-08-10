@@ -68,10 +68,19 @@ export function PreviewFloat({
   const floatW = Math.round(BASE_W * factor);
   const floatH = Math.round(BASE_H * factor);
   const expanded = mode === "expanded";
-  /** Large float: same thumb scale as mid, but content accepts input. */
+  /** Only the large float accepts content input; small/mid are click-to-cycle. */
   const contentInteractive = mode === "float" && sizeLevel === SIZE_FACTORS.length - 1;
   const showFloatClose = mode === "float" && sizeLevel >= 1;
-  const compactFloatChrome = mode === "float" && sizeLevel >= 1;
+  const midFloatChrome = mode === "float" && sizeLevel === 1;
+  const largeFloatChrome = contentInteractive;
+
+  const shrinkToSmallFloat = () => {
+    const nextW = Math.round(BASE_W * SIZE_FACTORS[0]);
+    const nextH = Math.round(BASE_H * SIZE_FACTORS[0]);
+    setSizeLevel(0);
+    setPos((current) => clampPos(current.x, current.y, nextW, nextH));
+    setMode("float");
+  };
 
   useEffect(() => {
     setMode("expanded");
@@ -244,38 +253,29 @@ export function PreviewFloat({
         }}
       >
         {expanded ? (
-          <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line px-3 py-2">
+          <header className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
             <button
               type="button"
               aria-label="查看预览信息"
               title="查看预览信息"
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg"
               onClick={() => setInfoOpen(true)}
             >
               <InfoIcon />
             </button>
-            <span className="min-w-0 flex-1 truncate font-mono text-xs">{source.path}</span>
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px] leading-none">
+              {source.path}
+            </span>
             <button
               type="button"
-              className="shrink-0 rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-fg"
-              onClick={() => {
-                setSizeLevel(0);
-                setPos((current) =>
-                  clampPos(
-                    current.x,
-                    current.y,
-                    Math.round(BASE_W * SIZE_FACTORS[0]),
-                    Math.round(BASE_H * SIZE_FACTORS[0]),
-                  ),
-                );
-                setMode("float");
-              }}
+              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] leading-none text-muted hover:bg-raised hover:text-fg"
+              onClick={shrinkToSmallFloat}
             >
               最小化
             </button>
             <button
               type="button"
-              className="shrink-0 rounded px-2 py-1 text-xs text-accent hover:bg-raised"
+              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] leading-none text-accent hover:bg-raised"
               onClick={() => {
                 window.dispatchEvent(
                   new CustomEvent("genehub:preview-open", {
@@ -290,7 +290,7 @@ export function PreviewFloat({
             <button
               type="button"
               aria-label="关闭预览"
-              className="shrink-0 rounded px-2 py-1 text-lg leading-none text-muted hover:bg-raised hover:text-fg"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-base leading-none text-muted hover:bg-raised hover:text-fg"
               onClick={onClose}
             >
               ×
@@ -298,9 +298,13 @@ export function PreviewFloat({
           </header>
         ) : (
           <header
-            className={`flex shrink-0 items-center gap-1 border-b border-line ${
-              compactFloatChrome ? "h-6 px-1" : "px-1.5 py-1"
-            } ${contentInteractive ? "cursor-grab active:cursor-grabbing" : ""}`}
+            className={`flex shrink-0 items-center gap-1 border-b border-line px-1 ${
+              largeFloatChrome
+                ? "h-[1.725rem] cursor-grab active:cursor-grabbing"
+                : midFloatChrome
+                  ? "h-6"
+                  : "py-1"
+            }`}
             onPointerDown={contentInteractive ? beginDrag : undefined}
             onPointerMove={contentInteractive ? onDragMove : undefined}
             onPointerUp={contentInteractive ? onDragUp : undefined}
@@ -316,9 +320,24 @@ export function PreviewFloat({
               maximize();
             }}
           >
+            {largeFloatChrome ? (
+              <button
+                type="button"
+                aria-label="最小化浮窗"
+                title="最小化"
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-sm leading-none text-muted hover:bg-raised hover:text-fg"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  shrinkToSmallFloat();
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                −
+              </button>
+            ) : null}
             <span
               className={`min-w-0 flex-1 truncate text-muted ${
-                compactFloatChrome
+                largeFloatChrome || midFloatChrome
                   ? "text-[11px] leading-none"
                   : "text-[10px] leading-tight"
               }`}
@@ -329,9 +348,7 @@ export function PreviewFloat({
               <button
                 type="button"
                 aria-label="关闭预览"
-                className={`flex shrink-0 items-center justify-center rounded leading-none text-muted hover:bg-raised hover:text-fg ${
-                  compactFloatChrome ? "h-5 w-5 text-base" : "h-5 w-5 text-sm"
-                }`}
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-base leading-none text-muted hover:bg-raised hover:text-fg"
                 onClick={(event) => {
                   event.stopPropagation();
                   onClose();
