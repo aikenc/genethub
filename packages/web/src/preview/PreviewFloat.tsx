@@ -13,9 +13,9 @@ import { assetPreviewUrl } from "./url";
 
 type Mode = "expanded" | "float";
 
-/** Base box; levels are 1× / 1.5× / 3× (small must fit maximize+close). */
-const BASE_W = 72;
-const BASE_H = 88;
+/** Base box; levels are 1× / 1.5× / 3× (small fits maximize + short title + close). */
+const BASE_W = 80;
+const BASE_H = 96;
 const SIZE_FACTORS = [1, 1.5, 3] as const;
 const EDGE = 8;
 const SNAP = 28;
@@ -70,7 +70,6 @@ export function PreviewFloat({
   const expanded = mode === "expanded";
   /** Only the large float accepts content input; small/mid are click-to-cycle. */
   const contentInteractive = mode === "float" && sizeLevel === SIZE_FACTORS.length - 1;
-  const smallFloatChrome = mode === "float" && sizeLevel === 0;
   const midFloatChrome = mode === "float" && sizeLevel === 1;
   const largeFloatChrome = contentInteractive;
   const blockContentGestures = mode === "float" && !contentInteractive;
@@ -88,20 +87,14 @@ export function PreviewFloat({
     setMode("float");
   };
 
-  /** Large float chrome; mid keeps a readable title; small is icon-only. */
+  /** Float chrome hit targets; keep left-aligned so mobile does not push controls right. */
   const chromeBtnLarge =
     "flex h-5 w-5 shrink-0 items-center justify-center rounded text-xs leading-none text-muted hover:bg-raised hover:text-fg";
-  const chromeBtnMid =
-    "flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-[11px] leading-none text-muted hover:bg-raised hover:text-fg";
-  const chromeBtnSmall =
-    "flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-[11px] leading-none text-muted hover:bg-raised hover:text-fg";
-  const chromeBtn = largeFloatChrome
-    ? chromeBtnLarge
-    : midFloatChrome
-      ? chromeBtnMid
-      : chromeBtnSmall;
-  const expandedActionBtn =
-    "shrink-0 rounded border border-line bg-surface px-2 py-0.5 text-[11px] leading-none text-fg shadow-sm hover:bg-raised active:bg-raised";
+  const chromeBtnCompact =
+    "flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm text-[10px] leading-none text-muted hover:bg-raised hover:text-fg";
+  const chromeBtn = largeFloatChrome ? chromeBtnLarge : chromeBtnCompact;
+  const expandedIconBtn =
+    "flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-line bg-surface text-muted hover:bg-raised hover:text-fg";
 
   useEffect(() => {
     setMode("expanded");
@@ -297,25 +290,33 @@ export function PreviewFloat({
         }}
       >
         {expanded ? (
-          <header className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
+          <header className="flex h-9 shrink-0 items-center gap-1 overflow-hidden border-b border-line px-1.5">
             <button
               type="button"
               aria-label="查看预览信息"
               title="查看预览信息"
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-line bg-surface text-muted hover:bg-raised hover:text-fg"
+              className={expandedIconBtn}
               onClick={() => setInfoOpen(true)}
             >
               <InfoIcon />
             </button>
-            <span className="min-w-0 flex-1 truncate text-[11px] leading-none text-fg">
+            <span className="min-w-0 flex-1 truncate text-[12px] leading-none text-fg">
               {title}
             </span>
-            <button type="button" className={expandedActionBtn} onClick={shrinkToSmallFloat}>
-              最小化
+            <button
+              type="button"
+              aria-label="最小化"
+              title="最小化"
+              className={expandedIconBtn}
+              onClick={shrinkToSmallFloat}
+            >
+              <MinimizeIcon />
             </button>
             <button
               type="button"
-              className={`${expandedActionBtn} text-accent`}
+              aria-label="新窗口打开"
+              title="新窗口打开"
+              className={`${expandedIconBtn} text-accent`}
               onClick={() => {
                 window.dispatchEvent(
                   new CustomEvent("genehub:preview-open", {
@@ -325,37 +326,29 @@ export function PreviewFloat({
                 window.open(externalUrl, "_blank", "noopener,noreferrer");
               }}
             >
-              新窗口打开
+              <ExternalLinkIcon />
             </button>
             <button
               type="button"
               aria-label="关闭预览"
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-line bg-surface text-base leading-none text-muted hover:bg-raised hover:text-fg"
+              title="关闭"
+              className={expandedIconBtn}
               onClick={onClose}
             >
-              ×
+              <CloseIcon />
             </button>
           </header>
         ) : (
           <header
-            className={`relative z-20 flex shrink-0 items-center border-b border-line ${
+            className={`relative z-20 flex shrink-0 items-center justify-start border-b border-line ${
               largeFloatChrome
-                ? "h-[1.725rem] cursor-grab gap-0.5 px-0.5 active:cursor-grabbing"
-                : midFloatChrome
-                  ? "h-5 justify-start gap-0 px-0"
-                  : "h-5 justify-between gap-0 px-0.5"
+                ? "h-[1.725rem] cursor-grab gap-0 px-0 active:cursor-grabbing"
+                : "h-5 gap-0 px-0"
             }`}
             onPointerDown={contentInteractive ? beginDrag : undefined}
             onPointerMove={contentInteractive ? onDragMove : undefined}
             onPointerUp={contentInteractive ? onDragUp : undefined}
             onPointerCancel={contentInteractive ? onDragUp : undefined}
-            onClick={(event) => {
-              // Large: title-bar click minimizes. Small/mid: let the click bubble
-              // so the whole float still cycles size.
-              if (!contentInteractive) return;
-              event.stopPropagation();
-              shrinkToSmallFloat();
-            }}
             onDoubleClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
@@ -375,17 +368,17 @@ export function PreviewFloat({
             >
               <MaximizeIcon compact={!largeFloatChrome} />
             </button>
-            {smallFloatChrome ? null : (
-              <span
-                className={`min-w-0 flex-1 truncate text-muted ${
-                  largeFloatChrome
-                    ? "px-0.5 text-[11px] leading-none"
-                    : "px-0.5 text-[11px] leading-none"
-                }`}
-              >
-                {title}
-              </span>
-            )}
+            <span
+              className={`min-w-0 flex-1 truncate text-muted ${
+                largeFloatChrome
+                  ? "px-0.5 text-[11px] leading-none"
+                  : midFloatChrome
+                    ? "px-px text-[11px] leading-none"
+                    : "px-px text-[10px] leading-none"
+              }`}
+            >
+              {title}
+            </span>
             {largeFloatChrome ? (
               <button
                 type="button"
@@ -551,6 +544,47 @@ function MaximizeIcon({ compact }: { compact?: boolean }) {
         rx="1"
         stroke="currentColor"
         strokeWidth="1.2"
+      />
+    </svg>
+  );
+}
+
+function MinimizeIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <path d="M3 7h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ExternalLinkIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <path
+        d="M5.5 3.5H3.75A1.25 1.25 0 0 0 2.5 4.75v5.5A1.25 1.25 0 0 0 3.75 11.5h5.5A1.25 1.25 0 0 0 10.5 10.25V8.5"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+      />
+      <path
+        d="M7.5 2.5H11.5V6.5M11.2 2.8 6.5 7.5"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <path
+        d="M4 4l6 6M10 4l-6 6"
+        stroke="currentColor"
+        strokeWidth="1.35"
+        strokeLinecap="round"
       />
     </svg>
   );
