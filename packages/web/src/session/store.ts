@@ -59,6 +59,13 @@ export interface WorkbenchTab {
 
 export type RightPanel = "changes" | "files" | null;
 
+/** In-workbench Asset Preview float (default open path; not a new browser tab). */
+export type PreviewFloatTarget = {
+  deviceHandle: string;
+  workspaceHandle: string;
+  path: string;
+};
+
 /**
  * A conversation that has been opened but not started.
  *
@@ -116,6 +123,8 @@ interface WorkbenchState {
   tabs: WorkbenchTab[];
   activeTabId: string | null;
   rightPanel: RightPanel;
+  /** Default Preview surface; null when closed. New-tab Preview is opt-in only. */
+  previewFloat: PreviewFloatTarget | null;
   timeline: TimelineState;
   /**
    * Warm snapshots for every chat tab still in the strip. Switching back to a
@@ -243,6 +252,8 @@ interface WorkbenchState {
   closeTab(tabId: string): void;
   setTabLimit(limit: number): void;
   setRightPanel(panel: RightPanel): void;
+  openPreviewFloat(target: PreviewFloatTarget): void;
+  closePreviewFloat(): void;
   send(text: string, attachments?: Attachment[]): Promise<void>;
   /** Sends a failed message again, unchanged. */
   retryPending(): Promise<void>;
@@ -450,6 +461,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   tabs: [],
   activeTabId: null,
   rightPanel: null,
+  previewFloat: null,
   timeline: emptyTimeline(),
   sessionTimelines: {},
   subscribedSessionIds: [],
@@ -968,6 +980,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   setRightPanel(panel) {
     set({ rightPanel: panel });
+  },
+
+  openPreviewFloat(target) {
+    set({
+      previewFloat: {
+        deviceHandle: target.deviceHandle,
+        workspaceHandle: target.workspaceHandle,
+        path: target.path,
+      },
+    });
+  },
+
+  closePreviewFloat() {
+    set({ previewFloat: null });
   },
 
   async send(text, attachments = []) {
