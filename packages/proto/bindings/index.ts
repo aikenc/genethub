@@ -322,7 +322,7 @@ export type InviteAuth = { inviteId: string, nonce: string, proof: string, };
  */
 export type InviteScope = { grants: Array<string>, };
 
-export type IsolationBackend = "landlock" | "seatbelt" | "appContainer" | "none";
+export type IsolationBackend = "landlock" | "namespaces" | "seatbelt" | "appContainer" | "none";
 
 /**
  * The operating system confinement this machine can put a spawned process in.

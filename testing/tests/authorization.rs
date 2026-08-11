@@ -297,7 +297,50 @@ async fn a_terminal_for_someone_else_is_confined_or_refused_but_never_neither() 
         rows: Some(24),
     };
     if confinable {
-        device.call(ask).await.expect("a confined terminal opens");
+        let pty_id = match device.call(ask).await.expect("a confined terminal opens") {
+            Reply::Pty { pty_id } => pty_id,
+            other => panic!("unexpected {other:?}"),
+        };
+        // Opening is the easy half. A confinement that leaves the shell unable
+        // to load its own libraries produces a terminal that opens and then
+        // dies, which reads to the person at the other end as the feature not
+        // working at all — so the shell has to answer, from inside.
+        let outside = std::path::Path::new(&journey.workspace.root)
+            .parent()
+            .map(|parent| {
+                let path = parent.join("outside-the-workspace.txt");
+                std::fs::write(&path, "OUT-OF-BOUNDS").expect("a file next door");
+                path
+            });
+        // Two details keep this from passing without proving anything. The
+        // marker is computed by the shell, so it cannot match the terminal
+        // echoing back the line we typed; and the read of the file next door
+        // comes first, so arriving at the marker means its output would already
+        // have been sent.
+        let probe = match &outside {
+            Some(path) => format!("cat {}; echo confined-$((6*7))\n", path.display()),
+            None => "echo confined-$((6*7))\n".to_string(),
+        };
+        device
+            .call(Request::PtyWrite {
+                pty_id,
+                data: probe,
+            })
+            .await
+            .expect("input accepted");
+        let transcript = device
+            .collect_pty("confined-42", Duration::from_secs(20))
+            .await;
+        assert!(
+            transcript.contains("confined-42"),
+            "the confined terminal never answered, so it was confined into uselessness: \
+             {transcript:?}"
+        );
+        // And the same terminal, one directory up from the work, gets nothing.
+        assert!(
+            !transcript.contains("OUT-OF-BOUNDS"),
+            "a confined terminal read a file outside its workspace: {transcript:?}"
+        );
     } else {
         let error = device.expect_error(ask).await;
         assert!(

@@ -1,8 +1,9 @@
 //! The wrapper that puts a process inside an operating system sandbox.
 //!
-//! Run as a subprocess on purpose. Landlock restricts the calling thread and
-//! cannot be undone, so a test that applied it in-process would confine the
-//! test runner and everything it went on to do.
+//! Run as a subprocess on purpose. Confinement is applied to the calling
+//! process and cannot be undone — Landlock restricts the thread, the namespace
+//! backend replaces the filesystem underneath it — so a test that applied it
+//! in-process would confine the test runner and everything it went on to do.
 
 use std::path::Path;
 use std::process::Command;
@@ -14,12 +15,19 @@ fn genet() -> &'static str {
 }
 
 /// Runs a program through the wrapper, under a policy that allows `writable`.
+///
+/// The override is set once and never taken back. Libtest runs these in
+/// parallel threads of one process, so a test that set the variable and then
+/// removed it would be removing it out from under whichever test was mid-`wrap`
+/// — which silently falls back to this test binary as the wrapper and fails
+/// somewhere far from the cause.
 fn confined(writable: &Path, program: &str, arguments: &[&str]) -> (String, String, i32) {
-    std::env::set_var(CONFINE_COMMAND_ENV, genet());
+    static WRAPPER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    WRAPPER.get_or_init(|| std::env::set_var(CONFINE_COMMAND_ENV, genet()));
+
     let argv = Policy::for_workspace(&[writable.to_path_buf()])
         .wrap(Path::new(program))
         .expect("a wrapped command");
-    std::env::remove_var(CONFINE_COMMAND_ENV);
     let (helper, rest) = argv.split_first().expect("a wrapper command");
     let output = Command::new(helper)
         .args(rest)
@@ -87,6 +95,38 @@ fn a_confined_process_reaches_its_workspace_and_nothing_beside_it() {
     );
     assert_ne!(code, 0, "a confined process read outside its workspace");
     assert!(!stdout.contains("not the workspace"), "{stdout}");
+}
+
+#[test]
+fn a_confinement_that_rebuilds_the_root_leaves_no_way_back_to_the_old_one() {
+    let Some(()) = kernel_can_confine() else {
+        return;
+    };
+    // Specific to the namespace backend and worth its own test, because the
+    // way it fails is silent. `pivot_root` leaves the entire previous
+    // filesystem mounted inside the new one; until it is detached, every path
+    // the policy excluded is still there under another name, and every other
+    // assertion in this file would go on passing.
+    let inside = tempfile::tempdir().expect("a workspace");
+    let outside = tempfile::tempdir().expect("somewhere else on the same machine");
+    std::fs::write(outside.path().join("theirs.txt"), "not the workspace").expect("a file to read");
+    let hidden = outside.path().join("theirs.txt");
+
+    let (stdout, _, _) = confined(
+        inside.path(),
+        "/bin/sh",
+        &[
+            "-c",
+            &format!(
+                "cat /.oldroot{0} /oldroot{0} /old{0} 2>&1; ls -a / 2>&1",
+                hidden.display()
+            ),
+        ],
+    );
+    assert!(
+        !stdout.contains("not the workspace"),
+        "the previous root is still reachable from inside the sandbox: {stdout}"
+    );
 }
 
 #[test]

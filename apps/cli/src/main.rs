@@ -23,19 +23,30 @@ pub const EXIT_INVALID_ARGS: i32 = 2;
 pub const EXIT_UNREACHABLE: i32 = 3;
 pub const EXIT_FAILED: i32 = 4;
 
-#[tokio::main]
-async fn main() {
+/// Deliberately not the async entry point, and deliberately doing one thing
+/// before the runtime exists.
+///
+/// The confinement wrapper has to run in a process that has never started a
+/// thread: creating a user namespace is refused outright for a multi-threaded
+/// caller, so the same code that works here fails with `EINVAL` if it is moved
+/// a few lines down into `#[tokio::main]`, where the worker pool is already up
+/// (`apps/daemon/src/isolation.rs`).
+fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // Answered before anything else, and deliberately not a subcommand anybody
-    // is meant to type: this is the daemon re-running itself to put a process
-    // inside an operating system sandbox before becoming it. It parses its own
-    // arguments, restricts itself and execs; nothing below this line runs
-    // (`apps/daemon/src/isolation.rs`).
+    // Not a subcommand anybody is meant to type: this is the daemon re-running
+    // itself to put a process inside an operating system sandbox before
+    // becoming it. It parses its own arguments, restricts itself and execs;
+    // nothing below this line runs.
     if args.first().map(String::as_str) == Some(genet_daemon::isolation::CONFINE_ARG) {
         std::process::exit(genet_daemon::isolation::confine_and_exec(&args[1..]));
     }
 
+    run(args)
+}
+
+#[tokio::main]
+async fn run(args: Vec<String>) {
     // Answered before anything touches the disk: "which build is this" is a
     // question asked of a machine that is already misbehaving, and the answer
     // should not depend on a data directory being readable. The release

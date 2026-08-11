@@ -472,6 +472,10 @@ pub struct IsolationInfo {
 #[ts(export, export_to = "index.ts")]
 pub enum IsolationBackend {
     Landlock,
+    /// Unprivileged user and mount namespaces: a filesystem view built to hold
+    /// only what the caller is allowed to see. Older than Landlock by a
+    /// decade, and the only thing available on a kernel that predates it.
+    Namespaces,
     Seatbelt,
     AppContainer,
     None,
