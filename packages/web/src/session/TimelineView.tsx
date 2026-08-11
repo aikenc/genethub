@@ -485,7 +485,10 @@ function TrunkCard({
         <span className="shrink-0" aria-hidden="true">
           🧭
         </span>
-        <span className="min-w-0 flex-1 break-words text-sm font-medium">
+        <span
+          className="min-w-0 flex-1 truncate text-sm font-medium"
+          title={trunkTitle}
+        >
           {trunkTitle}
         </span>
         <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>
@@ -534,7 +537,10 @@ function BatchCard({ batch, active }: { batch: RoundBatch; active: boolean }) {
         <span className="shrink-0" aria-hidden="true">
           💭
         </span>
-        <span className="min-w-0 flex-1 break-words text-xs">
+        <span
+          className="min-w-0 flex-1 truncate text-xs"
+          title={monologue.first || batch.summary.text}
+        >
           {monologue.first || batch.summary.text}
         </span>
         <span className="shrink-0 text-xs text-muted">{batch.summary.blobCount} 项</span>
