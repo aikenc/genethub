@@ -568,7 +568,7 @@ async fn resolve_workspace(
             workspace.id.clone(),
             Some(absolute.to_string_lossy().into_owned()),
         )),
-        None if run.open_workspace && here => {
+        None if run.open_workspace => {
             let Reply::Workspace(workspace) = rpc
                 .call(Request::WorkspaceOpen {
                     root: absolute.to_string_lossy().into_owned(),

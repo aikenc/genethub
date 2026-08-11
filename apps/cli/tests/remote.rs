@@ -276,12 +276,6 @@ async fn a_prompt_typed_here_is_answered_by_an_agent_running_there() {
     let daemon = Daemon::start(Paths::new(data.path()))
         .await
         .expect("the machine could not be started");
-    daemon
-        .state
-        .workspaces
-        .open(&project, None)
-        .await
-        .expect("opening the workspace on the machine");
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     let invite = daemon.state.devices.invite_with(GrantSet::full());
@@ -313,6 +307,9 @@ async fn a_prompt_typed_here_is_answered_by_an_agent_running_there() {
         "这个仓库编译得过吗",
         "--model",
         genehub_testing::harness::REAL_MODEL,
+        // The directory is not registered there yet, and registering it is
+        // something the far machine can do for itself.
+        "--open-workspace",
         "--timeout",
         "60",
     ]);
