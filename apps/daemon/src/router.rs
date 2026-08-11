@@ -246,9 +246,14 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
         Request::SessionFork {
             session_id,
             turn_id,
+            target,
         } => {
             let providers = state.providers().await;
-            match state.sessions.fork(&session_id, &turn_id, &providers).await {
+            match state
+                .sessions
+                .fork(&session_id, &turn_id, target, &providers)
+                .await
+            {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }

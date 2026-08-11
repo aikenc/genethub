@@ -609,6 +609,7 @@ mod tests {
             updated_at_ms: 1,
             archived: false,
             unsupported: None,
+            lineage: None,
         };
         assert_eq!(
             sessions(Reply::Sessions(vec![summary.clone()])).unwrap(),

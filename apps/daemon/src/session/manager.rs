@@ -11,16 +11,20 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    Attachment, BlobPayload, BlobRef, Catalog, ItemDelta, PermissionOptionKind, PermissionOutcome,
-    PermissionRequest, PermissionRequestKind, RoundLayer, RoundLayerOutcome, RoundSummary,
-    RoundTrunk, SequencedEvent, SessionEvent, SessionSnapshot, SessionStatus, SessionSummary,
-    TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
+    Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ItemDelta,
+    PermissionOptionKind, PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState,
+    RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionEvent,
+    SessionLineage, SessionSnapshot, SessionStatus, SessionSummary, TimelineItem, ToolStatus,
+    TurnOutcome, TurnStats, Usage,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
+use super::context_seed::{build_context_seed, prompt_with_seed, seed_token_budget};
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
-use super::store::{self, now_ms, title_from, SessionMeta, Store, SESSION_FORMAT};
+use super::store::{
+    self, now_ms, title_from, ContextSeedState, SessionMeta, Store, SESSION_FORMAT,
+};
 use crate::adapter::registry::Registry;
 use crate::adapter::{AgentSession, PersistHandle, PromptInput, ProviderMap, SessionConfig};
 
@@ -203,6 +207,7 @@ impl SessionManager {
             archived: false,
             persist: None,
             pending_permission: None,
+            lineage: None,
         };
         self.store.save_meta(&meta)?;
         let summary = meta.summary(SessionStatus::Idle);
@@ -217,6 +222,7 @@ impl SessionManager {
         &self,
         session_id: &str,
         turn_id: &str,
+        target: Option<ForkTarget>,
         providers: &ProviderMap,
     ) -> Result<SessionSummary> {
         let source = self.live(session_id).await?;
@@ -227,13 +233,7 @@ impl SessionManager {
             anyhow::bail!("wait for the current turn to finish before forking");
         }
         let source_meta = source.meta.lock().await.clone();
-        let adapter = self.registry.require(&source_meta.agent_id)?;
-        if !adapter.capabilities().fork {
-            anyhow::bail!(
-                "the {} agent does not support forking",
-                source_meta.agent_id
-            );
-        }
+        let source_adapter = self.registry.require(&source_meta.agent_id)?;
 
         let (items, checkpoint) = {
             let items = source.items.lock().await;
@@ -247,24 +247,92 @@ impl SessionManager {
                 })
                 .ok_or_else(|| anyhow!("no completed turn called {turn_id}"))?;
             let checkpoint = match &items[at] {
-                TimelineItem::TurnSummary { stats, .. } => stats
-                    .fork_checkpoint
-                    .clone()
-                    .ok_or_else(|| anyhow!("that turn has no Agent fork checkpoint"))?,
+                TimelineItem::TurnSummary { stats, .. } => stats.fork_checkpoint.clone(),
                 _ => unreachable!("the index was selected by the same variant"),
             };
             (items[..=at].to_vec(), checkpoint)
         };
 
-        self.ensure_started(&source, providers).await?;
-        let persist = source
-            .agent
-            .lock()
-            .await
-            .as_ref()
-            .ok_or_else(|| anyhow!("the source session has no running agent"))?
-            .fork(&checkpoint)
-            .await?;
+        let explicit_target = target.is_some();
+        let target = target.unwrap_or_else(|| ForkTarget {
+            agent_id: source_meta.agent_id.clone(),
+            model_id: source_meta.model_id.clone(),
+            mode_id: source_meta.mode_id.clone(),
+            effort_id: source_meta.effort_id.clone(),
+        });
+        let same_agent = target.agent_id == source_meta.agent_id;
+        let native = same_agent && source_adapter.capabilities().fork && checkpoint.is_some();
+        if !explicit_target && !source_adapter.capabilities().fork {
+            anyhow::bail!(
+                "the {} agent does not support forking",
+                source_meta.agent_id
+            );
+        }
+        if !explicit_target && checkpoint.is_none() {
+            anyhow::bail!("that turn has no Agent fork checkpoint");
+        }
+
+        let target_adapter = self.registry.require(&target.agent_id)?;
+        if !native {
+            match target_adapter.probe().await {
+                ProbeState::Ready => {}
+                ProbeState::NotInstalled => {
+                    anyhow::bail!("the {} agent is not installed", target.agent_id)
+                }
+                ProbeState::Unavailable { reason } => {
+                    anyhow::bail!("the {} agent is unavailable: {reason}", target.agent_id)
+                }
+            }
+        }
+
+        let model_id = target
+            .model_id
+            .or_else(|| same_agent.then(|| source_meta.model_id.clone()).flatten());
+        let mode_id = target
+            .mode_id
+            .or_else(|| same_agent.then(|| source_meta.mode_id.clone()).flatten());
+        let effort_id = target
+            .effort_id
+            .or_else(|| same_agent.then(|| source_meta.effort_id.clone()).flatten());
+
+        let (persist, method, context_seed, context) = if native {
+            self.ensure_started(&source, providers).await?;
+            let checkpoint = checkpoint.expect("native was selected only with a checkpoint");
+            let persist = source
+                .agent
+                .lock()
+                .await
+                .as_ref()
+                .ok_or_else(|| anyhow!("the source session has no running agent"))?
+                .fork(&checkpoint)
+                .await?;
+            (Some(persist), ForkMethod::NativeCheckpoint, None, None)
+        } else {
+            let catalog = target_adapter.catalog(providers).await;
+            let context_window = model_id
+                .as_deref()
+                .and_then(|id| catalog.models.iter().find(|model| model.id == id))
+                .or_else(|| {
+                    catalog
+                        .default_model
+                        .as_deref()
+                        .and_then(|id| catalog.models.iter().find(|model| model.id == id))
+                })
+                .and_then(|model| model.context_window);
+            let built = build_context_seed(
+                session_id,
+                turn_id,
+                &source_meta.agent_id,
+                &items,
+                seed_token_budget(context_window),
+            );
+            (
+                None,
+                ForkMethod::ReconstructedContext,
+                Some(built.seed),
+                Some(built.stats),
+            )
+        };
 
         let now = now_ms();
         let title = source_meta
@@ -275,23 +343,41 @@ impl SessionManager {
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: source_meta.workspace_id,
             format: SESSION_FORMAT,
-            agent_id: source_meta.agent_id,
+            agent_id: target.agent_id,
             title,
             cwd: source_meta.cwd,
-            model_id: source_meta.model_id,
-            mode_id: source_meta.mode_id,
-            effort_id: source_meta.effort_id,
+            model_id,
+            mode_id,
+            effort_id,
             created_at_ms: now,
             updated_at_ms: now,
             archived: false,
-            persist: Some(persist),
+            persist,
             pending_permission: None,
+            lineage: Some(SessionLineage {
+                source_session_id: session_id.to_string(),
+                source_turn_id: turn_id.to_string(),
+                source_agent_id: source_meta.agent_id,
+                method,
+                context,
+            }),
         };
-        self.store.save_meta(&meta)?;
-        // The fork inherits the conversation, not the source's round layer:
-        // its rounds happened in another session and stay addressable there.
-        self.store
-            .append_chat_items(&meta.workspace_id, &meta.id, &items)?;
+        let write = || -> Result<()> {
+            self.store.save_meta(&meta)?;
+            // The fork inherits the conversation, not the source's round
+            // layer: its rounds happened in another session and stay
+            // addressable through lineage.
+            self.store
+                .append_chat_items(&meta.workspace_id, &meta.id, &items)?;
+            if let Some(seed) = &context_seed {
+                self.store.save_seed(&meta.workspace_id, &meta.id, seed)?;
+            }
+            Ok(())
+        };
+        if let Err(error) = write() {
+            let _ = self.store.delete(&meta.workspace_id, &meta.id);
+            return Err(error);
+        }
         let summary = meta.summary(SessionStatus::Idle);
         let forked = Arc::new(Live::new(meta, self.store.clone()));
         *forked.items.lock().await = items;
@@ -729,6 +815,29 @@ impl SessionManager {
         }
         self.ensure_started(live, providers).await?;
 
+        let seed_owner = {
+            let meta = live.meta.lock().await;
+            (meta.workspace_id.clone(), meta.id.clone())
+        };
+        let mut applying_seed = match self.store.load_seed(&seed_owner.0, &seed_owner.1)? {
+            Some(mut seed) if seed.state == ContextSeedState::Pending => {
+                seed.state = ContextSeedState::Applying;
+                self.store.save_seed(&seed_owner.0, &seed_owner.1, &seed)?;
+                Some(seed)
+            }
+            Some(seed) if seed.state == ContextSeedState::Applying => {
+                anyhow::bail!(
+                    "the reconstructed history may already have been handed to the Agent; \
+                     create a new Fork instead of sending it twice"
+                )
+            }
+            Some(_) | None => None,
+        };
+        let agent_text = applying_seed
+            .as_ref()
+            .map(|seed| prompt_with_seed(&seed.text, &text))
+            .unwrap_or_else(|| text.clone());
+
         // Record the prompt before handing it over: if the agent dies on the
         // next line, the user's question is still in the log.
         let item = TimelineItem::UserMessage {
@@ -771,9 +880,41 @@ impl SessionManager {
             .as_ref()
             .ok_or_else(|| anyhow!("the session has no running agent"))?;
         let turn_id = agent
-            .send(PromptInput { text, attachments })
-            .await
-            .context("handing the prompt to the agent")?;
+            .send(PromptInput {
+                text: agent_text,
+                attachments,
+            })
+            .await;
+        let turn_id = match turn_id {
+            Ok(turn_id) => {
+                if let Some(seed) = &mut applying_seed {
+                    seed.state = ContextSeedState::Applied;
+                    self.store
+                        .save_seed(&seed_owner.0, &seed_owner.1, seed)
+                        .context("marking reconstructed history as applied")?;
+                }
+                turn_id
+            }
+            Err(error) => {
+                // A returned error means the adapter did not accept a turn.
+                // Put the seed back for an explicit retry. A daemon crash while
+                // the await is pending leaves `Applying`, which is intentionally
+                // blocked above because its outcome is unknowable.
+                if let Some(seed) = &mut applying_seed {
+                    seed.state = ContextSeedState::Pending;
+                    if let Err(save_error) =
+                        self.store.save_seed(&seed_owner.0, &seed_owner.1, seed)
+                    {
+                        tracing::error!(
+                            %save_error,
+                            session = %seed_owner.1,
+                            "could not restore reconstructed history seed after a failed send"
+                        );
+                    }
+                }
+                return Err(error).context("handing the prompt to the agent");
+            }
+        };
         // Only recorded once the handover actually succeeded: a failed send
         // must not leave a round with zero adapter turns behind (`send`
         // resets status to Idle on this same error, as if it never happened).
@@ -2419,6 +2560,7 @@ mod tests {
             archived: false,
             persist: None,
             pending_permission: None,
+            lineage: None,
         }
     }
 
@@ -2455,6 +2597,20 @@ mod tests {
     struct ContextRecorder(Arc<std::sync::Mutex<Option<String>>>);
 
     struct Blank(tokio::sync::broadcast::Sender<SessionEvent>);
+
+    struct ForkHarness {
+        id: &'static str,
+        native_fork: bool,
+        prompts: Arc<std::sync::Mutex<Vec<PromptInput>>>,
+        starts: Arc<std::sync::Mutex<Vec<Option<PersistHandle>>>>,
+    }
+
+    struct ForkHarnessSession {
+        id: &'static str,
+        native_fork: bool,
+        prompts: Arc<std::sync::Mutex<Vec<PromptInput>>>,
+        events: tokio::sync::broadcast::Sender<SessionEvent>,
+    }
 
     #[async_trait::async_trait]
     impl crate::adapter::AgentAdapter for Amnesiac {
@@ -2563,6 +2719,369 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::adapter::AgentAdapter for ForkHarness {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn label(&self) -> &str {
+            self.id
+        }
+
+        fn capabilities(&self) -> genehub_proto::Capabilities {
+            genehub_proto::Capabilities {
+                fork: self.native_fork,
+                ..Default::default()
+            }
+        }
+
+        async fn probe(&self) -> genehub_proto::ProbeState {
+            genehub_proto::ProbeState::Ready
+        }
+
+        async fn catalog(&self, _providers: &ProviderMap) -> genehub_proto::Catalog {
+            genehub_proto::Catalog {
+                models: vec![genehub_proto::ModelInfo {
+                    id: "model".into(),
+                    label: "Model".into(),
+                    context_window: Some(10_000),
+                    reasoning: true,
+                    efforts: Vec::new(),
+                }],
+                modes: Vec::new(),
+                commands: Vec::new(),
+                default_model: Some("model".into()),
+                default_mode: None,
+                default_effort: None,
+            }
+        }
+
+        async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
+            self.starts.lock().unwrap().push(config.resume);
+            Ok(Box::new(ForkHarnessSession {
+                id: self.id,
+                native_fork: self.native_fork,
+                prompts: self.prompts.clone(),
+                events: tokio::sync::broadcast::channel(8).0,
+            }))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentSession for ForkHarnessSession {
+        fn events(&self) -> tokio::sync::broadcast::Receiver<SessionEvent> {
+            self.events.subscribe()
+        }
+
+        async fn send(&self, input: PromptInput) -> Result<String> {
+            self.prompts.lock().unwrap().push(input);
+            Ok(format!("turn-{}", self.prompts.lock().unwrap().len()))
+        }
+
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_model(&self, _model_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_mode(&self, _mode_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn fork(&self, checkpoint: &str) -> Result<PersistHandle> {
+            if !self.native_fork {
+                anyhow::bail!("native fork disabled");
+            }
+            Ok(PersistHandle {
+                agent_id: self.id.into(),
+                value: serde_json::json!({ "checkpoint": checkpoint }),
+            })
+        }
+
+        async fn respond_permission(
+            &self,
+            _request_id: &str,
+            _outcome: genehub_proto::PermissionOutcome,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn completed_turn(checkpoint: Option<&str>) -> Vec<TimelineItem> {
+        vec![
+            TimelineItem::UserMessage {
+                id: "user-1".into(),
+                text: "Investigate the failing deploy".into(),
+                attachments: Vec::new(),
+            },
+            TimelineItem::AssistantMessage {
+                id: "assistant-1".into(),
+                text: "The health check path is stale".into(),
+            },
+            TimelineItem::TurnSummary {
+                id: "summary-1".into(),
+                stats: TurnStats {
+                    turn_id: "source-turn".into(),
+                    outcome: TurnOutcome::Completed,
+                    started_at_ms: 1,
+                    finished_at_ms: 2,
+                    duration_ms: 1,
+                    usage: Usage::default(),
+                    tool_calls: 3,
+                    fork_checkpoint: checkpoint.map(str::to_string),
+                },
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn cross_agent_fork_uses_a_bounded_seed_without_reusing_the_source_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let source_starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![
+                Arc::new(ForkHarness {
+                    id: "source",
+                    native_fork: true,
+                    prompts: source_prompts.clone(),
+                    starts: source_starts.clone(),
+                }),
+                Arc::new(ForkHarness {
+                    id: "target",
+                    native_fork: false,
+                    prompts: target_prompts.clone(),
+                    starts: target_starts.clone(),
+                }),
+            ])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "source",
+                None,
+                None,
+                Some("Deploy".into()),
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        let inherited = completed_turn(Some("native-checkpoint"));
+        *source_live.items.lock().await = inherited.clone();
+        sessions
+            .store
+            .append_chat_items("w1", &source.id, &inherited)
+            .unwrap();
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "source-turn",
+                Some(ForkTarget {
+                    agent_id: "target".into(),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fork.agent_id, "target");
+        let lineage = fork.lineage.as_ref().unwrap();
+        assert_eq!(lineage.method, ForkMethod::ReconstructedContext);
+        assert!(lineage.context.as_ref().unwrap().token_budget <= 3_500);
+        let meta = sessions.store.load_meta("w1", &fork.id).unwrap();
+        assert!(
+            meta.persist.is_none(),
+            "a cross-Agent handle must never leak"
+        );
+        assert_eq!(
+            sessions
+                .store
+                .load_seed("w1", &fork.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ContextSeedState::Pending
+        );
+
+        sessions
+            .send(
+                &fork.id,
+                "Continue with the fix".into(),
+                Vec::new(),
+                &ProviderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        {
+            let prompts = target_prompts.lock().unwrap();
+            assert_eq!(prompts.len(), 1);
+            assert!(prompts[0].text.contains("Investigate the failing deploy"));
+            assert!(prompts[0].text.contains("<current-user-message>"));
+            assert!(prompts[0].text.contains("Continue with the fix"));
+        }
+        assert_eq!(target_starts.lock().unwrap().as_slice(), &[None]);
+        assert!(source_starts.lock().unwrap().is_empty());
+        assert!(source_prompts.lock().unwrap().is_empty());
+        assert_eq!(
+            sessions
+                .store
+                .load_seed("w1", &fork.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ContextSeedState::Applied
+        );
+        let stored = sessions.store.load_chat("w1", &fork.id).unwrap();
+        assert!(stored.items.iter().any(|item| {
+            matches!(item, TimelineItem::UserMessage { text, .. } if text == "Continue with the fix")
+        }));
+        assert!(!stored.items.iter().any(|item| {
+            matches!(item, TimelineItem::UserMessage { text, .. } if text.contains("genehub-chat-history"))
+        }));
+
+        // The capsule is a one-time bootstrap. Later turns go to the target
+        // Agent as ordinary user messages and cannot pay the history cost a
+        // second time.
+        let fork_live = sessions.live(&fork.id).await.unwrap();
+        *fork_live.status.lock().await = SessionStatus::Idle;
+        sessions
+            .send(
+                &fork.id,
+                "Run the focused test".into(),
+                Vec::new(),
+                &ProviderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let prompts = target_prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[1].text, "Run the focused test");
+    }
+
+    #[tokio::test]
+    async fn same_agent_with_a_checkpoint_keeps_the_native_fork_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: starts.clone(),
+            })])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        *source_live.items.lock().await = completed_turn(Some("native-checkpoint"));
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "source-turn",
+                Some(ForkTarget {
+                    agent_id: "source".into(),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fork.lineage.unwrap().method, ForkMethod::NativeCheckpoint);
+        let meta = sessions.store.load_meta("w1", &fork.id).unwrap();
+        assert_eq!(meta.persist.as_ref().unwrap().agent_id, "source");
+        assert!(sessions.store.load_seed("w1", &fork.id).unwrap().is_none());
+        assert_eq!(starts.lock().unwrap().as_slice(), &[None]);
+    }
+
+    #[tokio::test]
+    async fn explicit_same_agent_without_a_checkpoint_reconstructs_but_legacy_fork_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        *source_live.items.lock().await = completed_turn(None);
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "source-turn",
+                Some(ForkTarget {
+                    agent_id: "source".into(),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fork.lineage.unwrap().method,
+            ForkMethod::ReconstructedContext
+        );
+        assert!(sessions.store.load_seed("w1", &fork.id).unwrap().is_some());
+
+        let error = sessions
+            .fork(&source.id, "source-turn", None, &ProviderMap::new())
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("that turn has no Agent fork checkpoint"));
     }
 
     #[tokio::test]

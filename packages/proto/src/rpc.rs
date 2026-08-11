@@ -110,7 +110,16 @@ pub enum Request {
         continues_round: Option<String>,
     },
     #[serde(rename = "session.fork", rename_all = "camelCase")]
-    SessionFork { session_id: String, turn_id: String },
+    SessionFork {
+        session_id: String,
+        turn_id: String,
+        /// Absent is the legacy native-only request. New clients send an
+        /// explicit target to opt into provider-agnostic reconstruction when
+        /// a native checkpoint cannot be used.
+        #[serde(default)]
+        #[ts(optional)]
+        target: Option<ForkTarget>,
+    },
     #[serde(rename = "session.interrupt", rename_all = "camelCase")]
     SessionInterrupt { session_id: String },
     #[serde(rename = "session.close", rename_all = "camelCase")]

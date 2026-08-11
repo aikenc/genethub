@@ -7,6 +7,7 @@
 //!
 //! ```text
 //! <workspace>/.genethub/sessions/<session>/meta.json
+//! <workspace>/.genethub/sessions/<session>/seed.json                 pending reconstructed context
 //! <workspace>/.genethub/sessions/<session>/chat.jsonl                 narrative + one row per round
 //! <workspace>/.genethub/sessions/<session>/rounds/r-000/index.jsonl   one row per trunk
 //! <workspace>/.genethub/sessions/<session>/rounds/r-000/t-0000.jsonl  one trunk's batches and blob rows
@@ -27,7 +28,8 @@ use std::sync::{Arc, RwLock};
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     BlobKind, BlobOverview, BlobPayload, BlobRef, PermissionRequest, RoundBatch, RoundBatchSummary,
-    RoundTrunk, RoundTrunkSummary, SessionStatus, SessionSummary, TimelineItem, UnsupportedFormat,
+    RoundTrunk, RoundTrunkSummary, SessionLineage, SessionStatus, SessionSummary, TimelineItem,
+    UnsupportedFormat,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,7 +59,10 @@ const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 /// to, which is exactly the weight it should carry.
 ///
 /// 4 — the path-as-index layout: `chat.jsonl`, `rounds/`, `blobs/`.
-pub const SESSION_FORMAT: u32 = 4;
+/// 5 — fork lineage plus a separately persisted reconstructed context seed.
+///     An older build would silently send without that seed, so this addition
+///     is correctness-breaking rather than merely metadata it can ignore.
+pub const SESSION_FORMAT: u32 = 5;
 
 /// What a `meta.json` from before versioning is: the layout numbered 4, which
 /// is the only one that has ever been written into a workspace.
@@ -126,6 +131,29 @@ pub struct SessionMeta {
     /// Stored in meta so no live socket or Agent process is required.
     #[serde(default)]
     pub pending_permission: Option<PermissionRequest>,
+    /// The Agent this session runs remains `agent_id`; lineage only describes
+    /// where inherited history came from and how it reached this Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<SessionLineage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextSeedState {
+    Pending,
+    /// Persisted before handing the first combined prompt to the Agent. A
+    /// daemon restart in this state must not blindly send it a second time.
+    Applying,
+    Applied,
+}
+
+/// The potentially large reconstructed prompt lives outside `meta.json`, so a
+/// session list never has to parse every inherited conversation body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextSeed {
+    pub state: ContextSeedState,
+    pub text: String,
 }
 
 impl SessionMeta {
@@ -150,6 +178,7 @@ impl SessionMeta {
             archived: false,
             persist: None,
             pending_permission: None,
+            lineage: None,
         }
     }
 
@@ -176,6 +205,7 @@ impl SessionMeta {
                 written: self.format,
                 supported: SESSION_FORMAT,
             }),
+            lineage: self.lineage.clone(),
         }
     }
 }
@@ -486,6 +516,12 @@ impl Store {
             .join("meta.json"))
     }
 
+    fn seed_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .session_dir(workspace_id, session_id)?
+            .join("seed.json"))
+    }
+
     fn chat_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
         Ok(self
             .session_dir(workspace_id, session_id)?
@@ -624,6 +660,36 @@ impl Store {
         meta.workspace_id = workspace_id.to_string();
         meta.format = header.format;
         Ok(meta)
+    }
+
+    /// Saves a reconstructed fork's one-shot prompt separately from metadata.
+    pub fn save_seed(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        seed: &ContextSeed,
+    ) -> Result<()> {
+        let path = self.seed_path(workspace_id, session_id)?;
+        self.prepare_write(
+            workspace_id,
+            path.parent().expect("seed.json always has a parent"),
+        )?;
+        crate::config::save_private(&path, serde_json::to_vec_pretty(seed)?.as_slice())
+    }
+
+    /// Loads the reconstructed context when this session still needs to hand
+    /// it to its target Agent. Ordinary and native-forked sessions have no
+    /// seed file.
+    pub fn load_seed(&self, workspace_id: &str, session_id: &str) -> Result<Option<ContextSeed>> {
+        let path = self.seed_path(workspace_id, session_id)?;
+        let raw = match fs::read(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+        };
+        Ok(Some(
+            serde_json::from_slice(&raw).with_context(|| format!("parsing {}", path.display()))?,
+        ))
     }
 
     /// Every session of every registered workspace, newest first.
@@ -1178,6 +1244,7 @@ mod project_home_tests {
             archived: false,
             persist: None,
             pending_permission: None,
+            lineage: None,
         }
     }
 

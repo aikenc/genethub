@@ -184,6 +184,29 @@ path: string, isDir: boolean, size?: number,
  */
 children?: Array<FileNode>, };
 
+/**
+ * What a bounded reconstructed fork carried into its target Agent.
+ */
+export type ForkContextStats = { sourceItemCount: number, includedItemCount: number, omittedItemCount: number, estimatedTokens: number, tokenBudget: number, digest: string, };
+
+/**
+ * How a child session obtained the context that precedes its first new turn.
+ *
+ * Native checkpoints preserve the Agent's own thread. Reconstructed context
+ * is deliberately named differently: it is a bounded, provider-agnostic view
+ * of GeneHub's visible history, not a claim that hidden Agent state moved.
+ */
+export type ForkMethod = "nativeCheckpoint" | "reconstructedContext";
+
+/**
+ * The explicit destination chosen in the Fork UI.
+ *
+ * Omitting this object on the RPC keeps the old client's native-only Fork
+ * semantics. New clients always send it, even when the chosen Agent is the
+ * current one, which is how they opt into reconstructed fallback.
+ */
+export type ForkTarget = { agentId: string, modelId?: string, modeId?: string, effortId?: string, };
+
 export type GitChange = { path: string, kind: GitChangeKind, staged: boolean, };
 
 export type GitChangeKind = "added" | "modified" | "deleted" | "renamed" | "untracked";
@@ -462,7 +485,13 @@ artifactPreviewBaseUrl: string | null,
  * round that already ended, this is treated as a new round — a
  * wrong stitch is a worse failure than an extra round.
  */
-continuesRound: string | null, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+continuesRound: string | null, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, 
+/**
+ * Absent is the legacy native-only request. New clients send an
+ * explicit target to opt into provider-agnostic reconstruction when
+ * a native checkpoint cannot be used.
+ */
+target?: ForkTarget, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -554,6 +583,11 @@ export type SessionEvent = { "type": "turnStarted", turnId: string,
 startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
 
 /**
+ * Durable ancestry for a forked conversation.
+ */
+export type SessionLineage = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, method: ForkMethod, context?: ForkContextStats, };
+
+/**
  * Everything a client needs to render a session from scratch.
  */
 export type SessionSnapshot = { summary: SessionSummary, items: Array<TimelineItem>, 
@@ -588,7 +622,12 @@ title?: string, status: SessionStatus, modelId?: string, modeId?: string, effort
  * conversation is in the user's own project folder, and an unexplained
  * absence is worse than a row that says why it is out of reach.
  */
-unsupported?: UnsupportedFormat, };
+unsupported?: UnsupportedFormat, 
+/**
+ * Present only for a fork. Ordinary and imported sessions can add their
+ * own origin variants later without overloading the Agent binding.
+ */
+lineage?: SessionLineage, };
 
 /**
  * The machine-level settings a client may see and change.

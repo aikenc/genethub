@@ -92,6 +92,26 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+
+        let fork: Request = serde_json::from_value(
+            json!({"type": "session.fork", "payload": {"sessionId": "s", "turnId": "t"}}),
+        )
+        .expect("parse legacy fork");
+        assert!(matches!(fork, Request::SessionFork { target: None, .. }));
+    }
+
+    #[test]
+    fn fork_target_survives_the_wire() {
+        round_trip(Request::SessionFork {
+            session_id: "source".into(),
+            turn_id: "turn-7".into(),
+            target: Some(ForkTarget {
+                agent_id: "claude".into(),
+                model_id: Some("sonnet".into()),
+                mode_id: None,
+                effort_id: None,
+            }),
+        });
     }
 
     #[test]

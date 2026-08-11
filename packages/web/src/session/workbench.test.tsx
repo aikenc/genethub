@@ -1408,6 +1408,68 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled();
     expect(state.status).toBe("idle");
   });
+
+  it("opens Agent selection for a completed turn without a native checkpoint", async () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          id: "s1",
+          workspaceId: "w1",
+          agentId: "codex",
+          title: undefined,
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          archived: false,
+          status: "idle",
+        },
+      ],
+      activeSessionId: "s1",
+      agents: [
+        agent({
+          id: "codex",
+          label: "Codex",
+          capabilities: { ...agent().capabilities, fork: true },
+        }),
+        agent({ id: "claude", label: "Claude Code" }),
+      ],
+    });
+    let state = apply(emptyTimeline(), {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "继续实现", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "turnSummary",
+        id: "summary-t1",
+        stats: {
+          turnId: "t1",
+          outcome: "completed",
+          startedAtMs: 1,
+          finishedAtMs: 2,
+          durationMs: 1,
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            costUsd: undefined,
+          },
+          toolCalls: 0,
+          forkCheckpoint: undefined,
+        },
+      },
+    });
+
+    render(<TimelineView state={state} />);
+    await userEvent.click(screen.getByRole("button", { name: "Fork" }));
+
+    expect(screen.getByRole("dialog", { name: "Fork 到 Agent" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Codex" })).toBeChecked();
+    expect(screen.getByText("重建会话")).toBeInTheDocument();
+  });
 });
 
 describe("a turn that failed", () => {

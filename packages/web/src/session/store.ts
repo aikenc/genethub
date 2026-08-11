@@ -4,6 +4,7 @@ import type {
   DeviceInfo,
   DeviceInvite,
   FileNode,
+  ForkTarget,
   GitStatus,
   HubClaim,
   HubStatus,
@@ -262,7 +263,7 @@ interface WorkbenchState {
   /** Acknowledges that the composer has taken `restoreDraft` back. */
   restoredDraft(): void;
   /** Creates an independent Agent context through one completed turn. */
-  forkSession(turnId: string): Promise<void>;
+  forkSession(turnId: string, target: ForkTarget): Promise<boolean>;
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
   setMode(modeId: string): Promise<void>;
@@ -1095,18 +1096,19 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set({ restoreDraft: null });
   },
 
-  async forkSession(turnId) {
+  async forkSession(turnId, target) {
     const sessionId = get().activeSessionId;
-    if (!sessionId) return;
+    if (!sessionId) return false;
     const reply = await asked(set, () =>
       require_(get().client).call({
         type: "session.fork",
-        payload: { sessionId, turnId },
+        payload: { sessionId, turnId, target },
       }),
     );
-    if (reply?.type !== "session") return;
+    if (reply?.type !== "session") return false;
     set((state) => ({ sessions: [reply.data, ...state.sessions] }));
     await get().selectSession(reply.data.id);
+    return true;
   },
 
   async interrupt() {

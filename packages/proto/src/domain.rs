@@ -150,6 +150,69 @@ pub struct WorkspaceInfo {
     pub workspace_file: Option<String>,
 }
 
+/// How a child session obtained the context that precedes its first new turn.
+///
+/// Native checkpoints preserve the Agent's own thread. Reconstructed context
+/// is deliberately named differently: it is a bounded, provider-agnostic view
+/// of GeneHub's visible history, not a claim that hidden Agent state moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum ForkMethod {
+    NativeCheckpoint,
+    ReconstructedContext,
+}
+
+/// What a bounded reconstructed fork carried into its target Agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ForkContextStats {
+    pub source_item_count: u32,
+    pub included_item_count: u32,
+    pub omitted_item_count: u32,
+    #[ts(type = "number")]
+    pub estimated_tokens: u64,
+    #[ts(type = "number")]
+    pub token_budget: u64,
+    pub digest: String,
+}
+
+/// Durable ancestry for a forked conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionLineage {
+    pub source_session_id: String,
+    pub source_turn_id: String,
+    pub source_agent_id: String,
+    pub method: ForkMethod,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub context: Option<ForkContextStats>,
+}
+
+/// The explicit destination chosen in the Fork UI.
+///
+/// Omitting this object on the RPC keeps the old client's native-only Fork
+/// semantics. New clients always send it, even when the chosen Agent is the
+/// current one, which is how they opt into reconstructed fallback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ForkTarget {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mode_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub effort_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -181,6 +244,11 @@ pub struct SessionSummary {
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsupported: Option<UnsupportedFormat>,
+    /// Present only for a fork. Ordinary and imported sessions can add their
+    /// own origin variants later without overloading the Agent binding.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<SessionLineage>,
 }
 
 /// A session written by a newer build than this one.

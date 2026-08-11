@@ -507,11 +507,15 @@ describe("forking a completed turn", () => {
     } as unknown as Client;
     useWorkbench.setState({ client, activeSessionId: SESSION.id });
 
-    await useWorkbench.getState().forkSession("turn-7");
+    await useWorkbench.getState().forkSession("turn-7", { agentId: "claude" });
 
     expect(calls).toContainEqual({
       type: "session.fork",
-      payload: { sessionId: SESSION.id, turnId: "turn-7" },
+      payload: {
+        sessionId: SESSION.id,
+        turnId: "turn-7",
+        target: { agentId: "claude" },
+      },
     });
     expect(useWorkbench.getState().sessions[0]).toEqual(forked);
     expect(useWorkbench.getState().activeSessionId).toBe(forked.id);
