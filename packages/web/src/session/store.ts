@@ -1367,7 +1367,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async invite() {
-    const reply = await require_(get().client).call({ type: "device.invite" });
+    // Null, not a grant list: the workbench pairs a device the owner will use
+    // as themselves. Narrowing belongs to whoever is deliberately handing out
+    // less, and inventing a default here would decide that for them.
+    const reply = await require_(get().client).call({
+      type: "device.invite",
+      payload: null,
+    });
     return reply?.type === "invite" ? reply.data : null;
   },
 

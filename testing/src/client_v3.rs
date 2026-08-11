@@ -103,6 +103,26 @@ impl Client {
             let _ = endpoint_task.await;
         });
 
+        let (events_rx, pty_rx, notice_rx, event_reader) = Self::read_events(&endpoint).await?;
+
+        Ok(Self {
+            endpoint,
+            events: Mutex::new(events_rx),
+            pty: Mutex::new(pty_rx),
+            notices: Mutex::new(notice_rx),
+            tasks: vec![writer, reader, endpoint_monitor, event_reader],
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn read_events(
+        endpoint: &ClientEndpoint,
+    ) -> Result<(
+        mpsc::UnboundedReceiver<SequencedEvent>,
+        mpsc::UnboundedReceiver<(String, String)>,
+        mpsc::UnboundedReceiver<String>,
+        tokio::task::JoinHandle<()>,
+    )> {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (pty_tx, pty_rx) = mpsc::unbounded_channel();
         let (notice_tx, notice_rx) = mpsc::unbounded_channel();
@@ -154,13 +174,132 @@ impl Client {
                 }
             }
         });
+        Ok((events_rx, pty_rx, notice_rx, event_reader))
+    }
 
+    /// Connects as a paired device, over the same peer code path a relay would
+    /// carry but without one in the way.
+    ///
+    /// The carrier is the only thing simulated. The handshake, the device
+    /// authentication, the grant gate and the event fanout are the daemon's
+    /// own, which is the whole point: a test that stubbed those would prove
+    /// something about the stub.
+    pub async fn connect_as_device(
+        daemon: &genet_daemon::Daemon,
+        credential: &genehub_proto::DeviceCredential,
+    ) -> Result<Self> {
+        let nonce = challenge();
+        let context = genet_daemon::channel_auth::device_context(&credential.device_id);
+        let hello = PeerHello {
+            version: genehub_proto::DATA_PLANE_VERSION,
+            client_name: "genehub-testing-device".into(),
+            auth: PeerAuth::Device {
+                device_id: credential.device_id.clone(),
+                nonce: nonce.clone(),
+                proof: genet_daemon::channel_auth::client_proof(
+                    &credential.secret,
+                    &context,
+                    &nonce,
+                ),
+            },
+            rtc_supported: false,
+        };
+        Self::over_carrier(daemon, hello, &credential.secret, &context, &nonce).await
+    }
+
+    /// Connects with a pairing invitation, the way a device that owns nothing
+    /// yet has to start.
+    pub async fn connect_with_invite(
+        daemon: &genet_daemon::Daemon,
+        code: &str,
+    ) -> Result<(Self, String)> {
+        let (invite_id, secret) = code
+            .split_once('.')
+            .ok_or_else(|| anyhow!("a pairing code is `<inviteId>.<secret>`"))?;
+        let nonce = challenge();
+        let context = format!("invite:{invite_id}");
+        let hello = PeerHello {
+            version: genehub_proto::DATA_PLANE_VERSION,
+            client_name: "genehub-testing-invite".into(),
+            auth: PeerAuth::Invite {
+                invite_id: invite_id.to_string(),
+                nonce: nonce.clone(),
+                proof: genet_daemon::channel_auth::client_proof(secret, &context, &nonce),
+            },
+            rtc_supported: false,
+        };
+        let client = Self::over_carrier(daemon, hello, secret, &context, &nonce).await?;
+        Ok((client, invite_id.to_string()))
+    }
+
+    async fn over_carrier(
+        daemon: &genet_daemon::Daemon,
+        hello: PeerHello,
+        secret: &str,
+        context: &str,
+        nonce: &str,
+    ) -> Result<Self> {
+        let accepted = genet_daemon::dataplane::handshake::accept(
+            &daemon.state,
+            genehub_proto::TransportKind::Forwarded,
+            genet_daemon::transport::admission::Admission::DeviceRequired,
+            &serde_json::to_vec(&hello)?,
+            None,
+            None,
+        )?;
+        genet_daemon::channel_auth::verify_proof(
+            &genet_daemon::channel_auth::server_proof(
+                secret,
+                context,
+                nonce,
+                &accepted.welcome.server_nonce,
+            ),
+            &accepted.welcome.proof,
+        )?;
+        let key = genet_daemon::channel_auth::derive_key(
+            secret,
+            context,
+            nonce,
+            &accepted.welcome.server_nonce,
+        );
+
+        let (to_client, mut from_daemon, daemon_carrier) =
+            genet_daemon::dataplane::endpoint::carrier_channels();
+        let (to_daemon, mut from_client, client_carrier) =
+            genet_daemon::dataplane::endpoint::carrier_channels();
+        let state = daemon.state.clone();
+        let access = accepted.access.clone();
+        let daemon_key = key.clone();
+        let peer = tokio::spawn(async move {
+            let _ =
+                genet_daemon::dataplane::endpoint::serve(state, daemon_key, access, daemon_carrier)
+                    .await;
+        });
+        let uplink = tokio::spawn(async move {
+            while let Some(record) = from_client.recv().await {
+                if to_client.send(record).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let downlink = tokio::spawn(async move {
+            while let Some(record) = from_daemon.recv().await {
+                if to_daemon.send(record).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let (endpoint, endpoint_task) = ClientEndpoint::start(key, client_carrier);
+        let endpoint_monitor = tokio::spawn(async move {
+            let _ = endpoint_task.await;
+        });
+        let (events_rx, pty_rx, notice_rx, event_reader) = Self::read_events(&endpoint).await?;
         Ok(Self {
             endpoint,
             events: Mutex::new(events_rx),
             pty: Mutex::new(pty_rx),
             notices: Mutex::new(notice_rx),
-            tasks: vec![writer, reader, endpoint_monitor, event_reader],
+            tasks: vec![peer, uplink, downlink, endpoint_monitor, event_reader],
         })
     }
 
@@ -362,6 +501,11 @@ impl Client {
             task.abort();
         }
     }
+}
+
+/// The 16 random bytes a peer challenge has to be, in lowercase hexadecimal.
+fn challenge() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 pub trait EventsExt {

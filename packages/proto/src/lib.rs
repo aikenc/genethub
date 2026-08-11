@@ -144,4 +144,30 @@ mod tests {
             "a text delta for a todo item is a protocol error, not a no-op"
         );
     }
+
+    #[test]
+    fn an_invite_sent_the_way_it_was_sent_before_grants_still_means_no_limits() {
+        // Pairing is the exchange that has to keep working on the machine
+        // nobody can walk over to and fix, so an older client that never heard
+        // of grants must still be understood, and understood as asking for
+        // what it always got.
+        let old: Request = serde_json::from_value(json!({"type": "device.invite"})).unwrap();
+        assert_eq!(old, Request::DeviceInvite(None));
+
+        let narrowed: Request = serde_json::from_value(
+            json!({"type": "device.invite", "payload": {"grants": ["read", "session"]}}),
+        )
+        .unwrap();
+        assert_eq!(
+            narrowed,
+            Request::DeviceInvite(Some(InviteScope {
+                grants: vec!["read".into(), "session".into()]
+            }))
+        );
+
+        round_trip(Request::DeviceInvite(None));
+        round_trip(Request::DeviceInvite(Some(InviteScope {
+            grants: vec!["pty".into()],
+        })));
+    }
 }

@@ -497,8 +497,29 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             remote: remote_status(state).await,
         }),
 
-        Request::DeviceInvite => {
-            let mut invite = state.devices.invite();
+        Request::DeviceInvite(scope) => {
+            let grants = match scope {
+                None => crate::authz::GrantSet::full(),
+                Some(scope) => {
+                    let mut named = Vec::with_capacity(scope.grants.len());
+                    for raw in &scope.grants {
+                        match crate::authz::Capability::parse(raw) {
+                            Some(capability) => named.push(capability),
+                            // Refused rather than dropped: an invitation minted
+                            // from a misspelled grant would silently be worth
+                            // less than whoever sent it believes.
+                            None => {
+                                return Handled::err(
+                                    ErrorCode::BadRequest,
+                                    format!("unknown grant `{raw}`"),
+                                )
+                            }
+                        }
+                    }
+                    crate::authz::GrantSet::of(named)
+                }
+            };
+            let mut invite = state.devices.invite_with(grants);
             invite.rendezvous_url = remote_status(state).await.rendezvous_url;
             Handled::ok(Reply::Invite(invite))
         }

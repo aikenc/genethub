@@ -727,6 +727,11 @@ pub struct DeviceInfo {
     pub last_seen_at: Option<String>,
     /// True while this device has a live connection to the machine.
     pub connected: bool,
+    /// What this device may ask for. Absent from machines that predate grants,
+    /// where every authorized device could do everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub grants: Option<Vec<String>>,
 }
 
 /// A one-time chance to become an authorized device.
@@ -748,6 +753,23 @@ pub struct DeviceInvite {
     #[ts(optional)]
     pub rendezvous_url: Option<String>,
     pub expires_at: String,
+    /// What redeeming this invitation will be worth. Shown before anyone
+    /// accepts it, because a grant nobody was told about is not a choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub grants: Option<Vec<String>>,
+}
+
+/// How much of a machine an invitation is worth.
+///
+/// Its own type rather than a bare list of strings so that the request carrying
+/// it can grow other limits — an expiry, a workspace — without changing shape
+/// again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct InviteScope {
+    pub grants: Vec<String>,
 }
 
 /// What a client keeps after redeeming an invite.

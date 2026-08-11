@@ -137,7 +137,12 @@ export type DeviceInfo = { id: string, name: string, pairedAt: string, lastSeenA
 /**
  * True while this device has a live connection to the machine.
  */
-connected: boolean, };
+connected: boolean, 
+/**
+ * What this device may ask for. Absent from machines that predate grants,
+ * where every authorized device could do everything.
+ */
+grants?: Array<string>, };
 
 /**
  * A one-time chance to become an authorized device.
@@ -155,7 +160,12 @@ export type DeviceInvite = { code: string,
  * a relay first for that reason; privileged LAN transport is deliberately
  * unsupported.
  */
-rendezvousUrl?: string, expiresAt: string, };
+rendezvousUrl?: string, expiresAt: string, 
+/**
+ * What redeeming this invitation will be worth. Shown before anyone
+ * accepts it, because a grant nobody was told about is not a choice.
+ */
+grants?: Array<string>, };
 
 export type DirectoryEntry = { name: string, path: string, };
 
@@ -297,6 +307,15 @@ export type InteractionQuestion = { id: string, prompt: string, allowMultiple: b
  * Proof of the PSK carried in the fragment half of a pairing link.
  */
 export type InviteAuth = { inviteId: string, nonce: string, proof: string, };
+
+/**
+ * How much of a machine an invitation is worth.
+ *
+ * Its own type rather than a bare list of strings so that the request carrying
+ * it can grow other limits — an expiry, a workspace — without changing shape
+ * again.
+ */
+export type InviteScope = { grants: Array<string>, };
 
 /**
  * Streaming increment for an item already on the timeline.
@@ -484,7 +503,7 @@ models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payloa
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */

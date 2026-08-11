@@ -4,6 +4,7 @@
 //! real daemon in-process instead of asserting against a mock of one.
 
 pub mod adapter;
+pub mod authz;
 pub mod channel;
 pub mod channel_auth;
 pub mod config;

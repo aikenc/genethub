@@ -269,8 +269,14 @@ pub enum Request {
     ///
     /// The new device names itself when it redeems the invite — it is the one
     /// that knows whether it is a phone or a laptop.
+    ///
+    /// The payload narrows what the invitation is worth. It is optional, and
+    /// deliberately a payload rather than a field: a client built before grants
+    /// existed sends `{"type":"device.invite"}` with no `payload` key at all,
+    /// and pairing is the one exchange that must keep working on the machine
+    /// nobody can walk over to and fix.
     #[serde(rename = "device.invite")]
-    DeviceInvite,
+    DeviceInvite(Option<InviteScope>),
     /// Redeems an invite. The only request a stranger may send, and only once
     /// per invite: everything else needs a credential this call hands out.
     #[serde(rename = "device.claim", rename_all = "camelCase")]
