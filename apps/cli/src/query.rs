@@ -12,8 +12,9 @@ use serde_json::{json, Value};
 
 use crate::output::{self, CliFailure, CLI_SCHEMA};
 use crate::rpc::{ConnectError, Rpc, RpcError};
+use crate::target::{self, Routing};
 
-const COMMAND_NAMES: [&str; 7] = [
+const COMMAND_NAMES: [&str; 13] = [
     "schema",
     "context",
     "capabilities",
@@ -21,7 +22,23 @@ const COMMAND_NAMES: [&str; 7] = [
     "workspace.show",
     "session.list",
     "session.get",
+    "agent.list",
+    "agent.run",
+    "session.send",
+    "session.respond",
+    "session.interrupt",
+    "session.close",
 ];
+
+/// Commands that change something on the target machine. Read by agents that
+/// need to know what is safe to retry, so it is a property of the command
+/// rather than a judgement made at each call site.
+fn mutates(name: &str) -> bool {
+    matches!(
+        name,
+        "agent.run" | "session.send" | "session.respond" | "session.interrupt" | "session.close"
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Query {
@@ -222,7 +239,13 @@ async fn connect() -> Result<Rpc, CliFailure> {
     Rpc::connect().await.map_err(connect_error)
 }
 
-fn connect_error(error: ConnectError) -> CliFailure {
+/// The workspace catalogue, shared with the conversation surface so both
+/// resolve `--workspace` and `--cwd` against exactly the same list.
+pub async fn list_workspaces(rpc: &Rpc) -> Result<Vec<WorkspaceInfo>, CliFailure> {
+    workspaces(rpc.call(Request::WorkspaceList).await.map_err(rpc_error)?)
+}
+
+pub fn connect_error(error: ConnectError) -> CliFailure {
     match error {
         ConnectError::Rejected(ProtocolError {
             code: ErrorCode::ProtocolVersion,
@@ -245,6 +268,17 @@ fn context_data(hello: &HelloResult) -> Value {
         "workspaceSelection": "explicitOnly",
         "remoteExec": false,
         "deviceSelector": false,
+        // Which machine this call actually resolved to, and how. An agent that
+        // wants to know whether it is talking to itself should read this rather
+        // than infer it from the absence of a flag.
+        "target": {
+            "machineId": hello.machine_id,
+            "machineName": hello.machine_name,
+            "resolvedFrom": "loopback",
+            "transport": hello.transport,
+            "credential": "loopbackAdmission",
+        },
+        "workingDirectory": {"selector": "--cwd", "value": null, "inferred": false},
         "daemon": {
             "version": hello.daemon_version,
             "protocolVersion": hello.protocol_version,
@@ -260,18 +294,47 @@ fn capabilities_data() -> Value {
     json!({
         "source": "staticCliContract",
         "transport": "localDaemon",
-        "readOnly": true,
+        "readOnly": false,
+        "agentConversation": {
+            "sugar": "genet <agentId> \"<prompt>\"",
+            "canonical": "agent.run",
+            "reserved": crate::target::RESERVED,
+            "sessionBacked": true,
+            "resume": ["--session", "--since-seq", "session.respond"],
+            "permissionsWithoutAPerson": "denied unless --auto-approve; questions always stop",
+        },
+        // Kept a boolean because agents and scripts already branch on it. The
+        // detail that does not fit in a boolean lives in `remote` beside it,
+        // which is an added field rather than a changed type.
         "remoteExec": false,
+        "remote": {
+            "transports": [],
+            "hostedHub": false,
+            "selector": {"kind": "exactId", "flag": "--machine", "implicitDefault": false},
+        },
+        // What the target machine will let a command touch. Arbitrary commands
+        // are not offered at all yet, so there is nothing to isolate and the
+        // engine is absent rather than "none" — an agent must not read a
+        // missing sandbox as a permissive one.
+        "isolation": {"arbitraryCommands": false, "engine": null},
         "deviceSelector": false,
         "workspaceSelector": {
             "kind": "exactId",
             "supportedBy": ["session.list"],
             "implicitDefault": false,
         },
+        "workingDirectory": {
+            "flag": "--cwd",
+            "supportedBy": COMMAND_NAMES.iter().filter(|name| target::accepts_cwd(name))
+                .collect::<Vec<_>>(),
+            "inferred": false,
+        },
         "commands": COMMAND_NAMES.iter().map(|name| json!({
             "name": name,
             "requiresDaemon": !matches!(*name, "schema" | "capabilities"),
-            "mutation": false,
+            "mutation": mutates(name),
+            "routable": matches!(target::routing(name), Routing::Routable),
+            "streaming": streams(name),
         })).collect::<Vec<_>>(),
     })
 }
@@ -319,26 +382,159 @@ fn command_schema(name: &str) -> Value {
                 &["sessionId"],
             ),
         ),
+        "agent.list" => ("genet agent list", true, object_input(json!({}), &[])),
+        "agent.run" => (
+            "genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>] \
+             [--session <id>] [--model <id>] [--mode <id>] [--effort <id>] [--title <t>] \
+             [--wait|--no-wait] [--since-seq <n>] [--auto-approve] [--timeout <s>] \
+             [--open-workspace]",
+            true,
+            object_input(
+                json!({
+                    "agentId": {"type": "string", "minLength": 1},
+                    "prompt": {"type": "string", "minLength": 1},
+                    "sessionId": {"type": ["string", "null"], "minLength": 1},
+                    "workspaceId": {"type": ["string", "null"], "minLength": 1},
+                    "modelId": {"type": ["string", "null"], "minLength": 1},
+                    "modeId": {"type": ["string", "null"], "minLength": 1},
+                    "effortId": {"type": ["string", "null"], "minLength": 1},
+                    "title": {"type": ["string", "null"], "minLength": 1},
+                    "wait": {"type": "boolean", "default": true},
+                    "sinceSeq": {"type": ["integer", "null"], "minimum": 0},
+                    "autoApprove": {"type": "boolean", "default": false},
+                    "timeout": {"type": ["integer", "null"], "minimum": 1},
+                    "openWorkspace": {"type": "boolean", "default": false},
+                }),
+                &["agentId", "prompt"],
+            ),
+        ),
+        "session.send" => (
+            "genet session send <id> \"<text>\" [--wait|--no-wait] [--timeout <s>]",
+            true,
+            object_input(
+                json!({
+                    "sessionId": {"type": "string", "minLength": 1},
+                    "prompt": {"type": "string", "minLength": 1},
+                    "wait": {"type": "boolean", "default": true},
+                    "timeout": {"type": ["integer", "null"], "minimum": 1},
+                }),
+                &["sessionId", "prompt"],
+            ),
+        ),
+        "session.respond" => (
+            "genet session respond <id> --request <rid> --choose <optionId>",
+            true,
+            object_input(
+                json!({
+                    "sessionId": {"type": "string", "minLength": 1},
+                    "requestId": {"type": "string", "minLength": 1},
+                    "optionId": {"type": "string", "minLength": 1},
+                }),
+                &["sessionId", "requestId", "optionId"],
+            ),
+        ),
+        "session.interrupt" | "session.close" => (
+            if name == "session.close" {
+                "genet session close <id>"
+            } else {
+                "genet session interrupt <id>"
+            },
+            true,
+            object_input(
+                json!({"sessionId": {"type": "string", "minLength": 1}}),
+                &["sessionId"],
+            ),
+        ),
         _ => unreachable!("schema names are validated before lookup"),
     };
     json!({
         "name": name,
         "synopsis": synopsis,
         "requiresDaemon": requires_daemon,
-        "mutation": false,
-        "inputSchema": input,
-        "outputSchema": {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["schema", "type", "data"],
-            "properties": {
-                "schema": {"const": CLI_SCHEMA},
-                "type": {"const": name},
-                "data": {"type": "object"},
-            }
+        "mutation": mutates(name),
+        "routable": matches!(target::routing(name), Routing::Routable),
+        "streaming": streams(name),
+        "inputSchema": with_selectors(name, input),
+        "outputSchema": if streams(name) { stream_output() } else { single_output(name) },
+    })
+}
+
+fn streams(name: &str) -> bool {
+    matches!(name, "agent.run" | "session.send")
+}
+
+fn single_output(name: &str) -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema", "type", "data"],
+        "properties": {
+            "schema": {"const": CLI_SCHEMA},
+            "type": {"const": name},
+            "data": {"type": "object"},
         }
     })
+}
+
+/// A watched conversation prints many lines, but not a second envelope shape:
+/// each line is the same three fields with a different `type`, and the last one
+/// is always terminal so a reader knows it is done without relying on EOF —
+/// which could equally mean the pipe broke.
+fn stream_output() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$comment": "JSON Lines: one envelope per line, in order",
+        "type": "object",
+        "required": ["schema", "type"],
+        "properties": {
+            "schema": {"const": CLI_SCHEMA},
+            "type": {"enum": [
+                "session.created",
+                "session.attached",
+                "session.desync",
+                "session.event",
+                "session.result",
+                "error",
+            ]},
+        },
+        "x-terminalTypes": ["session.result", "error"],
+        "x-resultStatuses": [
+            "completed", "failed", "canceled", "waiting",
+            "detached", "timedOut", "disconnected", "running",
+        ],
+    })
+}
+
+/// Adds the global selectors to a command's input schema, but only where they
+/// mean something. A command that would reject `--machine` at runtime must not
+/// advertise it here, or the map an agent reads once will send it down a path
+/// that always fails.
+fn with_selectors(name: &str, mut input: Value) -> Value {
+    let Some(properties) = input.get_mut("properties").and_then(Value::as_object_mut) else {
+        return input;
+    };
+    if matches!(target::routing(name), Routing::Routable) {
+        properties.insert(
+            "machineId".into(),
+            json!({
+                "type": ["string", "null"],
+                "minLength": 1,
+                "description": "--machine; exact id of a paired machine, never a name or a prefix",
+            }),
+        );
+    }
+    if target::accepts_cwd(name) {
+        properties.insert(
+            "cwd".into(),
+            json!({
+                "type": ["string", "null"],
+                "minLength": 1,
+                "description": "--cwd; working directory on the target machine, absolute when --machine is used",
+            }),
+        );
+    }
+    input
 }
 
 fn object_input(properties: Value, required: &[&str]) -> Value {
@@ -372,7 +568,7 @@ fn snapshot(reply: Reply) -> Result<SessionSnapshot, CliFailure> {
     }
 }
 
-fn unexpected_reply(expected: &str, actual: &Reply) -> CliFailure {
+pub fn unexpected_reply(expected: &str, actual: &Reply) -> CliFailure {
     CliFailure::protocol(format!(
         "the local daemon returned {}, expected {expected}",
         reply_kind(actual)
@@ -414,7 +610,7 @@ fn reply_kind(reply: &Reply) -> &'static str {
     }
 }
 
-fn rpc_error(error: RpcError) -> CliFailure {
+pub fn rpc_error(error: RpcError) -> CliFailure {
     match error {
         RpcError::Transport(message) => CliFailure::daemon_unavailable(message),
         RpcError::Remote(ProtocolError { code, message }) => match code {

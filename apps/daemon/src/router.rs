@@ -142,21 +142,38 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             model_id,
             mode_id,
             title,
+            cwd,
         } => {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
+            let start_in = match cwd {
+                // Any of the workspace's folders, not only the first: a
+                // multi-folder workspace is one project, and a task started in
+                // its second folder is not a different workspace.
+                Some(cwd) => {
+                    let candidate = std::path::Path::new(&cwd);
+                    match workspace
+                        .folders
+                        .iter()
+                        .find_map(|folder| {
+                            crate::session::store::ensure_within(&folder.root, candidate).ok()
+                        })
+                        .or_else(|| {
+                            crate::session::store::ensure_within(&workspace.root, candidate).ok()
+                        }) {
+                        Some(resolved) => resolved,
+                        // Refusing beats clamping to the root: a task quietly
+                        // run in the wrong directory looks like it worked.
+                        None => return failed(anyhow::anyhow!("cwd {cwd} escapes the workspace")),
+                    }
+                }
+                None => workspace.root,
+            };
             match state
                 .sessions
-                .create(
-                    &workspace_id,
-                    workspace.root,
-                    &agent_id,
-                    model_id,
-                    mode_id,
-                    title,
-                )
+                .create(&workspace_id, start_in, &agent_id, model_id, mode_id, title)
                 .await
             {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),

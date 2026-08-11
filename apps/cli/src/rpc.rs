@@ -7,15 +7,22 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use genehub_proto::{HelloResult, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply, Request};
+use genehub_proto::{
+    HelloResult, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply, Request, SequencedEvent,
+    ServerFrame,
+};
 use genet_daemon::config::Paths;
 use genet_daemon::dataplane::client::ClientEndpoint;
 use serde_json::Value;
+use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{fail, EXIT_UNREACHABLE};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// One event frame. Generous next to any single session event and bounded so a
+/// malformed length cannot make the client allocate on request.
+const MAX_EVENT_FRAME_BYTES: usize = 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,8 +74,11 @@ impl std::error::Error for ConnectError {}
 
 pub struct Rpc {
     endpoint: ClientEndpoint,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     hello: HelloResult,
+    /// Absent until someone asks to watch. A one-shot command opens no event
+    /// stream, and the daemon allows one per peer.
+    events: Mutex<Option<mpsc::UnboundedReceiver<Payload>>>,
 }
 
 impl Rpc {
@@ -214,8 +224,9 @@ impl Rpc {
         verify_local_identity(&hello, &admission)?;
         Ok(Self {
             endpoint: data,
-            tasks: vec![writer, reader, endpoint_monitor],
+            tasks: Mutex::new(vec![writer, reader, endpoint_monitor]),
             hello,
+            events: Mutex::new(None),
         })
     }
 
@@ -226,6 +237,95 @@ impl Rpc {
     pub async fn call(&self, request: Request) -> Result<Reply, RpcError> {
         rpc_call(&self.endpoint, request).await
     }
+
+    /// Starts receiving this peer's event frames.
+    ///
+    /// Opened before subscribing, never after: the daemon starts queueing a
+    /// session's events the moment it accepts the subscription, and a stream
+    /// opened afterwards would be a race whose loser is a missing turn.
+    pub async fn watch_events(&self) -> Result<(), RpcError> {
+        let mut events = self.events.lock().await;
+        if events.is_some() {
+            return Ok(());
+        }
+        let mut stream = self
+            .endpoint
+            .open_stream("events", Value::Null, Vec::new(), None)
+            .await
+            .map_err(|error| RpcError::Transport(format!("open the event stream: {error:#}")))?;
+        let head = stream
+            .response_head()
+            .await
+            .map_err(|error| RpcError::Transport(format!("event stream head: {error:#}")))?;
+        if let Some(error) = head.error {
+            return Err(RpcError::Remote(error));
+        }
+        if head.status != 200 {
+            return Err(RpcError::Transport(format!(
+                "the daemon answered the event stream with status {}",
+                head.status
+            )));
+        }
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let reader = tokio::spawn(async move {
+            let mut buffered = Vec::<u8>::new();
+            while let Some(Ok(chunk)) = stream.next_chunk().await {
+                buffered.extend_from_slice(&chunk);
+                while let Some(frame) = take_frame(&mut buffered) {
+                    // Only session traffic. A terminal belongs to whoever is
+                    // watching one, and this client is not.
+                    if let ServerFrame::Event { payload, .. } = frame {
+                        if sender.send(Payload::Event(payload)).is_err() {
+                            return;
+                        }
+                    } else if let ServerFrame::Desync { session_id, missed } = frame {
+                        if sender.send(Payload::Desync { session_id, missed }).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        *events = Some(receiver);
+        self.tasks.lock().await.push(reader);
+        Ok(())
+    }
+
+    /// The next session frame, or `None` once the stream is over.
+    pub async fn next_event(&self) -> Option<Payload> {
+        let mut events = self.events.lock().await;
+        events.as_mut()?.recv().await
+    }
+}
+
+/// What arrives on the event stream that a conversation cares about.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Payload {
+    Event(SequencedEvent),
+    /// The daemon dropped frames for this session; what follows is not
+    /// continuous with what came before.
+    Desync {
+        session_id: String,
+        missed: u64,
+    },
+}
+
+/// Splits one `u32`-length-prefixed JSON frame off the front of the buffer.
+fn take_frame(buffered: &mut Vec<u8>) -> Option<ServerFrame> {
+    if buffered.len() < 4 {
+        return None;
+    }
+    let length = u32::from_be_bytes(buffered[..4].try_into().ok()?) as usize;
+    if length == 0 || length > MAX_EVENT_FRAME_BYTES {
+        buffered.clear();
+        return None;
+    }
+    if buffered.len() < 4 + length {
+        return None;
+    }
+    let frame = serde_json::from_slice::<ServerFrame>(&buffered[4..4 + length]).ok();
+    buffered.drain(..4 + length);
+    frame
 }
 
 async fn rpc_call(endpoint: &ClientEndpoint, request: Request) -> Result<Reply, RpcError> {
@@ -293,8 +393,10 @@ fn dial_failure(port: u16) -> String {
 
 impl Drop for Rpc {
     fn drop(&mut self) {
-        for task in &self.tasks {
-            task.abort();
+        if let Ok(tasks) = self.tasks.try_lock() {
+            for task in tasks.iter() {
+                task.abort();
+            }
         }
     }
 }

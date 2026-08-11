@@ -236,6 +236,7 @@ describe.skipIf(
         modelId: null,
         modeId: null,
         title: null,
+        cwd: null,
       },
     });
     if (created?.type !== "session") throw new Error("no session was created");

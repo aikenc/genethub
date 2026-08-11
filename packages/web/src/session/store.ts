@@ -1503,6 +1503,7 @@ async function start(
         modelId: draft.modelId,
         modeId: draft.modeId,
         title: null,
+        cwd: null,
       },
     }),
   );

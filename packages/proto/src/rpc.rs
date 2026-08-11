@@ -58,6 +58,14 @@ pub enum Request {
         mode_id: Option<String>,
         #[serde(default)]
         title: Option<String>,
+        /// Where the agent starts, inside the workspace. Absent means the
+        /// workspace root, which is what every client sent before this field
+        /// existed. Relative paths resolve against the root; an absolute path
+        /// must still fall inside it, and the daemon refuses the rest rather
+        /// than clamping — a task silently run in the wrong directory is worse
+        /// than one that refused to start.
+        #[serde(default)]
+        cwd: Option<String>,
     },
     #[serde(rename = "session.list", rename_all = "camelCase")]
     SessionList {

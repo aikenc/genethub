@@ -20,6 +20,84 @@ fn an_unknown_command_uses_the_same_agent_error_envelope() {
     assert!(String::from_utf8(output.stderr).unwrap().contains("usage:"));
 }
 
+fn envelope(arguments: &[&str], expected_exit: i32) -> serde_json::Value {
+    let output = genet().args(arguments).output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(expected_exit),
+        "genet {}",
+        arguments.join(" ")
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn every_command_states_whether_it_can_run_on_another_machine() {
+    let schema = envelope(&["schema"], 0);
+    let commands = schema["data"]["commands"].as_array().unwrap();
+    assert!(!commands.is_empty());
+    for command in commands {
+        let name = command["name"].as_str().unwrap();
+        let routable = command["routable"]
+            .as_bool()
+            .unwrap_or_else(|| panic!("{name} has no routable flag"));
+        // The selector is advertised exactly where it is accepted, so the map
+        // an agent reads once never points at a path that always fails.
+        let advertises_machine = command["inputSchema"]["properties"]
+            .get("machineId")
+            .is_some();
+        assert_eq!(routable, advertises_machine, "{name}");
+    }
+    assert_eq!(schema["data"]["commands"][0]["mutation"], false);
+}
+
+#[test]
+fn capabilities_describe_remote_and_isolation_without_changing_frozen_types() {
+    let capabilities = envelope(&["capabilities"], 0);
+    let data = &capabilities["data"];
+
+    // Still a boolean, because scripts already branch on it; the detail that
+    // does not fit in a boolean is an added sibling.
+    assert_eq!(data["remoteExec"], false);
+    assert_eq!(data["remote"]["hostedHub"], false);
+    assert_eq!(data["remote"]["transports"].as_array().unwrap().len(), 0);
+    assert_eq!(data["remote"]["selector"]["flag"], "--machine");
+    assert_eq!(data["remote"]["selector"]["implicitDefault"], false);
+
+    // An absent engine must not be readable as a permissive one.
+    assert_eq!(data["isolation"]["arbitraryCommands"], false);
+    assert!(data["isolation"]["engine"].is_null());
+    assert_eq!(data["workingDirectory"]["inferred"], false);
+}
+
+#[test]
+fn a_machine_selector_is_refused_by_name_rather_than_ignored() {
+    // Local-only: stopping this machine's daemon has no remote meaning.
+    let local_only = envelope(&["daemon", "stop", "--machine", "m_other"], 2);
+    assert_eq!(local_only["error"]["code"], "commandNotRoutable");
+    assert_eq!(local_only["error"]["details"]["command"], "daemon.stop");
+
+    // Static: answered by this binary, so it never reaches any daemon.
+    let statically_answered = envelope(&["schema", "--machine", "m_other"], 2);
+    assert_eq!(statically_answered["error"]["code"], "commandNotRoutable");
+
+    // Routable but not yet reachable. The one outcome this must never be is a
+    // silent local run.
+    let routable = envelope(&["session", "list", "--machine=m_other"], 4);
+    assert_eq!(routable["error"]["code"], "unsupportedCapability");
+    assert_eq!(routable["error"]["retryable"], false);
+}
+
+#[test]
+fn the_working_directory_is_refused_where_it_would_be_ignored() {
+    let error = envelope(&["workspace", "list", "--cwd", "/srv/app"], 2);
+    assert_eq!(error["error"]["code"], "invalidArgs");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--cwd"));
+}
+
 #[test]
 fn unsigned_self_update_is_explicitly_unsupported() {
     let dir = tempfile::tempdir().unwrap();

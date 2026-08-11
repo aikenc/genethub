@@ -298,6 +298,7 @@ impl Journey {
                 model_id: Some(model_id.to_string()),
                 mode_id: None,
                 title: None,
+                cwd: None,
             })
             .await?;
         match reply {

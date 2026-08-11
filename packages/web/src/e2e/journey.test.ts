@@ -162,6 +162,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           modelId: "deepseek/deepseek-v4-flash",
           modeId: null,
           title: null,
+          cwd: null,
         },
       });
       if (session?.type !== "session")
@@ -217,6 +218,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           modelId: "deepseek/deepseek-v4-flash",
           modeId: null,
           title: null,
+          cwd: null,
         },
       });
       if (session?.type !== "session")
@@ -286,6 +288,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
               modelId,
               modeId: null,
               title: null,
+              cwd: null,
             },
           });
           if (session?.type !== "session")
