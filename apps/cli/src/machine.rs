@@ -11,7 +11,7 @@ use serde_json::json;
 
 use crate::machines::{self, PairedMachine};
 use crate::output::{self, CliFailure};
-use crate::rpc::Rpc;
+use crate::rpc::{Pairing, Rpc};
 use crate::target::Selection;
 
 /// Machines this installation can reach. Never routed: pairing and the local
@@ -136,42 +136,23 @@ async fn pair(args: &[String]) -> Result<serde_json::Value, CliFailure> {
             CliFailure::invalid_args("that pairing code is not in the form the machine issues")
         })?;
 
-    let rpc = Rpc::connect_with_invite(&endpoint, &invite_id, &invite_secret)
+    let pairing = Pairing::open(&endpoint, &invite_id, &invite_secret)
         .await
         .map_err(|error| {
             CliFailure::business(
                 "pairingRefused",
-                format!("{endpoint}: {error}"),
+                format!("{}: {error}", redacted(&endpoint)),
                 Some(json!({"endpoint": redacted(&endpoint)})),
             )
         })?;
 
-    // The claim names only the invite id. The peer handshake already proved
-    // the secret, so copying the reusable code into a second frame would put it
-    // on the wire twice for nothing.
-    let credential = match rpc
-        .call(Request::DeviceClaim {
-            code: invite_id,
-            device_name: name.clone(),
-        })
-        .await
-    {
-        Ok(Reply::Claimed(credential)) => credential,
-        Ok(other) => {
-            return Err(CliFailure::business(
-                "pairingRefused",
-                format!("the machine answered the claim with {other:?}"),
-                None,
-            ))
-        }
-        Err(error) => {
-            return Err(CliFailure::business(
-                "pairingRefused",
-                format!("the machine refused the claim: {error}"),
-                None,
-            ))
-        }
-    };
+    let credential = pairing.claim(&invite_id, &name).await.map_err(|error| {
+        CliFailure::business(
+            "pairingRefused",
+            format!("the machine refused the claim: {error}"),
+            None,
+        )
+    })?;
 
     let machine = PairedMachine {
         machine_id: credential.machine_id.clone(),

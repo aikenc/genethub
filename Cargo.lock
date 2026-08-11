@@ -954,6 +954,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "genehub-proto",
+ "genehub-testing",
  "genet-daemon",
  "serde",
  "serde_json",

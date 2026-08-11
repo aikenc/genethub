@@ -266,31 +266,6 @@ impl Rpc {
         Ok(rpc)
     }
 
-    /// Redeems a pairing invitation on a machine this installation has never
-    /// spoken to. The only exchange this connection is allowed is the claim.
-    pub async fn connect_with_invite(
-        endpoint: &str,
-        invite_id: &str,
-        secret: &str,
-    ) -> Result<Self, ConnectError> {
-        let nonce = fresh_nonce();
-        let context = format!("invite:{invite_id}");
-        let auth = PeerAuth::Invite {
-            invite_id: invite_id.to_string(),
-            nonce: nonce.clone(),
-            proof: genet_daemon::channel_auth::client_proof(secret, &context, &nonce),
-        };
-        Self::over_fabric(
-            endpoint,
-            route_of(endpoint)?,
-            auth,
-            secret,
-            &context,
-            &nonce,
-        )
-        .await
-    }
-
     /// Connects with a capability a Hub issued for this machine.
     pub async fn connect_hosted(ticket: &HubTicket) -> Result<Self, ConnectError> {
         let nonce = fresh_nonce();
@@ -327,7 +302,6 @@ impl Rpc {
         Ok(rpc)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn over_fabric(
         endpoint: &str,
         route_ticket: &str,
@@ -336,48 +310,7 @@ impl Rpc {
         context: &str,
         nonce: &str,
     ) -> Result<Self, ConnectError> {
-        let hello = PeerHello {
-            version: genehub_proto::DATA_PLANE_VERSION,
-            client_name: format!("{}-cli", genet_daemon::channel::CLI_BINARY),
-            auth,
-            rtc_supported: false,
-        };
-        let link = genet_daemon::transport::fabric::dial(endpoint, route_ticket, &hello)
-            .await
-            .map_err(dial_refusal)?;
-        if link.welcome.version != genehub_proto::DATA_PLANE_VERSION {
-            return Err(ConnectError::Protocol(
-                "that machine uses a different data-plane version".into(),
-            ));
-        }
-        // The proof is what makes the relay uninteresting: whoever is holding
-        // the other end of this route either knows the secret or does not, and
-        // occupying the slot in front of the machine proves nothing.
-        let expected = genet_daemon::channel_auth::server_proof(
-            secret,
-            context,
-            nonce,
-            &link.welcome.server_nonce,
-        );
-        genet_daemon::channel_auth::verify_proof(&expected, &link.welcome.proof).map_err(|_| {
-            ConnectError::Protocol(
-                "whoever answered at that address could not prove the expected secret".into(),
-            )
-        })?;
-        let key = genet_daemon::channel_auth::derive_key(
-            secret,
-            context,
-            nonce,
-            &link.welcome.server_nonce,
-        );
-        let genet_daemon::transport::fabric::FabricLink { carrier, pump, .. } = link;
-        let (data, endpoint_task) = ClientEndpoint::start(key, carrier);
-        // The pump rides along in the task so the socket lives exactly as long
-        // as the endpoint that is speaking over it, and no longer.
-        let monitor = tokio::spawn(async move {
-            let _ = endpoint_task.await;
-            drop(pump);
-        });
+        let (data, monitor) = link_up(endpoint, route_ticket, auth, secret, context, nonce).await?;
         let hello = match rpc_call(&data, Request::ConnectionIdentity).await {
             Ok(Reply::Hello(hello)) => hello,
             Ok(other) => {
@@ -496,6 +429,118 @@ fn route_of(endpoint: &str) -> Result<&str, ConnectError> {
                     .into(),
             )
         })
+}
+
+/// A connection that may do exactly one thing: redeem the invitation it was
+/// opened with.
+///
+/// Its own type rather than an `Rpc` with a note attached, because the machine
+/// refuses everything else on such a connection. A caller that cannot express
+/// the mistake cannot make it.
+pub struct Pairing {
+    endpoint: ClientEndpoint,
+    _link: tokio::task::JoinHandle<()>,
+}
+
+impl Pairing {
+    /// Opens the narrow bootstrap connection an invitation authenticates.
+    pub async fn open(endpoint: &str, invite_id: &str, secret: &str) -> Result<Self, ConnectError> {
+        let nonce = fresh_nonce();
+        let context = format!("invite:{invite_id}");
+        let auth = PeerAuth::Invite {
+            invite_id: invite_id.to_string(),
+            nonce: nonce.clone(),
+            proof: genet_daemon::channel_auth::client_proof(secret, &context, &nonce),
+        };
+        let (endpoint, link) = link_up(
+            endpoint,
+            route_of(endpoint)?,
+            auth,
+            secret,
+            &context,
+            &nonce,
+        )
+        .await?;
+        Ok(Pairing {
+            endpoint,
+            _link: link,
+        })
+    }
+
+    /// Redeems it. The claim names only the invitation's id: the handshake
+    /// already proved the secret, and putting it on the wire a second time
+    /// would risk it for nothing.
+    pub async fn claim(
+        &self,
+        invite_id: &str,
+        device_name: &str,
+    ) -> Result<genehub_proto::DeviceCredential, RpcError> {
+        match rpc_call(
+            &self.endpoint,
+            Request::DeviceClaim {
+                code: invite_id.to_string(),
+                device_name: device_name.to_string(),
+            },
+        )
+        .await?
+        {
+            Reply::Claimed(credential) => Ok(credential),
+            other => Err(RpcError::Transport(format!(
+                "the machine answered the claim with {other:?}"
+            ))),
+        }
+    }
+}
+
+/// Dials, proves both directions, and starts the encrypted endpoint.
+///
+/// The returned task owns the socket pumps, so the link lives exactly as long
+/// as whoever is speaking over it.
+async fn link_up(
+    endpoint: &str,
+    route_ticket: &str,
+    auth: PeerAuth,
+    secret: &str,
+    context: &str,
+    nonce: &str,
+) -> Result<(ClientEndpoint, tokio::task::JoinHandle<()>), ConnectError> {
+    let hello = PeerHello {
+        version: genehub_proto::DATA_PLANE_VERSION,
+        client_name: format!("{}-cli", genet_daemon::channel::CLI_BINARY),
+        auth,
+        rtc_supported: false,
+    };
+    let link = genet_daemon::transport::fabric::dial(endpoint, route_ticket, &hello)
+        .await
+        .map_err(dial_refusal)?;
+    if link.welcome.version != genehub_proto::DATA_PLANE_VERSION {
+        return Err(ConnectError::Protocol(
+            "that machine uses a different data-plane version".into(),
+        ));
+    }
+    // The proof is what makes the relay uninteresting: whoever is holding the
+    // other end of this route either knows the secret or does not, and
+    // occupying the slot in front of the machine proves nothing.
+    let expected = genet_daemon::channel_auth::server_proof(
+        secret,
+        context,
+        nonce,
+        &link.welcome.server_nonce,
+    );
+    genet_daemon::channel_auth::verify_proof(&expected, &link.welcome.proof).map_err(|_| {
+        ConnectError::Protocol(
+            "whoever answered at that address could not prove the expected secret".into(),
+        )
+    })?;
+    let key =
+        genet_daemon::channel_auth::derive_key(secret, context, nonce, &link.welcome.server_nonce);
+    let genet_daemon::transport::fabric::FabricLink { carrier, pump, .. } = link;
+    let (data, endpoint_task) = ClientEndpoint::start(key, carrier);
+    let monitor = tokio::spawn(async move {
+        let _ = endpoint_task.await;
+        drop(pump);
+    });
+    Ok((data, monitor))
 }
 
 /// Keeps the dialer's distinction between "not now" and "not you".
