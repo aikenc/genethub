@@ -126,6 +126,8 @@ WebRTC DataChannel。无论使用哪条远端 carrier，客户端看到的都是
 
 部署到公网、评估威胁模型或处理敏感代码前，请完整阅读
 [security-model.md](./docs/security-model.md) 与 [e2ee-data-plane.md](./docs/e2ee-data-plane.md)。
+保持“一条链接直达”体验并移除 Control 内容密钥权力的实施方案见
+[trusted-link-pairing.md](./docs/trusted-link-pairing.md)。
 
 ## 自建
 
@@ -225,6 +227,7 @@ node apps/desktop/scripts/bundle.mjs
 | [relay.md](./docs/relay.md) | 部署或开发 Fabric Relay |
 | [self-hosting.md](./docs/self-hosting.md) | 自建完整的远程访问闭环 |
 | [security-model.md](./docs/security-model.md) | 评估信任边界、凭证、撤销和已知限制 |
+| [trusted-link-pairing.md](./docs/trusted-link-pairing.md) | 实现不增步骤的可信链接配对、Control-blind 授权与前向保密 |
 | [testing.md](./docs/testing.md) | 选择受影响的测试与端到端门禁 |
 | [roadmap.md](./docs/roadmap.md) | 查看已经落地、正在推进和明确不做的能力 |
 
