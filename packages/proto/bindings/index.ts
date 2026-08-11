@@ -201,9 +201,9 @@ export type ForkMethod = "nativeCheckpoint" | "reconstructedContext";
 /**
  * The explicit destination chosen in the Fork UI.
  *
- * Omitting this object on the RPC keeps the old client's native-only Fork
- * semantics. New clients always send it, even when the chosen Agent is the
- * current one, which is how they opt into reconstructed fallback.
+ * Omitting this object on the RPC keeps the native Fork semantics of the
+ * current Agent. A client sends it only when the user explicitly switches
+ * Agent, which is the opt-in boundary for reconstructed context.
  */
 export type ForkTarget = { agentId: string, modelId?: string, modeId?: string, effortId?: string, };
 
@@ -309,6 +309,12 @@ fabricRouteTicket: string, fabricRouteExpiresAt: string,
  * anything.
  */
 fingerprint: string, };
+
+/**
+ * Whether an imported conversation can keep talking through its original
+ * Agent thread, or is a durable GeneHub transcript only.
+ */
+export type ImportContinuation = "native" | "readOnly";
 
 export type InteractionAnswer = { questionId: string, selectedOptionIds: Array<string>, freeformText?: string, };
 
@@ -462,7 +468,7 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
 
 export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -491,7 +497,7 @@ continuesRound: string | null, } } | { "type": "session.fork", "payload": { sess
  * explicit target to opt into provider-agnostic reconstruction when
  * a native checkpoint cannot be used.
  */
-target?: ForkTarget, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+target?: ForkTarget, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -583,6 +589,33 @@ export type SessionEvent = { "type": "turnStarted", turnId: string,
 startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
 
 /**
+ * One lightweight external conversation returned by the discovery pass.
+ *
+ * `candidate_id` is an expiring daemon-owned token. Provider handles, source
+ * paths and storage details never cross the RPC boundary.
+ */
+export type SessionImportCandidate = { candidateId: string, agentId: string, title: string, preview: string, updatedAtMs: number, continuation: ImportContinuation, };
+
+/**
+ * Result of the lightweight discovery pass. Selecting one candidate performs
+ * the separate full-history import, so opening this dialog stays bounded even
+ * when an Agent owns years of sessions.
+ */
+export type SessionImportListing = { sources: Array<SessionImportSource>, expiresAtMs: number, filteredDuplicates: number, };
+
+/**
+ * Durable, public import origin. The provider-specific source key remains in
+ * daemon metadata and is used only for duplicate detection.
+ */
+export type SessionImportOrigin = { agentId: string, continuation: ImportContinuation, warnings: Array<string>, };
+
+/**
+ * Discovery is isolated by Agent: one unavailable or incompatible CLI does
+ * not hide importable conversations reported by the others.
+ */
+export type SessionImportSource = { agentId: string, label: string, supported: boolean, candidates: Array<SessionImportCandidate>, error?: string, };
+
+/**
  * Durable ancestry for a forked conversation.
  */
 export type SessionLineage = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, method: ForkMethod, context?: ForkContextStats, };
@@ -627,7 +660,11 @@ unsupported?: UnsupportedFormat,
  * Present only for a fork. Ordinary and imported sessions can add their
  * own origin variants later without overloading the Agent binding.
  */
-lineage?: SessionLineage, };
+lineage?: SessionLineage, 
+/**
+ * Present only for a conversation imported from an Agent's native store.
+ */
+imported?: SessionImportOrigin, };
 
 /**
  * The machine-level settings a client may see and change.

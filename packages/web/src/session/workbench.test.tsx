@@ -1468,7 +1468,9 @@ describe("a whole turn as the timeline sees it", () => {
 
     expect(screen.getByRole("dialog", { name: "Fork 到 Agent" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Codex" })).toBeChecked();
-    expect(screen.getByText("重建会话")).toBeInTheDocument();
+    expect(screen.getByText("当前回合不可原生 Fork")).toBeInTheDocument();
+    expect(screen.queryByText("重建会话")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "无法原生 Fork" })).toBeDisabled();
   });
 });
 

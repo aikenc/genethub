@@ -480,6 +480,35 @@ describe("opening a session that belongs to another project", () => {
 });
 
 describe("forking a completed turn", () => {
+  it("omits the target when the current Agent should use its native Fork", async () => {
+    const calls: unknown[] = [];
+    const client = {
+      call: async (request: unknown) => {
+        calls.push(request);
+        return { type: "session", data: { ...SESSION, id: "s-native" } };
+      },
+      subscribe: async () => ({
+        snapshot: {
+          seq: 0,
+          items: [],
+          pendingPermissions: [],
+          summary: { ...SESSION, id: "s-native" },
+        },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({ client, activeSessionId: SESSION.id });
+
+    await useWorkbench.getState().forkSession("turn-native");
+
+    expect(calls[0]).toEqual({
+      type: "session.fork",
+      payload: { sessionId: SESSION.id, turnId: "turn-native" },
+    });
+  });
+
   it("asks for the exact turn and opens the independent session returned by the daemon", async () => {
     const forked: SessionSummary = {
       ...SESSION,

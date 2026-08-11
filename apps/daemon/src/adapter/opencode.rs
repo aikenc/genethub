@@ -15,16 +15,16 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use genehub_proto::{
-    Capabilities, Catalog, ModeInfo, ModelInfo, PermissionOutcome, ProbeState, SessionEvent,
-    TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    Capabilities, Catalog, ImportContinuation, ModeInfo, ModelInfo, PermissionOutcome, ProbeState,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, Mutex};
 
 use super::{
-    find_executable, AgentAdapter, AgentSession, Chatter, PersistHandle, PromptInput, ProviderMap,
-    SessionConfig,
+    find_executable, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
+    PersistHandle, PromptInput, ProviderMap, SessionConfig,
 };
 
 const BINARY: &str = "opencode";
@@ -148,6 +148,190 @@ impl AgentAdapter for OpenCodeAdapter {
             turn,
             child: Mutex::new(Some(child)),
         }))
+    }
+
+    async fn list_import_candidates(
+        &self,
+        cwd: &Path,
+        limit: usize,
+    ) -> Result<Option<Vec<ImportCandidate>>> {
+        let mut server = OpenCodeImportServer::start(cwd).await?;
+        let outcome = async {
+            let response = server
+                .http
+                .get(format!("{}/session", server.base))
+                .query(&[("directory", cwd.to_string_lossy().as_ref())])
+                .send()
+                .await
+                .context("listing OpenCode sessions")?
+                .error_for_status()
+                .context("OpenCode refused session listing")?;
+            let sessions: Value = response.json().await.context("reading OpenCode sessions")?;
+            let mut candidates = sessions
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|session| {
+                    session
+                        .get("directory")
+                        .and_then(Value::as_str)
+                        .is_none_or(|directory| Path::new(directory) == cwd)
+                })
+                .filter_map(|session| {
+                    let source_id = session.get("id")?.as_str()?.to_string();
+                    let title = session
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or("OpenCode 会话")
+                        .to_string();
+                    Some(ImportCandidate {
+                        source_id,
+                        preview: String::new(),
+                        title,
+                        updated_at_ms: session
+                            .get("time")
+                            .and_then(|time| time.get("updated"))
+                            .and_then(Value::as_i64)
+                            .unwrap_or_default(),
+                        continuation: ImportContinuation::Native,
+                    })
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.updated_at_ms));
+            candidates.truncate(limit);
+            Ok(candidates)
+        }
+        .await;
+        server.stop().await;
+        outcome.map(Some)
+    }
+
+    async fn import_history(&self, cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
+        let mut server = OpenCodeImportServer::start(cwd).await?;
+        let outcome = async {
+            let session: Value = server
+                .http
+                .get(format!("{}/session/{source_id}", server.base))
+                .query(&[("directory", cwd.to_string_lossy().as_ref())])
+                .send()
+                .await
+                .context("loading selected OpenCode session")?
+                .error_for_status()
+                .context("OpenCode could not load the selected session")?
+                .json()
+                .await?;
+            let messages: Value = server
+                .http
+                .get(format!("{}/session/{source_id}/message", server.base))
+                .query(&[("directory", cwd.to_string_lossy().as_ref())])
+                .send()
+                .await
+                .context("loading selected OpenCode history")?
+                .error_for_status()
+                .context("OpenCode could not load the selected history")?
+                .json()
+                .await?;
+            let mut items = Vec::new();
+            for message in messages.as_array().into_iter().flatten() {
+                let role = message
+                    .get("info")
+                    .and_then(|info| info.get("role"))
+                    .and_then(Value::as_str);
+                let text = message
+                    .get("parts")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let id = format!("import-{}", uuid::Uuid::new_v4().simple());
+                match role {
+                    Some("user") => items.push(TimelineItem::UserMessage {
+                        id,
+                        text,
+                        attachments: Vec::new(),
+                    }),
+                    Some("assistant") => items.push(TimelineItem::AssistantMessage { id, text }),
+                    _ => {}
+                }
+            }
+            Ok(ImportedHistory {
+                title: session
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string),
+                created_at_ms: session
+                    .get("time")
+                    .and_then(|time| time.get("created"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default(),
+                updated_at_ms: session
+                    .get("time")
+                    .and_then(|time| time.get("updated"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default(),
+                items,
+                persist: Some(PersistHandle {
+                    agent_id: "opencode".into(),
+                    value: json!({ "sessionId": source_id }),
+                }),
+                continuation: ImportContinuation::Native,
+                warnings: Vec::new(),
+            })
+        }
+        .await;
+        server.stop().await;
+        outcome
+    }
+}
+
+struct OpenCodeImportServer {
+    http: reqwest::Client,
+    base: String,
+    child: Child,
+}
+
+impl OpenCodeImportServer {
+    async fn start(cwd: &Path) -> Result<Self> {
+        let binary = find_executable(BINARY).ok_or_else(|| anyhow!("OpenCode is not installed"))?;
+        let port = pick_port()?;
+        let base = format!("http://127.0.0.1:{port}");
+        let mut command = Command::new(&binary);
+        command
+            .arg("serve")
+            .arg("--hostname")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .env("OPENCODE_PERMISSION", OPENCODE_ALLOW_ALL)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        super::without_a_window(&mut command);
+        let mut child = command
+            .spawn()
+            .context("spawning OpenCode for session import")?;
+        let chatter = Chatter::default();
+        chatter.watch("opencode-import", child.stdout.take()).await;
+        chatter.watch("opencode-import", child.stderr.take()).await;
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()?;
+        wait_until_ready(&http, &base, &mut child, &chatter).await?;
+        Ok(Self { http, base, child })
+    }
+
+    async fn stop(&mut self) {
+        super::kill_tree(&mut self.child).await;
     }
 }
 

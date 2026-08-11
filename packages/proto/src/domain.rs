@@ -194,9 +194,9 @@ pub struct SessionLineage {
 
 /// The explicit destination chosen in the Fork UI.
 ///
-/// Omitting this object on the RPC keeps the old client's native-only Fork
-/// semantics. New clients always send it, even when the chosen Agent is the
-/// current one, which is how they opt into reconstructed fallback.
+/// Omitting this object on the RPC keeps the native Fork semantics of the
+/// current Agent. A client sends it only when the user explicitly switches
+/// Agent, which is the opt-in boundary for reconstructed context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -211,6 +211,73 @@ pub struct ForkTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub effort_id: Option<String>,
+}
+
+/// Whether an imported conversation can keep talking through its original
+/// Agent thread, or is a durable GeneHub transcript only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum ImportContinuation {
+    Native,
+    ReadOnly,
+}
+
+/// One lightweight external conversation returned by the discovery pass.
+///
+/// `candidate_id` is an expiring daemon-owned token. Provider handles, source
+/// paths and storage details never cross the RPC boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionImportCandidate {
+    pub candidate_id: String,
+    pub agent_id: String,
+    pub title: String,
+    pub preview: String,
+    #[ts(type = "number")]
+    pub updated_at_ms: i64,
+    pub continuation: ImportContinuation,
+}
+
+/// Discovery is isolated by Agent: one unavailable or incompatible CLI does
+/// not hide importable conversations reported by the others.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionImportSource {
+    pub agent_id: String,
+    pub label: String,
+    pub supported: bool,
+    pub candidates: Vec<SessionImportCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// Result of the lightweight discovery pass. Selecting one candidate performs
+/// the separate full-history import, so opening this dialog stays bounded even
+/// when an Agent owns years of sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionImportListing {
+    pub sources: Vec<SessionImportSource>,
+    #[ts(type = "number")]
+    pub expires_at_ms: i64,
+    pub filtered_duplicates: u32,
+}
+
+/// Durable, public import origin. The provider-specific source key remains in
+/// daemon metadata and is used only for duplicate detection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionImportOrigin {
+    pub agent_id: String,
+    pub continuation: ImportContinuation,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -249,6 +316,10 @@ pub struct SessionSummary {
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<SessionLineage>,
+    /// Present only for a conversation imported from an Agent's native store.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported: Option<SessionImportOrigin>,
 }
 
 /// A session written by a newer build than this one.

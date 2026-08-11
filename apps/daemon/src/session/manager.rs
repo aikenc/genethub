@@ -11,24 +11,44 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ItemDelta,
-    PermissionOptionKind, PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState,
-    RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionEvent,
+    Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ImportContinuation,
+    ItemDelta, PermissionOptionKind, PermissionOutcome, PermissionRequest, PermissionRequestKind,
+    ProbeState, RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent,
+    SessionEvent, SessionImportCandidate, SessionImportListing, SessionImportSource,
     SessionLineage, SessionSnapshot, SessionStatus, SessionSummary, TimelineItem, ToolStatus,
     TurnOutcome, TurnStats, Usage,
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
 use super::context_seed::{build_context_seed, prompt_with_seed, seed_token_budget};
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
-    self, now_ms, title_from, ContextSeedState, SessionMeta, Store, SESSION_FORMAT,
+    self, now_ms, title_from, ContextSeedState, ImportedSessionMeta, SessionMeta, Store,
+    SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::{AgentSession, PersistHandle, PromptInput, ProviderMap, SessionConfig};
 
 const BROADCAST_CAPACITY: usize = 1024;
+const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
+/// A snapshot is one RPC body (`MAX_RPC_BODY_BYTES` is 2.9 MiB). Leave room for
+/// summary/round metadata and JSON escaping instead of importing a transcript
+/// that can be written successfully but never opened.
+const IMPORT_VISIBLE_BYTES: usize = 1_800_000;
+const IMPORT_VISIBLE_ITEMS: usize = 4_000;
+
+#[derive(Debug, Clone)]
+struct CachedImportCandidate {
+    workspace_id: String,
+    cwd: PathBuf,
+    agent_id: String,
+    source_id: String,
+    source_key: String,
+    title: String,
+    expires_at_ms: i64,
+}
 
 /// One live session.
 struct Live {
@@ -167,6 +187,7 @@ pub struct SessionManager {
     registry: Arc<Registry>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
     replay_window: usize,
+    import_candidates: Mutex<HashMap<String, CachedImportCandidate>>,
 }
 
 impl SessionManager {
@@ -176,6 +197,7 @@ impl SessionManager {
             registry,
             sessions: RwLock::new(HashMap::new()),
             replay_window: replay_window.max(1),
+            import_candidates: Mutex::new(HashMap::new()),
         }
     }
 
@@ -208,6 +230,7 @@ impl SessionManager {
             persist: None,
             pending_permission: None,
             lineage: None,
+            imported: None,
         };
         self.store.save_meta(&meta)?;
         let summary = meta.summary(SessionStatus::Idle);
@@ -361,6 +384,7 @@ impl SessionManager {
                 method,
                 context,
             }),
+            imported: None,
         };
         let write = || -> Result<()> {
             self.store.save_meta(&meta)?;
@@ -385,6 +409,201 @@ impl SessionManager {
             .write()
             .await
             .insert(summary.id.clone(), forked);
+        Ok(summary)
+    }
+
+    /// Lightweight discovery pass. Every provider is asked in parallel and
+    /// returns only descriptors; the full selected transcript is read later.
+    pub async fn list_imports(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        limit: Option<u32>,
+    ) -> Result<SessionImportListing> {
+        let limit = limit.unwrap_or(20).clamp(1, 100) as usize;
+        let now = now_ms();
+        let expires_at_ms = now.saturating_add(IMPORT_CANDIDATE_TTL_MS);
+        let duplicate_keys: HashSet<String> = self
+            .store
+            .list_meta()?
+            .into_iter()
+            .filter(|meta| meta.workspace_id == workspace_id)
+            .filter_map(|meta| meta.imported.map(|imported| imported.source_key))
+            .collect();
+        let discovered = self.registry.import_candidates(&cwd, limit).await;
+        let mut filtered_duplicates = 0_u32;
+        let mut cached = self.import_candidates.lock().await;
+        cached.retain(|_, candidate| {
+            candidate.expires_at_ms > now && candidate.workspace_id != workspace_id
+        });
+        let mut sources = Vec::new();
+        for (agent_id, label, result) in discovered {
+            match result {
+                Ok(Some(candidates)) => {
+                    let mut public = Vec::new();
+                    for candidate in candidates {
+                        let source_key = import_source_key(&agent_id, &cwd, &candidate.source_id);
+                        if duplicate_keys.contains(&source_key) {
+                            filtered_duplicates = filtered_duplicates.saturating_add(1);
+                            continue;
+                        }
+                        let candidate_id = format!("ic_{}", uuid::Uuid::new_v4().simple());
+                        cached.insert(
+                            candidate_id.clone(),
+                            CachedImportCandidate {
+                                workspace_id: workspace_id.to_string(),
+                                cwd: cwd.clone(),
+                                agent_id: agent_id.clone(),
+                                source_id: candidate.source_id,
+                                source_key,
+                                title: candidate.title.clone(),
+                                expires_at_ms,
+                            },
+                        );
+                        public.push(SessionImportCandidate {
+                            candidate_id,
+                            agent_id: agent_id.clone(),
+                            title: candidate.title,
+                            preview: candidate.preview,
+                            updated_at_ms: candidate.updated_at_ms,
+                            continuation: candidate.continuation,
+                        });
+                    }
+                    sources.push(SessionImportSource {
+                        agent_id,
+                        label,
+                        supported: true,
+                        candidates: public,
+                        error: None,
+                    });
+                }
+                Ok(None) => sources.push(SessionImportSource {
+                    agent_id,
+                    label,
+                    supported: false,
+                    candidates: Vec::new(),
+                    error: None,
+                }),
+                Err(error) => {
+                    tracing::warn!(agent = %agent_id, %error, "session import discovery failed");
+                    sources.push(SessionImportSource {
+                        agent_id,
+                        label,
+                        supported: true,
+                        candidates: Vec::new(),
+                        // Provider paths and native handles stay out of RPC
+                        // errors; the daemon log retains the detailed cause.
+                        error: Some("读取失败，请查看日志".into()),
+                    });
+                }
+            }
+        }
+        Ok(SessionImportListing {
+            sources,
+            expires_at_ms,
+            filtered_duplicates,
+        })
+    }
+
+    /// Full-history pass for exactly one expiring candidate. The candidate is
+    /// consumed before provider I/O, so a retry always starts with a fresh
+    /// discovery result rather than accidentally importing twice.
+    pub async fn import(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        candidate_id: &str,
+    ) -> Result<SessionSummary> {
+        let candidate = self
+            .import_candidates
+            .lock()
+            .await
+            .remove(candidate_id)
+            .ok_or_else(|| anyhow!("that import candidate expired; refresh the list"))?;
+        if candidate.expires_at_ms <= now_ms()
+            || candidate.workspace_id != workspace_id
+            || candidate.cwd != cwd
+        {
+            anyhow::bail!("that import candidate expired; refresh the list");
+        }
+        if self.store.list_meta()?.into_iter().any(|meta| {
+            meta.workspace_id == workspace_id
+                && meta
+                    .imported
+                    .as_ref()
+                    .is_some_and(|imported| imported.source_key == candidate.source_key)
+        }) {
+            anyhow::bail!("that Agent session has already been imported");
+        }
+        let mut history = self
+            .registry
+            .import_history(&candidate.agent_id, &cwd, &candidate.source_id)
+            .await?;
+        let (bounded_items, omitted_items) = bound_imported_items(history.items);
+        history.items = bounded_items;
+        if omitted_items > 0 {
+            history.warnings.push(format!(
+                "历史过长：GeneHub 保留最近可见内容，省略较早的 {omitted_items} 项；原 Agent 会话仍保留完整上下文"
+            ));
+        }
+        let mut continuation = history.continuation;
+        if continuation == ImportContinuation::Native && history.persist.is_none() {
+            continuation = ImportContinuation::ReadOnly;
+            history
+                .warnings
+                .push("Agent 没有返回可恢复句柄，已按只读历史导入".into());
+        }
+        let now = now_ms();
+        let created_at_ms = if history.created_at_ms > 0 {
+            history.created_at_ms
+        } else {
+            now
+        };
+        let updated_at_ms = if history.updated_at_ms > 0 {
+            history.updated_at_ms
+        } else {
+            now
+        };
+        let meta = SessionMeta {
+            id: format!("s_{}", uuid::Uuid::new_v4().simple()),
+            workspace_id: workspace_id.to_string(),
+            format: SESSION_FORMAT,
+            agent_id: candidate.agent_id.clone(),
+            title: history.title.or(Some(candidate.title)),
+            cwd,
+            model_id: None,
+            mode_id: None,
+            effort_id: None,
+            created_at_ms,
+            updated_at_ms,
+            archived: false,
+            persist: history.persist,
+            pending_permission: None,
+            lineage: None,
+            imported: Some(ImportedSessionMeta {
+                source_key: candidate.source_key,
+                agent_id: candidate.agent_id,
+                continuation,
+                warnings: history.warnings,
+            }),
+        };
+        let write = || -> Result<()> {
+            self.store.save_meta(&meta)?;
+            self.store
+                .append_chat_items(workspace_id, &meta.id, &history.items)?;
+            Ok(())
+        };
+        if let Err(error) = write() {
+            let _ = self.store.delete(workspace_id, &meta.id);
+            return Err(error);
+        }
+        let summary = meta.summary(SessionStatus::Idle);
+        let imported = Arc::new(Live::new(meta, self.store.clone()));
+        *imported.items.lock().await = history.items;
+        self.sessions
+            .write()
+            .await
+            .insert(summary.id.clone(), imported);
         Ok(summary)
     }
 
@@ -745,6 +964,18 @@ impl SessionManager {
         continues_round: Option<String>,
     ) -> Result<String> {
         let live = self.live(session_id).await?;
+        if live
+            .meta
+            .lock()
+            .await
+            .imported
+            .as_ref()
+            .is_some_and(|imported| imported.continuation == ImportContinuation::ReadOnly)
+        {
+            anyhow::bail!(
+                "this imported conversation is read-only because its Agent cannot resume it"
+            );
+        }
         // Preview locators are rebound in the workbench Markdown renderer from
         // relative/absolute workspace paths. A deployment-specific URL prefix
         // must not be injected into Agent system prompts — only path-linking
@@ -1391,6 +1622,84 @@ impl SessionManager {
             .collect();
         for live in sessions {
             live.shutdown().await;
+        }
+    }
+}
+
+fn import_source_key(agent_id: &str, cwd: &std::path::Path, source_id: &str) -> String {
+    let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let mut digest = Sha256::new();
+    digest.update(agent_id.as_bytes());
+    digest.update([0]);
+    digest.update(canonical.to_string_lossy().as_bytes());
+    digest.update([0]);
+    digest.update(source_id.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+fn bound_imported_items(items: Vec<TimelineItem>) -> (Vec<TimelineItem>, usize) {
+    let total = items.len();
+    let mut kept = Vec::new();
+    let mut bytes = 0_usize;
+    for mut item in items.into_iter().rev() {
+        if kept.len() >= IMPORT_VISIBLE_ITEMS {
+            break;
+        }
+        let mut item_bytes = serde_json::to_vec(&item)
+            .map(|encoded| encoded.len().saturating_add(1))
+            .unwrap_or(IMPORT_VISIBLE_BYTES);
+        if item_bytes > IMPORT_VISIBLE_BYTES {
+            item = truncate_import_item(item, IMPORT_VISIBLE_BYTES / 2);
+            item_bytes = serde_json::to_vec(&item)
+                .map(|encoded| encoded.len().saturating_add(1))
+                .unwrap_or(IMPORT_VISIBLE_BYTES);
+        }
+        if !kept.is_empty() && bytes.saturating_add(item_bytes) > IMPORT_VISIBLE_BYTES {
+            break;
+        }
+        bytes = bytes.saturating_add(item_bytes);
+        kept.push(item);
+    }
+    kept.reverse();
+    let omitted = total.saturating_sub(kept.len());
+    if omitted > 0 {
+        kept.insert(
+            0,
+            TimelineItem::Compaction {
+                id: format!("import-{}", uuid::Uuid::new_v4().simple()),
+                reason: format!("导入历史过长，较早的 {omitted} 项未放入当前可见窗口"),
+            },
+        );
+    }
+    (kept, omitted)
+}
+
+fn truncate_import_item(mut item: TimelineItem, max_bytes: usize) -> TimelineItem {
+    let id = item.id().to_string();
+    let text = match &mut item {
+        TimelineItem::UserMessage { text, .. }
+        | TimelineItem::AssistantMessage { text, .. }
+        | TimelineItem::Reasoning { text, .. } => Some(text),
+        TimelineItem::Compaction { reason, .. } => Some(reason),
+        TimelineItem::Error { message, .. } => Some(message),
+        _ => None,
+    };
+    if let Some(text) = text {
+        if text.len() > max_bytes {
+            let mut boundary = max_bytes.min(text.len());
+            while boundary > 0 && !text.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            text.truncate(boundary);
+            text.push_str("\n\n[单条消息过长，导入时已截断]");
+        }
+    }
+    if serde_json::to_vec(&item).is_ok_and(|encoded| encoded.len() <= max_bytes) {
+        item
+    } else {
+        TimelineItem::Compaction {
+            id,
+            reason: "单条历史记录过长，导入时已省略".into(),
         }
     }
 }
@@ -2561,6 +2870,7 @@ mod tests {
             persist: None,
             pending_permission: None,
             lineage: None,
+            imported: None,
         }
     }
 
@@ -2610,6 +2920,79 @@ mod tests {
         native_fork: bool,
         prompts: Arc<std::sync::Mutex<Vec<PromptInput>>>,
         events: tokio::sync::broadcast::Sender<SessionEvent>,
+    }
+
+    struct ImportHarness;
+
+    #[async_trait::async_trait]
+    impl crate::adapter::AgentAdapter for ImportHarness {
+        fn id(&self) -> &str {
+            "historian"
+        }
+
+        fn label(&self) -> &str {
+            "Historian"
+        }
+
+        fn capabilities(&self) -> genehub_proto::Capabilities {
+            genehub_proto::Capabilities {
+                resume: true,
+                ..Default::default()
+            }
+        }
+
+        async fn probe(&self) -> genehub_proto::ProbeState {
+            genehub_proto::ProbeState::Ready
+        }
+
+        async fn catalog(&self, _providers: &ProviderMap) -> genehub_proto::Catalog {
+            Default::default()
+        }
+
+        async fn start(
+            &self,
+            _config: SessionConfig,
+        ) -> Result<Box<dyn crate::adapter::AgentSession>> {
+            anyhow::bail!("not needed by the import test")
+        }
+
+        async fn list_import_candidates(
+            &self,
+            _cwd: &std::path::Path,
+            _limit: usize,
+        ) -> Result<Option<Vec<crate::adapter::ImportCandidate>>> {
+            Ok(Some(vec![crate::adapter::ImportCandidate {
+                source_id: "native-secret-42".into(),
+                title: "Imported work".into(),
+                preview: "first prompt".into(),
+                updated_at_ms: 20,
+                continuation: ImportContinuation::Native,
+            }]))
+        }
+
+        async fn import_history(
+            &self,
+            _cwd: &std::path::Path,
+            source_id: &str,
+        ) -> Result<crate::adapter::ImportedHistory> {
+            assert_eq!(source_id, "native-secret-42");
+            Ok(crate::adapter::ImportedHistory {
+                title: Some("Imported work".into()),
+                created_at_ms: 10,
+                updated_at_ms: 20,
+                items: vec![TimelineItem::UserMessage {
+                    id: "import-user".into(),
+                    text: "first prompt".into(),
+                    attachments: Vec::new(),
+                }],
+                persist: Some(PersistHandle {
+                    agent_id: "historian".into(),
+                    value: serde_json::json!({ "sessionId": source_id }),
+                }),
+                continuation: ImportContinuation::Native,
+                warnings: Vec::new(),
+            })
+        }
     }
 
     #[async_trait::async_trait]
@@ -3082,6 +3465,90 @@ mod tests {
         assert!(error
             .to_string()
             .contains("that turn has no Agent fork checkpoint"));
+    }
+
+    #[tokio::test]
+    async fn import_discovery_is_opaque_two_stage_and_filters_durable_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ImportHarness)])),
+            16,
+        );
+
+        let listing = sessions
+            .list_imports("w1", dir.path().to_path_buf(), Some(20))
+            .await
+            .unwrap();
+        let candidate = &listing.sources[0].candidates[0];
+        assert!(candidate.candidate_id.starts_with("ic_"));
+        assert!(
+            !serde_json::to_string(&listing)
+                .unwrap()
+                .contains("native-secret-42"),
+            "a provider handle crossed the RPC boundary"
+        );
+
+        let imported = sessions
+            .import("w1", dir.path().to_path_buf(), &candidate.candidate_id)
+            .await
+            .unwrap();
+        assert_eq!(imported.agent_id, "historian");
+        assert_eq!(
+            imported.imported.as_ref().unwrap().continuation,
+            ImportContinuation::Native
+        );
+        assert_eq!(
+            sessions.snapshot(&imported.id).await.unwrap().items.len(),
+            1
+        );
+
+        let refreshed = sessions
+            .list_imports("w1", dir.path().to_path_buf(), Some(20))
+            .await
+            .unwrap();
+        assert!(refreshed.sources[0].candidates.is_empty());
+        assert_eq!(refreshed.filtered_duplicates, 1);
+    }
+
+    #[test]
+    fn oversized_imports_keep_a_bounded_recent_window_that_can_fit_one_rpc() {
+        let items = (0..(IMPORT_VISIBLE_ITEMS + 100))
+            .map(|index| TimelineItem::AssistantMessage {
+                id: format!("i-{index}"),
+                text: "reply".into(),
+            })
+            .collect();
+        let (bounded, omitted) = bound_imported_items(items);
+        assert_eq!(omitted, 100);
+        assert!(matches!(
+            bounded.first(),
+            Some(TimelineItem::Compaction { .. })
+        ));
+        assert!(bounded.len() <= IMPORT_VISIBLE_ITEMS + 1);
+
+        let huge = vec![TimelineItem::AssistantMessage {
+            id: "huge".into(),
+            text: "四".repeat(IMPORT_VISIBLE_BYTES),
+        }];
+        let (bounded, _) = bound_imported_items(huge);
+        assert!(serde_json::to_vec(&bounded).unwrap().len() < IMPORT_VISIBLE_BYTES);
+
+        let huge_tool = vec![TimelineItem::ToolCall {
+            id: "huge-tool".into(),
+            name: "external".into(),
+            status: ToolStatus::Ok,
+            detail: ToolCallDetail::Unknown {
+                raw: serde_json::json!({ "payload": "x".repeat(IMPORT_VISIBLE_BYTES * 2) }),
+            },
+        }];
+        let (bounded, _) = bound_imported_items(huge_tool);
+        assert!(matches!(
+            bounded.first(),
+            Some(TimelineItem::Compaction { reason, .. })
+                if reason.contains("单条历史记录过长")
+        ));
+        assert!(serde_json::to_vec(&bounded).unwrap().len() < IMPORT_VISIBLE_BYTES);
     }
 
     #[tokio::test]

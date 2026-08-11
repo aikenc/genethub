@@ -14,6 +14,7 @@ import type {
   BlobRef,
   SequencedEvent,
   SessionSnapshot,
+  SessionImportListing,
   SessionSummary,
   Settings,
   UpdateDownload,
@@ -263,7 +264,11 @@ interface WorkbenchState {
   /** Acknowledges that the composer has taken `restoreDraft` back. */
   restoredDraft(): void;
   /** Creates an independent Agent context through one completed turn. */
-  forkSession(turnId: string, target: ForkTarget): Promise<boolean>;
+  forkSession(turnId: string, target?: ForkTarget): Promise<boolean>;
+  /** Lightweight provider discovery; full history is read only after selection. */
+  listImportableSessions(workspaceId: string): Promise<SessionImportListing | null>;
+  /** Imports one expiring candidate and opens the resulting GeneHub session. */
+  importSessionCandidate(workspaceId: string, candidateId: string): Promise<boolean>;
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
   setMode(modeId: string): Promise<void>;
@@ -1102,7 +1107,30 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const reply = await asked(set, () =>
       require_(get().client).call({
         type: "session.fork",
-        payload: { sessionId, turnId, target },
+        payload: { sessionId, turnId, ...(target ? { target } : {}) },
+      }),
+    );
+    if (reply?.type !== "session") return false;
+    set((state) => ({ sessions: [reply.data, ...state.sessions] }));
+    await get().selectSession(reply.data.id);
+    return true;
+  },
+
+  async listImportableSessions(workspaceId) {
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "session.importList",
+        payload: { workspaceId, limit: 30 },
+      }),
+    );
+    return reply?.type === "sessionImports" ? reply.data : null;
+  },
+
+  async importSessionCandidate(workspaceId, candidateId) {
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "session.import",
+        payload: { workspaceId, candidateId },
       }),
     );
     if (reply?.type !== "session") return false;

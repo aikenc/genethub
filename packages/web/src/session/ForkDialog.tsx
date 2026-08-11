@@ -27,11 +27,9 @@ export function ForkDialog({
   const dialog = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
   const selected = agents.find((agent) => agent.id === selectedAgentId);
-  const native = Boolean(
-    selectedAgentId === sourceAgentId &&
-      hasNativeCheckpoint &&
-      selected?.capabilities.fork,
-  );
+  const sameAgent = selectedAgentId === sourceAgentId;
+  const native = Boolean(sameAgent && hasNativeCheckpoint && selected?.capabilities.fork);
+  const currentUnavailable = sameAgent && !native;
 
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
@@ -72,7 +70,7 @@ export function ForkDialog({
             <h2 id="fork-agent-title" className="font-medium text-fg">
               Fork 到 Agent
             </h2>
-            <p className="text-xs text-faint">默认沿用当前 Agent，也可以用可见历史重建新会话。</p>
+            <p className="text-xs text-faint">当前 Agent 走原生 Fork；切换 Agent 才使用可见历史重建。</p>
           </div>
           <button
             ref={close}
@@ -127,14 +125,22 @@ export function ForkDialog({
 
           <div
             className={`rounded-xl border px-3 py-3 text-sm ${
-              native ? "border-accent/40 bg-accent/10" : "border-line bg-raised/50"
+              native
+                ? "border-accent/40 bg-accent/10"
+                : currentUnavailable
+                  ? "border-danger/30 bg-danger/10"
+                  : "border-line bg-raised/50"
             }`}
           >
-            <p className="font-medium text-fg">{native ? "原生分支" : "重建会话"}</p>
+            <p className="font-medium text-fg">
+              {native ? "原生分支" : currentUnavailable ? "当前回合不可原生 Fork" : "重建会话"}
+            </p>
             <p className="mt-1 text-xs text-muted">
               {native
                 ? "保留当前 Agent 的 checkpoint 和原生线程状态。"
-                : "完整历史仍留在 GeneHub；目标 Agent 接收受预算约束的可见历史胶囊，默认不超过上下文窗口的 35%。"}
+                : currentUnavailable
+                  ? "当前 Agent 没有这个回合的原生 checkpoint。可选择其他 Agent，用受预算约束的可见历史重建。"
+                  : "完整历史仍留在 GeneHub；目标 Agent 接收受预算约束的可见历史胶囊，默认不超过上下文窗口的 35%。"}
             </p>
           </div>
         </div>
@@ -150,7 +156,7 @@ export function ForkDialog({
           </button>
           <button
             type="button"
-            disabled={busy || !selected || !canStartAgent(selected)}
+            disabled={busy || !selected || !canStartAgent(selected) || currentUnavailable}
             className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent disabled:cursor-not-allowed disabled:opacity-50"
             onClick={() => {
               setBusy(true);
@@ -160,7 +166,13 @@ export function ForkDialog({
               });
             }}
           >
-            {busy ? "正在创建…" : native ? "创建原生分支" : `用 ${selected ? resolveAgentPresentation(selected).label : "Agent"} 重建`}
+            {busy
+              ? "正在创建…"
+              : native
+                ? "创建原生分支"
+                : currentUnavailable
+                  ? "无法原生 Fork"
+                  : `用 ${selected ? resolveAgentPresentation(selected).label : "Agent"} 重建`}
           </button>
         </footer>
       </section>

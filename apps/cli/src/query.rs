@@ -398,6 +398,7 @@ fn reply_kind(reply: &Reply) -> &'static str {
         Reply::UpdateDownload(_) => "update download",
         Reply::Session(_) => "session",
         Reply::Sessions(_) => "sessions",
+        Reply::SessionImports(_) => "session imports",
         Reply::Snapshot(_) => "session snapshot",
         Reply::RoundLayer(_) => "round layer",
         Reply::RoundTrunk(_) => "round trunk",
@@ -610,6 +611,7 @@ mod tests {
             archived: false,
             unsupported: None,
             lineage: None,
+            imported: None,
         };
         assert_eq!(
             sessions(Reply::Sessions(vec![summary.clone()])).unwrap(),

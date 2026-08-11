@@ -120,6 +120,21 @@ pub enum Request {
         #[ts(optional)]
         target: Option<ForkTarget>,
     },
+    /// Lists lightweight, workspace-scoped candidates from every installed
+    /// Agent. Full histories are not read until `session.import` selects one.
+    #[serde(rename = "session.importList", rename_all = "camelCase")]
+    SessionImportList {
+        workspace_id: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Imports one candidate from the most recent discovery pass. The opaque
+    /// token expires and cannot be replayed for another workspace.
+    #[serde(rename = "session.import", rename_all = "camelCase")]
+    SessionImport {
+        workspace_id: String,
+        candidate_id: String,
+    },
     #[serde(rename = "session.interrupt", rename_all = "camelCase")]
     SessionInterrupt { session_id: String },
     #[serde(rename = "session.close", rename_all = "camelCase")]
@@ -411,6 +426,7 @@ pub enum Reply {
     UpdateDownload(UpdateDownload),
     Session(SessionSummary),
     Sessions(Vec<SessionSummary>),
+    SessionImports(SessionImportListing),
     Snapshot(SessionSnapshot),
     RoundLayer(RoundLayer),
     RoundTrunk(RoundTrunk),

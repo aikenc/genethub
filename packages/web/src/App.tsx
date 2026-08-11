@@ -150,6 +150,7 @@ export function App({
   const draft = workbench.draft;
   const agentId = session?.agentId ?? draft?.agentId ?? null;
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
+  const importedReadOnly = session?.imported?.continuation === "readOnly";
   const composing = Boolean(workbench.activeSessionId || draft);
   const composerSpace = `calc(${composerHeight}px + var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)) + 0.5rem)`;
 
@@ -432,6 +433,18 @@ export function App({
               </button>
             </p>
           ) : null}
+          {session?.imported ? (
+            <div className="shrink-0 border-b border-line bg-raised px-3 py-1.5 text-xs text-muted">
+              <span>
+                已从 {session.imported.agentId} 导入 · {session.imported.continuation === "native" ? "可继续对话" : "只读历史"}
+              </span>
+              {session.imported.warnings.map((warning) => (
+                <span key={warning} className="ml-2 text-faint">
+                  {warning}
+                </span>
+              ))}
+            </div>
+          ) : null}
 
           <div className="flex min-h-0 flex-1">
             <section className="relative flex min-w-0 flex-1 flex-col">
@@ -467,6 +480,12 @@ export function App({
                     ) : null}
                     <Composer
                       phase={phase}
+                      disabled={importedReadOnly}
+                      disabledReason={
+                        importedReadOnly
+                          ? "这是只读导入历史：原 Agent 没有提供可恢复会话。"
+                          : undefined
+                      }
                       agents={workbench.agents}
                       agentId={agentId}
                       modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}

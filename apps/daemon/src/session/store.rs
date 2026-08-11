@@ -27,9 +27,9 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    BlobKind, BlobOverview, BlobPayload, BlobRef, PermissionRequest, RoundBatch, RoundBatchSummary,
-    RoundTrunk, RoundTrunkSummary, SessionLineage, SessionStatus, SessionSummary, TimelineItem,
-    UnsupportedFormat,
+    BlobKind, BlobOverview, BlobPayload, BlobRef, ImportContinuation, PermissionRequest,
+    RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary, SessionImportOrigin,
+    SessionLineage, SessionStatus, SessionSummary, TimelineItem, UnsupportedFormat,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -62,7 +62,9 @@ const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 /// 5 — fork lineage plus a separately persisted reconstructed context seed.
 ///     An older build would silently send without that seed, so this addition
 ///     is correctness-breaking rather than merely metadata it can ignore.
-pub const SESSION_FORMAT: u32 = 5;
+/// 6 — imported origin and continuation mode. An older build would allow a
+///     read-only imported transcript to send into a blank Agent context.
+pub const SESSION_FORMAT: u32 = 6;
 
 /// What a `meta.json` from before versioning is: the layout numbered 4, which
 /// is the only one that has ever been written into a workspace.
@@ -135,6 +137,21 @@ pub struct SessionMeta {
     /// where inherited history came from and how it reached this Agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<SessionLineage>,
+    /// Provider source identity stays private to the daemon. It is also the
+    /// durable duplicate key, while the public summary exposes only the Agent
+    /// and whether native continuation survived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported: Option<ImportedSessionMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedSessionMeta {
+    pub source_key: String,
+    pub agent_id: String,
+    pub continuation: ImportContinuation,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +196,7 @@ impl SessionMeta {
             persist: None,
             pending_permission: None,
             lineage: None,
+            imported: None,
         }
     }
 
@@ -206,6 +224,11 @@ impl SessionMeta {
                 supported: SESSION_FORMAT,
             }),
             lineage: self.lineage.clone(),
+            imported: self.imported.as_ref().map(|imported| SessionImportOrigin {
+                agent_id: imported.agent_id.clone(),
+                continuation: imported.continuation,
+                warnings: imported.warnings.clone(),
+            }),
         }
     }
 }
@@ -1245,6 +1268,7 @@ mod project_home_tests {
             persist: None,
             pending_permission: None,
             lineage: None,
+            imported: None,
         }
     }
 

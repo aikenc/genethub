@@ -259,6 +259,42 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             }
         }
 
+        Request::SessionImportList {
+            workspace_id,
+            limit,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match state
+                .sessions
+                .list_imports(&workspace_id, workspace.root, limit)
+                .await
+            {
+                Ok(listing) => Handled::ok(Reply::SessionImports(listing)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionImport {
+            workspace_id,
+            candidate_id,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match state
+                .sessions
+                .import(&workspace_id, workspace.root, &candidate_id)
+                .await
+            {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::SessionInterrupt { session_id } => {
             match state.sessions.interrupt(&session_id).await {
                 Ok(()) => Handled::ok(Reply::Ack),

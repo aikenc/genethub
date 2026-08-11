@@ -60,7 +60,7 @@ describe("ForkDialog", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
-  it("uses reconstructed context for the current Agent when the turn has no checkpoint", () => {
+  it("never falls back to a history capsule for the unchanged Agent", () => {
     render(
       <ForkDialog
         agents={[agent("codex", "Codex", true)]}
@@ -71,7 +71,8 @@ describe("ForkDialog", () => {
       />,
     );
 
-    expect(screen.getByText("重建会话")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "用 Codex 重建" })).toBeEnabled();
+    expect(screen.getByText("当前回合不可原生 Fork")).toBeInTheDocument();
+    expect(screen.queryByText(/上下文窗口的 35%/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "无法原生 Fork" })).toBeDisabled();
   });
 });

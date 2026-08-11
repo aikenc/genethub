@@ -175,9 +175,10 @@ export function TimelineView({ state }: { state: TimelineState }) {
           hasNativeCheckpoint={forkRequest.hasNativeCheckpoint}
           onClose={() => setForkRequest(null)}
           onConfirm={(agentId) =>
-            forkSession(forkRequest.turnId, {
-              agentId,
-            })
+            forkSession(
+              forkRequest.turnId,
+              agentId === activeSession.agentId ? undefined : { agentId },
+            )
           }
         />
       ) : null}

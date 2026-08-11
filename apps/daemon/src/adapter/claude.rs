@@ -56,7 +56,7 @@
 //!   which can be followed by more tool-result round trips.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -64,10 +64,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, CommandInfo, ItemDelta, ModeInfo, ModelInfo, PermissionOption,
-    PermissionOptionKind, PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolKind, ToolStatus, TurnError, TurnErrorCode,
-    Usage,
+    Capabilities, Catalog, CommandInfo, ImportContinuation, ItemDelta, ModeInfo, ModelInfo,
+    PermissionOption, PermissionOptionKind, PermissionOutcome, PermissionRequest,
+    PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, ToolCallDetail, ToolKind,
+    ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -76,8 +76,8 @@ use tokio::sync::{broadcast, Mutex};
 
 use super::stdio::write_json_line;
 use super::{
-    find_executable, AgentAdapter, AgentSession, Chatter, PersistHandle, PromptInput, ProviderMap,
-    SessionConfig,
+    find_executable, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
+    PersistHandle, PromptInput, ProviderMap, SessionConfig,
 };
 
 const BINARY: &str = "claude";
@@ -713,6 +713,261 @@ impl AgentAdapter for ClaudeAdapter {
 
         Ok(Box::new(session))
     }
+
+    async fn list_import_candidates(
+        &self,
+        cwd: &Path,
+        limit: usize,
+    ) -> Result<Option<Vec<ImportCandidate>>> {
+        let cwd = cwd.to_path_buf();
+        let candidates = tokio::task::spawn_blocking(move || claude_candidates(&cwd, limit))
+            .await
+            .map_err(|error| anyhow!("Claude import discovery stopped: {error}"))??;
+        Ok(Some(candidates))
+    }
+
+    async fn import_history(&self, cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
+        let cwd = cwd.to_path_buf();
+        let source_id = source_id.to_string();
+        tokio::task::spawn_blocking(move || claude_history(&cwd, &source_id))
+            .await
+            .map_err(|error| anyhow!("Claude history import stopped: {error}"))?
+    }
+}
+
+fn claude_config_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    dirs::home_dir()
+        .map(|home| home.join(".claude"))
+        .ok_or_else(|| anyhow!("cannot find the Claude config directory"))
+}
+
+/// Verbatim shape of Claude's project-directory encoding for ordinary paths.
+/// The rare >200-character case includes the SDK's signed 32-bit JS hash.
+fn claude_project_dir(cwd: &Path) -> Result<PathBuf> {
+    let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let text = canonical.to_string_lossy();
+    let replaced: String = text
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let encoded = if replaced.chars().count() <= 200 {
+        replaced
+    } else {
+        let mut hash = 0_i32;
+        for unit in text.encode_utf16() {
+            hash = hash.wrapping_mul(31).wrapping_add(i32::from(unit));
+        }
+        let suffix = radix36(hash.unsigned_abs());
+        format!(
+            "{}-{suffix}",
+            replaced.chars().take(200).collect::<String>()
+        )
+    };
+    Ok(claude_config_dir()?.join("projects").join(encoded))
+}
+
+fn radix36(mut value: u32) -> String {
+    if value == 0 {
+        return "0".into();
+    }
+    let mut output = Vec::new();
+    while value > 0 {
+        let digit = (value % 36) as u8;
+        output.push(if digit < 10 {
+            b'0' + digit
+        } else {
+            b'a' + digit - 10
+        });
+        value /= 36;
+    }
+    output.reverse();
+    String::from_utf8(output).expect("base36 is ascii")
+}
+
+fn claude_candidates(cwd: &Path, limit: usize) -> Result<Vec<ImportCandidate>> {
+    let directory = claude_project_dir(cwd)?;
+    let mut files = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .filter_map(|entry| {
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((entry.path(), modified))
+            })
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", directory.display()))
+        }
+    };
+    files.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
+    let mut output = Vec::new();
+    for (path, modified) in files.into_iter().take(limit.saturating_mul(3).max(limit)) {
+        let Some((session_id, title, preview)) = claude_descriptor(&path)? else {
+            continue;
+        };
+        let updated_at_ms = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        output.push(ImportCandidate {
+            source_id: session_id,
+            title: clip_import_text(&title, 120),
+            preview: clip_import_text(&preview, 240),
+            updated_at_ms,
+            continuation: ImportContinuation::Native,
+        });
+        if output.len() >= limit {
+            break;
+        }
+    }
+    Ok(output)
+}
+
+fn claude_descriptor(path: &Path) -> Result<Option<(String, String, String)>> {
+    use std::io::BufRead as _;
+    let file = std::fs::File::open(path)?;
+    let mut session_id = None;
+    let mut title = None;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        session_id = session_id.or_else(|| {
+            entry
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        if title.is_none() && entry.get("type").and_then(Value::as_str) == Some("user") {
+            title = claude_message_text(entry.get("message").unwrap_or(&Value::Null));
+        }
+        if session_id.is_some() && title.is_some() {
+            break;
+        }
+    }
+    let Some(session_id) = session_id.or_else(|| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string)
+    }) else {
+        return Ok(None);
+    };
+    let title =
+        title.unwrap_or_else(|| format!("Claude 会话 {}", &session_id[..8.min(session_id.len())]));
+    Ok(Some((session_id, title.clone(), title)))
+}
+
+fn claude_history(cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
+    if source_id.is_empty()
+        || !source_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        anyhow::bail!("invalid Claude session id");
+    }
+    let path = claude_project_dir(cwd)?.join(format!("{source_id}.jsonl"));
+    use std::io::BufRead as _;
+    let file = std::fs::File::open(&path)
+        .with_context(|| format!("reading selected Claude session {}", path.display()))?;
+    let metadata = file.metadata()?;
+    let mut items = Vec::new();
+    let mut title = None;
+    let mut created_at_ms = i64::MAX;
+    let mut updated_at_ms = 0_i64;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        if let Some(timestamp) = entry
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.timestamp_millis())
+        {
+            created_at_ms = created_at_ms.min(timestamp);
+            updated_at_ms = updated_at_ms.max(timestamp);
+        }
+        let Some(text) = claude_message_text(entry.get("message").unwrap_or(&Value::Null)) else {
+            continue;
+        };
+        let id = format!("import-{}", uuid::Uuid::new_v4().simple());
+        match entry.get("type").and_then(Value::as_str) {
+            Some("user") => {
+                title.get_or_insert_with(|| clip_import_text(&text, 120));
+                items.push(TimelineItem::UserMessage {
+                    id,
+                    text,
+                    attachments: Vec::new(),
+                });
+            }
+            Some("assistant") => items.push(TimelineItem::AssistantMessage { id, text }),
+            _ => {}
+        }
+    }
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default();
+    if created_at_ms == i64::MAX {
+        created_at_ms = modified;
+    }
+    if updated_at_ms == 0 {
+        updated_at_ms = modified;
+    }
+    Ok(ImportedHistory {
+        title,
+        created_at_ms,
+        updated_at_ms,
+        items,
+        persist: Some(PersistHandle {
+            agent_id: "claude".into(),
+            value: json!({ "sessionId": source_id }),
+        }),
+        continuation: ImportContinuation::Native,
+        warnings: Vec::new(),
+    })
+}
+
+fn claude_message_text(message: &Value) -> Option<String> {
+    let text = match message.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then(|| text.trim().to_string())
+}
+
+fn clip_import_text(value: &str, limit: usize) -> String {
+    let trimmed = value.trim();
+    let mut output: String = trimmed.chars().take(limit).collect();
+    if trimmed.chars().count() > limit {
+        output.push('…');
+    }
+    output
 }
 
 /// Everything that changes over the life of one turn.
