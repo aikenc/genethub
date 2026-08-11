@@ -780,6 +780,9 @@ describe("opening a new conversation", () => {
         modelId: "opus",
         modeId: null,
         title: null,
+        // The workbench opens a session at the workspace root; naming a
+        // directory inside it is something only the CLI does today.
+        cwd: null,
       },
     });
   });
