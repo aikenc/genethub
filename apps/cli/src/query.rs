@@ -468,6 +468,12 @@ fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
             "machineName": hello.machine_name,
             "fingerprint": hello.fingerprint,
             "transport": hello.transport,
+            // What that machine can hold a process to, as measured there
+            // rather than assumed here. An agent weighing whether to run
+            // something it does not fully trust reads this; null means the
+            // daemon predates the question, which is not the same as "no"
+            // (`genet-remote-execution.md` §7.5).
+            "isolation": hello.isolation,
         }
     })
 }
@@ -507,7 +513,15 @@ fn capabilities_data() -> Value {
         // are not offered at all yet, so there is nothing to isolate and the
         // engine is absent rather than "none" — an agent must not read a
         // missing sandbox as a permissive one.
-        "isolation": {"arbitraryCommands": false, "engine": null},
+        "isolation": {
+            "arbitraryCommands": false,
+            "engine": null,
+            // What a *machine* can enforce is not a property of this binary,
+            // and answering it from here would be answering it about the
+            // wrong computer. It is measured on the machine that would run
+            // the process and reported where that machine speaks.
+            "reportedBy": "context.daemon.isolation",
+        },
         "deviceSelector": false,
         "workspaceSelector": {
             "kind": "exactId",
@@ -867,6 +881,12 @@ pub fn rpc_error(error: RpcError) -> CliFailure {
             ErrorCode::Forbidden => CliFailure::business("forbidden", message, None),
             ErrorCode::Internal => CliFailure::business("internal", message, None),
             ErrorCode::ProtocolVersion => CliFailure::protocol(message),
+            // Not retryable and not fixable by asking for more: this machine
+            // cannot confine a process, and an agent told to wait would wait
+            // forever (`genet-remote-execution.md` §7.5).
+            ErrorCode::IsolationUnavailable => {
+                CliFailure::business("isolationUnavailable", message, None)
+            }
         },
     }
 }
@@ -979,6 +999,7 @@ mod tests {
             transport: TransportKind::Loopback,
             machine_name: "desk".into(),
             rtc_supported: false,
+            isolation: None,
         }
     }
 

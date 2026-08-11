@@ -52,6 +52,15 @@ pub enum Capability {
     /// The terminal. Separate from `Files` because a shell is not a file
     /// editor: it is every capability the account has, at once.
     Pty,
+    /// A terminal the operating system is *not* holding to the workspace.
+    ///
+    /// Held apart from `Pty` because it is the difference between "may open a
+    /// terminal here" and "may open a terminal that can read the whole
+    /// account". Every device paired before this existed holds it, so nothing
+    /// they could do yesterday stopped working; a narrowed invitation can hand
+    /// out `pty` alone and get a confined one (`genet-remote-execution.md`
+    /// §7.6).
+    PtyUnconfined,
     /// Deciding who else may reach this machine.
     Devices,
     /// Machine configuration and stored provider credentials.
@@ -61,13 +70,14 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Capability; 9] = [
+    pub const ALL: [Capability; 10] = [
         Capability::Handshake,
         Capability::Read,
         Capability::Session,
         Capability::Files,
         Capability::Git,
         Capability::Pty,
+        Capability::PtyUnconfined,
         Capability::Devices,
         Capability::Settings,
         Capability::Update,
@@ -81,6 +91,7 @@ impl Capability {
             Capability::Files => "files",
             Capability::Git => "git",
             Capability::Pty => "pty",
+            Capability::PtyUnconfined => "pty:unconfined",
             Capability::Devices => "devices",
             Capability::Settings => "settings",
             Capability::Update => "update",

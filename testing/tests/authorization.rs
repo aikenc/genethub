@@ -276,3 +276,70 @@ async fn a_device_without_a_files_grant_cannot_take_the_bytes_by_another_door() 
 
     journey.finish().await;
 }
+
+#[tokio::test]
+async fn a_terminal_for_someone_else_is_confined_or_refused_but_never_neither() {
+    // A shell is not a file editor: it is every authority the account has, at
+    // once. So a device that was given `pty` and nothing else gets a terminal
+    // the operating system holds to the workspace — and on a machine that
+    // cannot do that, it gets a refusal rather than the unconstrained login
+    // shell that used to be the only kind (`genet-remote-execution.md` §7.6).
+    let journey = Journey::start().await.expect("journey starts");
+    let confinable = genet_daemon::isolation::report().enforced;
+
+    let narrow = pair_granting(&journey, &["read", "pty"]).await;
+    let device = Client::connect_as_device(journey.daemon(), &narrow)
+        .await
+        .expect("a paired device connects");
+    let ask = Request::PtyOpen {
+        workspace_id: journey.workspace.id.clone(),
+        cols: Some(80),
+        rows: Some(24),
+    };
+    if confinable {
+        device.call(ask).await.expect("a confined terminal opens");
+    } else {
+        let error = device.expect_error(ask).await;
+        assert!(
+            error.contains("IsolationUnavailable"),
+            "an unconfinable machine has to say so: {error}"
+        );
+        // The refusal has to be told apart from "you were not allowed": no
+        // wider invitation would fix this one, and an agent that reads it as a
+        // permission problem will go and ask for authority it cannot use.
+        assert!(!error.contains("Forbidden"), "{error}");
+    }
+    device.close().await;
+
+    // Everything that worked before this existed still works. A device paired
+    // before grants were a thing holds the full set, `pty:unconfined` among
+    // them, and opens exactly the terminal it always did.
+    let whole = pair_granting(&journey, &[]).await;
+    let device = Client::connect_as_device(journey.daemon(), &whole)
+        .await
+        .expect("a paired device connects");
+    device
+        .call(Request::PtyOpen {
+            workspace_id: journey.workspace.id.clone(),
+            cols: Some(80),
+            rows: Some(24),
+        })
+        .await
+        .expect("an unconfined terminal is still allowed to those who hold it");
+    device.close().await;
+
+    // And the person sitting at the machine is not confined at all: they own
+    // the account, so a sandbox would cost them a working shell and protect
+    // nobody (`architecture.md` §3.4).
+    journey
+        .client
+        .call(Request::PtyOpen {
+            workspace_id: journey.workspace.id.clone(),
+            cols: Some(80),
+            rows: Some(24),
+        })
+        .await
+        .expect("the local user opens a terminal");
+
+    journey.finish().await;
+}

@@ -276,7 +276,16 @@ async fn a_machine_across_a_relay_answers_exactly_as_the_local_one_does() {
         .clear()
         .await
         .expect("detaching from the relay");
-    let (offline, code) = cli.run(&["session", "list", "--machine", &machine_id]);
+    // Leaving is not instantaneous — the relay finds out — so this waits for
+    // the verdict instead of assuming the next call already knows.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let (offline, code) = loop {
+        let answer = cli.run(&["session", "list", "--machine", &machine_id]);
+        if answer.0["error"]["code"] == "machineOffline" || Instant::now() > deadline {
+            break answer;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     assert_eq!(offline["error"]["code"], "machineOffline", "{offline}");
     assert_eq!(offline["error"]["retryable"], true);
     assert_eq!(code, 3, "{offline}");

@@ -13,6 +13,7 @@ pub mod devices;
 pub mod files;
 pub mod git;
 pub mod hub;
+pub mod isolation;
 pub mod lifecycle;
 pub mod link;
 pub mod logs;

@@ -50,6 +50,45 @@ impl Handled {
     }
 }
 
+/// Decides what the operating system must hold this caller's terminal to.
+///
+/// Whoever is sitting at this machine gets a terminal with nothing in its way:
+/// they already own the account, so confining them would cost them a working
+/// shell and protect nobody (`architecture.md` §3.4). A device that reaches in
+/// from somewhere else is a different subject, and the only reason its
+/// terminal was ever unconstrained is that nothing existed to constrain it.
+///
+/// When confinement is required and this machine cannot provide it, the answer
+/// is a refusal. Handing back an unconfined terminal instead would be the one
+/// outcome nobody could detect.
+fn terminal_confinement(
+    caller: &crate::authz::Principal,
+    workspace: &crate::config::WorkspaceEntry,
+) -> Result<Option<crate::isolation::Policy>, String> {
+    use crate::authz::Capability;
+
+    if caller.allows(Capability::PtyUnconfined) {
+        return Ok(None);
+    }
+    let report = crate::isolation::report();
+    if !report.enforced {
+        return Err(format!(
+            "this terminal has to be confined to the workspace and this machine cannot do that: \
+             {}. A device holding pty:unconfined may still open one.",
+            report.detail
+        ));
+    }
+    let mut roots: Vec<std::path::PathBuf> = workspace
+        .folders
+        .iter()
+        .map(|folder| folder.root.clone())
+        .collect();
+    if roots.is_empty() {
+        roots.push(workspace.root.clone());
+    }
+    Ok(Some(crate::isolation::Policy::for_workspace(&roots)))
+}
+
 /// Maps an internal failure onto a client-visible error.
 ///
 /// Everything that reaches a user goes through here, so the wording is worth
@@ -86,7 +125,19 @@ fn failed(error: anyhow::Error) -> Handled {
     }
 }
 
-pub async fn handle(state: &Shared, transport: TransportKind, request: Request) -> Handled {
+/// Handles one request on behalf of `caller`.
+///
+/// The caller is passed in rather than re-derived here because the gate above
+/// has already resolved it, and two answers to "who is this" is one too many.
+/// Most requests only need to have passed that gate; the ones that start a
+/// process need to know *which* caller, because what the operating system is
+/// asked to enforce on it depends on the answer.
+pub async fn handle(
+    state: &Shared,
+    transport: TransportKind,
+    caller: &crate::authz::Principal,
+    request: Request,
+) -> Handled {
     match request {
         Request::ConnectionIdentity => Handled::ok(Reply::Hello(HelloResult {
             daemon_version: state.version.clone(),
@@ -96,6 +147,7 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             transport,
             machine_name: crate::link::default_display_name(),
             rtc_supported: true,
+            isolation: Some(crate::isolation::report()),
         })),
 
         Request::Subscribe {
@@ -717,9 +769,18 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
+            let confinement = match terminal_confinement(caller, &workspace) {
+                Ok(confinement) => confinement,
+                Err(refusal) => return Handled::err(ErrorCode::IsolationUnavailable, refusal),
+            };
             match state
                 .terminals
-                .open(&workspace.root, cols.unwrap_or(80), rows.unwrap_or(24))
+                .open(
+                    &workspace.root,
+                    cols.unwrap_or(80),
+                    rows.unwrap_or(24),
+                    confinement,
+                )
                 .await
             {
                 Ok(pty_id) => Handled::ok(Reply::Pty { pty_id }),

@@ -441,6 +441,40 @@ pub struct HelloResult {
     /// Advertised inside the encrypted data plane. The viewer's local RTC
     /// preference still decides whether negotiation is attempted.
     pub rtc_supported: bool,
+    /// What this machine can actually enforce on a process it starts on a
+    /// caller's behalf. Absent from older daemons, which is why it is optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub isolation: Option<IsolationInfo>,
+}
+
+/// The operating system confinement this machine can put a spawned process in.
+///
+/// Reported rather than promised. A caller decides whether to run something it
+/// does not fully trust by reading this, so it has to describe what is actually
+/// in force on this kernel right now — not what the build supports and not what
+/// a configuration file asked for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct IsolationInfo {
+    pub backend: IsolationBackend,
+    /// Whether a confined process would really be confined. False means every
+    /// request that needs confinement is refused, never quietly downgraded.
+    pub enforced: bool,
+    /// Why, in a sentence a person can act on. Present whether or not it worked,
+    /// because "landlock, abi 4" is as worth saying as "kernel 5.4 has none".
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum IsolationBackend {
+    Landlock,
+    Seatbelt,
+    AppContainer,
+    None,
 }
 
 /// Whether a newer build has been published, and where a person gets it.

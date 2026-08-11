@@ -787,12 +787,17 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         .await;
     }
 
+    // Resolved once and carried into the router: a request that decides what
+    // to enforce on a spawned process must be looking at the same caller the
+    // gate just admitted, not at a second lookup that could disagree with it.
+    let caller = Principal::of(&services.state, &services.access);
     let needed = authz::required(&request);
-    if !Principal::of(&services.state, &services.access).allows(needed) {
+    if !caller.allows(needed) {
         return refuse(stream, needed).await;
     }
 
-    let handled = router::handle(&services.state, services.access.transport, request).await;
+    let handled =
+        router::handle(&services.state, services.access.transport, &caller, request).await;
     match handled.reply {
         Ok(reply) => {
             send_reply(stream, reply).await?;
@@ -827,6 +832,10 @@ async fn send_protocol_error(stream: &mut ServerStream, error: ProtocolError) ->
         ErrorCode::Unsupported => 422,
         ErrorCode::ProtocolVersion => 426,
         ErrorCode::Internal => 500,
+        // Not 403: the caller is allowed, the machine is unable. Retrying with
+        // a wider grant would not help, and neither would retrying at all
+        // until this machine gains a backend.
+        ErrorCode::IsolationUnavailable => 501,
     };
     stream
         .respond(&ExchangeResponseHead {

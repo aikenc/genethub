@@ -475,6 +475,11 @@ pub enum ErrorCode {
     Forbidden,
     Internal,
     ProtocolVersion,
+    /// The request needed the process to be confined by the operating system,
+    /// and this machine cannot do that. Distinct from `Forbidden` because
+    /// nothing about the caller is wrong: the same request on a machine with a
+    /// working backend would succeed, and no grant will fix this one.
+    IsolationUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

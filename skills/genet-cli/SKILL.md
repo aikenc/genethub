@@ -158,11 +158,14 @@ genet machine list
 | `credentialRevoked` | false | 对面吊销了这台设备。**重试永远不会好**，要新邀请 |
 | `relayUnavailable` | true | 中转不通，通常是网络 |
 | `forbidden` | false | 配对时拿的 grant 不含这个操作。要一份更宽的邀请 |
+| `isolationUnavailable` | false | 这台机器没法把进程关进操作系统沙箱，而这个操作要求关。**更宽的 grant 也没用**，换一台能关的机器，或让持有 `pty:unconfined` 的设备去做 |
 
 ## 不要做的事
 
 - 不要解析人类可读的 `message` 做控制流。
-- 不要因为看不到沙箱就假设有沙箱：`capabilities.isolation.engine` 是 `null` 表示**没有**
-  隔离层，不是「默认安全」。
+- 不要因为看不到沙箱就假设有沙箱。`genet capabilities` 的 `isolation.engine` 说的是这个
+  CLI 不提供任意命令执行；某台机器**实际**能强制什么，只有那台机器自己知道，读
+  `genet context --machine <id>` 的 `daemon.isolation`：`enforced: false` 表示**没有**隔离，
+  `null` 表示那台 daemon 老到还不回答这个问题——两者都不是「默认安全」。
 - 不要在 `--wait` 前台进程被杀掉后就以为任务停了。会话跑在 daemon 里，CLI 只是观察者。
 - 不要为了省事重复 `genet schema` 的内容到别的地方。

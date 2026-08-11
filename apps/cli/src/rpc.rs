@@ -702,6 +702,7 @@ fn error_code_name(code: genehub_proto::ErrorCode) -> &'static str {
         Forbidden => "forbidden",
         Internal => "internal",
         ProtocolVersion => "protocol_mismatch",
+        IsolationUnavailable => "isolation_unavailable",
     }
 }
 
@@ -736,6 +737,7 @@ mod tests {
             transport: TransportKind::Loopback,
             machine_name: "local".into(),
             rtc_supported: true,
+            isolation: None,
         };
         (admission, hello)
     }

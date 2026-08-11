@@ -175,7 +175,7 @@ export type DirectoryListing = { path: string, parent: string | null, directorie
  */
 workspaceFiles: Array<DirectoryEntry>, };
 
-export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "protocolVersion";
+export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "protocolVersion" | "isolationUnavailable";
 
 /**
  * The first encrypted record on a client-opened logical stream.
@@ -209,7 +209,12 @@ fingerprint: string, transport: TransportKind, machineName: string,
  * Advertised inside the encrypted data plane. The viewer's local RTC
  * preference still decides whether negotiation is attempted.
  */
-rtcSupported: boolean, };
+rtcSupported: boolean, 
+/**
+ * What this machine can actually enforce on a process it starts on a
+ * caller's behalf. Absent from older daemons, which is why it is optional.
+ */
+isolation?: IsolationInfo, };
 
 /**
  * The ways back into an identity that has no password.
@@ -316,6 +321,28 @@ export type InviteAuth = { inviteId: string, nonce: string, proof: string, };
  * again.
  */
 export type InviteScope = { grants: Array<string>, };
+
+export type IsolationBackend = "landlock" | "seatbelt" | "appContainer" | "none";
+
+/**
+ * The operating system confinement this machine can put a spawned process in.
+ *
+ * Reported rather than promised. A caller decides whether to run something it
+ * does not fully trust by reading this, so it has to describe what is actually
+ * in force on this kernel right now — not what the build supports and not what
+ * a configuration file asked for.
+ */
+export type IsolationInfo = { backend: IsolationBackend, 
+/**
+ * Whether a confined process would really be confined. False means every
+ * request that needs confinement is refused, never quietly downgraded.
+ */
+enforced: boolean, 
+/**
+ * Why, in a sentence a person can act on. Present whether or not it worked,
+ * because "landlock, abi 4" is as worth saying as "kernel 5.4 has none".
+ */
+detail: string, };
 
 /**
  * Streaming increment for an item already on the timeline.
