@@ -950,6 +950,7 @@ name = "genet-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "fs2",
  "futures-util",
  "genehub-proto",
@@ -959,6 +960,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "uuid",
 ]
 
 [[package]]

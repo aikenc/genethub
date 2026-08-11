@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use genehub_proto::{
-    HelloResult, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply, Request, SequencedEvent,
-    ServerFrame,
+    HelloResult, HubTicket, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply, Request,
+    SequencedEvent, ServerFrame,
 };
 use genet_daemon::config::Paths;
 use genet_daemon::dataplane::client::ClientEndpoint;
@@ -17,6 +17,9 @@ use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
+pub use genet_daemon::transport::fabric::Refusal;
+
+use crate::machines::PairedMachine;
 use crate::{fail, EXIT_UNREACHABLE};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -50,6 +53,13 @@ impl std::error::Error for RpcError {}
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectError {
     Unavailable(String),
+    /// The relay or the machine answered, and said no. Which kind of no is
+    /// kept, because "that machine is asleep" and "that credential is no
+    /// longer honoured" differ in whether waiting is worth anything.
+    Refused {
+        reason: Refusal,
+        message: String,
+    },
     Rejected(ProtocolError),
     Protocol(String),
 }
@@ -57,9 +67,9 @@ pub enum ConnectError {
 impl std::fmt::Display for ConnectError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConnectError::Unavailable(message) | ConnectError::Protocol(message) => {
-                formatter.write_str(message)
-            }
+            ConnectError::Unavailable(message)
+            | ConnectError::Protocol(message)
+            | ConnectError::Refused { message, .. } => formatter.write_str(message),
             ConnectError::Rejected(error) => write!(
                 formatter,
                 "{}: {}",
@@ -230,6 +240,162 @@ impl Rpc {
         })
     }
 
+    /// Connects to a machine this installation has already paired with.
+    ///
+    /// The relay in the middle is asked for a route and nothing else. It never
+    /// learns whether this device is allowed in, because it could not answer:
+    /// the authorized-device list lives on the machine being called.
+    pub async fn connect_remote(machine: &PairedMachine) -> Result<Self, ConnectError> {
+        let nonce = fresh_nonce();
+        let context = genet_daemon::channel_auth::device_context(&machine.device_id);
+        let auth = PeerAuth::Device {
+            device_id: machine.device_id.clone(),
+            nonce: nonce.clone(),
+            proof: genet_daemon::channel_auth::client_proof(&machine.secret, &context, &nonce),
+        };
+        let rpc = Self::over_fabric(
+            &machine.endpoint,
+            route_of(&machine.endpoint)?,
+            auth,
+            &machine.secret,
+            &context,
+            &nonce,
+        )
+        .await?;
+        verify_remote_identity(&rpc.hello, machine)?;
+        Ok(rpc)
+    }
+
+    /// Redeems a pairing invitation on a machine this installation has never
+    /// spoken to. The only exchange this connection is allowed is the claim.
+    pub async fn connect_with_invite(
+        endpoint: &str,
+        invite_id: &str,
+        secret: &str,
+    ) -> Result<Self, ConnectError> {
+        let nonce = fresh_nonce();
+        let context = format!("invite:{invite_id}");
+        let auth = PeerAuth::Invite {
+            invite_id: invite_id.to_string(),
+            nonce: nonce.clone(),
+            proof: genet_daemon::channel_auth::client_proof(secret, &context, &nonce),
+        };
+        Self::over_fabric(
+            endpoint,
+            route_of(endpoint)?,
+            auth,
+            secret,
+            &context,
+            &nonce,
+        )
+        .await
+    }
+
+    /// Connects with a capability a Hub issued for this machine.
+    pub async fn connect_hosted(ticket: &HubTicket) -> Result<Self, ConnectError> {
+        let nonce = fresh_nonce();
+        let context = genet_daemon::channel_auth::hosted_context(&ticket.channel_capability);
+        let auth = PeerAuth::Hosted {
+            capability_id: ticket.channel_capability.clone(),
+            nonce: nonce.clone(),
+            proof: genet_daemon::channel_auth::client_proof(
+                &ticket.channel_secret,
+                &context,
+                &nonce,
+            ),
+        };
+        let rpc = Self::over_fabric(
+            &ticket.url,
+            &ticket.fabric_route_ticket,
+            auth,
+            &ticket.channel_secret,
+            &context,
+            &nonce,
+        )
+        .await?;
+        // The Hub said which key this machine has, and the connection proved
+        // one. Comparing them is the only reason asking the Hub was worth
+        // anything: a Hub that lies gets caught here rather than believed.
+        if !ticket.fingerprint.is_empty()
+            && !rpc.hello.fingerprint.is_empty()
+            && rpc.hello.fingerprint != ticket.fingerprint
+        {
+            return Err(ConnectError::Protocol(
+                "the machine that answered is not the one the Hub named".into(),
+            ));
+        }
+        Ok(rpc)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn over_fabric(
+        endpoint: &str,
+        route_ticket: &str,
+        auth: PeerAuth,
+        secret: &str,
+        context: &str,
+        nonce: &str,
+    ) -> Result<Self, ConnectError> {
+        let hello = PeerHello {
+            version: genehub_proto::DATA_PLANE_VERSION,
+            client_name: format!("{}-cli", genet_daemon::channel::CLI_BINARY),
+            auth,
+            rtc_supported: false,
+        };
+        let link = genet_daemon::transport::fabric::dial(endpoint, route_ticket, &hello)
+            .await
+            .map_err(dial_refusal)?;
+        if link.welcome.version != genehub_proto::DATA_PLANE_VERSION {
+            return Err(ConnectError::Protocol(
+                "that machine uses a different data-plane version".into(),
+            ));
+        }
+        // The proof is what makes the relay uninteresting: whoever is holding
+        // the other end of this route either knows the secret or does not, and
+        // occupying the slot in front of the machine proves nothing.
+        let expected = genet_daemon::channel_auth::server_proof(
+            secret,
+            context,
+            nonce,
+            &link.welcome.server_nonce,
+        );
+        genet_daemon::channel_auth::verify_proof(&expected, &link.welcome.proof).map_err(|_| {
+            ConnectError::Protocol(
+                "whoever answered at that address could not prove the expected secret".into(),
+            )
+        })?;
+        let key = genet_daemon::channel_auth::derive_key(
+            secret,
+            context,
+            nonce,
+            &link.welcome.server_nonce,
+        );
+        let genet_daemon::transport::fabric::FabricLink { carrier, pump, .. } = link;
+        let (data, endpoint_task) = ClientEndpoint::start(key, carrier);
+        // The pump rides along in the task so the socket lives exactly as long
+        // as the endpoint that is speaking over it, and no longer.
+        let monitor = tokio::spawn(async move {
+            let _ = endpoint_task.await;
+            drop(pump);
+        });
+        let hello = match rpc_call(&data, Request::ConnectionIdentity).await {
+            Ok(Reply::Hello(hello)) => hello,
+            Ok(other) => {
+                return Err(ConnectError::Protocol(format!(
+                    "unexpected identity reply: {other:?}"
+                )))
+            }
+            Err(RpcError::Remote(error)) => return Err(ConnectError::Rejected(error)),
+            Err(RpcError::Transport(message)) => return Err(ConnectError::Unavailable(message)),
+        };
+        Ok(Self {
+            endpoint: data,
+            tasks: Mutex::new(vec![monitor]),
+            hello,
+            events: Mutex::new(None),
+        })
+    }
+
     pub fn hello(&self) -> &HelloResult {
         &self.hello
     }
@@ -308,6 +474,75 @@ pub enum Payload {
         session_id: String,
         missed: u64,
     },
+}
+
+/// The route a rendezvous URL is asking for.
+///
+/// Self-hosted endpoints carry it in the URL because that is the whole address
+/// someone copies; a hosted ticket carries it separately, since the Hub issues
+/// the route and the address independently.
+fn route_of(endpoint: &str) -> Result<&str, ConnectError> {
+    let query = endpoint
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or("");
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("route="))
+        .filter(|route| !route.is_empty())
+        .ok_or_else(|| {
+            ConnectError::Unavailable(
+                "that endpoint names no route; a rendezvous URL is the one the machine printed"
+                    .into(),
+            )
+        })
+}
+
+/// Keeps the dialer's distinction between "not now" and "not you".
+fn dial_refusal(error: genet_daemon::transport::fabric::DialError) -> ConnectError {
+    use genet_daemon::transport::fabric::DialError;
+    match error {
+        DialError::Refused { reason, message } => ConnectError::Refused { reason, message },
+        DialError::Unavailable(message) => ConnectError::Unavailable(message),
+        DialError::Protocol(message) => ConnectError::Protocol(message),
+    }
+}
+
+/// The 16 random bytes a peer challenge has to be.
+fn fresh_nonce() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// Checks that the machine that answered is the one that was called.
+///
+/// A mutually authenticated identity withholds the machine's public fields —
+/// the key exchange already proved who this is, and repeating them would tell
+/// a relay who is on the other end. Only a filled-in field is checked.
+fn verify_remote_identity(
+    hello: &HelloResult,
+    machine: &PairedMachine,
+) -> Result<(), ConnectError> {
+    if hello.protocol_version != genehub_proto::DATA_PLANE_VERSION {
+        return Err(ConnectError::Protocol(format!(
+            "{} speaks data plane {}, this build speaks {}",
+            machine.machine_id,
+            hello.protocol_version,
+            genehub_proto::DATA_PLANE_VERSION
+        )));
+    }
+    if !hello.machine_id.is_empty() && hello.machine_id != machine.machine_id {
+        return Err(ConnectError::Protocol(format!(
+            "expected {}, but {} answered",
+            machine.machine_id, hello.machine_id
+        )));
+    }
+    if !hello.fingerprint.is_empty() && hello.fingerprint != machine.fingerprint {
+        return Err(ConnectError::Protocol(format!(
+            "{} answered with a different identity key than it had when it was paired",
+            machine.machine_id
+        )));
+    }
+    Ok(())
 }
 
 /// Splits one `u32`-length-prefixed JSON frame off the front of the buffer.

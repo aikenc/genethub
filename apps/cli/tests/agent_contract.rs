@@ -44,7 +44,7 @@ fn every_command_states_whether_it_can_run_on_another_machine() {
         // The selector is advertised exactly where it is accepted, so the map
         // an agent reads once never points at a path that always fails.
         let advertises_machine = command["inputSchema"]["properties"]
-            .get("machineId")
+            .get("machine")
             .is_some();
         assert_eq!(routable, advertises_machine, "{name}");
     }
@@ -58,10 +58,13 @@ fn capabilities_describe_remote_and_isolation_without_changing_frozen_types() {
 
     // Still a boolean, because scripts already branch on it; the detail that
     // does not fit in a boolean is an added sibling.
-    assert_eq!(data["remoteExec"], false);
-    assert_eq!(data["remote"]["hostedHub"], false);
-    assert_eq!(data["remote"]["transports"].as_array().unwrap().len(), 0);
+    assert_eq!(data["remoteExec"], true);
+    assert_eq!(data["remote"]["hostedHub"], true);
+    let transports = data["remote"]["transports"].as_array().unwrap();
+    assert!(transports.iter().any(|kind| kind == "rendezvous"));
     assert_eq!(data["remote"]["selector"]["flag"], "--machine");
+    // Nothing is ever aimed elsewhere unless it was named: an agent that omits
+    // the flag has to be able to rely on running here.
     assert_eq!(data["remote"]["selector"]["implicitDefault"], false);
 
     // An absent engine must not be readable as a permissive one.
@@ -81,10 +84,11 @@ fn a_machine_selector_is_refused_by_name_rather_than_ignored() {
     let statically_answered = envelope(&["schema", "--machine", "m_other"], 2);
     assert_eq!(statically_answered["error"]["code"], "commandNotRoutable");
 
-    // Routable but not yet reachable. The one outcome this must never be is a
-    // silent local run.
+    // Routable, and aimed at a machine this installation never paired with.
+    // The one outcome this must never be is a silent local run.
     let routable = envelope(&["session", "list", "--machine=m_other"], 4);
-    assert_eq!(routable["error"]["code"], "unsupportedCapability");
+    assert_eq!(routable["error"]["code"], "machineNotPaired");
+    assert_eq!(routable["error"]["details"]["machineId"], "m_other");
     assert_eq!(routable["error"]["retryable"], false);
 }
 

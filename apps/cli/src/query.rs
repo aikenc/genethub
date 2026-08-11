@@ -11,10 +11,10 @@ use genehub_proto::{
 use serde_json::{json, Value};
 
 use crate::output::{self, CliFailure, CLI_SCHEMA};
-use crate::rpc::{ConnectError, Rpc, RpcError};
-use crate::target::{self, Routing};
+use crate::rpc::{ConnectError, Refusal, Rpc, RpcError};
+use crate::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 13] = [
+const COMMAND_NAMES: [&str; 20] = [
     "schema",
     "context",
     "capabilities",
@@ -28,6 +28,28 @@ const COMMAND_NAMES: [&str; 13] = [
     "session.respond",
     "session.interrupt",
     "session.close",
+    "machine.list",
+    "machine.show",
+    "machine.pair",
+    "machine.forget",
+    "device.list",
+    "device.invite",
+    "device.revoke",
+];
+
+/// The capability vocabulary a machine grants a device, named here so `genet
+/// schema` can offer it as an enum rather than leaving an agent to discover the
+/// spelling by being refused.
+const GRANTS: [&str; 9] = [
+    "handshake",
+    "read",
+    "session",
+    "files",
+    "git",
+    "pty",
+    "devices",
+    "settings",
+    "update",
 ];
 
 /// Commands that change something on the target machine. Read by agents that
@@ -36,7 +58,15 @@ const COMMAND_NAMES: [&str; 13] = [
 fn mutates(name: &str) -> bool {
     matches!(
         name,
-        "agent.run" | "session.send" | "session.respond" | "session.interrupt" | "session.close"
+        "agent.run"
+            | "session.send"
+            | "session.respond"
+            | "session.interrupt"
+            | "session.close"
+            | "machine.pair"
+            | "machine.forget"
+            | "device.invite"
+            | "device.revoke"
     )
 }
 
@@ -51,12 +81,12 @@ enum Query {
     SessionGet { session_id: String },
 }
 
-pub async fn run(args: &[String]) -> i32 {
+pub async fn run(args: &[String], selection: &Selection) -> i32 {
     let command = match parse(args) {
         Ok(command) => command,
         Err(error) => return output::fail(error),
     };
-    match execute(command).await {
+    match execute(command, selection).await {
         Ok((kind, data)) => output::succeed(kind, data),
         Err(error) => output::fail(error),
     }
@@ -176,22 +206,28 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
     }
 }
 
-async fn execute(command: Query) -> Result<(&'static str, Value), CliFailure> {
+async fn execute(
+    command: Query,
+    selection: &Selection,
+) -> Result<(&'static str, Value), CliFailure> {
     match command {
         Query::Schema { command } => Ok(("schema", schema_data(command.as_deref()))),
         Query::Capabilities => Ok(("capabilities", capabilities_data())),
         Query::Context => {
-            let rpc = connect().await?;
-            Ok(("context", context_data(rpc.hello())))
+            let rpc = connect_selected(selection).await?;
+            Ok((
+                "context",
+                context_data(rpc.hello(), selection.machine.as_deref()),
+            ))
         }
         Query::WorkspaceList => {
-            let rpc = connect().await?;
+            let rpc = connect_selected(selection).await?;
             let workspaces =
                 workspaces(rpc.call(Request::WorkspaceList).await.map_err(rpc_error)?)?;
             Ok(("workspace.list", json!({"workspaces": workspaces})))
         }
         Query::WorkspaceShow { workspace_id } => {
-            let rpc = connect().await?;
+            let rpc = connect_selected(selection).await?;
             let listed = workspaces(rpc.call(Request::WorkspaceList).await.map_err(rpc_error)?)?;
             let workspace = listed
                 .into_iter()
@@ -200,7 +236,7 @@ async fn execute(command: Query) -> Result<(&'static str, Value), CliFailure> {
             Ok(("workspace.show", json!({"workspace": workspace})))
         }
         Query::SessionList { workspace_id } => {
-            let rpc = connect().await?;
+            let rpc = connect_selected(selection).await?;
             if let Some(id) = workspace_id.as_deref() {
                 let listed =
                     workspaces(rpc.call(Request::WorkspaceList).await.map_err(rpc_error)?)?;
@@ -222,7 +258,7 @@ async fn execute(command: Query) -> Result<(&'static str, Value), CliFailure> {
             ))
         }
         Query::SessionGet { session_id } => {
-            let rpc = connect().await?;
+            let rpc = connect_selected(selection).await?;
             let snapshot = snapshot(
                 rpc.call(Request::SessionGet {
                     session_id: session_id.clone(),
@@ -233,10 +269,6 @@ async fn execute(command: Query) -> Result<(&'static str, Value), CliFailure> {
             Ok(("session.get", json!({"session": snapshot})))
         }
     }
-}
-
-async fn connect() -> Result<Rpc, CliFailure> {
-    Rpc::connect().await.map_err(connect_error)
 }
 
 /// The workspace catalogue, shared with the conversation surface so both
@@ -253,30 +285,180 @@ pub fn connect_error(error: ConnectError) -> CliFailure {
         })
         | ConnectError::Protocol(message) => CliFailure::protocol(message),
         ConnectError::Rejected(error) => rpc_error(RpcError::Remote(error)),
-        ConnectError::Unavailable(message) => CliFailure::daemon_unavailable(format!(
-            "could not reach the local daemon: {message}; run `{} daemon start`",
-            genet_daemon::channel::CLI_BINARY
-        )),
+        ConnectError::Unavailable(message) | ConnectError::Refused { message, .. } => {
+            CliFailure::daemon_unavailable(format!(
+                "could not reach the local daemon: {message}; run `{} daemon start`",
+                genet_daemon::channel::CLI_BINARY
+            ))
+        }
     }
 }
 
-fn context_data(hello: &HelloResult) -> Value {
+/// The same failures, said in the vocabulary of another machine.
+///
+/// The distinction that earns its place here is `retryable`. A machine that is
+/// merely asleep and a credential that was revoked both look like "cannot
+/// connect", but an agent should wait out the first and stop on the second,
+/// and it can only do that if the two arrive under different codes.
+pub fn remote_connect_error(machine_id: &str, error: ConnectError) -> CliFailure {
+    let details = Some(json!({"machineId": machine_id}));
+    match error {
+        ConnectError::Rejected(ProtocolError {
+            code: ErrorCode::ProtocolVersion,
+            message,
+        })
+        | ConnectError::Protocol(message) => CliFailure::protocol(message),
+        ConnectError::Rejected(ProtocolError {
+            code: ErrorCode::Unauthorized,
+            message,
+        }) => CliFailure {
+            code: "credentialRevoked",
+            message: format!(
+                "{machine_id} no longer accepts this installation's credential ({message}); \
+                 pair again with a fresh invite"
+            ),
+            retryable: false,
+            details,
+            exit: crate::EXIT_FAILED,
+        },
+        ConnectError::Rejected(error) => rpc_error(RpcError::Remote(error)),
+        // Nothing was consumed finding out that nobody was home, which is
+        // exactly why retrying is safe and why a brief absence should not be
+        // reported as breakage.
+        ConnectError::Refused {
+            reason: Refusal::Offline,
+            ..
+        } => CliFailure {
+            code: "machineOffline",
+            message: format!("{machine_id} is not currently connected to its relay"),
+            retryable: true,
+            details,
+            exit: crate::EXIT_UNREACHABLE,
+        },
+        ConnectError::Refused {
+            reason: Refusal::Credential,
+            message,
+        } => CliFailure {
+            code: "credentialRevoked",
+            message: format!(
+                "{machine_id} no longer accepts this installation's credential ({message}); \
+                 pair again with a fresh invite"
+            ),
+            retryable: false,
+            details,
+            exit: crate::EXIT_FAILED,
+        },
+        ConnectError::Refused { message, .. } => CliFailure {
+            code: "relayUnavailable",
+            message: format!("the relay in front of {machine_id} refused this call: {message}"),
+            retryable: true,
+            details,
+            exit: crate::EXIT_UNREACHABLE,
+        },
+        ConnectError::Unavailable(message) => CliFailure {
+            code: "relayUnavailable",
+            message: format!("could not reach {machine_id}: {message}"),
+            retryable: true,
+            details,
+            exit: crate::EXIT_UNREACHABLE,
+        },
+    }
+}
+
+/// Connects to whichever machine this invocation named.
+///
+/// Every command that can be routed goes through here, so there is exactly one
+/// place where `--machine` turns into a different socket. A command that
+/// forgot to use it would run locally while claiming to run elsewhere, which is
+/// the one failure mode nobody would notice.
+pub async fn connect_selected(selection: &Selection) -> Result<Rpc, CliFailure> {
+    let Some(machine_id) = selection.machine.as_deref() else {
+        return Rpc::connect().await.map_err(connect_error);
+    };
+    // A machine paired directly with this installation wins. Its credential is
+    // this installation's own, so reaching it does not depend on a daemon
+    // running here or on a Hub being up.
+    if let Some(machine) = crate::machines::lookup(machine_id)? {
+        return Rpc::connect_remote(&machine)
+            .await
+            .map_err(|error| remote_connect_error(machine_id, error));
+    }
+    hosted(machine_id).await
+}
+
+/// The hosted-Hub path: a per-connection ticket, fetched through the local
+/// daemon's enrolment.
+///
+/// The CLI holds no Hub enrolment of its own, so this only works where a local
+/// daemon is running and paired. That is a real limit and it is reported as
+/// one — a machine that is unreachable because nothing here is enrolled must
+/// not read as a machine that does not exist.
+async fn hosted(machine_id: &str) -> Result<Rpc, CliFailure> {
+    let local = Rpc::connect().await.map_err(|_| {
+        not_paired(
+            machine_id,
+            "no local daemon is running here to fetch a hosted ticket with",
+        )
+    })?;
+    let ticket = match local
+        .call(Request::HubConnect {
+            machine_id: machine_id.to_string(),
+        })
+        .await
+    {
+        Ok(Reply::HubTicket(ticket)) => ticket,
+        Ok(other) => return Err(CliFailure::protocol(format!("unexpected reply: {other:?}"))),
+        Err(RpcError::Remote(error)) => {
+            return Err(not_paired(
+                machine_id,
+                &format!("the Hub did not issue a ticket for it: {}", error.message),
+            ))
+        }
+        Err(error) => return Err(rpc_error(error)),
+    };
+    drop(local);
+    Rpc::connect_hosted(&ticket)
+        .await
+        .map_err(|error| remote_connect_error(machine_id, error))
+}
+
+fn not_paired(machine_id: &str, why: &str) -> CliFailure {
+    CliFailure::business(
+        "machineNotPaired",
+        format!(
+            "{machine_id} is not a machine this installation can reach: {why}. \
+             `genet machine list` shows the ones it paired with directly, and \
+             `genet hub status` whether a Hub can introduce the rest"
+        ),
+        Some(json!({"machineId": machine_id})),
+    )
+}
+
+fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
+    // A mutually authenticated Hello withholds the machine's public identity,
+    // because proving the shared credential already settled who answered and
+    // repeating it would only tell an eavesdropper. So when a machine was
+    // named, that name is the honest answer for what this resolved to.
+    let (machine_id, machine_name) = match machine {
+        Some(id) => (id.to_string(), String::new()),
+        None => (hello.machine_id.clone(), hello.machine_name.clone()),
+    };
     json!({
-        "source": "localDaemon",
-        "principal": {"type": "localUser"},
+        "source": if machine.is_some() { "remoteDaemon" } else { "localDaemon" },
+        "principal": {"type": if machine.is_some() { "pairedDevice" } else { "localUser" }},
         "defaultWorkspaceId": null,
         "workspaceSelection": "explicitOnly",
-        "remoteExec": false,
+        "remoteExec": true,
         "deviceSelector": false,
         // Which machine this call actually resolved to, and how. An agent that
         // wants to know whether it is talking to itself should read this rather
         // than infer it from the absence of a flag.
         "target": {
-            "machineId": hello.machine_id,
-            "machineName": hello.machine_name,
-            "resolvedFrom": "loopback",
+            "machineId": machine_id,
+            "machineName": machine_name,
+            "resolvedFrom": if machine.is_some() { "--machine" } else { "loopback" },
             "transport": hello.transport,
-            "credential": "loopbackAdmission",
+            "credential": if machine.is_some() { "pairedDeviceSecret" } else { "loopbackAdmission" },
         },
         "workingDirectory": {"selector": "--cwd", "value": null, "inferred": false},
         "daemon": {
@@ -306,11 +488,20 @@ fn capabilities_data() -> Value {
         // Kept a boolean because agents and scripts already branch on it. The
         // detail that does not fit in a boolean lives in `remote` beside it,
         // which is an added field rather than a changed type.
-        "remoteExec": false,
+        "remoteExec": true,
         "remote": {
-            "transports": [],
-            "hostedHub": false,
+            "transports": ["rendezvous", "hostedHub"],
+            "hostedHub": true,
+            // The condition is stated because it is not one an agent could
+            // guess from a boolean. The CLI holds no Hub enrolment of its own,
+            // so a hosted machine is reached by borrowing the local daemon's —
+            // which means this path needs a daemon running here, and the
+            // rendezvous path does not.
+            "hostedHubRequires": "a local daemon enrolled with the Hub",
+            "resolutionOrder": ["machines.json", "hub.connect"],
             "selector": {"kind": "exactId", "flag": "--machine", "implicitDefault": false},
+            "pairing": ["machine.pair", "device.invite"],
+            "credentialStore": "machines.json",
         },
         // What the target machine will let a command touch. Arbitrary commands
         // are not offered at all yet, so there is nothing to isolate and the
@@ -445,6 +636,56 @@ fn command_schema(name: &str) -> Value {
                 &["sessionId"],
             ),
         ),
+        "machine.list" => ("genet machine list", false, object_input(json!({}), &[])),
+        "machine.show" => (
+            "genet machine show <machineId>",
+            false,
+            object_input(
+                json!({"machineId": {"type": "string", "minLength": 1}}),
+                &["machineId"],
+            ),
+        ),
+        "machine.pair" => (
+            "genet machine pair <code> --endpoint <url> [--name <label>]",
+            false,
+            object_input(
+                json!({
+                    "code": {"type": "string", "minLength": 1},
+                    "endpoint": {"type": "string", "minLength": 1},
+                    "name": {"type": ["string", "null"], "minLength": 1},
+                }),
+                &["code", "endpoint"],
+            ),
+        ),
+        "machine.forget" => (
+            "genet machine forget <machineId>",
+            false,
+            object_input(
+                json!({"machineId": {"type": "string", "minLength": 1}}),
+                &["machineId"],
+            ),
+        ),
+        "device.list" => ("genet device list", true, object_input(json!({}), &[])),
+        "device.invite" => (
+            "genet device invite [--grant <capability>]…",
+            true,
+            object_input(
+                json!({"grants": {
+                    "type": ["array", "null"],
+                    "items": {"type": "string", "enum": GRANTS},
+                    "description": "absent means an unrestricted device",
+                }}),
+                &[],
+            ),
+        ),
+        "device.revoke" => (
+            "genet device revoke <deviceId>",
+            true,
+            object_input(
+                json!({"deviceId": {"type": "string", "minLength": 1}}),
+                &["deviceId"],
+            ),
+        ),
         _ => unreachable!("schema names are validated before lookup"),
     };
     json!({
@@ -515,8 +756,12 @@ fn with_selectors(name: &str, mut input: Value) -> Value {
         return input;
     };
     if matches!(target::routing(name), Routing::Routable) {
+        // Named for the flag rather than for what it holds, so it cannot
+        // collide with a command whose own subject is a machine id. `genet
+        // machine show m_a --machine m_b` is a coherent thing to type, and a
+        // schema that spelled both of those `machineId` could not say so.
         properties.insert(
-            "machineId".into(),
+            "machine".into(),
             json!({
                 "type": ["string", "null"],
                 "minLength": 1,
@@ -725,23 +970,36 @@ mod tests {
         }
     }
 
-    #[test]
-    fn context_is_explicitly_local_and_never_invents_a_workspace() {
-        let data = context_data(&HelloResult {
+    fn hello() -> HelloResult {
+        HelloResult {
             daemon_version: "1.2.3".into(),
             protocol_version: genehub_proto::DATA_PLANE_VERSION,
             machine_id: "m_local".into(),
             fingerprint: "AA-BB".into(),
             transport: TransportKind::Loopback,
             machine_name: "desk".into(),
-            rtc_supported: true,
-        });
+            rtc_supported: false,
+        }
+    }
 
+    #[test]
+    fn context_never_invents_a_workspace_and_says_which_machine_answered() {
+        let data = context_data(&hello(), None);
         assert_eq!(data["source"], "localDaemon");
-        assert_eq!(data["remoteExec"], false);
+        assert_eq!(data["target"]["resolvedFrom"], "loopback");
         assert_eq!(data["defaultWorkspaceId"], Value::Null);
         assert_eq!(data["workspaceSelection"], "explicitOnly");
         assert_eq!(data["daemon"]["machineId"], "m_local");
+
+        // A mutually authenticated Hello withholds the machine's public
+        // identity, so the named machine is the only honest answer for what
+        // this resolved to. Reporting the empty string it came back with would
+        // read as "nowhere".
+        let routed = context_data(&hello(), Some("m_far"));
+        assert_eq!(routed["source"], "remoteDaemon");
+        assert_eq!(routed["target"]["machineId"], "m_far");
+        assert_eq!(routed["target"]["resolvedFrom"], "--machine");
+        assert_eq!(routed["target"]["credential"], "pairedDeviceSecret");
     }
 
     #[test]
@@ -758,24 +1016,29 @@ mod tests {
 
         let capabilities = capabilities_data();
         assert_eq!(capabilities["source"], "staticCliContract");
-        assert_eq!(capabilities["remoteExec"], false);
+        assert_eq!(capabilities["remoteExec"], true);
+        assert_eq!(capabilities["remote"]["transports"][0], "rendezvous");
         assert_eq!(capabilities["deviceSelector"], false);
         assert_eq!(capabilities["workspaceSelector"]["implicitDefault"], false);
     }
 
     #[tokio::test]
     async fn static_introspection_executes_without_opening_an_rpc_connection() {
-        let (schema_kind, schema) = execute(Query::Schema {
-            command: Some("session.list".into()),
-        })
+        let here = Selection::default();
+        let (schema_kind, schema) = execute(
+            Query::Schema {
+                command: Some("session.list".into()),
+            },
+            &here,
+        )
         .await
         .unwrap();
         assert_eq!(schema_kind, "schema");
         assert_eq!(schema["command"]["name"], "session.list");
 
-        let (capability_kind, capabilities) = execute(Query::Capabilities).await.unwrap();
+        let (capability_kind, capabilities) = execute(Query::Capabilities, &here).await.unwrap();
         assert_eq!(capability_kind, "capabilities");
-        assert_eq!(capabilities["remoteExec"], false);
+        assert_eq!(capabilities["remoteExec"], true);
     }
 
     #[test]

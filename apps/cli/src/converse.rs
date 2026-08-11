@@ -86,7 +86,7 @@ pub enum Command {
 /// `genet agent …` and the `genet <agentId> …` sugar.
 pub async fn agent(args: &[String], selection: &Selection) -> i32 {
     match parse_agent(args, selection) {
-        Ok(command) => execute(command).await,
+        Ok(command) => execute(command, selection).await,
         Err(error) => output::fail(error),
     }
 }
@@ -94,7 +94,7 @@ pub async fn agent(args: &[String], selection: &Selection) -> i32 {
 /// The mutating `genet session …` verbs. Reading verbs stay in `query.rs`.
 pub async fn session(args: &[String], selection: &Selection) -> i32 {
     match parse_session(args, selection) {
-        Ok(command) => execute(command).await,
+        Ok(command) => execute(command, selection).await,
         Err(error) => output::fail(error),
     }
 }
@@ -110,7 +110,7 @@ pub async fn sugar(agent_id: &str, args: &[String], selection: &Selection) -> i3
         Err(error) => return output::fail(error),
     };
     run.agent_id = Some(agent_id.to_string());
-    execute(Command::Run(Box::new(run))).await
+    execute(Command::Run(Box::new(run)), selection).await
 }
 
 fn parse_agent(args: &[String], selection: &Selection) -> Result<Command, CliFailure> {
@@ -280,17 +280,17 @@ fn number(raw: &str, flag: &str) -> Result<u64, CliFailure> {
         .map_err(|_| CliFailure::invalid_args(format!("{flag} needs a whole number, got {raw}")))
 }
 
-async fn execute(command: Command) -> i32 {
-    let rpc = match Rpc::connect().await {
+async fn execute(command: Command, selection: &Selection) -> i32 {
+    let rpc = match query::connect_selected(selection).await {
         Ok(rpc) => rpc,
-        Err(error) => return output::fail(query::connect_error(error)),
+        Err(error) => return output::fail(error),
     };
     let result = match command {
         Command::AgentList => agent_list(&rpc).await.map(|data| {
             output::succeed("agent.list", data);
             EXIT_OK
         }),
-        Command::Run(run) => run_conversation(&rpc, *run).await,
+        Command::Run(run) => run_conversation(&rpc, *run, selection.machine.is_none()).await,
         Command::Respond {
             session_id,
             request_id,
@@ -370,16 +370,14 @@ async fn respond(
     Ok(json!({"sessionId": session_id, "requestId": request_id, "chose": choose}))
 }
 
-async fn run_conversation(rpc: &Rpc, run: Run) -> Result<i32, CliFailure> {
+async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFailure> {
     let session = match run.session_id.as_deref() {
         Some(session_id) => attach(rpc, session_id, run.agent_id.as_deref()).await?,
-        None => create(rpc, &run).await?,
+        None => create(rpc, &run, here).await?,
     };
 
     // Subscribing before sending is what makes the stream gap-free: a turn that
     // starts and finishes between the two calls would otherwise be invisible.
-    // The event stream itself opens before the subscription, for the same
-    // reason one step further out.
     let mut seq = 0;
     if run.wait {
         rpc.watch_events().await.map_err(query::rpc_error)?;
@@ -510,12 +508,12 @@ async fn attach(
     Ok(snapshot.summary)
 }
 
-async fn create(rpc: &Rpc, run: &Run) -> Result<SessionSummary, CliFailure> {
+async fn create(rpc: &Rpc, run: &Run, here: bool) -> Result<SessionSummary, CliFailure> {
     let agent_id = run
         .agent_id
         .clone()
         .ok_or_else(|| CliFailure::invalid_args("no agent named"))?;
-    let (workspace_id, cwd) = resolve_workspace(rpc, run).await?;
+    let (workspace_id, cwd) = resolve_workspace(rpc, run, here).await?;
     let Reply::Session(summary) = rpc
         .call(Request::SessionCreate {
             workspace_id,
@@ -537,11 +535,15 @@ async fn create(rpc: &Rpc, run: &Run) -> Result<SessionSummary, CliFailure> {
 
 /// Turns `--workspace` or `--cwd` into the pair the daemon wants.
 ///
-/// A `--cwd` inside a registered workspace keeps that workspace and passes the
-/// remainder as the start directory, rather than registering a second workspace
-/// per directory — one repository should not fragment into a workspace per
+/// A `--cwd` inside a registered workspace keeps that workspace and starts the
+/// agent in that directory, rather than registering a second workspace per
+/// directory — one repository should not fragment into a workspace per
 /// subdirectory just because tasks ran in different places inside it.
-async fn resolve_workspace(rpc: &Rpc, run: &Run) -> Result<(String, Option<String>), CliFailure> {
+async fn resolve_workspace(
+    rpc: &Rpc,
+    run: &Run,
+    here: bool,
+) -> Result<(String, Option<String>), CliFailure> {
     if let Some(workspace_id) = run.workspace_id.clone() {
         let known = query::list_workspaces(rpc).await?;
         if !known.iter().any(|workspace| workspace.id == workspace_id) {
@@ -555,13 +557,18 @@ async fn resolve_workspace(rpc: &Rpc, run: &Run) -> Result<(String, Option<Strin
              neither is inferred",
         ));
     };
-    let absolute = std::fs::canonicalize(cwd)
-        .map_err(|error| CliFailure::invalid_args(format!("--cwd {cwd}: {error}")))?;
+    let absolute = absolute_cwd(cwd, here)?;
 
     let known = query::list_workspaces(rpc).await?;
-    match deepest_containing(&known, &absolute) {
-        Some((workspace, relative)) => Ok((workspace.id.clone(), relative)),
-        None if run.open_workspace => {
+    match deepest_containing(&known, &absolute, here) {
+        // Absolute, not the remainder: a multi-folder workspace can hold the
+        // same relative path under two folders, and the daemon would have to
+        // guess which one was meant.
+        Some(workspace) => Ok((
+            workspace.id.clone(),
+            Some(absolute.to_string_lossy().into_owned()),
+        )),
+        None if run.open_workspace && here => {
             let Reply::Workspace(workspace) = rpc
                 .call(Request::WorkspaceOpen {
                     root: absolute.to_string_lossy().into_owned(),
@@ -578,9 +585,8 @@ async fn resolve_workspace(rpc: &Rpc, run: &Run) -> Result<(String, Option<Strin
         None => Err(CliFailure::business(
             "targetNotFound",
             format!(
-                "no workspace contains {}; run `genet workspace open {}` first, or pass \
-                 --open-workspace to register it now",
-                absolute.display(),
+                "no workspace on the machine that answered contains {}; open it there first, \
+                 or pass --workspace <id>",
                 absolute.display()
             ),
             Some(json!({"cwd": absolute.to_string_lossy()})),
@@ -588,43 +594,67 @@ async fn resolve_workspace(rpc: &Rpc, run: &Run) -> Result<(String, Option<Strin
     }
 }
 
-/// The innermost workspace containing `path`, with the leftover relative part.
+/// The directory named, as the machine that will run in it would write it.
 ///
-/// Every folder of a workspace counts, not only the first. A multi-folder
-/// workspace is one project, and a task started in its second folder belongs to
-/// it rather than to nothing.
+/// Only a local directory can be resolved from here. A relative `--cwd` aimed
+/// at another machine would silently mean "wherever that string lands over
+/// there", so it is refused instead of resolved against the wrong filesystem.
+fn absolute_cwd(cwd: &str, here: bool) -> Result<PathBuf, CliFailure> {
+    if here {
+        return std::fs::canonicalize(cwd)
+            .map_err(|error| CliFailure::invalid_args(format!("--cwd {cwd}: {error}")));
+    }
+    let path = PathBuf::from(cwd);
+    if !path.is_absolute() {
+        return Err(CliFailure::invalid_args(format!(
+            "--cwd {cwd} is relative, and this machine's directories are not the other \
+             machine's; give the absolute path as it exists there"
+        )));
+    }
+    Ok(path)
+}
+
+/// The workspace whose folders reach deepest into `path`.
+///
+/// Every folder counts, not only the first: a multi-folder workspace is one
+/// project, and a task started in its second folder is not a different
+/// workspace.
 fn deepest_containing<'a>(
     workspaces: &'a [WorkspaceInfo],
     path: &Path,
-) -> Option<(&'a WorkspaceInfo, Option<String>)> {
+    here: bool,
+) -> Option<&'a WorkspaceInfo> {
     workspaces
         .iter()
         .filter_map(|workspace| {
             roots_of(workspace)
+                .into_iter()
                 .filter_map(|root| {
-                    let relative = path.strip_prefix(&root).ok()?;
-                    let relative = if relative.as_os_str().is_empty() {
-                        None
+                    let root = PathBuf::from(root);
+                    let root = if here {
+                        std::fs::canonicalize(&root).unwrap_or(root)
                     } else {
-                        Some(relative.to_string_lossy().into_owned())
+                        root
                     };
-                    Some((workspace, relative, root.components().count()))
+                    path.strip_prefix(&root).ok()?;
+                    Some(root.components().count())
                 })
-                .max_by_key(|(_, _, depth)| *depth)
+                .max()
+                .map(|depth| (workspace, depth))
         })
-        .max_by_key(|(_, _, depth)| *depth)
-        .map(|(workspace, relative, _)| (workspace, relative))
+        .max_by_key(|(_, depth)| *depth)
+        .map(|(workspace, _)| workspace)
 }
 
-/// Every directory this workspace actually spans, resolved through symlinks so
-/// that a path the user typed compares against the same thing the daemon has.
-fn roots_of(workspace: &WorkspaceInfo) -> impl Iterator<Item = PathBuf> + '_ {
-    std::iter::once(workspace.root.clone())
-        .chain(workspace.folders.iter().map(|folder| folder.root.clone()))
-        .map(|root| {
-            let root = PathBuf::from(root);
-            std::fs::canonicalize(&root).unwrap_or(root)
-        })
+/// Every physical directory a workspace covers, first folder included.
+fn roots_of(workspace: &WorkspaceInfo) -> Vec<&str> {
+    let mut roots = vec![workspace.root.as_str()];
+    for folder in &workspace.folders {
+        if folder.root != workspace.root {
+            roots.push(folder.root.as_str());
+        }
+    }
+    roots
 }
 
 async fn pump(
@@ -980,67 +1010,76 @@ mod tests {
         assert_eq!(automatic_answer(&odd, false), None);
     }
 
+    fn workspace(id: &str, roots: &[&std::path::Path]) -> WorkspaceInfo {
+        WorkspaceInfo {
+            id: id.into(),
+            name: id.into(),
+            root: roots[0].to_string_lossy().into_owned(),
+            is_git_repo: false,
+            folders: roots
+                .iter()
+                .enumerate()
+                .map(|(index, root)| genehub_proto::WorkspaceFolderInfo {
+                    name: format!("f{index}"),
+                    root: root.to_string_lossy().into_owned(),
+                    root_handle: format!("h{index}"),
+                })
+                .collect(),
+            workspace_file: None,
+        }
+    }
+
     #[test]
-    fn the_innermost_workspace_wins_and_keeps_the_remainder_as_the_start_directory() {
+    fn the_innermost_workspace_wins_over_one_that_merely_contains_it() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         let inner = repo.join("services/api");
         std::fs::create_dir_all(&inner).unwrap();
         let workspaces = vec![
-            workspace("w_repo", &repo, &[]),
-            workspace("w_outer", dir.path(), &[]),
+            workspace("w_repo", &[&repo]),
+            workspace("w_outer", &[dir.path()]),
         ];
 
-        let (workspace, relative) =
-            deepest_containing(&workspaces, &std::fs::canonicalize(&inner).unwrap()).unwrap();
-        assert_eq!(workspace.id, "w_repo");
-        assert_eq!(relative.unwrap().replace('\\', "/"), "services/api");
-
-        let (root_workspace, root_relative) =
-            deepest_containing(&workspaces, &std::fs::canonicalize(&repo).unwrap()).unwrap();
-        assert_eq!(root_workspace.id, "w_repo");
-        assert_eq!(root_relative, None);
-
-        assert!(deepest_containing(&workspaces, Path::new("/nowhere/at/all")).is_none());
+        let chosen =
+            deepest_containing(&workspaces, &std::fs::canonicalize(&inner).unwrap(), true).unwrap();
+        assert_eq!(chosen.id, "w_repo");
+        let at_the_root =
+            deepest_containing(&workspaces, &std::fs::canonicalize(&repo).unwrap(), true).unwrap();
+        assert_eq!(at_the_root.id, "w_repo");
+        assert!(deepest_containing(&workspaces, Path::new("/nowhere/at/all"), true).is_none());
     }
 
     #[test]
     fn a_directory_in_a_second_folder_belongs_to_that_workspace() {
-        // A multi-folder workspace is one project. Matching only the first
-        // folder would tell someone to open a workspace they already have.
         let dir = tempfile::tempdir().unwrap();
-        let api = dir.path().join("api");
-        let web = dir.path().join("web/src");
-        std::fs::create_dir_all(&api).unwrap();
-        std::fs::create_dir_all(&web).unwrap();
-        let workspaces = vec![workspace("w_both", &api, &[&web])];
+        let first = dir.path().join("app");
+        let second = dir.path().join("library");
+        let inside = second.join("src");
+        std::fs::create_dir_all(&inside).unwrap();
+        let workspaces = vec![workspace("w_pair", &[&first, &second])];
 
-        let (found, relative) =
-            deepest_containing(&workspaces, &std::fs::canonicalize(&web).unwrap()).unwrap();
-        assert_eq!(found.id, "w_both");
-        assert_eq!(relative, None);
+        let chosen =
+            deepest_containing(&workspaces, &std::fs::canonicalize(&inside).unwrap(), true)
+                .unwrap();
+        assert_eq!(chosen.id, "w_pair");
     }
 
-    fn workspace(id: &str, root: &Path, extra: &[&Path]) -> WorkspaceInfo {
-        WorkspaceInfo {
-            id: id.into(),
-            name: id.into(),
-            root: root.to_string_lossy().into_owned(),
-            is_git_repo: false,
-            folders: std::iter::once(root)
-                .chain(extra.iter().copied())
-                .map(|folder| genehub_proto::WorkspaceFolderInfo {
-                    name: folder
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
-                    root: folder.to_string_lossy().into_owned(),
-                    root_handle: format!("h_{}", folder.display()),
-                })
-                .collect(),
-            workspace_file: None,
-        }
+    #[test]
+    fn a_remote_directory_is_read_as_the_other_machine_wrote_it() {
+        // No canonicalization and no local existence check: the path belongs to
+        // a filesystem this process cannot see.
+        let workspaces = vec![workspace("w_remote", &[Path::new("/srv/app")])];
+        let absolute = absolute_cwd("/srv/app/services", false).unwrap();
+        assert_eq!(
+            deepest_containing(&workspaces, &absolute, false)
+                .unwrap()
+                .id,
+            "w_remote"
+        );
+        assert_eq!(
+            absolute_cwd("services", false).unwrap_err().code,
+            "invalidArgs"
+        );
     }
 
     #[test]

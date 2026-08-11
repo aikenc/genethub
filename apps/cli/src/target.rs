@@ -45,7 +45,7 @@ pub const RESERVED: [&str; 13] = [
     "shell",
 ];
 
-const ROUTABLE: [&str; 11] = [
+const ROUTABLE: [&str; 14] = [
     "context",
     "workspace.list",
     "workspace.show",
@@ -57,6 +57,9 @@ const ROUTABLE: [&str; 11] = [
     "session.close",
     "agent.list",
     "agent.run",
+    "device.list",
+    "device.invite",
+    "device.revoke",
 ];
 
 const STATIC: [&str; 2] = ["schema", "capabilities"];
@@ -209,20 +212,10 @@ pub fn enforce(selection: &Selection, command: Option<&str>) -> Result<(), CliFa
                      do for you",
                 ))
             }
-            // Reaching a remote daemon is batch 5 of
-            // `genet-remote-execution.md` §10. Until the transport exists this
-            // has to say so rather than quietly running locally, which would be
-            // the one failure mode nobody would notice.
-            Routing::Routable => {
-                return Err(CliFailure::business(
-                    "unsupportedCapability",
-                    format!(
-                        "{command} is routable, but this build cannot reach another machine yet; \
-                         `genet capabilities` reports remote.transports"
-                    ),
-                    None,
-                ))
-            }
+            // Routed for real. Dispatch resolves the machine through
+            // `query::connect_selected`, which is the single place a selector
+            // turns into a different socket.
+            Routing::Routable => {}
         }
     }
     if selection.cwd.is_some() && !accepts_cwd(command) {
@@ -356,14 +349,24 @@ mod tests {
     }
 
     #[test]
-    fn a_routable_command_says_the_transport_is_missing_rather_than_running_locally() {
+    fn a_routable_command_accepts_a_machine_and_leaves_resolving_it_to_dispatch() {
         let selection = Selection {
             machine: Some("m_1".into()),
             cwd: None,
         };
-        let error = enforce(&selection, Some("session.list")).unwrap_err();
-        assert_eq!(error.code, "unsupportedCapability");
-        assert_ne!(error.exit, crate::EXIT_OK);
+        for command in ["session.list", "agent.run", "device.list", "context"] {
+            assert!(
+                enforce(&selection, Some(command)).is_ok(),
+                "{command} refused a machine it can be routed to"
+            );
+        }
+        // Pairing is about this installation's own credential store, so it has
+        // no meaning aimed elsewhere — asking machine A to pair with machine B
+        // would store the credential on the wrong one.
+        assert_eq!(
+            enforce(&selection, Some("machine.pair")).unwrap_err().code,
+            "commandNotRoutable"
+        );
     }
 
     #[test]
