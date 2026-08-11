@@ -68,6 +68,11 @@ fn start_relay(bundle: &Path) -> Relay {
         .expect("the relay could not be started");
 
     let stdout = process.stdout.take().expect("relay stdout");
+    // Owned before it is read from, so that giving up below still reaps it.
+    let mut relay = Relay {
+        process,
+        origin: String::new(),
+    };
     let mut lines = BufReader::new(stdout).lines();
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
@@ -78,43 +83,64 @@ fn start_relay(bundle: &Path) -> Relay {
             .and_then(|tail| tail.split(|c: char| !c.is_ascii_digit()).next())
             .filter(|port| !port.is_empty())
         {
-            return Relay {
-                process,
-                origin: format!("http://127.0.0.1:{port}"),
-            };
+            relay.origin = format!("http://127.0.0.1:{port}");
+            return relay;
         }
     }
     panic!("the relay never said where it was listening");
 }
 
-struct Cli {
-    home: tempfile::TempDir,
+/// A `genet` installation: one data directory, and the binary run against it.
+enum Cli {
+    /// Its own directory, holding nothing but what pairing put there. This is
+    /// the jump box or CI runner the feature exists for.
+    Elsewhere(tempfile::TempDir),
+    /// The machine's own directory, so the same binary reaches the daemon over
+    /// loopback. Only used to compare the two answers.
+    OnTheMachine(PathBuf),
 }
 
 impl Cli {
     fn new() -> Self {
-        Cli {
-            home: tempfile::tempdir().expect("a data directory for the CLI"),
+        Cli::Elsewhere(tempfile::tempdir().expect("a data directory for the CLI"))
+    }
+
+    fn on(data: &Path) -> Self {
+        Cli::OnTheMachine(data.to_path_buf())
+    }
+
+    fn home(&self) -> &Path {
+        match self {
+            Cli::Elsewhere(dir) => dir.path(),
+            Cli::OnTheMachine(path) => path,
         }
     }
 
     /// One `genet` run, as an agent would get it: the JSON envelope and the
     /// exit code, together, because the pair is the contract.
     fn run(&self, arguments: &[&str]) -> (Value, i32) {
-        let output = Command::new(env!("CARGO_BIN_EXE_genet-dev"))
-            .args(arguments)
-            .env("GENEHUB_DEV_DATA_DIR", self.home.path())
-            .env("GENEHUB_DEV_WORKSPACE_DIR", self.home.path())
-            .output()
-            .expect("the CLI could not be run");
-        let stdout = String::from_utf8(output.stdout).expect("the CLI printed invalid UTF-8");
-        let last = stdout
+        let (raw, code) = self.raw(arguments);
+        let last = raw
             .lines()
-            .filter(|line| line.trim_start().starts_with('{'))
-            .next_back()
-            .unwrap_or_else(|| panic!("no envelope in: {stdout}"));
+            .rfind(|line| line.trim_start().starts_with('{'))
+            .unwrap_or_else(|| panic!("no envelope in: {raw}"));
         (
             serde_json::from_str(last).expect("the CLI printed something that is not JSON"),
+            code,
+        )
+    }
+
+    /// Everything the command printed, unparsed. A streaming command emits one
+    /// envelope per line and the order is part of the contract.
+    fn raw(&self, arguments: &[&str]) -> (String, i32) {
+        let output = Command::new(env!("CARGO_BIN_EXE_genet-dev"))
+            .args(arguments)
+            .env("GENEHUB_DEV_DATA_DIR", self.home())
+            .env("GENEHUB_DEV_WORKSPACE_DIR", self.home())
+            .output()
+            .expect("the CLI could not be run");
+        (
+            String::from_utf8(output.stdout).expect("the CLI printed invalid UTF-8"),
             output.status.code().unwrap_or(-1),
         )
     }
@@ -373,6 +399,316 @@ async fn a_device_that_was_revoked_is_told_to_pair_again_rather_than_to_wait() {
     // retry loop.
     assert_eq!(refused["error"]["retryable"], false);
     assert_eq!(code, 4, "{refused}");
+
+    daemon.shutdown().await;
+}
+
+/// §1.1 的原话：远程执行「语义等价于在目标机本地执行」。
+///
+/// The claim is not that both answers are plausible. It is that they are the
+/// same bytes, so an agent can be written once and pointed anywhere. Anything
+/// that leaks the route into the payload — a path rewritten, a field only the
+/// loopback path fills in — breaks it, and would otherwise be found by whoever
+/// diffed two transcripts at three in the morning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_command_returns_the_same_bytes_from_here_and_from_there() {
+    let Some(bundle) = relay_bundle() else { return };
+    let relay = start_relay(&bundle);
+
+    let data = tempfile::tempdir().expect("a data directory for the machine");
+    let project = data.path().join("project");
+    std::fs::create_dir_all(&project).expect("the project directory");
+    let daemon = Daemon::start(Paths::new(data.path()))
+        .await
+        .expect("the machine could not be started");
+    daemon
+        .state
+        .workspaces
+        .open(&project, None)
+        .await
+        .expect("opening a workspace so the answer is not empty");
+    let rendezvous = attach(&daemon, &relay.origin).await;
+
+    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let elsewhere = Cli::new();
+    let (paired, code) = elsewhere.run(&[
+        "machine",
+        "pair",
+        &invite.code,
+        "--endpoint",
+        &rendezvous,
+        "--name",
+        "a CLI that will compare notes",
+    ]);
+    assert_eq!(code, 0, "{paired}");
+    let machine_id = paired["data"]["machine"]["machineId"]
+        .as_str()
+        .expect("the pairing did not name the machine")
+        .to_string();
+
+    // The same binary, one installation on the machine and one anywhere else.
+    let here = Cli::on(data.path());
+    for command in [
+        vec!["workspace", "list"],
+        vec!["session", "list"],
+        vec!["agent", "list"],
+    ] {
+        let (local, local_code) = here.raw(&command);
+        let mut routed = command.clone();
+        routed.push("--machine");
+        routed.push(&machine_id);
+        let (remote, remote_code) = elsewhere.raw(&routed);
+        assert_eq!(
+            local,
+            remote,
+            "`genet {}` answered differently through the relay",
+            command.join(" ")
+        );
+        assert_eq!(local_code, remote_code);
+    }
+
+    // `context` is the one command that must differ, and differ honestly: it
+    // exists to say which machine answered.
+    let (local, _) = here.run(&["context"]);
+    let (remote, _) = elsewhere.run(&["context", "--machine", &machine_id]);
+    assert_eq!(local["data"]["source"], "localDaemon");
+    assert_eq!(remote["data"]["source"], "remoteDaemon");
+    assert_eq!(
+        local["data"]["daemon"]["machineId"], remote["data"]["daemon"]["machineId"],
+        "the same machine described itself as two different ones"
+    );
+
+    daemon.shutdown().await;
+}
+
+/// A session outlives the process that started it, and can be picked up again
+/// from the seq the caller last saw.
+///
+/// This is the promise `--no-wait` makes, and it is the one an orchestrator
+/// leans on hardest: it fires a long task, goes away, and comes back. Proving
+/// it needs the CLI process to actually exit between the two halves, which is
+/// why it cannot be shown from inside one connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backgrounded_conversation_keeps_going_and_can_be_picked_up_again() {
+    let Some(bundle) = relay_bundle() else { return };
+    let relay = start_relay(&bundle);
+
+    let model = MockLlm::start().await.expect("the mock model");
+    let data = tempfile::tempdir().expect("a data directory for the machine");
+    let project = data.path().join("project");
+    std::fs::create_dir_all(&project).expect("the project directory");
+    write_provider_config(data.path(), &model.base_url);
+    let (variable, agent) = agent_command_override().expect("locating the agent binary");
+    std::env::set_var(variable, agent);
+
+    let daemon = Daemon::start(Paths::new(data.path()))
+        .await
+        .expect("the machine could not be started");
+    let rendezvous = attach(&daemon, &relay.origin).await;
+    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let cli = Cli::new();
+    let (paired, code) = cli.run(&[
+        "machine",
+        "pair",
+        &invite.code,
+        "--endpoint",
+        &rendezvous,
+        "--name",
+        "a CLI that will walk away",
+    ]);
+    assert_eq!(code, 0, "{paired}");
+    let machine_id = paired["data"]["machine"]["machineId"]
+        .as_str()
+        .expect("the pairing did not name the machine")
+        .to_string();
+
+    // Turn one, watched. This is the caller's baseline: the last seq it saw.
+    model.reply(Turn::text("第一轮的回答")).await;
+    let (watched, code) = cli.raw(&[
+        "--machine",
+        &machine_id,
+        "--cwd",
+        &project.to_string_lossy(),
+        "genet",
+        "先说第一句",
+        "--model",
+        genehub_testing::harness::REAL_MODEL,
+        "--open-workspace",
+    ]);
+    assert_eq!(code, 0, "{watched}");
+    let session_id = envelopes(&watched)[0]["data"]["sessionId"]
+        .as_str()
+        .expect("no session id to come back to")
+        .to_string();
+    let seen = settled(&cli, &machine_id, &session_id).await;
+
+    // Turn two runs with nobody watching, and the process that started it is
+    // gone before it finishes.
+    model.reply(Turn::text("第二轮的回答")).await;
+    let (backgrounded, code) = cli.run(&[
+        "session",
+        "send",
+        &session_id,
+        "这一句我不等了",
+        "--machine",
+        &machine_id,
+        "--no-wait",
+    ]);
+    assert_eq!(code, 0, "{backgrounded}");
+    // Not waiting is not the same as not answering: the caller still gets a
+    // terminal envelope, and it says the turn was left running on purpose.
+    assert_eq!(backgrounded["type"], "session.result", "{backgrounded}");
+    assert_eq!(backgrounded["data"]["status"], "running", "{backgrounded}");
+    assert_eq!(backgrounded["data"]["waited"], false, "{backgrounded}");
+    let after_two = settled(&cli, &machine_id, &session_id).await;
+    assert!(after_two > seen, "the unwatched turn produced no events");
+    assert_eq!(model.request_count().await, 2);
+
+    // Coming back from the seq it holds, the caller is given exactly what it
+    // missed — not a reset, and not silence.
+    model.reply(Turn::text("第三轮的回答")).await;
+    let (resumed, code) = cli.raw(&[
+        "session",
+        "send",
+        &session_id,
+        "接着上面那个思路",
+        "--machine",
+        &machine_id,
+        "--since-seq",
+        &seen.to_string(),
+    ]);
+    assert_eq!(code, 0, "{resumed}");
+    let stream = envelopes(&resumed);
+    assert!(
+        !stream.iter().any(|line| line["type"] == "session.desync"),
+        "a seq still inside the window was treated as a gap: {resumed}"
+    );
+    assert!(
+        resumed.contains("第二轮的回答"),
+        "the replay dropped the turn that ran while nobody watched: {resumed}"
+    );
+    assert!(
+        stream
+            .iter()
+            .filter(|line| line["type"] == "session.event")
+            .all(|line| line["data"]["seq"].as_u64().unwrap_or(0) > seen),
+        "the replay repeated events the caller already had: {resumed}"
+    );
+    let last = stream.last().expect("no envelope at all");
+    assert_eq!(last["type"], "session.result");
+    assert_eq!(last["data"]["status"], "completed", "{last}");
+    assert_eq!(model.request_count().await, 3);
+
+    // Asking from zero is the other case, and it has to be told apart from the
+    // one above: nothing is replayed, and the caller is told so rather than
+    // being left to conclude the session was empty.
+    model.reply(Turn::text("第四轮的回答")).await;
+    let (from_zero, code) = cli.raw(&[
+        "session",
+        "send",
+        &session_id,
+        "从头开始接",
+        "--machine",
+        &machine_id,
+        "--since-seq",
+        "0",
+    ]);
+    assert_eq!(code, 0, "{from_zero}");
+    let stream = envelopes(&from_zero);
+    assert_eq!(stream[0]["type"], "session.attached");
+    assert_eq!(stream[1]["type"], "session.desync", "{from_zero}");
+    assert!(!from_zero.contains("第二轮的回答"), "{from_zero}");
+
+    daemon.shutdown().await;
+}
+
+/// Every JSON line a streaming command printed, in order.
+fn envelopes(printed: &str) -> Vec<Value> {
+    printed
+        .lines()
+        .filter(|line| line.trim_start().starts_with('{'))
+        .map(|line| serde_json::from_str(line).expect("the CLI printed something that is not JSON"))
+        .collect()
+}
+
+/// Waits for the far machine to finish whatever it is doing, and reports the
+/// seq it stopped at.
+async fn settled(cli: &Cli, machine_id: &str, session_id: &str) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (snapshot, code) = cli.run(&["session", "get", session_id, "--machine", machine_id]);
+        assert_eq!(code, 0, "{snapshot}");
+        let session = &snapshot["data"]["session"];
+        if session["summary"]["status"] == "idle" {
+            return session["seq"].as_u64().expect("a session without a seq");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the turn never settled: {snapshot}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The machine that answers has to be the machine that was paired with.
+///
+/// The proof already settles that whoever answered knows the device secret, so
+/// this catches the honest case rather than the adversarial one: a daemon
+/// reinstalled behind the same rendezvous holds a new identity key, and
+/// carrying on as if nothing happened would silently redefine what `--machine
+/// m_x` means.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_that_answers_with_a_different_identity_is_refused() {
+    let Some(bundle) = relay_bundle() else { return };
+    let relay = start_relay(&bundle);
+
+    let data = tempfile::tempdir().expect("a data directory for the machine");
+    let daemon = Daemon::start(Paths::new(data.path()))
+        .await
+        .expect("the machine could not be started");
+    let rendezvous = attach(&daemon, &relay.origin).await;
+
+    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let cli = Cli::new();
+    let (paired, code) = cli.run(&[
+        "machine",
+        "pair",
+        &invite.code,
+        "--endpoint",
+        &rendezvous,
+        "--name",
+        "a CLI holding a stale fingerprint",
+    ]);
+    assert_eq!(code, 0, "{paired}");
+    let machine_id = paired["data"]["machine"]["machineId"]
+        .as_str()
+        .expect("the pairing did not name the machine")
+        .to_string();
+
+    let store = cli.home().join("machines.json");
+    let mut remembered: Value = serde_json::from_str(
+        &std::fs::read_to_string(&store).expect("the pairing wrote no machine store"),
+    )
+    .expect("the machine store is not JSON");
+    remembered["machines"][0]["fingerprint"] = Value::String("AA-BB-CC-DD".into());
+    std::fs::write(&store, remembered.to_string()).expect("rewriting the machine store");
+
+    let (refused, code) = cli.run(&["session", "list", "--machine", &machine_id]);
+    assert_eq!(
+        refused["error"]["code"], "protocolIncompatible",
+        "{refused}"
+    );
+    assert_eq!(refused["error"]["retryable"], false);
+    assert_eq!(code, 3, "{refused}");
+
+    // Forgetting is the other half of the story, and it has to bite
+    // immediately: a credential dropped here must stop working here.
+    let (forgotten, code) = cli.run(&["machine", "forget", &machine_id]);
+    assert_eq!(code, 0, "{forgotten}");
+    assert_eq!(forgotten["data"]["forgotten"], true);
+    let (gone, code) = cli.run(&["session", "list", "--machine", &machine_id]);
+    assert_eq!(gone["error"]["code"], "machineNotPaired", "{gone}");
+    assert_eq!(code, 4, "{gone}");
 
     daemon.shutdown().await;
 }

@@ -213,3 +213,66 @@ async fn a_device_revoked_while_connected_stops_being_able_to_act() {
     device.close().await;
     journey.finish().await;
 }
+
+#[tokio::test]
+async fn a_device_without_a_files_grant_cannot_take_the_bytes_by_another_door() {
+    // Requests are not the only way in. `asset.preview` returns file contents
+    // over a stream of its own, so a gate that only reads the rpc envelope
+    // would leave the Files grant decorative.
+    let journey = Journey::start().await.expect("journey starts");
+    std::fs::write(
+        std::path::Path::new(&journey.workspace.root).join("secret.txt"),
+        "the bytes",
+    )
+    .expect("writing a file worth reading");
+
+    // A preview names a root handle, not a bare path: a workspace can have
+    // more than one folder and the two could both hold a `secret.txt`.
+    let asset = format!(
+        "{}/secret.txt",
+        journey
+            .workspace
+            .folders
+            .first()
+            .expect("a workspace with no folders")
+            .root_handle
+    );
+
+    let narrow = pair_granting(&journey, &["read"]).await;
+    let device = Client::connect_as_device(journey.daemon(), &narrow)
+        .await
+        .expect("a paired device connects");
+    let (head, body) = device
+        .preview(&journey.workspace.id, &asset)
+        .await
+        .expect("the stream is answered rather than hung");
+    assert_eq!(head.status, 403, "read alone bought the file bytes");
+    // Refused by the gate, before the file was ever looked for: the message
+    // names the missing grant so a narrowed caller knows to ask for it.
+    let refusal = head.error.expect("the gate refused without saying why");
+    assert!(refusal.message.contains("files"), "{refusal:?}");
+    assert!(
+        !String::from_utf8_lossy(&body).contains("the bytes"),
+        "the refusal carried the file anyway"
+    );
+    device.close().await;
+
+    // And the same door opens for a device that was given files, so the gate
+    // is refusing the grant rather than the method.
+    let allowed = pair_granting(&journey, &["read", "files"]).await;
+    let device = Client::connect_as_device(journey.daemon(), &allowed)
+        .await
+        .expect("a paired device connects");
+    let (head, body) = device
+        .preview(&journey.workspace.id, &asset)
+        .await
+        .expect("the preview is answered");
+    assert_eq!(
+        head.status, 200,
+        "files was granted and still refused: {head:?}"
+    );
+    assert_eq!(String::from_utf8_lossy(&body), "the bytes");
+    device.close().await;
+
+    journey.finish().await;
+}

@@ -320,6 +320,31 @@ impl Client {
         Ok(serde_json::from_slice(&response.body)?)
     }
 
+    /// Asks for a file's bytes the way the workbench does: a stream of its own,
+    /// not an rpc. Returns the whole response head, because a refusal by the
+    /// gate and a refusal by the preview itself share a status code and differ
+    /// only in what they say.
+    pub async fn preview(
+        &self,
+        workspace_id: &str,
+        path: &str,
+    ) -> Result<(genehub_proto::ExchangeResponseHead, Vec<u8>)> {
+        let response = tokio::time::timeout(
+            WAIT_TIMEOUT,
+            self.endpoint.exchange(
+                "asset.preview",
+                serde_json::json!({
+                    "source": { "kind": "workspaceFile", "workspaceHandle": workspace_id, "path": path }
+                }),
+                Vec::new(),
+                None,
+            ),
+        )
+        .await
+        .context("timed out waiting for a preview")??;
+        Ok((response.head, response.body))
+    }
+
     pub async fn expect_error(&self, request: Request) -> String {
         match self.call(request).await {
             Ok(reply) => panic!("expected a failure, got {reply:?}"),
