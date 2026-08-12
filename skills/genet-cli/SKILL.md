@@ -145,6 +145,8 @@ genet shell --machine srv-1 --cwd /srv/app -- /bin/sh -c 'make 2>&1 | tail -5'
 - 命令跑在某个 workspace 里，规则与 `--cwd` 那节完全一致；不在任何 workspace 里就报
   `targetNotFound`，这里**不会**顺手注册一个（注册是对那台机器的持久改动，不该是 `ls` 打错
   目录的副作用）。
+- 多 root（`.code-workspace`）按整个项目算：`--cwd` 可以落在**任意**一个文件夹里，受限执行时
+  每个文件夹都可写。一个多 root 项目不是「第一个文件夹加几个只读的旁观者」。
 - 需要的授权是 `pty`，不是另开一个名字。开终端和跑一条命令是同一种权力，凡终端能做的命令
   也能做，给它单独取个名字只会让邀请看起来比实际更窄。
 - 没有 `pty:unconfined` 的设备，命令会被关进操作系统沙箱，只看得见这个 workspace；关不住就

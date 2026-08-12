@@ -225,6 +225,84 @@ async fn a_confined_command_still_works_inside_the_workspace() {
 }
 
 #[tokio::test]
+async fn every_folder_of_a_multi_root_workspace_is_inside_the_confinement() {
+    // A `.code-workspace` is one project that happens to live in several
+    // directories. Confining only the first would leave the second readable but
+    // not writable — a shell that works until it touches the other half, and
+    // the report would still say "confined".
+    let journey = Journey::start().await.expect("journey starts");
+    if !genet_daemon::isolation::report().enforced {
+        eprintln!("skipping: this machine cannot confine a process");
+        return;
+    }
+    let home = std::path::Path::new(&journey.workspace.root)
+        .parent()
+        .expect("the workspace has a parent")
+        .to_path_buf();
+    let product = home.join("product");
+    let docs = home.join("docs");
+    let elsewhere = home.join("elsewhere");
+    for directory in [&product, &docs, &elsewhere] {
+        std::fs::create_dir_all(directory).expect("a directory");
+    }
+    std::fs::write(elsewhere.join("secret.txt"), "OUT-OF-BOUNDS").expect("a file next door");
+    let definition = home.join("suite.code-workspace");
+    std::fs::write(
+        &definition,
+        r#"{ "folders": [{ "path": "product" }, { "path": "docs" }] }"#,
+    )
+    .expect("a workspace file");
+    let suite = journey
+        .daemon()
+        .state
+        .workspaces
+        .open(&definition, None)
+        .await
+        .expect("the machine opens the multi-root workspace");
+    assert_eq!(suite.folders.len(), 2, "the fixture is not multi-root");
+
+    let credential = pair_granting(&journey, &["read", "pty"]).await;
+    let device = Client::connect_as_device(journey.daemon(), &credential)
+        .await
+        .expect("a paired device connects");
+
+    // The second folder is writable, which is the part a single-root
+    // confinement would silently get wrong.
+    let mut request = ask(
+        &suite.id,
+        &["/bin/sh", "-c", "echo written > note.txt && cat note.txt"],
+    );
+    request.cwd = Some(docs.to_string_lossy().into_owned());
+    let (head, frames) = device
+        .run_command(request)
+        .await
+        .expect("the machine answers");
+    assert_eq!(head.status, 200, "{head:?}");
+    assert!(
+        text(&frames, "stdout").contains("written"),
+        "the second folder was not writable inside the confinement: {frames:?}"
+    );
+    assert_eq!(exit(&frames), Some((Some(0), None)));
+    assert!(docs.join("note.txt").exists(), "the write went nowhere");
+
+    // And the confinement is still a confinement: a sibling directory that is
+    // not one of the folders stays out of reach.
+    let (_, frames) = device
+        .run_command(ask(
+            &suite.id,
+            &["/bin/cat", &elsewhere.join("secret.txt").to_string_lossy()],
+        ))
+        .await
+        .expect("the machine answers");
+    assert!(
+        !text(&frames, "stdout").contains("OUT-OF-BOUNDS"),
+        "a third directory came along with the two that were named: {frames:?}"
+    );
+    device.close().await;
+    journey.finish().await;
+}
+
+#[tokio::test]
 async fn a_directory_outside_the_workspace_is_refused_rather_than_clamped() {
     let journey = Journey::start().await.expect("journey starts");
     let mut request = ask(&journey.workspace.id, &["/bin/pwd"]);
