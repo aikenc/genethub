@@ -102,6 +102,20 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_omit_an_absent_categorical_code() {
+        let event = SupportDiagnosticEvent {
+            at: "2026-08-12T00:00:00.000Z".into(),
+            component: "daemon".into(),
+            operation: "lifecycle".into(),
+            outcome: "started".into(),
+            code: None,
+            count: 1,
+        };
+        let encoded = serde_json::to_value(event).expect("serialize diagnostic event");
+        assert_eq!(encoded.get("code"), None, "None must be absent, not null");
+    }
+
+    #[test]
     fn fork_target_survives_the_wire() {
         round_trip(Request::SessionFork {
             session_id: "source".into(),

@@ -949,6 +949,7 @@ pub struct SupportDiagnosticEvent {
     pub operation: String,
     pub outcome: String,
     #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     /// Consecutive identical events are coalesced so a reconnect loop cannot
     /// evict every earlier clue from the bounded record.
