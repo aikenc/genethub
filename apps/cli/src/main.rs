@@ -13,6 +13,7 @@ mod machine;
 mod machines;
 mod output;
 mod place;
+mod process;
 mod query;
 mod rpc;
 mod shell;
@@ -89,6 +90,7 @@ async fn run(args: Vec<String>) {
         },
         Some("agent") => converse::agent(&args[1..], &selection).await,
         Some("shell") => shell::shell(&args[1..], &selection).await,
+        Some("process") => process::process(&args[1..], &selection).await,
         Some("machine") => machine::machine(&args[1..]).await,
         Some("device") => machine::device(&args[1..], &selection).await,
         Some("daemon") => control::daemon(&args[1..]).await,
@@ -132,9 +134,16 @@ pub fn usage() -> i32 {
   genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>]
                                     start a session and stream it as JSON Lines
   genet <agentId> \"<prompt>\" [...]   the same thing, spelled shorter
-  genet shell [--workspace <id>] --cwd <dir> -- <command> [args...]
+  genet shell [--workspace <id>] --cwd <dir> [--env NAME=VALUE]... [--timeout <s>]
+              [--max-output <bytes>] -- <command> [args...]
                                     run one command in a workspace and stream
-                                    stdout and stderr apart as JSON Lines
+                                    stdout and stderr apart as JSON Lines;
+                                    anything piped in becomes its stdin
+  genet process list                what the agents there left running
+  genet process kill <pid> [--session <id>]
+                                    end one of them, and what it started
+  genet process kill-all --session <id>
+                                    end everything one conversation left
   genet session send <id> \"<text>\"  continue a session
   genet session respond <id> --request <rid> --choose <optionId>
                                     answer what a waiting session asked

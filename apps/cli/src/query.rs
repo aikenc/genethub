@@ -16,11 +16,14 @@ use crate::output::{self, CliFailure, CLI_SCHEMA};
 use crate::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use crate::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 28] = [
+const COMMAND_NAMES: [&str; 31] = [
     "schema",
     "context",
     "capabilities",
     "shell",
+    "process.list",
+    "process.kill",
+    "process.killAll",
     "workspace.list",
     "workspace.show",
     "session.list",
@@ -50,13 +53,17 @@ const COMMAND_NAMES: [&str; 28] = [
 /// The capability vocabulary a machine grants a device, named here so `genet
 /// schema` can offer it as an enum rather than leaving an agent to discover the
 /// spelling by being refused.
-const GRANTS: [&str; 9] = [
+const GRANTS: [&str; 10] = [
     "handshake",
     "read",
     "session",
     "files",
     "git",
     "pty",
+    // Named even though it is rarely granted: an agent that needs it can only
+    // discover the spelling here, and one that guesses gets refused with no
+    // hint that the grant it wanted exists.
+    "pty:unconfined",
     "devices",
     "settings",
     "update",
@@ -69,6 +76,8 @@ fn mutates(name: &str) -> bool {
     matches!(
         name,
         "shell"
+            | "process.kill"
+            | "process.killAll"
             | "agent.run"
             | "session.send"
             | "session.respond"
@@ -967,7 +976,8 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "shell" => (
-            "genet shell [--workspace <id> | --cwd <dir>] [--machine <id>] -- <command> [args...]",
+            "genet shell [--workspace <id> | --cwd <dir>] [--machine <id>] [--env NAME=VALUE]... \
+             [--timeout <s>] [--max-output <bytes>] -- <command> [args...]",
             true,
             object_input(
                 json!({
@@ -979,8 +989,63 @@ fn command_schema(name: &str) -> Value {
                                      so nothing in it can become a second command",
                     },
                     "workspaceId": {"type": ["string", "null"], "minLength": 1},
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "$comment": "added to the machine's environment, overriding it name by \
+                                     name; there is no way to ask for a cleared one",
+                    },
+                    "timeout": {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "$comment": "seconds; absent means the command may run indefinitely, so a \
+                                     caller that cannot interrupt it should say a number",
+                    },
+                    "maxOutput": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": crate::shell::DEFAULT_MAX_OUTPUT_BYTES,
+                        "$comment": "bytes of output to repeat; past it the middle is dropped and \
+                                     a shell.truncated record says how much, 0 means all of it",
+                    },
+                    "stdin": {
+                        "type": "string",
+                        "$comment": "not an option: whatever is piped into this process is sent as \
+                                     the command's standard input, and a terminal is not read \
+                                     from. Input that has to depend on the command's output is a \
+                                     terminal's job, not this one's",
+                    },
                 }),
                 &["argv"],
+            ),
+        ),
+        "process.list" => (
+            "genet process list [--machine <id>]",
+            true,
+            object_input(json!({}), &[]),
+        ),
+        "process.kill" => (
+            "genet process kill <pid> [--session <id>] [--machine <id>]",
+            true,
+            object_input(
+                json!({
+                    "pid": {"type": "integer", "minimum": 1},
+                    "sessionId": {
+                        "type": ["string", "null"],
+                        "minLength": 1,
+                        "$comment": "looked up from the list when absent; the machine will only \
+                                     end a process the named session is answerable for",
+                    },
+                }),
+                &["pid"],
+            ),
+        ),
+        "process.killAll" => (
+            "genet process kill-all --session <id> [--machine <id>]",
+            true,
+            object_input(
+                json!({"sessionId": {"type": "string", "minLength": 1}}),
+                &["sessionId"],
             ),
         ),
         "agent.list" => ("genet agent list", true, object_input(json!({}), &[])),
@@ -1179,11 +1244,28 @@ fn command_output() -> Value {
         "required": ["schema", "type"],
         "properties": {
             "schema": {"const": CLI_SCHEMA},
-            "type": {"enum": ["shell.started", "shell.output", "shell.exit", "error"]},
+            "type": {
+                "enum": [
+                    "shell.started",
+                    "shell.output",
+                    "shell.truncated",
+                    "shell.exit",
+                    "error",
+                ],
+            },
         },
         "x-terminalTypes": ["shell.exit", "error"],
         "x-streams": ["stdout", "stderr"],
         "x-exitCode": "shell.exit.data.exitCode, not the exit code of this process",
+        "x-timedOut": "shell.exit.data.timedOut: the command was ended because it \
+                       reached --timeout rather than because it finished. Its exit \
+                       code is the one for being killed, which on its own would not \
+                       tell you that retrying with more time is the sensible thing.",
+        "x-truncated": "shell.truncated, if present, means the output did not fit in \
+                        --max-output: the records before it are the beginning and the \
+                        ones after it are the end, and droppedBytes is what was in \
+                        between. The kept end arrives after this record rather than \
+                        in its place in the stream.",
         "x-confinement": "shell.started.data.confinement: null, or the backend and \
                           the roots the command can reach. Read every missing path \
                           outside those roots as out of bounds, not as absent: with \
@@ -1393,7 +1475,7 @@ pub fn unexpected_reply(expected: &str, actual: &Reply) -> CliFailure {
     ))
 }
 
-fn reply_kind(reply: &Reply) -> &'static str {
+pub fn reply_kind(reply: &Reply) -> &'static str {
     match reply {
         Reply::Hello(_) => "hello",
         Reply::Subscribed { .. } => "subscribed",
@@ -1429,6 +1511,7 @@ fn reply_kind(reply: &Reply) -> &'static str {
         Reply::GitDiff { .. } => "git diff",
         Reply::GitCommit { .. } => "git commit",
         Reply::Pty { .. } => "pty",
+        Reply::Processes(_) => "background processes",
         Reply::Ack => "ack",
     }
 }

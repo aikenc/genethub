@@ -69,6 +69,13 @@ async fn a_device_gets_what_its_invitation_named_and_nothing_else() {
             rows: Some(24),
         },
         Request::SettingsGet,
+        // Ending what an agent left running is part of driving the session
+        // that started it, so a device that may not drive one may not do this
+        // either.
+        Request::ProcessList,
+        Request::ProcessKillAll {
+            session_id: "s_any".into(),
+        },
         // Including the one that would undo the narrowing: a device that can
         // mint itself a wider invitation was never narrowed at all.
         Request::DeviceInvite(None),

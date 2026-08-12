@@ -220,7 +220,7 @@ async fn initialize(program: &std::path::Path) -> Option<Value> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    super::without_a_window(&mut command);
+    super::owned_child(&mut command);
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -558,7 +558,7 @@ impl AgentAdapter for ClaudeAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        super::without_a_window(&mut command);
+        super::owned_child(&mut command);
 
         // A session created earlier and resumed now (or one whose mode was set
         // before its first prompt lazily started the process — see

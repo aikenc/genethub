@@ -27,6 +27,23 @@ export type Attachment = { name: string, mime: string, path?: string,
  */
 dataBase64?: string, };
 
+/**
+ * A process an agent started and did not stop.
+ *
+ * Assembled from what the operating system says rather than from what was
+ * recorded when it started, because we did not start it — the agent did, and
+ * what it started is only visible from the outside.
+ */
+export type BackgroundProcess = { 
+/**
+ * The conversation whose agent is answerable for this.
+ */
+sessionId: string, pid: number, parentPid: number, 
+/**
+ * The full command line, as the operating system reports it.
+ */
+command: string, runningForSeconds: number, };
+
 export type BlobKind = "reasoning" | "toolCall";
 
 /**
@@ -541,7 +558,7 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -609,7 +626,7 @@ name: string | null, } } | { "type": "update.check" } | { "type": "update.downlo
 /**
  * Empty means "everything currently changed".
  */
-paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } };
+paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } } | { "type": "process.list" } | { "type": "process.kill", "payload": { sessionId: string, pid: number, } } | { "type": "process.killAll", "payload": { sessionId: string, } };
 
 /**
  * Whether text outside the retained GeneHub window can be read again.
@@ -670,7 +687,7 @@ export type SequencedEvent = { seq: number, sessionId: string, event: SessionEve
 /**
  * Anything the daemon sends to a client.
  */
-export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "desync", sessionId: string, missed: number, };
+export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "processes", processes: Array<BackgroundProcess>, } | { "type": "desync", sessionId: string, missed: number, };
 
 /**
  * Deterministic, model-free context projection used directly by Agents and
@@ -816,7 +833,18 @@ export type ShellFrame = { "type": "stdout", data: string, } | { "type": "stderr
  * Absent when a signal ended the process, which is the one case where
  * there is no exit status to report.
  */
-code?: number, signal?: number, };
+code?: number, signal?: number, 
+/**
+ * Whether the command was ended because it ran out of time rather
+ * than because it finished.
+ *
+ * Not inferable from the rest: a command ended this way reports
+ * exactly what one killed for any other reason reports, and "killed
+ * by SIGKILL" would leave the caller to guess between "it hung" and
+ * "somebody stopped it". The difference decides whether retrying with
+ * a longer limit is sensible.
+ */
+timed_out: boolean, };
 
 /**
  * What to run on a machine, and where.
@@ -825,12 +853,39 @@ code?: number, signal?: number, };
  * nothing in it can turn into a second command. A caller that wants a shell's
  * help says so out loud with `["bash", "-lc", "..."]`, and that is then
  * visibly a shell rather than something that became one by quoting.
+ * The request body, if there is one, is the command's standard input. It is
+ * sent whole rather than as it is typed, because a single exchange cannot
+ * carry a conversation: a command that reads, prints a question and reads
+ * again needs the answer to depend on the question, and that is a terminal
+ * (`pty.open`), not this. What this covers is the input that was already
+ * decided before the command started — a patch, a here-document, the output
+ * of something else in a pipeline.
  */
 export type ShellRunRequest = { workspaceId: string, argv: Array<string>, 
 /**
  * Somewhere inside the workspace. Absent means its root.
  */
-cwd?: string, };
+cwd?: string, 
+/**
+ * Added to the environment the daemon runs with, overriding it name by
+ * name.
+ *
+ * Additions only: there is no way to ask for a cleared environment. A
+ * command that loses `PATH` and `HOME` fails in ways that look like the
+ * machine is broken, and this grants no authority that choosing the argv
+ * did not already grant — the caller could have run `env FOO=bar ...`
+ * itself.
+ */
+env: { [key in string]?: string }, 
+/**
+ * How long the command may run before it is ended, in milliseconds.
+ *
+ * Absent means no limit, which is not what a one-shot tool call would
+ * choose but is right here: this streams, so the caller sees the output
+ * as it arrives and can stop the command by going away. A caller that
+ * cannot wait — an agent, which has no way to press Ctrl-C — says so.
+ */
+timeoutMs?: bigint, };
 
 /**
  * One entry in a session's timeline.

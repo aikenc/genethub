@@ -34,10 +34,26 @@ const READ_CHUNK: usize = 16 * 1024;
 /// than growing a buffer in this process.
 const FRAME_QUEUE: usize = 64;
 
+/// How long output may stay quiet after the command has exited before the
+/// last of it is declared to have arrived. Rearmed by every frame, so a
+/// descendant that is still saying something keeps its turn; one that is
+/// merely holding the pipe open does not.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How much standard input a command may be given.
+///
+/// Generous for the things this is for — a patch, a document, a list of paths
+/// — and far short of the point where sending input through a request stops
+/// being the sensible way to hand a command its data. Past this, write a file
+/// and name it.
+const MAX_STDIN_BYTES: usize = 1024 * 1024;
+
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
-    if !stream.read_body(0).await?.is_empty() {
-        anyhow::bail!("shell.run accepts no request body");
-    }
+    // Whatever the caller sent is the command's standard input. Read before
+    // anything is spawned, because the command must not start until its input
+    // is known — a reader that reaches end-of-file early gets a different and
+    // wrong answer.
+    let stdin = stream.read_body(MAX_STDIN_BYTES).await?;
     let request: ShellRunRequest = match serde_json::from_value(stream.head.metadata.clone()) {
         Ok(request) => request,
         Err(error) => {
@@ -120,33 +136,27 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         }
     };
 
-    let mut command = match &confinement {
-        None => {
-            let mut command = tokio::process::Command::new(program);
-            command.args(arguments);
-            command
-        }
-        Some(policy) => {
-            let argv = policy.wrap(std::path::Path::new(program))?;
-            let (helper, wrapper_arguments) = argv
-                .split_first()
-                .context("the confinement wrapper has no command")?;
-            let mut command = tokio::process::Command::new(helper);
-            command.args(wrapper_arguments).args(arguments);
-            command
-        }
-    };
+    let argv = crate::process::launch_argv(program, confinement.as_ref())?;
+    let mut command = crate::process::command(&argv, arguments, &cwd);
     command
-        .current_dir(&cwd)
-        .stdin(std::process::Stdio::null())
+        .envs(&request.env)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        // The command belongs to the request that asked for it. If this task
-        // goes away — the peer disconnected, the endpoint tore down — the
-        // process must not outlive the only thing that was watching it.
-        .kill_on_drop(true);
+        .stderr(std::process::Stdio::piped());
+    // A pipe only when there is something to put in it. An empty pipe and
+    // `/dev/null` both read as end-of-file, so the difference is invisible to
+    // the command — but a pipe is one more thing to hold open and close in
+    // order, and there is no reason to arrange that for nothing.
+    if stdin.is_empty() {
+        command.stdin(std::process::Stdio::null());
+    } else {
+        command.stdin(std::process::Stdio::piped());
+    }
 
-    let mut child = match command.spawn() {
+    // The command belongs to the request that asked for it, and so does
+    // everything it starts. If this task goes away — the peer disconnected,
+    // the endpoint tore down — none of it may outlive the only thing that was
+    // watching it (`process.rs`).
+    let mut child = match crate::process::Group::spawn(&mut command) {
         Ok(child) => child,
         Err(error) => {
             let (status, code) = if error.kind() == std::io::ErrorKind::NotFound {
@@ -175,28 +185,96 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         })
         .await?;
 
+    // Written from a task rather than here, because a command that reads none
+    // of its input — `head -1` on something large — leaves the pipe full and
+    // the write unfinished, and this side has output to be getting on with.
+    // The handle is dropped when the write ends, which is what tells the
+    // command its input is complete.
+    if let Some(mut sink) = child.stdin() {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            // Both failures mean the same thing and neither is ours to report:
+            // the command stopped reading, which it is allowed to do.
+            let _ = sink.write_all(&stdin).await;
+            let _ = sink.shutdown().await;
+        });
+    }
+
     let (sender, mut frames) = mpsc::channel(FRAME_QUEUE);
     let mut readers = tokio::task::JoinSet::new();
-    if let Some(stdout) = child.stdout.take() {
+    if let Some(stdout) = child.stdout() {
         readers.spawn(pump(stdout, sender.clone(), |data| ShellFrame::Stdout {
             data,
         }));
     }
-    if let Some(stderr) = child.stderr.take() {
+    if let Some(stderr) = child.stderr() {
         readers.spawn(pump(stderr, sender.clone(), |data| ShellFrame::Stderr {
             data,
         }));
     }
-    // Both readers hold a clone; the loop below ends when the last one is
-    // dropped, which is the same moment the process has stopped writing.
+    // Both readers hold a clone, so the channel closes when the last of them
+    // sees end-of-file.
     drop(sender);
-    while let Some(frame) = frames.recv().await {
+
+    // Absent means no limit: an open-ended command is a legitimate thing to
+    // ask for over a stream the caller can walk away from.
+    let deadline = request.timeout_ms.map(|milliseconds| {
+        tokio::time::Instant::now() + std::time::Duration::from_millis(milliseconds)
+    });
+    let mut timed_out = false;
+
+    // Whichever comes first. Waiting for end-of-file before asking for the
+    // exit status would be waiting for the wrong thing: a command that leaves
+    // something behind — `sleep 30 &` — has handed its stdout to a process
+    // that outlives it, and the pipe stays open long after there is an exit
+    // status to report.
+    let status = loop {
+        tokio::select! {
+            frame = frames.recv() => match frame {
+                Some(frame) => stream.write_message(&frame).await?,
+                None => break Some(child.wait().await.context("waiting for the command")?),
+            },
+            status = child.wait() => break Some(status.context("waiting for the command")?),
+            () = sleep_until(deadline) => {
+                timed_out = true;
+                tracing::info!(
+                    milliseconds = request.timeout_ms,
+                    argv = ?request.argv,
+                    "a command ran out of time and was ended",
+                );
+                // Asked to finish before being made to, so that a command
+                // interrupted this way still gets to leave the workspace in a
+                // sane state — a half-written file is a worse outcome than a
+                // slow one.
+                break child.end().await;
+            }
+        }
+    };
+
+    // The command is over; what it wrote may not have arrived yet. Drain until
+    // the output falls quiet rather than until the pipe closes, because the
+    // thing still holding the pipe is exactly the thing that is not going to
+    // close it.
+    while let Ok(Some(frame)) = tokio::time::timeout(SETTLE, frames.recv()).await {
         stream.write_message(&frame).await?;
     }
 
-    let status = child.wait().await.context("waiting for the command")?;
-    stream.write_message(&exit_frame(&status)).await?;
+    stream
+        .write_message(&exit_frame(status.as_ref(), timed_out))
+        .await?;
     stream.finish().await
+}
+
+/// A deadline that may not exist, as something a `select!` arm can wait on.
+///
+/// The alternative is a guard on the arm plus an unwrap inside it, which is
+/// the same thing written so that the absent case is a panic waiting to be
+/// introduced.
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn pump<R>(
@@ -223,16 +301,20 @@ async fn pump<R>(
     }
 }
 
-fn exit_frame(status: &std::process::ExitStatus) -> ShellFrame {
+/// The last word on a command. `None` where the operating system could not be
+/// asked how it ended, which happens only after it has already been stopped —
+/// so there is still an answer to give, just a less specific one.
+fn exit_frame(status: Option<&std::process::ExitStatus>, timed_out: bool) -> ShellFrame {
     #[cfg(unix)]
     let signal = {
         use std::os::unix::process::ExitStatusExt;
-        status.signal()
+        status.and_then(ExitStatusExt::signal)
     };
     #[cfg(not(unix))]
     let signal = None;
     ShellFrame::Exit {
-        code: status.code(),
+        code: status.and_then(|status| status.code()),
         signal,
+        timed_out,
     }
 }

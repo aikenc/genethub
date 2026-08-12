@@ -156,7 +156,7 @@ impl AgentAdapter for AcpAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        super::without_a_window(&mut command);
+        super::owned_child(&mut command);
 
         let mut child = command
             .spawn()
@@ -325,7 +325,7 @@ impl AcpImportProbe {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        super::without_a_window(&mut spawn);
+        super::owned_child(&mut spawn);
         let mut child = spawn
             .spawn()
             .context("spawning ACP agent for session import")?;
@@ -735,6 +735,14 @@ impl AgentSession for AcpSession {
         .await
     }
 
+    async fn pid(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|child| child.id())
+    }
+
     async fn close(&self) -> Result<()> {
         let mut child = self.child.lock().await;
         if let Some(mut child) = child.take() {
@@ -810,7 +818,7 @@ async fn discover(program: &Path, command: &[String]) -> Option<Hello> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    super::without_a_window(&mut spawn);
+    super::owned_child(&mut spawn);
 
     let mut child = match spawn.spawn() {
         Ok(child) => child,

@@ -29,6 +29,8 @@ pub struct AppState {
     pub sessions: SessionManager,
     pub workspaces: Workspaces,
     pub terminals: Arc<Terminals>,
+    /// What each session's agent has left running.
+    pub processes: Arc<crate::processes::Processes>,
     pub version: String,
     /// Owner-only token used to mint loopback control proofs.
     pub token: String,
@@ -130,6 +132,7 @@ impl AppState {
             }
         }
 
+        let processes = sessions.processes();
         let (terminals, pty_rx) = Terminals::new();
         let updates_dir = paths.updates_dir();
 
@@ -142,6 +145,7 @@ impl AppState {
             sessions,
             workspaces,
             terminals,
+            processes,
             version: env!("CARGO_PKG_VERSION").to_string(),
             token: uuid::Uuid::new_v4().simple().to_string(),
             devices,

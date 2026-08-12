@@ -325,6 +325,14 @@ pub fn required(request: &Request) -> Capability {
         | Request::PtyResize { .. }
         | Request::PtyClose { .. } => Capability::Pty,
 
+        // Seeing and ending what a session's agent left running is part of
+        // driving that session, not a separate power: whoever may send a turn
+        // may already start these processes, so withholding the ability to
+        // stop them would only mean they accumulate.
+        Request::ProcessList | Request::ProcessKill { .. } | Request::ProcessKillAll { .. } => {
+            Capability::Session
+        }
+
         // Opening or removing a workspace changes what this machine exposes at
         // all, so it sits with the other configuration changes rather than with
         // reading one.

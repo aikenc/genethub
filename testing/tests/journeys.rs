@@ -1044,6 +1044,45 @@ async fn changes_made_by_the_agent_show_up_in_git_and_can_be_committed() {
 }
 
 #[tokio::test]
+async fn what_an_agent_left_running_is_answerable_to_the_session_that_started_it() {
+    // The daemon only ends a process the named session is currently
+    // answerable for. Nothing has been started here, so every pid is somebody
+    // else's — including the ones that certainly exist, which is the point: a
+    // pid is a small integer anyone can name.
+    let journey = Journey::start().await.expect("journey starts");
+
+    let listed = match journey.client.call(Request::ProcessList).await.unwrap() {
+        Reply::Processes(processes) => processes,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert!(
+        listed.is_empty(),
+        "nothing has been started yet: {listed:?}"
+    );
+
+    let refused = journey
+        .client
+        .expect_error(Request::ProcessKill {
+            session_id: "s_nobody".into(),
+            pid: 1,
+        })
+        .await;
+    assert!(refused.contains("NotFound"), "{refused}");
+
+    // Asking a session with nothing to end is not an error. The caller wanted
+    // none of them running, and none of them are.
+    journey
+        .client
+        .call(Request::ProcessKillAll {
+            session_id: "s_nobody".into(),
+        })
+        .await
+        .expect("clearing nothing succeeds");
+
+    journey.finish().await;
+}
+
+#[tokio::test]
 async fn files_can_be_browsed_and_edited_through_the_workspace() {
     let journey = Journey::start().await.expect("journey starts");
     let root_handle = &journey.workspace.folders[0].root_handle;

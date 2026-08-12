@@ -151,6 +151,17 @@ pub trait AgentSession: Send + Sync {
     async fn set_model(&self, model_id: &str) -> Result<()>;
     async fn set_mode(&self, mode_id: &str) -> Result<()>;
 
+    /// The agent's own process, when it has one.
+    ///
+    /// Not for controlling it — that is what `close` is for — but for finding
+    /// what it started. An agent runs commands, and the ones still running
+    /// when it goes quiet are reachable only through the process it runs as
+    /// (`crate::processes`). `None` from an agent that is not a local process
+    /// simply means there is nothing of that kind to find.
+    async fn pid(&self) -> Option<u32> {
+        None
+    }
+
     /// Creates a genuinely independent Agent context through a completed turn.
     /// The checkpoint is opaque to the session kernel and came from this same
     /// adapter when that turn completed.
@@ -301,6 +312,19 @@ async fn exit_code(child: &Mutex<Option<tokio::process::Child>>) -> Option<i32> 
     None
 }
 
+/// Prepares a child process this daemon is answerable for.
+///
+/// Two unrelated-looking things, always wanted together, because they are the
+/// same requirement seen from two platforms: what we start must not surprise
+/// the person at the machine, and must not survive us. On Windows that means
+/// no console window; everywhere it means a process group of our own, so that
+/// ending the agent ends what the agent started rather than orphaning a
+/// language server or a dev server onto init (`crate::process`).
+pub fn owned_child(command: &mut tokio::process::Command) {
+    without_a_window(command);
+    crate::process::own_group(command);
+}
+
 /// Starts a child process without giving it a console window.
 ///
 /// Every agent here is a console program, and on Windows starting one from a GUI
@@ -338,7 +362,16 @@ pub(super) fn append_system_prompt_arg(
 /// `cmd.exe` and the agent itself is its child. Killing what we hold leaves the
 /// real thing running — a language server or an HTTP server with an open port,
 /// once per session, for as long as the machine is up.
+///
+/// The same was true on every other platform, for a better-hidden reason: an
+/// agent is a thing that runs commands, so the interesting processes are never
+/// the one we hold. They are reachable because the agent was started in a
+/// process group of its own (`crate::process::own_group`).
 pub async fn kill_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        crate::process::stop_tree(pid);
+    }
     #[cfg(windows)]
     if let Some(pid) = child.id() {
         // `/T` is the whole point: the tree, not the shim. Failure is not worth
@@ -433,18 +466,28 @@ mod tests {
         assert!(message.contains("日志"), "nowhere to look next: {message}");
     }
 
-    /// Windows-only behaviour that Linux CI cannot exercise, guarded at the source
-    /// level instead: an agent started without this flag opens a console window on
-    /// every session, and the person who sees it is not the person who can run a
-    /// test for it.
+    /// Guarded at the source level because half of what is being guarded
+    /// cannot be exercised here: an agent started without the flag opens a
+    /// console window on every session, and the person who sees that is on
+    /// Windows and is not the person who can run a test for it.
+    ///
+    /// The second assertion is the one that will earn its keep. Calling
+    /// `without_a_window` directly still passes a naive check for "was this
+    /// spawn prepared", while quietly skipping the process group — and the
+    /// symptom of that, a language server left running after a session ends,
+    /// shows up nowhere near the line that caused it.
     #[test]
-    fn every_agent_is_started_without_a_console_window() {
+    fn every_agent_is_started_as_a_child_this_daemon_can_account_for() {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
         for file in ["claude.rs", "codex.rs", "opencode.rs", "acp.rs", "genet.rs"] {
             let source = std::fs::read_to_string(here.join(file)).expect("read the adapter");
             assert!(
-                source.contains("without_a_window"),
-                "{file} starts a program without suppressing its console window"
+                source.contains("owned_child"),
+                "{file} starts a program without preparing it to be owned"
+            );
+            assert!(
+                !source.contains("without_a_window"),
+                "{file} suppresses the console window but skips the process group"
             );
         }
     }

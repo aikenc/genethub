@@ -48,6 +48,8 @@ fn ask(workspace_id: &str, argv: &[&str]) -> ShellRunRequest {
         workspace_id: workspace_id.to_string(),
         argv: argv.iter().map(|word| (*word).to_string()).collect(),
         cwd: None,
+        env: Default::default(),
+        timeout_ms: None,
     }
 }
 
@@ -65,7 +67,7 @@ fn text(frames: &[ShellFrame], stream: &str) -> String {
 
 fn exit(frames: &[ShellFrame]) -> Option<(Option<i32>, Option<i32>)> {
     frames.iter().find_map(|frame| match frame {
-        ShellFrame::Exit { code, signal } => Some((*code, *signal)),
+        ShellFrame::Exit { code, signal, .. } => Some((*code, *signal)),
         _ => None,
     })
 }
@@ -403,6 +405,196 @@ async fn every_folder_of_a_multi_root_workspace_is_inside_the_confinement() {
 }
 
 #[tokio::test]
+async fn a_command_that_leaves_something_behind_still_reports_when_it_finished() {
+    // The mirror image of the stray-process problem, in the same place. The
+    // shell here exits immediately, but the `sleep` it started inherited its
+    // stdout and holds the pipe open for a minute. Reading to end-of-file
+    // before reporting the status would report this command as taking a
+    // minute, and a caller waiting on `cargo build` would have no way to tell
+    // that from a slow build.
+    let journey = Journey::start().await.expect("journey starts");
+    let started = std::time::Instant::now();
+    let (head, frames) = tokio::time::timeout(
+        Duration::from_secs(20),
+        journey.client.run_command(ask(
+            &journey.workspace.id,
+            &["/bin/sh", "-c", "sleep 60 & echo done; exit 7"],
+        )),
+    )
+    .await
+    .expect("the command must not wait for what it left behind")
+    .expect("the machine answers");
+
+    assert_eq!(head.status, 200, "{head:?}");
+    assert_eq!(exit(&frames), Some((Some(7), None)));
+    assert!(
+        text(&frames, "stdout").contains("done"),
+        "output written before the exit must still arrive: {frames:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the answer waited for the descendant rather than the command"
+    );
+    journey.finish().await;
+}
+
+#[tokio::test]
+async fn a_command_is_given_what_was_piped_to_it() {
+    // The thing that makes this more than a nicety: a command that reads is
+    // the only way to hand a machine data that is not a file yet. Without it
+    // an agent has to write the data somewhere first, which means choosing a
+    // path in somebody's workspace and remembering to remove it.
+    let journey = Journey::start().await.expect("journey starts");
+    let (head, frames) = journey
+        .client
+        .run_command_with_input(
+            ask(&journey.workspace.id, &["/bin/cat"]),
+            b"the-input".to_vec(),
+        )
+        .await
+        .expect("the machine answers");
+
+    assert_eq!(head.status, 200, "{head:?}");
+    assert_eq!(text(&frames, "stdout"), "the-input");
+    assert_eq!(exit(&frames), Some((Some(0), None)));
+    journey.finish().await;
+}
+
+#[tokio::test]
+async fn a_command_given_nothing_reads_end_of_file_rather_than_waiting() {
+    // The failure this rules out is the worst kind: a command that reads
+    // standard input, is given none, and waits forever for input nobody is
+    // going to send. It has to see the end of its input immediately.
+    let journey = Journey::start().await.expect("journey starts");
+    let (_, frames) = tokio::time::timeout(
+        Duration::from_secs(20),
+        journey
+            .client
+            .run_command(ask(&journey.workspace.id, &["/bin/cat"])),
+    )
+    .await
+    .expect("a command with no input must not wait for any")
+    .expect("the machine answers");
+
+    assert_eq!(text(&frames, "stdout"), "");
+    assert_eq!(exit(&frames), Some((Some(0), None)));
+    journey.finish().await;
+}
+
+#[tokio::test]
+async fn a_command_runs_with_the_environment_it_was_given() {
+    let journey = Journey::start().await.expect("journey starts");
+    let mut request = ask(&journey.workspace.id, &["/bin/sh", "-c", "echo $MARKER"]);
+    request.env.insert("MARKER".into(), "set-by-caller".into());
+
+    let (_, frames) = journey
+        .client
+        .run_command(request)
+        .await
+        .expect("the machine answers");
+    assert!(
+        text(&frames, "stdout").contains("set-by-caller"),
+        "the environment did not reach the command: {frames:?}"
+    );
+    journey.finish().await;
+}
+
+#[tokio::test]
+async fn a_command_that_runs_out_of_time_is_ended_and_says_so() {
+    // Two things are being checked, and the second is the one that is easy to
+    // leave out. Ending it is not enough: a command killed for running long
+    // reports exactly what a command killed for any other reason reports, so
+    // without a word for it the caller cannot tell "it hung" from "somebody
+    // stopped it" — and only one of those is worth retrying with more time.
+    let journey = Journey::start().await.expect("journey starts");
+    let mut request = ask(&journey.workspace.id, &["/bin/sleep", "60"]);
+    request.timeout_ms = Some(500);
+
+    let started = std::time::Instant::now();
+    let (head, frames) =
+        tokio::time::timeout(Duration::from_secs(20), journey.client.run_command(request))
+            .await
+            .expect("a command with a limit must be ended at it")
+            .expect("the machine answers");
+
+    assert_eq!(head.status, 200, "{head:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "the limit was not enforced"
+    );
+    let timed_out = frames.iter().any(|frame| {
+        matches!(
+            frame,
+            ShellFrame::Exit {
+                timed_out: true,
+                ..
+            }
+        )
+    });
+    assert!(
+        timed_out,
+        "the command was ended without saying why: {frames:?}"
+    );
+    journey.finish().await;
+}
+
+#[tokio::test]
+async fn a_command_that_finishes_within_its_limit_is_left_alone() {
+    // The other half. A limit that also ends the commands that met it would be
+    // worse than none, and this is the case a timeout bug hides in.
+    let journey = Journey::start().await.expect("journey starts");
+    let mut request = ask(&journey.workspace.id, &["/bin/echo", "quick"]);
+    request.timeout_ms = Some(30_000);
+
+    let (_, frames) = journey
+        .client
+        .run_command(request)
+        .await
+        .expect("the machine answers");
+    assert!(text(&frames, "stdout").contains("quick"));
+    assert_eq!(exit(&frames), Some((Some(0), None)));
+    assert!(
+        !frames.iter().any(|frame| matches!(
+            frame,
+            ShellFrame::Exit {
+                timed_out: true,
+                ..
+            }
+        )),
+        "a command that finished in time was reported as having run out: {frames:?}"
+    );
+    journey.finish().await;
+}
+
+#[tokio::test]
+async fn a_command_ended_for_running_long_is_asked_before_it_is_made_to() {
+    // Being out of time is not a reason to lose the work. A process killed
+    // outright never runs its cleanup, which for anything holding a file open
+    // means whatever it was mid-way through writing stays mid-way. The proof
+    // has to come from inside the command's own handler, so it traps the
+    // request and writes a file from it.
+    let journey = Journey::start().await.expect("journey starts");
+    let marker = std::path::Path::new(&journey.workspace.root).join("tidied-up.txt");
+    let script = format!(
+        "trap 'echo tidy > {}; exit 0' TERM; while true; do sleep 0.05; done",
+        marker.display()
+    );
+    let mut request = ask(&journey.workspace.id, &["/bin/sh", "-c", &script]);
+    request.timeout_ms = Some(500);
+
+    let _ = tokio::time::timeout(Duration::from_secs(20), journey.client.run_command(request))
+        .await
+        .expect("the command is ended at its limit");
+
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap_or_default().trim(),
+        "tidy",
+        "the command was killed outright instead of being asked to finish"
+    );
+    journey.finish().await;
+}
+
+#[tokio::test]
 async fn a_directory_outside_the_workspace_is_refused_rather_than_clamped() {
     let journey = Journey::start().await.expect("journey starts");
     let mut request = ask(&journey.workspace.id, &["/bin/pwd"]);
@@ -425,10 +617,16 @@ async fn a_command_does_not_outlive_the_caller_that_asked_for_it() {
     // Nothing is watching a process whose only reason to exist has gone away,
     // and on a machine people leave running that is how a mistake becomes
     // permanent.
+    //
+    // The work is put in a *grandchild* on purpose. Killing the process this
+    // daemon spawned is one signal to one pid, and everything that process
+    // started keeps running, reparented to init; a version of this test whose
+    // loop ran in the shell itself passed for a year while `bash -lc "npm run
+    // dev"` went on holding its port after every disconnect.
     let journey = Journey::start().await.expect("journey starts");
     let marker = std::path::Path::new(&journey.workspace.root).join("still-running.txt");
     let script = format!(
-        "for i in $(seq 1 200); do echo alive >> {}; sleep 0.05; done",
+        "(while true; do echo alive >> {}; sleep 0.05; done) & sleep 60",
         marker.display()
     );
 
