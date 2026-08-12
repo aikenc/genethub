@@ -271,7 +271,12 @@ pub fn required(request: &Request) -> Capability {
         | Request::UpdateCheck
         | Request::UpdateDownloadState => Capability::Read,
 
-        Request::FileWrite { .. } => Capability::Files,
+        Request::FileWrite { .. }
+        | Request::FileMkdir { .. }
+        | Request::FileCopy { .. }
+        | Request::FileMove { .. }
+        | Request::FileDelete { .. }
+        | Request::DirectoryMkdir { .. } => Capability::Files,
 
         Request::GitStatus { .. } | Request::GitDiff { .. } | Request::GitCommit { .. } => {
             Capability::Git

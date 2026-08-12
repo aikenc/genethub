@@ -47,7 +47,12 @@ pub struct Workspaces {
     homes: WorkspaceHomes,
 }
 
+/// Empty path asks for machine roots. Elsewhere `None` still means home.
 pub fn list_directory(requested: Option<&Path>) -> Result<DirectoryListing> {
+    if requested.is_some_and(|path| path.as_os_str().is_empty()) {
+        return list_machine_roots();
+    }
+
     let path = requested
         .map(Path::to_path_buf)
         .or_else(dirs::home_dir)
@@ -83,10 +88,116 @@ pub fn list_directory(requested: Option<&Path>) -> Result<DirectoryListing> {
 
     Ok(DirectoryListing {
         path: path.display().to_string(),
-        parent: path.parent().map(|parent| parent.display().to_string()),
+        parent: listing_parent(&path),
         directories,
         workspace_files,
+        roots: false,
     })
+}
+
+/// Creates `parent/name` on the daemon machine and returns the refreshed parent listing.
+pub fn mkdir_directory(parent: &Path, name: &str) -> Result<DirectoryListing> {
+    let name = validate_new_entry_name(name)?;
+    if parent.as_os_str().is_empty() {
+        return Err(anyhow!("cannot create a folder at the machine roots"));
+    }
+    let parent = parent
+        .canonicalize()
+        .with_context(|| format!("no such directory: {}", parent.display()))?;
+    if !parent.is_dir() {
+        return Err(anyhow!("{} is not a directory", parent.display()));
+    }
+    let path = parent.join(name);
+    if path.exists() {
+        return Err(anyhow!("{} already exists", path.display()));
+    }
+    std::fs::create_dir(&path).with_context(|| format!("could not create {}", path.display()))?;
+    list_directory(Some(&parent))
+}
+
+fn listing_parent(path: &Path) -> Option<String> {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => Some(parent.display().to_string()),
+        // Volume roots (`C:\`, `/`) have no real parent. On Windows the picker
+        // climbs to the drive list; elsewhere `/` is the top.
+        _ => {
+            if cfg!(windows) {
+                Some(String::new())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn list_machine_roots() -> Result<DirectoryListing> {
+    let mut directories = machine_root_entries();
+    directories.sort_by_key(|entry| entry.name.to_lowercase());
+    Ok(DirectoryListing {
+        path: String::new(),
+        parent: None,
+        directories,
+        workspace_files: Vec::new(),
+        roots: true,
+    })
+}
+
+fn machine_root_entries() -> Vec<DirectoryEntry> {
+    #[cfg(windows)]
+    {
+        (b'A'..=b'Z')
+            .filter_map(|letter| {
+                let drive = format!("{}:\\", letter as char);
+                let path = Path::new(&drive);
+                if path.is_dir() {
+                    Some(DirectoryEntry {
+                        name: format!("{}:", letter as char),
+                        path: drive,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        vec![DirectoryEntry {
+            name: "/".into(),
+            path: "/".into(),
+        }]
+    }
+}
+
+fn validate_new_entry_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("folder name is required"));
+    }
+    if name.len() > 255 {
+        return Err(anyhow!("folder name is too long"));
+    }
+    if name == "." || name == ".." {
+        return Err(anyhow!("invalid folder name"));
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return Err(anyhow!("folder name cannot contain path separators"));
+    }
+    #[cfg(windows)]
+    {
+        const RESERVED: &[&str] = &[
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        ];
+        let stem = name.split('.').next().unwrap_or(name);
+        if RESERVED.iter().any(|item| stem.eq_ignore_ascii_case(item)) {
+            return Err(anyhow!("folder name is reserved on Windows"));
+        }
+        if name.chars().any(|ch| "<>:\"|?*".contains(ch)) {
+            return Err(anyhow!("folder name contains an invalid character"));
+        }
+    }
+    Ok(name)
 }
 
 #[derive(Debug, Clone)]
@@ -863,6 +974,7 @@ mod tests {
         assert_eq!(listing.directories[0].name, "project");
         assert_eq!(listing.workspace_files.len(), 1);
         assert_eq!(listing.workspace_files[0].name, "product.code-workspace");
+        assert!(!listing.roots);
         let expected_parent = dir
             .path()
             .parent()
@@ -872,6 +984,26 @@ mod tests {
             .display()
             .to_string();
         assert_eq!(listing.parent.as_deref(), Some(expected_parent.as_str()));
+    }
+
+    #[test]
+    fn directory_picker_empty_path_lists_machine_roots() {
+        let listing = list_directory(Some(Path::new(""))).unwrap();
+        assert!(listing.roots);
+        assert_eq!(listing.path, "");
+        assert!(listing.parent.is_none());
+        assert!(listing.directories.iter().any(|entry| entry.path == "/"));
+    }
+
+    #[test]
+    fn directory_picker_can_create_a_folder_and_refresh_the_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let listing = mkdir_directory(dir.path(), "fresh-project").unwrap();
+        assert!(dir.path().join("fresh-project").is_dir());
+        assert!(listing
+            .directories
+            .iter()
+            .any(|entry| entry.name == "fresh-project"));
     }
 
     #[tokio::test]

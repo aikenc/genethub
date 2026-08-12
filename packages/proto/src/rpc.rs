@@ -316,10 +316,19 @@ pub enum Request {
     #[serde(rename = "workspace.remove", rename_all = "camelCase")]
     WorkspaceRemove { workspace_id: String },
     /// Lists folders on the daemon's machine before a workspace exists.
+    ///
+    /// Pass `path: ""` to list machine roots (Windows drive letters). A volume
+    /// root listing returns `parent: Some("")` so the picker can climb there.
     #[serde(rename = "directory.list", rename_all = "camelCase")]
     DirectoryList {
         #[serde(default)]
         path: Option<String>,
+    },
+    /// Creates a folder on the daemon machine (project picker, outside a workspace).
+    #[serde(rename = "directory.mkdir", rename_all = "camelCase")]
+    DirectoryMkdir {
+        parent: String,
+        name: String,
     },
 
     // -- files -------------------------------------------------------------
@@ -336,6 +345,32 @@ pub enum Request {
         workspace_id: String,
         path: String,
         content: String,
+    },
+    /// Creates a directory inside a registered workspace.
+    #[serde(rename = "file.mkdir", rename_all = "camelCase")]
+    FileMkdir {
+        workspace_id: String,
+        path: String,
+    },
+    /// Copies a file or directory tree within a workspace (`to` is the full destination path).
+    #[serde(rename = "file.copy", rename_all = "camelCase")]
+    FileCopy {
+        workspace_id: String,
+        from: String,
+        to: String,
+    },
+    /// Moves or renames a file or directory within a workspace.
+    #[serde(rename = "file.move", rename_all = "camelCase")]
+    FileMove {
+        workspace_id: String,
+        from: String,
+        to: String,
+    },
+    /// Deletes files and/or directories (recursive) inside a workspace.
+    #[serde(rename = "file.delete", rename_all = "camelCase")]
+    FileDelete {
+        workspace_id: String,
+        paths: Vec<String>,
     },
 
     // -- git ---------------------------------------------------------------
@@ -450,6 +485,9 @@ pub struct DirectoryListing {
     pub directories: Vec<DirectoryEntry>,
     /// Openable VS Code workspace definitions in this directory.
     pub workspace_files: Vec<DirectoryEntry>,
+    /// Machine roots view (Windows drives). Not a selectable project folder.
+    #[serde(default)]
+    pub roots: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
