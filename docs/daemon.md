@@ -158,7 +158,7 @@ DataEndpoint method 只有四个：
 
 已登记项目与 device-local root mapping 都存在 `<data>/config.json`。直接打开 folder 与打开 `.code-workspace` 是不同项目来源，因此使用不同、可恢复的项目 id；同一 canonical directory 则复用一个项目无关的随机 `rootHandle`。项目只声明 root 成员关系，folder label 只负责显示，文件路径统一为 `<rootHandle>/<relative-path>`。第一个目录仍是 Agent、会话、终端和 Git 的根。
 
-多个项目可以共享第一个物理目录，但不会为 `.genethub/` 重复争锁：session home 的 kernel lock 按真实目录唯一。会话 meta 不持久化本机随机 workspace id，而是保存同一 session home 内稳定的 project key；folder key 可被另一安装直接采用，workspace 文件 key 由其 canonical source 派生，因此两种项目视图不会互相冒充会话。
+多个项目可以共享第一个物理目录；写入锁按 session 而不是 `.genethub/` 或 workspace 划分，所以不同 channel 能在同一目录并行写不同会话。会话 meta 不持久化本机随机 workspace id，而是保存同一 session home 内稳定的 project key；folder key 可被另一安装直接采用，workspace 文件 key 由其 canonical source 派生，因此两种项目视图不会互相冒充会话。
 
 `workspace.remove` 只把登记项标成隐藏并从当前会话存储索引卸载，绝不删除项目文件或 `.genethub/`。重新打开同一 folder source 或同一 `.code-workspace` source 会复用各自原 id，会话随即重新可见。运行中或等待交互的会话必须先结束，避免移除动作截断正在写入的历史。旧配置在启动时一次性补齐全局 rootHandle；运行时没有 folder-prefix fallback。
 

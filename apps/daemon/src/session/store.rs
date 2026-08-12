@@ -39,6 +39,23 @@ use sha2::{Digest, Sha256};
 use super::rounds::RoundRecord;
 use crate::adapter::PersistHandle;
 
+#[derive(Debug)]
+pub struct SessionWriteContended {
+    holder: String,
+}
+
+impl std::fmt::Display for SessionWriteContended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is writing this session; you can still read it or Fork from a completed turn",
+            self.holder
+        )
+    }
+}
+
+impl std::error::Error for SessionWriteContended {}
+
 /// Content ids are the first 24 hex characters of a SHA-256. 96 bits keeps
 /// collisions negligible at any session size, and every trunk row carries one.
 const BLOB_ID_CHARS: usize = 24;
@@ -290,32 +307,38 @@ pub fn sessions_dir(workspace_root: &Path) -> PathBuf {
 /// The per-workspace directory GeneHub owns inside the user's own project.
 const HOME_DIR_NAME: &str = ".genethub";
 
-/// The file whose kernel lock decides which build may write a workspace's
-/// sessions.
+/// Compatibility gate for builds that still take one exclusive workspace
+/// lock. Current builds hold it shared, so they can coexist with each other
+/// but never double-write alongside an older daemon.
+const LEGACY_OWNER_LOCK: &str = "owner.lock";
+const LEGACY_OWNER_NAME: &str = "owner";
+
+/// The file whose kernel lock decides which build may write one session.
 ///
 /// Kept empty. A Windows exclusive lock blocks reads as well as writes, so
 /// anything stored here would be unreadable by precisely the process that
 /// needs it: the one that just lost the lock.
-const OWNER_LOCK: &str = "owner.lock";
+const WRITER_LOCK: &str = "writer.lock";
 
-/// Who holds [`OWNER_LOCK`], in plain text, so the build that loses can name
+/// Who holds [`WRITER_LOCK`], in plain text, so the build that loses can name
 /// the one to close instead of saying "something else". Diagnostics only —
 /// the kernel lock decides, and this file is merely the label on it.
-const OWNER_NAME: &str = "owner";
+const WRITER_NAME: &str = "writer";
 
 /// A registered workspace: where it is, and whether this daemon may write it.
 struct Home {
-    /// The physical session home's write lock while this daemon holds it. Dropping the
-    /// handle releases it, so it lives exactly as long as the entry does, and
-    /// a crash releases it too — the kernel holds it, not a file's contents.
-    lock: Option<File>,
+    /// Shared compatibility lock excluding older workspace-locking builds.
+    compatibility: Option<File>,
+    /// One write lock per session. Different channels may write different
+    /// conversations in the same workspace at the same time.
+    writers: BTreeMap<String, File>,
 }
 
 #[derive(Default)]
 struct Homes {
     /// Project id to physical Agent/session root.
     workspaces: BTreeMap<String, WorkspaceHome>,
-    /// One lock per physical `.genethub`, shared by every project view rooted
+    /// One entry per physical `.genethub`, shared by every project view rooted
     /// there. Folder and `.code-workspace` identities must never self-contend.
     roots: BTreeMap<PathBuf, Home>,
 }
@@ -432,30 +455,18 @@ impl WorkspaceHomes {
             .collect()
     }
 
-    /// Whether this daemon already owns the workspace's write lock.
-    fn holds(&self, workspace_id: &str) -> bool {
+    /// Whether this daemon already owns this session's write lock.
+    fn holds(&self, workspace_id: &str, session_id: &str) -> bool {
         self.homes.read().is_ok_and(|homes| {
             homes
                 .workspaces
                 .get(workspace_id)
                 .and_then(|workspace| homes.roots.get(&workspace.root))
-                .is_some_and(|home| home.lock.is_some())
+                .is_some_and(|home| home.writers.contains_key(session_id))
         })
     }
 
-    /// Takes the workspace's write lock, or names who is holding it.
-    ///
-    /// Sessions live in the project, so a beta and a release pointed at the
-    /// same folder are two processes over one set of files. Both may read;
-    /// only one may write, and the one that loses says so instead of
-    /// interleaving its rounds into the other's `chat.jsonl`.
-    ///
-    /// Claimed on the first write rather than when the workspace is
-    /// registered, because merely opening a folder must not leave a
-    /// `.genethub` behind in it. Re-attempted while unheld, so the loser
-    /// starts working the moment the other build quits — no restart, no
-    /// stale-lock cleanup, since the kernel drops it even on a crash.
-    fn claim(&self, workspace_id: &str, home_dir: &Path) -> Result<()> {
+    fn claim_compatibility(&self, workspace_id: &str, home_dir: &Path) -> Result<()> {
         let mut homes = self
             .homes
             .write()
@@ -469,10 +480,65 @@ impl WorkspaceHomes {
             .roots
             .get_mut(&root)
             .ok_or_else(|| anyhow!("workspace {workspace_id} has no session home"))?;
-        if home.lock.is_some() {
+        if home.compatibility.is_some() {
             return Ok(());
         }
-        let path = home_dir.join(OWNER_LOCK);
+        let path = home_dir.join(LEGACY_OWNER_LOCK);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        match fs2::FileExt::try_lock_shared(&file) {
+            Ok(()) => {}
+            Err(error) if crate::lifecycle::lock_contended(&error) => {
+                let holder = fs::read_to_string(home_dir.join(LEGACY_OWNER_NAME))
+                    .ok()
+                    .map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| "an older GeneHub".to_string());
+                return Err(anyhow!(
+                    "{holder} uses the older workspace-wide session lock; close or upgrade it before writing here"
+                ));
+            }
+            Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
+        }
+        home.compatibility = Some(file);
+        Ok(())
+    }
+
+    /// Takes one session's write lock, or names who is holding it.
+    ///
+    /// Sessions live in the project, so a beta and a release pointed at the
+    /// same folder are two processes over one set of files. Both may write
+    /// different sessions; only one may write a particular session, and the
+    /// one that loses says so instead of interleaving `chat.jsonl` rows.
+    ///
+    /// Claimed on the first write rather than when the workspace is
+    /// registered, because merely opening a folder must not leave a
+    /// `.genethub` behind in it. Re-attempted while unheld, so the loser
+    /// starts working the moment the other build quits — no restart, no
+    /// stale-lock cleanup, since the kernel drops it even on a crash.
+    fn claim(&self, workspace_id: &str, session_id: &str, session_dir: &Path) -> Result<()> {
+        let mut homes = self
+            .homes
+            .write()
+            .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
+        let root = homes
+            .workspaces
+            .get(workspace_id)
+            .map(|home| home.root.clone())
+            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
+        let home = homes
+            .roots
+            .get_mut(&root)
+            .ok_or_else(|| anyhow!("workspace {workspace_id} has no session home"))?;
+        if home.writers.contains_key(session_id) {
+            return Ok(());
+        }
+        let path = session_dir.join(WRITER_LOCK);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -483,27 +549,44 @@ impl WorkspaceHomes {
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => {}
             Err(error) if crate::lifecycle::lock_contended(&error) => {
-                let holder = fs::read_to_string(home_dir.join(OWNER_NAME))
+                let holder = fs::read_to_string(session_dir.join(WRITER_NAME))
                     .ok()
                     .map(|text| text.trim().to_string())
                     .filter(|text| !text.is_empty())
                     .unwrap_or_else(|| "another GeneHub".to_string());
-                return Err(anyhow!(
-                    "{holder} has this project's sessions open, so this one can only read them"
-                ));
+                return Err(SessionWriteContended { holder }.into());
             }
             Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
         }
         let stamp = format!("{} (pid {})\n", crate::channel::PRODUCT, std::process::id());
-        let _ = fs::write(home_dir.join(OWNER_NAME), stamp);
-        home.lock = Some(file);
+        let _ = fs::write(session_dir.join(WRITER_NAME), stamp);
+        home.writers.insert(session_id.to_string(), file);
+        Ok(())
+    }
+
+    fn release(&self, workspace_id: &str, session_id: &str) -> Result<()> {
+        let mut homes = self
+            .homes
+            .write()
+            .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
+        let root = homes
+            .workspaces
+            .get(workspace_id)
+            .map(|home| home.root.clone())
+            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
+        if let Some(home) = homes.roots.get_mut(&root) {
+            home.writers.remove(session_id);
+        }
         Ok(())
     }
 }
 
 impl Home {
     fn at() -> Self {
-        Home { lock: None }
+        Home {
+            compatibility: None,
+            writers: BTreeMap::new(),
+        }
     }
 }
 
@@ -535,6 +618,13 @@ impl Store {
 
     pub fn session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
         Ok(self.homes.sessions_dir(workspace_id)?.join(session_id))
+    }
+
+    /// Claims a session for work that may touch adapter scratch. Forking uses
+    /// this to choose native checkpointing only when the source is writable.
+    pub fn claim_session(&self, workspace_id: &str, session_id: &str) -> Result<()> {
+        let dir = self.session_dir(workspace_id, session_id)?;
+        self.prepare_write(workspace_id, session_id, &dir)
     }
 
     fn meta_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
@@ -592,31 +682,33 @@ impl Store {
     /// The adapter's scratch space, ready to be written into.
     pub fn make_scratch_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
         let dir = self.scratch_dir(workspace_id, session_id)?;
-        self.prepare_write(workspace_id, &dir)?;
+        self.prepare_write(workspace_id, session_id, &dir)?;
         Ok(dir)
     }
 
-    /// The one gate every write to a workspace passes through: claims the
-    /// write lock, establishes the GeneHub home the first time, and creates
-    /// the directory being written into.
+    /// The one gate every session write passes through: establishes the
+    /// GeneHub home, creates the target directory, then claims that session.
     ///
     /// Reads deliberately do not come here. A build that cannot write a
     /// workspace can still show every conversation in it.
-    fn prepare_write(&self, workspace_id: &str, dir: &Path) -> Result<()> {
+    fn prepare_write(&self, workspace_id: &str, session_id: &str, dir: &Path) -> Result<()> {
         let home = self.homes.home_dir(workspace_id)?;
-        // Holding the lock means the home was established to put it in, so the
-        // ordinary case — one more append to a workspace already being written
-        // — costs a map lookup and a stat, not a syscall per level.
-        if !self.homes.holds(workspace_id) {
+        if !self.homes.holds(workspace_id, session_id) {
             self.establish_home(&home)?;
-            self.homes.claim(workspace_id, &home)?;
+            self.homes.claim_compatibility(workspace_id, &home)?;
         }
-        if dir.exists() {
-            return Ok(());
+        if !dir.exists() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            for path in dir.ancestors().take_while(|path| path.starts_with(&home)) {
+                crate::config::restrict_dir_to_owner(path)?;
+            }
         }
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        for path in dir.ancestors().take_while(|path| path.starts_with(&home)) {
-            crate::config::restrict_dir_to_owner(path)?;
+        if !self.homes.holds(workspace_id, session_id) {
+            let session_dir = self.session_dir(workspace_id, session_id)?;
+            fs::create_dir_all(&session_dir)
+                .with_context(|| format!("creating {}", session_dir.display()))?;
+            crate::config::restrict_dir_to_owner(&session_dir)?;
+            self.homes.claim(workspace_id, session_id, &session_dir)?;
         }
         Ok(())
     }
@@ -649,6 +741,7 @@ impl Store {
         let path = self.meta_path(&meta.workspace_id, &meta.id)?;
         self.prepare_write(
             &meta.workspace_id,
+            &meta.id,
             path.parent().expect("meta.json always has a parent"),
         )?;
         let stamped = SessionMeta {
@@ -699,6 +792,7 @@ impl Store {
         let path = self.seed_path(workspace_id, session_id)?;
         self.prepare_write(
             workspace_id,
+            session_id,
             path.parent().expect("seed.json always has a parent"),
         )?;
         crate::config::save_private(&path, serde_json::to_vec_pretty(seed)?.as_slice())
@@ -821,6 +915,7 @@ impl Store {
         let path = self.chat_path(workspace_id, session_id)?;
         self.prepare_write(
             workspace_id,
+            session_id,
             path.parent().expect("chat.jsonl always has a parent"),
         )?;
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -889,7 +984,7 @@ impl Store {
         trunk: &RoundTrunk,
     ) -> Result<()> {
         let dir = self.round_dir(workspace_id, session_id, ord)?;
-        self.prepare_write(workspace_id, &dir)?;
+        self.prepare_write(workspace_id, session_id, &dir)?;
         let mut body = Vec::new();
         for batch in &trunk.batches {
             writeln!(
@@ -931,6 +1026,7 @@ impl Store {
         let path = self.trunk_index_path(workspace_id, session_id, ord)?;
         self.prepare_write(
             workspace_id,
+            session_id,
             path.parent().expect("index.jsonl always has a parent"),
         )?;
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -1089,7 +1185,7 @@ impl Store {
             .collect();
         let bucket = id[..2].to_string();
         let dir = self.blob_dir(workspace_id, session_id)?;
-        self.prepare_write(workspace_id, &dir)?;
+        self.prepare_write(workspace_id, session_id, &dir)?;
         let path = dir.join(format!("b-{bucket}.jsonl"));
         let line = serde_json::to_vec(&BlobRecord {
             id: id.clone(),
@@ -1168,12 +1264,13 @@ impl Store {
         if !dir.exists() {
             return Ok(());
         }
-        // Removing a conversation is a write like any other, and the build that
-        // holds the workspace may be in the middle of appending to this one.
-        if !self.homes.holds(workspace_id) {
-            self.homes
-                .claim(workspace_id, &self.homes.home_dir(workspace_id)?)?;
+        // Removing a conversation is a write like any other. Claim this
+        // session, then drop our handle before removing its directory (Windows
+        // cannot unlink a locked file).
+        if !self.homes.holds(workspace_id, session_id) {
+            self.homes.claim(workspace_id, session_id, &dir)?;
         }
+        self.homes.release(workspace_id, session_id)?;
         let _ = fs::remove_dir_all(dir);
         Ok(())
     }
