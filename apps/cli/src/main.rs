@@ -60,6 +60,16 @@ pub fn usage() -> i32 {
   genet session list [--workspace <id>]
                                     list local daemon sessions
   genet session get <id>            get one session snapshot
+  genet session inspect <id>        inspect session structure and coverage
+  genet session narrative <id>      read a bounded narrative page
+  genet session rounds <id>         read a bounded round-summary page
+  genet session trunks <id> --round <round-id>
+                                    list bounded work trunks for one round
+  genet session trunk <id> --round <round-id> --index <n>
+                                    read one work trunk and opaque blob refs
+  genet session blob <id> --ref <opaque-ref>
+                                    resolve one blob ref
+  genet session context <id>        build bounded, cited context without an LLM
   genet update                      unsupported until releases are independently signed
   genet daemon run                  run the daemon in the foreground (systemd)
   genet daemon start                start the daemon in the background

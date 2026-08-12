@@ -27,9 +27,10 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    BlobKind, BlobOverview, BlobPayload, BlobRef, ImportContinuation, PermissionRequest,
-    RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary, SessionImportOrigin,
-    SessionLineage, SessionStatus, SessionSummary, TimelineItem, UnsupportedFormat,
+    BlobKind, BlobOverview, BlobPayload, BlobRef, HistoryCoverage, ImportContinuation,
+    PermissionRequest, RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary,
+    SessionImportOrigin, SessionLineage, SessionStatus, SessionSummary, TimelineItem,
+    UnsupportedFormat,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -152,6 +153,8 @@ pub struct ImportedSessionMeta {
     pub continuation: ImportContinuation,
     #[serde(default)]
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<HistoryCoverage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +231,7 @@ impl SessionMeta {
                 agent_id: imported.agent_id.clone(),
                 continuation: imported.continuation,
                 warnings: imported.warnings.clone(),
+                coverage: imported.coverage.clone(),
             }),
         }
     }

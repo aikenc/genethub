@@ -68,6 +68,44 @@ pub enum Request {
     },
     #[serde(rename = "session.get", rename_all = "camelCase")]
     SessionGet { session_id: String },
+    #[serde(rename = "session.inspect", rename_all = "camelCase")]
+    SessionInspect {
+        session_id: String,
+        #[serde(default)]
+        through_round_id: Option<String>,
+    },
+    #[serde(rename = "session.narrative", rename_all = "camelCase")]
+    SessionNarrative {
+        session_id: String,
+        #[serde(default)]
+        through_round_id: Option<String>,
+        /// Exact item lookup. Mutually exclusive with `cursor` on the CLI.
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    #[serde(rename = "session.rounds", rename_all = "camelCase")]
+    SessionRounds {
+        session_id: String,
+        #[serde(default)]
+        through_round_id: Option<String>,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    #[serde(rename = "session.context", rename_all = "camelCase")]
+    SessionContext {
+        session_id: String,
+        #[serde(default)]
+        through_round_id: Option<String>,
+        #[serde(default)]
+        #[ts(type = "number")]
+        token_budget: Option<u64>,
+    },
     #[serde(rename = "round.trunk.list", rename_all = "camelCase")]
     RoundTrunkList {
         session_id: String,
@@ -428,6 +466,10 @@ pub enum Reply {
     Sessions(Vec<SessionSummary>),
     SessionImports(SessionImportListing),
     Snapshot(SessionSnapshot),
+    SessionInspection(SessionInspection),
+    SessionNarrative(SessionNarrativePage),
+    SessionRounds(SessionRoundPage),
+    SessionContext(SessionContext),
     RoundLayer(RoundLayer),
     RoundTrunk(RoundTrunk),
     Blob(BlobPayload),

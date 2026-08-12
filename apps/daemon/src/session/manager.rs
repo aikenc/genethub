@@ -11,12 +11,13 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ImportContinuation,
-    ItemDelta, PermissionOptionKind, PermissionOutcome, PermissionRequest, PermissionRequestKind,
-    ProbeState, RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent,
-    SessionEvent, SessionImportCandidate, SessionImportListing, SessionImportSource,
-    SessionLineage, SessionSnapshot, SessionStatus, SessionSummary, TimelineItem, ToolStatus,
-    TurnOutcome, TurnStats, Usage,
+    Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, HistoryCoverage,
+    ImportContinuation, ItemDelta, PermissionOptionKind, PermissionOutcome, PermissionRequest,
+    PermissionRequestKind, ProbeState, RetrievalCapability, RoundLayer, RoundLayerOutcome,
+    RoundSummary, RoundTrunk, SequencedEvent, SessionContext, SessionEvent, SessionImportCandidate,
+    SessionImportListing, SessionImportSource, SessionInspection, SessionLineage,
+    SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot, SessionStatus,
+    SessionSummary, TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
@@ -157,6 +158,14 @@ struct RoundView {
     trunk_count: u32,
 }
 
+struct SessionReadView {
+    meta: SessionMeta,
+    items: Vec<TimelineItem>,
+    rounds: Vec<RoundSummary>,
+    source: SessionReadSource,
+    coverage: HistoryCoverage,
+}
+
 impl ActiveRound {
     /// Feeds one item into this round's trunk pagination, if the item is one
     /// of the three kinds trunks track (`TrunkItem`). A no-op for every
@@ -257,6 +266,13 @@ impl SessionManager {
         }
         let source_meta = source.meta.lock().await.clone();
         let source_adapter = self.registry.require(&source_meta.agent_id)?;
+        let source_round_id = source
+            .rounds
+            .lock()
+            .await
+            .iter()
+            .find(|round| round.adapter_turn_ids.iter().any(|id| id == turn_id))
+            .map(|round| round.round_id.clone());
 
         let (items, checkpoint) = {
             let items = source.items.lock().await;
@@ -345,9 +361,11 @@ impl SessionManager {
             let built = build_context_seed(
                 session_id,
                 turn_id,
+                source_round_id.as_deref(),
                 &source_meta.agent_id,
                 &items,
                 seed_token_budget(context_window),
+                coverage_for_meta(&source_meta, items.len()),
             );
             (
                 None,
@@ -539,11 +557,14 @@ impl SessionManager {
             .registry
             .import_history(&candidate.agent_id, &cwd, &candidate.source_id)
             .await?;
-        let (bounded_items, omitted_items) = bound_imported_items(history.items);
+        let source_item_count = history.items.len();
+        let (bounded_items, omitted_items, altered_items) = bound_imported_items(history.items);
         history.items = bounded_items;
-        if omitted_items > 0 {
+        let unavailable_items = omitted_items.saturating_add(altered_items);
+        if unavailable_items > 0 {
             history.warnings.push(format!(
-                "历史过长：GeneHub 保留最近可见内容，省略较早的 {omitted_items} 项；原 Agent 会话仍保留完整上下文"
+                "历史过长：GeneHub 完整保留 {} 项，省略或裁剪 {unavailable_items} 项；原 Agent 会话可能仍保留完整上下文",
+                source_item_count.saturating_sub(unavailable_items)
             ));
         }
         let mut continuation = history.continuation;
@@ -585,6 +606,24 @@ impl SessionManager {
                 agent_id: candidate.agent_id,
                 continuation,
                 warnings: history.warnings,
+                coverage: Some(HistoryCoverage {
+                    source_item_count: Some(u64::try_from(source_item_count).unwrap_or(u64::MAX)),
+                    retained_item_count: u64::try_from(
+                        source_item_count.saturating_sub(unavailable_items),
+                    )
+                    .unwrap_or(u64::MAX),
+                    omitted_item_count: u64::try_from(unavailable_items).unwrap_or(u64::MAX),
+                    retrieval: if unavailable_items == 0 {
+                        RetrievalCapability::Genehub
+                    } else if continuation == ImportContinuation::Native {
+                        RetrievalCapability::NativeOnly
+                    } else {
+                        RetrievalCapability::Unavailable
+                    },
+                    reason: (unavailable_items > 0).then(|| {
+                        "the import retained a recent bounded window and clipped oversized records to finish promptly".into()
+                    }),
+                }),
             }),
         };
         let write = || -> Result<()> {
@@ -677,6 +716,177 @@ impl SessionManager {
     pub async fn snapshot(&self, session_id: &str) -> Result<SessionSnapshot> {
         let live = self.live(session_id).await?;
         live.snapshot().await
+    }
+
+    /// A bounded-reader view frozen at an optional round boundary. This is the
+    /// single source for the CLI pages below, so inspect/narrative/rounds agree
+    /// on both the digest and what "through round" means.
+    async fn read_view(
+        &self,
+        session_id: &str,
+        through_round_id: Option<&str>,
+    ) -> Result<SessionReadView> {
+        let live = self.live(session_id).await?;
+        let meta = live.meta.lock().await.clone();
+        let views = self.round_views(&live).await;
+        let boundary = match through_round_id {
+            Some(round_id) => Some(
+                views
+                    .iter()
+                    .position(|view| view.round_id == round_id)
+                    .ok_or_else(|| anyhow!("no such round: {round_id}"))?,
+            ),
+            None => views.len().checked_sub(1),
+        };
+        let selected_views = boundary.map(|index| &views[..=index]).unwrap_or(&[]);
+        let rounds: Vec<RoundSummary> = selected_views.iter().map(round_summary).collect();
+
+        let all_items = live.items.lock().await.clone();
+        // The next round's user item is a stronger boundary than an adapter
+        // turn id: imported and stitched rounds can contain a different number
+        // of adapter turns, while every round begins with at most one stable
+        // user narrative item.
+        let end = boundary
+            .and_then(|index| views.get(index + 1))
+            .and_then(|next| next.user_item_id.as_deref())
+            .and_then(|next_user| all_items.iter().position(|item| item.id() == next_user))
+            .unwrap_or(all_items.len());
+        let items: Vec<TimelineItem> = all_items[..end]
+            .iter()
+            .filter(|item| !store::is_work_item(item))
+            .cloned()
+            .collect();
+
+        let encoded = serde_json::to_vec(&(items.as_slice(), rounds.as_slice()))?;
+        let digest = format!("sha256:{:x}", Sha256::digest(&encoded));
+        let through_round_id = boundary.map(|index| views[index].round_id.clone());
+        let coverage = meta
+            .imported
+            .as_ref()
+            .and_then(|imported| imported.coverage.clone())
+            .unwrap_or_else(|| HistoryCoverage {
+                source_item_count: Some(u64::try_from(items.len()).unwrap_or(u64::MAX)),
+                retained_item_count: u64::try_from(items.len()).unwrap_or(u64::MAX),
+                omitted_item_count: 0,
+                retrieval: RetrievalCapability::Genehub,
+                reason: None,
+            });
+        Ok(SessionReadView {
+            meta,
+            items,
+            rounds,
+            source: SessionReadSource {
+                session_id: session_id.to_string(),
+                through_round_id,
+                digest,
+                untrusted: true,
+            },
+            coverage,
+        })
+    }
+
+    pub async fn inspect(
+        &self,
+        session_id: &str,
+        through_round_id: Option<&str>,
+    ) -> Result<SessionInspection> {
+        let view = self.read_view(session_id, through_round_id).await?;
+        let status = *self.live(session_id).await?.status.lock().await;
+        Ok(SessionInspection {
+            summary: view.meta.summary(status),
+            source: view.source,
+            narrative_item_count: u64::try_from(view.items.len()).unwrap_or(u64::MAX),
+            round_count: u64::try_from(view.rounds.len()).unwrap_or(u64::MAX),
+            latest_round_id: view.rounds.last().map(|round| round.round_id.clone()),
+            coverage: view.coverage,
+            layers: vec![
+                "narrative".into(),
+                "rounds".into(),
+                "trunks".into(),
+                "blobs".into(),
+                "context".into(),
+            ],
+        })
+    }
+
+    pub async fn narrative_page(
+        &self,
+        session_id: &str,
+        through_round_id: Option<&str>,
+        item_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<SessionNarrativePage> {
+        let view = self.read_view(session_id, through_round_id).await?;
+        if let Some(item_id) = item_id {
+            if cursor.is_some() {
+                anyhow::bail!("itemId and cursor are mutually exclusive");
+            }
+            let item = view
+                .items
+                .iter()
+                .find(|item| item.id() == item_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("no such narrative item: {item_id}"))?;
+            return Ok(SessionNarrativePage {
+                source: view.source,
+                items: vec![item],
+                next_cursor: None,
+            });
+        }
+        let end = parse_trunk_cursor(cursor, view.items.len())?;
+        let limit = limit.unwrap_or(20).clamp(1, 100) as usize;
+        let start = end.saturating_sub(limit);
+        Ok(SessionNarrativePage {
+            source: view.source,
+            items: view.items[start..end].to_vec(),
+            next_cursor: (start > 0).then(|| format!("before:{start}")),
+        })
+    }
+
+    pub async fn round_page(
+        &self,
+        session_id: &str,
+        through_round_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<SessionRoundPage> {
+        let view = self.read_view(session_id, through_round_id).await?;
+        let end = parse_trunk_cursor(cursor, view.rounds.len())?;
+        let limit = limit.unwrap_or(20).clamp(1, 100) as usize;
+        let start = end.saturating_sub(limit);
+        Ok(SessionRoundPage {
+            source: view.source,
+            rounds: view.rounds[start..end].to_vec(),
+            next_cursor: (start > 0).then(|| format!("before:{start}")),
+        })
+    }
+
+    pub async fn session_context(
+        &self,
+        session_id: &str,
+        through_round_id: Option<&str>,
+        token_budget: Option<u64>,
+    ) -> Result<SessionContext> {
+        let view = self.read_view(session_id, through_round_id).await?;
+        let boundary = view
+            .source
+            .through_round_id
+            .as_deref()
+            .unwrap_or("latest")
+            .to_string();
+        let built = build_context_seed(
+            session_id,
+            &boundary,
+            view.source.through_round_id.as_deref(),
+            &view.meta.agent_id,
+            &view.items,
+            token_budget
+                .unwrap_or(super::context_seed::DEFAULT_SEED_TOKEN_BUDGET)
+                .clamp(2_048, 64_000),
+            view.coverage,
+        );
+        Ok(built.context)
     }
 
     async fn snapshot_for_open(
@@ -1637,10 +1847,11 @@ fn import_source_key(agent_id: &str, cwd: &std::path::Path, source_id: &str) -> 
     format!("{:x}", digest.finalize())
 }
 
-fn bound_imported_items(items: Vec<TimelineItem>) -> (Vec<TimelineItem>, usize) {
+fn bound_imported_items(items: Vec<TimelineItem>) -> (Vec<TimelineItem>, usize, usize) {
     let total = items.len();
     let mut kept = Vec::new();
     let mut bytes = 0_usize;
+    let mut altered = 0_usize;
     for mut item in items.into_iter().rev() {
         if kept.len() >= IMPORT_VISIBLE_ITEMS {
             break;
@@ -1649,7 +1860,11 @@ fn bound_imported_items(items: Vec<TimelineItem>) -> (Vec<TimelineItem>, usize) 
             .map(|encoded| encoded.len().saturating_add(1))
             .unwrap_or(IMPORT_VISIBLE_BYTES);
         if item_bytes > IMPORT_VISIBLE_BYTES {
+            let original = item.clone();
             item = truncate_import_item(item, IMPORT_VISIBLE_BYTES / 2);
+            if item != original {
+                altered = altered.saturating_add(1);
+            }
             item_bytes = serde_json::to_vec(&item)
                 .map(|encoded| encoded.len().saturating_add(1))
                 .unwrap_or(IMPORT_VISIBLE_BYTES);
@@ -1671,7 +1886,7 @@ fn bound_imported_items(items: Vec<TimelineItem>) -> (Vec<TimelineItem>, usize) 
             },
         );
     }
-    (kept, omitted)
+    (kept, omitted, altered)
 }
 
 fn truncate_import_item(mut item: TimelineItem, max_bytes: usize) -> TimelineItem {
@@ -1713,6 +1928,19 @@ fn round_summary(view: &RoundView) -> RoundSummary {
         outcome: view.outcome,
         trunk_count: view.trunk_count,
     }
+}
+
+fn coverage_for_meta(meta: &SessionMeta, retained_items: usize) -> HistoryCoverage {
+    meta.imported
+        .as_ref()
+        .and_then(|imported| imported.coverage.clone())
+        .unwrap_or_else(|| HistoryCoverage {
+            source_item_count: Some(u64::try_from(retained_items).unwrap_or(u64::MAX)),
+            retained_item_count: u64::try_from(retained_items).unwrap_or(u64::MAX),
+            omitted_item_count: 0,
+            retrieval: RetrievalCapability::Genehub,
+            reason: None,
+        })
 }
 
 fn parse_trunk_cursor(cursor: Option<&str>, len: usize) -> Result<usize> {
@@ -3270,6 +3498,26 @@ mod tests {
             .append_chat_items("w1", &source.id, &inherited)
             .unwrap();
 
+        let inspection = sessions.inspect(&source.id, None).await.unwrap();
+        assert_eq!(inspection.narrative_item_count, 3);
+        assert_eq!(inspection.coverage.omitted_item_count, 0);
+        assert!(inspection.layers.iter().any(|layer| layer == "blobs"));
+        let exact = sessions
+            .narrative_page(&source.id, None, Some("assistant-1"), None, Some(1))
+            .await
+            .unwrap();
+        assert_eq!(exact.items.len(), 1);
+        let context = sessions
+            .session_context(&source.id, None, Some(2_048))
+            .await
+            .unwrap();
+        assert!(context.text.contains("ghref:item"));
+        assert!(context
+            .retrieval_commands
+            .iter()
+            .any(|command| command.contains("session narrative")));
+        assert!(!context.references.is_empty());
+
         let fork = sessions
             .fork(
                 &source.id,
@@ -3498,6 +3746,15 @@ mod tests {
             imported.imported.as_ref().unwrap().continuation,
             ImportContinuation::Native
         );
+        let coverage = imported
+            .imported
+            .as_ref()
+            .and_then(|origin| origin.coverage.as_ref())
+            .expect("new imports report structured coverage");
+        assert_eq!(coverage.source_item_count, Some(1));
+        assert_eq!(coverage.retained_item_count, 1);
+        assert_eq!(coverage.omitted_item_count, 0);
+        assert_eq!(coverage.retrieval, RetrievalCapability::Genehub);
         assert_eq!(
             sessions.snapshot(&imported.id).await.unwrap().items.len(),
             1
@@ -3519,8 +3776,9 @@ mod tests {
                 text: "reply".into(),
             })
             .collect();
-        let (bounded, omitted) = bound_imported_items(items);
+        let (bounded, omitted, altered) = bound_imported_items(items);
         assert_eq!(omitted, 100);
+        assert_eq!(altered, 0);
         assert!(matches!(
             bounded.first(),
             Some(TimelineItem::Compaction { .. })
@@ -3531,7 +3789,8 @@ mod tests {
             id: "huge".into(),
             text: "四".repeat(IMPORT_VISIBLE_BYTES),
         }];
-        let (bounded, _) = bound_imported_items(huge);
+        let (bounded, omitted, altered) = bound_imported_items(huge);
+        assert_eq!((omitted, altered), (0, 1));
         assert!(serde_json::to_vec(&bounded).unwrap().len() < IMPORT_VISIBLE_BYTES);
 
         let huge_tool = vec![TimelineItem::ToolCall {
@@ -3542,7 +3801,8 @@ mod tests {
                 raw: serde_json::json!({ "payload": "x".repeat(IMPORT_VISIBLE_BYTES * 2) }),
             },
         }];
-        let (bounded, _) = bound_imported_items(huge_tool);
+        let (bounded, omitted, altered) = bound_imported_items(huge_tool);
+        assert_eq!((omitted, altered), (0, 1));
         assert!(matches!(
             bounded.first(),
             Some(TimelineItem::Compaction { reason, .. })

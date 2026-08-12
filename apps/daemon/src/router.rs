@@ -181,6 +181,71 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             Err(error) => failed(error),
         },
 
+        Request::SessionInspect {
+            session_id,
+            through_round_id,
+        } => match state
+            .sessions
+            .inspect(&session_id, through_round_id.as_deref())
+            .await
+        {
+            Ok(inspection) => Handled::ok(Reply::SessionInspection(inspection)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionNarrative {
+            session_id,
+            through_round_id,
+            item_id,
+            cursor,
+            limit,
+        } => match state
+            .sessions
+            .narrative_page(
+                &session_id,
+                through_round_id.as_deref(),
+                item_id.as_deref(),
+                cursor.as_deref(),
+                limit,
+            )
+            .await
+        {
+            Ok(page) => Handled::ok(Reply::SessionNarrative(page)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionRounds {
+            session_id,
+            through_round_id,
+            cursor,
+            limit,
+        } => match state
+            .sessions
+            .round_page(
+                &session_id,
+                through_round_id.as_deref(),
+                cursor.as_deref(),
+                limit,
+            )
+            .await
+        {
+            Ok(page) => Handled::ok(Reply::SessionRounds(page)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionContext {
+            session_id,
+            through_round_id,
+            token_budget,
+        } => match state
+            .sessions
+            .session_context(&session_id, through_round_id.as_deref(), token_budget)
+            .await
+        {
+            Ok(context) => Handled::ok(Reply::SessionContext(context)),
+            Err(error) => failed(error),
+        },
+
         Request::RoundTrunkList {
             session_id,
             round_id,

@@ -278,6 +278,140 @@ pub struct SessionImportOrigin {
     pub continuation: ImportContinuation,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// What GeneHub retained from the provider transcript and whether omitted
+    /// history can be recovered. Older imports have no structured answer and
+    /// keep this absent rather than pretending their warning prose was parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub coverage: Option<HistoryCoverage>,
+}
+
+/// Whether text outside the retained GeneHub window can be read again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum RetrievalCapability {
+    /// The referenced history is stored in GeneHub and available through the
+    /// bounded session/round/trunk/blob query surface.
+    Genehub,
+    /// The daemon has a durable provider handle that can page the source.
+    External,
+    /// The provider can resume its own thread, but GeneHub cannot read the
+    /// omitted portion for another Agent.
+    NativeOnly,
+    /// The omitted portion is not currently recoverable.
+    Unavailable,
+}
+
+/// Honest coverage for a full, clipped or imported history view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct HistoryCoverage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub source_item_count: Option<u64>,
+    #[ts(type = "number")]
+    pub retained_item_count: u64,
+    #[ts(type = "number")]
+    pub omitted_item_count: u64,
+    pub retrieval: RetrievalCapability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<String>,
+}
+
+/// Stable identity and waterline shared by every read-only session page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionReadSource {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub through_round_id: Option<String>,
+    pub digest: String,
+    pub untrusted: bool,
+}
+
+/// A small structural entry point. It deliberately contains no free-form
+/// transcript text; callers choose a bounded narrative page explicitly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionInspection {
+    pub summary: SessionSummary,
+    pub source: SessionReadSource,
+    #[ts(type = "number")]
+    pub narrative_item_count: u64,
+    #[ts(type = "number")]
+    pub round_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub latest_round_id: Option<String>,
+    pub coverage: HistoryCoverage,
+    pub layers: Vec<String>,
+}
+
+/// A recent-first page of narrative items, returned in chronological order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionNarrativePage {
+    pub source: SessionReadSource,
+    pub items: Vec<crate::timeline::TimelineItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub next_cursor: Option<String>,
+}
+
+/// A recent-first page of round summaries, returned in chronological order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionRoundPage {
+    pub source: SessionReadSource,
+    pub rounds: Vec<RoundSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub next_cursor: Option<String>,
+}
+
+/// A durable address carried by compacted context instead of copied detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionSourceRef {
+    pub id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub round_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub digest: Option<String>,
+}
+
+/// Deterministic, model-free context projection used directly by Agents and
+/// as the fallback for reconstructed forks and built-in compaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionContext {
+    pub source: SessionReadSource,
+    pub coverage: HistoryCoverage,
+    pub text: String,
+    pub references: Vec<SessionSourceRef>,
+    pub retrieval_commands: Vec<String>,
+    #[ts(type = "number")]
+    pub estimated_tokens: u64,
+    #[ts(type = "number")]
+    pub token_budget: u64,
+    pub digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

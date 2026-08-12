@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { HistoryCoverage } from "@genehub/proto";
 
 import { ChangesPanel } from "./changes/ChangesPanel";
 import { claimMachine, deviceName } from "./devices/claim";
@@ -443,6 +444,11 @@ export function App({
                   {warning}
                 </span>
               ))}
+              {session.imported.coverage ? (
+                <span className="ml-2 text-faint">
+                  {importCoverageLabel(session.imported.coverage)}
+                </span>
+              ) : null}
             </div>
           ) : null}
 
@@ -603,6 +609,20 @@ export function App({
       ) : null}
     </div>
   );
+}
+
+function importCoverageLabel(coverage: HistoryCoverage): string {
+  if (coverage.omittedItemCount === 0) {
+    return `历史完整（${coverage.retainedItemCount} 条）`;
+  }
+  const source = coverage.sourceItemCount ?? coverage.retainedItemCount + coverage.omittedItemCount;
+  const recovery = {
+    genehub: "可在 GeneHub 继续检索",
+    external: "需从原 Agent 继续检索",
+    nativeOnly: "仅原 Agent 原生会话可找回",
+    unavailable: "省略部分不可找回",
+  }[coverage.retrieval];
+  return `保留 ${coverage.retainedItemCount}/${source} 条，省略 ${coverage.omittedItemCount} 条 · ${recovery}`;
 }
 
 function dialOf(endpoint: Endpoint): ProtocolDial {

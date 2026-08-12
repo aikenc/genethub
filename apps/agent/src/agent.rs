@@ -53,6 +53,7 @@ pub async fn run_prompt(state: Arc<Mutex<State>>, text: String) {
                     &guard.skills,
                     &guard.additional_system_prompts,
                 ),
+                tools_enabled: guard.tools_enabled,
                 thinking_level: guard.thinking_level.clone(),
                 cwd: guard.cwd.clone(),
             }
@@ -135,6 +136,7 @@ struct Snapshot {
     system_prompt: String,
     thinking_level: String,
     cwd: std::path::PathBuf,
+    tools_enabled: bool,
 }
 
 struct StreamedAssistant {
@@ -159,7 +161,11 @@ async fn stream_assistant(
     let request = Request {
         system_prompt: snapshot.system_prompt.clone(),
         messages: snapshot.messages.clone(),
-        tools: tools::definitions(),
+        tools: if snapshot.tools_enabled {
+            tools::definitions()
+        } else {
+            Vec::new()
+        },
         thinking_level: snapshot.thinking_level.clone(),
     };
     let model = snapshot.model.clone();
@@ -343,12 +349,15 @@ async fn execute_calls(
     }
 
     let abort = { state.lock().await.abort.clone() };
+    let tools_enabled = snapshot.tools_enabled;
     let futures = calls.iter().map(|(id, name, arguments)| {
         let emitter = emitter.clone();
         let cwd = snapshot.cwd.clone();
         let abort = abort.clone();
         async move {
-            let result = if abort.load(Ordering::SeqCst) {
+            let result = if !tools_enabled {
+                tools::ToolResult::error("Tools are disabled for this private analysis run")
+            } else if abort.load(Ordering::SeqCst) {
                 tools::ToolResult::error("Operation aborted")
             } else {
                 tools::execute(name, arguments, &cwd).await
@@ -456,11 +465,14 @@ mod tests {
             current_model: model,
             thinking_level: "medium".into(),
             auto_compaction: true,
+            genehub_session_id: None,
             additional_system_prompts: Vec::new(),
             skills: Vec::<Skill>::new(),
             cwd,
             stats: Usage::default(),
             streaming: false,
+            compacting: false,
+            tools_enabled: true,
             abort: Arc::new(AtomicBool::new(false)),
             running: None,
         }))
