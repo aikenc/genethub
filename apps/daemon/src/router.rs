@@ -641,6 +641,13 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             }
         }
 
+        Request::DirectoryMkdir { parent, name } => {
+            match crate::workspace::mkdir_directory(Path::new(&parent), &name) {
+                Ok(listing) => Handled::ok(Reply::Directory(listing)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::FileTree {
             workspace_id,
             path,
@@ -669,6 +676,86 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
+        }
+
+        Request::FileMkdir {
+            workspace_id,
+            path,
+        } => {
+            let target = match state.workspaces.resolve(&workspace_id, &path).await {
+                Ok(target) => target,
+                Err(error) => return failed(error),
+            };
+            match files::mkdir(&target.root, &target.absolute) {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::FileCopy {
+            workspace_id,
+            from,
+            to,
+        } => {
+            let source = match state.workspaces.resolve(&workspace_id, &from).await {
+                Ok(source) => source,
+                Err(error) => return failed(error),
+            };
+            let destination = match state.workspaces.resolve(&workspace_id, &to).await {
+                Ok(destination) => destination,
+                Err(error) => return failed(error),
+            };
+            if source.root_handle != destination.root_handle {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "copy must stay inside the same workspace root",
+                );
+            }
+            match files::copy_path(&source.root, &source.absolute, &destination.absolute) {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::FileMove {
+            workspace_id,
+            from,
+            to,
+        } => {
+            let source = match state.workspaces.resolve(&workspace_id, &from).await {
+                Ok(source) => source,
+                Err(error) => return failed(error),
+            };
+            let destination = match state.workspaces.resolve(&workspace_id, &to).await {
+                Ok(destination) => destination,
+                Err(error) => return failed(error),
+            };
+            if source.root_handle != destination.root_handle {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "move must stay inside the same workspace root",
+                );
+            }
+            match files::move_path(&source.root, &source.absolute, &destination.absolute) {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::FileDelete {
+            workspace_id,
+            paths,
+        } => {
+            for path in paths {
+                let target = match state.workspaces.resolve(&workspace_id, &path).await {
+                    Ok(target) => target,
+                    Err(error) => return failed(error),
+                };
+                if let Err(error) = files::delete_path(&target.root, &target.absolute) {
+                    return failed(error);
+                }
+            }
+            Handled::ok(Reply::Ack)
         }
 
         Request::GitStatus { workspace_id } => {
