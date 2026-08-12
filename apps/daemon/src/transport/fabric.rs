@@ -176,11 +176,22 @@ impl FabricUplink {
                         &admission.url,
                         PeerAdmissionSource::Hosted(enrollment.clone()),
                         &task_online,
+                        "managed.uplink",
                     )
                     .await
                 }
                 .await;
                 task_online.store(false, Ordering::Relaxed);
+                state.diagnostics.record(
+                    "fabric",
+                    "managed.uplink",
+                    "offline",
+                    Some(if result.is_err() {
+                        "connection"
+                    } else {
+                        "closed"
+                    }),
+                );
                 if let Err(error) = result {
                     tracing::warn!(%error, "Fabric uplink disconnected");
                 }
@@ -205,9 +216,20 @@ impl FabricUplink {
                     &url,
                     PeerAdmissionSource::DeviceRequired,
                     &task_online,
+                    "rendezvous.uplink",
                 )
                 .await;
                 task_online.store(false, Ordering::Relaxed);
+                state.diagnostics.record(
+                    "fabric",
+                    "rendezvous.uplink",
+                    "offline",
+                    Some(if result.is_err() {
+                        "connection"
+                    } else {
+                        "closed"
+                    }),
+                );
                 if let Err(error) = result {
                     tracing::warn!(%error, "rendezvous Fabric uplink disconnected");
                 }
@@ -234,6 +256,7 @@ async fn run_once(
     url: &str,
     admission_source: PeerAdmissionSource,
     online: &AtomicBool,
+    diagnostic_operation: &'static str,
 ) -> Result<()> {
     validate_fabric_url(url)?;
     let request = url
@@ -252,6 +275,9 @@ async fn run_once(
     .await
     .context("Fabric WebSocket handshake timed out")??;
     online.store(true, Ordering::Relaxed);
+    state
+        .diagnostics
+        .record("fabric", diagnostic_operation, "online", None);
     tracing::info!("Fabric v2 uplink established");
 
     let (mut sink, mut source) = socket.split();

@@ -267,6 +267,15 @@ pub enum Request {
         name: Option<String>,
     },
 
+    /// Returns the daemon's bounded, privacy-safe support record.
+    ///
+    /// Unlike `log.tail`, this contains only fixed operation names, outcomes,
+    /// error classes and coarse connectivity state. It is safe for an official
+    /// client to attach to an explicit feedback submission without copying
+    /// terminal, Agent, prompt, filesystem path or credential text.
+    #[serde(rename = "diagnostics.snapshot")]
+    DiagnosticsSnapshot,
+
     // -- updates -----------------------------------------------------------
     /// Whether a newer build has been published. Sent when a person asks, and
     /// never on a timer — see `UpdateStatus`.
@@ -503,6 +512,7 @@ pub enum Reply {
     RemoteAccess(RemoteAccess),
     Settings(Settings),
     Log(LogTail),
+    Diagnostics(SupportDiagnostics),
     Update(UpdateStatus),
     UpdateDownload(UpdateDownload),
     Session(SessionSummary),

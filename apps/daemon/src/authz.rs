@@ -290,6 +290,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::DirectoryList { .. }
         | Request::FileTree { .. }
         | Request::LogTail { .. }
+        | Request::DiagnosticsSnapshot
         | Request::HubStatus
         | Request::HubMachines
         | Request::UpdateCheck

@@ -1408,6 +1408,7 @@ fn reply_kind(reply: &Reply) -> &'static str {
         Reply::RemoteAccess(_) => "remote access",
         Reply::Settings(_) => "settings",
         Reply::Log(_) => "log",
+        Reply::Diagnostics(_) => "diagnostics",
         Reply::Update(_) => "update",
         Reply::UpdateDownload(_) => "update download",
         Reply::Session(_) => "session",
