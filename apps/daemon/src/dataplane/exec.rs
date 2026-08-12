@@ -161,7 +161,15 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     stream
         .respond(&ExchangeResponseHead {
             status: 200,
-            metadata: serde_json::json!({ "codec": "json-u32be" }),
+            metadata: serde_json::json!({
+                "codec": "json-u32be",
+                // Said before the first byte of output, because it is what the
+                // output has to be read in light of: under confinement a path
+                // outside the workspace does not report "forbidden", it reports
+                // nothing at all, and a caller that has not been told the rule
+                // will read that as "this machine does not have it".
+                "confinement": crate::isolation::describe(confinement.as_ref()),
+            }),
             body_length: None,
             error: None,
         })

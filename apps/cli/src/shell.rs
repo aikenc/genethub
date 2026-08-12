@@ -134,6 +134,10 @@ async fn run(rpc: &Rpc, ask: Ask, selection: &Selection) -> Result<i32, CliFailu
             "argv": request.argv,
             "workspace": request.workspace_id,
             "cwd": request.cwd,
+            // Ahead of the output rather than alongside the failure, because
+            // the failure will not look like one: outside these roots a file
+            // is missing, not forbidden, and "missing" is the wrong lesson.
+            "confinement": running.confinement,
         }),
     );
 

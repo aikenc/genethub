@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
+use crate::domain::IsolationBackend;
 use crate::rpc::ProtocolError;
 
 /// A clean break from the former connection-wide JSON request protocol.
@@ -171,6 +172,25 @@ pub struct ShellRunRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub cwd: Option<String>,
+}
+
+/// What the operating system is holding a process to, told to whoever asked
+/// for the process.
+///
+/// Without this a confined caller has to infer the rule from the symptoms, and
+/// the symptoms differ by backend: a namespace makes the rest of the filesystem
+/// *absent* (`ENOENT`), Landlock leaves it there and *refuses* it (`EACCES`).
+/// An agent reading "no such file" concludes the directory does not exist and
+/// sets about creating it. Saying the rule up front is cheaper than every
+/// caller guessing it wrong differently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct Confinement {
+    pub backend: IsolationBackend,
+    /// Absolute paths the process can reach and write. Everything outside them
+    /// is absent or refused; which of the two depends on `backend`.
+    pub roots: Vec<String>,
 }
 
 /// One message from a running command.

@@ -106,6 +106,24 @@ name: string, description?: string,
 argumentHint?: string, };
 
 /**
+ * What the operating system is holding a process to, told to whoever asked
+ * for the process.
+ *
+ * Without this a confined caller has to infer the rule from the symptoms, and
+ * the symptoms differ by backend: a namespace makes the rest of the filesystem
+ * *absent* (`ENOENT`), Landlock leaves it there and *refuses* it (`EACCES`).
+ * An agent reading "no such file" concludes the directory does not exist and
+ * sets about creating it. Saying the rule up front is cheaper than every
+ * caller guessing it wrong differently.
+ */
+export type Confinement = { backend: IsolationBackend, 
+/**
+ * Absolute paths the process can reach and write. Everything outside them
+ * is absent or refused; which of the two depends on `backend`.
+ */
+roots: Array<string>, };
+
+/**
  * A client proving it is on the authorized list, without sending its secret.
  */
 export type DeviceAuth = { deviceId: string, 

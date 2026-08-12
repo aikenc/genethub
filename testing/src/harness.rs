@@ -430,6 +430,12 @@ fn point_confinement_at_the_real_binary() {
     }
     // The test executable sits in `target/<profile>/deps`; the CLI is built two
     // levels up, under whichever name this channel stamps.
+    //
+    // Cargo does not rebuild that binary for `--test command`, so a confinement
+    // test run straight after editing this library exercises whatever was built
+    // last. It will happily agree with a change that is not in it. Build the CLI
+    // too before believing a result here — including a failure you were trying
+    // to provoke.
     let Ok(here) = std::env::current_exe() else {
         return;
     };

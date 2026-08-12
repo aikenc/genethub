@@ -129,7 +129,7 @@ genet shell --machine srv-1 --cwd /srv/app -- /bin/sh -c 'make 2>&1 | tail -5'
 
 | `type` | 含义 |
 |--------|------|
-| `shell.started` | 第一行，回显最终的 argv、workspace 与 cwd |
+| `shell.started` | 第一行，回显最终的 argv、workspace、cwd，以及 `data.confinement` |
 | `shell.output` | `data.stream` 是 `"stdout"` 或 `"stderr"`，`data.data` 是这一段文本 |
 | `shell.exit` | **终止行**，`data.exitCode` 是命令自己的退出码（被信号杀死时为 `null`，`data.signal` 有值） |
 
@@ -151,6 +151,23 @@ genet shell --machine srv-1 --cwd /srv/app -- /bin/sh -c 'make 2>&1 | tail -5'
   也能做，给它单独取个名字只会让邀请看起来比实际更窄。
 - 没有 `pty:unconfined` 的设备，命令会被关进操作系统沙箱，只看得见这个 workspace；关不住就
   报 `isolationUnavailable` 而拒绝执行，**不会**退化成不受限地跑。
+
+### 被关起来的时候，「文件不存在」多半是假的
+
+`shell.started` 的 `data.confinement` 要么是 `null`（没关），要么给出 `backend` 和 `roots`
+（能到达的目录）。**在跑之前就读它**，因为失败的样子不像失败：
+
+| `backend` | 越界时看到的 |
+|-----------|--------------|
+| `namespaces` | 那条路径**根本不存在**——`ENOENT`、`No such file or directory` |
+| `landlock` | 路径还在，访问被拒——`EACCES`、`Permission denied` |
+
+同一条策略，两台机器两种症状，所以**不能靠 errno 反推规则**。`roots` 之外的任何「不存在」
+都要先当成越界：不要去建那个目录、不要断定工具链坏了、更不要重装依赖——你看不见它，不等于
+那台机器上没有它。
+
+命令自己也会被告知，两个环境变量：`GENEHUB_CONFINEMENT`（后端名）和 `GENEHUB_CONFINED_ROOTS`
+（`:` 分隔的可达目录）。写脚本时可以直接判断，没设就是没被关。
 - 没有 stdin：这条路是给非交互命令的，要交互用终端。
 - 连接断了命令就被杀，不会留在那台机器上跑。反过来说，流没等到 `shell.exit` 就结束，意味着
   连接先断了——那时命令的下落是未知的，会报 `commandInterrupted`。

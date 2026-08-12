@@ -758,6 +758,13 @@ fn command_output() -> Value {
         "x-terminalTypes": ["shell.exit", "error"],
         "x-streams": ["stdout", "stderr"],
         "x-exitCode": "shell.exit.data.exitCode, not the exit code of this process",
+        "x-confinement": "shell.started.data.confinement: null, or the backend and \
+                          the roots the command can reach. Read every missing path \
+                          outside those roots as out of bounds, not as absent: with \
+                          the namespaces backend the rest of the filesystem is not \
+                          there at all, so the machine reports no such file rather \
+                          than permission denied. The command itself is told the \
+                          same thing in GENEHUB_CONFINEMENT and GENEHUB_CONFINED_ROOTS.",
     })
 }
 

@@ -224,6 +224,106 @@ async fn a_confined_command_still_works_inside_the_workspace() {
     journey.finish().await;
 }
 
+/// Being confined is not something a process can find out by looking. Under a
+/// namespace the rest of the filesystem is *gone*, which reads exactly like a
+/// machine that never had it — an agent will create the directory it cannot
+/// see, or reinstall the toolchain it cannot reach, and both are wrong. It has
+/// to be told, in the process and before the output.
+#[tokio::test]
+async fn a_confined_command_is_told_it_is_confined_and_where_it_may_go() {
+    let journey = Journey::start().await.expect("journey starts");
+    if !genet_daemon::isolation::report().enforced {
+        eprintln!("skipping: this machine cannot confine a process");
+        return;
+    }
+
+    let credential = pair_granting(&journey, &["read", "pty"]).await;
+    let device = Client::connect_as_device(journey.daemon(), &credential)
+        .await
+        .expect("a paired device connects");
+    let (head, frames) = device
+        .run_command(ask(
+            &journey.workspace.id,
+            &[
+                "/bin/sh",
+                "-c",
+                "echo \"$GENEHUB_CONFINEMENT|$GENEHUB_CONFINED_ROOTS\"",
+            ],
+        ))
+        .await
+        .expect("the machine answers");
+    assert_eq!(head.status, 200, "{head:?}");
+
+    let said = text(&frames, "stdout");
+    let (backend, roots) = said.trim().split_once('|').expect("both were set");
+    assert!(
+        !backend.is_empty() && backend != "none",
+        "a process told it is confined by nothing has been told nothing: {said:?}"
+    );
+    assert!(
+        roots.split(':').any(|root| root == journey.workspace.root),
+        "the process was not told the one directory it can actually use: {said:?}"
+    );
+    assert!(
+        !roots.contains("/dev/"),
+        "naming the plumbing does not help anyone find their files: {said:?}"
+    );
+
+    // And out of band, before a single byte of output, so a caller can read a
+    // missing file as "out of bounds" rather than "this machine lacks it".
+    let announced = head
+        .metadata
+        .get("confinement")
+        .expect("the caller was told the rule");
+    assert_eq!(
+        announced["backend"], backend,
+        "the caller and the process were told different things"
+    );
+    assert!(
+        announced["roots"]
+            .as_array()
+            .expect("roots are a list")
+            .iter()
+            .any(|root| root == journey.workspace.root.as_str()),
+        "{announced:?}"
+    );
+
+    device.close().await;
+    journey.finish().await;
+}
+
+/// The inverse, and the one that would rot silently: an unconfined process
+/// that believes it is confined will refuse work it could have done.
+#[tokio::test]
+async fn a_command_that_is_not_confined_does_not_claim_to_be() {
+    let journey = Journey::start().await.expect("journey starts");
+    let credential = pair_granting(&journey, &["read", "pty", "pty:unconfined"]).await;
+    let device = Client::connect_as_device(journey.daemon(), &credential)
+        .await
+        .expect("a paired device connects");
+    let (head, frames) = device
+        .run_command(ask(
+            &journey.workspace.id,
+            &["/bin/sh", "-c", "echo \"[$GENEHUB_CONFINED_ROOTS]\""],
+        ))
+        .await
+        .expect("the machine answers");
+
+    assert_eq!(head.status, 200, "{head:?}");
+    assert_eq!(
+        head.metadata.get("confinement"),
+        Some(&serde_json::Value::Null),
+        "nothing is holding this command to anything"
+    );
+    assert_eq!(
+        text(&frames, "stdout").trim(),
+        "[]",
+        "an unconfined process was handed a fence it is not behind"
+    );
+    device.close().await;
+    journey.finish().await;
+}
+
 #[tokio::test]
 async fn every_folder_of_a_multi_root_workspace_is_inside_the_confinement() {
     // A `.code-workspace` is one project that happens to live in several

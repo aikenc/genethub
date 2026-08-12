@@ -57,11 +57,23 @@ pub const CONFINE_COMMAND_ENV: &str = "GENEHUB_CONFINE_COMMAND";
 /// that cannot read `/usr/lib` dies before it can say why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
+    /// The directories the request was about, and the only part of the policy
+    /// anyone is told about. Kept apart from the rest of `writable` because
+    /// "`/dev/null` is reachable" is true and useless: a caller trying to work
+    /// out why a path is missing needs the workspace, not the plumbing.
+    pub roots: Vec<PathBuf>,
+    /// Writable, and not worth reporting: what a program needs merely to have
+    /// a working stdio.
     pub writable: Vec<PathBuf>,
     pub readable: Vec<PathBuf>,
 }
 
 impl Policy {
+    /// Everything the process may write, roots included.
+    pub fn writable_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.roots.iter().chain(self.writable.iter())
+    }
+
     /// Confines a process to the workspace it was opened in.
     ///
     /// The workspace folders are writable because that is the work; the system
@@ -86,10 +98,10 @@ impl Policy {
             "/dev/full",
         ];
         Policy {
-            writable: roots
+            roots: roots.iter().filter(|path| path.exists()).cloned().collect(),
+            writable: DEVICES
                 .iter()
-                .cloned()
-                .chain(DEVICES.iter().map(PathBuf::from))
+                .map(PathBuf::from)
                 .filter(|path| path.exists())
                 .collect(),
             readable: SYSTEM
@@ -107,6 +119,12 @@ impl Policy {
             None => std::env::current_exe()?,
         };
         let mut argv = vec![helper, PathBuf::from(CONFINE_ARG)];
+        // Named apart from `--rw` all the way through, so the wrapper can tell
+        // the process what its workspace is without listing the device nodes.
+        for path in &self.roots {
+            argv.push(PathBuf::from("--root"));
+            argv.push(path.clone());
+        }
         for path in &self.writable {
             argv.push(PathBuf::from("--rw"));
             argv.push(path.clone());
@@ -160,6 +178,18 @@ pub fn required_for(
         roots.push(workspace.root.clone());
     }
     Ok(Some(Policy::for_workspace(&roots)))
+}
+
+/// How a policy is described to the caller that caused it.
+pub fn describe(policy: Option<&Policy>) -> Option<genehub_proto::Confinement> {
+    policy.map(|policy| genehub_proto::Confinement {
+        backend: report().backend,
+        roots: policy
+            .roots
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+    })
 }
 
 /// What this machine can enforce, asked once and answered the same way every
@@ -295,7 +325,7 @@ fn landlock_confine(policy: &Policy) -> Result<String> {
         .handle_access(AccessFs::from_all(TARGET))?
         .create()?
         .add_rules(landlock::path_beneath_rules(
-            &policy.writable,
+            policy.writable_paths(),
             AccessFs::from_all(TARGET),
         ))?
         .add_rules(landlock::path_beneath_rules(
@@ -399,8 +429,7 @@ fn namespace_confine(policy: &Policy) -> Result<String> {
 
     let mut bound = 0usize;
     for (source, writable) in policy
-        .writable
-        .iter()
+        .writable_paths()
         .map(|path| (path, true))
         .chain(policy.readable.iter().map(|path| (path, false)))
     {
@@ -481,11 +510,45 @@ pub fn confine(_policy: &Policy) -> Result<String> {
     ))
 }
 
+/// Names the variables that tell a confined process it is one.
+///
+/// Nothing else can. From inside a namespace the rest of the filesystem is
+/// simply gone, which is indistinguishable from a machine that never had it —
+/// and an agent that reads "no such directory" will go and create it, or
+/// decide the toolchain is broken and reinstall it. Under Landlock the same
+/// policy produces "permission denied" instead, so even the symptom is not a
+/// stable thing to learn. These are the only in-band way to tell the
+/// difference, and they cost two `setenv` calls.
+pub const CONFINED_BACKEND_ENV: &str = "GENEHUB_CONFINEMENT";
+pub const CONFINED_ROOTS_ENV: &str = "GENEHUB_CONFINED_ROOTS";
+
+fn announcement(backend: IsolationBackend, policy: &Policy) -> Vec<(String, String)> {
+    vec![
+        (
+            CONFINED_BACKEND_ENV.to_string(),
+            format!("{backend:?}").to_lowercase(),
+        ),
+        (CONFINED_ROOTS_ENV.to_string(), joined(&policy.roots)),
+    ]
+}
+
+/// Path-list separator, as every Unix tool already writes one. A path holding
+/// a colon would be mis-split, which is the same limitation `PATH` has had
+/// throughout, and a worse trade than inventing a separator nobody parses.
+fn joined(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 /// The wrapper: restrict this process, then become the program that was asked
 /// for. Never returns on success, because there is nothing left of us to
 /// return to.
 pub fn confine_and_exec(args: &[String]) -> i32 {
     let mut policy = Policy {
+        roots: Vec::new(),
         writable: Vec::new(),
         readable: Vec::new(),
     };
@@ -493,15 +556,15 @@ pub fn confine_and_exec(args: &[String]) -> i32 {
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--rw" | "--ro" => {
+            "--root" | "--rw" | "--ro" => {
                 let Some(path) = args.get(index + 1) else {
                     eprintln!("genet: {} needs a path", args[index]);
                     return 2;
                 };
-                if args[index] == "--rw" {
-                    policy.writable.push(PathBuf::from(path));
-                } else {
-                    policy.readable.push(PathBuf::from(path));
+                match args[index].as_str() {
+                    "--root" => policy.roots.push(PathBuf::from(path)),
+                    "--rw" => policy.writable.push(PathBuf::from(path)),
+                    _ => policy.readable.push(PathBuf::from(path)),
                 }
                 index += 2;
             }
@@ -520,6 +583,7 @@ pub fn confine_and_exec(args: &[String]) -> i32 {
         return 2;
     };
 
+    let backend = report().backend;
     if let Err(error) = confine(&policy) {
         // The one thing this process must never do is exec anyway.
         eprintln!("genet: refusing to start an unconfined process: {error}");
@@ -529,8 +593,23 @@ pub fn confine_and_exec(args: &[String]) -> i32 {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        let error = std::process::Command::new(program).args(arguments).exec();
-        eprintln!("genet: {} could not be started: {error}", program);
+        let error = std::process::Command::new(program)
+            .envs(announcement(backend, &policy))
+            .args(arguments)
+            .exec();
+        // The one moment where saying "no such file" alone would be actively
+        // misleading: from in here the rest of the filesystem is missing, and
+        // a program that reads this is meant to conclude "out of bounds"
+        // rather than "not installed".
+        eprintln!(
+            "genet: {program} could not be started: {error}. This process is confined to {}; \
+             anything outside is {}.",
+            joined(&policy.roots),
+            match backend {
+                IsolationBackend::Namespaces => "not there at all",
+                _ => "refused",
+            }
+        );
         71
     }
     #[cfg(not(unix))]
@@ -568,15 +647,15 @@ mod tests {
     fn a_policy_names_the_workspace_and_the_toolchain_and_nothing_else() {
         let workspace = std::env::temp_dir();
         let policy = Policy::for_workspace(std::slice::from_ref(&workspace));
-        assert!(policy.writable.contains(&workspace));
+        assert!(policy.roots.contains(&workspace));
         assert!(
-            !policy.writable.iter().any(|path| path == Path::new("/")),
+            !policy.writable_paths().any(|path| path == Path::new("/")),
             "a policy that allows the root allows everything"
         );
         assert!(!policy.readable.iter().any(|path| path == Path::new("/")));
         // Every path handed to the kernel has to exist, or the rule is dropped
         // on the floor and the result is a quieter policy than it looks.
-        for path in policy.writable.iter().chain(policy.readable.iter()) {
+        for path in policy.writable_paths().chain(policy.readable.iter()) {
             assert!(path.exists(), "{} does not exist", path.display());
         }
         // The daemon runs as this same account, so procfs would hand over its
@@ -591,10 +670,64 @@ mod tests {
         );
     }
 
+    /// A process that cannot tell confinement from a bare machine will act on
+    /// the wrong one: create the directory it cannot see, reinstall the
+    /// toolchain it cannot reach. What it is told has to be the workspace and
+    /// only the workspace — `/dev/null` is reachable, and saying so helps
+    /// nobody work out where their files went.
+    #[test]
+    fn a_confined_process_is_told_the_workspace_and_not_the_plumbing() {
+        let policy = Policy {
+            roots: vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+            writable: vec![PathBuf::from("/dev/null")],
+            readable: vec![PathBuf::from("/usr")],
+        };
+        let announced: std::collections::HashMap<_, _> =
+            announcement(IsolationBackend::Namespaces, &policy)
+                .into_iter()
+                .collect();
+        assert_eq!(
+            announced[CONFINED_ROOTS_ENV], "/tmp/a:/tmp/b",
+            "the caller cannot act on roots it was not given"
+        );
+        assert!(
+            !announced[CONFINED_ROOTS_ENV].contains("/dev"),
+            "the plumbing is not somewhere anyone's files went"
+        );
+        assert_eq!(
+            announced[CONFINED_BACKEND_ENV], "namespaces",
+            "which backend decides whether the symptom is absence or refusal"
+        );
+    }
+
+    /// Not cosmetic: the two backends make the same policy look like two
+    /// different faults, so a process that only sees the symptom cannot learn
+    /// a rule that holds on the next machine.
+    #[test]
+    fn the_backend_is_named_because_the_symptom_differs_by_backend() {
+        let policy = Policy {
+            roots: vec![PathBuf::from("/tmp")],
+            writable: Vec::new(),
+            readable: Vec::new(),
+        };
+        let of = |backend| {
+            announcement(backend, &policy)
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>()[CONFINED_BACKEND_ENV]
+                .clone()
+        };
+        assert_eq!(of(IsolationBackend::Landlock), "landlock");
+        assert_ne!(
+            of(IsolationBackend::Landlock),
+            of(IsolationBackend::Namespaces)
+        );
+    }
+
     #[test]
     fn the_wrapper_puts_the_program_last_so_its_arguments_cannot_become_ours() {
         let policy = Policy {
-            writable: vec![PathBuf::from("/tmp")],
+            roots: vec![PathBuf::from("/tmp")],
+            writable: vec![PathBuf::from("/dev/null")],
             readable: vec![PathBuf::from("/usr")],
         };
         std::env::set_var(CONFINE_COMMAND_ENV, "/opt/genet");
@@ -607,8 +740,10 @@ mod tests {
             [
                 "/opt/genet",
                 CONFINE_ARG,
-                "--rw",
+                "--root",
                 "/tmp",
+                "--rw",
+                "/dev/null",
                 "--ro",
                 "/usr",
                 "--",
