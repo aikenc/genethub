@@ -4905,20 +4905,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_one_build_at_a_time_writes_a_project() {
+    async fn builds_share_a_project_but_only_one_writes_each_session() {
         let workspace = tempfile::tempdir().unwrap();
         let holder = manager(workspace.path());
         holder.store.save_meta(&meta()).unwrap();
 
         let other = manager(workspace.path());
+        let mut independent = meta();
+        independent.id = "s2".into();
+        independent.title = Some("independent".into());
+        other.store.save_meta(&independent).unwrap();
+        assert!(
+            workspace
+                .path()
+                .join(".genethub/sessions/s2/meta.json")
+                .is_file(),
+            "another channel could not create or write an independent session"
+        );
+
         let refused = other.store.save_meta(&meta()).unwrap_err().to_string();
         assert!(
             refused.contains(crate::channel::PRODUCT),
-            "the second build must name who is holding the project: {refused}"
+            "the second build must name who is writing the session: {refused}"
+        );
+        assert!(
+            refused.contains("Fork from a completed turn"),
+            "the refusal gives no continuation path: {refused}"
         );
         assert_eq!(
             other.list(None, false).await.unwrap().len(),
-            1,
+            2,
             "losing the write lock must not hide the conversations"
         );
 
@@ -4935,6 +4951,38 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             resumed = other.store.save_meta(&meta());
         }
-        resumed.expect("the second build had to be restarted to write again");
+        resumed.expect("the second build had to be restarted to write the session again");
+    }
+
+    #[tokio::test]
+    async fn current_builds_do_not_double_write_with_a_legacy_workspace_owner() {
+        let workspace = tempfile::tempdir().unwrap();
+        let home = workspace.path().join(".genethub");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("owner"), "GeneHub Legacy\n").unwrap();
+        let legacy = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(home.join("owner.lock"))
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&legacy).unwrap();
+
+        let current = manager(workspace.path());
+        let refused = current.store.save_meta(&meta()).unwrap_err().to_string();
+        assert!(refused.contains("GeneHub Legacy"), "{refused}");
+        assert!(refused.contains("upgrade"), "{refused}");
+
+        drop(legacy);
+        let mut resumed = current.store.save_meta(&meta());
+        for _ in 0..40 {
+            if resumed.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            resumed = current.store.save_meta(&meta());
+        }
+        resumed.expect("the current build had to restart after the legacy owner exited");
     }
 }
