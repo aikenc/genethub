@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { assetPreviewUrl } from "../preview/url";
 import { useWorkbench } from "../session/store";
 import { FileTree } from "./FileTree";
 

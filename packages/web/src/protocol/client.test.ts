@@ -183,7 +183,6 @@ describe("the v3 peer connection", () => {
     expect(attempts).toEqual([0, 1]);
     client.close();
   });
-});
 
   it("notices a silently dead carrier through the heartbeat and reconnects", async () => {
     const { client, queue } = await connected({

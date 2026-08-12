@@ -27,7 +27,6 @@ import type { Host } from "../host";
 import type { Client, ConnectionState } from "../protocol/client";
 import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
-import { assetPreviewBaseUrl } from "../preview/url";
 import {
   applySequenced,
   emptyTimeline,
