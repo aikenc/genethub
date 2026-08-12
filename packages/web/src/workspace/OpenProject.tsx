@@ -3,6 +3,7 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { Endpoint, Host } from "../host";
+import { warnOp } from "../session/op-log";
 import { useWorkbench } from "../session/store";
 import { ProjectIcon } from "./WorkspaceIcon";
 
@@ -56,7 +57,7 @@ export function OpenProject({
       setCreating(false);
       onOpened?.();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(warnOp("workspace.open", failure));
     } finally {
       setBusy(false);
     }
@@ -73,7 +74,7 @@ export function OpenProject({
       const picked = await pick(startingDirectory());
       if (picked) await open(picked);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(warnOp("workspace.pick", failure));
     } finally {
       setBusy(false);
     }
@@ -98,7 +99,7 @@ export function OpenProject({
       setPicker(listing);
       if (!listing.roots) rememberPickerDirectory(endpoint, listing.path);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(warnOp("directory.list", failure));
     } finally {
       setPickerBusy(false);
     }
@@ -126,7 +127,7 @@ export function OpenProject({
         failure = error;
       }
     }
-    setError(failure instanceof Error ? failure.message : String(failure));
+    setError(warnOp("directory.list", failure));
     setPickerBusy(false);
   };
 
@@ -150,7 +151,7 @@ export function OpenProject({
       setCreating(false);
       setNewFolderName("新建文件夹");
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(warnOp("directory.mkdir", failure));
     } finally {
       setPickerBusy(false);
     }

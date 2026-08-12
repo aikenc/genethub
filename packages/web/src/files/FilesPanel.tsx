@@ -1,6 +1,7 @@
 import type { FileNode } from "@genehub/proto";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { warnOp } from "../session/op-log";
 import { useWorkbench } from "../session/store";
 import { FileTree } from "./FileTree";
 
@@ -108,7 +109,7 @@ export function FilesPanel() {
     return focusIsDir ? focusPath : parentPath(focusPath);
   };
 
-  const run = async (action: () => Promise<void>) => {
+  const run = async (op: string, action: () => Promise<void>) => {
     if (!client || !activeWorkspaceId) return;
     setBusy(true);
     setError(null);
@@ -118,7 +119,7 @@ export function FilesPanel() {
       const directory = targetDirectory();
       if (directory) await loadTree(directory);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(warnOp(op, failure));
     } finally {
       setBusy(false);
     }
@@ -132,7 +133,7 @@ export function FilesPanel() {
       return;
     }
     const path = joinPath(directory, name);
-    await run(async () => {
+    await run("file.mkdir", async () => {
       const reply = await client!.call({
         type: "file.mkdir",
         payload: { workspaceId: activeWorkspaceId!, path },
@@ -158,7 +159,8 @@ export function FilesPanel() {
         return;
       }
     }
-    await run(async () => {
+    const op = clipboard.mode === "copy" ? "file.copy" : "file.move";
+    await run(op, async () => {
       let lastPath: string | null = null;
       for (const item of clipboard.items) {
         const to = uniqueChildPath(directory, item.name, tree);
@@ -214,7 +216,7 @@ export function FilesPanel() {
     const label =
       paths.length === 1 ? `「${baseName(paths[0]!)}」` : `${paths.length} 个项目`;
     if (!window.confirm(`确定删除${label}？此操作不可撤销。`)) return;
-    await run(async () => {
+    await run("file.delete", async () => {
       const reply = await client!.call({
         type: "file.delete",
         payload: { workspaceId: activeWorkspaceId!, paths },

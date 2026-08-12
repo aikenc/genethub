@@ -80,6 +80,9 @@ fn failed(error: anyhow::Error) -> Handled {
     } else {
         ErrorCode::Internal
     };
+    // Default filter is info; warn keeps the sentence the client already saw in
+    // daemon.log so a feedback pull of log.tail can explain the same failure.
+    tracing::warn!(?code, error = %message, "rpc failed");
     Handled {
         reply: Err(ProtocolError { code, message }),
         effect: SideEffect::None,
@@ -762,7 +765,10 @@ pub async fn handle(
 
         Request::DirectoryMkdir { parent, name } => {
             match crate::workspace::mkdir_directory(Path::new(&parent), &name) {
-                Ok(listing) => Handled::ok(Reply::Directory(listing)),
+                Ok(listing) => {
+                    tracing::info!(%parent, %name, "directory.mkdir");
+                    Handled::ok(Reply::Directory(listing))
+                }
                 Err(error) => failed(error),
             }
         }
@@ -803,7 +809,10 @@ pub async fn handle(
                 Err(error) => return failed(error),
             };
             match files::mkdir(&target.root, &target.absolute) {
-                Ok(()) => Handled::ok(Reply::Ack),
+                Ok(()) => {
+                    tracing::info!(%workspace_id, %path, "file.mkdir");
+                    Handled::ok(Reply::Ack)
+                }
                 Err(error) => failed(error),
             }
         }
@@ -822,13 +831,22 @@ pub async fn handle(
                 Err(error) => return failed(error),
             };
             if source.root_handle != destination.root_handle {
+                tracing::warn!(
+                    %workspace_id,
+                    %from,
+                    %to,
+                    "file.copy refused: must stay inside the same workspace root"
+                );
                 return Handled::err(
                     ErrorCode::BadRequest,
                     "copy must stay inside the same workspace root",
                 );
             }
             match files::copy_path(&source.root, &source.absolute, &destination.absolute) {
-                Ok(()) => Handled::ok(Reply::Ack),
+                Ok(()) => {
+                    tracing::info!(%workspace_id, %from, %to, "file.copy");
+                    Handled::ok(Reply::Ack)
+                }
                 Err(error) => failed(error),
             }
         }
@@ -847,13 +865,22 @@ pub async fn handle(
                 Err(error) => return failed(error),
             };
             if source.root_handle != destination.root_handle {
+                tracing::warn!(
+                    %workspace_id,
+                    %from,
+                    %to,
+                    "file.move refused: must stay inside the same workspace root"
+                );
                 return Handled::err(
                     ErrorCode::BadRequest,
                     "move must stay inside the same workspace root",
                 );
             }
             match files::move_path(&source.root, &source.absolute, &destination.absolute) {
-                Ok(()) => Handled::ok(Reply::Ack),
+                Ok(()) => {
+                    tracing::info!(%workspace_id, %from, %to, "file.move");
+                    Handled::ok(Reply::Ack)
+                }
                 Err(error) => failed(error),
             }
         }
@@ -862,8 +889,8 @@ pub async fn handle(
             workspace_id,
             paths,
         } => {
-            for path in paths {
-                let target = match state.workspaces.resolve(&workspace_id, &path).await {
+            for path in &paths {
+                let target = match state.workspaces.resolve(&workspace_id, path).await {
                     Ok(target) => target,
                     Err(error) => return failed(error),
                 };
@@ -871,6 +898,7 @@ pub async fn handle(
                     return failed(error);
                 }
             }
+            tracing::info!(%workspace_id, count = paths.len(), "file.delete");
             Handled::ok(Reply::Ack)
         }
 

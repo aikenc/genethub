@@ -47,9 +47,9 @@
 ## 3. 布局
 
 ```text
-<workspace>/.genethub/owner.lock              写入权的内核锁，内容始终为空
-<workspace>/.genethub/owner                   持锁者的名字，只用于提示
 <workspace>/.genethub/sessions/<session-id>/
+  writer.lock                      此会话写入权的内核锁，内容始终为空
+  writer                           持锁者的名字，只用于提示
   meta.json                        会话元数据，含数据格式版本号
   chat.jsonl                       会话层：叙事行 + 每个 round 一行折叠态
   rounds/r-000/index.jsonl         round 层索引：一行一个 trunk 摘要
@@ -58,6 +58,7 @@
   rounds/r-001/…
   blobs/b-9f.jsonl                 blob 正文，按内容 id 前两位合批
   state/                           adapter 私有 scratch
+<workspace>/.genethub/tombstones/<session-id>.json  持锁写入的逻辑删除标记
 ```
 
 会话目录**自包含**：没有任何一个文件名、也没有 `meta.json` 里的任何一个字段依赖外部上下文——它属于哪个工作区由它躺在哪里决定（§3.4）。整个目录可以整体移动、整体删除、整体备份，换一个 channel 打开也还是同一批对话。
@@ -155,11 +156,13 @@ pub struct BlobRef {
 - **只读不升级。** 只有写操作会把 `format` 盖成本机版本，而且是在 `save_meta` 里统一盖的，不靠每个调用点记得。旧版本读一遍新会话不会改变任何东西。
 - **什么时候该 +1：** 只有当旧版本读了会**读错**的时候。加字段不算——serde 会忽略不认识的字段，旧版本照常工作，为此升版号纯属把人白白挡在外面。每次 +1 对新版本写过的每个会话都是单向门，这个分量正合适。
 
-**写入互斥用 `<work>/.genethub/owner.lock`。** 两个 daemon 同时往一个 `chat.jsonl` 里追加 round，谁也说不清结果。所以第一次写入时抢一把内核文件锁（`fs2::try_lock_exclusive`），拿到才写。
+**写入互斥用 `<session>/writer.lock`。** 两个 daemon 同时往同一个 `chat.jsonl` 里追加 round，谁也说不清结果。所以第一次写入某个会话时抢一把内核文件锁（`fs2::try_lock_exclusive`），拿到才写。锁不放在 workspace：不同 channel 可以同时在同一项目里写不同会话，从已完成 turn Fork 出来的新会话也不会被源会话的 writer 阻塞。
+
+滚动升级期间，新版还会共享持有旧 `<work>/.genethub/owner.lock`：多个新版的共享锁互不阻塞，但会与旧版的 workspace 排他锁互斥。这样旧、新 channel 不会因锁协议不同而双写；全部升级后它只是一道无竞争的兼容门，不再限制 workspace 并发。
 
 - **在第一次写入时抢，不在注册工作区时抢。** 否则用户随手打开一个目录就会在里面留下 `.genethub/`。
-- **抢不到只影响写，不影响读。** 列表照列、会话照开，写的时候才报「GeneHub Beta 正占用这个项目的会话」。
-- **持有者的名字写在旁边的 `owner` 里，锁文件本身永远是空的。** Windows 的排他锁连读一起挡，写在锁文件里的名字恰恰是需要读它的那个进程读不到。这个文件只用于凑出一句能读的话，判定始终是内核锁。
+- **抢不到只影响这个会话的写，不影响读或其他会话。** 列表照列、会话照开，其他会话照常创建和续聊；写的时候才指出持有者，并提示可从已完成 turn Fork。
+- **持有者的名字写在旁边的 `writer` 里，锁文件本身永远是空的。** Windows 的排他锁连读一起挡，写在锁文件里的名字恰恰是需要读它的那个进程读不到。这个文件只用于凑出一句能读的话，判定始终是内核锁。
 - **不需要清理陈旧锁。** 内核锁在进程崩溃时也会释放，而且每次写入都会重试一次，对方一退出这边立刻恢复，不用重启。
 - **判断「锁被占用」不能只看 `ErrorKind::WouldBlock`。** Windows 报的是 `ERROR_LOCK_VIOLATION`，不映射到任何 kind，只看 kind 会把「别人拿着」读成「这个文件坏了」。判定收在 `lifecycle::lock_contended` 一处。
 
@@ -215,5 +218,5 @@ N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = �
 - **边界：** batch 第 16 条关闭、trunk 第 100 条关闭；无独白时 batch 文本回退到首个 thinking 前 100 字，再回退到「调用了 N 次工具」。
 - **跨 channel 复用：** 另一个 channel 注册同一个目录后，既有会话照常列出、照常打开、照常续聊，不依赖它自己那份 workspace id。
 - **版本单向：** `format` 高于本机的会话仍出现在列表里并说明原因，但打不开；本机只读它不会改动 `meta.json`。
-- **写入互斥：** 同一目录第二个 daemon 的写入被拒绝并指出占用者，读取不受影响；占用者退出后无需重启即可恢复写入。
-- **删除彻底：** `session.delete` 删掉整个会话目录，包括 blobs 与 scratch。
+- **写入互斥：** 同一 session 的第二个 daemon 写入被拒绝并指出占用者，读取不受影响；不同 session 可跨 channel 并行写；占用者退出后无需重启即可恢复写入；从稳定 turn Fork 的新 session 不受源 session 锁影响。
+- **删除原子且可回收：** `session.delete` 持有该 session 的 writer lock 写入 durable tombstone；从此所有 channel 都隐藏并拒绝写入该 id。随后释放锁并删除整个会话目录，包括 blobs 与 scratch；Windows 若因开放 handle 暂时不能删除，启动/列表扫描会继续回收，墓碑保证残留目录永不复活。

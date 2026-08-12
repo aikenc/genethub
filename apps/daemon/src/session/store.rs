@@ -39,6 +39,34 @@ use sha2::{Digest, Sha256};
 use super::rounds::RoundRecord;
 use crate::adapter::PersistHandle;
 
+#[derive(Debug)]
+pub struct SessionWriteContended {
+    holder: String,
+}
+
+impl std::fmt::Display for SessionWriteContended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is writing this session; you can still read it or Fork from a completed turn",
+            self.holder
+        )
+    }
+}
+
+impl std::error::Error for SessionWriteContended {}
+
+#[derive(Debug)]
+pub struct SessionDeleted;
+
+impl std::fmt::Display for SessionDeleted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this session was deleted")
+    }
+}
+
+impl std::error::Error for SessionDeleted {}
+
 /// Content ids are the first 24 hex characters of a SHA-256. 96 bits keeps
 /// collisions negligible at any session size, and every trunk row carries one.
 const BLOB_ID_CHARS: usize = 24;
@@ -289,33 +317,40 @@ pub fn sessions_dir(workspace_root: &Path) -> PathBuf {
 
 /// The per-workspace directory GeneHub owns inside the user's own project.
 const HOME_DIR_NAME: &str = ".genethub";
+const TOMBSTONES_DIR: &str = "tombstones";
 
-/// The file whose kernel lock decides which build may write a workspace's
-/// sessions.
+/// Compatibility gate for builds that still take one exclusive workspace
+/// lock. Current builds hold it shared, so they can coexist with each other
+/// but never double-write alongside an older daemon.
+const LEGACY_OWNER_LOCK: &str = "owner.lock";
+const LEGACY_OWNER_NAME: &str = "owner";
+
+/// The file whose kernel lock decides which build may write one session.
 ///
 /// Kept empty. A Windows exclusive lock blocks reads as well as writes, so
 /// anything stored here would be unreadable by precisely the process that
 /// needs it: the one that just lost the lock.
-const OWNER_LOCK: &str = "owner.lock";
+const WRITER_LOCK: &str = "writer.lock";
 
-/// Who holds [`OWNER_LOCK`], in plain text, so the build that loses can name
+/// Who holds [`WRITER_LOCK`], in plain text, so the build that loses can name
 /// the one to close instead of saying "something else". Diagnostics only —
 /// the kernel lock decides, and this file is merely the label on it.
-const OWNER_NAME: &str = "owner";
+const WRITER_NAME: &str = "writer";
 
 /// A registered workspace: where it is, and whether this daemon may write it.
 struct Home {
-    /// The physical session home's write lock while this daemon holds it. Dropping the
-    /// handle releases it, so it lives exactly as long as the entry does, and
-    /// a crash releases it too — the kernel holds it, not a file's contents.
-    lock: Option<File>,
+    /// Shared compatibility lock excluding older workspace-locking builds.
+    compatibility: Option<File>,
+    /// One write lock per session. Different channels may write different
+    /// conversations in the same workspace at the same time.
+    writers: BTreeMap<String, File>,
 }
 
 #[derive(Default)]
 struct Homes {
     /// Project id to physical Agent/session root.
     workspaces: BTreeMap<String, WorkspaceHome>,
-    /// One lock per physical `.genethub`, shared by every project view rooted
+    /// One entry per physical `.genethub`, shared by every project view rooted
     /// there. Folder and `.code-workspace` identities must never self-contend.
     roots: BTreeMap<PathBuf, Home>,
 }
@@ -432,30 +467,18 @@ impl WorkspaceHomes {
             .collect()
     }
 
-    /// Whether this daemon already owns the workspace's write lock.
-    fn holds(&self, workspace_id: &str) -> bool {
+    /// Whether this daemon already owns this session's write lock.
+    fn holds(&self, workspace_id: &str, session_id: &str) -> bool {
         self.homes.read().is_ok_and(|homes| {
             homes
                 .workspaces
                 .get(workspace_id)
                 .and_then(|workspace| homes.roots.get(&workspace.root))
-                .is_some_and(|home| home.lock.is_some())
+                .is_some_and(|home| home.writers.contains_key(session_id))
         })
     }
 
-    /// Takes the workspace's write lock, or names who is holding it.
-    ///
-    /// Sessions live in the project, so a beta and a release pointed at the
-    /// same folder are two processes over one set of files. Both may read;
-    /// only one may write, and the one that loses says so instead of
-    /// interleaving its rounds into the other's `chat.jsonl`.
-    ///
-    /// Claimed on the first write rather than when the workspace is
-    /// registered, because merely opening a folder must not leave a
-    /// `.genethub` behind in it. Re-attempted while unheld, so the loser
-    /// starts working the moment the other build quits — no restart, no
-    /// stale-lock cleanup, since the kernel drops it even on a crash.
-    fn claim(&self, workspace_id: &str, home_dir: &Path) -> Result<()> {
+    fn claim_compatibility(&self, workspace_id: &str, home_dir: &Path) -> Result<()> {
         let mut homes = self
             .homes
             .write()
@@ -469,10 +492,71 @@ impl WorkspaceHomes {
             .roots
             .get_mut(&root)
             .ok_or_else(|| anyhow!("workspace {workspace_id} has no session home"))?;
-        if home.lock.is_some() {
+        if home.compatibility.is_some() {
             return Ok(());
         }
-        let path = home_dir.join(OWNER_LOCK);
+        let path = home_dir.join(LEGACY_OWNER_LOCK);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        match fs2::FileExt::try_lock_shared(&file) {
+            Ok(()) => {}
+            Err(error) if crate::lifecycle::lock_contended(&error) => {
+                let holder = fs::read_to_string(home_dir.join(LEGACY_OWNER_NAME))
+                    .ok()
+                    .map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| "an older GeneHub".to_string());
+                tracing::warn!(
+                    event = "legacy_workspace_writer_contended",
+                    workspace = %workspace_id,
+                    %holder,
+                    "an older GeneHub is holding the workspace-wide session lock"
+                );
+                return Err(anyhow!(
+                    "{holder} uses the older workspace-wide session lock; close or upgrade it before writing here"
+                ));
+            }
+            Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
+        }
+        home.compatibility = Some(file);
+        Ok(())
+    }
+
+    /// Takes one session's write lock, or names who is holding it.
+    ///
+    /// Sessions live in the project, so a beta and a release pointed at the
+    /// same folder are two processes over one set of files. Both may write
+    /// different sessions; only one may write a particular session, and the
+    /// one that loses says so instead of interleaving `chat.jsonl` rows.
+    ///
+    /// Claimed on the first write rather than when the workspace is
+    /// registered, because merely opening a folder must not leave a
+    /// `.genethub` behind in it. Re-attempted while unheld, so the loser
+    /// starts working the moment the other build quits — no restart, no
+    /// stale-lock cleanup, since the kernel drops it even on a crash.
+    fn claim(&self, workspace_id: &str, session_id: &str, session_dir: &Path) -> Result<()> {
+        let mut homes = self
+            .homes
+            .write()
+            .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
+        let root = homes
+            .workspaces
+            .get(workspace_id)
+            .map(|home| home.root.clone())
+            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
+        let home = homes
+            .roots
+            .get_mut(&root)
+            .ok_or_else(|| anyhow!("workspace {workspace_id} has no session home"))?;
+        if home.writers.contains_key(session_id) {
+            return Ok(());
+        }
+        let path = session_dir.join(WRITER_LOCK);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -483,27 +567,51 @@ impl WorkspaceHomes {
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => {}
             Err(error) if crate::lifecycle::lock_contended(&error) => {
-                let holder = fs::read_to_string(home_dir.join(OWNER_NAME))
+                let holder = fs::read_to_string(session_dir.join(WRITER_NAME))
                     .ok()
                     .map(|text| text.trim().to_string())
                     .filter(|text| !text.is_empty())
                     .unwrap_or_else(|| "another GeneHub".to_string());
-                return Err(anyhow!(
-                    "{holder} has this project's sessions open, so this one can only read them"
-                ));
+                tracing::warn!(
+                    event = "session_writer_contended",
+                    workspace = %workspace_id,
+                    session = %session_id,
+                    %holder,
+                    "another daemon is writing this session"
+                );
+                return Err(SessionWriteContended { holder }.into());
             }
             Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
         }
         let stamp = format!("{} (pid {})\n", crate::channel::PRODUCT, std::process::id());
-        let _ = fs::write(home_dir.join(OWNER_NAME), stamp);
-        home.lock = Some(file);
+        let _ = fs::write(session_dir.join(WRITER_NAME), stamp);
+        home.writers.insert(session_id.to_string(), file);
+        Ok(())
+    }
+
+    fn release(&self, workspace_id: &str, session_id: &str) -> Result<()> {
+        let mut homes = self
+            .homes
+            .write()
+            .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
+        let root = homes
+            .workspaces
+            .get(workspace_id)
+            .map(|home| home.root.clone())
+            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
+        if let Some(home) = homes.roots.get_mut(&root) {
+            home.writers.remove(session_id);
+        }
         Ok(())
     }
 }
 
 impl Home {
     fn at() -> Self {
-        Home { lock: None }
+        Home {
+            compatibility: None,
+            writers: BTreeMap::new(),
+        }
     }
 }
 
@@ -534,7 +642,38 @@ impl Store {
     }
 
     pub fn session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        self.ensure_not_deleted(workspace_id, session_id)?;
+        self.raw_session_dir(workspace_id, session_id)
+    }
+
+    fn raw_session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
         Ok(self.homes.sessions_dir(workspace_id)?.join(session_id))
+    }
+
+    fn tombstone_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .homes
+            .home_dir(workspace_id)?
+            .join(TOMBSTONES_DIR)
+            .join(format!("{session_id}.json")))
+    }
+
+    fn is_deleted(&self, workspace_id: &str, session_id: &str) -> Result<bool> {
+        Ok(self.tombstone_path(workspace_id, session_id)?.exists())
+    }
+
+    fn ensure_not_deleted(&self, workspace_id: &str, session_id: &str) -> Result<()> {
+        if self.is_deleted(workspace_id, session_id)? {
+            return Err(SessionDeleted.into());
+        }
+        Ok(())
+    }
+
+    /// Claims a session for work that may touch adapter scratch. Forking uses
+    /// this to choose native checkpointing only when the source is writable.
+    pub fn claim_session(&self, workspace_id: &str, session_id: &str) -> Result<()> {
+        let dir = self.raw_session_dir(workspace_id, session_id)?;
+        self.prepare_write(workspace_id, session_id, &dir)
     }
 
     fn meta_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
@@ -592,31 +731,41 @@ impl Store {
     /// The adapter's scratch space, ready to be written into.
     pub fn make_scratch_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
         let dir = self.scratch_dir(workspace_id, session_id)?;
-        self.prepare_write(workspace_id, &dir)?;
+        self.prepare_write(workspace_id, session_id, &dir)?;
         Ok(dir)
     }
 
-    /// The one gate every write to a workspace passes through: claims the
-    /// write lock, establishes the GeneHub home the first time, and creates
-    /// the directory being written into.
+    /// The one gate every session write passes through: establishes the
+    /// GeneHub home, creates the target directory, then claims that session.
     ///
     /// Reads deliberately do not come here. A build that cannot write a
     /// workspace can still show every conversation in it.
-    fn prepare_write(&self, workspace_id: &str, dir: &Path) -> Result<()> {
+    fn prepare_write(&self, workspace_id: &str, session_id: &str, dir: &Path) -> Result<()> {
+        self.ensure_not_deleted(workspace_id, session_id)?;
         let home = self.homes.home_dir(workspace_id)?;
-        // Holding the lock means the home was established to put it in, so the
-        // ordinary case — one more append to a workspace already being written
-        // — costs a map lookup and a stat, not a syscall per level.
-        if !self.homes.holds(workspace_id) {
+        if !self.homes.holds(workspace_id, session_id) {
             self.establish_home(&home)?;
-            self.homes.claim(workspace_id, &home)?;
+            self.homes.claim_compatibility(workspace_id, &home)?;
         }
-        if dir.exists() {
-            return Ok(());
+        if !dir.exists() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            for path in dir.ancestors().take_while(|path| path.starts_with(&home)) {
+                crate::config::restrict_dir_to_owner(path)?;
+            }
         }
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        for path in dir.ancestors().take_while(|path| path.starts_with(&home)) {
-            crate::config::restrict_dir_to_owner(path)?;
+        if !self.homes.holds(workspace_id, session_id) {
+            let session_dir = self.raw_session_dir(workspace_id, session_id)?;
+            fs::create_dir_all(&session_dir)
+                .with_context(|| format!("creating {}", session_dir.display()))?;
+            crate::config::restrict_dir_to_owner(&session_dir)?;
+            self.homes.claim(workspace_id, session_id, &session_dir)?;
+            // A competing deleter may have written the tombstone while this
+            // process waited for writer.lock. Check only after owning the lock
+            // so no write can cross the logical deletion boundary.
+            if let Err(error) = self.ensure_not_deleted(workspace_id, session_id) {
+                self.homes.release(workspace_id, session_id)?;
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -649,6 +798,7 @@ impl Store {
         let path = self.meta_path(&meta.workspace_id, &meta.id)?;
         self.prepare_write(
             &meta.workspace_id,
+            &meta.id,
             path.parent().expect("meta.json always has a parent"),
         )?;
         let stamped = SessionMeta {
@@ -699,6 +849,7 @@ impl Store {
         let path = self.seed_path(workspace_id, session_id)?;
         self.prepare_write(
             workspace_id,
+            session_id,
             path.parent().expect("seed.json always has a parent"),
         )?;
         crate::config::save_private(&path, serde_json::to_vec_pretty(seed)?.as_slice())
@@ -731,11 +882,21 @@ impl Store {
     pub fn list_meta(&self) -> Result<Vec<SessionMeta>> {
         let mut out = Vec::new();
         for (workspaces, sessions) in self.homes.all_sessions_dirs() {
+            if let Some((workspace_id, _)) = workspaces.first() {
+                self.reap_tombstoned_sessions(workspace_id, &sessions);
+            }
             let Ok(entries) = fs::read_dir(&sessions) else {
                 continue;
             };
             for entry in entries.flatten() {
                 let session_id = entry.file_name().to_string_lossy().into_owned();
+                if sessions.parent().is_some_and(|home| {
+                    home.join(TOMBSTONES_DIR)
+                        .join(format!("{session_id}.json"))
+                        .exists()
+                }) {
+                    continue;
+                }
                 if !entry.path().join("meta.json").exists() {
                     continue;
                 }
@@ -767,6 +928,62 @@ impl Store {
         }
         out.sort_by_key(|meta: &SessionMeta| std::cmp::Reverse(meta.updated_at_ms));
         Ok(out)
+    }
+
+    fn reap_tombstoned_sessions(&self, workspace_id: &str, sessions: &Path) {
+        let Some(home) = sessions.parent() else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(home.join(TOMBSTONES_DIR)) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(session_id) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if session_id.is_empty() {
+                continue;
+            }
+            self.reap_tombstoned_session(workspace_id, session_id, &sessions.join(session_id));
+        }
+    }
+
+    fn reap_tombstoned_session(&self, workspace_id: &str, session_id: &str, dir: &Path) {
+        if !dir.exists() {
+            return;
+        }
+        let Ok(home) = self.homes.home_dir(workspace_id) else {
+            return;
+        };
+        if let Err(error) = self.homes.claim_compatibility(workspace_id, &home) {
+            tracing::warn!(event = "session_cleanup_deferred", reason = "legacy_writer", workspace = %workspace_id, session = %session_id, %error, "deleted session cleanup is waiting for an older GeneHub");
+            return;
+        }
+        if !self.homes.holds(workspace_id, session_id) {
+            if let Err(error) = self.homes.claim(workspace_id, session_id, dir) {
+                tracing::warn!(event = "session_cleanup_deferred", reason = "session_writer", workspace = %workspace_id, session = %session_id, %error, "deleted session cleanup is waiting for its writer");
+                return;
+            }
+        }
+        if let Err(error) = self.homes.release(workspace_id, session_id) {
+            tracing::warn!(event = "session_cleanup_deferred", reason = "lock_release", workspace = %workspace_id, session = %session_id, %error, "could not release deleted session before cleanup");
+            return;
+        }
+        match fs::remove_dir_all(dir) {
+            Ok(()) => tracing::info!(
+                event = "session_cleanup_succeeded",
+                workspace = %workspace_id,
+                session = %session_id,
+                "removed files left by a logically deleted session"
+            ),
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(event = "session_cleanup_deferred", reason = "filesystem", workspace = %workspace_id, session = %session_id, %error, "deleted session is still awaiting physical cleanup");
+                }
+            }
+        }
     }
 
     // -- chat layer ---------------------------------------------------------
@@ -821,6 +1038,7 @@ impl Store {
         let path = self.chat_path(workspace_id, session_id)?;
         self.prepare_write(
             workspace_id,
+            session_id,
             path.parent().expect("chat.jsonl always has a parent"),
         )?;
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -889,7 +1107,7 @@ impl Store {
         trunk: &RoundTrunk,
     ) -> Result<()> {
         let dir = self.round_dir(workspace_id, session_id, ord)?;
-        self.prepare_write(workspace_id, &dir)?;
+        self.prepare_write(workspace_id, session_id, &dir)?;
         let mut body = Vec::new();
         for batch in &trunk.batches {
             writeln!(
@@ -931,6 +1149,7 @@ impl Store {
         let path = self.trunk_index_path(workspace_id, session_id, ord)?;
         self.prepare_write(
             workspace_id,
+            session_id,
             path.parent().expect("index.jsonl always has a parent"),
         )?;
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -1089,7 +1308,7 @@ impl Store {
             .collect();
         let bucket = id[..2].to_string();
         let dir = self.blob_dir(workspace_id, session_id)?;
-        self.prepare_write(workspace_id, &dir)?;
+        self.prepare_write(workspace_id, session_id, &dir)?;
         let path = dir.join(format!("b-{bucket}.jsonl"));
         let line = serde_json::to_vec(&BlobRecord {
             id: id.clone(),
@@ -1164,17 +1383,55 @@ impl Store {
     /// Missing files are not an error: this is also the cleanup path for a
     /// session that never got as far as being written.
     pub fn delete(&self, workspace_id: &str, session_id: &str) -> Result<()> {
-        let dir = self.session_dir(workspace_id, session_id)?;
+        let dir = self.raw_session_dir(workspace_id, session_id)?;
+        let tombstone = self.tombstone_path(workspace_id, session_id)?;
+        if tombstone.exists() {
+            self.reap_tombstoned_session(workspace_id, session_id, &dir);
+            return Ok(());
+        }
         if !dir.exists() {
             return Ok(());
         }
-        // Removing a conversation is a write like any other, and the build that
-        // holds the workspace may be in the middle of appending to this one.
-        if !self.homes.holds(workspace_id) {
-            self.homes
-                .claim(workspace_id, &self.homes.home_dir(workspace_id)?)?;
+        let home = self.homes.home_dir(workspace_id)?;
+        self.establish_home(&home)?;
+        self.homes.claim_compatibility(workspace_id, &home)?;
+        if !self.homes.holds(workspace_id, session_id) {
+            self.homes.claim(workspace_id, session_id, &dir)?;
         }
-        let _ = fs::remove_dir_all(dir);
+        let tombstones = tombstone
+            .parent()
+            .expect("a tombstone path always has a parent");
+        fs::create_dir_all(tombstones)
+            .with_context(|| format!("creating {}", tombstones.display()))?;
+        crate::config::restrict_dir_to_owner(tombstones)?;
+        let marker = serde_json::json!({
+            "sessionId": session_id,
+            "deletedAtMs": now_ms(),
+        });
+        crate::config::save_private(&tombstone, serde_json::to_vec_pretty(&marker)?.as_slice())?;
+        tracing::info!(
+            event = "session_tombstoned",
+            workspace = %workspace_id,
+            session = %session_id,
+            "session was logically deleted"
+        );
+
+        // The durable marker is the atomic logical deletion. Releasing the
+        // Windows lock before unlinking is now safe: every future claimant
+        // rejects the tombstone after it acquires writer.lock.
+        self.homes.release(workspace_id, session_id)?;
+        if let Err(error) = fs::remove_dir_all(&dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(event = "session_cleanup_deferred", reason = "filesystem", workspace = %workspace_id, session = %session_id, %error, "session was deleted logically but awaits physical cleanup");
+            }
+        } else {
+            tracing::info!(
+                event = "session_cleanup_succeeded",
+                workspace = %workspace_id,
+                session = %session_id,
+                "removed files for a logically deleted session"
+            );
+        }
         Ok(())
     }
 }
@@ -1254,6 +1511,22 @@ fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod project_home_tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn meta(id: &str, workspace_id: &str, cwd: &Path) -> SessionMeta {
         SessionMeta {
@@ -1308,5 +1581,42 @@ mod project_home_tests {
 
         homes.attach_project("w_folder", "folder", root.path());
         assert_eq!(store.list_meta().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn session_contention_and_deletion_leave_feedback_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        let holder_homes = WorkspaceHomes::default();
+        holder_homes.attach_project("w1", "folder", root.path());
+        let holder = Store::new(holder_homes);
+        let other_homes = WorkspaceHomes::default();
+        other_homes.attach_project("w1", "folder", root.path());
+        let other = Store::new(other_homes);
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let captured = Captured(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || captured.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            holder.save_meta(&meta("s1", "w1", root.path())).unwrap();
+            other.save_meta(&meta("s1", "w1", root.path())).unwrap_err();
+            holder.delete("w1", "s1").unwrap();
+        });
+
+        let log = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        for event in [
+            "session_writer_contended",
+            "session_tombstoned",
+            "session_cleanup_succeeded",
+        ] {
+            assert!(
+                log.contains(event),
+                "missing {event} from diagnostics: {log}"
+            );
+        }
+        assert!(!log.contains(&root.path().display().to_string()));
     }
 }
