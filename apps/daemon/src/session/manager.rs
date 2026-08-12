@@ -313,6 +313,13 @@ impl SessionManager {
                         .downcast_ref::<super::store::SessionWriteContended>()
                         .is_some() =>
                 {
+                    tracing::info!(
+                        event = "fork_fallback_reconstructed",
+                        workspace = %source_meta.workspace_id,
+                        session = %source_meta.id,
+                        turn = %turn_id,
+                        "native fork was unavailable because another daemon owns the source session"
+                    );
                     false
                 }
                 Err(error) => return Err(error),

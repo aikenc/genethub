@@ -192,6 +192,8 @@ DataEndpoint method 只有四个：
 
 `$GENEHUB_LOG` 控制级别（默认 `info`），和 `RUST_LOG` 同样的语法。
 
+会话并发与删除使用稳定的结构化 `event` 字段记录：包括 session writer/旧版 workspace writer 竞争、Fork 降级重建、逻辑墓碑、延迟物理清理和清理成功。字段只带会话与工作区的内部 id、持有者和失败阶段，不记录对话正文或完整工作区路径，反馈系统可以据此检索而不依赖自然语言。
+
 ---
 
 ## 4.3 已授权设备

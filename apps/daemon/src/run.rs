@@ -31,6 +31,15 @@ pub async fn run() -> Result<()> {
         .with_writer(Tee::new(crate::logs::LogFile::open(paths.log_file())))
         .init();
     tracing::info!("log: {}", paths.log_file().display());
+    tracing::info!(
+        event = "daemon_started",
+        version = env!("CARGO_PKG_VERSION"),
+        channel = crate::channel::PRODUCT,
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        pid = std::process::id(),
+        "daemon diagnostic context"
+    );
     let _lock = SingleInstance::acquire(&paths)?;
 
     let daemon = Daemon::start(paths).await?;
