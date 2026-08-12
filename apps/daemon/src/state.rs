@@ -29,9 +29,8 @@ pub struct AppState {
     pub sessions: SessionManager,
     pub workspaces: Workspaces,
     pub terminals: Arc<Terminals>,
-    /// Bounded allowlisted evidence for explicit user feedback. This is never
-    /// backed by the raw daemon/agent log.
-    pub diagnostics: crate::diagnostics::Diagnostics,
+    /// Bounded categorical facts safe for explicit feedback attachment.
+    pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
     pub version: String,
     /// Owner-only token used to mint loopback control proofs.
     pub token: String,
@@ -119,7 +118,13 @@ impl AppState {
         // only through what the workspace registry has published.
         let homes = WorkspaceHomes::default();
         let store = Store::new(homes.clone());
-        let sessions = SessionManager::new(store, registry.clone(), config.replay_window);
+        let diagnostics = Arc::new(crate::diagnostics::Diagnostics::new());
+        let sessions = SessionManager::new_with_diagnostics(
+            store,
+            registry.clone(),
+            config.replay_window,
+            diagnostics.clone(),
+        );
 
         let config = Arc::new(RwLock::new(config));
         let workspaces = Workspaces::new(config.clone(), paths.config_file(), homes);
@@ -145,7 +150,7 @@ impl AppState {
             sessions,
             workspaces,
             terminals,
-            diagnostics: crate::diagnostics::Diagnostics::default(),
+            diagnostics,
             version: env!("CARGO_PKG_VERSION").to_string(),
             token: uuid::Uuid::new_v4().simple().to_string(),
             devices,

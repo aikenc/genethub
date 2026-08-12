@@ -18,7 +18,6 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     }
     let request: AssetPreviewRequest = serde_json::from_value(stream.head.metadata.clone())
         .context("invalid asset.preview metadata")?;
-    stream.set_diagnostic_path(&request.source.path);
     if request.source.kind != WorkspaceFileSourceKind::WorkspaceFile {
         return preview_error(stream, 400, AssetPreviewError::Forbidden, None).await;
     }

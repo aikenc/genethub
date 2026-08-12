@@ -14,6 +14,7 @@ import {
 } from "../src/forward/fabric-frame.js";
 import { AuthorityHttpError } from "../src/shared/authority-error.js";
 import { config } from "../src/shared/config.js";
+import { endpointDiagnosticRef } from "../src/shared/diagnostic-ref.js";
 import {
   closed,
   connect,
@@ -215,18 +216,20 @@ describe("Fabric v2 over real WebSockets", () => {
       });
       const connected = records.find(
         (record) => record.msg === "fabric: endpoint connected" &&
-          record.endpointHandle === "endpoint:log-source",
+          record.endpointRef === endpointDiagnosticRef("endpoint:log-source"),
       );
       assert.equal(connected?.connectionGeneration, 1);
-      assert.match(String(connected?.connectionEpoch), /^[0-9a-f]{32}$/);
       const disconnected = records.find(
         (record) => record.msg === "fabric: endpoint disconnected" &&
-          record.endpointHandle === "endpoint:log-source",
+          record.endpointRef === endpointDiagnosticRef("endpoint:log-source"),
       );
       assert.equal(typeof disconnected?.closeCode, "number");
 
       const output = lines.join("\n");
-      assert.doesNotMatch(output, /credential:log|ticket:log-secret|hello:ticket|accepted:ticket/);
+      assert.doesNotMatch(
+        output,
+        /credential:log|ticket:log-secret|hello:ticket|accepted:ticket|endpoint:log/,
+      );
     } finally {
       console.log = original;
     }

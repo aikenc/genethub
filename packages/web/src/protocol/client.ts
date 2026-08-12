@@ -1,7 +1,6 @@
 import type {
   AssetPreviewError,
   AssetPreviewMetadata,
-  DaemonDiagnosticSnapshot,
   HelloResult,
   PeerWelcome,
   ProtocolError,
@@ -9,6 +8,7 @@ import type {
   Request,
   SequencedEvent,
   ServerFrame,
+  SupportDiagnostics,
   UpdateDownload,
 } from "@genehub/proto";
 
@@ -514,7 +514,7 @@ export class Client {
   }
 
   /** Fetches only the daemon's bounded allowlisted ring, never its raw log. */
-  async diagnostics(): Promise<DaemonDiagnosticSnapshot> {
+  async diagnostics(): Promise<SupportDiagnostics> {
     const reply = await this.call({ type: "diagnostics.snapshot" });
     if (reply?.type !== "diagnostics") {
       throw new Error(`unexpected reply to diagnostics.snapshot: ${reply?.type}`);

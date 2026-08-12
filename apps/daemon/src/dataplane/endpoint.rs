@@ -210,7 +210,6 @@ pub(super) struct ServerStream {
     expected_local_bytes: Option<u64>,
     response_status: Option<u16>,
     diagnostic_operation: Option<String>,
-    diagnostic_path: Option<String>,
     local_head_sent: bool,
     local_finished: bool,
 }
@@ -373,10 +372,6 @@ impl ServerStream {
             .await;
         let _ = self.commands.send(EndpointCommand::Retire(self.id)).await;
     }
-
-    pub(super) fn set_diagnostic_path(&mut self, path: &str) {
-        self.diagnostic_path = Some(path.to_string());
-    }
 }
 
 pub(super) struct PeerServices {
@@ -428,22 +423,9 @@ pub async fn serve(
     // Decided once, at connection: grants are fixed when a device is paired,
     // and revoking one drops its connections rather than editing them.
     let watches_terminals = Principal::of(&state, &access).allows(Capability::Pty);
-    state.diagnostics.record(
-        genehub_proto::DaemonDiagnosticEvent {
-            at_ms: 0,
-            kind: "connection".into(),
-            operation: "data.endpoint".into(),
-            request_id: None,
-            transport: Some(carrier_kind.as_str().into()),
-            outcome: "connected".into(),
-            status: None,
-            duration_ms: None,
-            request_bytes: None,
-            response_bytes: None,
-            path: None,
-        },
-        access.workspace_id.as_deref(),
-    );
+    state
+        .diagnostics
+        .record("stream", "data.endpoint", "online", None);
     let fanout_task = state.fanout.get().map(|fanout| {
         let mut receiver = fanout.subscribe();
         let events = services.event_sender.clone();
@@ -529,25 +511,14 @@ pub async fn serve(
         state.devices.mark_disconnected(device_id);
     }
     state.diagnostics.record(
-        genehub_proto::DaemonDiagnosticEvent {
-            at_ms: 0,
-            kind: "connection".into(),
-            operation: "data.endpoint".into(),
-            request_id: None,
-            transport: Some(carrier_kind.as_str().into()),
-            outcome: if outcome.is_ok() {
-                "disconnected"
-            } else {
-                "error"
-            }
-            .into(),
-            status: None,
-            duration_ms: None,
-            request_bytes: None,
-            response_bytes: None,
-            path: None,
+        "stream",
+        "data.endpoint",
+        if outcome.is_ok() { "offline" } else { "error" },
+        if outcome.is_ok() {
+            None
+        } else {
+            Some("carrier")
         },
-        access.workspace_id.as_deref(),
     );
     outcome
 }
@@ -641,7 +612,6 @@ fn dispatch(
             expected_local_bytes: None,
             response_status: None,
             diagnostic_operation: None,
-            diagnostic_path: None,
             local_head_sent: false,
             local_finished: false,
         };
@@ -756,22 +726,14 @@ async fn handle_stream(mut stream: ServerStream, services: Arc<PeerServices>) ->
             "error"
         };
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        services.state.diagnostics.record(
-            genehub_proto::DaemonDiagnosticEvent {
-                at_ms: 0,
-                kind: "operation".into(),
-                operation: operation.clone(),
-                request_id: request_id.clone(),
-                transport: Some(services.carrier_kind.as_str().into()),
-                outcome: outcome.into(),
-                status,
-                duration_ms: Some(duration_ms),
-                request_bytes,
-                response_bytes: Some(stream.local_bytes),
-                path: stream.diagnostic_path.clone(),
-            },
-            services.access.workspace_id.as_deref(),
-        );
+        if let Some(operation) = support_stream_operation(&exchange_method) {
+            services.state.diagnostics.record(
+                "stream",
+                operation,
+                outcome,
+                support_status_code(status, result.is_err()),
+            );
+        }
         if outcome == "error" {
             tracing::warn!(
                 target: "diagnostic",
@@ -780,6 +742,8 @@ async fn handle_stream(mut stream: ServerStream, services: Arc<PeerServices>) ->
                 transport = services.carrier_kind.as_str(),
                 status,
                 duration_ms,
+                request_bytes,
+                response_bytes = stream.local_bytes,
                 "data operation failed"
             );
         } else if exchange_method == "asset.preview" || exchange_method == "rtc.negotiate" {
@@ -790,6 +754,8 @@ async fn handle_stream(mut stream: ServerStream, services: Arc<PeerServices>) ->
                 transport = services.carrier_kind.as_str(),
                 status,
                 duration_ms,
+                request_bytes,
+                response_bytes = stream.local_bytes,
                 "data operation completed"
             );
         }
@@ -808,6 +774,12 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
     };
     let needed = method.required();
     if !Principal::of(&services.state, &services.access).allows(needed) {
+        services.state.diagnostics.record(
+            "stream",
+            "authorization",
+            "error",
+            Some(needed.as_str()),
+        );
         return refuse(stream, needed).await;
     }
     match method {
@@ -918,17 +890,15 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     let caller = Principal::of(&services.state, &services.access);
     let needed = authz::required(&request);
     if !caller.allows(needed) {
+        services
+            .state
+            .diagnostics
+            .record("rpc", "authorization", "error", Some(needed.as_str()));
         return refuse(stream, needed).await;
     }
 
-    let handled = router::handle(
-        &services.state,
-        services.access.transport,
-        &caller,
-        services.access.workspace_id.as_deref(),
-        request,
-    )
-    .await;
+    let handled =
+        router::handle(&services.state, services.access.transport, &caller, request).await;
     match handled.reply {
         Ok(reply) => {
             send_reply(stream, reply).await?;
@@ -965,6 +935,27 @@ fn diagnostic_operation(metadata: &serde_json::Value) -> Option<String> {
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         })
         .map(str::to_string)
+}
+
+fn support_stream_operation(method: &str) -> Option<&'static str> {
+    match method {
+        "asset.preview" => Some("asset.preview"),
+        "rtc.negotiate" => Some("rtc.negotiate"),
+        "shell.run" => Some("shell.run"),
+        _ => None,
+    }
+}
+
+fn support_status_code(status: Option<u16>, transport_error: bool) -> Option<&'static str> {
+    if transport_error {
+        Some("transport")
+    } else {
+        match status {
+            Some(400..=499) => Some("clientError"),
+            Some(500..=599) => Some("serverError"),
+            _ => None,
+        }
+    }
 }
 
 async fn send_reply(stream: &mut ServerStream, reply: Reply) -> Result<()> {

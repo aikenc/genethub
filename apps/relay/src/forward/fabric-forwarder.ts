@@ -7,6 +7,7 @@ import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import type { FabricAuthority } from "../contract/fabric.js";
 import { FABRIC_PATH } from "../contract/fabric-wire.js";
 import { config } from "../shared/config.js";
+import { endpointDiagnosticRef } from "../shared/diagnostic-ref.js";
 import { isDefinitiveAuthorityError } from "../shared/authority-error.js";
 import { log } from "../shared/log.js";
 import { OutboundByteBudget } from "../shared/outbound-budget.js";
@@ -94,6 +95,10 @@ export class FabricForwarder {
     perMessageDeflate: false,
   });
   private readonly peers = new Set<SocketPeer>();
+  private readonly socketDiagnostics = new WeakMap<
+    WebSocket,
+    { endpointRef: string; connectionGeneration: number }
+  >();
   private readonly pendingSockets = new Set<Duplex>();
   /** Per endpoint: exactly one in-flight write and at most one latest intent. */
   private readonly presenceReports = new Map<string, PresenceQueue>();
@@ -207,9 +212,9 @@ export class FabricForwarder {
         );
       }
       log.info("fabric: endpoint disconnected", {
-        ...connectionContext(peer.connection),
+        ...this.diagnosticFields(peer.socket),
         closeCode: 1012,
-        closeReason: "authority-disconnected",
+        reasonCode: "authorityDisconnected",
         endpoints: this.core.stats().endpoints,
       });
       this.closeSocket(peer.socket, 1012, "authority disconnected");
@@ -236,9 +241,9 @@ export class FabricForwarder {
         );
       }
       log.info("fabric: endpoint disconnected", {
-        ...connectionContext(peer.connection),
+        ...this.diagnosticFields(peer.socket),
         closeCode: 1001,
-        closeReason: "relay-shutdown",
+        reasonCode: "relayShutdown",
         endpoints: this.core.stats().endpoints,
       });
       this.closeSocket(peer.socket, 1001, "relay shutting down");
@@ -272,7 +277,9 @@ export class FabricForwarder {
     try {
       grant = await this.authority.authorizeEndpoint(credential);
     } catch (error) {
-      log.warn("fabric: the control plane could not be reached", { error: errorKind(error) });
+      log.warn("fabric: the control plane could not be reached", {
+        errorType: diagnosticErrorType(error),
+      });
       if (!socket.destroyed) reject(socket, 503, "Service Unavailable");
       return;
     } finally {
@@ -330,6 +337,10 @@ export class FabricForwarder {
     revocationCheckpoint: number,
   ): void {
     const context = Object.freeze({ ...rawContext });
+    this.socketDiagnostics.set(socket, {
+      endpointRef: endpointDiagnosticRef(context.endpointHandle),
+      connectionGeneration: context.connectionGeneration,
+    });
     const connection: FabricEndpointConnection = {
       context,
       socketIdentity: socket,
@@ -357,8 +368,8 @@ export class FabricForwarder {
     // the active peer set.
     socket.on("error", (error) => {
       log.warn("fabric: endpoint socket error", {
-        ...connectionContext(connection),
-        error: errorKind(error),
+        ...this.diagnosticFields(socket),
+        errorType: diagnosticErrorType(error),
       });
       this.closeSocket(socket);
     });
@@ -367,7 +378,7 @@ export class FabricForwarder {
     this.peers.add(peer);
     previous?.close(4000);
     log.info("fabric: endpoint connected", {
-      ...connectionContext(connection),
+      ...this.diagnosticFields(socket),
       replacedPrevious: Boolean(previous),
       endpoints: this.core.stats().endpoints,
     });
@@ -383,16 +394,16 @@ export class FabricForwarder {
       peer.alive = true;
       if (!isBinary) {
         log.warn("fabric: invalid endpoint frame", {
-          ...connectionContext(connection),
-          reason: "not-binary",
+          ...this.diagnosticFields(socket),
+          reasonCode: "nonBinaryFrame",
         });
         return this.closeSocket(socket, 1003, "Fabric speaks binary frames");
       }
       const buffer = asBuffer(data);
       if (buffer.length > config.limits.maxFrameBytes) {
         log.warn("fabric: invalid endpoint frame", {
-          ...connectionContext(connection),
-          reason: "too-large",
+          ...this.diagnosticFields(socket),
+          reasonCode: "frameTooLarge",
           frameBytes: buffer.length,
         });
         return this.closeSocket(socket, 1009, "frame too large");
@@ -400,15 +411,15 @@ export class FabricForwarder {
       const frame = decodeFabricFrame(buffer);
       if (!frame) {
         log.warn("fabric: invalid endpoint frame", {
-          ...connectionContext(connection),
-          reason: "malformed",
+          ...this.diagnosticFields(socket),
+          reasonCode: "malformedFrame",
           frameBytes: buffer.length,
         });
         return this.closeSocket(socket, 1003, "malformed Fabric frame");
       }
       if (isLifecycleFrame(frame)) {
         log.debug("fabric: stream lifecycle", {
-          ...connectionContext(connection),
+          ...this.diagnosticFields(socket),
           streamId: frame.streamId,
           frameKind: fabricKindName(frame.kind),
           frameBytes: buffer.length,
@@ -416,10 +427,10 @@ export class FabricForwarder {
       }
       void this.core.handle(connection, frame).catch((error: unknown) => {
         log.warn("fabric: frame handling failed", {
-          ...connectionContext(connection),
+          ...this.diagnosticFields(socket),
           streamId: frame.streamId,
           frameKind: fabricKindName(frame.kind),
-          error: errorKind(error),
+          errorType: diagnosticErrorType(error),
         });
         this.closeSocket(socket, 1011, "frame handling failed");
       });
@@ -440,7 +451,7 @@ export class FabricForwarder {
         );
       }
       log.info("fabric: endpoint disconnected", {
-        ...connectionContext(connection),
+        ...this.diagnosticFields(socket),
         closeCode: code,
         closeReasonBytes: reason.byteLength,
         endpoints: this.core.stats().endpoints,
@@ -500,9 +511,9 @@ export class FabricForwarder {
   private closeSocket(socket: WebSocket, code?: number, reason = ""): void {
     if (socket.readyState === socket.CLOSED || socket.readyState === socket.CLOSING) return;
     log.warn("fabric: closing a socket", {
-      ...this.socketContext(socket),
+      ...this.diagnosticFields(socket),
       code: code ?? null,
-      reason,
+      reasonCode: diagnosticSocketReason(reason),
     });
     try {
       if (code === undefined) socket.close();
@@ -513,7 +524,10 @@ export class FabricForwarder {
   }
 
   private terminate(socket: WebSocket, why = "unspecified"): void {
-    log.warn("fabric: terminating a socket", { ...this.socketContext(socket), why });
+    log.warn("fabric: terminating a socket", {
+      ...this.diagnosticFields(socket),
+      reasonCode: diagnosticSocketReason(why),
+    });
     try {
       socket.terminate();
     } catch {
@@ -584,11 +598,11 @@ export class FabricForwarder {
           }
         } catch (error) {
           log.warn("fabric: presence report failed", {
-            endpointHandle,
+            endpointRef: endpointDiagnosticRef(endpointHandle),
             connectionGeneration: desired.connectionGeneration,
             state: desired.state,
             attempt: report.attempt,
-            error: errorKind(error),
+            errorType: diagnosticErrorType(error),
           });
           if (desired.state === "online") {
             const peer = this.currentPeer(endpointHandle, desired.connectionGeneration);
@@ -662,6 +676,17 @@ export class FabricForwarder {
     return null;
   }
 
+  private diagnosticFields(
+    socket: WebSocket,
+  ): { endpointRef: string | null; connectionGeneration: number | null } {
+    return (
+      this.socketDiagnostics.get(socket) ?? {
+        endpointRef: null,
+        connectionGeneration: null,
+      }
+    );
+  }
+
   private expirePresence(peer: SocketPeer): void {
     if (!this.peers.delete(peer)) return;
     if (peer.presenceRefresh) clearTimeout(peer.presenceRefresh);
@@ -669,7 +694,7 @@ export class FabricForwarder {
     peer.presenceOnline = false;
     this.core.unregister(peer.connection, FabricReset.Revoked);
     log.warn("fabric: endpoint presence expired", {
-      ...connectionContext(peer.connection),
+      ...this.diagnosticFields(peer.socket),
       endpoints: this.core.stats().endpoints,
     });
     this.closeSocket(peer.socket, 1012, "presence lease expired");
@@ -686,23 +711,6 @@ export class FabricForwarder {
     }
     this.presenceReports.clear();
   }
-
-  private socketContext(socket: WebSocket): Record<string, string | number> {
-    for (const peer of this.peers) {
-      if (peer.socket === socket) return connectionContext(peer.connection);
-    }
-    return {};
-  }
-}
-
-function connectionContext(
-  connection: FabricEndpointConnection,
-): { endpointHandle: string; connectionGeneration: number; connectionEpoch: string } {
-  return {
-    endpointHandle: connection.context.endpointHandle,
-    connectionGeneration: connection.context.connectionGeneration,
-    connectionEpoch: connection.context.connectionEpoch,
-  };
 }
 
 function isLifecycleFrame(frame: FabricFrame): boolean {
@@ -729,10 +737,56 @@ function fabricKindName(kind: FabricFrame["kind"]): string {
   }
 }
 
-function errorKind(error: unknown): string {
-  return error instanceof Error ? error.name : typeof error;
-}
-
 function validOpaqueHandle(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value);
+}
+
+function diagnosticErrorType(error: unknown): string {
+  const candidate = error instanceof Error ? error.name : typeof error;
+  return new Set([
+    "AggregateError",
+    "Error",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "TypeError",
+    "URIError",
+  ]).has(candidate)
+    ? candidate
+    : "Error";
+}
+
+function diagnosticSocketReason(reason: string): string {
+  switch (reason) {
+    case "":
+    case "unspecified":
+      return "unspecified";
+    case "the endpoint missed a heartbeat":
+      return "heartbeatTimeout";
+    case "authority disconnected":
+      return "authorityDisconnected";
+    case "relay shutting down":
+      return "relayShutdown";
+    case "Fabric speaks binary frames":
+      return "nonBinaryFrame";
+    case "frame too large":
+      return "frameTooLarge";
+    case "malformed Fabric frame":
+      return "malformedFrame";
+    case "frame handling failed":
+      return "frameHandlingFailed";
+    case "too slow":
+      return "backpressure";
+    case "the send failed":
+    case "the send threw":
+      return "sendFailed";
+    case "the close handshake failed":
+      return "closeHandshakeFailed";
+    case "the heartbeat ping threw":
+      return "heartbeatFailed";
+    case "presence lease expired":
+      return "presenceExpired";
+    default:
+      return "other";
+  }
 }

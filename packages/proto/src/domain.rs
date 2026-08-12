@@ -916,57 +916,44 @@ pub struct LogEntry {
     pub bytes: u64,
 }
 
-/// One allowlisted daemon diagnostic row. This is deliberately not a tracing
-/// log record: agent output, request bodies, credentials and physical paths can
-/// never fit this schema and therefore cannot be attached to feedback by
-/// accident.
+/// A bounded support record that is safe to attach to explicit user feedback.
+///
+/// Every string in this shape comes from a daemon-owned allowlist. User input,
+/// local paths, URLs, identifiers, prompts, terminal output and Agent output do
+/// not have a field in the schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
-pub struct DaemonDiagnosticEvent {
-    #[ts(type = "number")]
-    pub at_ms: i64,
-    pub kind: String,
-    pub operation: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub request_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub transport: Option<String>,
-    pub outcome: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub status: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    #[ts(type = "number")]
-    pub duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    #[ts(type = "number")]
-    pub request_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    #[ts(type = "number")]
-    pub response_bytes: Option<u64>,
-    /// Workspace-relative Preview path only. Physical paths are never recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub path: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct DaemonDiagnosticSnapshot {
+pub struct SupportDiagnostics {
     pub version: u32,
+    pub captured_at: String,
     pub daemon_version: String,
+    pub os: String,
+    pub arch: String,
     #[ts(type = "number")]
-    pub captured_at_ms: i64,
-    pub events: Vec<DaemonDiagnosticEvent>,
+    pub uptime_seconds: u64,
+    pub hub_state: String,
+    pub remote_state: String,
+    pub events: Vec<SupportDiagnosticEvent>,
     #[ts(type = "number")]
     pub dropped_events: u64,
+}
+
+/// One daemon-owned diagnostic fact. Values are intentionally categorical.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SupportDiagnosticEvent {
+    pub at: String,
+    pub component: String,
+    pub operation: String,
+    pub outcome: String,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Consecutive identical events are coalesced so a reconnect loop cannot
+    /// evict every earlier clue from the bounded record.
+    pub count: u32,
 }
 
 /// Where this machine stands with a Hub.

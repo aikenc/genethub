@@ -129,20 +129,6 @@ export type Confinement = { backend: IsolationBackend,
 roots: Array<string>, };
 
 /**
- * One allowlisted daemon diagnostic row. This is deliberately not a tracing
- * log record: agent output, request bodies, credentials and physical paths can
- * never fit this schema and therefore cannot be attached to feedback by
- * accident.
- */
-export type DaemonDiagnosticEvent = { atMs: number, kind: string, operation: string, requestId?: string, transport?: string, outcome: string, status?: number, durationMs?: number, requestBytes?: number, responseBytes?: number, 
-/**
- * Workspace-relative Preview path only. Physical paths are never recorded.
- */
-path?: string, };
-
-export type DaemonDiagnosticSnapshot = { version: number, daemonVersion: string, capturedAtMs: number, events: Array<DaemonDiagnosticEvent>, droppedEvents: number, };
-
-/**
  * A client proving it is on the authorized list, without sending its secret.
  */
 export type DeviceAuth = { deviceId: string, 
@@ -560,7 +546,7 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": DaemonDiagnosticSnapshot } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
 
 export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -850,6 +836,25 @@ export type ShellRunRequest = { workspaceId: string, argv: Array<string>,
  * Somewhere inside the workspace. Absent means its root.
  */
 cwd?: string, };
+
+/**
+ * One daemon-owned diagnostic fact. Values are intentionally categorical.
+ */
+export type SupportDiagnosticEvent = { at: string, component: string, operation: string, outcome: string, code?: string, 
+/**
+ * Consecutive identical events are coalesced so a reconnect loop cannot
+ * evict every earlier clue from the bounded record.
+ */
+count: number, };
+
+/**
+ * A bounded support record that is safe to attach to explicit user feedback.
+ *
+ * Every string in this shape comes from a daemon-owned allowlist. User input,
+ * local paths, URLs, identifiers, prompts, terminal output and Agent output do
+ * not have a field in the schema.
+ */
+export type SupportDiagnostics = { version: number, capturedAt: string, daemonVersion: string, os: string, arch: string, uptimeSeconds: number, hubState: string, remoteState: string, events: Array<SupportDiagnosticEvent>, droppedEvents: number, };
 
 /**
  * One entry in a session's timeline.

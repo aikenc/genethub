@@ -26,5 +26,5 @@ export {
   registerDiagnosticClient,
 } from "./diagnostics";
 export type { ClientDiagnosticEvent, ClientDiagnosticKind } from "./protocol/client";
-export type { DaemonDiagnosticSnapshot } from "@genehub/proto";
+export type { SupportDiagnostics } from "@genehub/proto";
 export type { ExtraTab } from "./shell/tabs";
