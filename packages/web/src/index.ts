@@ -20,4 +20,5 @@ export { AssetPreviewPage } from "./preview/AssetPreviewPage";
 export { PreviewFloat } from "./preview/PreviewFloat";
 export { assetPreviewUrl, parseAssetPreviewPath } from "./preview/url";
 export { useWorkbench } from "./session/store";
+export type { SupportDiagnostics } from "@genehub/proto";
 export type { ExtraTab } from "./shell/tabs";

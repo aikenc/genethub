@@ -916,6 +916,45 @@ pub struct LogEntry {
     pub bytes: u64,
 }
 
+/// A bounded support record that is safe to attach to explicit user feedback.
+///
+/// Every string in this shape comes from a daemon-owned allowlist. User input,
+/// local paths, URLs, identifiers, prompts, terminal output and Agent output do
+/// not have a field in the schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SupportDiagnostics {
+    pub version: u32,
+    pub captured_at: String,
+    pub daemon_version: String,
+    pub os: String,
+    pub arch: String,
+    #[ts(type = "number")]
+    pub uptime_seconds: u64,
+    pub hub_state: String,
+    pub remote_state: String,
+    pub events: Vec<SupportDiagnosticEvent>,
+    #[ts(type = "number")]
+    pub dropped_events: u64,
+}
+
+/// One daemon-owned diagnostic fact. Values are intentionally categorical.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SupportDiagnosticEvent {
+    pub at: String,
+    pub component: String,
+    pub operation: String,
+    pub outcome: String,
+    #[ts(optional)]
+    pub code: Option<String>,
+    /// Consecutive identical events are coalesced so a reconnect loop cannot
+    /// evict every earlier clue from the bounded record.
+    pub count: u32,
+}
+
 /// Where this machine stands with a Hub.
 ///
 /// One shape covers every stage of pairing so the UI polls a single call and

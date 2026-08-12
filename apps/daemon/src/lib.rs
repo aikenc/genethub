@@ -10,6 +10,7 @@ pub mod channel_auth;
 pub mod config;
 pub mod dataplane;
 pub mod devices;
+pub mod diagnostics;
 pub mod files;
 pub mod git;
 pub mod hub;
@@ -42,6 +43,9 @@ pub struct Daemon {
 impl Daemon {
     pub async fn start(paths: config::Paths) -> Result<Self> {
         let (state, pty_rx) = AppState::build(paths).await?;
+        state
+            .diagnostics
+            .record("daemon", "lifecycle", "started", None);
         let pty = transport::local::pty_fanout(pty_rx);
         // The same channel every client already listens on, handed to the state
         // so anything the machine wants to volunteer — download progress, for

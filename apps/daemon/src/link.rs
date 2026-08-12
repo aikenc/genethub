@@ -268,6 +268,9 @@ impl Link {
             Ok(enrollment) => match self.state() {
                 Ok(state) => {
                     tracing::info!("paired with {}", enrollment.hub_url);
+                    state
+                        .diagnostics
+                        .record("hub", "pairing.complete", "ok", None);
                     *stage = Stage::Paired {
                         uplink: dial(&state, &self.pty, &enrollment),
                         catalog_sync: start_catalog_sync(&state, &enrollment),
@@ -283,6 +286,11 @@ impl Link {
             },
             Err(error) => {
                 tracing::warn!("pairing failed: {error:#}");
+                if let Ok(state) = self.state() {
+                    state
+                        .diagnostics
+                        .record("hub", "pairing.complete", "error", Some("control"));
+                }
                 *stage = Stage::Failed {
                     hub_url: hub_url.to_string(),
                     message: format!("{error:#}"),
@@ -390,6 +398,14 @@ fn start_catalog_sync(state: &Arc<AppState>, enrollment: &Enrollment) -> Catalog
                     Err(error) => {
                         if weak_state.upgrade().is_none() {
                             return;
+                        }
+                        if let Some(state) = weak_state.upgrade() {
+                            state.diagnostics.record(
+                                "hub",
+                                "catalog.sync",
+                                "error",
+                                Some("control"),
+                            );
                         }
                         tracing::warn!(
                             %error,

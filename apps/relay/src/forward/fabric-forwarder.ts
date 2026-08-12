@@ -7,6 +7,7 @@ import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import type { FabricAuthority } from "../contract/fabric.js";
 import { FABRIC_PATH } from "../contract/fabric-wire.js";
 import { config } from "../shared/config.js";
+import { endpointDiagnosticRef } from "../shared/diagnostic-ref.js";
 import { isDefinitiveAuthorityError } from "../shared/authority-error.js";
 import { log } from "../shared/log.js";
 import { OutboundByteBudget } from "../shared/outbound-budget.js";
@@ -88,6 +89,10 @@ export class FabricForwarder {
     perMessageDeflate: false,
   });
   private readonly peers = new Set<SocketPeer>();
+  private readonly socketDiagnostics = new WeakMap<
+    WebSocket,
+    { endpointRef: string; connectionGeneration: number }
+  >();
   private readonly pendingSockets = new Set<Duplex>();
   /** Per endpoint: exactly one in-flight write and at most one latest intent. */
   private readonly presenceReports = new Map<string, PresenceQueue>();
@@ -312,6 +317,10 @@ export class FabricForwarder {
     revocationCheckpoint: number,
   ): void {
     const context = Object.freeze({ ...rawContext });
+    this.socketDiagnostics.set(socket, {
+      endpointRef: endpointDiagnosticRef(context.endpointHandle),
+      connectionGeneration: context.connectionGeneration,
+    });
     const connection: FabricEndpointConnection = {
       context,
       socketIdentity: socket,
@@ -341,6 +350,7 @@ export class FabricForwarder {
     const previous = this.core.register(connection, revocationCheckpoint);
     if (connection.closed) return;
     this.peers.add(peer);
+    log.info("fabric: endpoint connected", this.diagnosticFields(socket));
     previous?.close(4000);
     peer.presenceOnline = true;
     this.reportPresence(context.endpointHandle, context.connectionGeneration, "online");
@@ -360,13 +370,17 @@ export class FabricForwarder {
       const frame = decodeFabricFrame(buffer);
       if (!frame) return this.closeSocket(socket, 1003, "malformed Fabric frame");
       void this.core.handle(connection, frame).catch((error: unknown) => {
-        log.warn("fabric: frame handling failed", { error: String(error) });
+        log.warn("fabric: frame handling failed", {
+          ...this.diagnosticFields(socket),
+          errorType: diagnosticErrorType(error),
+        });
         this.closeSocket(socket, 1011, "frame handling failed");
       });
     });
 
     const shutdown = () => {
       if (!this.peers.delete(peer)) return;
+      log.info("fabric: endpoint disconnected", this.diagnosticFields(socket));
       if (peer.presenceRefresh) clearTimeout(peer.presenceRefresh);
       peer.presenceRefresh = null;
       const replacement = this.core.current(context.endpointHandle);
@@ -433,7 +447,11 @@ export class FabricForwarder {
    * can report nothing more specific than "the connection ended". */
   private closeSocket(socket: WebSocket, code?: number, reason = ""): void {
     if (socket.readyState === socket.CLOSED || socket.readyState === socket.CLOSING) return;
-    log.warn("fabric: closing a socket", { code: code ?? null, reason });
+    log.warn("fabric: closing a socket", {
+      ...this.diagnosticFields(socket),
+      code: code ?? null,
+      reasonCode: diagnosticSocketReason(reason),
+    });
     try {
       if (code === undefined) socket.close();
       else socket.close(code, reason);
@@ -443,7 +461,10 @@ export class FabricForwarder {
   }
 
   private terminate(socket: WebSocket, why = "unspecified"): void {
-    log.warn("fabric: terminating a socket", { why });
+    log.warn("fabric: terminating a socket", {
+      ...this.diagnosticFields(socket),
+      reasonCode: diagnosticSocketReason(why),
+    });
     try {
       socket.terminate();
     } catch {
@@ -513,7 +534,12 @@ export class FabricForwarder {
             succeeded = true;
           }
         } catch (error) {
-          log.warn("fabric: presence report failed", { state: desired.state });
+          log.warn("fabric: presence report failed", {
+            endpointRef: endpointDiagnosticRef(endpointHandle),
+            connectionGeneration: desired.connectionGeneration,
+            state: desired.state,
+            errorType: diagnosticErrorType(error),
+          });
           if (desired.state === "online") {
             const peer = this.currentPeer(endpointHandle, desired.connectionGeneration);
             if (
@@ -586,6 +612,17 @@ export class FabricForwarder {
     return null;
   }
 
+  private diagnosticFields(
+    socket: WebSocket,
+  ): { endpointRef: string | null; connectionGeneration: number | null } {
+    return (
+      this.socketDiagnostics.get(socket) ?? {
+        endpointRef: null,
+        connectionGeneration: null,
+      }
+    );
+  }
+
   private expirePresence(peer: SocketPeer): void {
     if (!this.peers.delete(peer)) return;
     if (peer.presenceRefresh) clearTimeout(peer.presenceRefresh);
@@ -605,5 +642,55 @@ export class FabricForwarder {
       if (report.timer) clearTimeout(report.timer);
     }
     this.presenceReports.clear();
+  }
+}
+
+function diagnosticErrorType(error: unknown): string {
+  const candidate = error instanceof Error ? error.name : typeof error;
+  return new Set([
+    "AggregateError",
+    "Error",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "TypeError",
+    "URIError",
+  ]).has(candidate)
+    ? candidate
+    : "Error";
+}
+
+function diagnosticSocketReason(reason: string): string {
+  switch (reason) {
+    case "":
+    case "unspecified":
+      return "unspecified";
+    case "the endpoint missed a heartbeat":
+      return "heartbeatTimeout";
+    case "authority disconnected":
+      return "authorityDisconnected";
+    case "relay shutting down":
+      return "relayShutdown";
+    case "Fabric speaks binary frames":
+      return "nonBinaryFrame";
+    case "frame too large":
+      return "frameTooLarge";
+    case "malformed Fabric frame":
+      return "malformedFrame";
+    case "frame handling failed":
+      return "frameHandlingFailed";
+    case "too slow":
+      return "backpressure";
+    case "the send failed":
+    case "the send threw":
+      return "sendFailed";
+    case "the close handshake failed":
+      return "closeHandshakeFailed";
+    case "the heartbeat ping threw":
+      return "heartbeatFailed";
+    case "presence lease expired":
+      return "presenceExpired";
+    default:
+      return "other";
   }
 }
