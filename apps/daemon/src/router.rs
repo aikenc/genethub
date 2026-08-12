@@ -102,6 +102,24 @@ pub async fn handle(
     caller: &crate::authz::Principal,
     request: Request,
 ) -> Handled {
+    let operation = diagnostic_operation(&request);
+    let handled = dispatch(state, transport, caller, request).await;
+    if let Some(operation) = operation {
+        let (outcome, code) = match &handled.reply {
+            Ok(_) => ("ok", None),
+            Err(error) => ("error", Some(error_code_name(error.code))),
+        };
+        state.diagnostics.record("rpc", operation, outcome, code);
+    }
+    handled
+}
+
+async fn dispatch(
+    state: &Shared,
+    transport: TransportKind,
+    caller: &crate::authz::Principal,
+    request: Request,
+) -> Handled {
     match request {
         Request::ConnectionIdentity => Handled::ok(Reply::Hello(HelloResult {
             daemon_version: state.version.clone(),
@@ -520,6 +538,19 @@ pub async fn handle(
                 })),
                 Err(error) => failed(error),
             }
+        }
+
+        Request::DiagnosticsSnapshot => {
+            let hub = match state.link.get() {
+                Some(link) => link.status().await,
+                None => genehub_proto::HubStatus::Unpaired,
+            };
+            let remote = remote_status(state).await;
+            Handled::ok(Reply::Diagnostics(state.diagnostics.snapshot(
+                &state.version,
+                &hub,
+                &remote,
+            )))
         }
 
         Request::UpdateCheck => automatic_update_refusal(),
@@ -1005,6 +1036,66 @@ pub async fn handle(
             state.processes.stop_all(&session_id).await;
             Handled::ok(Reply::Ack)
         }
+    }
+}
+
+/// Only operations useful during support triage enter the automatic record.
+/// Payload values are deliberately ignored; names are compile-time constants.
+fn diagnostic_operation(request: &Request) -> Option<&'static str> {
+    match request {
+        Request::AgentRefresh => Some("agent.refresh"),
+        Request::SessionCreate { .. } => Some("session.create"),
+        Request::SessionSend { .. } => Some("session.send"),
+        Request::SessionFork { .. } => Some("session.fork"),
+        Request::SessionImport { .. } => Some("session.import"),
+        Request::SessionInterrupt { .. } => Some("session.interrupt"),
+        Request::SessionDelete { .. } => Some("session.delete"),
+        Request::SessionRespondPermission { .. } => Some("session.respondPermission"),
+        Request::SettingsSetProvider { .. } => Some("settings.setProvider"),
+        Request::SettingsForgetProvider { .. } => Some("settings.forgetProvider"),
+        Request::HubPair { .. } => Some("hub.pair"),
+        Request::HubTrial { .. } => Some("hub.trial"),
+        Request::HubClaimLink => Some("hub.claimLink"),
+        Request::HubConnect { .. } => Some("hub.connect"),
+        Request::HubUnpair => Some("hub.unpair"),
+        Request::DeviceInvite(..) => Some("device.invite"),
+        Request::DeviceClaim { .. } => Some("device.claim"),
+        Request::DeviceRevoke { .. } => Some("device.revoke"),
+        Request::DeviceRemoteAttach { .. } => Some("device.remoteAttach"),
+        Request::DeviceRemoteDetach => Some("device.remoteDetach"),
+        Request::WorkspaceOpen { .. } => Some("workspace.open"),
+        Request::WorkspaceCreate { .. } => Some("workspace.create"),
+        Request::WorkspaceRename { .. } => Some("workspace.rename"),
+        Request::WorkspaceRemove { .. } => Some("workspace.remove"),
+        Request::DirectoryList { .. } => Some("directory.list"),
+        Request::DirectoryMkdir { .. } => Some("directory.mkdir"),
+        Request::FileTree { .. } => Some("file.tree"),
+        Request::FileWrite { .. } => Some("file.write"),
+        Request::FileMkdir { .. } => Some("file.mkdir"),
+        Request::FileCopy { .. } => Some("file.copy"),
+        Request::FileMove { .. } => Some("file.move"),
+        Request::FileDelete { .. } => Some("file.delete"),
+        Request::GitStatus { .. } => Some("git.status"),
+        Request::GitDiff { .. } => Some("git.diff"),
+        Request::GitCommit { .. } => Some("git.commit"),
+        Request::PtyOpen { .. } => Some("pty.open"),
+        Request::PtyResize { .. } => Some("pty.resize"),
+        Request::PtyClose { .. } => Some("pty.close"),
+        _ => None,
+    }
+}
+
+fn error_code_name(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::BadRequest => "badRequest",
+        ErrorCode::Unauthorized => "unauthorized",
+        ErrorCode::NotFound => "notFound",
+        ErrorCode::Conflict => "conflict",
+        ErrorCode::Unsupported => "unsupported",
+        ErrorCode::Forbidden => "forbidden",
+        ErrorCode::Internal => "internal",
+        ErrorCode::ProtocolVersion => "protocolVersion",
+        ErrorCode::IsolationUnavailable => "isolationUnavailable",
     }
 }
 

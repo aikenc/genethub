@@ -17,7 +17,7 @@ use genehub_proto::{
     RoundSummary, RoundTrunk, SequencedEvent, SessionContext, SessionEvent, SessionImportCandidate,
     SessionImportListing, SessionImportSource, SessionInspection, SessionLineage,
     SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot, SessionStatus,
-    SessionSummary, TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
+    SessionSummary, TimelineItem, ToolStatus, TurnErrorCode, TurnOutcome, TurnStats, Usage,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
@@ -31,6 +31,7 @@ use super::store::{
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::{AgentSession, PersistHandle, PromptInput, ProviderMap, SessionConfig};
+use crate::diagnostics::Diagnostics;
 
 const BROADCAST_CAPACITY: usize = 1024;
 const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
@@ -194,6 +195,7 @@ impl ActiveRound {
 pub struct SessionManager {
     store: Store,
     registry: Arc<Registry>,
+    diagnostics: Arc<Diagnostics>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
     /// What each session's agent has left running. Owned here because that is
     /// where the ownership is: a stray process belongs to the conversation
@@ -206,9 +208,19 @@ pub struct SessionManager {
 
 impl SessionManager {
     pub fn new(store: Store, registry: Arc<Registry>, replay_window: usize) -> Self {
+        Self::new_with_diagnostics(store, registry, replay_window, Arc::new(Diagnostics::new()))
+    }
+
+    pub fn new_with_diagnostics(
+        store: Store,
+        registry: Arc<Registry>,
+        replay_window: usize,
+        diagnostics: Arc<Diagnostics>,
+    ) -> Self {
         SessionManager {
             store,
             registry,
+            diagnostics,
             sessions: RwLock::new(HashMap::new()),
             processes: crate::processes::Processes::new(),
             replay_window: replay_window.max(1),
@@ -1558,6 +1570,7 @@ impl SessionManager {
             self.store.clone(),
             self.replay_window,
             self.processes.clone(),
+            self.diagnostics.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         Ok(())
@@ -2599,6 +2612,7 @@ async fn pump_events(
     store: Store,
     replay_window: usize,
     processes: Arc<crate::processes::Processes>,
+    diagnostics: Arc<Diagnostics>,
 ) {
     let (workspace_id, session_id) = {
         let meta = live.meta.lock().await;
@@ -2646,6 +2660,7 @@ async fn pump_events(
         let mut event = match receiver.recv().await {
             Ok(event) => event,
             Err(broadcast::error::RecvError::Closed) => {
+                diagnostics.record("agent", "event-stream", "error", Some("closed"));
                 flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
                 // No `TurnFailed`, no `TurnCanceled` — the adapter's own sender
                 // just vanished (a crashed process is the ordinary cause). The
@@ -2657,10 +2672,25 @@ async fn pump_events(
                 break;
             }
             Err(broadcast::error::RecvError::Lagged(missed)) => {
+                diagnostics.record("agent", "event-stream", "error", Some("dropped"));
                 tracing::warn!("dropped {missed} agent events: the pump fell behind");
                 continue;
             }
         };
+
+        match &event {
+            SessionEvent::TurnStarted { .. } => {
+                diagnostics.record("agent", "turn", "started", None)
+            }
+            SessionEvent::TurnCompleted { .. } => diagnostics.record("agent", "turn", "ok", None),
+            SessionEvent::TurnFailed { error, .. } => {
+                diagnostics.record("agent", "turn", "error", Some(turn_error_code(error.code)))
+            }
+            SessionEvent::TurnCanceled { .. } => {
+                diagnostics.record("agent", "turn", "canceled", None)
+            }
+            _ => {}
+        }
 
         if let SessionEvent::TurnStarted {
             turn_id,
@@ -2884,6 +2914,18 @@ async fn pump_events(
     let _ = blob_writer.await;
     if channel_closed {
         finalize_after_channel_closed(&live, &store).await;
+    }
+}
+
+fn turn_error_code(code: TurnErrorCode) -> &'static str {
+    match code {
+        TurnErrorCode::MissingCredentials => "missingCredentials",
+        TurnErrorCode::RateLimited => "rateLimited",
+        TurnErrorCode::Upstream => "upstream",
+        TurnErrorCode::Timeout => "timeout",
+        TurnErrorCode::AgentCrashed => "agentCrashed",
+        TurnErrorCode::Canceled => "canceled",
+        TurnErrorCode::Internal => "internal",
     }
 }
 
@@ -4782,6 +4824,7 @@ mod tests {
             store.clone(),
             64,
             crate::processes::Processes::new(),
+            Arc::new(Diagnostics::new()),
         ));
         for event in script {
             agent_events.send(event).expect("the pump is listening");
@@ -5303,6 +5346,7 @@ mod tests {
             sessions.store.clone(),
             64,
             sessions.processes(),
+            sessions.diagnostics.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         (sessions, events, turn_ids)
@@ -5858,6 +5902,7 @@ mod tests {
             sessions.store.clone(),
             64,
             sessions.processes(),
+            sessions.diagnostics.clone(),
         ));
         *live.pump.lock().await = Some(pump);
 
@@ -6414,5 +6459,67 @@ mod tests {
             resumed = current.store.save_meta(&meta());
         }
         resumed.expect("the current build had to restart after the legacy owner exited");
+    }
+
+    #[tokio::test]
+    async fn event_pump_records_agent_failure_without_the_runtime_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let live = Arc::new(Live::new(meta(), store.clone()));
+        live.begin_round(None, "t", "u0").await;
+        let (agent_events, _) = broadcast::channel(64);
+        let mut seen = live.events.subscribe();
+        let diagnostics = Arc::new(Diagnostics::new());
+        let pump = tokio::spawn(pump_events(
+            live,
+            agent_events.subscribe(),
+            store,
+            64,
+            crate::processes::Processes::new(),
+            diagnostics.clone(),
+        ));
+
+        agent_events
+            .send(SessionEvent::TurnStarted {
+                turn_id: "t".into(),
+                started_at_ms: now_ms(),
+            })
+            .unwrap();
+        agent_events
+            .send(SessionEvent::TurnFailed {
+                turn_id: "t".into(),
+                error: genehub_proto::TurnError {
+                    code: TurnErrorCode::RateLimited,
+                    message: "secret prompt and provider response".into(),
+                },
+            })
+            .unwrap();
+        loop {
+            if matches!(
+                seen.recv().await.unwrap().event,
+                SessionEvent::TurnFailed { .. }
+            ) {
+                break;
+            }
+        }
+
+        let snapshot = diagnostics.snapshot(
+            "test",
+            &genehub_proto::HubStatus::Unpaired,
+            &genehub_proto::RemoteAccess {
+                relay_url: None,
+                rendezvous_url: None,
+                online: false,
+            },
+        );
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        assert!(snapshot.events.iter().any(|event| {
+            event.component == "agent"
+                && event.operation == "turn"
+                && event.outcome == "error"
+                && event.code.as_deref() == Some("rateLimited")
+        }));
+        assert!(!encoded.contains("secret prompt"));
+        pump.abort();
     }
 }

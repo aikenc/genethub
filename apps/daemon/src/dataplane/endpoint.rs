@@ -687,6 +687,12 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
     };
     let needed = method.required();
     if !Principal::of(&services.state, &services.access).allows(needed) {
+        services.state.diagnostics.record(
+            "stream",
+            "authorization",
+            "error",
+            Some(needed.as_str()),
+        );
         return refuse(stream, needed).await;
     }
     match method {
@@ -800,6 +806,10 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     let caller = Principal::of(&services.state, &services.access);
     let needed = authz::required(&request);
     if !caller.allows(needed) {
+        services
+            .state
+            .diagnostics
+            .record("rpc", "authorization", "error", Some(needed.as_str()));
         return refuse(stream, needed).await;
     }
 

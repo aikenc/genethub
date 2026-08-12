@@ -46,12 +46,16 @@ fn relay_bundle() -> Option<PathBuf> {
 struct Relay {
     process: Child,
     origin: String,
+    output_drains: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for Relay {
     fn drop(&mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
+        for drain in self.output_drains.drain(..) {
+            let _ = drain.join();
+        }
     }
 }
 
@@ -68,10 +72,12 @@ fn start_relay(bundle: &Path) -> Relay {
         .expect("the relay could not be started");
 
     let stdout = process.stdout.take().expect("relay stdout");
+    let stderr = process.stderr.take().expect("relay stderr");
     // Owned before it is read from, so that giving up below still reaps it.
     let mut relay = Relay {
         process,
         origin: String::new(),
+        output_drains: Vec::new(),
     };
     let mut lines = BufReader::new(stdout).lines();
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -84,6 +90,17 @@ fn start_relay(bundle: &Path) -> Relay {
             .filter(|port| !port.is_empty())
         {
             relay.origin = format!("http://127.0.0.1:{port}");
+            // The Relay now logs endpoint lifecycle after startup. Keep both
+            // pipes drained for the lifetime of the child: dropping stdout
+            // here closes the reader and turns the first useful log line into
+            // EPIPE, while leaving stderr unread can eventually deadlock a
+            // noisy failure path on a full pipe.
+            relay
+                .output_drains
+                .push(std::thread::spawn(move || for _ in lines {}));
+            relay.output_drains.push(std::thread::spawn(move || {
+                for _ in BufReader::new(stderr).lines() {}
+            }));
             return relay;
         }
     }

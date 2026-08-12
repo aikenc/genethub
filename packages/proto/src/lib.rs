@@ -69,6 +69,7 @@ mod tests {
             json!({"type": "pty.resize", "payload": {"ptyId": "p", "cols": 80, "rows": 24}}),
             json!({"type": "workspace.rename", "payload": {"workspaceId": "w", "name": "demo"}}),
             json!({"type": "session.fork", "payload": {"sessionId": "s", "turnId": "t"}}),
+            json!({"type": "diagnostics.snapshot"}),
         ];
         for case in cases {
             let raw = case.to_string();
@@ -98,6 +99,20 @@ mod tests {
         )
         .expect("parse legacy fork");
         assert!(matches!(fork, Request::SessionFork { target: None, .. }));
+    }
+
+    #[test]
+    fn diagnostics_omit_an_absent_categorical_code() {
+        let event = SupportDiagnosticEvent {
+            at: "2026-08-12T00:00:00.000Z".into(),
+            component: "daemon".into(),
+            operation: "lifecycle".into(),
+            outcome: "started".into(),
+            code: None,
+            count: 1,
+        };
+        let encoded = serde_json::to_value(event).expect("serialize diagnostic event");
+        assert_eq!(encoded.get("code"), None, "None must be absent, not null");
     }
 
     #[test]
