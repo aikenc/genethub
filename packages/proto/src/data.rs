@@ -155,6 +155,54 @@ pub struct AssetPreviewRequest {
     pub source: WorkspaceFileSource,
 }
 
+/// What to run on a machine, and where.
+///
+/// `argv` is a list, never a command line: the machine does not parse it, so
+/// nothing in it can turn into a second command. A caller that wants a shell's
+/// help says so out loud with `["bash", "-lc", "..."]`, and that is then
+/// visibly a shell rather than something that became one by quoting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ShellRunRequest {
+    pub workspace_id: String,
+    pub argv: Vec<String>,
+    /// Somewhere inside the workspace. Absent means its root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cwd: Option<String>,
+}
+
+/// One message from a running command.
+///
+/// The two output streams stay apart the whole way. A terminal merges them
+/// because a person is reading both at once; a caller that has to tell a
+/// diagnostic from a result cannot un-merge them afterwards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum ShellFrame {
+    Stdout {
+        data: String,
+    },
+    Stderr {
+        data: String,
+    },
+    /// Always the last frame, and sent even when the command was killed —
+    /// a stream that simply stopped would be indistinguishable from a
+    /// connection that broke.
+    Exit {
+        /// Absent when a signal ended the process, which is the one case where
+        /// there is no exit status to report.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        code: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        signal: Option<i32>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]

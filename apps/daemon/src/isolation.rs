@@ -121,6 +121,47 @@ impl Policy {
     }
 }
 
+/// Decides what the operating system must hold this caller's process to.
+///
+/// The same question for a terminal and for a single command, answered in one
+/// place because they are the same authority: anything that can be done in one
+/// can be done in the other.
+///
+/// Whoever is sitting at this machine gets a process with nothing in its way:
+/// they already own the account, so confining them would cost them a working
+/// shell and protect nobody (`architecture.md` §3.4). A device that reaches in
+/// from somewhere else is a different subject, and the only reason its
+/// processes were ever unconstrained is that nothing existed to constrain them.
+///
+/// When confinement is required and this machine cannot provide it, the answer
+/// is a refusal. Starting an unconfined process instead would be the one
+/// outcome nobody could detect.
+pub fn required_for(
+    caller: &crate::authz::Principal,
+    workspace: &crate::config::WorkspaceEntry,
+) -> Result<Option<Policy>, String> {
+    if caller.allows(crate::authz::Capability::PtyUnconfined) {
+        return Ok(None);
+    }
+    let report = report();
+    if !report.enforced {
+        return Err(format!(
+            "this has to run confined to the workspace and this machine cannot do that: {}. \
+             A device holding pty:unconfined may still run it.",
+            report.detail
+        ));
+    }
+    let mut roots: Vec<PathBuf> = workspace
+        .folders
+        .iter()
+        .map(|folder| folder.root.clone())
+        .collect();
+    if roots.is_empty() {
+        roots.push(workspace.root.clone());
+    }
+    Ok(Some(Policy::for_workspace(&roots)))
+}
+
 /// What this machine can enforce, asked once and answered the same way every
 /// time so that two callers never get two different stories.
 pub fn report() -> IsolationInfo {

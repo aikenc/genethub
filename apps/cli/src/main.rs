@@ -12,8 +12,10 @@ mod hub;
 mod machine;
 mod machines;
 mod output;
+mod place;
 mod query;
 mod rpc;
+mod shell;
 mod target;
 mod update;
 
@@ -82,6 +84,7 @@ async fn run(args: Vec<String>) {
             Some(_) => converse::session(&args[1..], &selection).await,
         },
         Some("agent") => converse::agent(&args[1..], &selection).await,
+        Some("shell") => shell::shell(&args[1..], &selection).await,
         Some("machine") => machine::machine(&args[1..]).await,
         Some("device") => machine::device(&args[1..], &selection).await,
         Some("daemon") => control::daemon(&args[1..]).await,
@@ -115,6 +118,9 @@ pub fn usage() -> i32 {
   genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>]
                                     start a session and stream it as JSON Lines
   genet <agentId> \"<prompt>\" [...]   the same thing, spelled shorter
+  genet shell [--workspace <id>] --cwd <dir> -- <command> [args...]
+                                    run one command in a workspace and stream
+                                    stdout and stderr apart as JSON Lines
   genet session send <id> \"<text>\"  continue a session
   genet session respond <id> --request <rid> --choose <optionId>
                                     answer what a waiting session asked

@@ -67,9 +67,18 @@ fn capabilities_describe_remote_and_isolation_without_changing_frozen_types() {
     // the flag has to be able to rely on running here.
     assert_eq!(data["remote"]["selector"]["implicitDefault"], false);
 
-    // An absent engine must not be readable as a permissive one.
-    assert_eq!(data["isolation"]["arbitraryCommands"], false);
+    // `genet shell` runs an argv list, so arbitrary commands are offered and no
+    // command line is ever parsed here.
+    assert_eq!(data["isolation"]["arbitraryCommands"], true);
+    assert_eq!(data["isolation"]["commandLineParsing"], false);
+    // What can actually be enforced is a property of the machine that would run
+    // the process, not of this binary. A null engine here must be read as "ask
+    // over there", never as "nothing is enforced".
     assert!(data["isolation"]["engine"].is_null());
+    assert_eq!(
+        data["isolation"]["reportedBy"], "context.daemon.isolation",
+        "a null engine has to say where the real answer lives"
+    );
     assert_eq!(data["workingDirectory"]["inferred"], false);
 }
 

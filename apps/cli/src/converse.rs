@@ -9,13 +9,11 @@
 //! second kind of session is a second set of rules for everything that reads
 //! one (`genet-remote-execution.md` §6.2).
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use genehub_proto::{
     PermissionOptionKind, PermissionOutcome, PermissionRequest, PermissionRequestKind, Reply,
     Request, SequencedEvent, SessionEvent, SessionSnapshot, SessionSummary, TurnError,
-    WorkspaceInfo,
 };
 use serde_json::{json, Value};
 
@@ -544,117 +542,35 @@ async fn resolve_workspace(
     run: &Run,
     here: bool,
 ) -> Result<(String, Option<String>), CliFailure> {
-    if let Some(workspace_id) = run.workspace_id.clone() {
-        let known = query::list_workspaces(rpc).await?;
-        if !known.iter().any(|workspace| workspace.id == workspace_id) {
-            return Err(CliFailure::target_not_found("workspace", &workspace_id));
-        }
-        return Ok((workspace_id, None));
-    }
-    let Some(cwd) = run.cwd.as_deref() else {
-        return Err(CliFailure::invalid_args(
-            "which directory should the agent work in? pass --cwd <dir> or --workspace <id>; \
-             neither is inferred",
-        ));
+    let located =
+        crate::place::locate(rpc, run.workspace_id.clone(), run.cwd.as_deref(), here).await?;
+    let uncovered = match located {
+        crate::place::Located::In { workspace_id, cwd } => return Ok((workspace_id, cwd)),
+        crate::place::Located::Uncovered(path) => path,
     };
-    let absolute = absolute_cwd(cwd, here)?;
-
-    let known = query::list_workspaces(rpc).await?;
-    match deepest_containing(&known, &absolute, here) {
-        // Absolute, not the remainder: a multi-folder workspace can hold the
-        // same relative path under two folders, and the daemon would have to
-        // guess which one was meant.
-        Some(workspace) => Ok((
-            workspace.id.clone(),
-            Some(absolute.to_string_lossy().into_owned()),
-        )),
-        None if run.open_workspace => {
-            let Reply::Workspace(workspace) = rpc
-                .call(Request::WorkspaceOpen {
-                    root: absolute.to_string_lossy().into_owned(),
-                })
-                .await
-                .map_err(query::rpc_error)?
-            else {
-                return Err(CliFailure::protocol(
-                    "the daemon answered workspace.open with something other than a workspace",
-                ));
-            };
-            Ok((workspace.id, None))
-        }
-        None => Err(CliFailure::business(
+    if !run.open_workspace {
+        return Err(CliFailure::business(
             "targetNotFound",
             format!(
                 "no workspace on the machine that answered contains {}; open it there first, \
                  or pass --workspace <id>",
-                absolute.display()
+                uncovered.display()
             ),
-            Some(json!({"cwd": absolute.to_string_lossy()})),
-        )),
+            Some(json!({"cwd": uncovered.to_string_lossy()})),
+        ));
     }
-}
-
-/// The directory named, as the machine that will run in it would write it.
-///
-/// Only a local directory can be resolved from here. A relative `--cwd` aimed
-/// at another machine would silently mean "wherever that string lands over
-/// there", so it is refused instead of resolved against the wrong filesystem.
-fn absolute_cwd(cwd: &str, here: bool) -> Result<PathBuf, CliFailure> {
-    if here {
-        return std::fs::canonicalize(cwd)
-            .map_err(|error| CliFailure::invalid_args(format!("--cwd {cwd}: {error}")));
-    }
-    let path = PathBuf::from(cwd);
-    if !path.is_absolute() {
-        return Err(CliFailure::invalid_args(format!(
-            "--cwd {cwd} is relative, and this machine's directories are not the other \
-             machine's; give the absolute path as it exists there"
-        )));
-    }
-    Ok(path)
-}
-
-/// The workspace whose folders reach deepest into `path`.
-///
-/// Every folder counts, not only the first: a multi-folder workspace is one
-/// project, and a task started in its second folder is not a different
-/// workspace.
-fn deepest_containing<'a>(
-    workspaces: &'a [WorkspaceInfo],
-    path: &Path,
-    here: bool,
-) -> Option<&'a WorkspaceInfo> {
-    workspaces
-        .iter()
-        .filter_map(|workspace| {
-            roots_of(workspace)
-                .into_iter()
-                .filter_map(|root| {
-                    let root = PathBuf::from(root);
-                    let root = if here {
-                        std::fs::canonicalize(&root).unwrap_or(root)
-                    } else {
-                        root
-                    };
-                    path.strip_prefix(&root).ok()?;
-                    Some(root.components().count())
-                })
-                .max()
-                .map(|depth| (workspace, depth))
+    let Reply::Workspace(workspace) = rpc
+        .call(Request::WorkspaceOpen {
+            root: uncovered.to_string_lossy().into_owned(),
         })
-        .max_by_key(|(_, depth)| *depth)
-        .map(|(workspace, _)| workspace)
-}
-
-/// Every physical directory a workspace covers, first folder included.
-fn roots_of(workspace: &WorkspaceInfo) -> Vec<&str> {
-    let mut roots = vec![workspace.root.as_str()];
-    for folder in &workspace.folders {
-        if folder.root != workspace.root {
-            roots.push(folder.root.as_str());
-        }
-    }
-    roots
+        .await
+        .map_err(query::rpc_error)?
+    else {
+        return Err(CliFailure::protocol(
+            "the daemon answered workspace.open with something other than a workspace",
+        ));
+    };
+    Ok((workspace.id, None))
 }
 
 async fn pump(
@@ -1008,78 +924,6 @@ mod tests {
             &[("only", PermissionOptionKind::AllowAlways)],
         );
         assert_eq!(automatic_answer(&odd, false), None);
-    }
-
-    fn workspace(id: &str, roots: &[&std::path::Path]) -> WorkspaceInfo {
-        WorkspaceInfo {
-            id: id.into(),
-            name: id.into(),
-            root: roots[0].to_string_lossy().into_owned(),
-            is_git_repo: false,
-            folders: roots
-                .iter()
-                .enumerate()
-                .map(|(index, root)| genehub_proto::WorkspaceFolderInfo {
-                    name: format!("f{index}"),
-                    root: root.to_string_lossy().into_owned(),
-                    root_handle: format!("h{index}"),
-                })
-                .collect(),
-            workspace_file: None,
-        }
-    }
-
-    #[test]
-    fn the_innermost_workspace_wins_over_one_that_merely_contains_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        let inner = repo.join("services/api");
-        std::fs::create_dir_all(&inner).unwrap();
-        let workspaces = vec![
-            workspace("w_repo", &[&repo]),
-            workspace("w_outer", &[dir.path()]),
-        ];
-
-        let chosen =
-            deepest_containing(&workspaces, &std::fs::canonicalize(&inner).unwrap(), true).unwrap();
-        assert_eq!(chosen.id, "w_repo");
-        let at_the_root =
-            deepest_containing(&workspaces, &std::fs::canonicalize(&repo).unwrap(), true).unwrap();
-        assert_eq!(at_the_root.id, "w_repo");
-        assert!(deepest_containing(&workspaces, Path::new("/nowhere/at/all"), true).is_none());
-    }
-
-    #[test]
-    fn a_directory_in_a_second_folder_belongs_to_that_workspace() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("app");
-        let second = dir.path().join("library");
-        let inside = second.join("src");
-        std::fs::create_dir_all(&inside).unwrap();
-        let workspaces = vec![workspace("w_pair", &[&first, &second])];
-
-        let chosen =
-            deepest_containing(&workspaces, &std::fs::canonicalize(&inside).unwrap(), true)
-                .unwrap();
-        assert_eq!(chosen.id, "w_pair");
-    }
-
-    #[test]
-    fn a_remote_directory_is_read_as_the_other_machine_wrote_it() {
-        // No canonicalization and no local existence check: the path belongs to
-        // a filesystem this process cannot see.
-        let workspaces = vec![workspace("w_remote", &[Path::new("/srv/app")])];
-        let absolute = absolute_cwd("/srv/app/services", false).unwrap();
-        assert_eq!(
-            deepest_containing(&workspaces, &absolute, false)
-                .unwrap()
-                .id,
-            "w_remote"
-        );
-        assert_eq!(
-            absolute_cwd("services", false).unwrap_err().code,
-            "invalidArgs"
-        );
     }
 
     #[test]

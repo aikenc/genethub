@@ -45,8 +45,9 @@ pub const RESERVED: [&str; 13] = [
     "shell",
 ];
 
-const ROUTABLE: [&str; 14] = [
+const ROUTABLE: [&str; 15] = [
     "context",
+    "shell",
     "workspace.list",
     "workspace.show",
     "session.list",
@@ -66,7 +67,7 @@ const STATIC: [&str; 2] = ["schema", "capabilities"];
 
 /// Commands that carry a working directory. Everything else rejects `--cwd`
 /// rather than accepting and ignoring it.
-const TAKES_CWD: [&str; 1] = ["agent.run"];
+const TAKES_CWD: [&str; 2] = ["agent.run", "shell"];
 
 pub fn routing(command: &str) -> Routing {
     if STATIC.contains(&command) {
@@ -185,6 +186,10 @@ pub fn canonical(args: &[String]) -> Option<String> {
     }
     match (first, verb) {
         ("schema" | "context" | "capabilities" | "status" | "update", _) => Some(first.to_string()),
+        // Everything after `shell` is the command line, so the token following
+        // it is not a verb. Reading it as one would make `genet shell ls` a
+        // request to route a command called `shell.ls`, which exists nowhere.
+        ("shell", _) => Some("shell".to_string()),
         (_, Some(verb)) if !verb.starts_with('-') => Some(format!("{first}.{verb}")),
         _ => None,
     }

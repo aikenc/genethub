@@ -50,45 +50,6 @@ impl Handled {
     }
 }
 
-/// Decides what the operating system must hold this caller's terminal to.
-///
-/// Whoever is sitting at this machine gets a terminal with nothing in its way:
-/// they already own the account, so confining them would cost them a working
-/// shell and protect nobody (`architecture.md` §3.4). A device that reaches in
-/// from somewhere else is a different subject, and the only reason its
-/// terminal was ever unconstrained is that nothing existed to constrain it.
-///
-/// When confinement is required and this machine cannot provide it, the answer
-/// is a refusal. Handing back an unconfined terminal instead would be the one
-/// outcome nobody could detect.
-fn terminal_confinement(
-    caller: &crate::authz::Principal,
-    workspace: &crate::config::WorkspaceEntry,
-) -> Result<Option<crate::isolation::Policy>, String> {
-    use crate::authz::Capability;
-
-    if caller.allows(Capability::PtyUnconfined) {
-        return Ok(None);
-    }
-    let report = crate::isolation::report();
-    if !report.enforced {
-        return Err(format!(
-            "this terminal has to be confined to the workspace and this machine cannot do that: \
-             {}. A device holding pty:unconfined may still open one.",
-            report.detail
-        ));
-    }
-    let mut roots: Vec<std::path::PathBuf> = workspace
-        .folders
-        .iter()
-        .map(|folder| folder.root.clone())
-        .collect();
-    if roots.is_empty() {
-        roots.push(workspace.root.clone());
-    }
-    Ok(Some(crate::isolation::Policy::for_workspace(&roots)))
-}
-
 /// Maps an internal failure onto a client-visible error.
 ///
 /// Everything that reaches a user goes through here, so the wording is worth
@@ -769,7 +730,7 @@ pub async fn handle(
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
-            let confinement = match terminal_confinement(caller, &workspace) {
+            let confinement = match crate::isolation::required_for(caller, &workspace) {
                 Ok(confinement) => confinement,
                 Err(refusal) => return Handled::err(ErrorCode::IsolationUnavailable, refusal),
             };

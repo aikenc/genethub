@@ -14,10 +14,11 @@ use crate::output::{self, CliFailure, CLI_SCHEMA};
 use crate::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use crate::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 20] = [
+const COMMAND_NAMES: [&str; 21] = [
     "schema",
     "context",
     "capabilities",
+    "shell",
     "workspace.list",
     "workspace.show",
     "session.list",
@@ -58,7 +59,8 @@ const GRANTS: [&str; 9] = [
 fn mutates(name: &str) -> bool {
     matches!(
         name,
-        "agent.run"
+        "shell"
+            | "agent.run"
             | "session.send"
             | "session.respond"
             | "session.interrupt"
@@ -509,12 +511,13 @@ fn capabilities_data() -> Value {
             "pairing": ["machine.pair", "device.invite"],
             "credentialStore": "machines.json",
         },
-        // What the target machine will let a command touch. Arbitrary commands
-        // are not offered at all yet, so there is nothing to isolate and the
-        // engine is absent rather than "none" — an agent must not read a
-        // missing sandbox as a permissive one.
+        // What the target machine will let a command touch. `genet shell` runs
+        // an argv list, never a command line, so this binary never parses a
+        // shell and there is no interpreter of ours to sandbox — what holds is
+        // the operating system confinement on the machine that runs it.
         "isolation": {
-            "arbitraryCommands": false,
+            "arbitraryCommands": true,
+            "commandLineParsing": false,
             "engine": null,
             // What a *machine* can enforce is not a property of this binary,
             // and answering it from here would be answering it about the
@@ -585,6 +588,23 @@ fn command_schema(name: &str) -> Value {
             object_input(
                 json!({"sessionId": {"type": "string", "minLength": 1}}),
                 &["sessionId"],
+            ),
+        ),
+        "shell" => (
+            "genet shell [--workspace <id> | --cwd <dir>] [--machine <id>] -- <command> [args...]",
+            true,
+            object_input(
+                json!({
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "$comment": "a list, never a command line: it is not parsed by a shell, \
+                                     so nothing in it can become a second command",
+                    },
+                    "workspaceId": {"type": ["string", "null"], "minLength": 1},
+                }),
+                &["argv"],
             ),
         ),
         "agent.list" => ("genet agent list", true, object_input(json!({}), &[])),
@@ -710,12 +730,39 @@ fn command_schema(name: &str) -> Value {
         "routable": matches!(target::routing(name), Routing::Routable),
         "streaming": streams(name),
         "inputSchema": with_selectors(name, input),
-        "outputSchema": if streams(name) { stream_output() } else { single_output(name) },
+        "outputSchema": match name {
+            _ if !streams(name) => single_output(name),
+            "shell" => command_output(),
+            _ => stream_output(),
+        },
+    })
+}
+
+/// What a running command prints: the same envelope per line, and the two
+/// output streams named rather than merged.
+///
+/// `shell.exit` is the terminal record and carries the command's own status.
+/// The exit code of the CLI process deliberately does not: its codes are
+/// frozen and describe whether the CLI could do its job, so a command exiting 4
+/// must not be indistinguishable from a machine refusing the request.
+fn command_output() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$comment": "JSON Lines: one envelope per line, in order",
+        "type": "object",
+        "required": ["schema", "type"],
+        "properties": {
+            "schema": {"const": CLI_SCHEMA},
+            "type": {"enum": ["shell.started", "shell.output", "shell.exit", "error"]},
+        },
+        "x-terminalTypes": ["shell.exit", "error"],
+        "x-streams": ["stdout", "stderr"],
+        "x-exitCode": "shell.exit.data.exitCode, not the exit code of this process",
     })
 }
 
 fn streams(name: &str) -> bool {
-    matches!(name, "agent.run" | "session.send")
+    matches!(name, "shell" | "agent.run" | "session.send")
 }
 
 fn single_output(name: &str) -> Value {

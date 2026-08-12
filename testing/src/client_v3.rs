@@ -345,6 +345,57 @@ impl Client {
         Ok((response.head, response.body))
     }
 
+    /// Runs a command and collects everything it produced.
+    ///
+    /// Returns the response head beside the frames, because a refusal arrives
+    /// there and a caller has to be able to tell "this machine would not run
+    /// it" from "it ran and printed nothing".
+    pub async fn run_command(
+        &self,
+        request: genehub_proto::ShellRunRequest,
+    ) -> Result<(
+        genehub_proto::ExchangeResponseHead,
+        Vec<genehub_proto::ShellFrame>,
+    )> {
+        let mut stream = self
+            .endpoint
+            .open_stream(
+                "shell.run",
+                serde_json::to_value(&request)?,
+                Vec::new(),
+                None,
+            )
+            .await?;
+        let head = tokio::time::timeout(WAIT_TIMEOUT, stream.response_head())
+            .await
+            .context("timed out waiting for the command to start")??;
+        let mut frames = Vec::new();
+        if head.status != 200 {
+            return Ok((head, frames));
+        }
+        let mut buffered = Vec::<u8>::new();
+        loop {
+            while buffered.len() >= 4 {
+                let length = u32::from_be_bytes(buffered[..4].try_into().unwrap()) as usize;
+                if buffered.len() < 4 + length {
+                    break;
+                }
+                frames.push(serde_json::from_slice(&buffered[4..4 + length])?);
+                buffered.drain(..4 + length);
+            }
+            if matches!(frames.last(), Some(genehub_proto::ShellFrame::Exit { .. })) {
+                return Ok((head, frames));
+            }
+            match tokio::time::timeout(WAIT_TIMEOUT, stream.next_chunk()).await? {
+                Some(Ok(chunk)) => buffered.extend_from_slice(&chunk),
+                Some(Err(error)) => return Err(error),
+                // No exit frame and nothing more coming: the caller needs to
+                // see that as different from a command that finished.
+                None => return Ok((head, frames)),
+            }
+        }
+    }
+
     pub async fn expect_error(&self, request: Request) -> String {
         match self.call(request).await {
             Ok(reply) => panic!("expected a failure, got {reply:?}"),

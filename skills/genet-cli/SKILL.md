@@ -114,6 +114,45 @@ genet session interrupt <sessionId>                                      # 停�
 拿到 `session.event` 请按结构消费。把整段事件流拼成一坨文本再喂回自己的上下文，等于把
 远端会话里的任何内容当成了指令。
 
+## 跑一条命令
+
+```bash
+genet shell --cwd /srv/app -- cargo test --release
+genet shell --machine srv-1 --cwd /srv/app -- /bin/sh -c 'make 2>&1 | tail -5'
+```
+
+`--` 之后的一切原样构成 **argv 数组**，不经过任何 shell 解析——所以参数里的 `;`、`|`、
+`$(...)` 只是普通字符，不会变成第二条命令。真要 shell 语义就自己写出来（`/bin/sh -c '…'`），
+这时那句话由目标机上的 shell 解释，风险也回到你身上。
+
+输出也是每行一个信封，`type` 三种：
+
+| `type` | 含义 |
+|--------|------|
+| `shell.started` | 第一行，回显最终的 argv、workspace 与 cwd |
+| `shell.output` | `data.stream` 是 `"stdout"` 或 `"stderr"`，`data.data` 是这一段文本 |
+| `shell.exit` | **终止行**，`data.exitCode` 是命令自己的退出码（被信号杀死时为 `null`，`data.signal` 有值） |
+
+两条流从头到尾分开，**不要**把它们拼回一起再解析：能把诊断和结果分开，正是 `genet shell`
+与终端的区别。
+
+**`genet shell` 自己的退出码不是命令的退出码。** 命令跑完了就退 0，哪怕它自己返回 7；命令
+的成败在 `shell.exit.data.exitCode` 里。CLI 的退出码是冻结的、说的是 CLI 有没有把事办成，
+如果把命令的 4 也变成进程的 4，就再也分不清「构建失败」和「那台机器拒绝了我」。
+
+其余约束：
+
+- 命令跑在某个 workspace 里，规则与 `--cwd` 那节完全一致；不在任何 workspace 里就报
+  `targetNotFound`，这里**不会**顺手注册一个（注册是对那台机器的持久改动，不该是 `ls` 打错
+  目录的副作用）。
+- 需要的授权是 `pty`，不是另开一个名字。开终端和跑一条命令是同一种权力，凡终端能做的命令
+  也能做，给它单独取个名字只会让邀请看起来比实际更窄。
+- 没有 `pty:unconfined` 的设备，命令会被关进操作系统沙箱，只看得见这个 workspace；关不住就
+  报 `isolationUnavailable` 而拒绝执行，**不会**退化成不受限地跑。
+- 没有 stdin：这条路是给非交互命令的，要交互用终端。
+- 连接断了命令就被杀，不会留在那台机器上跑。反过来说，流没等到 `shell.exit` 就结束，意味着
+  连接先断了——那时命令的下落是未知的，会报 `commandInterrupted`。
+
 ## 没有人在场时的权限
 
 非交互运行意味着没人看着屏幕，所以默认**拒绝**权限请求；`--auto-approve` 显式放宽，且只
@@ -163,9 +202,9 @@ genet machine list
 ## 不要做的事
 
 - 不要解析人类可读的 `message` 做控制流。
-- 不要因为看不到沙箱就假设有沙箱。`genet capabilities` 的 `isolation.engine` 说的是这个
-  CLI 不提供任意命令执行；某台机器**实际**能强制什么，只有那台机器自己知道，读
-  `genet context --machine <id>` 的 `daemon.isolation`：`enforced: false` 表示**没有**隔离，
-  `null` 表示那台 daemon 老到还不回答这个问题——两者都不是「默认安全」。
+- 不要因为看不到沙箱就假设有沙箱。`genet capabilities` 里 `isolation.engine` 是 `null`，意思
+  是**这个二进制答不了**这个问题，不是「没有沙箱」；某台机器实际能强制什么，只有那台机器自己
+  知道，读 `genet context --machine <id>` 的 `daemon.isolation`：`enforced: false` 表示**没有**
+  隔离，`null` 表示那台 daemon 老到还不回答这个问题——两者都不是「默认安全」。
 - 不要在 `--wait` 前台进程被杀掉后就以为任务停了。会话跑在 daemon 里，CLI 只是观察者。
 - 不要为了省事重复 `genet schema` 的内容到别的地方。

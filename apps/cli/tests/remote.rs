@@ -359,6 +359,114 @@ async fn a_prompt_typed_here_is_answered_by_an_agent_running_there() {
     daemon.shutdown().await;
 }
 
+/// The other claim: a command typed here runs there, and what it printed comes
+/// back with the two streams still apart and the command's own status intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_command_typed_here_runs_there_and_reports_what_it_did() {
+    let Some(bundle) = relay_bundle() else { return };
+    let relay = start_relay(&bundle);
+
+    let data = tempfile::tempdir().expect("a data directory for the machine");
+    let project = data.path().join("project");
+    std::fs::create_dir_all(&project).expect("the project directory");
+    std::fs::write(project.join("here.txt"), "on the far machine")
+        .expect("a file on the far machine");
+
+    let daemon = Daemon::start(Paths::new(data.path()))
+        .await
+        .expect("the machine could not be started");
+    daemon
+        .state
+        .workspaces
+        .open(&project, None)
+        .await
+        .expect("the far machine opens its workspace");
+    let rendezvous = attach(&daemon, &relay.origin).await;
+
+    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let cli = Cli::new();
+    let (paired, code) = cli.run(&[
+        "machine",
+        "pair",
+        &invite.code,
+        "--endpoint",
+        &rendezvous,
+        "--name",
+        "a CLI with something to run",
+    ]);
+    assert_eq!(code, 0, "{paired}");
+    let machine_id = paired["data"]["machine"]["machineId"]
+        .as_str()
+        .expect("the pairing did not name the machine")
+        .to_string();
+
+    let (raw, code) = cli.raw(&[
+        "--machine",
+        &machine_id,
+        "--cwd",
+        &project.to_string_lossy(),
+        "shell",
+        "--",
+        "/bin/cat",
+        "here.txt",
+    ]);
+    // Zero because the command ran. What the command itself returned is a
+    // record, not this process's exit code, or a build failing would be
+    // indistinguishable from the machine refusing us.
+    assert_eq!(code, 0, "{raw}");
+
+    let lines: Vec<Value> = raw
+        .lines()
+        .filter(|line| line.trim_start().starts_with('{'))
+        .map(|line| serde_json::from_str(line).expect("the CLI printed something that is not JSON"))
+        .collect();
+    let stdout: String = lines
+        .iter()
+        .filter(|line| line["type"] == "shell.output" && line["data"]["stream"] == "stdout")
+        .filter_map(|line| line["data"]["data"].as_str())
+        .collect();
+    assert!(
+        stdout.contains("on the far machine"),
+        "the command's output never came back: {raw}"
+    );
+    let last = lines.last().expect("the CLI printed nothing");
+    assert_eq!(last["type"], "shell.exit", "{raw}");
+    assert_eq!(last["data"]["exitCode"], 0, "{raw}");
+
+    // A command that fails over there fails here in the same words, and still
+    // is not confused with the CLI itself failing.
+    let (raw, code) = cli.raw(&[
+        "--machine",
+        &machine_id,
+        "--cwd",
+        &project.to_string_lossy(),
+        "shell",
+        "--",
+        "/bin/sh",
+        "-c",
+        "echo went wrong 1>&2; exit 7",
+    ]);
+    assert_eq!(code, 0, "{raw}");
+    let lines: Vec<Value> = raw
+        .lines()
+        .filter(|line| line.trim_start().starts_with('{'))
+        .map(|line| serde_json::from_str(line).expect("the CLI printed invalid JSON"))
+        .collect();
+    assert!(
+        lines.iter().any(|line| {
+            line["type"] == "shell.output"
+                && line["data"]["stream"] == "stderr"
+                && line["data"]["data"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("went wrong"))
+        }),
+        "stderr did not arrive labelled as stderr: {raw}"
+    );
+    assert_eq!(lines.last().unwrap()["data"]["exitCode"], 7, "{raw}");
+
+    daemon.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_device_that_was_revoked_is_told_to_pair_again_rather_than_to_wait() {
     let Some(bundle) = relay_bundle() else { return };

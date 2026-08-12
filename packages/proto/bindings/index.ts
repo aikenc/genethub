@@ -655,6 +655,34 @@ export type Settings = { providers: Array<ProviderInfo>,
 lanEnabled: boolean, };
 
 /**
+ * One message from a running command.
+ *
+ * The two output streams stay apart the whole way. A terminal merges them
+ * because a person is reading both at once; a caller that has to tell a
+ * diagnostic from a result cannot un-merge them afterwards.
+ */
+export type ShellFrame = { "type": "stdout", data: string, } | { "type": "stderr", data: string, } | { "type": "exit", 
+/**
+ * Absent when a signal ended the process, which is the one case where
+ * there is no exit status to report.
+ */
+code?: number, signal?: number, };
+
+/**
+ * What to run on a machine, and where.
+ *
+ * `argv` is a list, never a command line: the machine does not parse it, so
+ * nothing in it can turn into a second command. A caller that wants a shell's
+ * help says so out loud with `["bash", "-lc", "..."]`, and that is then
+ * visibly a shell rather than something that became one by quoting.
+ */
+export type ShellRunRequest = { workspaceId: string, argv: Array<string>, 
+/**
+ * Somewhere inside the workspace. Absent means its root.
+ */
+cwd?: string, };
+
+/**
  * One entry in a session's timeline.
  *
  * `id` is assigned by the daemon, not the agent, so that deltas can address an

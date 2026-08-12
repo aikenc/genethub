@@ -223,6 +223,8 @@ pub enum StreamMethod {
     Events,
     /// Streams the bytes of a workspace file.
     AssetPreview,
+    /// Runs a command and streams what it writes.
+    ShellRun,
     /// Moves this same authenticated peer onto a direct carrier.
     RtcNegotiate,
 }
@@ -232,6 +234,7 @@ impl StreamMethod {
         match method {
             "events" => Some(StreamMethod::Events),
             "asset.preview" => Some(StreamMethod::AssetPreview),
+            "shell.run" => Some(StreamMethod::ShellRun),
             "rtc.negotiate" => Some(StreamMethod::RtcNegotiate),
             _ => None,
         }
@@ -245,6 +248,11 @@ impl StreamMethod {
             // Returns file bytes. That it arrives as a stream rather than a
             // request does not make it a cheaper thing to hand out.
             StreamMethod::AssetPreview => Capability::Files,
+            // The same authority as a terminal, deliberately not a grant of
+            // its own. Running one command and opening a shell to run it are
+            // the same power, and a separate name for one of them would invite
+            // an invitation that looks narrower than it is.
+            StreamMethod::ShellRun => Capability::Pty,
             // A transport upgrade for an already authenticated peer, which
             // inherits that peer's device identity and scope.
             StreamMethod::RtcNegotiate => Capability::Handshake,

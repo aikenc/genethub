@@ -300,7 +300,7 @@ impl ServerStream {
         Ok(())
     }
 
-    async fn write_message<T: serde::Serialize>(&mut self, message: &T) -> Result<()> {
+    pub(super) async fn write_message<T: serde::Serialize>(&mut self, message: &T) -> Result<()> {
         let body = serde_json::to_vec(message)?;
         let length = u32::try_from(body.len()).context("event message is too large")?;
         let mut wire = Vec::with_capacity(4 + body.len());
@@ -690,6 +690,7 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
     match method {
         StreamMethod::Events => handle_events(stream, services).await,
         StreamMethod::AssetPreview => crate::dataplane::preview::handle(stream, services).await,
+        StreamMethod::ShellRun => crate::dataplane::exec::handle(stream, services).await,
         StreamMethod::RtcNegotiate => crate::dataplane::rtc::handle(stream, services).await,
     }
 }

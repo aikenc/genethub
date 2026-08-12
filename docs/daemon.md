@@ -97,6 +97,7 @@ DataEndpoint method 只有四个：
 | `rpc` | 现有版本化 `Request/Reply` 业务 schema，作为 body；不再是 connection envelope |
 | `events` | 长期 response stream；`u32be length + ServerFrame JSON` |
 | `asset.preview` | workspace-relative、完整或失败、≤4 MiB 的文件 Preview |
+| `shell.run` | 在 workspace 内跑一条命令；metadata 带 argv 数组与 cwd，response 是 `u32be length + ShellFrame JSON`，stdout/stderr 分开、末帧带退出码。与 `pty.*` 同属 `pty` 能力，隔离决策也共用一处 |
 | `rtc.negotiate` | 在已认证基线连接内交换非 trickle SDP |
 
 `rpc` body 的 MVP 方法集：

@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use genehub_proto::{
     HelloResult, HubTicket, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply, Request,
-    SequencedEvent, ServerFrame,
+    SequencedEvent, ServerFrame, ShellFrame, ShellRunRequest,
 };
 use genet_daemon::config::Paths;
 use genet_daemon::dataplane::client::ClientEndpoint;
@@ -395,6 +395,63 @@ impl Rpc {
         let mut events = self.events.lock().await;
         events.as_mut()?.recv().await
     }
+
+    /// Starts a command on the machine at the other end.
+    ///
+    /// Its own stream rather than a request: output has to arrive while the
+    /// command is still running, and an RPC that answered once at the end
+    /// would turn a build into a long silence followed by a wall of text.
+    pub async fn run_command(&self, request: &ShellRunRequest) -> Result<Running, RpcError> {
+        let metadata = serde_json::to_value(request)
+            .map_err(|error| RpcError::Transport(format!("encode shell.run: {error}")))?;
+        let mut stream = self
+            .endpoint
+            .open_stream("shell.run", metadata, Vec::new(), None)
+            .await
+            .map_err(|error| RpcError::Transport(format!("open the command stream: {error:#}")))?;
+        let head = stream
+            .response_head()
+            .await
+            .map_err(|error| RpcError::Transport(format!("command stream head: {error:#}")))?;
+        if let Some(error) = head.error {
+            return Err(RpcError::Remote(error));
+        }
+        if head.status != 200 {
+            return Err(RpcError::Transport(format!(
+                "the machine answered shell.run with status {}",
+                head.status
+            )));
+        }
+        Ok(Running {
+            stream,
+            buffered: Vec::new(),
+        })
+    }
+}
+
+/// A command that has started, and the frames it has yet to produce.
+pub struct Running {
+    stream: genet_daemon::dataplane::client::ClientStream,
+    buffered: Vec<u8>,
+}
+
+impl Running {
+    /// The next frame, or `None` when the machine has nothing more to send.
+    ///
+    /// `None` before an `Exit` frame means the connection ended mid-command,
+    /// which is a different outcome from the command finishing and has to stay
+    /// distinguishable by the caller.
+    pub async fn next(&mut self) -> Option<ShellFrame> {
+        loop {
+            if let Some(frame) = take_json_frame(&mut self.buffered) {
+                return Some(frame);
+            }
+            match self.stream.next_chunk().await {
+                Some(Ok(chunk)) => self.buffered.extend_from_slice(&chunk),
+                Some(Err(_)) | None => return None,
+            }
+        }
+    }
 }
 
 /// What arrives on the event stream that a conversation cares about.
@@ -592,6 +649,10 @@ fn verify_remote_identity(
 
 /// Splits one `u32`-length-prefixed JSON frame off the front of the buffer.
 fn take_frame(buffered: &mut Vec<u8>) -> Option<ServerFrame> {
+    take_json_frame(buffered)
+}
+
+fn take_json_frame<T: serde::de::DeserializeOwned>(buffered: &mut Vec<u8>) -> Option<T> {
     if buffered.len() < 4 {
         return None;
     }
@@ -603,7 +664,7 @@ fn take_frame(buffered: &mut Vec<u8>) -> Option<ServerFrame> {
     if buffered.len() < 4 + length {
         return None;
     }
-    let frame = serde_json::from_slice::<ServerFrame>(&buffered[4..4 + length]).ok();
+    let frame = serde_json::from_slice::<T>(&buffered[4..4 + length]).ok();
     buffered.drain(..4 + length);
     frame
 }
