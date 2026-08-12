@@ -659,11 +659,12 @@ impl SessionManager {
         continues_round: Option<String>,
     ) -> Result<String> {
         let live = self.live(session_id).await?;
-        let workspace_id = live.meta.lock().await.workspace_id.clone();
-        let additional_system_prompt = artifact_preview_base_url
-            .as_deref()
-            .map(|base_url| super::artifact_links::system_prompt(base_url, &workspace_id))
-            .transpose()?;
+        // Preview locators are rebound in the workbench Markdown renderer from
+        // relative/absolute workspace paths. A deployment-specific URL prefix
+        // must not be injected into Agent system prompts — only path-linking
+        // rules (HTML entry file, supported kinds, no directory links).
+        let _ = artifact_preview_base_url;
+        let additional_system_prompt = Some(super::artifact_links::guidance().to_string());
         {
             let mut status = live.status.lock().await;
             if matches!(*status, SessionStatus::Running | SessionStatus::Waiting) {
@@ -2609,7 +2610,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_preview_context_reaches_the_adapter_as_fixed_system_guidance() {
+    async fn browser_preview_url_prefix_is_not_injected_but_path_guidance_is() {
         let dir = tempfile::tempdir().unwrap();
         let captured = Arc::new(std::sync::Mutex::new(None));
         let sessions = SessionManager::new(
@@ -2626,7 +2627,7 @@ mod tests {
                 ..meta()
             })
             .unwrap();
-        let base = "https://app.example/relay-dev-2/assets/preview/v1/m_device/w1/";
+        let base = "https://app.example/relay-dev-2/assets/preview/v2/m_device/w1/r_project/";
 
         sessions
             .send(
@@ -2640,10 +2641,16 @@ mod tests {
             .await
             .unwrap();
 
-        let prompt = captured.lock().unwrap().clone().unwrap();
-        assert!(prompt.contains(base));
-        assert!(prompt.contains("workspace-relative"));
-        assert!(!prompt.contains("生成报告"));
+        let prompt = captured.lock().unwrap().clone();
+        let prompt = prompt.expect("path-linking guidance should reach the adapter");
+        assert!(
+            !prompt.contains(base),
+            "deployment-bound Preview prefixes must not become Agent system guidance"
+        );
+        assert!(
+            prompt.contains("index.html") && prompt.contains("Never link a directory"),
+            "Agents still need file-path linking rules, especially HTML entry files"
+        );
         sessions.shutdown().await;
     }
 
@@ -3854,7 +3861,9 @@ mod tests {
         let sessions = manager(root);
         sessions.store.save_meta(&meta()).unwrap();
         let live = sessions.live("s1").await.unwrap();
-        let (events, _) = broadcast::channel(64);
+        // Match the production adapter buffer: pagination tests deliberately
+        // send more than 64 events and are not overflow tests.
+        let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let turn_ids = Arc::new(AtomicU64::new(0));
         *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
             events.clone(),
@@ -4101,7 +4110,19 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        eventually("persisted the narrated trunk", async || {
+            let Ok(chat) = sessions.store.load_chat("w1", "s1") else {
+                return false;
+            };
+            let Ok(trunks) = sessions.store.load_trunk_index("w1", "s1", 0) else {
+                return false;
+            };
+            chat.rounds
+                .first()
+                .is_some_and(|round| round.trunk_count == 1)
+                && trunks.len() == 1
+        })
+        .await;
 
         let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         assert_eq!(rounds.len(), 1, "one settled round must be ledgered");
@@ -4166,7 +4187,19 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        eventually("persisted both paginated trunks", async || {
+            let Ok(chat) = sessions.store.load_chat("w1", "s1") else {
+                return false;
+            };
+            let Ok(trunks) = sessions.store.load_trunk_index("w1", "s1", 0) else {
+                return false;
+            };
+            chat.rounds
+                .first()
+                .is_some_and(|round| round.trunk_count == 2)
+                && trunks.len() == 2
+        })
+        .await;
 
         let rounds = sessions.store.load_chat("w1", "s1").unwrap().rounds;
         let trunks = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
@@ -4225,7 +4258,23 @@ mod tests {
                 fork_checkpoint: None,
             })
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        eventually("persisted the expanded trunk and its blob", async || {
+            let Ok(index) = sessions.store.load_trunk_index("w1", "s1", 0) else {
+                return false;
+            };
+            let Some(summary) = index.last() else {
+                return false;
+            };
+            let Ok(trunk) = sessions.store.load_trunk("w1", "s1", 0, summary) else {
+                return false;
+            };
+            trunk
+                .batches
+                .iter()
+                .flat_map(|batch| &batch.blobs)
+                .any(|blob| blob.blob.is_some())
+        })
+        .await;
 
         let (snapshot, replayed, reset, _) = sessions.subscribe("s1", Some(0), true).await.unwrap();
         assert!(reset);

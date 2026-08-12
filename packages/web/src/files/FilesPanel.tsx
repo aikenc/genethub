@@ -4,9 +4,9 @@ import { assetPreviewUrl } from "../preview/url";
 import { useWorkbench } from "../session/store";
 import { FileTree } from "./FileTree";
 
-/** File-system entry point for the independent, E2EE Asset Preview page. */
+/** File-system entry point for the in-workbench Asset Preview float. */
 export function FilesPanel() {
-  const { tree, loadTree, client, activeWorkspaceId } = useWorkbench();
+  const { tree, loadTree, client, activeWorkspaceId, openPreviewFloat } = useWorkbench();
   const [selected, setSelected] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const refreshInFlight = useRef(false);
@@ -51,14 +51,17 @@ export function FilesPanel() {
     const deviceHandle = client?.identity?.machineId;
     if (!deviceHandle || !activeWorkspaceId) return;
     setSelected(path);
-    const url = assetPreviewUrl(deviceHandle, activeWorkspaceId, path);
-    window.open(url, "_blank", "noopener,noreferrer");
+    openPreviewFloat({
+      deviceHandle,
+      workspaceHandle: activeWorkspaceId,
+      path,
+    });
   };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2 text-[11px] text-muted">
-        <p className="min-w-0 flex-1">文件会在独立预览页打开；单个文件上限 4 MiB。</p>
+        <p className="min-w-0 flex-1">文件在浮窗中预览；单个文件上限 4 MiB。</p>
         <button
           type="button"
           className="shrink-0 rounded px-2 py-1 text-accent hover:bg-raised disabled:text-faint"

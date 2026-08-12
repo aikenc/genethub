@@ -58,6 +58,14 @@ pub enum Request {
         mode_id: Option<String>,
         #[serde(default)]
         title: Option<String>,
+        /// Where the agent starts, inside the workspace. Absent means the
+        /// workspace root, which is what every client sent before this field
+        /// existed. Relative paths resolve against the root; an absolute path
+        /// must still fall inside it, and the daemon refuses the rest rather
+        /// than clamping — a task silently run in the wrong directory is worse
+        /// than one that refused to start.
+        #[serde(default)]
+        cwd: Option<String>,
     },
     #[serde(rename = "session.list", rename_all = "camelCase")]
     SessionList {
@@ -94,11 +102,9 @@ pub enum Request {
         text: String,
         #[serde(default)]
         attachments: Vec<Attachment>,
-        /// Browser-composed, deployment-aware Asset Preview prefix for this
-        /// session's workspace. It is context, not authority: opening a link
-        /// still performs normal target selection, authentication and E2EE.
-        /// The daemon validates the URL shape and turns it into fixed Agent
-        /// guidance; arbitrary client-authored system prompts are never accepted.
+        /// Deprecated wire field. Current clients always send `null`; Preview
+        /// locators are rebound in the workbench from relative/absolute paths.
+        /// Kept so older clients remain deserializable.
         #[serde(default)]
         artifact_preview_base_url: Option<String>,
         /// Claims this message as a continuation of a round left open by an
@@ -271,8 +277,14 @@ pub enum Request {
     ///
     /// The new device names itself when it redeems the invite — it is the one
     /// that knows whether it is a phone or a laptop.
+    ///
+    /// The payload narrows what the invitation is worth. It is optional, and
+    /// deliberately a payload rather than a field: a client built before grants
+    /// existed sends `{"type":"device.invite"}` with no `payload` key at all,
+    /// and pairing is the one exchange that must keep working on the machine
+    /// nobody can walk over to and fix.
     #[serde(rename = "device.invite")]
-    DeviceInvite,
+    DeviceInvite(Option<InviteScope>),
     /// Redeems an invite. The only request a stranger may send, and only once
     /// per invite: everything else needs a credential this call hands out.
     #[serde(rename = "device.claim", rename_all = "camelCase")]

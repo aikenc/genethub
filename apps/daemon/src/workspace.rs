@@ -9,6 +9,7 @@ use genehub_proto::{
     DirectoryEntry, DirectoryListing, FileNode, WorkspaceFolderInfo, WorkspaceInfo,
 };
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
 use crate::config::{Config, WorkspaceEntry, WorkspaceFolderEntry};
@@ -93,7 +94,7 @@ pub struct ResolvedWorkspacePath {
     pub root: PathBuf,
     pub absolute: PathBuf,
     pub relative: PathBuf,
-    pub path_prefix: String,
+    pub root_handle: String,
 }
 
 #[derive(Deserialize)]
@@ -123,10 +124,17 @@ impl Workspaces {
 
     pub async fn load(&self) {
         let mut entries = self.entries.write().await;
-        for entry in &self.config.read().await.workspaces {
+        let config = self.config.read().await;
+        for entry in &config.workspaces {
             debug_assert!(!entry.folders.is_empty());
+            debug_assert!(entry.folders.iter().all(|folder| {
+                config.workspace_roots.iter().any(|mapping| {
+                    mapping.handle == folder.root_handle && mapping.root == folder.root
+                })
+            }));
             if !entry.removed {
-                self.homes.attach(&entry.id, &entry.root);
+                self.homes
+                    .attach_project(&entry.id, &session_project_key(entry), &entry.root);
             }
             entries.insert(entry.id.clone(), entry.clone());
         }
@@ -192,18 +200,20 @@ impl Workspaces {
     }
 
     pub async fn get(&self, id: &str) -> Result<WorkspaceEntry> {
-        self.entries
+        let entry = self
+            .entries
             .read()
             .await
             .get(id)
             .filter(|entry| !entry.removed)
             .cloned()
-            .ok_or_else(|| anyhow!("no such workspace: {id}"))
+            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+        hydrate_entry(entry, &self.config.read().await.workspace_roots)
     }
 
-    /// Resolves a virtual workspace path to one concrete root. Plain folder
-    /// workspaces keep their historic unprefixed paths; `.code-workspace`
-    /// roots use the folder's stable first segment.
+    /// Resolves `<rootHandle>/<recursive relative path>` inside one project.
+    /// The handle is device-wide; project membership is checked before the
+    /// capability-confined filesystem path is opened.
     pub async fn resolve(
         &self,
         workspace_id: &str,
@@ -233,7 +243,7 @@ impl Workspaces {
                                 &folder.root,
                                 &folder.root,
                                 depth.saturating_sub(1),
-                                &folder.path_prefix,
+                                &folder.root_handle,
                                 Some(&folder.name),
                             )
                         })
@@ -249,18 +259,32 @@ impl Workspaces {
             });
         }
 
-        let requested = path.unwrap_or(".");
+        if path.is_none() {
+            let folder = entry
+                .folders
+                .first()
+                .ok_or_else(|| anyhow!("workspace has no folders"))?;
+            return crate::files::tree_with_prefix(
+                &folder.root,
+                &folder.root,
+                depth,
+                &folder.root_handle,
+                Some(&folder.name),
+            );
+        }
+
+        let requested = path.expect("handled the project root above");
         let resolved = resolve_entry(&entry, requested)?;
         crate::files::tree_with_prefix(
             &resolved.root,
             &resolved.absolute,
             depth,
-            &resolved.path_prefix,
+            &resolved.root_handle,
             if resolved.relative.as_os_str().is_empty() {
                 entry
                     .folders
                     .iter()
-                    .find(|folder| folder.path_prefix == resolved.path_prefix)
+                    .find(|folder| folder.root_handle == resolved.root_handle)
                     .map(|folder| folder.name.as_str())
             } else {
                 None
@@ -287,14 +311,19 @@ impl Workspaces {
             ));
         };
 
-        // Keep the write lock from the identity check through commit. The first
-        // folder is the Agent cwd and session-history anchor, so opening that
-        // folder through a `.code-workspace` must enhance the existing entry,
-        // not mint a competing id over the same `.genethub` home.
+        // Keep the write lock from the source identity check through commit.
+        // A folder source and a `.code-workspace` source remain distinct even
+        // when their Agent roots happen to be the same directory.
         let mut entries = self.entries.write().await;
+        let mut config = self.config.write().await;
+        let mut next = config.clone();
+        let mut candidate = candidate;
+        for folder in &mut candidate.folders {
+            folder.root_handle = next.ensure_workspace_root(&folder.root);
+        }
         if let Some(existing) = entries
             .values()
-            .find(|entry| entry.root == candidate.root)
+            .find(|entry| same_project_source(entry, &candidate))
             .cloned()
         {
             let mut updated = candidate;
@@ -311,8 +340,6 @@ impl Workspaces {
             let catalog_changed = existing.removed
                 || existing.name != updated.name
                 || existing.is_git_repo != updated.is_git_repo;
-            let mut config = self.config.write().await;
-            let mut next = config.clone();
             let saved = next
                 .workspaces
                 .iter_mut()
@@ -324,21 +351,21 @@ impl Workspaces {
             }
             next.save(&self.config_path)?;
             *config = next;
-            self.homes.attach(&updated.id, &updated.root);
+            self.homes
+                .attach_project(&updated.id, &session_project_key(&updated), &updated.root);
             entries.insert(updated.id.clone(), updated.clone());
             return Ok(describe(&updated));
         }
 
         let entry = candidate;
-        let mut config = self.config.write().await;
-        let mut next = config.clone();
         next.workspaces.push(entry.clone());
         next.workspace_catalog_revision = next.workspace_catalog_revision.saturating_add(1);
         // Publish to memory only after the durable snapshot exists. Otherwise
         // the background Hub sync could upload a revision that restart loses.
         next.save(&self.config_path)?;
         *config = next;
-        self.homes.attach(&entry.id, &entry.root);
+        self.homes
+            .attach_project(&entry.id, &session_project_key(&entry), &entry.root);
         entries.insert(entry.id.clone(), entry.clone());
 
         Ok(describe(&entry))
@@ -436,7 +463,7 @@ fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
             .map(|folder| WorkspaceFolderInfo {
                 name: folder.name.clone(),
                 root: folder.root.display().to_string(),
-                path_prefix: folder.path_prefix.clone(),
+                root_handle: folder.root_handle.clone(),
             })
             .collect(),
         workspace_file: entry
@@ -458,7 +485,7 @@ fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {
         folders: vec![WorkspaceFolderEntry {
             name: folder_name,
             root: root.clone(),
-            path_prefix: String::new(),
+            root_handle: String::new(),
         }],
         workspace_file: None,
         removed: false,
@@ -495,7 +522,6 @@ fn code_workspace(path: &Path) -> Result<WorkspaceEntry> {
         .parent()
         .ok_or_else(|| anyhow!("workspace file has no parent directory"))?;
     let mut roots = HashSet::new();
-    let mut prefixes = HashSet::new();
     let mut folders = Vec::with_capacity(parsed.folders.len());
     for (index, folder) in parsed.folders.into_iter().enumerate() {
         if folder.uri.is_some() {
@@ -535,11 +561,10 @@ fn code_workspace(path: &Path) -> Result<WorkspaceEntry> {
             anyhow::bail!("workspace file contains the same folder more than once");
         }
         let name = workspace_folder_name(folder.name.as_deref(), &root)?;
-        let path_prefix = unique_path_prefix(&name, &mut prefixes);
         folders.push(WorkspaceFolderEntry {
             name,
             root,
-            path_prefix,
+            root_handle: String::new(),
         });
     }
 
@@ -580,31 +605,6 @@ fn workspace_folder_name(configured: Option<&str>, root: &Path) -> Result<String
     Ok(value.chars().take(80).collect())
 }
 
-fn unique_path_prefix(name: &str, used: &mut HashSet<String>) -> String {
-    let mut base = String::new();
-    for character in name.chars() {
-        let replacement =
-            character.is_control() || matches!(character, '/' | '\\' | ':' | '#' | '?');
-        base.push(if replacement { '-' } else { character });
-        if base.len() >= 180 {
-            break;
-        }
-    }
-    let base = base.trim_matches(|character| matches!(character, ' ' | '.'));
-    let base = if base.is_empty() || matches!(base, "." | "..") {
-        "folder"
-    } else {
-        base
-    };
-    let mut candidate = base.to_string();
-    let mut suffix = 2;
-    while !used.insert(candidate.clone()) {
-        candidate = format!("{base}-{suffix}");
-        suffix += 1;
-    }
-    candidate
-}
-
 fn is_workspace_file(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -615,26 +615,17 @@ fn resolve_entry(entry: &WorkspaceEntry, virtual_path: &str) -> Result<ResolvedW
     if virtual_path.contains('\0') || virtual_path.contains('\\') {
         anyhow::bail!("workspace path is not canonical");
     }
-    let (folder, relative) = if entry.workspace_file.is_some() {
-        if matches!(virtual_path, "" | ".") {
-            anyhow::bail!("the multi-root workspace itself is not a filesystem directory");
-        }
-        let (prefix, tail) = virtual_path
-            .split_once('/')
-            .map_or((virtual_path, ""), |(prefix, tail)| (prefix, tail));
-        let folder = entry
-            .folders
-            .iter()
-            .find(|folder| folder.path_prefix == prefix)
-            .ok_or_else(|| anyhow!("no such workspace folder: {prefix}"))?;
-        (folder, tail)
-    } else {
-        let folder = entry
-            .folders
-            .first()
-            .ok_or_else(|| anyhow!("workspace has no folders"))?;
-        (folder, virtual_path)
-    };
+    if matches!(virtual_path, "" | ".") {
+        anyhow::bail!("a workspace resource path must name its root handle");
+    }
+    let (handle, relative) = virtual_path
+        .split_once('/')
+        .map_or((virtual_path, ""), |(handle, tail)| (handle, tail));
+    let folder = entry
+        .folders
+        .iter()
+        .find(|folder| folder.root_handle == handle)
+        .ok_or_else(|| anyhow!("root handle is not a member of this workspace"))?;
     let requested = if matches!(relative, "" | ".") {
         Path::new(".")
     } else {
@@ -649,8 +640,68 @@ fn resolve_entry(entry: &WorkspaceEntry, virtual_path: &str) -> Result<ResolvedW
         root: folder.root.clone(),
         absolute,
         relative,
-        path_prefix: folder.path_prefix.clone(),
+        root_handle: folder.root_handle.clone(),
     })
+}
+
+fn hydrate_entry(
+    mut entry: WorkspaceEntry,
+    mappings: &[crate::config::WorkspaceRootEntry],
+) -> Result<WorkspaceEntry> {
+    for folder in &mut entry.folders {
+        let mapping = mappings
+            .iter()
+            .find(|mapping| mapping.handle == folder.root_handle)
+            .ok_or_else(|| anyhow!("no such filesystem root: {}", folder.root_handle))?;
+        folder.root = mapping.root.clone();
+    }
+    entry.root = entry
+        .folders
+        .first()
+        .ok_or_else(|| anyhow!("workspace has no folders"))?
+        .root
+        .clone();
+    Ok(entry)
+}
+
+fn same_project_source(left: &WorkspaceEntry, right: &WorkspaceEntry) -> bool {
+    left.root == right.root
+        && match (&left.workspace_file, &right.workspace_file) {
+            (None, None) => true,
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
+}
+
+fn session_project_key(entry: &WorkspaceEntry) -> String {
+    match &entry.workspace_file {
+        None => "folder".to_string(),
+        Some(path) => {
+            let mut digest = Sha256::new();
+            digest.update(b"genehub-workspace-source-v1\0");
+            update_path_digest(&mut digest, path);
+            format!("workspace:{:x}", digest.finalize())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn update_path_digest(digest: &mut Sha256, path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    digest.update(path.as_os_str().as_bytes());
+}
+
+#[cfg(windows)]
+fn update_path_digest(digest: &mut Sha256, path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    for unit in path.as_os_str().encode_wide() {
+        digest.update(unit.to_le_bytes());
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn update_path_digest(digest: &mut Sha256, path: &Path) {
+    digest.update(path.to_string_lossy().as_bytes());
 }
 
 /// Produces a Hub-safe display label without letting one legacy/local name
@@ -827,13 +878,308 @@ mod tests {
     async fn resolution_is_confined_to_the_workspace_root() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
-        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir_all(project.join("a/b/c")).unwrap();
+        std::fs::write(project.join("a/b/c/report.md"), "# deep\n").unwrap();
         let spaces = workspaces(dir.path()).await;
         let info = spaces.open(&project, None).await.unwrap();
+        let root_handle = &info.folders[0].root_handle;
 
-        assert!(spaces.resolve(&info.id, "src/main.rs").await.is_ok());
-        assert!(spaces.resolve(&info.id, "../outside").await.is_err());
+        assert!(spaces
+            .resolve(&info.id, &format!("{root_handle}/src/main.rs"))
+            .await
+            .is_ok());
+        assert!(spaces
+            .resolve(&info.id, &format!("{root_handle}/../outside"))
+            .await
+            .is_err());
         assert!(spaces.resolve(&info.id, "/etc/passwd").await.is_err());
+        let deep = spaces
+            .resolve(&info.id, &format!("{root_handle}/a/b/c/report.md"))
+            .await
+            .unwrap();
+        assert_eq!(deep.relative, PathBuf::from("a/b/c/report.md"));
+    }
+
+    #[tokio::test]
+    async fn a_code_workspace_exposes_ordered_roots_and_virtual_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let product = dir.path().join("product");
+        let docs = dir.path().join("docs");
+        std::fs::create_dir(&product).unwrap();
+        std::fs::create_dir(&docs).unwrap();
+        std::fs::write(product.join("main.unknown-source"), "fn main() {}\n").unwrap();
+        std::fs::write(docs.join("guide.md"), "# Guide\n").unwrap();
+        let definition = dir.path().join("suite.code-workspace");
+        std::fs::write(
+            &definition,
+            r#"{
+              // The first folder remains the Agent working directory.
+              folders: [
+                { name: "Product", path: "product" },
+                { name: "Docs", path: "docs" },
+              ],
+              settings: { "files.exclude": { "generated": true } },
+            }"#,
+        )
+        .unwrap();
+        let spaces = workspaces(dir.path()).await;
+
+        let opened = spaces.open(&definition, None).await.unwrap();
+        assert_eq!(opened.name, "suite");
+        assert_eq!(
+            opened.root,
+            product.canonicalize().unwrap().display().to_string()
+        );
+        assert_eq!(
+            opened
+                .folders
+                .iter()
+                .map(|folder| folder.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Product", "Docs"]
+        );
+        let product_handle = opened.folders[0].root_handle.clone();
+        let docs_handle = opened.folders[1].root_handle.clone();
+        assert!(product_handle.starts_with("r_"));
+        assert!(docs_handle.starts_with("r_"));
+        assert_ne!(product_handle, docs_handle);
+        let expected_definition = definition.canonicalize().unwrap().display().to_string();
+        assert_eq!(
+            opened.workspace_file.as_deref(),
+            Some(expected_definition.as_str())
+        );
+
+        let root = spaces.tree(&opened.id, None, 1).await.unwrap();
+        let children = root.children.unwrap();
+        assert_eq!(
+            children
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Product", "Docs"]
+        );
+        assert_eq!(children[0].path, product_handle);
+        assert!(children[0].children.is_none());
+
+        let docs_tree = spaces
+            .tree(&opened.id, Some(&docs_handle), 1)
+            .await
+            .unwrap();
+        assert_eq!(docs_tree.path, docs_handle);
+        assert_eq!(
+            docs_tree.children.unwrap()[0].path,
+            format!("{docs_handle}/guide.md")
+        );
+
+        let source = spaces
+            .resolve(&opened.id, &format!("{product_handle}/main.unknown-source"))
+            .await
+            .unwrap();
+        assert_eq!(source.root, product.canonicalize().unwrap());
+        assert_eq!(source.relative, PathBuf::from("main.unknown-source"));
+        assert!(spaces
+            .resolve(&opened.id, "main.unknown-source")
+            .await
+            .is_err());
+        assert!(spaces
+            .resolve(&opened.id, &format!("{docs_handle}/../../outside"))
+            .await
+            .is_err());
+
+        let reopened = spaces.open(&definition, None).await.unwrap();
+        assert_eq!(reopened.id, opened.id);
+        assert_eq!(spaces.list().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_workspace_file_and_its_agent_root_are_distinct_projects_over_one_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let product = dir.path().join("product");
+        let docs = dir.path().join("docs");
+        std::fs::create_dir(&product).unwrap();
+        std::fs::create_dir(&docs).unwrap();
+        let definition = dir.path().join("suite.code-workspace");
+        std::fs::write(
+            &definition,
+            r#"{ folders: [{ path: "product" }, { path: "docs" }] }"#,
+        )
+        .unwrap();
+        let spaces = workspaces(dir.path()).await;
+
+        let folder = spaces.open(&product, None).await.unwrap();
+        spaces.rename(&folder.id, "Core").await.unwrap();
+        let multi_root = spaces.open(&definition, None).await.unwrap();
+
+        assert_ne!(multi_root.id, folder.id);
+        assert_eq!(multi_root.name, "suite");
+        assert_eq!(
+            multi_root.workspace_file.as_deref(),
+            Some(
+                definition
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(multi_root.folders.len(), 2);
+        assert_eq!(
+            multi_root.folders[0].root_handle, folder.folders[0].root_handle,
+            "one physical root keeps one device-wide handle"
+        );
+        assert_eq!(spaces.list().await.len(), 2);
+
+        let plain_again = spaces.open(&product, None).await.unwrap();
+        assert_eq!(plain_again.id, folder.id);
+        assert_eq!(plain_again.name, "Core");
+        assert!(plain_again.workspace_file.is_none());
+        assert_eq!(plain_again.folders.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reopening_a_workspace_file_refreshes_its_roots_without_changing_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["product", "docs", "tests"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let definition = dir.path().join("suite.code-workspace");
+        std::fs::write(
+            &definition,
+            r#"{ folders: [{ path: "product" }, { path: "docs" }] }"#,
+        )
+        .unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let first = spaces.open(&definition, None).await.unwrap();
+
+        std::fs::write(
+            &definition,
+            r#"{ folders: [{ path: "product" }, { path: "tests" }] }"#,
+        )
+        .unwrap();
+        let refreshed = spaces.open(&definition, None).await.unwrap();
+
+        assert_eq!(refreshed.id, first.id);
+        assert_eq!(refreshed.folders[1].name, "tests");
+        assert_eq!(spaces.catalog().await.revision, 1);
+    }
+
+    #[tokio::test]
+    async fn changing_the_agent_root_creates_a_new_identity_instead_of_moving_history() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["product", "replacement"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let definition = dir.path().join("suite.code-workspace");
+        std::fs::write(&definition, r#"{ folders: [{ path: "product" }] }"#).unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let first = spaces.open(&definition, None).await.unwrap();
+
+        std::fs::write(&definition, r#"{ folders: [{ path: "replacement" }] }"#).unwrap();
+        let moved = spaces.open(&definition, None).await.unwrap();
+
+        assert_ne!(moved.id, first.id);
+        assert_ne!(moved.root, first.root);
+        assert_eq!(spaces.list().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_code_workspace_rejects_remote_uri_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let definition = dir.path().join("remote.code-workspace");
+        std::fs::write(
+            &definition,
+            r#"{ folders: [{ uri: "vscode-remote://ssh-remote+host/project" }] }"#,
+        )
+        .unwrap();
+        let spaces = workspaces(dir.path()).await;
+
+        let error = spaces.open(&definition, None).await.unwrap_err();
+        assert!(error.to_string().contains("local path entries only"));
+        assert!(spaces.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn configured_labels_do_not_participate_in_root_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("one")).unwrap();
+        std::fs::create_dir(dir.path().join("two")).unwrap();
+        let definition = dir.path().join("labels.code-workspace");
+        std::fs::write(
+            &definition,
+            r#"{ folders: [
+              { name: "Root", path: "one" },
+              { name: "Root", path: "two" },
+            ] }"#,
+        )
+        .unwrap();
+        let spaces = workspaces(dir.path()).await;
+
+        let opened = spaces.open(&definition, None).await.unwrap();
+        assert_eq!(opened.folders[0].name, "Root");
+        assert_eq!(opened.folders[1].name, "Root");
+        assert_ne!(opened.folders[0].root_handle, opened.folders[1].root_handle);
+
+        let duplicate = dir.path().join("duplicate.code-workspace");
+        std::fs::write(
+            &duplicate,
+            r#"{ folders: [{ path: "one" }, { path: "./one" }] }"#,
+        )
+        .unwrap();
+        let error = spaces.open(&duplicate, None).await.unwrap_err();
+        assert!(error.to_string().contains("same folder more than once"));
+    }
+
+    #[tokio::test]
+    async fn changing_a_workspace_folder_label_does_not_change_resource_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let definition = dir.path().join("labels.code-workspace");
+        std::fs::write(
+            &definition,
+            r#"{ folders: [{ name: "Frontend", path: "project" }] }"#,
+        )
+        .unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let first = spaces.open(&definition, None).await.unwrap();
+        let handle = first.folders[0].root_handle.clone();
+
+        std::fs::write(
+            &definition,
+            r#"{ folders: [{ name: "Web UI", path: "project" }] }"#,
+        )
+        .unwrap();
+        let reopened = spaces.open(&definition, None).await.unwrap();
+
+        assert_eq!(reopened.id, first.id);
+        assert_eq!(reopened.folders[0].name, "Web UI");
+        assert_eq!(reopened.folders[0].root_handle, handle);
+        assert!(spaces
+            .resolve(&reopened.id, &format!("{handle}/nested/file.txt"))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_code_workspace_rejects_more_than_the_small_root_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut folders = Vec::new();
+        for index in 0..=MAX_WORKSPACE_FOLDERS {
+            let name = format!("root-{index}");
+            std::fs::create_dir(dir.path().join(&name)).unwrap();
+            folders.push(serde_json::json!({ "path": name }));
+        }
+        let definition = dir.path().join("too-many.code-workspace");
+        std::fs::write(
+            &definition,
+            serde_json::to_vec(&serde_json::json!({ "folders": folders })).unwrap(),
+        )
+        .unwrap();
+        let spaces = workspaces(dir.path()).await;
+
+        let error = spaces.open(&definition, None).await.unwrap_err();
+        assert!(error.to_string().contains("above the 32 folder limit"));
+        assert!(spaces.list().await.is_empty());
     }
 
     #[tokio::test]
@@ -1228,6 +1574,10 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         let config = Arc::new(RwLock::new(Config {
             workspace_catalog_generation: "wcg_test".into(),
+            workspace_roots: vec![crate::config::WorkspaceRootEntry {
+                handle: "r_project".into(),
+                root: project.clone(),
+            }],
             workspaces: vec![WorkspaceEntry {
                 id: "w_unsafe12345678".into(),
                 name: "  looks-safe\u{202e}but-is-not  ".into(),
@@ -1235,7 +1585,7 @@ mod tests {
                 folders: vec![WorkspaceFolderEntry {
                     name: "project".into(),
                     root: project,
-                    path_prefix: String::new(),
+                    root_handle: "r_project".into(),
                 }],
                 workspace_file: None,
                 removed: false,

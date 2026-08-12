@@ -121,7 +121,7 @@ function workspace(
     name,
     root,
     isGitRepo,
-    folders: [{ name, root, pathPrefix: "" }],
+    folders: [{ name, root, rootHandle: `r_${name}` }],
   };
 }
 
@@ -199,8 +199,8 @@ describe("the first run", () => {
           ...workspace("w1", "suite", "/home/me/product", true),
           workspaceFile: "/home/me/suite.code-workspace",
           folders: [
-            { name: "Product", root: "/home/me/product", pathPrefix: "Product" },
-            { name: "Docs", root: "/home/me/docs", pathPrefix: "Docs" },
+            { name: "Product", root: "/home/me/product", rootHandle: "r_product" },
+            { name: "Docs", root: "/home/me/docs", rootHandle: "r_docs" },
           ],
         },
       }),
@@ -367,8 +367,8 @@ describe("the first run", () => {
           isGitRepo: true,
           workspaceFile: "/srv/suite.code-workspace",
           folders: [
-            { name: "Product", root: "/srv/product", pathPrefix: "Product" },
-            { name: "Docs", root: "/srv/docs", pathPrefix: "Docs" },
+            { name: "Product", root: "/srv/product", rootHandle: "r_product" },
+            { name: "Docs", root: "/srv/docs", rootHandle: "r_docs" },
           ],
         },
       }),

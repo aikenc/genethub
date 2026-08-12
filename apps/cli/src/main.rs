@@ -7,10 +7,14 @@
 //! human words go to stderr (`genethub-cli.md` §3.2).
 
 mod control;
+mod converse;
 mod hub;
+mod machine;
+mod machines;
 mod output;
 mod query;
 mod rpc;
+mod target;
 mod update;
 
 /// Exit codes, frozen for scripts and agents (`genethub-cli.md` §3.2).
@@ -35,14 +39,41 @@ async fn main() {
         return;
     }
 
+    // The global selectors come off first, so every command sees the same
+    // rules about which machine and which directory it runs in, and so a
+    // command that has no answer for one of them says so instead of ignoring
+    // it (`genet-remote-execution.md` §5.1).
+    let (selection, args) = match target::split(&args) {
+        Ok(split) => split,
+        Err(error) => std::process::exit(output::fail(error)),
+    };
+    if let Err(error) = target::enforce(&selection, target::canonical(&args).as_deref()) {
+        std::process::exit(output::fail(error));
+    }
+
     let code = match args.first().map(String::as_str) {
-        Some("schema" | "context" | "capabilities" | "workspace" | "session") => {
-            query::run(&args).await
+        Some("schema" | "context" | "capabilities" | "workspace") => {
+            query::run(&args, &selection).await
         }
+        // Reading and writing the same resource split here, so `query.rs` can
+        // keep guaranteeing it never mutates anything.
+        Some("session") => match args.get(1).map(String::as_str) {
+            Some("list" | "get") | None => query::run(&args, &selection).await,
+            Some(_) => converse::session(&args[1..], &selection).await,
+        },
+        Some("agent") => converse::agent(&args[1..], &selection).await,
+        Some("machine") => machine::machine(&args[1..]).await,
+        Some("device") => machine::device(&args[1..], &selection).await,
         Some("daemon") => control::daemon(&args[1..]).await,
         Some("status") => control::status(&args[1..]).await,
         Some("hub") => hub::hub(&args[1..]).await,
         Some("update") => update::update(&args[1..]),
+        // Not a subcommand, so it names an agent — but only with something to
+        // say, which keeps a plain typo reporting the usage error rather than
+        // dialling a daemon (`genet-remote-execution.md` §6.1).
+        Some(head) if !head.starts_with('-') && args.len() > 1 => {
+            converse::sugar(head, &args[1..], &selection).await
+        }
         _ => usage(),
     };
     std::process::exit(code);
@@ -60,6 +91,26 @@ pub fn usage() -> i32 {
   genet session list [--workspace <id>]
                                     list local daemon sessions
   genet session get <id>            get one session snapshot
+  genet agent list                  agents installed on this machine
+  genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>]
+                                    start a session and stream it as JSON Lines
+  genet <agentId> \"<prompt>\" [...]   the same thing, spelled shorter
+  genet session send <id> \"<text>\"  continue a session
+  genet session respond <id> --request <rid> --choose <optionId>
+                                    answer what a waiting session asked
+  genet session interrupt <id>      stop the running turn
+  genet session close <id>          close the session
+  genet machine list                machines this installation can reach
+  genet machine pair <code> --endpoint <url> [--name <label>]
+                                    redeem a pairing code from another machine
+  genet machine show <machineId>    one paired machine
+  genet machine forget <machineId>  drop the local credential for a machine
+  genet device list                 clients authorized on the target machine
+  genet device invite [--grant read,session,files,git,pty,devices,settings,update]
+                                    mint a pairing code; no --grant means no limits
+  genet device revoke <deviceId>    withdraw one client's authorization
+  genet <any of the above> --machine <machineId>
+                                    run it on a paired machine instead
   genet update                      unsupported until releases are independently signed
   genet daemon run                  run the daemon in the foreground (systemd)
   genet daemon start                start the daemon in the background

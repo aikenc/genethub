@@ -298,6 +298,7 @@ impl Journey {
                 model_id: Some(model_id.to_string()),
                 mode_id: None,
                 title: None,
+                cwd: None,
             })
             .await?;
         match reply {
@@ -413,7 +414,7 @@ impl Journey {
 /// binary to point it at. Both names come from `scripts/channel.env` — the
 /// stamp decides what a binary is called, and this harness follows the stamp
 /// rather than pinning a channel's names here.
-fn agent_command_override() -> Result<(String, PathBuf)> {
+pub fn agent_command_override() -> Result<(String, PathBuf)> {
     let channel = channel_env()?;
     let env_name = channel
         .get("ENV_AGENT_COMMAND")

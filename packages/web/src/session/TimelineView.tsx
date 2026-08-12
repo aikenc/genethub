@@ -15,6 +15,7 @@ import { attachmentPreviewUrl } from "./attachments";
 import { useWorkbench } from "./store";
 import type { PendingMessage, TimelineState } from "./timeline";
 import { ToolCallView } from "./ToolCall";
+import { useSessionArtifact } from "./useSessionArtifact";
 
 /**
  * How long a send may stay silent before the wait is named.
@@ -269,7 +270,7 @@ function Item({ item }: { item: TimelineItem }) {
     case "assistantMessage":
       return (
         <div data-testid="assistant-message">
-          <Markdown text={item.text} />
+          <SessionMarkdown text={item.text} />
         </div>
       );
 
@@ -484,7 +485,10 @@ function TrunkCard({
         <span className="shrink-0" aria-hidden="true">
           🧭
         </span>
-        <span className="min-w-0 flex-1 break-words text-sm font-medium">
+        <span
+          className="min-w-0 flex-1 truncate text-sm font-medium"
+          title={trunkTitle}
+        >
           {trunkTitle}
         </span>
         <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>
@@ -533,7 +537,10 @@ function BatchCard({ batch, active }: { batch: RoundBatch; active: boolean }) {
         <span className="shrink-0" aria-hidden="true">
           💭
         </span>
-        <span className="min-w-0 flex-1 break-words text-xs">
+        <span
+          className="min-w-0 flex-1 truncate text-xs"
+          title={monologue.first || batch.summary.text}
+        >
           {monologue.first || batch.summary.text}
         </span>
         <span className="shrink-0 text-xs text-muted">{batch.summary.blobCount} 项</span>
@@ -557,7 +564,7 @@ function BatchContent({
     <div className="space-y-1 px-2 pb-2">
       {monologue ? (
         <div className="px-1 py-1 text-sm" data-testid="batch-monologue">
-          <Markdown text={monologue} />
+          <SessionMarkdown text={monologue} />
         </div>
       ) : null}
       {batch.blobs.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
@@ -902,9 +909,14 @@ function Reasoning({ text }: { text: string }) {
       </button>
       {open ? (
         <div className="mt-1">
-          <Markdown text={text} />
+          <SessionMarkdown text={text} />
         </div>
       ) : null}
     </div>
   );
+}
+
+function SessionMarkdown({ text }: { text: string }) {
+  const artifact = useSessionArtifact();
+  return <Markdown text={text} artifact={artifact} />;
 }

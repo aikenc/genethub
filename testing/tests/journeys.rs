@@ -1046,6 +1046,7 @@ async fn changes_made_by_the_agent_show_up_in_git_and_can_be_committed() {
 #[tokio::test]
 async fn files_can_be_browsed_and_edited_through_the_workspace() {
     let journey = Journey::start().await.expect("journey starts");
+    let root_handle = &journey.workspace.folders[0].root_handle;
     journey.write_file("src/main.rs", "fn main() {}").unwrap();
     journey.write_file("README.md", "# hi").unwrap();
 
@@ -1071,7 +1072,7 @@ async fn files_can_be_browsed_and_edited_through_the_workspace() {
         .client
         .call(Request::FileWrite {
             workspace_id: journey.workspace.id.clone(),
-            path: "src/main.rs".into(),
+            path: format!("{root_handle}/src/main.rs"),
             content: "fn main() { println!(\"edited\"); }".into(),
         })
         .await
@@ -1084,13 +1085,19 @@ async fn files_can_be_browsed_and_edited_through_the_workspace() {
 #[tokio::test]
 async fn writes_outside_the_workspace_are_refused() {
     let journey = Journey::start().await.expect("journey starts");
+    let root_handle = &journey.workspace.folders[0].root_handle;
 
-    for path in ["../escape.txt", "/etc/passwd", "src/../../escape.txt"] {
+    for path in [
+        format!("{root_handle}/../escape.txt"),
+        "/etc/passwd".into(),
+        format!("{root_handle}/src/../../escape.txt"),
+        "r_not_a_member/file.txt".into(),
+    ] {
         let error = journey
             .client
             .expect_error(Request::FileWrite {
                 workspace_id: journey.workspace.id.clone(),
-                path: path.into(),
+                path: path.clone(),
                 content: "owned".into(),
             })
             .await;
@@ -2274,4 +2281,88 @@ async fn a_log_request_cannot_reach_outside_the_log_directory() {
             .await;
         assert!(refused.is_err(), "{attempt} was served");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Working directory
+// ---------------------------------------------------------------------------
+
+/// A task that only makes sense in the right directory is the common case, not
+/// an exotic one, so the proof has to be where the agent's own relative path
+/// landed — not what the session metadata claims.
+#[tokio::test]
+async fn a_session_starts_where_it_was_told_to_and_cannot_be_told_to_leave() {
+    let journey = Journey::start().await.expect("journey starts");
+    mock_only!(journey);
+    std::fs::create_dir_all(journey.project().join("services/api")).expect("subdirectory exists");
+
+    let created = journey
+        .client
+        .call(Request::SessionCreate {
+            workspace_id: journey.workspace.id.clone(),
+            agent_id: "genet".into(),
+            model_id: Some(journey.model_id()),
+            mode_id: None,
+            title: None,
+            cwd: Some("services/api".into()),
+        })
+        .await
+        .expect("the session is created");
+    let Reply::Session(summary) = created else {
+        panic!("expected a session, got {created:?}");
+    };
+    journey
+        .client
+        .call(Request::Subscribe {
+            session_id: summary.id.clone(),
+            since_seq: None,
+            expand_last_round: false,
+        })
+        .await
+        .expect("subscribed");
+
+    script_the_task(&journey).await;
+    journey
+        .send(&summary.id, TASK)
+        .await
+        .expect("prompt accepted");
+    let events = journey.client.drain_turn().await.expect("the turn ends");
+    assert!(
+        events.completed(),
+        "the turn should complete; saw {:?}",
+        events.failure()
+    );
+
+    assert_eq!(
+        journey
+            .read_file("services/api/result.txt")
+            .as_deref()
+            .map(str::trim),
+        Some("DONE"),
+        "the agent's relative write belongs in the directory the session was given"
+    );
+    assert!(
+        !journey.file_exists("result.txt"),
+        "nothing should have been written at the workspace root"
+    );
+
+    // Refusing beats clamping to the root: a task quietly run somewhere else
+    // looks exactly like a task that worked.
+    let escaped = journey
+        .client
+        .call(Request::SessionCreate {
+            workspace_id: journey.workspace.id.clone(),
+            agent_id: "genet".into(),
+            model_id: Some(journey.model_id()),
+            mode_id: None,
+            title: None,
+            cwd: Some("../elsewhere".into()),
+        })
+        .await;
+    assert!(
+        escaped.is_err(),
+        "a cwd outside the workspace must not create a session; got {escaped:?}"
+    );
+
+    journey.finish().await;
 }

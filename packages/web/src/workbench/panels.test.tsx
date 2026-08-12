@@ -53,7 +53,7 @@ function install(client: Client) {
       name: "demo",
       root: "/tmp/demo",
       isGitRepo: true,
-      folders: [{ name: "demo", root: "/tmp/demo", pathPrefix: "" }],
+      folders: [{ name: "demo", root: "/tmp/demo", rootHandle: "r_demo" }],
     }],
     sessions: [],
     activeWorkspaceId: "w1",
@@ -76,6 +76,7 @@ beforeEach(() => {
     update: null,
     updating: false,
     download: { state: "idle" },
+    previewFloat: null,
   });
 });
 
@@ -149,16 +150,15 @@ describe("the log panel", () => {
 });
 
 describe("the files panel", () => {
-  it("opens a stable workspace-relative Preview URL in its own page", async () => {
-    const opened = vi.spyOn(window, "open").mockImplementation(() => null);
+  it("opens a file in the workbench Preview float", async () => {
     const { client, calls } = stubDaemon({
       "file.tree": () => ({
         type: "fileTree",
         data: {
           name: "demo",
-          path: "",
+          path: "r_demo",
           isDir: true,
-          children: [{ name: "notes.md", path: "notes.md", isDir: false }],
+          children: [{ name: "notes.md", path: "r_demo/notes.md", isDir: false }],
         },
       }),
     });
@@ -167,25 +167,24 @@ describe("the files panel", () => {
     render(<FilesPanel />);
     const entry = await screen.findByText("notes.md");
     await userEvent.click(entry);
-    expect(opened).toHaveBeenCalledWith(
-      "http://localhost:3000/assets/preview/v1/m_device/w1/notes.md",
-      "_blank",
-      "noopener,noreferrer",
-    );
+    expect(useWorkbench.getState().previewFloat).toEqual({
+      deviceHandle: "m_device",
+      workspaceHandle: "w1",
+      path: "r_demo/notes.md",
+    });
     expect(calls.some((call) => call.type === "file.tree")).toBe(true);
     expect(calls.some((call) => call.type === "file.write")).toBe(false);
   });
 
   it("does not load file bytes into the workbench store", async () => {
-    const opened = vi.spyOn(window, "open").mockImplementation(() => null);
     const { client } = stubDaemon({
       "file.tree": () => ({
         type: "fileTree",
         data: {
           name: "demo",
-          path: "",
+          path: "r_demo",
           isDir: true,
-          children: [{ name: "notes.md", path: "notes.md", isDir: false }],
+          children: [{ name: "notes.md", path: "r_demo/notes.md", isDir: false }],
         },
       }),
     });
@@ -193,7 +192,7 @@ describe("the files panel", () => {
 
     render(<FilesPanel />);
     await userEvent.click(await screen.findByText("notes.md"));
-    expect(opened).toHaveBeenCalledTimes(1);
+    expect(useWorkbench.getState().previewFloat?.path).toBe("r_demo/notes.md");
     expect(screen.queryByRole("textbox")).toBeNull();
   });
 
@@ -201,27 +200,27 @@ describe("the files panel", () => {
     const opened = vi.spyOn(window, "open").mockImplementation(() => null);
     const { client, calls } = stubDaemon({
       "file.tree": (payload: { path?: string | null }) =>
-        payload.path === "docs"
+        payload.path === "r_demo/docs"
           ? {
               type: "fileTree",
               data: {
                 name: "docs",
-                path: "docs",
+                path: "r_demo/docs",
                 isDir: true,
-                children: [{ name: "guide.md", path: "docs/guide.md", isDir: false }],
+                children: [{ name: "guide.md", path: "r_demo/docs/guide.md", isDir: false }],
               },
             }
           : {
               type: "fileTree",
               data: {
                 name: "demo",
-                path: "",
+                path: "r_demo",
                 isDir: true,
                 // This is the exact shape older Rust daemons emitted for None.
                 // Clicking it must not call null.map() and unmount the page.
                 children: [{
                   name: "docs",
-                  path: "docs",
+                  path: "r_demo/docs",
                   isDir: true,
                   children: null as never,
                 }],
@@ -237,7 +236,7 @@ describe("the files panel", () => {
     expect(opened).not.toHaveBeenCalled();
     expect(calls).toContainEqual({
       type: "file.tree",
-      payload: { workspaceId: "w1", path: "docs", depth: 1 },
+      payload: { workspaceId: "w1", path: "r_demo/docs", depth: 1 },
     });
     expect(screen.getByText(/单个文件上限 4 MiB/)).toBeInTheDocument();
   });
@@ -251,10 +250,10 @@ describe("the files panel", () => {
           type: "fileTree",
           data: {
             name: "demo",
-            path: "",
+            path: "r_demo",
             isDir: true,
             children: [
-              { name: roots === 1 ? "before.md" : "after.md", path: roots === 1 ? "before.md" : "after.md", isDir: false },
+              { name: roots === 1 ? "before.md" : "after.md", path: roots === 1 ? "r_demo/before.md" : "r_demo/after.md", isDir: false },
             ],
           },
         };

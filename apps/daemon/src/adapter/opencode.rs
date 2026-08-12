@@ -933,11 +933,11 @@ mod tests {
         let body = message_body(
             &input,
             Some("openai/gpt-5"),
-            Some("Use https://app.example/assets/preview/v1/device/workspace/"),
+            Some("Use https://app.example/assets/preview/v2/device/workspace/r_root/"),
         );
         assert_eq!(
             body["system"],
-            "Use https://app.example/assets/preview/v1/device/workspace/"
+            "Use https://app.example/assets/preview/v2/device/workspace/r_root/"
         );
         assert_eq!(body["parts"][0]["text"], "生成报告");
         assert_eq!(body["model"]["providerID"], "openai");

@@ -59,7 +59,11 @@ fn failed(error: anyhow::Error) -> Handled {
     let message = format!("{error:#}");
     let code = if message.contains("Asset Preview base URL") {
         ErrorCode::BadRequest
-    } else if message.contains("escapes the workspace") {
+    } else if message.contains("escapes the workspace")
+        || message.contains("not a member of this workspace")
+        || message.contains("workspace path is not canonical")
+        || message.contains("must name its root handle")
+    {
         ErrorCode::Forbidden
     } else if message.contains("already running") {
         ErrorCode::Conflict
@@ -138,21 +142,38 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             model_id,
             mode_id,
             title,
+            cwd,
         } => {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
+            let start_in = match cwd {
+                // Any of the workspace's folders, not only the first: a
+                // multi-folder workspace is one project, and a task started in
+                // its second folder is not a different workspace.
+                Some(cwd) => {
+                    let candidate = std::path::Path::new(&cwd);
+                    match workspace
+                        .folders
+                        .iter()
+                        .find_map(|folder| {
+                            crate::session::store::ensure_within(&folder.root, candidate).ok()
+                        })
+                        .or_else(|| {
+                            crate::session::store::ensure_within(&workspace.root, candidate).ok()
+                        }) {
+                        Some(resolved) => resolved,
+                        // Refusing beats clamping to the root: a task quietly
+                        // run in the wrong directory looks like it worked.
+                        None => return failed(anyhow::anyhow!("cwd {cwd} escapes the workspace")),
+                    }
+                }
+                None => workspace.root,
+            };
             match state
                 .sessions
-                .create(
-                    &workspace_id,
-                    workspace.root,
-                    &agent_id,
-                    model_id,
-                    mode_id,
-                    title,
-                )
+                .create(&workspace_id, start_in, &agent_id, model_id, mode_id, title)
                 .await
             {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
@@ -493,8 +514,29 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             remote: remote_status(state).await,
         }),
 
-        Request::DeviceInvite => {
-            let mut invite = state.devices.invite();
+        Request::DeviceInvite(scope) => {
+            let grants = match scope {
+                None => crate::authz::GrantSet::full(),
+                Some(scope) => {
+                    let mut named = Vec::with_capacity(scope.grants.len());
+                    for raw in &scope.grants {
+                        match crate::authz::Capability::parse(raw) {
+                            Some(capability) => named.push(capability),
+                            // Refused rather than dropped: an invitation minted
+                            // from a misspelled grant would silently be worth
+                            // less than whoever sent it believes.
+                            None => {
+                                return Handled::err(
+                                    ErrorCode::BadRequest,
+                                    format!("unknown grant `{raw}`"),
+                                )
+                            }
+                        }
+                    }
+                    crate::authz::GrantSet::of(named)
+                }
+            };
+            let mut invite = state.devices.invite_with(grants);
             invite.rendezvous_url = remote_status(state).await.rendezvous_url;
             Handled::ok(Reply::Invite(invite))
         }
@@ -755,10 +797,16 @@ mod tests {
 
     #[test]
     fn workspace_escapes_are_reported_as_forbidden_not_internal() {
-        let handled = failed(anyhow::anyhow!("path escapes the workspace"));
-        match handled.reply {
-            Err(error) => assert_eq!(error.code, ErrorCode::Forbidden),
-            Ok(_) => panic!("expected an error"),
+        for message in [
+            "path escapes the workspace",
+            "root handle is not a member of this workspace",
+            "a workspace resource path must name its root handle",
+        ] {
+            let handled = failed(anyhow::anyhow!(message));
+            match handled.reply {
+                Err(error) => assert_eq!(error.code, ErrorCode::Forbidden),
+                Ok(_) => panic!("expected an error"),
+            }
         }
     }
 

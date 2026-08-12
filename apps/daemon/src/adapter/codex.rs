@@ -2829,11 +2829,11 @@ mod tests {
     fn artifact_guidance_uses_codex_developer_instructions() {
         let params = with_developer_instructions(
             json!({ "cwd": "/tmp/workspace" }),
-            Some("Use https://app.example/assets/preview/v1/device/workspace/"),
+            Some("Use https://app.example/assets/preview/v2/device/workspace/r_root/"),
         );
         assert_eq!(
             params["developerInstructions"],
-            "Use https://app.example/assets/preview/v1/device/workspace/"
+            "Use https://app.example/assets/preview/v2/device/workspace/r_root/"
         );
         assert!(with_developer_instructions(json!({}), None)
             .get("developerInstructions")

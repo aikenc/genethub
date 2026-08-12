@@ -90,6 +90,10 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    // Several mandatory journeys launch real daemon, agent and relay
+    // processes. Running those files beside timer-sensitive protocol tests
+    // makes the result depend on runner load instead of product behavior.
+    fileParallelism: false,
   },
 });
 

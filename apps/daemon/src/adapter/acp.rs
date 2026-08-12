@@ -1504,7 +1504,7 @@ mod tests {
         };
         let blocks = prompt_blocks_with_context(
             &input,
-            Some("Use https://app.example/assets/preview/v1/device/workspace/"),
+            Some("Use https://app.example/assets/preview/v2/device/workspace/r_root/"),
         );
         assert_eq!(blocks.len(), 2);
         assert!(blocks[0]["text"]
@@ -1514,7 +1514,7 @@ mod tests {
         assert!(blocks[0]["text"]
             .as_str()
             .unwrap()
-            .contains("https://app.example/assets/preview/v1/device/workspace/"));
+            .contains("https://app.example/assets/preview/v2/device/workspace/r_root/"));
         assert_eq!(blocks[1], json!({ "type": "text", "text": "生成报告" }));
     }
 

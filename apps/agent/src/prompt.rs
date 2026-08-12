@@ -142,11 +142,11 @@ mod tests {
         let prompt = build(
             &dir,
             &[],
-            &["Use https://app.example/assets/preview/v1/device/workspace/".into()],
+            &["Use https://app.example/assets/preview/v2/device/workspace/r_root/".into()],
         );
         let added_at = prompt.find("<additional_system_prompt>").unwrap();
         let cwd_at = prompt.find("Current working directory:").unwrap();
         assert!(added_at < cwd_at);
-        assert!(prompt.contains("https://app.example/assets/preview/v1/device/workspace/"));
+        assert!(prompt.contains("https://app.example/assets/preview/v2/device/workspace/r_root/"));
     }
 }

@@ -41,6 +41,7 @@ class TestConnection implements FabricEndpointConnection {
   readonly streams = new Map<string, FabricStreamLeg>();
   readonly pending = new Map<string, symbol>();
   readonly tombstones = new Map<string, number>();
+  readonly lateFrameBudgets = new Map<string, number>();
   readonly sent: FabricFrame[] = [];
   readonly closeCodes: number[] = [];
   closed = false;
@@ -586,6 +587,47 @@ describe("Fabric protocol violations stay scoped", () => {
       frame(FabricKind.Reset, secondPeer, BigInt(FabricReset.ProtocolViolation)),
     );
     assert.equal(core.stats().streams, 0);
+  });
+
+  it("absorbs only a bounded tail already in flight when its peer resets", async () => {
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority, {
+      streamId: () => id(906),
+      maxStrikes: 2,
+      maxLateFramesPerClosedStream: 2,
+    });
+    const source = new TestConnection("endpoint:source");
+    const target = new TestConnection("endpoint:target");
+    core.register(source);
+    core.register(target);
+
+    const targetStream = await establish(
+      core,
+      authority,
+      source,
+      target,
+      id(27),
+      "reset-race",
+    );
+    await core.handle(source, frame(FabricKind.Reset, id(27), 1n));
+    const sourceFrames = source.sent.length;
+
+    await core.handle(
+      target,
+      frame(FabricKind.Data, targetStream, 1n, Buffer.from("already sent")),
+    );
+    await core.handle(
+      target,
+      frame(FabricKind.WindowUpdate, targetStream, 12n),
+    );
+    assert.equal(target.strikes, 0);
+    assert.equal(source.sent.length, sourceFrames);
+
+    await core.handle(target, frame(FabricKind.Fin, targetStream));
+    assert.equal(target.strikes, 1, "the grace is finite");
+    await core.handle(target, frame(FabricKind.Fin, targetStream));
+    assert.equal(target.closed, true);
+    assert.deepEqual(target.closeCodes, [4400]);
   });
 
   it("does not let control frames bypass DATA payload limits", async () => {

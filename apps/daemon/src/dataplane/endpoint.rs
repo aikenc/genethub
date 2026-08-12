@@ -9,6 +9,7 @@ use genehub_proto::{
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
+use crate::authz::{self, Capability, Principal, StreamMethod};
 use crate::channel_auth::{self, Direction, SessionKey};
 use crate::dataplane::frame::{Frame, Kind, MAX_PAYLOAD_BYTES};
 use crate::router::{self, SideEffect};
@@ -388,6 +389,16 @@ pub async fn serve(
         subscriptions: tokio::sync::Mutex::new(HashMap::new()),
     });
 
+    // A terminal is shared across a user's own devices on purpose, but this
+    // fanout reaches every authenticated peer, and a device that was never
+    // granted `pty` must not be sent the terminal anyway. Gating only
+    // `pty.open` would leave the output arriving unasked, which is the half
+    // that matters: a shell shows keystrokes, paths, and whatever the user
+    // pastes into it.
+    //
+    // Decided once, at connection: grants are fixed when a device is paired,
+    // and revoking one drops its connections rather than editing them.
+    let watches_terminals = Principal::of(&state, &access).allows(Capability::Pty);
     let fanout_task = state.fanout.get().map(|fanout| {
         let mut receiver = fanout.subscribe();
         let events = services.event_sender.clone();
@@ -395,6 +406,9 @@ pub async fn serve(
             loop {
                 match receiver.recv().await {
                     Ok(frame) => {
+                        if !watches_terminals && terminal_frame(&frame) {
+                            continue;
+                        }
                         if events.send(frame).await.is_err() {
                             return;
                         }
@@ -653,25 +667,64 @@ fn dispatch(
 }
 
 async fn handle_stream(mut stream: ServerStream, services: Arc<PeerServices>) -> Result<()> {
-    let result = match stream.head.method.as_str() {
-        "rpc" => handle_rpc(&mut stream, &services).await,
-        "events" => handle_events(&mut stream, &services).await,
-        "asset.preview" => crate::dataplane::preview::handle(&mut stream, &services).await,
-        "rtc.negotiate" => crate::dataplane::rtc::handle(&mut stream, &services).await,
-        _ => {
-            send_error(
-                &mut stream,
-                404,
-                ErrorCode::NotFound,
-                "unknown exchange method",
-            )
-            .await
-        }
-    };
+    let result = serve_stream(&mut stream, &services).await;
     if result.is_err() {
         stream.reset(RESET_PROTOCOL).await;
     }
     result
+}
+
+async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
+    if stream.head.method == "rpc" {
+        // Per-request rather than per-stream: one RPC stream carries one
+        // operation, and they do not all cost the same.
+        return handle_rpc(stream, services).await;
+    }
+    let Some(method) = StreamMethod::parse(&stream.head.method) else {
+        return send_error(stream, 404, ErrorCode::NotFound, "unknown exchange method").await;
+    };
+    let needed = method.required();
+    if !Principal::of(&services.state, &services.access).allows(needed) {
+        return refuse(stream, needed).await;
+    }
+    match method {
+        StreamMethod::Events => handle_events(stream, services).await,
+        StreamMethod::AssetPreview => crate::dataplane::preview::handle(stream, services).await,
+        StreamMethod::RtcNegotiate => crate::dataplane::rtc::handle(stream, services).await,
+    }
+}
+
+/// Whether a frame carries terminal traffic.
+///
+/// Matched by name with no wildcard so that a new terminal-bearing frame has
+/// to be classified here before it can be broadcast to peers that were never
+/// granted a terminal.
+fn terminal_frame(frame: &ServerFrame) -> bool {
+    match frame {
+        ServerFrame::PtyOutput { .. } | ServerFrame::PtyClosed { .. } => true,
+        ServerFrame::Event { .. }
+        | ServerFrame::Desync { .. }
+        | ServerFrame::Notice { .. }
+        | ServerFrame::UpdateDownloadChanged { .. } => false,
+    }
+}
+
+/// The one wording for "you are authenticated, and this is still not yours".
+///
+/// It names the missing capability rather than the request, so that a caller
+/// that was narrowed on purpose can tell that apart from a request it got
+/// wrong, and ask for the right invitation instead of retrying.
+async fn refuse(stream: &mut ServerStream, needed: Capability) -> Result<()> {
+    send_error(
+        stream,
+        403,
+        ErrorCode::Forbidden,
+        format!(
+            "this device was not granted `{}` on this machine",
+            needed.as_str()
+        ),
+    )
+    .await
 }
 
 async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
@@ -732,6 +785,11 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
             "pairing sessions may only redeem their invitation",
         )
         .await;
+    }
+
+    let needed = authz::required(&request);
+    if !Principal::of(&services.state, &services.access).allows(needed) {
+        return refuse(stream, needed).await;
     }
 
     let handled = router::handle(&services.state, services.access.transport, request).await;

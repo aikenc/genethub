@@ -7,6 +7,7 @@ import { FilesPanel } from "./files/FilesPanel";
 import { detectHost, type Endpoint, type Host } from "./host";
 import type { Target } from "./host";
 import { LogsPanel } from "./logs/LogsPanel";
+import { PreviewFloat } from "./preview/PreviewFloat";
 import { Client, type ProtocolDial } from "./protocol/client";
 import { SettingsPanel } from "./settings/SettingsPanel";
 import { readRtcEnabled } from "./settings/rtc";
@@ -574,6 +575,13 @@ export function App({
       {/* Outside every tab, because a finished download is not about whichever
           panel happens to be open. */}
       <UpdateToast host={host} />
+      {workbench.previewFloat ? (
+        <PreviewFloat
+          source={workbench.previewFloat}
+          host={host}
+          onClose={() => workbench.closePreviewFloat()}
+        />
+      ) : null}
     </div>
   );
 }

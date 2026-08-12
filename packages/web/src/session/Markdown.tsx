@@ -50,6 +50,12 @@ import { memo, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import {
+  resolveArtifactRef,
+  type ArtifactResolveContext,
+} from "../preview/resolveArtifactRef";
+import { useWorkbench } from "./store";
+
 const HIGHLIGHT_BYTES = 256 * 1024;
 const MERMAID_BYTES = 128 * 1024;
 
@@ -236,14 +242,24 @@ export function languageForPath(path: string): string | undefined {
 
 export type MarkdownVariant = "chat" | "document";
 
+export type MarkdownArtifactProps = ArtifactResolveContext & {
+  /** Authenticated workspace read used to inline local images. */
+  loadPreview?: (
+    path: string,
+  ) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
+};
+
 /** Safe, styled GFM used by both conversations and standalone documents. */
 export const Markdown = memo(function Markdown({
   text,
   variant = "chat",
+  artifact = null,
 }: {
   text: string;
   variant?: MarkdownVariant;
+  artifact?: MarkdownArtifactProps | null;
 }) {
+  const openPreviewFloat = useWorkbench((state) => state.openPreviewFloat);
   return (
     <div
       className={`gh-markdown gh-markdown-${variant} break-words text-fg`}
@@ -267,11 +283,38 @@ export const Markdown = memo(function Markdown({
           strong: ({ children }) => <strong>{children}</strong>,
           em: ({ children }) => <em>{children}</em>,
           del: ({ children }) => <del>{children}</del>,
-          a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noreferrer noopener">
-              {children}
-            </a>
-          ),
+          a: ({ href, children }) => {
+            const resolved = resolveArtifactRef(href, artifact);
+            if (resolved.kind === "blocked") {
+              return <span className="gh-blocked-link">{children}</span>;
+            }
+            if (
+              resolved.kind === "preview" &&
+              artifact?.deviceHandle &&
+              artifact.workspaceHandle
+            ) {
+              return (
+                <a
+                  href={resolved.href}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    openPreviewFloat({
+                      deviceHandle: artifact.deviceHandle,
+                      workspaceHandle: artifact.workspaceHandle,
+                      path: resolved.path,
+                    });
+                  }}
+                >
+                  {children}
+                </a>
+              );
+            }
+            return (
+              <a href={resolved.href} target="_blank" rel="noreferrer noopener">
+                {children}
+              </a>
+            );
+          },
           code: ({ className, children }) => {
             const text = String(children).replace(/\n$/, "");
             const language = className?.replace(/^language-/, "");
@@ -294,13 +337,10 @@ export const Markdown = memo(function Markdown({
           input: ({ type, checked, disabled }) => (
             <input type={type} checked={checked} disabled={disabled} readOnly />
           ),
-          // Model/document-authored images never trigger a request. An image
-          // can still be previewed explicitly through its authenticated Asset
-          // Preview URL; merely rendering Markdown is not authorization to load.
-          img: ({ alt }) => (
-            <span className="gh-blocked-image">
-              图片已阻止{alt ? `：${alt}` : ""}
-            </span>
+          // Bare http(s) images stay blocked. Workspace-relative / absolute
+          // paths and Preview locators load through the authenticated reader.
+          img: ({ src, alt }) => (
+            <MarkdownImage src={src} alt={alt} artifact={artifact} />
           ),
         }}
       >
@@ -309,6 +349,72 @@ export const Markdown = memo(function Markdown({
     </div>
   );
 });
+
+function MarkdownImage({
+  src,
+  alt,
+  artifact,
+}: {
+  src?: string;
+  alt?: string;
+  artifact?: MarkdownArtifactProps | null;
+}) {
+  const resolved = resolveArtifactRef(src, artifact);
+  const previewPath = resolved.kind === "preview" ? resolved.path : null;
+  const loadPreview = artifact?.loadPreview;
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let revoke: string | null = null;
+    let cancelled = false;
+    setUrl(null);
+    setFailed(false);
+    if (!previewPath || !loadPreview) {
+      if (previewPath) setFailed(true);
+      return () => {};
+    }
+    void (async () => {
+      try {
+        const loaded = await loadPreview(previewPath);
+        if (cancelled) return;
+        if (!loaded || !loaded.mediaType.startsWith("image/")) {
+          setFailed(true);
+          return;
+        }
+        const objectUrl = URL.createObjectURL(
+          new Blob([loaded.bytes.slice().buffer as ArrayBuffer], {
+            type: loaded.mediaType,
+          }),
+        );
+        revoke = objectUrl;
+        setUrl(objectUrl);
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (revoke) URL.revokeObjectURL(revoke);
+    };
+  }, [loadPreview, previewPath]);
+
+  if (resolved.kind === "external" || resolved.kind === "blocked" || failed) {
+    return (
+      <span className="gh-blocked-image">
+        图片已阻止{alt ? `：${alt}` : ""}
+      </span>
+    );
+  }
+  if (!url) {
+    return (
+      <span className="gh-blocked-image" role="status">
+        图片加载中{alt ? `：${alt}` : ""}
+      </span>
+    );
+  }
+  return <img src={url} alt={alt ?? ""} className="gh-markdown-image" />;
+}
 
 export function HighlightedCode({
   text,

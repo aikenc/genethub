@@ -424,7 +424,7 @@ mod tests {
         append_system_prompt_arg(
             &mut command,
             "--append-system-prompt",
-            Some("first line\nhttps://app.example/assets/preview/v1/d/w/"),
+            Some("first line\nhttps://app.example/assets/preview/v2/d/w/r_root/"),
         );
         let args: Vec<_> = command
             .as_std()
@@ -435,7 +435,7 @@ mod tests {
             args,
             [
                 "--append-system-prompt",
-                "first line\nhttps://app.example/assets/preview/v1/d/w/",
+                "first line\nhttps://app.example/assets/preview/v2/d/w/r_root/",
             ]
         );
     }

@@ -82,12 +82,12 @@ npm run build
 `dist/` 是静态文件，可以放在任意 HTTPS 静态托管。SPA host 必须把不存在的前端路径回退到 `index.html`，因为 Preview 使用真实 deep link：
 
 ```text
-/assets/preview/v1/<deviceHandle>/<workspaceHandle>/<relative-path>
+/assets/preview/v2/<deviceHandle>/<projectHandle>/<rootHandle>/<relative-path>
 ```
 
 如果部署在子路径，构建时设置正确的 Vite base；Preview builder/parser 会保留该 base。静态 host 不需要安装 daemon，也不代理文件内容。
 
-建议静态工作台与 Relay 分开部署。至少设置 CSP、`frame-ancestors 'none'` 和 HTTPS；工作台自身位于浏览器凭证信任路径中，不要加载第三方脚本。普通页面应保持 `script-src 'self'`。只有 `/assets/preview/v1/*` 的独立 Preview 文档需要允许 `unsafe-inline`/HTTPS script 与 HTTPS/WSS connect，因为 `srcdoc` 会继承父文档 CSP；它仍必须保持 `frame-ancestors 'none'`，并由代码中的 opaque-origin iframe sandbox 再隔离活动 HTML。不要把这条放宽后的策略全站复用。
+建议静态工作台与 Relay 分开部署。至少设置 CSP、`frame-ancestors 'none'` 和 HTTPS；工作台自身位于浏览器凭证信任路径中，不要加载第三方脚本。普通页面应保持 `script-src 'self'`。只有 `/assets/preview/v2/*` 的独立 Preview 文档需要允许 `unsafe-inline`/HTTPS script 与 HTTPS/WSS connect，因为 `srcdoc` 会继承父文档 CSP；它仍必须保持 `frame-ancestors 'none'`，并由代码中的 opaque-origin iframe sandbox 再隔离活动 HTML。不要把这条放宽后的策略全站复用。
 
 ## 4. 开启远程访问与配对
 
@@ -106,8 +106,8 @@ npm run build
 文件链接的形态是：
 
 ```text
-https://workbench.example/assets/preview/v1/
-  <deviceHandle>/<workspaceHandle>/docs/result.md
+https://workbench.example/assets/preview/v2/
+  <deviceHandle>/<projectHandle>/<rootHandle>/docs/result.md
 ```
 
 URL 明文保留设备、workspace 和相对路径，便于 Agent 输出可点击文档链接。它不是 capability：
@@ -115,8 +115,8 @@ URL 明文保留设备、workspace 和相对路径，便于 Agent 输出可点�
 - 已配对电脑或手机打开同一 URL 后，从自己的 roster 找到 `deviceHandle`，重新连接对应 rendezvous slot，并用自己的 device credential 完成 E2EE。
 - 未配对浏览器只会得到“尚未获准连接资源所在设备”，不会因为知道 URL 而读取文件。
 - 查看设备不需要 daemon；资源所在电脑的 daemon 必须在线。
-- daemon 按 URL 中 workspace-relative path 读取完整文件；超过 4 MiB 或类型不支持会直接拒绝。
-- workspace/path/MIME/bytes 都在 v3 E2EE record 内，Relay 看不到。
+- daemon 先检查项目是否包含 URL 中的全局 rootHandle，再按递归相对路径读取完整文件；超过 4 MiB 或类型不支持会直接拒绝。
+- `asset.preview` request、MIME 与 bytes 都在 v3 E2EE record 内，Fabric Relay 看不到；但浏览器首先请求的 Preview URL locator 是普通 HTTPS path，静态站点/反向代理会看到它。若不希望写入日志，应在 edge 对 `/assets/preview/v2/*` 关闭或脱敏 access log。
 
 同一个 URL 的“相同”包括 workbench origin。如果你有多个静态域名，需要由产品层选择 canonical origin；MVP 不做跨 origin credential 同步。
 

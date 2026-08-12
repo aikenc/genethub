@@ -1,4 +1,4 @@
-const PREVIEW_PATH = "assets/preview/v1/";
+const PREVIEW_PATH = "assets/preview/v2/";
 
 export interface AssetPreviewLocation {
   deviceHandle: string;
@@ -23,7 +23,7 @@ export function assetPreviewUrl(
 }
 
 /**
- * Exact deployment/device/workspace prefix Agents append artifact paths to.
+ * Exact deployment/device/project/root prefix Agents append artifact paths to.
  *
  * It deliberately contains no placeholder path: the daemon validates this
  * structured prefix before turning it into fixed system guidance, and Agents
@@ -32,14 +32,13 @@ export function assetPreviewUrl(
 export function assetPreviewBaseUrl(
   deviceHandle: string,
   workspaceHandle: string,
-  workspaceFolder = "",
+  rootHandle: string,
   origin = typeof location === "undefined" ? "" : location.origin,
   basePath = previewBasePath(),
 ): string {
   const base = assetPreviewBasePath(deviceHandle, workspaceHandle, basePath);
-  const pathname = workspaceFolder
-    ? base + encodeURIComponent(locatorSegment(workspaceFolder, "workspace folder")) + "/"
-    : base;
+  const pathname =
+    base + encodeURIComponent(locatorSegment(rootHandle, "root handle")) + "/";
   return origin ? new URL(pathname, origin).toString() : pathname;
 }
 
@@ -60,7 +59,8 @@ export function parseAssetPreviewPath(
   const prefix = previewPrefix(basePath);
   if (!pathname.startsWith(prefix)) return null;
   const raw = pathname.slice(prefix.length).split("/");
-  if (raw.length < 3) return null;
+  // device, project, root handle, then at least one recursive file segment.
+  if (raw.length < 4) return null;
   try {
     const deviceHandle = decodeCanonical(raw[0]!, "device handle");
     const workspaceHandle = decodeCanonical(raw[1]!, "workspace handle");
@@ -99,13 +99,15 @@ function previewPrefix(basePath: string): string {
 }
 
 export function previewPath(value: string): string {
+  const parts = value.split("/");
   if (
     !value ||
     new TextEncoder().encode(value).byteLength > 4096 ||
     value.startsWith("/") ||
     value.includes("\\") ||
     value.includes("\0") ||
-    value.split("/").some(
+    parts.length < 2 ||
+    parts.some(
       (part) =>
         !part ||
         part === "." ||
@@ -115,8 +117,9 @@ export function previewPath(value: string): string {
         part.endsWith(" "),
     )
   ) {
-    throw new TypeError("preview path must be a canonical workspace-relative file path");
+    throw new TypeError("preview path must be a canonical root-qualified file path");
   }
+  locatorSegment(parts[0]!, "root handle");
   return value;
 }
 

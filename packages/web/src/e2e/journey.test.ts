@@ -56,6 +56,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
     let homeDir: string;
     let workspaceDir: string;
     let workspaceId: string;
+    let workspaceRootHandle: string;
 
     beforeAll(async () => {
       model = await startMockModel();
@@ -63,7 +64,12 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
       homeDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-home-"));
       workspaceDir = mkdtempSync(path.join(tmpdir(), "genehub-e2e-work-"));
       mkdirSync(path.join(workspaceDir, "docs"));
+      mkdirSync(path.join(workspaceDir, "docs", "nested"));
       writeFileSync(path.join(workspaceDir, "notes.md"), "hello\n");
+      writeFileSync(
+        path.join(workspaceDir, "docs", "nested", "deep.md"),
+        "# recursive\n",
+      );
 
       const started = await startDaemon(dataDir, path.join(homeDir, "GeneHub"));
       daemon = started.process;
@@ -98,6 +104,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
       if (workspace?.type !== "workspace")
         throw new Error("the workspace would not open");
       workspaceId = workspace.data.id;
+      workspaceRootHandle = workspace.data.folders[0]!.rootHandle;
     }, 30_000);
 
     afterAll(async () => {
@@ -155,6 +162,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           modelId: "deepseek/deepseek-v4-flash",
           modeId: null,
           title: null,
+          cwd: null,
         },
       });
       if (session?.type !== "session")
@@ -210,6 +218,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
           modelId: "deepseek/deepseek-v4-flash",
           modeId: null,
           title: null,
+          cwd: null,
         },
       });
       if (session?.type !== "session")
@@ -279,6 +288,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
               modelId,
               modeId: null,
               title: null,
+              cwd: null,
             },
           });
           if (session?.type !== "session")
@@ -344,9 +354,17 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
         ).toBeUndefined();
       }
 
-      const preview = await client.preview(workspaceId, "notes.md");
+      const preview = await client.preview(
+        workspaceId,
+        `${workspaceRootHandle}/notes.md`,
+      );
       expect(preview.metadata.kind).toBe("markdown");
       expect(new TextDecoder().decode(preview.bytes)).toContain("hello");
+      const recursive = await client.preview(
+        workspaceId,
+        `${workspaceRootHandle}/docs/nested/deep.md`,
+      );
+      expect(new TextDecoder().decode(recursive.bytes)).toContain("recursive");
 
       const terminal = await client.call({
         type: "pty.open",
@@ -394,14 +412,14 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
       });
       expect(opened?.type).toBe("workspace");
       if (opened?.type !== "workspace") return;
-      // A folder and a .code-workspace rooted in that folder are two views of
-      // one durable project, not two session stores contending for one path.
-      expect(opened.data.id).toBe(workspaceId);
+      // Opening sources are distinct projects, while their shared physical
+      // directory keeps one device-wide resource locator.
+      expect(opened.data.id).not.toBe(workspaceId);
       expect(opened.data.root).toBe(realpathSync(workspaceDir));
-      expect(opened.data.folders.map((folder) => folder.pathPrefix)).toEqual([
-        "Product",
-        "Docs",
-      ]);
+      expect(opened.data.folders[0]?.rootHandle).toBe(workspaceRootHandle);
+      const productHandle = opened.data.folders[0]!.rootHandle;
+      const docsHandle = opened.data.folders[1]!.rootHandle;
+      expect(docsHandle).not.toBe(productHandle);
 
       const root = await client.call({
         type: "file.tree",
@@ -410,23 +428,26 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
       expect(root?.type).toBe("fileTree");
       if (root?.type !== "fileTree") return;
       expect(root.data.children?.map((node) => node.path)).toEqual([
-        "Product",
-        "Docs",
+        productHandle,
+        docsHandle,
       ]);
       expect(root.data.children?.[0]?.children).toBeUndefined();
 
       const preview = await client.preview(
         opened.data.id,
-        "Docs/guide.custom-text",
+        `${docsHandle}/guide.custom-text`,
       );
       expect(preview.metadata.kind).toBe("text");
       expect(new TextDecoder().decode(preview.bytes)).toContain("section: preview");
+      await expect(
+        client.preview(workspaceId, `${docsHandle}/guide.custom-text`),
+      ).rejects.toMatchObject({ detail: "forbidden", status: 403 });
 
       const write = await client.call({
         type: "file.write",
         payload: {
           workspaceId: opened.data.id,
-          path: "Docs/generated.json",
+          path: `${docsHandle}/generated.json`,
           content: '{"multiRoot":true}\n',
         },
       });
@@ -461,7 +482,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
 
       const reopened = await client.call({
         type: "workspace.open",
-        payload: { root: definition },
+        payload: { root: workspaceDir },
       });
       expect(reopened?.type).toBe("workspace");
       if (reopened?.type !== "workspace") return;

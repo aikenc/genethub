@@ -137,7 +137,12 @@ export type DeviceInfo = { id: string, name: string, pairedAt: string, lastSeenA
 /**
  * True while this device has a live connection to the machine.
  */
-connected: boolean, };
+connected: boolean, 
+/**
+ * What this device may ask for. Absent from machines that predate grants,
+ * where every authorized device could do everything.
+ */
+grants?: Array<string>, };
 
 /**
  * A one-time chance to become an authorized device.
@@ -155,7 +160,12 @@ export type DeviceInvite = { code: string,
  * a relay first for that reason; privileged LAN transport is deliberately
  * unsupported.
  */
-rendezvousUrl?: string, expiresAt: string, };
+rendezvousUrl?: string, expiresAt: string, 
+/**
+ * What redeeming this invitation will be worth. Shown before anyone
+ * accepts it, because a grant nobody was told about is not a choice.
+ */
+grants?: Array<string>, };
 
 export type DirectoryEntry = { name: string, path: string, };
 
@@ -297,6 +307,15 @@ export type InteractionQuestion = { id: string, prompt: string, allowMultiple: b
  * Proof of the PSK carried in the fragment half of a pairing link.
  */
 export type InviteAuth = { inviteId: string, nonce: string, proof: string, };
+
+/**
+ * How much of a machine an invitation is worth.
+ *
+ * Its own type rather than a bare list of strings so that the request carrying
+ * it can grow other limits — an expiry, a workspace — without changing shape
+ * again.
+ */
+export type InviteScope = { grants: Array<string>, };
 
 /**
  * Streaming increment for an item already on the timeline.
@@ -446,7 +465,22 @@ export type Request = { "type": "connection.identity" } | { "type": "subscribe",
  * Prefetches the last round's trunk index and final trunk details in
  * the subscription response.
  */
-expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, 
+/**
+ * Where the agent starts, inside the workspace. Absent means the
+ * workspace root, which is what every client sent before this field
+ * existed. Relative paths resolve against the root; an absolute path
+ * must still fall inside it, and the daemon refuses the rest rather
+ * than clamping — a task silently run in the wrong directory is worse
+ * than one that refused to start.
+ */
+cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+/**
+ * Deprecated wire field. Current clients always send `null`; Preview
+ * locators are rebound in the workbench from relative/absolute paths.
+ * Kept so older clients remain deserializable.
+ */
+artifactPreviewBaseUrl: string | null, 
 /**
  * Browser-composed, deployment-aware Asset Preview prefix for this
  * session's workspace. It is context, not authority: opening a link
@@ -486,7 +520,7 @@ models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payloa
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */
@@ -764,9 +798,10 @@ name: string,
  */
 root: string, 
 /**
- * Empty for a plain folder workspace; otherwise the first virtual path segment.
+ * Stable device-local locator for this physical root. Display names and
+ * project membership never participate in resource identity.
  */
-pathPrefix: string, };
+rootHandle: string, };
 
 export type WorkspaceInfo = { id: string, name: string, 
 /**

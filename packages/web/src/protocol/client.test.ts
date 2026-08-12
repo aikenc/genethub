@@ -185,6 +185,53 @@ describe("the v3 peer connection", () => {
   });
 });
 
+  it("notices a silently dead carrier through the heartbeat and reconnects", async () => {
+    const { client, queue } = await connected({
+      heartbeatMs: 20,
+      heartbeatTimeoutMs: 40,
+      backoffMs: () => 0,
+    });
+
+    // The page was suspended and the carrier died without a close frame: the
+    // socket still looks open, it just never answers again.
+    queue.latest().silence();
+    await waitFor(() => client.connectionState === "reconnecting", 500);
+    await waitFor(() => queue.sockets.length === 2, 500);
+
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"), 500);
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready", 500);
+    client.close();
+  });
+
+  it("keeps a healthy carrier ready across heartbeat probes", async () => {
+    const { client, socket } = await connected({ heartbeatMs: 15 });
+    await waitFor(
+      () =>
+        socket.sent.filter((message) => message.type === "connection.identity").length >= 3,
+      500,
+    );
+    expect(client.connectionState).toBe("ready");
+    client.close();
+  });
+
+  it("reconnects immediately when the page returns while reconnecting", async () => {
+    const { client, queue } = await connected({ backoffMs: () => 3_600_000 });
+    queue.latest().close(1006, "lost");
+    await waitFor(() => client.connectionState === "reconnecting");
+    expect(queue.sockets.length).toBe(1);
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => queue.sockets.length === 2);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+    client.close();
+  });
+});
+
 describe("RPC exchanges are independent logical streams", () => {
   it("queues work until authenticated, then resolves concurrent replies out of order", async () => {
     const proof = localProof();
@@ -296,14 +343,14 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
   it("streams exact Preview bytes and preserves typed failures", async () => {
     const { client, socket } = await connected();
     const bytes = new TextEncoder().encode("# hello");
-    const preview = client.preview("workspace-1", "docs/readme.md");
+    const preview = client.preview("workspace-1", "r_project/docs/readme.md");
     await waitFor(() => socket.sent.some((message) => message.type === "asset.preview"));
     const exchange = socket.lastOf("asset.preview");
     expect(exchange.payload).toEqual({
       source: {
         kind: "workspaceFile",
         workspaceHandle: "workspace-1",
-        path: "docs/readme.md",
+        path: "r_project/docs/readme.md",
       },
     });
     socket.respondExchange(exchange.id, 200, {
@@ -314,7 +361,7 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
     }, bytes);
     expect(Array.from((await preview).bytes)).toEqual(Array.from(bytes));
 
-    const missing = client.preview("workspace-1", "gone.png");
+    const missing = client.preview("workspace-1", "r_project/gone.png");
     await waitFor(() => socket.lastOf("asset.preview").id !== exchange.id);
     socket.respondExchange(socket.lastOf("asset.preview").id, 404, {
       error: "notFound",

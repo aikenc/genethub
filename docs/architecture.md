@@ -265,6 +265,7 @@ apps/relay       ← Node：转发层。无数据库、无业务、可自建
 apps/desktop     ← 仅 Windows/macOS 的 Tauri 2 壳；复用 Web 工作台
 packages/web     ← 工作台前端（四个宿主同一份产物）
 packages/proto   ← 会话协议的唯一定义处，生成 TS 类型与 Rust 结构
+skills/          ← 教 Agent 怎么用 genet CLI 的 Agent Skills
 testing/         ← 跨部件旅程测试（daemon + agent + mock 模型）
 ```
 

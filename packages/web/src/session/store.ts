@@ -60,6 +60,13 @@ export interface WorkbenchTab {
 
 export type RightPanel = "changes" | "files" | null;
 
+/** In-workbench Asset Preview float (default open path; not a new browser tab). */
+export type PreviewFloatTarget = {
+  deviceHandle: string;
+  workspaceHandle: string;
+  path: string;
+};
+
 /**
  * A conversation that has been opened but not started.
  *
@@ -117,6 +124,8 @@ interface WorkbenchState {
   tabs: WorkbenchTab[];
   activeTabId: string | null;
   rightPanel: RightPanel;
+  /** Default Preview surface; null when closed. New-tab Preview is opt-in only. */
+  previewFloat: PreviewFloatTarget | null;
   timeline: TimelineState;
   /**
    * Warm snapshots for every chat tab still in the strip. Switching back to a
@@ -244,6 +253,8 @@ interface WorkbenchState {
   closeTab(tabId: string): void;
   setTabLimit(limit: number): void;
   setRightPanel(panel: RightPanel): void;
+  openPreviewFloat(target: PreviewFloatTarget): void;
+  closePreviewFloat(): void;
   send(text: string, attachments?: Attachment[]): Promise<void>;
   /** Sends a failed message again, unchanged. */
   retryPending(): Promise<void>;
@@ -451,6 +462,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   tabs: [],
   activeTabId: null,
   rightPanel: null,
+  previewFloat: null,
   timeline: emptyTimeline(),
   sessionTimelines: {},
   subscribedSessionIds: [],
@@ -971,6 +983,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set({ rightPanel: panel });
   },
 
+  openPreviewFloat(target) {
+    set({
+      previewFloat: {
+        deviceHandle: target.deviceHandle,
+        workspaceHandle: target.workspaceHandle,
+        path: target.path,
+      },
+    });
+  },
+
+  closePreviewFloat() {
+    set({ previewFloat: null });
+  },
+
   async send(text, attachments = []) {
     // The previous complaint goes away as the next attempt starts, so a stale
     // line does not get read as a description of what just happened.
@@ -1010,15 +1036,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
 
     try {
-      const state = get();
-      const deviceHandle = state.client?.identity?.machineId;
-      const workspaceId = currentWorkspace(state);
-      const workspace = state.workspaces.find((entry) => entry.id === workspaceId);
-      const primaryFolder = workspace?.folders?.[0]?.pathPrefix ?? "";
-      const artifactPreviewBaseUrl =
-        deviceHandle && workspaceId
-          ? assetPreviewBaseUrl(deviceHandle, workspaceId, primaryFolder)
-          : null;
+      // Artifact Preview URLs are bound at chat/document render time from the
+      // current workspace roots. Agents emit relative/absolute file paths; the
+      // daemon teaches path-linking rules (not a deployment-specific prefix).
       await require_(get().client).call({
         type: "session.send",
         // Continuing a round after an interrupt is not wired into the UI
@@ -1028,7 +1048,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           sessionId,
           text,
           attachments,
-          artifactPreviewBaseUrl,
+          artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
       });
@@ -1348,7 +1368,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async invite() {
-    const reply = await require_(get().client).call({ type: "device.invite" });
+    // Null, not a grant list: the workbench pairs a device the owner will use
+    // as themselves. Narrowing belongs to whoever is deliberately handing out
+    // less, and inventing a default here would decide that for them.
+    const reply = await require_(get().client).call({
+      type: "device.invite",
+      payload: null,
+    });
     return reply?.type === "invite" ? reply.data : null;
   },
 
@@ -1478,6 +1504,7 @@ async function start(
         modelId: draft.modelId,
         modeId: draft.modeId,
         title: null,
+        cwd: null,
       },
     }),
   );

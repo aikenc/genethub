@@ -84,6 +84,8 @@ struct MetaHeader {
     created_at_ms: i64,
     #[serde(default)]
     updated_at_ms: i64,
+    #[serde(default)]
+    project_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,10 +94,9 @@ pub struct SessionMeta {
     pub id: String,
     /// Which workspace this conversation belongs to.
     ///
-    /// Derived from where the session was found, never stored. The id is a
-    /// random uuid minted per installation, so the one a beta build wrote means
-    /// nothing to a release build reading the same folder; the session sitting
-    /// inside the project it is about is the fact that survives both.
+    /// Resolved from the durable project key stored on disk. The local id is
+    /// deliberately never persisted because another installation names the
+    /// same project differently.
     #[serde(default, skip)]
     pub workspace_id: String,
     /// The layout this session is stored in, taken from the file's frozen
@@ -247,11 +248,26 @@ const OWNER_NAME: &str = "owner";
 
 /// A registered workspace: where it is, and whether this daemon may write it.
 struct Home {
-    root: PathBuf,
-    /// The workspace's write lock while this daemon holds it. Dropping the
+    /// The physical session home's write lock while this daemon holds it. Dropping the
     /// handle releases it, so it lives exactly as long as the entry does, and
     /// a crash releases it too — the kernel holds it, not a file's contents.
     lock: Option<File>,
+}
+
+#[derive(Default)]
+struct Homes {
+    /// Project id to physical Agent/session root.
+    workspaces: BTreeMap<String, WorkspaceHome>,
+    /// One lock per physical `.genethub`, shared by every project view rooted
+    /// there. Folder and `.code-workspace` identities must never self-contend.
+    roots: BTreeMap<PathBuf, Home>,
+}
+
+struct WorkspaceHome {
+    root: PathBuf,
+    /// Stable within this physical session home and independent of the local
+    /// workspace id, so another GeneHub installation can adopt the history.
+    project_key: String,
 }
 
 /// Which directory on disk belongs to each workspace id.
@@ -264,21 +280,43 @@ struct Home {
 /// which is the honest answer, not a path in some fallback directory.
 #[derive(Clone, Default)]
 pub struct WorkspaceHomes {
-    roots: Arc<RwLock<BTreeMap<String, Home>>>,
+    homes: Arc<RwLock<Homes>>,
 }
 
 impl WorkspaceHomes {
     pub fn attach(&self, workspace_id: &str, root: &Path) {
-        let Ok(mut roots) = self.roots.write() else {
+        self.attach_project(workspace_id, "folder", root);
+    }
+
+    pub fn attach_project(&self, workspace_id: &str, project_key: &str, root: &Path) {
+        let Ok(mut homes) = self.homes.write() else {
             return;
         };
-        match roots.get_mut(workspace_id) {
-            // Re-registering the same folder must not drop the write lock the
-            // daemon is holding for it.
-            Some(home) if home.root == root => {}
-            Some(home) => *home = Home::at(root),
-            None => {
-                roots.insert(workspace_id.to_string(), Home::at(root));
+        if homes
+            .workspaces
+            .get(workspace_id)
+            .is_some_and(|known| known.root == root && known.project_key == project_key)
+        {
+            return;
+        }
+        if let Some(previous) = homes.workspaces.insert(
+            workspace_id.to_string(),
+            WorkspaceHome {
+                root: root.to_path_buf(),
+                project_key: project_key.to_string(),
+            },
+        ) {
+            prune_home(&mut homes, &previous.root);
+        }
+        homes.roots.entry(root.to_path_buf()).or_default();
+    }
+
+    /// Stops exposing one workspace's history without deleting any of it.
+    /// Reattaching the same id and root makes every session visible again.
+    pub fn detach(&self, workspace_id: &str) {
+        if let Ok(mut homes) = self.homes.write() {
+            if let Some(home) = homes.workspaces.remove(workspace_id) {
+                prune_home(&mut homes, &home.root);
             }
         }
     }
@@ -293,13 +331,26 @@ impl WorkspaceHomes {
 
     /// Where a workspace lives on disk.
     pub fn root(&self, workspace_id: &str) -> Result<PathBuf> {
-        let roots = self
-            .roots
+        let homes = self
+            .homes
             .read()
             .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
-        roots
+        homes
+            .workspaces
             .get(workspace_id)
             .map(|home| home.root.clone())
+            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))
+    }
+
+    fn project_key(&self, workspace_id: &str) -> Result<String> {
+        let homes = self
+            .homes
+            .read()
+            .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
+        homes
+            .workspaces
+            .get(workspace_id)
+            .map(|home| home.project_key.clone())
             .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))
     }
 
@@ -311,22 +362,34 @@ impl WorkspaceHomes {
         Ok(self.home_dir(workspace_id)?.join("sessions"))
     }
 
-    /// Every registered workspace's sessions directory, in id order.
-    fn all_sessions_dirs(&self) -> Vec<(String, PathBuf)> {
-        let Ok(roots) = self.roots.read() else {
+    /// Every physical session directory once, plus the active projects allowed
+    /// to see sessions stored there.
+    fn all_sessions_dirs(&self) -> Vec<(Vec<(String, String)>, PathBuf)> {
+        let Ok(homes) = self.homes.read() else {
             return Vec::new();
         };
-        roots
-            .iter()
-            .map(|(id, home)| (id.clone(), sessions_dir(&home.root)))
+        homes
+            .roots
+            .keys()
+            .map(|root| {
+                let projects = homes
+                    .workspaces
+                    .iter()
+                    .filter(|(_, candidate)| &candidate.root == root)
+                    .map(|(id, home)| (id.clone(), home.project_key.clone()))
+                    .collect();
+                (projects, sessions_dir(root))
+            })
             .collect()
     }
 
     /// Whether this daemon already owns the workspace's write lock.
     fn holds(&self, workspace_id: &str) -> bool {
-        self.roots.read().is_ok_and(|roots| {
-            roots
+        self.homes.read().is_ok_and(|homes| {
+            homes
+                .workspaces
                 .get(workspace_id)
+                .and_then(|workspace| homes.roots.get(&workspace.root))
                 .is_some_and(|home| home.lock.is_some())
         })
     }
@@ -344,13 +407,19 @@ impl WorkspaceHomes {
     /// starts working the moment the other build quits — no restart, no
     /// stale-lock cleanup, since the kernel drops it even on a crash.
     fn claim(&self, workspace_id: &str, home_dir: &Path) -> Result<()> {
-        let mut roots = self
-            .roots
+        let mut homes = self
+            .homes
             .write()
             .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
-        let home = roots
-            .get_mut(workspace_id)
+        let root = homes
+            .workspaces
+            .get(workspace_id)
+            .map(|home| home.root.clone())
             .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
+        let home = homes
+            .roots
+            .get_mut(&root)
+            .ok_or_else(|| anyhow!("workspace {workspace_id} has no session home"))?;
         if home.lock.is_some() {
             return Ok(());
         }
@@ -384,11 +453,24 @@ impl WorkspaceHomes {
 }
 
 impl Home {
-    fn at(root: &Path) -> Self {
-        Home {
-            root: root.to_path_buf(),
-            lock: None,
-        }
+    fn at() -> Self {
+        Home { lock: None }
+    }
+}
+
+impl Default for Home {
+    fn default() -> Self {
+        Self::at()
+    }
+}
+
+fn prune_home(homes: &mut Homes, root: &Path) {
+    if !homes
+        .workspaces
+        .values()
+        .any(|candidate| candidate.root == root)
+    {
+        homes.roots.remove(root);
     }
 }
 
@@ -518,7 +600,10 @@ impl Store {
             format: SESSION_FORMAT,
             ..meta.clone()
         };
-        crate::config::save_private(&path, serde_json::to_string_pretty(&stamped)?.as_bytes())
+        let mut value = serde_json::to_value(stamped)?;
+        value["projectKey"] =
+            serde_json::Value::String(self.homes.project_key(&meta.workspace_id)?);
+        crate::config::save_private(&path, serde_json::to_string_pretty(&value)?.as_bytes())
     }
 
     pub fn load_meta(&self, workspace_id: &str, session_id: &str) -> Result<SessionMeta> {
@@ -528,6 +613,10 @@ impl Store {
         let header: MetaHeader = serde_json::from_str(&raw)
             .with_context(|| format!("reading the header of {}", path.display()))?;
         if header.format > SESSION_FORMAT {
+            let expected = self.homes.project_key(workspace_id)?;
+            if !header.project_key.is_empty() && header.project_key != expected {
+                anyhow::bail!("session {session_id} belongs to another workspace");
+            }
             return Ok(SessionMeta::unopenable(
                 session_id.to_string(),
                 workspace_id.to_string(),
@@ -536,6 +625,10 @@ impl Store {
             ));
         }
         let mut meta: SessionMeta = serde_json::from_str(&raw)?;
+        let expected = self.homes.project_key(workspace_id)?;
+        if !header.project_key.is_empty() && header.project_key != expected {
+            anyhow::bail!("session {session_id} belongs to another workspace");
+        }
         meta.workspace_id = workspace_id.to_string();
         meta.format = header.format;
         Ok(meta)
@@ -552,7 +645,7 @@ impl Store {
     /// list, even though this build cannot show what is inside them.
     pub fn list_meta(&self) -> Result<Vec<SessionMeta>> {
         let mut out = Vec::new();
-        for (workspace_id, sessions) in self.homes.all_sessions_dirs() {
+        for (workspaces, sessions) in self.homes.all_sessions_dirs() {
             let Ok(entries) = fs::read_dir(&sessions) else {
                 continue;
             };
@@ -561,6 +654,22 @@ impl Store {
                 if !entry.path().join("meta.json").exists() {
                     continue;
                 }
+                let project_key = fs::read_to_string(entry.path().join("meta.json"))
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<MetaHeader>(&raw).ok())
+                    .map(|header| header.project_key)
+                    .unwrap_or_default();
+                let owner = if project_key.is_empty() {
+                    workspaces.first().map(|(id, _)| id.clone())
+                } else {
+                    workspaces
+                        .iter()
+                        .find(|(_, candidate)| candidate == &project_key)
+                        .map(|(id, _)| id.clone())
+                };
+                let Some(workspace_id) = owner else {
+                    continue;
+                };
                 match self.load_meta(&workspace_id, &session_id) {
                     Ok(meta) => out.push(meta),
                     Err(error) => tracing::warn!(
@@ -1055,4 +1164,62 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod project_home_tests {
+    use super::*;
+
+    fn meta(id: &str, workspace_id: &str, cwd: &Path) -> SessionMeta {
+        SessionMeta {
+            id: id.into(),
+            workspace_id: workspace_id.into(),
+            format: SESSION_FORMAT,
+            agent_id: "genet".into(),
+            title: Some(id.into()),
+            cwd: cwd.to_path_buf(),
+            model_id: None,
+            mode_id: None,
+            effort_id: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            archived: false,
+            persist: None,
+            pending_permission: None,
+        }
+    }
+
+    #[test]
+    fn project_views_share_one_physical_lock_but_not_session_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let homes = WorkspaceHomes::default();
+        homes.attach_project("w_folder", "folder", root.path());
+        homes.attach_project("w_workspace", "workspace:suite", root.path());
+        let store = Store::new(homes.clone());
+
+        store
+            .save_meta(&meta("s_folder", "w_folder", root.path()))
+            .unwrap();
+        store
+            .save_meta(&meta("s_workspace", "w_workspace", root.path()))
+            .unwrap();
+
+        let listed = store.list_meta().unwrap();
+        assert_eq!(listed.len(), 2, "the shared directory is scanned once");
+        assert!(listed.iter().any(|meta| meta.workspace_id == "w_folder"));
+        assert!(listed.iter().any(|meta| meta.workspace_id == "w_workspace"));
+        assert!(store.load_meta("w_workspace", "s_folder").is_err());
+
+        homes.detach("w_folder");
+        let listed = store.list_meta().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].workspace_id, "w_workspace");
+        assert!(root
+            .path()
+            .join(".genethub/sessions/s_folder/meta.json")
+            .is_file());
+
+        homes.attach_project("w_folder", "folder", root.path());
+        assert_eq!(store.list_meta().unwrap().len(), 2);
+    }
 }

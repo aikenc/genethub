@@ -77,6 +77,23 @@ describe("an agent's reply", () => {
     expect(container.innerHTML).not.toContain("127.0.0.1");
   });
 
+  it("rewrites workspace-relative links using the current Preview binding", () => {
+    render(
+      <Markdown
+        text="见 [报告](reports/a.md)"
+        artifact={{
+          deviceHandle: "m_device",
+          workspaceHandle: "w_docs",
+          folders: [{ root: "/srv/product", rootHandle: "r_product" }],
+        }}
+      />,
+    );
+    expect(screen.getByRole("link", { name: "报告" })).toHaveAttribute(
+      "href",
+      "http://localhost:3000/assets/preview/v2/m_device/w_docs/r_product/reports/a.md",
+    );
+  });
+
   it("puts a code block behind a copy button rather than in the prose", async () => {
     const write = vi.fn(async () => {});
     // Only the clipboard: replacing the whole of `navigator` would drop every
