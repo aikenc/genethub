@@ -229,6 +229,19 @@ describe("the v3 peer connection", () => {
     await waitFor(() => client.connectionState === "ready");
     client.close();
   });
+
+  it("settles a fake peer reply that races with closing the carrier", async () => {
+    const { client, socket } = await connected();
+    const pending = client.call({ type: "agent.list" });
+    await waitFor(() => socket.sent.some((message) => message.type === "agent.list"));
+
+    socket.reply(socket.lastOf("agent.list").id, { type: "agents", data: [] });
+    client.close();
+
+    await pending.catch(() => undefined);
+    await settle();
+    expect(socket.closed).toBe(true);
+  });
 });
 
 describe("RPC exchanges are independent logical streams", () => {
