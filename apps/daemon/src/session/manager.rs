@@ -300,7 +300,26 @@ impl SessionManager {
             effort_id: source_meta.effort_id.clone(),
         });
         let same_agent = target.agent_id == source_meta.agent_id;
-        let native = same_agent && source_adapter.capabilities().fork && checkpoint.is_some();
+        let native_candidate =
+            same_agent && source_adapter.capabilities().fork && checkpoint.is_some();
+        let native = if native_candidate {
+            match self
+                .store
+                .claim_session(&source_meta.workspace_id, &source_meta.id)
+            {
+                Ok(()) => true,
+                Err(error)
+                    if error
+                        .downcast_ref::<super::store::SessionWriteContended>()
+                        .is_some() =>
+                {
+                    false
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            false
+        };
         if !explicit_target && !source_adapter.capabilities().fork {
             anyhow::bail!(
                 "the {} agent does not support forking",
@@ -3660,6 +3679,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cross_channel_fork_reconstructs_when_the_source_session_is_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let source = holder
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let inherited = completed_turn(Some("native-checkpoint"));
+        holder
+            .store
+            .append_chat_items("w1", &source.id, &inherited)
+            .unwrap();
+
+        let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let other = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: starts.clone(),
+            })])),
+            16,
+        );
+        other.list(None, false).await.unwrap();
+        let fork = other
+            .fork(&source.id, "source-turn", None, &ProviderMap::new())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fork.lineage.unwrap().method,
+            ForkMethod::ReconstructedContext
+        );
+        assert!(other.store.load_seed("w1", &fork.id).unwrap().is_some());
+        assert!(starts.lock().unwrap().is_empty());
+        holder
+            .store
+            .save_meta(&holder.store.load_meta("w1", &source.id).unwrap())
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn explicit_same_agent_without_a_checkpoint_reconstructs_but_legacy_fork_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = SessionManager::new(
@@ -6151,20 +6229,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_one_build_at_a_time_writes_a_project() {
+    async fn builds_share_a_project_but_only_one_writes_each_session() {
         let workspace = tempfile::tempdir().unwrap();
         let holder = manager(workspace.path());
         holder.store.save_meta(&meta()).unwrap();
 
         let other = manager(workspace.path());
+        let mut independent = meta();
+        independent.id = "s2".into();
+        independent.title = Some("independent".into());
+        other.store.save_meta(&independent).unwrap();
+        assert!(
+            workspace
+                .path()
+                .join(".genethub/sessions/s2/meta.json")
+                .is_file(),
+            "another channel could not create or write an independent session"
+        );
+
         let refused = other.store.save_meta(&meta()).unwrap_err().to_string();
         assert!(
             refused.contains(crate::channel::PRODUCT),
-            "the second build must name who is holding the project: {refused}"
+            "the second build must name who is writing the session: {refused}"
+        );
+        assert!(
+            refused.contains("Fork from a completed turn"),
+            "the refusal gives no continuation path: {refused}"
         );
         assert_eq!(
             other.list(None, false).await.unwrap().len(),
-            1,
+            2,
             "losing the write lock must not hide the conversations"
         );
 
@@ -6181,6 +6275,38 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             resumed = other.store.save_meta(&meta());
         }
-        resumed.expect("the second build had to be restarted to write again");
+        resumed.expect("the second build had to be restarted to write the session again");
+    }
+
+    #[tokio::test]
+    async fn current_builds_do_not_double_write_with_a_legacy_workspace_owner() {
+        let workspace = tempfile::tempdir().unwrap();
+        let home = workspace.path().join(".genethub");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("owner"), "GeneHub Legacy\n").unwrap();
+        let legacy = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(home.join("owner.lock"))
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&legacy).unwrap();
+
+        let current = manager(workspace.path());
+        let refused = current.store.save_meta(&meta()).unwrap_err().to_string();
+        assert!(refused.contains("GeneHub Legacy"), "{refused}");
+        assert!(refused.contains("upgrade"), "{refused}");
+
+        drop(legacy);
+        let mut resumed = current.store.save_meta(&meta());
+        for _ in 0..40 {
+            if resumed.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            resumed = current.store.save_meta(&meta());
+        }
+        resumed.expect("the current build had to restart after the legacy owner exited");
     }
 }
