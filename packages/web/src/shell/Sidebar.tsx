@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { Endpoint, Host, Target } from "../host";
 import { useWorkbench } from "../session/store";
+import { ImportSessionsDialog } from "../session/ImportSessionsDialog";
 import { OpenProject } from "../workspace/OpenProject";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import { SessionStatusIcon } from "./SessionStatusIcon";
@@ -63,6 +64,7 @@ export function Sidebar({
   const [collapsed, setCollapsed] = useState<string[]>(() => recall(COLLAPSED_KEY, []));
   const [query, setQuery] = useState("");
   const [recentOpen, setRecentOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [readAt, setReadAt] = useState<Record<string, number>>(() => recall(READ_KEY, {}));
   const readStateInitialized = useRef(recall(READ_INITIALIZED_KEY, false));
 
@@ -189,6 +191,15 @@ export function Sidebar({
             <span aria-hidden>+</span>
             新建会话
           </button>
+          <button
+            type="button"
+            className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-line px-3 text-sm text-muted hover:border-accent/50 hover:bg-sidebar-hover hover:text-fg disabled:opacity-40 md:min-h-0 md:rounded-md md:py-1.5 md:text-xs"
+            disabled={!workspace || connection !== "ready"}
+            onClick={() => setImportOpen(true)}
+          >
+            <span aria-hidden>⇩</span>
+            导入历史
+          </button>
           {sessions.length > 0 ? (
             <button
               type="button"
@@ -287,6 +298,15 @@ export function Sidebar({
           <StatusDot connection={connection} />
         </div>
       </aside>
+      {importOpen && workspace ? (
+        <ImportSessionsDialog
+          workspaceId={workspace.id}
+          onClose={() => {
+            setImportOpen(false);
+            onNavigate();
+          }}
+        />
+      ) : null}
 
       {recentOpen ? (
         <RecentSessionsDialog

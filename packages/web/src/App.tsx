@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { HistoryCoverage } from "@genehub/proto";
 
 import { ChangesPanel } from "./changes/ChangesPanel";
 import { claimMachine, deviceName } from "./devices/claim";
@@ -150,6 +151,7 @@ export function App({
   const draft = workbench.draft;
   const agentId = session?.agentId ?? draft?.agentId ?? null;
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
+  const importedReadOnly = session?.imported?.continuation === "readOnly";
   const composing = Boolean(workbench.activeSessionId || draft);
   const composerSpace = `calc(${composerHeight}px + var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)) + 0.5rem)`;
 
@@ -432,6 +434,23 @@ export function App({
               </button>
             </p>
           ) : null}
+          {session?.imported ? (
+            <div className="shrink-0 border-b border-line bg-raised px-3 py-1.5 text-xs text-muted">
+              <span>
+                已从 {session.imported.agentId} 导入 · {session.imported.continuation === "native" ? "可继续对话" : "只读历史"}
+              </span>
+              {session.imported.warnings.map((warning) => (
+                <span key={warning} className="ml-2 text-faint">
+                  {warning}
+                </span>
+              ))}
+              {session.imported.coverage ? (
+                <span className="ml-2 text-faint">
+                  {importCoverageLabel(session.imported.coverage)}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
 
           <div className="flex min-h-0 flex-1">
             <section className="relative flex min-w-0 flex-1 flex-col">
@@ -467,6 +486,12 @@ export function App({
                     ) : null}
                     <Composer
                       phase={phase}
+                      disabled={importedReadOnly}
+                      disabledReason={
+                        importedReadOnly
+                          ? "这是只读导入历史：原 Agent 没有提供可恢复会话。"
+                          : undefined
+                      }
                       agents={workbench.agents}
                       agentId={agentId}
                       modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}
@@ -584,6 +609,20 @@ export function App({
       ) : null}
     </div>
   );
+}
+
+function importCoverageLabel(coverage: HistoryCoverage): string {
+  if (coverage.omittedItemCount === 0) {
+    return `历史完整（${coverage.retainedItemCount} 条）`;
+  }
+  const source = coverage.sourceItemCount ?? coverage.retainedItemCount + coverage.omittedItemCount;
+  const recovery = {
+    genehub: "可在 GeneHub 继续检索",
+    external: "需从原 Agent 继续检索",
+    nativeOnly: "仅原 Agent 原生会话可找回",
+    unavailable: "省略部分不可找回",
+  }[coverage.retrieval];
+  return `保留 ${coverage.retainedItemCount}/${source} 条，省略 ${coverage.omittedItemCount} 条 · ${recovery}`;
 }
 
 function dialOf(endpoint: Endpoint): ProtocolDial {

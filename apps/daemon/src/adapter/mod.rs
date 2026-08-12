@@ -20,7 +20,8 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use genehub_proto::{
-    Attachment, Capabilities, Catalog, PermissionOutcome, ProbeState, SessionEvent,
+    Attachment, Capabilities, Catalog, ImportContinuation, PermissionOutcome, ProbeState,
+    SessionEvent, TimelineItem,
 };
 use tokio::sync::{broadcast, Mutex};
 
@@ -69,6 +70,32 @@ pub struct PromptInput {
     pub attachments: Vec<Attachment>,
 }
 
+/// Provider-owned identity and lightweight display data discovered without
+/// reading an external session's full transcript.
+#[derive(Debug, Clone)]
+pub struct ImportCandidate {
+    /// Opaque outside the adapter boundary. The manager replaces it with an
+    /// expiring candidate id before anything reaches a client.
+    pub source_id: String,
+    pub title: String,
+    pub preview: String,
+    pub updated_at_ms: i64,
+    pub continuation: ImportContinuation,
+}
+
+/// The selected external transcript after normalization into GeneHub's own
+/// timeline. Only this full object is proportional to history size.
+#[derive(Debug, Clone)]
+pub struct ImportedHistory {
+    pub title: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub items: Vec<TimelineItem>,
+    pub persist: Option<PersistHandle>,
+    pub continuation: ImportContinuation,
+    pub warnings: Vec<String>,
+}
+
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
     fn id(&self) -> &str;
@@ -88,6 +115,26 @@ pub trait AgentAdapter: Send + Sync {
     async fn catalog(&self, providers: &ProviderMap) -> Catalog;
 
     async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>>;
+
+    /// `None` means this Agent does not publish an import surface. Listing is
+    /// deliberately lightweight; full history belongs only in `import_history`.
+    async fn list_import_candidates(
+        &self,
+        _cwd: &std::path::Path,
+        _limit: usize,
+    ) -> Result<Option<Vec<ImportCandidate>>> {
+        Ok(None)
+    }
+
+    async fn import_history(
+        &self,
+        _cwd: &std::path::Path,
+        _source_id: &str,
+    ) -> Result<ImportedHistory> {
+        Err(anyhow::anyhow!(
+            "this agent does not support session import"
+        ))
+    }
 }
 
 pub type ProviderMap = std::collections::BTreeMap<String, ProviderConfig>;

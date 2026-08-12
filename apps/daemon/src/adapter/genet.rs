@@ -12,8 +12,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, ItemDelta, ModelInfo, PermissionOutcome, ProbeState, SessionEvent,
-    TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    Capabilities, Catalog, CommandInfo, ItemDelta, ModelInfo, PermissionOutcome, ProbeState,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -148,8 +148,22 @@ impl AgentAdapter for GenetAdapter {
             })
             .collect();
         Catalog {
-            // Our own agent has no slash commands to offer.
-            commands: Vec::new(),
+            commands: vec![
+                CommandInfo {
+                    name: "skill:genehub-session-history".into(),
+                    description: Some(
+                        "Load the deterministic GeneHub session-history analysis SOP".into(),
+                    ),
+                    argument_hint: Some("[analysis goal]".into()),
+                },
+                CommandInfo {
+                    name: "compact".into(),
+                    description: Some(
+                        "Compact this session in a private, non-recorded analysis run".into(),
+                    ),
+                    argument_hint: None,
+                },
+            ],
             default_model: models.first().map(|m| m.id.clone()),
             models,
             modes: Vec::new(),
@@ -175,12 +189,18 @@ impl AgentAdapter for GenetAdapter {
             .arg("rpc")
             .arg("--session")
             .arg(&session_file)
+            .arg("--genehub-session-id")
+            .arg(&config.session_id)
             .current_dir(&config.cwd)
             .env(crate::channel::ENV_AGENT_HOME, &home)
+            .env("GENEHUB_SESSION_ID", &config.session_id)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Ok(cli) = std::env::current_exe() {
+            command.env("GENEHUB_CLI", cli);
+        }
         super::without_a_window(&mut command);
 
         // Under the daemon, `models.json` is the only source of models. The
@@ -295,14 +315,19 @@ impl AgentSession for GenetSession {
         }
         // A pipe that is already closed fails with "Broken pipe", which says
         // nothing about why the agent is gone. What it said on the way out does.
-        if let Err(broken) = self
-            .command(json!({
+        let command = if input.text.trim() == "/compact" && input.attachments.is_empty() {
+            json!({
+                "id": turn_id,
+                "type": "compact",
+            })
+        } else {
+            json!({
                 "id": turn_id,
                 "type": "prompt",
                 "message": input.text,
-            }))
-            .await
-        {
+            })
+        };
+        if let Err(broken) = self.command(command).await {
             let why = super::stopped(crate::channel::AGENT_LABEL, &self.child, &self.said).await;
             tracing::warn!("{why} (writing the prompt failed: {broken})");
             self.turn.lock().await.id = None;

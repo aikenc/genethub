@@ -79,10 +79,10 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, InteractionOption, InteractionQuestion, ItemDelta, ModeInfo, ModelInfo,
-    PermissionOption, PermissionOptionKind, PermissionOutcome, PermissionRequest,
-    PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, TodoEntry, TodoStatus,
-    ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    Capabilities, Catalog, ImportContinuation, InteractionOption, InteractionQuestion, ItemDelta,
+    ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome,
+    PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, TodoEntry,
+    TodoStatus, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -91,8 +91,8 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
 use super::{
-    find_executable, AgentAdapter, AgentSession, Chatter, PersistHandle, PromptInput, ProviderMap,
-    SessionConfig,
+    find_executable, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
+    PersistHandle, PromptInput, ProviderMap, SessionConfig,
 };
 
 const BINARY: &str = "codex";
@@ -426,6 +426,221 @@ impl AgentAdapter for CodexAdapter {
         }
         Ok(Box::new(session))
     }
+
+    async fn list_import_candidates(
+        &self,
+        cwd: &Path,
+        limit: usize,
+    ) -> Result<Option<Vec<ImportCandidate>>> {
+        let program = self
+            .program()
+            .ok_or_else(|| anyhow!("codex is not installed"))?;
+        let listed = import_rpc(
+            &program,
+            cwd,
+            "thread/list",
+            json!({
+                "cwd": cwd,
+                "limit": limit.clamp(1, 100),
+                "sortKey": "updated_at",
+                "sortDirection": "desc",
+            }),
+        )
+        .await?;
+        let candidates = listed
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|thread| {
+                let source_id = thread.get("id")?.as_str()?.to_string();
+                let preview = thread
+                    .get("preview")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let title = thread
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| preview.lines().next().unwrap_or("Codex 会话"))
+                    .to_string();
+                Some(ImportCandidate {
+                    source_id,
+                    title: clipped(&title, 120),
+                    preview: clipped(&preview, 240),
+                    updated_at_ms: thread
+                        .get("updatedAt")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default()
+                        .saturating_mul(1000),
+                    continuation: ImportContinuation::Native,
+                })
+            })
+            .collect();
+        Ok(Some(candidates))
+    }
+
+    async fn import_history(&self, cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
+        let program = self
+            .program()
+            .ok_or_else(|| anyhow!("codex is not installed"))?;
+        let read = import_rpc(
+            &program,
+            cwd,
+            "thread/read",
+            json!({ "threadId": source_id, "includeTurns": true }),
+        )
+        .await?;
+        let thread = read
+            .get("thread")
+            .ok_or_else(|| anyhow!("thread/read did not return a thread"))?;
+        let mut items = Vec::new();
+        for turn in thread
+            .get("turns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            for item in turn
+                .get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let id = format!("import-{}", uuid::Uuid::new_v4().simple());
+                match item.get("type").and_then(Value::as_str) {
+                    Some("userMessage") => {
+                        let text = item
+                            .get("content")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|part| {
+                                (part.get("type").and_then(Value::as_str) == Some("text"))
+                                    .then(|| part.get("text").and_then(Value::as_str))
+                                    .flatten()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !text.is_empty() {
+                            items.push(TimelineItem::UserMessage {
+                                id,
+                                text,
+                                attachments: Vec::new(),
+                            });
+                        }
+                    }
+                    Some("agentMessage") => {
+                        if let Some(text) = item.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                items.push(TimelineItem::AssistantMessage {
+                                    id,
+                                    text: text.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let preview = thread
+            .get("preview")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        Ok(ImportedHistory {
+            title: thread
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| preview.lines().next())
+                .map(|value| clipped(value, 120)),
+            created_at_ms: thread
+                .get("createdAt")
+                .and_then(Value::as_i64)
+                .unwrap_or_default()
+                .saturating_mul(1000),
+            updated_at_ms: thread
+                .get("updatedAt")
+                .and_then(Value::as_i64)
+                .unwrap_or_default()
+                .saturating_mul(1000),
+            items,
+            persist: Some(PersistHandle {
+                agent_id: "codex".into(),
+                value: json!({ "threadId": source_id }),
+            }),
+            continuation: ImportContinuation::Native,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+/// One bounded app-server query used by import discovery/read. The process is
+/// intentionally throwaway so opening the import dialog cannot interfere with
+/// a live conversation's notification stream.
+async fn import_rpc(program: &Path, cwd: &Path, method: &str, params: Value) -> Result<Value> {
+    let mut command = Command::new(program);
+    command
+        .args(app_server_args())
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    super::without_a_window(&mut command);
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("spawning {} for session import", program.display()))?;
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let answer = tokio::time::timeout(CALL_TIMEOUT, async {
+        let mut lines = BufReader::new(stdout).lines();
+        write_json_line(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "clientInfo": {
+                    "name": CLIENT_NAME,
+                    "title": crate::channel::PRODUCT,
+                    "version": env!("CARGO_PKG_VERSION"),
+                } },
+            }),
+        )
+        .await?;
+        answered(&mut lines, 1)
+            .await
+            .ok_or_else(|| anyhow!("codex did not answer initialize"))?;
+        write_json_line(
+            &mut stdin,
+            &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+        )
+        .await?;
+        write_json_line(
+            &mut stdin,
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params }),
+        )
+        .await?;
+        answered(&mut lines, 2)
+            .await
+            .ok_or_else(|| anyhow!("codex did not answer {method}"))
+    })
+    .await
+    .map_err(|_| anyhow!("codex timed out while handling {method}"))?;
+    super::kill_tree(&mut child).await;
+    answer
+}
+
+fn clipped(value: &str, limit: usize) -> String {
+    let mut text: String = value.trim().chars().take(limit).collect();
+    if value.trim().chars().count() > limit {
+        text.push('…');
+    }
+    text
 }
 
 /// Runs one handshake against a throwaway process and takes its answers away.

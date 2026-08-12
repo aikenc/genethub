@@ -259,6 +259,11 @@ pub fn required(request: &Request) -> Capability {
         | Request::AgentRefresh
         | Request::SessionList { .. }
         | Request::SessionGet { .. }
+        | Request::SessionInspect { .. }
+        | Request::SessionNarrative { .. }
+        | Request::SessionRounds { .. }
+        | Request::SessionContext { .. }
+        | Request::SessionImportList { .. }
         | Request::RoundTrunkList { .. }
         | Request::RoundTrunkGet { .. }
         | Request::BlobGet { .. }
@@ -280,6 +285,7 @@ pub fn required(request: &Request) -> Capability {
         Request::SessionCreate { .. }
         | Request::SessionSend { .. }
         | Request::SessionFork { .. }
+        | Request::SessionImport { .. }
         | Request::SessionInterrupt { .. }
         | Request::SessionClose { .. }
         | Request::SessionArchive { .. }
