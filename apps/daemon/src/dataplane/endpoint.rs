@@ -942,8 +942,14 @@ async fn handle_events(stream: &mut ServerStream, services: &PeerServices) -> Re
 fn request_workspace(request: &Request) -> Option<&str> {
     match request {
         Request::SessionCreate { workspace_id, .. }
+        | Request::SessionImportList { workspace_id, .. }
+        | Request::SessionImport { workspace_id, .. }
         | Request::FileTree { workspace_id, .. }
         | Request::FileWrite { workspace_id, .. }
+        | Request::FileMkdir { workspace_id, .. }
+        | Request::FileCopy { workspace_id, .. }
+        | Request::FileMove { workspace_id, .. }
+        | Request::FileDelete { workspace_id, .. }
         | Request::GitStatus { workspace_id }
         | Request::GitDiff { workspace_id, .. }
         | Request::GitCommit { workspace_id, .. }

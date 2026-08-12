@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use genehub_proto::{
-    HelloResult, HubTicket, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply, Request,
-    Confinement, SequencedEvent, ServerFrame, ShellFrame, ShellRunRequest,
+    Confinement, HelloResult, HubTicket, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply,
+    Request, SequencedEvent, ServerFrame, ShellFrame, ShellRunRequest,
 };
 use genet_daemon::config::Paths;
 use genet_daemon::dataplane::client::ClientEndpoint;

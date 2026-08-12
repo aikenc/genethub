@@ -111,7 +111,8 @@ DataEndpoint method 只有四个：
 | 设备 | `device.list` / `invite` / `claim` / `revoke` / `remoteAttach` / `remoteDetach` |
 | 控制面 | `hub.status` / `pair` / `trial` / `claimLink` / `unpair`（可选，见 [desktop-client.md](./desktop-client.md) §8） |
 | 工作区 | `workspace.list` / `open` / `create` |
-| 文件 | `file.tree` / `file.write`；用户可见读取只走 `asset.preview`，没有 `file.read` |
+| 文件 | `file.tree` / `file.write` / `file.mkdir` / `file.copy` / `file.move` / `file.delete`；用户可见读取只走 `asset.preview`，没有 `file.read` |
+| 目录选择 | `directory.list`（`path: ""` 为机器根/盘符）/ `directory.mkdir`（选夹时新建） |
 | Git | `git.status` / `git.diff` / `git.commit` |
 | 终端 | `pty.open` / `write` / `resize` / `close`（输出走推送） |
 | 更新 | `update.check` / `update.download` / `update.downloadState` / `update.dismiss`（见 §7） |

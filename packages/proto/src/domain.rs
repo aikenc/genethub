@@ -150,6 +150,270 @@ pub struct WorkspaceInfo {
     pub workspace_file: Option<String>,
 }
 
+/// How a child session obtained the context that precedes its first new turn.
+///
+/// Native checkpoints preserve the Agent's own thread. Reconstructed context
+/// is deliberately named differently: it is a bounded, provider-agnostic view
+/// of GeneHub's visible history, not a claim that hidden Agent state moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum ForkMethod {
+    NativeCheckpoint,
+    ReconstructedContext,
+}
+
+/// What a bounded reconstructed fork carried into its target Agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ForkContextStats {
+    pub source_item_count: u32,
+    pub included_item_count: u32,
+    pub omitted_item_count: u32,
+    #[ts(type = "number")]
+    pub estimated_tokens: u64,
+    #[ts(type = "number")]
+    pub token_budget: u64,
+    pub digest: String,
+}
+
+/// Durable ancestry for a forked conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionLineage {
+    pub source_session_id: String,
+    pub source_turn_id: String,
+    pub source_agent_id: String,
+    pub method: ForkMethod,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub context: Option<ForkContextStats>,
+}
+
+/// The explicit destination chosen in the Fork UI.
+///
+/// Omitting this object on the RPC keeps the native Fork semantics of the
+/// current Agent. A client sends it only when the user explicitly switches
+/// Agent, which is the opt-in boundary for reconstructed context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ForkTarget {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mode_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub effort_id: Option<String>,
+}
+
+/// Whether an imported conversation can keep talking through its original
+/// Agent thread, or is a durable GeneHub transcript only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum ImportContinuation {
+    Native,
+    ReadOnly,
+}
+
+/// One lightweight external conversation returned by the discovery pass.
+///
+/// `candidate_id` is an expiring daemon-owned token. Provider handles, source
+/// paths and storage details never cross the RPC boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionImportCandidate {
+    pub candidate_id: String,
+    pub agent_id: String,
+    pub title: String,
+    pub preview: String,
+    #[ts(type = "number")]
+    pub updated_at_ms: i64,
+    pub continuation: ImportContinuation,
+}
+
+/// Discovery is isolated by Agent: one unavailable or incompatible CLI does
+/// not hide importable conversations reported by the others.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionImportSource {
+    pub agent_id: String,
+    pub label: String,
+    pub supported: bool,
+    pub candidates: Vec<SessionImportCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// Result of the lightweight discovery pass. Selecting one candidate performs
+/// the separate full-history import, so opening this dialog stays bounded even
+/// when an Agent owns years of sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionImportListing {
+    pub sources: Vec<SessionImportSource>,
+    #[ts(type = "number")]
+    pub expires_at_ms: i64,
+    pub filtered_duplicates: u32,
+}
+
+/// Durable, public import origin. The provider-specific source key remains in
+/// daemon metadata and is used only for duplicate detection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionImportOrigin {
+    pub agent_id: String,
+    pub continuation: ImportContinuation,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// What GeneHub retained from the provider transcript and whether omitted
+    /// history can be recovered. Older imports have no structured answer and
+    /// keep this absent rather than pretending their warning prose was parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub coverage: Option<HistoryCoverage>,
+}
+
+/// Whether text outside the retained GeneHub window can be read again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum RetrievalCapability {
+    /// The referenced history is stored in GeneHub and available through the
+    /// bounded session/round/trunk/blob query surface.
+    Genehub,
+    /// The daemon has a durable provider handle that can page the source.
+    External,
+    /// The provider can resume its own thread, but GeneHub cannot read the
+    /// omitted portion for another Agent.
+    NativeOnly,
+    /// The omitted portion is not currently recoverable.
+    Unavailable,
+}
+
+/// Honest coverage for a full, clipped or imported history view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct HistoryCoverage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub source_item_count: Option<u64>,
+    #[ts(type = "number")]
+    pub retained_item_count: u64,
+    #[ts(type = "number")]
+    pub omitted_item_count: u64,
+    pub retrieval: RetrievalCapability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<String>,
+}
+
+/// Stable identity and waterline shared by every read-only session page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionReadSource {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub through_round_id: Option<String>,
+    pub digest: String,
+    pub untrusted: bool,
+}
+
+/// A small structural entry point. It deliberately contains no free-form
+/// transcript text; callers choose a bounded narrative page explicitly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionInspection {
+    pub summary: SessionSummary,
+    pub source: SessionReadSource,
+    #[ts(type = "number")]
+    pub narrative_item_count: u64,
+    #[ts(type = "number")]
+    pub round_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub latest_round_id: Option<String>,
+    pub coverage: HistoryCoverage,
+    pub layers: Vec<String>,
+}
+
+/// A recent-first page of narrative items, returned in chronological order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionNarrativePage {
+    pub source: SessionReadSource,
+    pub items: Vec<crate::timeline::TimelineItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub next_cursor: Option<String>,
+}
+
+/// A recent-first page of round summaries, returned in chronological order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionRoundPage {
+    pub source: SessionReadSource,
+    pub rounds: Vec<RoundSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub next_cursor: Option<String>,
+}
+
+/// A durable address carried by compacted context instead of copied detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionSourceRef {
+    pub id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub round_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub digest: Option<String>,
+}
+
+/// Deterministic, model-free context projection used directly by Agents and
+/// as the fallback for reconstructed forks and built-in compaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionContext {
+    pub source: SessionReadSource,
+    pub coverage: HistoryCoverage,
+    pub text: String,
+    pub references: Vec<SessionSourceRef>,
+    pub retrieval_commands: Vec<String>,
+    #[ts(type = "number")]
+    pub estimated_tokens: u64,
+    #[ts(type = "number")]
+    pub token_budget: u64,
+    pub digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -181,6 +445,15 @@ pub struct SessionSummary {
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsupported: Option<UnsupportedFormat>,
+    /// Present only for a fork. Ordinary and imported sessions can add their
+    /// own origin variants later without overloading the Agent binding.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<SessionLineage>,
+    /// Present only for a conversation imported from an Agent's native store.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported: Option<SessionImportOrigin>,
 }
 
 /// A session written by a newer build than this one.

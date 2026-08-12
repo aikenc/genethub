@@ -1,6 +1,7 @@
 //! Which agents exist on this machine, and what they can do.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -12,7 +13,7 @@ use super::claude::ClaudeAdapter;
 use super::codex::CodexAdapter;
 use super::genet::GenetAdapter;
 use super::opencode::OpenCodeAdapter;
-use super::{ProviderMap, SharedAdapter};
+use super::{ImportCandidate, ImportedHistory, ProviderMap, SharedAdapter};
 use crate::config::CustomAgent;
 
 pub struct Registry {
@@ -155,6 +156,32 @@ impl Registry {
             .into_iter()
             .filter(|agent| matches!(agent.probe, ProbeState::Ready))
             .collect()
+    }
+
+    /// Discovers external histories in parallel. Each result retains its own
+    /// error so one broken CLI cannot erase every other Agent's import entry.
+    pub async fn import_candidates(
+        &self,
+        cwd: &Path,
+        limit: usize,
+    ) -> Vec<(String, String, Result<Option<Vec<ImportCandidate>>>)> {
+        futures_util::future::join_all(self.adapters.iter().map(|adapter| async move {
+            (
+                adapter.id().to_string(),
+                adapter.label().to_string(),
+                adapter.list_import_candidates(cwd, limit).await,
+            )
+        }))
+        .await
+    }
+
+    pub async fn import_history(
+        &self,
+        agent_id: &str,
+        cwd: &Path,
+        source_id: &str,
+    ) -> Result<ImportedHistory> {
+        self.require(agent_id)?.import_history(cwd, source_id).await
     }
 }
 

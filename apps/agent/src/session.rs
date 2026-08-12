@@ -92,6 +92,25 @@ impl Session {
         self.append_entry("thinking_level_change", json!({ "thinkingLevel": level }));
     }
 
+    /// Replaces provider context with a cited summary while preserving the
+    /// append-only audit trail. Reopening the file replays the same reset at
+    /// this entry; the private analysis session that produced it is never
+    /// written here.
+    pub fn replace_with_compaction(&mut self, summary: String) {
+        let message = Message::user(format!(
+            "<genehub-compacted-context>\n{summary}\n</genehub-compacted-context>"
+        ));
+        self.messages.clear();
+        self.messages.push(message.clone());
+        self.append_entry(
+            "compaction",
+            json!({
+                "summary": summary,
+                "message": serde_json::to_value(message).unwrap_or(Value::Null),
+            }),
+        );
+    }
+
     fn append_entry(&mut self, kind: &str, extra: Value) {
         let id = short_id();
         let mut entry = json!({
@@ -162,6 +181,23 @@ impl Session {
                             // stay on disk but out of our context.
                             Err(_) => continue,
                         }
+                    }
+                }
+                Some("compaction") => {
+                    let message = entry
+                        .get("message")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<Message>(value).ok())
+                        .or_else(|| {
+                            entry.get("summary").and_then(Value::as_str).map(|summary| {
+                                Message::user(format!(
+                                    "<genehub-compacted-context>\n{summary}\n</genehub-compacted-context>"
+                                ))
+                            })
+                        });
+                    if let Some(message) = message {
+                        self.messages.clear();
+                        self.messages.push(message);
                     }
                 }
                 Some("session_info") => {
@@ -271,5 +307,26 @@ mod tests {
         session.append_message(Message::user("hello"));
         assert!(session.file.is_none());
         assert_eq!(session.messages.len(), 1);
+    }
+
+    #[test]
+    fn compaction_resets_context_and_survives_reopen() {
+        let dir = temp_dir("compaction");
+        let file = dir.join("s.jsonl");
+        let mut session = Session::open(file.clone(), dir.clone());
+        session.append_message(Message::user("old detail"));
+        session.replace_with_compaction("summary [source-ref id=\"ghref:item:s:i\"]".into());
+        assert_eq!(session.messages.len(), 1);
+
+        let reopened = Session::open(file.clone(), dir);
+        assert_eq!(reopened.messages.len(), 1);
+        assert!(matches!(
+            &reopened.messages[0],
+            Message::User { content, .. } if content.contains("ghref:item:s:i")
+        ));
+        assert!(std::fs::read_to_string(file)
+            .unwrap()
+            .lines()
+            .any(|line| line.contains("\"type\":\"compaction\"")));
     }
 }

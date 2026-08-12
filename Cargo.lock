@@ -970,6 +970,7 @@ name = "genet-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "fs2",
  "futures-util",

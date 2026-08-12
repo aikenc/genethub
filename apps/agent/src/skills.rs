@@ -8,6 +8,8 @@ use ignore::WalkBuilder;
 
 const MAX_NAME_LENGTH: usize = 64;
 const MAX_DESCRIPTION_LENGTH: usize = 1024;
+const BUILTIN_SESSION_HISTORY: &str =
+    include_str!("../builtin-skills/genehub-session-history/SKILL.md");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
@@ -20,6 +22,7 @@ pub struct Skill {
 
 /// Global then project locations; on a name collision the first one wins.
 pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
+    let builtin_dir = materialize_builtins(agent_dir);
     let mut skills: Vec<Skill> = Vec::new();
     let mut push = |found: Vec<Skill>| {
         for skill in found {
@@ -35,9 +38,47 @@ pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
     }
     push(load_dir(&cwd.join(".genehub").join("skills"), true));
     push(load_dir(&cwd.join(".agents").join("skills"), false));
+    if let Some(dir) = builtin_dir {
+        // Built-ins are guaranteed fallbacks. A user or project skill with the
+        // same name intentionally wins, which keeps the extension point real.
+        push(load_dir(&dir, false));
+    }
 
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
+}
+
+fn materialize_builtins(agent_dir: &Path) -> Option<PathBuf> {
+    let root = agent_dir.join("builtin-skills");
+    let skill_dir = root.join("genehub-session-history");
+    let target = skill_dir.join("SKILL.md");
+    if std::fs::read_to_string(&target).ok().as_deref() == Some(BUILTIN_SESSION_HISTORY) {
+        return Some(root);
+    }
+    if let Err(error) = std::fs::create_dir_all(&skill_dir) {
+        eprintln!("genet-agent: could not create built-in skill directory: {error}");
+        return None;
+    }
+    let temporary = skill_dir.join(format!(".SKILL.md.{}.tmp", std::process::id()));
+    let installed = std::fs::write(&temporary, BUILTIN_SESSION_HISTORY).and_then(|_| {
+        std::fs::rename(&temporary, &target).or_else(|first_error| {
+            // Windows does not replace an existing destination with rename.
+            // This fallback loses atomic replacement but keeps upgrades from
+            // silently dropping the built-in Skill on that platform.
+            if target.exists() {
+                std::fs::remove_file(&target)?;
+                std::fs::rename(&temporary, &target)
+            } else {
+                Err(first_error)
+            }
+        })
+    });
+    if let Err(error) = installed {
+        let _ = std::fs::remove_file(&temporary);
+        eprintln!("genet-agent: could not install built-in session skill: {error}");
+        return None;
+    }
+    Some(root)
 }
 
 /// Only our own skill directories treat loose `.md` files as skills; shared
@@ -336,5 +377,40 @@ mod tests {
             disable_model_invocation: true,
         }];
         assert!(format_for_prompt(&skills).is_empty());
+    }
+
+    #[test]
+    fn built_in_session_history_skill_is_materialized_and_discovered() {
+        let cwd = temp_dir("builtin-cwd");
+        let agent_dir = temp_dir("builtin-agent");
+        let skills = load(&cwd, &agent_dir);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "genehub-session-history")
+            .expect("built-in skill");
+        assert!(skill
+            .file_path
+            .starts_with(agent_dir.join("builtin-skills")));
+        assert!(std::fs::read_to_string(&skill.file_path)
+            .unwrap()
+            .contains("GENEHUB_SESSION_ID"));
+    }
+
+    #[test]
+    fn project_skill_can_override_the_built_in_fallback() {
+        let cwd = temp_dir("override-cwd");
+        let agent_dir = temp_dir("override-agent");
+        let override_path = write_skill(
+            &cwd.join(".agents").join("skills"),
+            "genehub-session-history",
+            "---\nname: genehub-session-history\ndescription: Project override\n---\n",
+        );
+        let skills = load(&cwd, &agent_dir);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "genehub-session-history")
+            .unwrap();
+        assert_eq!(skill.file_path, override_path);
+        assert_eq!(skill.description, "Project override");
     }
 }

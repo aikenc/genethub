@@ -1,12 +1,14 @@
 //! Agent-friendly, read-only CLI commands.
 //!
-//! Every dynamic answer in this module comes from the existing loopback daemon
-//! RPC. There is deliberately no device selector, remote transport, mutation,
-//! cwd inference, or remembered-target fallback in this slice.
+//! Every dynamic answer comes from the selected daemon RPC. The commands in
+//! this module are deterministic reads; target selection and remote transport
+//! stay centralized in `target` and `connect_selected`.
 
+use base64::Engine;
 use genehub_proto::{
-    ErrorCode, HelloResult, ProtocolError, Reply, Request, SessionSnapshot, SessionSummary,
-    WorkspaceInfo,
+    BlobRef, ErrorCode, HelloResult, ProtocolError, Reply, Request, RoundLayer, RoundTrunk,
+    SessionContext, SessionInspection, SessionNarrativePage, SessionRoundPage, SessionSnapshot,
+    SessionSummary, WorkspaceInfo,
 };
 use serde_json::{json, Value};
 
@@ -14,7 +16,7 @@ use crate::output::{self, CliFailure, CLI_SCHEMA};
 use crate::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use crate::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 21] = [
+const COMMAND_NAMES: [&str; 28] = [
     "schema",
     "context",
     "capabilities",
@@ -23,6 +25,13 @@ const COMMAND_NAMES: [&str; 21] = [
     "workspace.show",
     "session.list",
     "session.get",
+    "session.inspect",
+    "session.narrative",
+    "session.rounds",
+    "session.trunks",
+    "session.trunk",
+    "session.blob",
+    "session.context",
     "agent.list",
     "agent.run",
     "session.send",
@@ -74,13 +83,58 @@ fn mutates(name: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Query {
-    Schema { command: Option<String> },
+    Schema {
+        command: Option<String>,
+    },
     Context,
     Capabilities,
     WorkspaceList,
-    WorkspaceShow { workspace_id: String },
-    SessionList { workspace_id: Option<String> },
-    SessionGet { session_id: String },
+    WorkspaceShow {
+        workspace_id: String,
+    },
+    SessionList {
+        workspace_id: Option<String>,
+    },
+    SessionGet {
+        session_id: String,
+    },
+    SessionInspect {
+        session_id: String,
+        through_round_id: Option<String>,
+    },
+    SessionNarrative {
+        session_id: String,
+        through_round_id: Option<String>,
+        item_id: Option<String>,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    },
+    SessionRounds {
+        session_id: String,
+        through_round_id: Option<String>,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    },
+    SessionTrunks {
+        session_id: String,
+        round_id: String,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    },
+    SessionTrunk {
+        session_id: String,
+        round_id: String,
+        index: u32,
+    },
+    SessionBlob {
+        session_id: String,
+        reference: String,
+    },
+    SessionContext {
+        session_id: String,
+        through_round_id: Option<String>,
+        token_budget: Option<u64>,
+    },
 }
 
 pub async fn run(args: &[String], selection: &Selection) -> i32 {
@@ -158,7 +212,7 @@ fn parse_workspace(args: &[String]) -> Result<Query, CliFailure> {
 fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
     let Some(verb) = args.first().map(String::as_str) else {
         return Err(CliFailure::invalid_args(
-            "usage: genet session list [--workspace <id>] | genet session get <id>",
+            "usage: genet session <list|get|inspect|narrative|rounds|trunks|trunk|blob|context> ...",
         ));
     };
     match verb {
@@ -202,10 +256,174 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                 "session get needs exactly one session id",
             )),
         },
+        "inspect" => {
+            let (session_id, flags) = session_id_and_flags(args, "inspect")?;
+            reject_unknown_flags(&flags, &["--through-round"])?;
+            Ok(Query::SessionInspect {
+                session_id,
+                through_round_id: optional_string_flag(&flags, "--through-round")?,
+            })
+        }
+        "narrative" => {
+            let (session_id, flags) = session_id_and_flags(args, "narrative")?;
+            reject_unknown_flags(
+                &flags,
+                &["--through-round", "--item", "--cursor", "--limit"],
+            )?;
+            let item_id = optional_string_flag(&flags, "--item")?;
+            let cursor = optional_string_flag(&flags, "--cursor")?;
+            if item_id.is_some() && cursor.is_some() {
+                return Err(CliFailure::invalid_args(
+                    "--item and --cursor are mutually exclusive",
+                ));
+            }
+            Ok(Query::SessionNarrative {
+                session_id,
+                through_round_id: optional_string_flag(&flags, "--through-round")?,
+                item_id,
+                cursor,
+                limit: optional_u32_flag(&flags, "--limit")?,
+            })
+        }
+        "rounds" => {
+            let (session_id, flags) = session_id_and_flags(args, "rounds")?;
+            reject_unknown_flags(&flags, &["--through-round", "--cursor", "--limit"])?;
+            Ok(Query::SessionRounds {
+                session_id,
+                through_round_id: optional_string_flag(&flags, "--through-round")?,
+                cursor: optional_string_flag(&flags, "--cursor")?,
+                limit: optional_u32_flag(&flags, "--limit")?,
+            })
+        }
+        "trunks" => {
+            let (session_id, flags) = session_id_and_flags(args, "trunks")?;
+            reject_unknown_flags(&flags, &["--round", "--cursor", "--limit"])?;
+            Ok(Query::SessionTrunks {
+                session_id,
+                round_id: required_string_flag(&flags, "--round")?,
+                cursor: optional_string_flag(&flags, "--cursor")?,
+                limit: optional_u32_flag(&flags, "--limit")?,
+            })
+        }
+        "trunk" => {
+            let (session_id, flags) = session_id_and_flags(args, "trunk")?;
+            reject_unknown_flags(&flags, &["--round", "--index"])?;
+            Ok(Query::SessionTrunk {
+                session_id,
+                round_id: required_string_flag(&flags, "--round")?,
+                index: required_u32_flag(&flags, "--index")?,
+            })
+        }
+        "blob" => {
+            let (session_id, flags) = session_id_and_flags(args, "blob")?;
+            reject_unknown_flags(&flags, &["--ref"])?;
+            Ok(Query::SessionBlob {
+                session_id,
+                reference: required_string_flag(&flags, "--ref")?,
+            })
+        }
+        "context" => {
+            let (session_id, flags) = session_id_and_flags(args, "context")?;
+            reject_unknown_flags(&flags, &["--through-round", "--budget-tokens"])?;
+            Ok(Query::SessionContext {
+                session_id,
+                through_round_id: optional_string_flag(&flags, "--through-round")?,
+                token_budget: optional_u64_flag(&flags, "--budget-tokens")?,
+            })
+        }
         _ => Err(CliFailure::invalid_args(format!(
             "unknown session command: {verb}"
         ))),
     }
+}
+
+fn session_id_and_flags(
+    args: &[String],
+    verb: &str,
+) -> Result<(String, Vec<(String, String)>), CliFailure> {
+    let session_id = args
+        .get(1)
+        .filter(|value| !value.trim().is_empty() && !value.starts_with("--"))
+        .cloned()
+        .ok_or_else(|| CliFailure::invalid_args(format!("session {verb} needs a session id")))?;
+    let mut flags = Vec::new();
+    let mut index = 2;
+    while index < args.len() {
+        let name = args[index].clone();
+        if !name.starts_with("--") {
+            return Err(CliFailure::invalid_args(format!(
+                "unexpected session {verb} argument: {name}"
+            )));
+        }
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| CliFailure::invalid_args(format!("{name} needs a value")))?;
+        if value.trim().is_empty() || value.starts_with("--") {
+            return Err(CliFailure::invalid_args(format!("{name} needs a value")));
+        }
+        if flags.iter().any(|(seen, _)| seen == &name) {
+            return Err(CliFailure::invalid_args(format!(
+                "{name} may be supplied only once"
+            )));
+        }
+        flags.push((name, value.clone()));
+        index += 2;
+    }
+    Ok((session_id, flags))
+}
+
+fn optional_string_flag(
+    flags: &[(String, String)],
+    name: &str,
+) -> Result<Option<String>, CliFailure> {
+    Ok(flags
+        .iter()
+        .find(|(flag, _)| flag == name)
+        .map(|(_, value)| value.clone()))
+}
+
+fn required_string_flag(flags: &[(String, String)], name: &str) -> Result<String, CliFailure> {
+    optional_string_flag(flags, name)?
+        .ok_or_else(|| CliFailure::invalid_args(format!("session command requires {name} <value>")))
+}
+
+fn optional_u32_flag(flags: &[(String, String)], name: &str) -> Result<Option<u32>, CliFailure> {
+    optional_number_flag(flags, name)
+}
+
+fn required_u32_flag(flags: &[(String, String)], name: &str) -> Result<u32, CliFailure> {
+    optional_u32_flag(flags, name)?.ok_or_else(|| {
+        CliFailure::invalid_args(format!("session command requires {name} <number>"))
+    })
+}
+
+fn optional_u64_flag(flags: &[(String, String)], name: &str) -> Result<Option<u64>, CliFailure> {
+    optional_number_flag(flags, name)
+}
+
+fn optional_number_flag<T>(flags: &[(String, String)], name: &str) -> Result<Option<T>, CliFailure>
+where
+    T: std::str::FromStr,
+{
+    optional_string_flag(flags, name)?
+        .map(|value| {
+            value.parse().map_err(|_| {
+                CliFailure::invalid_args(format!("{name} needs a non-negative integer"))
+            })
+        })
+        .transpose()
+}
+
+fn reject_unknown_flags(flags: &[(String, String)], allowed: &[&str]) -> Result<(), CliFailure> {
+    if let Some((name, _)) = flags
+        .iter()
+        .find(|(name, _)| !allowed.contains(&name.as_str()))
+    {
+        return Err(CliFailure::invalid_args(format!(
+            "unknown argument: {name}"
+        )));
+    }
+    Ok(())
 }
 
 async fn execute(
@@ -270,6 +488,134 @@ async fn execute(
             )?;
             Ok(("session.get", json!({"session": snapshot})))
         }
+        Query::SessionInspect {
+            session_id,
+            through_round_id,
+        } => {
+            let rpc = connect_selected(selection).await?;
+            let inspection = inspection(
+                rpc.call(Request::SessionInspect {
+                    session_id,
+                    through_round_id,
+                })
+                .await
+                .map_err(rpc_error)?,
+            )?;
+            Ok(("session.inspect", json!({"inspection": inspection})))
+        }
+        Query::SessionNarrative {
+            session_id,
+            through_round_id,
+            item_id,
+            cursor,
+            limit,
+        } => {
+            let rpc = connect_selected(selection).await?;
+            let page = narrative(
+                rpc.call(Request::SessionNarrative {
+                    session_id,
+                    through_round_id,
+                    item_id,
+                    cursor,
+                    limit,
+                })
+                .await
+                .map_err(rpc_error)?,
+            )?;
+            Ok(("session.narrative", json!({"page": page})))
+        }
+        Query::SessionRounds {
+            session_id,
+            through_round_id,
+            cursor,
+            limit,
+        } => {
+            let rpc = connect_selected(selection).await?;
+            let page = round_page(
+                rpc.call(Request::SessionRounds {
+                    session_id,
+                    through_round_id,
+                    cursor,
+                    limit,
+                })
+                .await
+                .map_err(rpc_error)?,
+            )?;
+            Ok(("session.rounds", json!({"page": page})))
+        }
+        Query::SessionTrunks {
+            session_id,
+            round_id,
+            cursor,
+            limit,
+        } => {
+            let rpc = connect_selected(selection).await?;
+            let layer = round_layer(
+                rpc.call(Request::RoundTrunkList {
+                    session_id,
+                    round_id,
+                    cursor,
+                    limit,
+                })
+                .await
+                .map_err(rpc_error)?,
+            )?;
+            Ok(("session.trunks", json!({"layer": layer})))
+        }
+        Query::SessionTrunk {
+            session_id,
+            round_id,
+            index,
+        } => {
+            let rpc = connect_selected(selection).await?;
+            let trunk = round_trunk(
+                rpc.call(Request::RoundTrunkGet {
+                    session_id,
+                    round_id,
+                    trunk_index: index,
+                })
+                .await
+                .map_err(rpc_error)?,
+            )?;
+            let blob_refs = encoded_blob_refs(&trunk);
+            Ok((
+                "session.trunk",
+                json!({"trunk": trunk, "blobRefs": blob_refs}),
+            ))
+        }
+        Query::SessionBlob {
+            session_id,
+            reference,
+        } => {
+            let rpc = connect_selected(selection).await?;
+            let blob_ref = decode_blob_ref(&reference)?;
+            let blob = blob(
+                rpc.call(Request::BlobGet {
+                    session_id,
+                    blob: blob_ref,
+                })
+                .await
+                .map_err(rpc_error)?,
+            )?;
+            Ok(("session.blob", json!({"blob": blob})))
+        }
+        Query::SessionContext {
+            session_id,
+            through_round_id,
+            token_budget,
+        } => {
+            let rpc = connect_selected(selection).await?;
+            let context = session_context(
+                rpc.call(Request::SessionContext {
+                    session_id,
+                    through_round_id,
+                    token_budget,
+                })
+                .await
+                .map_err(rpc_error)?,
+            )?;
+            Ok(("session.context", json!({"context": context})))
+        }
     }
 }
 
@@ -277,6 +623,36 @@ async fn execute(
 /// resolve `--workspace` and `--cwd` against exactly the same list.
 pub async fn list_workspaces(rpc: &Rpc) -> Result<Vec<WorkspaceInfo>, CliFailure> {
     workspaces(rpc.call(Request::WorkspaceList).await.map_err(rpc_error)?)
+}
+
+fn encode_blob_ref(blob: &BlobRef) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(blob).expect("BlobRef is always JSON serializable"))
+}
+
+fn decode_blob_ref(encoded: &str) -> Result<BlobRef, CliFailure> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| CliFailure::invalid_args("--ref is not a valid genet blob reference"))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| CliFailure::invalid_args("--ref is not a valid genet blob reference"))
+}
+
+fn encoded_blob_refs(trunk: &RoundTrunk) -> Vec<Value> {
+    trunk
+        .batches
+        .iter()
+        .flat_map(|batch| batch.blobs.iter())
+        .filter_map(|blob| {
+            blob.blob.as_ref().map(|reference| {
+                json!({
+                    "itemId": blob.item_id,
+                    "kind": blob.kind,
+                    "ref": encode_blob_ref(reference),
+                })
+            })
+        })
+        .collect()
 }
 
 pub fn connect_error(error: ConnectError) -> CliFailure {
@@ -720,6 +1096,56 @@ fn command_schema(name: &str) -> Value {
                 &["deviceId"],
             ),
         ),
+        "session.inspect" => session_schema(
+            "genet session inspect <id> [--through-round <round-id>]",
+            json!({"throughRoundId": nullable_string()}),
+        ),
+        "session.narrative" => session_schema(
+            "genet session narrative <id> [--through-round <round-id>] [--item <item-id> | --cursor <cursor>] [--limit <n>]",
+            json!({
+                "throughRoundId": nullable_string(),
+                "itemId": nullable_string(),
+                "cursor": nullable_string(),
+                "limit": nullable_integer(),
+            }),
+        ),
+        "session.rounds" => session_schema(
+            "genet session rounds <id> [--through-round <round-id>] [--cursor <cursor>] [--limit <n>]",
+            json!({
+                "throughRoundId": nullable_string(),
+                "cursor": nullable_string(),
+                "limit": nullable_integer(),
+            }),
+        ),
+        "session.trunks" => session_schema_required(
+            "genet session trunks <id> --round <round-id> [--cursor <cursor>] [--limit <n>]",
+            json!({
+                "roundId": {"type": "string", "minLength": 1},
+                "cursor": nullable_string(),
+                "limit": nullable_integer(),
+            }),
+            &["sessionId", "roundId"],
+        ),
+        "session.trunk" => session_schema_required(
+            "genet session trunk <id> --round <round-id> --index <n>",
+            json!({
+                "roundId": {"type": "string", "minLength": 1},
+                "index": {"type": "integer", "minimum": 0},
+            }),
+            &["sessionId", "roundId", "index"],
+        ),
+        "session.blob" => session_schema_required(
+            "genet session blob <id> --ref <opaque-ref>",
+            json!({"ref": {"type": "string", "minLength": 1}}),
+            &["sessionId", "ref"],
+        ),
+        "session.context" => session_schema(
+            "genet session context <id> [--through-round <round-id>] [--budget-tokens <n>]",
+            json!({
+                "throughRoundId": nullable_string(),
+                "tokenBudget": nullable_integer(),
+            }),
+        ),
         _ => unreachable!("schema names are validated before lookup"),
     };
     json!({
@@ -850,6 +1276,36 @@ fn with_selectors(name: &str, mut input: Value) -> Value {
     input
 }
 
+fn session_schema(synopsis: &'static str, extra: Value) -> (&'static str, bool, Value) {
+    session_schema_required(synopsis, extra, &["sessionId"])
+}
+
+fn session_schema_required(
+    synopsis: &'static str,
+    extra: Value,
+    required: &[&str],
+) -> (&'static str, bool, Value) {
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        "sessionId".into(),
+        json!({"type": "string", "minLength": 1}),
+    );
+    properties.extend(extra.as_object().cloned().unwrap_or_default());
+    (
+        synopsis,
+        true,
+        object_input(Value::Object(properties), required),
+    )
+}
+
+fn nullable_string() -> Value {
+    json!({"type": ["string", "null"], "minLength": 1})
+}
+
+fn nullable_integer() -> Value {
+    json!({"type": ["integer", "null"], "minimum": 0})
+}
+
 fn object_input(properties: Value, required: &[&str]) -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -881,6 +1337,55 @@ fn snapshot(reply: Reply) -> Result<SessionSnapshot, CliFailure> {
     }
 }
 
+fn inspection(reply: Reply) -> Result<SessionInspection, CliFailure> {
+    match reply {
+        Reply::SessionInspection(value) => Ok(value),
+        other => Err(unexpected_reply("session inspection", &other)),
+    }
+}
+
+fn narrative(reply: Reply) -> Result<SessionNarrativePage, CliFailure> {
+    match reply {
+        Reply::SessionNarrative(value) => Ok(value),
+        other => Err(unexpected_reply("session narrative", &other)),
+    }
+}
+
+fn round_page(reply: Reply) -> Result<SessionRoundPage, CliFailure> {
+    match reply {
+        Reply::SessionRounds(value) => Ok(value),
+        other => Err(unexpected_reply("session rounds", &other)),
+    }
+}
+
+fn round_layer(reply: Reply) -> Result<RoundLayer, CliFailure> {
+    match reply {
+        Reply::RoundLayer(value) => Ok(value),
+        other => Err(unexpected_reply("round layer", &other)),
+    }
+}
+
+fn round_trunk(reply: Reply) -> Result<RoundTrunk, CliFailure> {
+    match reply {
+        Reply::RoundTrunk(value) => Ok(value),
+        other => Err(unexpected_reply("round trunk", &other)),
+    }
+}
+
+fn blob(reply: Reply) -> Result<genehub_proto::BlobPayload, CliFailure> {
+    match reply {
+        Reply::Blob(value) => Ok(value),
+        other => Err(unexpected_reply("blob", &other)),
+    }
+}
+
+fn session_context(reply: Reply) -> Result<SessionContext, CliFailure> {
+    match reply {
+        Reply::SessionContext(value) => Ok(value),
+        other => Err(unexpected_reply("session context", &other)),
+    }
+}
+
 pub fn unexpected_reply(expected: &str, actual: &Reply) -> CliFailure {
     CliFailure::protocol(format!(
         "the local daemon returned {}, expected {expected}",
@@ -907,7 +1412,12 @@ fn reply_kind(reply: &Reply) -> &'static str {
         Reply::UpdateDownload(_) => "update download",
         Reply::Session(_) => "session",
         Reply::Sessions(_) => "sessions",
+        Reply::SessionImports(_) => "session imports",
         Reply::Snapshot(_) => "session snapshot",
+        Reply::SessionInspection(_) => "session inspection",
+        Reply::SessionNarrative(_) => "session narrative",
+        Reply::SessionRounds(_) => "session rounds",
+        Reply::SessionContext(_) => "session context",
         Reply::RoundLayer(_) => "round layer",
         Reply::RoundTrunk(_) => "round trunk",
         Reply::Blob(_) => "blob",
@@ -981,6 +1491,53 @@ mod tests {
                 session_id: "s_1".into()
             }
         );
+        assert_eq!(
+            parse(&words(&[
+                "session",
+                "narrative",
+                "s_1",
+                "--through-round",
+                "r_2",
+                "--cursor",
+                "before:20",
+                "--limit",
+                "10",
+            ]))
+            .unwrap(),
+            Query::SessionNarrative {
+                session_id: "s_1".into(),
+                through_round_id: Some("r_2".into()),
+                item_id: None,
+                cursor: Some("before:20".into()),
+                limit: Some(10),
+            }
+        );
+        assert_eq!(
+            parse(&words(&[
+                "session", "trunk", "s_1", "--round", "r_2", "--index", "3"
+            ]))
+            .unwrap(),
+            Query::SessionTrunk {
+                session_id: "s_1".into(),
+                round_id: "r_2".into(),
+                index: 3,
+            }
+        );
+        assert_eq!(
+            parse(&words(&[
+                "session",
+                "context",
+                "s_1",
+                "--budget-tokens",
+                "12000"
+            ]))
+            .unwrap(),
+            Query::SessionContext {
+                session_id: "s_1".into(),
+                through_round_id: None,
+                token_budget: Some(12_000),
+            }
+        );
     }
 
     #[test]
@@ -1029,6 +1586,39 @@ mod tests {
         let error = parse(&words(&["session", "list", "--device", "node-a"])).unwrap_err();
         assert_eq!(error.code, "invalidArgs");
         assert!(error.message.contains("--device"));
+    }
+
+    #[test]
+    fn bounded_history_flags_are_strict_and_unambiguous() {
+        for args in [
+            words(&[
+                "session",
+                "narrative",
+                "s_1",
+                "--item",
+                "i_1",
+                "--cursor",
+                "before:2",
+            ]),
+            words(&["session", "trunks", "s_1"]),
+            words(&["session", "trunk", "s_1", "--round", "r_1", "--index", "-1"]),
+            words(&["session", "context", "s_1", "--unknown", "x"]),
+        ] {
+            assert_eq!(parse(&args).unwrap_err().code, "invalidArgs");
+        }
+    }
+
+    #[test]
+    fn blob_references_are_opaque_url_safe_round_trips() {
+        let reference = BlobRef {
+            id: "0123456789abcdef01234567".into(),
+            bytes: 42,
+            at: "3:100:42".into(),
+        };
+        let encoded = encode_blob_ref(&reference);
+        assert!(!encoded.contains(['+', '/', '=']));
+        assert_eq!(decode_blob_ref(&encoded).unwrap(), reference);
+        assert_eq!(decode_blob_ref("not-json").unwrap_err().code, "invalidArgs");
     }
 
     #[test]
@@ -1143,6 +1733,8 @@ mod tests {
             updated_at_ms: 1,
             archived: false,
             unsupported: None,
+            lineage: None,
+            imported: None,
         };
         assert_eq!(
             sessions(Reply::Sessions(vec![summary.clone()])).unwrap(),

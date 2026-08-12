@@ -191,7 +191,11 @@ export type DirectoryListing = { path: string, parent: string | null, directorie
 /**
  * Openable VS Code workspace definitions in this directory.
  */
-workspaceFiles: Array<DirectoryEntry>, };
+workspaceFiles: Array<DirectoryEntry>, 
+/**
+ * Machine roots view (Windows drives). Not a selectable project folder.
+ */
+roots: boolean, };
 
 export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "protocolVersion" | "isolationUnavailable";
 
@@ -211,6 +215,29 @@ path: string, isDir: boolean, size?: number,
  * Absent means "not expanded yet" rather than "empty".
  */
 children?: Array<FileNode>, };
+
+/**
+ * What a bounded reconstructed fork carried into its target Agent.
+ */
+export type ForkContextStats = { sourceItemCount: number, includedItemCount: number, omittedItemCount: number, estimatedTokens: number, tokenBudget: number, digest: string, };
+
+/**
+ * How a child session obtained the context that precedes its first new turn.
+ *
+ * Native checkpoints preserve the Agent's own thread. Reconstructed context
+ * is deliberately named differently: it is a bounded, provider-agnostic view
+ * of GeneHub's visible history, not a claim that hidden Agent state moved.
+ */
+export type ForkMethod = "nativeCheckpoint" | "reconstructedContext";
+
+/**
+ * The explicit destination chosen in the Fork UI.
+ *
+ * Omitting this object on the RPC keeps the native Fork semantics of the
+ * current Agent. A client sends it only when the user explicitly switches
+ * Agent, which is the opt-in boundary for reconstructed context.
+ */
+export type ForkTarget = { agentId: string, modelId?: string, modeId?: string, effortId?: string, };
 
 export type GitChange = { path: string, kind: GitChangeKind, staged: boolean, };
 
@@ -233,6 +260,11 @@ rtcSupported: boolean,
  * caller's behalf. Absent from older daemons, which is why it is optional.
  */
 isolation?: IsolationInfo, };
+
+/**
+ * Honest coverage for a full, clipped or imported history view.
+ */
+export type HistoryCoverage = { sourceItemCount?: number, retainedItemCount: number, omittedItemCount: number, retrieval: RetrievalCapability, reason?: string, };
 
 /**
  * The ways back into an identity that has no password.
@@ -319,6 +351,12 @@ fabricRouteTicket: string, fabricRouteExpiresAt: string,
  * anything.
  */
 fingerprint: string, };
+
+/**
+ * Whether an imported conversation can keep talking through its original
+ * Agent thread, or is a durable GeneHub transcript only.
+ */
+export type ImportContinuation = "native" | "readOnly";
 
 export type InteractionAnswer = { questionId: string, selectedOptionIds: Array<string>, freeformText?: string, };
 
@@ -503,7 +541,7 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
 
 export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -519,7 +557,11 @@ expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId:
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+/**
+ * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
+ */
+itemId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.rounds", "payload": { sessionId: string, throughRoundId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.context", "payload": { sessionId: string, throughRoundId: string | null, tokenBudget: number, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
 /**
  * Deprecated wire field. Current clients always send `null`; Preview
  * locators are rebound in the workbench from relative/absolute paths.
@@ -535,7 +577,13 @@ artifactPreviewBaseUrl: string | null,
  * round that already ended, this is treated as a new round — a
  * wrong stitch is a worse failure than an extra round.
  */
-continuesRound: string | null, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+continuesRound: string | null, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, 
+/**
+ * Absent is the legacy native-only request. New clients send an
+ * explicit target to opt into provider-agnostic reconstruction when
+ * a native checkpoint cannot be used.
+ */
+target?: ForkTarget, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -557,11 +605,16 @@ models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payloa
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */
 paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } };
+
+/**
+ * Whether text outside the retained GeneHub window can be read again.
+ */
+export type RetrievalCapability = "genehub" | "external" | "nativeOnly" | "unavailable";
 
 export type RoundBatch = { summary: RoundBatchSummary, 
 /**
@@ -619,12 +672,77 @@ export type SequencedEvent = { seq: number, sessionId: string, event: SessionEve
  */
 export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "desync", sessionId: string, missed: number, };
 
+/**
+ * Deterministic, model-free context projection used directly by Agents and
+ * as the fallback for reconstructed forks and built-in compaction.
+ */
+export type SessionContext = { source: SessionReadSource, coverage: HistoryCoverage, text: string, references: Array<SessionSourceRef>, retrievalCommands: Array<string>, estimatedTokens: number, tokenBudget: number, digest: string, };
+
 export type SessionEvent = { "type": "turnStarted", turnId: string, 
 /**
  * Zero is accepted from adapters; the session boundary replaces it
  * with its own wall clock before the event reaches a client.
  */
 startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
+
+/**
+ * One lightweight external conversation returned by the discovery pass.
+ *
+ * `candidate_id` is an expiring daemon-owned token. Provider handles, source
+ * paths and storage details never cross the RPC boundary.
+ */
+export type SessionImportCandidate = { candidateId: string, agentId: string, title: string, preview: string, updatedAtMs: number, continuation: ImportContinuation, };
+
+/**
+ * Result of the lightweight discovery pass. Selecting one candidate performs
+ * the separate full-history import, so opening this dialog stays bounded even
+ * when an Agent owns years of sessions.
+ */
+export type SessionImportListing = { sources: Array<SessionImportSource>, expiresAtMs: number, filteredDuplicates: number, };
+
+/**
+ * Durable, public import origin. The provider-specific source key remains in
+ * daemon metadata and is used only for duplicate detection.
+ */
+export type SessionImportOrigin = { agentId: string, continuation: ImportContinuation, warnings: Array<string>, 
+/**
+ * What GeneHub retained from the provider transcript and whether omitted
+ * history can be recovered. Older imports have no structured answer and
+ * keep this absent rather than pretending their warning prose was parsed.
+ */
+coverage?: HistoryCoverage, };
+
+/**
+ * Discovery is isolated by Agent: one unavailable or incompatible CLI does
+ * not hide importable conversations reported by the others.
+ */
+export type SessionImportSource = { agentId: string, label: string, supported: boolean, candidates: Array<SessionImportCandidate>, error?: string, };
+
+/**
+ * A small structural entry point. It deliberately contains no free-form
+ * transcript text; callers choose a bounded narrative page explicitly.
+ */
+export type SessionInspection = { summary: SessionSummary, source: SessionReadSource, narrativeItemCount: number, roundCount: number, latestRoundId?: string, coverage: HistoryCoverage, layers: Array<string>, };
+
+/**
+ * Durable ancestry for a forked conversation.
+ */
+export type SessionLineage = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, method: ForkMethod, context?: ForkContextStats, };
+
+/**
+ * A recent-first page of narrative items, returned in chronological order.
+ */
+export type SessionNarrativePage = { source: SessionReadSource, items: Array<TimelineItem>, nextCursor?: string, };
+
+/**
+ * Stable identity and waterline shared by every read-only session page.
+ */
+export type SessionReadSource = { sessionId: string, throughRoundId?: string, digest: string, untrusted: boolean, };
+
+/**
+ * A recent-first page of round summaries, returned in chronological order.
+ */
+export type SessionRoundPage = { source: SessionReadSource, rounds: Array<RoundSummary>, nextCursor?: string, };
 
 /**
  * Everything a client needs to render a session from scratch.
@@ -647,6 +765,11 @@ rounds?: Array<RoundSummary>,
  */
 expandedRound?: RoundLayer, };
 
+/**
+ * A durable address carried by compacted context instead of copied detail.
+ */
+export type SessionSourceRef = { id: string, sessionId: string, itemId?: string, roundId?: string, digest?: string, };
+
 export type SessionStatus = "idle" | "running" | "waiting" | "readOnly" | "failed" | "closed";
 
 export type SessionSummary = { id: string, workspaceId: string, agentId: string, 
@@ -661,7 +784,16 @@ title?: string, status: SessionStatus, modelId?: string, modeId?: string, effort
  * conversation is in the user's own project folder, and an unexplained
  * absence is worse than a row that says why it is out of reach.
  */
-unsupported?: UnsupportedFormat, };
+unsupported?: UnsupportedFormat, 
+/**
+ * Present only for a fork. Ordinary and imported sessions can add their
+ * own origin variants later without overloading the Agent binding.
+ */
+lineage?: SessionLineage, 
+/**
+ * Present only for a conversation imported from an Agent's native store.
+ */
+imported?: SessionImportOrigin, };
 
 /**
  * The machine-level settings a client may see and change.
