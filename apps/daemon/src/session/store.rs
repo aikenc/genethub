@@ -56,6 +56,17 @@ impl std::fmt::Display for SessionWriteContended {
 
 impl std::error::Error for SessionWriteContended {}
 
+#[derive(Debug)]
+pub struct SessionDeleted;
+
+impl std::fmt::Display for SessionDeleted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this session was deleted")
+    }
+}
+
+impl std::error::Error for SessionDeleted {}
+
 /// Content ids are the first 24 hex characters of a SHA-256. 96 bits keeps
 /// collisions negligible at any session size, and every trunk row carries one.
 const BLOB_ID_CHARS: usize = 24;
@@ -306,6 +317,7 @@ pub fn sessions_dir(workspace_root: &Path) -> PathBuf {
 
 /// The per-workspace directory GeneHub owns inside the user's own project.
 const HOME_DIR_NAME: &str = ".genethub";
+const TOMBSTONES_DIR: &str = "tombstones";
 
 /// Compatibility gate for builds that still take one exclusive workspace
 /// lock. Current builds hold it shared, so they can coexist with each other
@@ -617,13 +629,37 @@ impl Store {
     }
 
     pub fn session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        self.ensure_not_deleted(workspace_id, session_id)?;
+        self.raw_session_dir(workspace_id, session_id)
+    }
+
+    fn raw_session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
         Ok(self.homes.sessions_dir(workspace_id)?.join(session_id))
+    }
+
+    fn tombstone_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .homes
+            .home_dir(workspace_id)?
+            .join(TOMBSTONES_DIR)
+            .join(format!("{session_id}.json")))
+    }
+
+    fn is_deleted(&self, workspace_id: &str, session_id: &str) -> Result<bool> {
+        Ok(self.tombstone_path(workspace_id, session_id)?.exists())
+    }
+
+    fn ensure_not_deleted(&self, workspace_id: &str, session_id: &str) -> Result<()> {
+        if self.is_deleted(workspace_id, session_id)? {
+            return Err(SessionDeleted.into());
+        }
+        Ok(())
     }
 
     /// Claims a session for work that may touch adapter scratch. Forking uses
     /// this to choose native checkpointing only when the source is writable.
     pub fn claim_session(&self, workspace_id: &str, session_id: &str) -> Result<()> {
-        let dir = self.session_dir(workspace_id, session_id)?;
+        let dir = self.raw_session_dir(workspace_id, session_id)?;
         self.prepare_write(workspace_id, session_id, &dir)
     }
 
@@ -692,6 +728,7 @@ impl Store {
     /// Reads deliberately do not come here. A build that cannot write a
     /// workspace can still show every conversation in it.
     fn prepare_write(&self, workspace_id: &str, session_id: &str, dir: &Path) -> Result<()> {
+        self.ensure_not_deleted(workspace_id, session_id)?;
         let home = self.homes.home_dir(workspace_id)?;
         if !self.homes.holds(workspace_id, session_id) {
             self.establish_home(&home)?;
@@ -704,11 +741,18 @@ impl Store {
             }
         }
         if !self.homes.holds(workspace_id, session_id) {
-            let session_dir = self.session_dir(workspace_id, session_id)?;
+            let session_dir = self.raw_session_dir(workspace_id, session_id)?;
             fs::create_dir_all(&session_dir)
                 .with_context(|| format!("creating {}", session_dir.display()))?;
             crate::config::restrict_dir_to_owner(&session_dir)?;
             self.homes.claim(workspace_id, session_id, &session_dir)?;
+            // A competing deleter may have written the tombstone while this
+            // process waited for writer.lock. Check only after owning the lock
+            // so no write can cross the logical deletion boundary.
+            if let Err(error) = self.ensure_not_deleted(workspace_id, session_id) {
+                self.homes.release(workspace_id, session_id)?;
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -825,11 +869,21 @@ impl Store {
     pub fn list_meta(&self) -> Result<Vec<SessionMeta>> {
         let mut out = Vec::new();
         for (workspaces, sessions) in self.homes.all_sessions_dirs() {
+            if let Some((workspace_id, _)) = workspaces.first() {
+                self.reap_tombstoned_sessions(workspace_id, &sessions);
+            }
             let Ok(entries) = fs::read_dir(&sessions) else {
                 continue;
             };
             for entry in entries.flatten() {
                 let session_id = entry.file_name().to_string_lossy().into_owned();
+                if sessions.parent().is_some_and(|home| {
+                    home.join(TOMBSTONES_DIR)
+                        .join(format!("{session_id}.json"))
+                        .exists()
+                }) {
+                    continue;
+                }
                 if !entry.path().join("meta.json").exists() {
                     continue;
                 }
@@ -861,6 +915,54 @@ impl Store {
         }
         out.sort_by_key(|meta: &SessionMeta| std::cmp::Reverse(meta.updated_at_ms));
         Ok(out)
+    }
+
+    fn reap_tombstoned_sessions(&self, workspace_id: &str, sessions: &Path) {
+        let Some(home) = sessions.parent() else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(home.join(TOMBSTONES_DIR)) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(session_id) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if session_id.is_empty() {
+                continue;
+            }
+            self.reap_tombstoned_session(workspace_id, session_id, &sessions.join(session_id));
+        }
+    }
+
+    fn reap_tombstoned_session(&self, workspace_id: &str, session_id: &str, dir: &Path) {
+        if !dir.exists() {
+            return;
+        }
+        let Ok(home) = self.homes.home_dir(workspace_id) else {
+            return;
+        };
+        if let Err(error) = self.homes.claim_compatibility(workspace_id, &home) {
+            tracing::warn!(session = %session_id, %error, "deleted session cleanup is waiting for an older GeneHub");
+            return;
+        }
+        if !self.homes.holds(workspace_id, session_id) {
+            if let Err(error) = self.homes.claim(workspace_id, session_id, dir) {
+                tracing::warn!(session = %session_id, %error, "deleted session cleanup is waiting for its writer");
+                return;
+            }
+        }
+        if let Err(error) = self.homes.release(workspace_id, session_id) {
+            tracing::warn!(session = %session_id, %error, "could not release deleted session before cleanup");
+            return;
+        }
+        if let Err(error) = fs::remove_dir_all(dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(session = %session_id, %error, "deleted session is still awaiting physical cleanup");
+            }
+        }
     }
 
     // -- chat layer ---------------------------------------------------------
@@ -1260,18 +1362,42 @@ impl Store {
     /// Missing files are not an error: this is also the cleanup path for a
     /// session that never got as far as being written.
     pub fn delete(&self, workspace_id: &str, session_id: &str) -> Result<()> {
-        let dir = self.session_dir(workspace_id, session_id)?;
+        let dir = self.raw_session_dir(workspace_id, session_id)?;
+        let tombstone = self.tombstone_path(workspace_id, session_id)?;
+        if tombstone.exists() {
+            self.reap_tombstoned_session(workspace_id, session_id, &dir);
+            return Ok(());
+        }
         if !dir.exists() {
             return Ok(());
         }
-        // Removing a conversation is a write like any other. Claim this
-        // session, then drop our handle before removing its directory (Windows
-        // cannot unlink a locked file).
+        let home = self.homes.home_dir(workspace_id)?;
+        self.establish_home(&home)?;
+        self.homes.claim_compatibility(workspace_id, &home)?;
         if !self.homes.holds(workspace_id, session_id) {
             self.homes.claim(workspace_id, session_id, &dir)?;
         }
+        let tombstones = tombstone
+            .parent()
+            .expect("a tombstone path always has a parent");
+        fs::create_dir_all(tombstones)
+            .with_context(|| format!("creating {}", tombstones.display()))?;
+        crate::config::restrict_dir_to_owner(tombstones)?;
+        let marker = serde_json::json!({
+            "sessionId": session_id,
+            "deletedAtMs": now_ms(),
+        });
+        crate::config::save_private(&tombstone, serde_json::to_vec_pretty(&marker)?.as_slice())?;
+
+        // The durable marker is the atomic logical deletion. Releasing the
+        // Windows lock before unlinking is now safe: every future claimant
+        // rejects the tombstone after it acquires writer.lock.
         self.homes.release(workspace_id, session_id)?;
-        let _ = fs::remove_dir_all(dir);
+        if let Err(error) = fs::remove_dir_all(&dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(session = %session_id, %error, "session was deleted logically but awaits physical cleanup");
+            }
+        }
         Ok(())
     }
 }
