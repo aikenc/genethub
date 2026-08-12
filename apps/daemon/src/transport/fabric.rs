@@ -528,6 +528,7 @@ async fn serve_peer_inner(
         accepted.key,
         accepted.access,
         carrier,
+        endpoint::CarrierKind::Fabric,
     ));
     let expiry = async move {
         match admitted.expires_at {

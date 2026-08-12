@@ -100,6 +100,7 @@ pub async fn handle(
     state: &Shared,
     transport: TransportKind,
     caller: &crate::authz::Principal,
+    diagnostic_workspace_scope: Option<&str>,
     request: Request,
 ) -> Handled {
     match request {
@@ -521,6 +522,12 @@ pub async fn handle(
                 Err(error) => failed(error),
             }
         }
+
+        Request::DiagnosticsSnapshot => Handled::ok(Reply::Diagnostics(
+            state
+                .diagnostics
+                .snapshot(&state.version, diagnostic_workspace_scope),
+        )),
 
         Request::UpdateCheck => automatic_update_refusal(),
 

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssetPreviewMetadata } from "@genehub/proto";
 
+import { emitClientDiagnostic, registerDiagnosticClient } from "../diagnostics";
 import { detectHost, type Endpoint, type Host } from "../host";
 import { Client, type AssetPreviewResult, type ProtocolDial } from "../protocol/client";
 import { HighlightedCode, languageForPath, Markdown } from "../session/Markdown";
@@ -58,6 +59,7 @@ export function AssetPreviewPage({
   useEffect(() => {
     let cancelled = false;
     let owned: Client | null = null;
+    let unregisterDiagnosticClient: (() => void) | null = null;
     setState({ kind: "loading" });
     emitPreviewDiagnostic("log", {
       topic: "preview-load",
@@ -81,6 +83,7 @@ export function AssetPreviewPage({
             (await host.endpoint());
           if (!endpoint) throw new Error("这台浏览器尚未获准连接资源所在的设备");
           owned = connect(endpoint, host, source.deviceHandle);
+          unregisterDiagnosticClient = registerDiagnosticClient(owned);
           await ready(owned);
           if (owned.identity?.machineId !== source.deviceHandle) {
             throw new Error("链接指向的设备与当前连接不一致");
@@ -104,6 +107,8 @@ export function AssetPreviewPage({
         // Dialed clients stay in `owned` so effect cleanup closes them. Shared
         // workbench clients must never be closed from Preview.
       } catch (error) {
+        unregisterDiagnosticClient?.();
+        unregisterDiagnosticClient = null;
         owned?.close();
         if (!cancelled) {
           const message = error instanceof Error ? error.message : "无法预览这个文件";
@@ -121,6 +126,7 @@ export function AssetPreviewPage({
     })();
     return () => {
       cancelled = true;
+      unregisterDiagnosticClient?.();
       owned?.close();
     };
   }, [host, sharedClient, source.deviceHandle, source.path, source.workspaceHandle]);
@@ -296,6 +302,27 @@ export function HtmlDocument({
   onMetaChange?: (meta: PreviewMeta | null) => void;
 }) {
   const [srcDoc, setSrcDoc] = useState<string | null>(null);
+  const frameRef = useRef<HTMLIFrameElement>(null);
+
+  useEffect(() => {
+    const receive = (event: MessageEvent) => {
+      if (event.source !== frameRef.current?.contentWindow) return;
+      const payload = event.data;
+      if (!payload || typeof payload !== "object") return;
+      const data = payload as {
+        source?: string;
+        kind?: string;
+        detail?: Record<string, string | number | boolean | null>;
+      };
+      if (data.source !== PREVIEW_DIAG_SOURCE || !isPreviewDiagnosticKind(data.kind)) return;
+      emitPreviewDiagnostic(data.kind, {
+        surface: "html-preview-iframe",
+        ...(data.detail ?? {}),
+      });
+    };
+    window.addEventListener("message", receive);
+    return () => window.removeEventListener("message", receive);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -381,6 +408,7 @@ export function HtmlDocument({
         // absolutely-sized box is the only reliable constraint.
         <div className="relative min-h-0 flex-1 overflow-hidden">
           <iframe
+            ref={frameRef}
             title="HTML 文件预览"
             sandbox="allow-scripts"
             referrerPolicy="no-referrer"
@@ -524,8 +552,11 @@ export function isolatedHtml(source: string): string {
   return `<!doctype html>\n${document_.documentElement.outerHTML}`;
 }
 
-/** Keep in sync with console/src/diagnostics.ts PREVIEW_MESSAGE_SOURCE. */
 const PREVIEW_DIAG_SOURCE = "genehub-preview-diag";
+
+function isPreviewDiagnosticKind(kind: string | undefined): kind is string {
+  return kind === "console" || kind === "error" || kind === "resource" || kind === "csp" || kind === "log";
+}
 
 const PREVIEW_DIAG_BRIDGE = `(function(){
   function send(kind, detail){
@@ -562,7 +593,7 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       effectiveDirective: String(e.effectiveDirective || "").slice(0, 200),
       blockedURI: String(e.blockedURI || "").slice(0, 500),
       disposition: String(e.disposition || ""),
-      sample: String(e.sample || "").slice(0, 200)
+      sampleLength: String(e.sample || "").length
     });
   });
   ["warn", "error"].forEach(function(level){
@@ -601,6 +632,7 @@ function connect(endpoint: Endpoint, host: Host, deviceHandle: string): Client {
     ...dial(endpoint),
     credential: endpoint.credential,
     rtcEnabled: readRtcEnabled(),
+    onDiagnostic: emitClientDiagnostic,
     redial: async () => {
       const fresh =
         (await endpointForDevice(host, deviceHandle)) ??

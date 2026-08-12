@@ -29,6 +29,9 @@ pub struct AppState {
     pub sessions: SessionManager,
     pub workspaces: Workspaces,
     pub terminals: Arc<Terminals>,
+    /// Bounded allowlisted evidence for explicit user feedback. This is never
+    /// backed by the raw daemon/agent log.
+    pub diagnostics: crate::diagnostics::Diagnostics,
     pub version: String,
     /// Owner-only token used to mint loopback control proofs.
     pub token: String,
@@ -142,6 +145,7 @@ impl AppState {
             sessions,
             workspaces,
             terminals,
+            diagnostics: crate::diagnostics::Diagnostics::default(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             token: uuid::Uuid::new_v4().simple().to_string(),
             devices,

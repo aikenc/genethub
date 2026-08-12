@@ -3,6 +3,7 @@ import type { HistoryCoverage } from "@genehub/proto";
 
 import { ChangesPanel } from "./changes/ChangesPanel";
 import { claimMachine, deviceName } from "./devices/claim";
+import { emitClientDiagnostic } from "./diagnostics";
 import { DevicesPanel } from "./devices/DevicesPanel";
 import { FilesPanel } from "./files/FilesPanel";
 import { detectHost, type Endpoint, type Host } from "./host";
@@ -48,6 +49,7 @@ const openConnection = (
     fabricRouteTicket: endpoint.fabricRouteTicket,
     localServerProof: endpoint.localServerProof,
     rtcEnabled: readRtcEnabled(),
+    onDiagnostic: emitClientDiagnostic,
   });
 
 /**

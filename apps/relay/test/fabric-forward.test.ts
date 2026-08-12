@@ -185,6 +185,53 @@ describe("Fabric v2 over real WebSockets", () => {
     });
   });
 
+  it("logs opaque endpoint correlation without credentials or payloads", async () => {
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+    try {
+      const source = await endpoint("credential:log-source", "endpoint:log-source");
+      const target = await endpoint("credential:log-target", "endpoint:log-target");
+      await openRoute(
+        source,
+        target,
+        id(99),
+        "ticket:log-secret",
+        "endpoint:log-target",
+      );
+      source.close();
+      await closed(source);
+      await waitFor(
+        () => lines.some((line) => line.includes('"msg":"fabric: endpoint disconnected"')),
+        "expected a structured disconnect record",
+      );
+
+      const records = lines.flatMap((line) => {
+        try {
+          return [JSON.parse(line) as Record<string, unknown>];
+        } catch {
+          return [];
+        }
+      });
+      const connected = records.find(
+        (record) => record.msg === "fabric: endpoint connected" &&
+          record.endpointHandle === "endpoint:log-source",
+      );
+      assert.equal(connected?.connectionGeneration, 1);
+      assert.match(String(connected?.connectionEpoch), /^[0-9a-f]{32}$/);
+      const disconnected = records.find(
+        (record) => record.msg === "fabric: endpoint disconnected" &&
+          record.endpointHandle === "endpoint:log-source",
+      );
+      assert.equal(typeof disconnected?.closeCode, "number");
+
+      const output = lines.join("\n");
+      assert.doesNotMatch(output, /credential:log|ticket:log-secret|hello:ticket|accepted:ticket/);
+    } finally {
+      console.log = original;
+    }
+  });
+
   it("scopes equal and guessed stream ids to the actual socket", async () => {
     const sourceA = await endpoint("credential:source-a", "endpoint:source-a");
     const sourceB = await endpoint("credential:source-b", "endpoint:source-b");

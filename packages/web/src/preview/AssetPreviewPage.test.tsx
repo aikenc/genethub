@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { AssetPreviewMetadata } from "@genehub/proto";
 
@@ -58,5 +58,41 @@ describe("active single-file HTML Preview", () => {
     expect(frame.className).toContain("inset-0");
     expect(frame.parentElement?.className).toContain("relative");
     expect(frame.parentElement?.className).toContain("overflow-hidden");
+  });
+
+  it("accepts diagnostics only from the iframe it rendered", async () => {
+    const bytes = new TextEncoder().encode("<!doctype html><html><body>hello</body></html>");
+    const metadata = {
+      kind: "html",
+      mediaType: "text/html",
+      sourceBytes: bytes.byteLength,
+    } as AssetPreviewMetadata;
+    render(
+      <HtmlDocument
+        bytes={bytes}
+        metadata={metadata}
+        entryPath="r_root/index.html"
+        fetchAsset={async () => null}
+      />,
+    );
+    const frame = await screen.findByTitle<HTMLIFrameElement>("HTML 文件预览");
+    const received = vi.fn();
+    window.addEventListener("genehub:preview-diagnostic", received);
+    const data = {
+      source: "genehub-preview-diag",
+      kind: "error",
+      detail: { message: "render failed" },
+    };
+
+    window.dispatchEvent(new MessageEvent("message", { data, source: window }));
+    expect(received).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new MessageEvent("message", { data, source: frame.contentWindow }));
+    expect(received).toHaveBeenCalledTimes(1);
+    expect(received.mock.calls[0]?.[0].detail).toEqual({
+      kind: "error",
+      detail: { surface: "html-preview-iframe", message: "render failed" },
+    });
+    window.removeEventListener("genehub:preview-diagnostic", received);
   });
 });

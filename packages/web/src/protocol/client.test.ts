@@ -308,6 +308,55 @@ describe("RPC exchanges are independent logical streams", () => {
     expect(client.connectionState).toBe("ready");
     client.close();
   });
+
+  it("emits correlated operation evidence without request bodies", async () => {
+    const diagnostics: Array<{ kind: string; detail: Record<string, unknown> }> = [];
+    const { client, socket } = await connected({
+      onDiagnostic: (event) => diagnostics.push(event),
+    });
+    const call = client.call({
+      type: "file.tree",
+      payload: { workspaceId: "workspace-1", path: "r_root/docs", depth: 2 },
+    });
+    await waitFor(() => socket.sent.some((message) => message.type === "file.tree"));
+    socket.reply(socket.lastOf("file.tree").id, {
+      type: "fileTree",
+      data: { name: "docs", path: "r_root/docs", isDir: true, children: [] },
+    });
+    await call;
+
+    const operation = diagnostics.filter(
+      (event) => event.kind === "operation" && event.detail.operation === "file.tree",
+    );
+    expect(operation.map((event) => event.detail.phase)).toEqual(["start", "finish"]);
+    expect(operation[0]?.detail.requestId).toBe(operation[1]?.detail.requestId);
+    expect(operation[1]?.detail.outcome).toBe("ok");
+    expect(operation[0]?.detail).toMatchObject({
+      workspaceId: "workspace-1",
+      path: "r_root/docs",
+      transport: "websocket",
+    });
+    expect(JSON.stringify(operation)).not.toContain("children");
+    client.close();
+  });
+
+  it("retrieves the daemon's typed bounded diagnostic snapshot", async () => {
+    const { client, socket } = await connected();
+    const pending = client.diagnostics();
+    await waitFor(() => socket.sent.some((message) => message.type === "diagnostics.snapshot"));
+    socket.reply(socket.lastOf("diagnostics.snapshot").id, {
+      type: "diagnostics",
+      data: {
+        version: 1,
+        daemonVersion: "0.1.0",
+        capturedAtMs: 42,
+        droppedEvents: 0,
+        events: [],
+      },
+    });
+    await expect(pending).resolves.toMatchObject({ version: 1, capturedAtMs: 42 });
+    client.close();
+  });
 });
 
 describe("events, Preview and RTC use the same endpoint abstraction", () => {
@@ -351,6 +400,7 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
         workspaceHandle: "workspace-1",
         path: "r_project/docs/readme.md",
       },
+      diagnosticId: expect.stringMatching(/^preview_/),
     });
     socket.respondExchange(exchange.id, 200, {
       version: "0123456789abcdef0123456789abcdef",

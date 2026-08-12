@@ -154,6 +154,11 @@ pub enum WorkspaceFileSourceKind {
 #[ts(export, export_to = "index.ts")]
 pub struct AssetPreviewRequest {
     pub source: WorkspaceFileSource,
+    /// Opaque per-operation id used only to correlate the browser and daemon's
+    /// bounded diagnostic rings. It carries no account, workspace or path data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diagnostic_id: Option<String>,
 }
 
 /// What to run on a machine, and where.
@@ -270,6 +275,7 @@ mod tests {
                 workspace_handle: "w_one".into(),
                 path: "docs/readme.md".into(),
             },
+            diagnostic_id: None,
         })
         .unwrap();
         assert_eq!(value["source"]["kind"], "workspaceFile");
