@@ -5,6 +5,8 @@ import { ChangesPanel } from "./changes/ChangesPanel";
 import { claimMachine, deviceName } from "./devices/claim";
 import { DevicesPanel } from "./devices/DevicesPanel";
 import { FilesPanel } from "./files/FilesPanel";
+import { BackgroundBadge } from "./processes/BackgroundBadge";
+import { ProcessesPanel } from "./processes/ProcessesPanel";
 import { detectHost, type Endpoint, type Host } from "./host";
 import type { Target } from "./host";
 import { LogsPanel } from "./logs/LogsPanel";
@@ -401,6 +403,7 @@ export function App({
                 {workbench.connection === "closed" ? "已断开" : "连接中…"}
               </span>
             )}
+            <BackgroundBadge />
             <button
               type="button"
               aria-label="工作区工具"
@@ -457,7 +460,8 @@ export function App({
               {showChat ? (
                 composing ? (
                   <>
-                    <div className="hidden items-center justify-end border-b border-line px-3 py-1 md:flex">
+                    <div className="hidden items-center justify-end gap-2 border-b border-line px-3 py-1 md:flex">
+                      <BackgroundBadge />
                       <ConnectionBadge
                         state={workbench.connection}
                         endpoint={endpoint}
@@ -558,6 +562,11 @@ export function App({
               {kind === "devices" ? (
                 <div className="min-h-0 flex-1 overflow-y-auto">
                   <DevicesPanel host={host} />
+                </div>
+              ) : null}
+              {kind === "processes" ? (
+                <div className="min-h-0 flex-1">
+                  <ProcessesPanel />
                 </div>
               ) : null}
               {extraTabs.map((tab) =>

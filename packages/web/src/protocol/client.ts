@@ -1,6 +1,7 @@
 import type {
   AssetPreviewError,
   AssetPreviewMetadata,
+  BackgroundProcess,
   HelloResult,
   PeerWelcome,
   ProtocolError,
@@ -216,6 +217,7 @@ export class Client {
   private readonly ptyListeners = new Set<(ptyId: string, data: string | null) => void>();
   private readonly noticeListeners = new Set<(level: string, message: string) => void>();
   private readonly downloadListeners = new Set<(download: UpdateDownload) => void>();
+  private readonly processListeners = new Set<(processes: BackgroundProcess[]) => void>();
   private state: ConnectionState = "connecting";
   private stopped = false;
   private attempt = 0;
@@ -295,6 +297,11 @@ export class Client {
   onUpdateDownload(listener: (download: UpdateDownload) => void): () => void {
     this.downloadListeners.add(listener);
     return () => this.downloadListeners.delete(listener);
+  }
+
+  onBackgroundProcesses(listener: (processes: BackgroundProcess[]) => void): () => void {
+    this.processListeners.add(listener);
+    return () => this.processListeners.delete(listener);
   }
 
   connect(): void {
@@ -821,6 +828,10 @@ export class Client {
         return;
       case "notice":
         for (const listener of this.noticeListeners) this.callListener(() => listener(frame.level, frame.message));
+        return;
+      case "processes":
+        for (const listener of this.processListeners)
+          this.callListener(() => listener(frame.processes));
         return;
       case "updateDownload":
         for (const listener of this.downloadListeners) this.callListener(() => listener(frame.download));
