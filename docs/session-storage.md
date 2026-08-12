@@ -58,6 +58,7 @@
   rounds/r-001/…
   blobs/b-9f.jsonl                 blob 正文，按内容 id 前两位合批
   state/                           adapter 私有 scratch
+<workspace>/.genethub/tombstones/<session-id>.json  持锁写入的逻辑删除标记
 ```
 
 会话目录**自包含**：没有任何一个文件名、也没有 `meta.json` 里的任何一个字段依赖外部上下文——它属于哪个工作区由它躺在哪里决定（§3.4）。整个目录可以整体移动、整体删除、整体备份，换一个 channel 打开也还是同一批对话。
@@ -218,4 +219,4 @@ N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = �
 - **跨 channel 复用：** 另一个 channel 注册同一个目录后，既有会话照常列出、照常打开、照常续聊，不依赖它自己那份 workspace id。
 - **版本单向：** `format` 高于本机的会话仍出现在列表里并说明原因，但打不开；本机只读它不会改动 `meta.json`。
 - **写入互斥：** 同一 session 的第二个 daemon 写入被拒绝并指出占用者，读取不受影响；不同 session 可跨 channel 并行写；占用者退出后无需重启即可恢复写入；从稳定 turn Fork 的新 session 不受源 session 锁影响。
-- **删除彻底：** `session.delete` 删掉整个会话目录，包括 blobs 与 scratch。
+- **删除原子且可回收：** `session.delete` 持有该 session 的 writer lock 写入 durable tombstone；从此所有 channel 都隐藏并拒绝写入该 id。随后释放锁并删除整个会话目录，包括 blobs 与 scratch；Windows 若因开放 handle 暂时不能删除，启动/列表扫描会继续回收，墓碑保证残留目录永不复活。

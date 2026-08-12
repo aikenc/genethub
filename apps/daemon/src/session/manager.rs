@@ -4058,16 +4058,12 @@ mod tests {
         sessions.delete("s1").await.unwrap();
 
         assert!(sessions.store.list_meta().unwrap().is_empty());
-        assert!(sessions
-            .store
-            .load_chat("w1", "s1")
-            .unwrap()
-            .items
-            .is_empty());
+        assert!(sessions.store.load_chat("w1", "s1").is_err());
         assert!(
             !scratch.exists(),
             "the agent's own copy of the conversation outlived the delete"
         );
+        assert!(dir.path().join(".genethub/tombstones/s1.json").is_file());
     }
 
     #[tokio::test]
@@ -4081,6 +4077,63 @@ mod tests {
         assert!(
             sessions.delete("s1").await.is_ok(),
             "two windows deleting the same row would show the second one an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tombstone_hides_residual_files_and_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        let saved = std::fs::read(dir.path().join(".genethub/sessions/s1/meta.json")).unwrap();
+
+        sessions.delete("s1").await.unwrap();
+        let residual = dir.path().join(".genethub/sessions/s1");
+        std::fs::create_dir_all(&residual).unwrap();
+        std::fs::write(residual.join("meta.json"), saved).unwrap();
+
+        let restarted = manager(dir.path());
+        assert!(restarted.list(None, false).await.unwrap().is_empty());
+        let refused = restarted.store.save_meta(&meta()).unwrap_err();
+        assert!(
+            refused
+                .downcast_ref::<super::store::SessionDeleted>()
+                .is_some(),
+            "a physically residual deleted session could be resurrected: {refused}"
+        );
+        restarted.delete("s1").await.unwrap();
+        assert!(!residual.exists(), "retry did not collect residual files");
+    }
+
+    #[tokio::test]
+    async fn tombstone_cleanup_waits_for_a_legacy_workspace_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        let saved = std::fs::read(dir.path().join(".genethub/sessions/s1/meta.json")).unwrap();
+        sessions.delete("s1").await.unwrap();
+        drop(sessions);
+
+        let residual = dir.path().join(".genethub/sessions/s1");
+        std::fs::create_dir_all(&residual).unwrap();
+        std::fs::write(residual.join("meta.json"), saved).unwrap();
+        let legacy = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.path().join(".genethub/owner.lock"))
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&legacy).unwrap();
+
+        let restarted = manager(dir.path());
+        assert!(restarted.list(None, false).await.unwrap().is_empty());
+        assert!(residual.exists(), "cleanup raced the legacy writer");
+        drop(legacy);
+        restarted.list(None, false).await.unwrap();
+        assert!(
+            !residual.exists(),
+            "cleanup did not resume after the legacy writer left"
         );
     }
 
