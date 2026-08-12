@@ -151,6 +151,23 @@ genet shell --machine srv-1 --cwd /srv/app -- /bin/sh -c 'make 2>&1 | tail -5'
   也能做，给它单独取个名字只会让邀请看起来比实际更窄。
 - 没有 `pty:unconfined` 的设备，命令会被关进操作系统沙箱，只看得见这个 workspace；关不住就
   报 `isolationUnavailable` 而拒绝执行，**不会**退化成不受限地跑。
+- 没有 stdin：这条路是给非交互命令的，要交互用终端。
+- 连接断了命令就被杀，不会留在那台机器上跑。反过来说，流没等到 `shell.exit` 就结束，意味着
+  连接先断了——那时命令的下落是未知的，会报 `commandInterrupted`。
+
+### 受限执行跑不了依赖家目录的工具链
+
+这是当前实现的一条**已知边界**，不是故障。受限进程能读到的系统目录是一张固定名单
+（`/usr`、`/bin`、`/sbin`、`/lib`、`/lib64`、`/etc`、`/opt`），**家目录不在里面**。所以：
+
+- 装在家目录里的工具链够不着：`~/.cargo/bin` 里的 `cargo`、`~/.nvm` 里的 `node`、
+  `~/.local/bin` 里的东西，一律表现为「不存在」。
+- 需要写家目录缓存的命令会失败：`npm install`（写 `~/.npm`）、要下依赖的 `cargo build`
+  （写 `~/.cargo/registry`）。
+- 名单里的目录如果是指向别处的符号链接（`/opt/x -> /data/x` 这种），一样够不着。
+
+所以只带 `pty` 的设备**能跑基本命令，跑不了真实构建**。要让对方真能干活，发邀请时给
+`pty:unconfined`——那是明确的信任决定，而不是让人对着一台「cargo 不见了」的机器猜半天。
 
 ### 被关起来的时候，「文件不存在」多半是假的
 
@@ -168,9 +185,6 @@ genet shell --machine srv-1 --cwd /srv/app -- /bin/sh -c 'make 2>&1 | tail -5'
 
 命令自己也会被告知，两个环境变量：`GENEHUB_CONFINEMENT`（后端名）和 `GENEHUB_CONFINED_ROOTS`
 （`:` 分隔的可达目录）。写脚本时可以直接判断，没设就是没被关。
-- 没有 stdin：这条路是给非交互命令的，要交互用终端。
-- 连接断了命令就被杀，不会留在那台机器上跑。反过来说，流没等到 `shell.exit` 就结束，意味着
-  连接先断了——那时命令的下落是未知的，会报 `commandInterrupted`。
 
 ## 没有人在场时的权限
 
