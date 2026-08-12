@@ -198,6 +198,71 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             Err(error) => failed(error),
         },
 
+        Request::SessionInspect {
+            session_id,
+            through_round_id,
+        } => match state
+            .sessions
+            .inspect(&session_id, through_round_id.as_deref())
+            .await
+        {
+            Ok(inspection) => Handled::ok(Reply::SessionInspection(inspection)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionNarrative {
+            session_id,
+            through_round_id,
+            item_id,
+            cursor,
+            limit,
+        } => match state
+            .sessions
+            .narrative_page(
+                &session_id,
+                through_round_id.as_deref(),
+                item_id.as_deref(),
+                cursor.as_deref(),
+                limit,
+            )
+            .await
+        {
+            Ok(page) => Handled::ok(Reply::SessionNarrative(page)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionRounds {
+            session_id,
+            through_round_id,
+            cursor,
+            limit,
+        } => match state
+            .sessions
+            .round_page(
+                &session_id,
+                through_round_id.as_deref(),
+                cursor.as_deref(),
+                limit,
+            )
+            .await
+        {
+            Ok(page) => Handled::ok(Reply::SessionRounds(page)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionContext {
+            session_id,
+            through_round_id,
+            token_budget,
+        } => match state
+            .sessions
+            .session_context(&session_id, through_round_id.as_deref(), token_budget)
+            .await
+        {
+            Ok(context) => Handled::ok(Reply::SessionContext(context)),
+            Err(error) => failed(error),
+        },
+
         Request::RoundTrunkList {
             session_id,
             round_id,
@@ -263,9 +328,50 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
         Request::SessionFork {
             session_id,
             turn_id,
+            target,
         } => {
             let providers = state.providers().await;
-            match state.sessions.fork(&session_id, &turn_id, &providers).await {
+            match state
+                .sessions
+                .fork(&session_id, &turn_id, target, &providers)
+                .await
+            {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionImportList {
+            workspace_id,
+            limit,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match state
+                .sessions
+                .list_imports(&workspace_id, workspace.root, limit)
+                .await
+            {
+                Ok(listing) => Handled::ok(Reply::SessionImports(listing)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionImport {
+            workspace_id,
+            candidate_id,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match state
+                .sessions
+                .import(&workspace_id, workspace.root, &candidate_id)
+                .await
+            {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }

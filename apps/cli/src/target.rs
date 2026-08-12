@@ -45,12 +45,19 @@ pub const RESERVED: [&str; 13] = [
     "shell",
 ];
 
-const ROUTABLE: [&str; 14] = [
+const ROUTABLE: [&str; 21] = [
     "context",
     "workspace.list",
     "workspace.show",
     "session.list",
     "session.get",
+    "session.inspect",
+    "session.narrative",
+    "session.rounds",
+    "session.trunks",
+    "session.trunk",
+    "session.blob",
+    "session.context",
     "session.send",
     "session.respond",
     "session.interrupt",

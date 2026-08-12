@@ -52,7 +52,7 @@ daemon ──spawn──> genet-agent --mode rpc [--model M] [--thinking L] [--s
 
 ### 2.3 明确不做（MVP）
 
-TUI、subagents、extensions、MCP、LLM 压缩（compact 只留应答桩）、fork / branch / tree / rewind、steering 与 follow-up 队列、auto-retry、prompt templates、导出 HTML、图片输入、直连 `bash` RPC 命令、telemetry 与成本统计、远程模型目录、project trust。
+TUI、subagents、extensions、MCP、fork / branch / tree / rewind、steering 与 follow-up 队列、auto-retry、prompt templates、导出 HTML、图片输入、直连 `bash` RPC 命令、telemetry 与成本统计、远程模型目录、project trust。
 
 对应的 RPC 命令一律返回结构合法的空值或 `success: false`，**不允许静默不回**——挂起的请求会让 daemon 侧 30s 超时。
 
@@ -76,6 +76,7 @@ Genet Agent **不是给人直接用的 CLI**：没有交互式界面、没有 pr
 genet-agent --mode rpc
             [--model <provider/id>] [--thinking <level>]
             [--no-session | --session <file>]
+            [--genehub-session-id <public-session-id>]
             [--add-system-prompt <text>]...
             [--mcp-config <path>] [--extension <path>]...
 ```
@@ -83,6 +84,8 @@ genet-agent --mode rpc
 后两个参数 MVP 内接受并忽略（记一行 stderr 日志），**不能因为不认识而退出**——这样 adapter 可以对所有后端统一拼参数，不必为内置 agent 特判。
 
 `--add-system-prompt` 可重复，每项作为独立的 `<additional_system_prompt>` 块放在项目 context/skills 之后、当前工作目录之前。它不是 RPC 命令，也不会成为 user message；daemon 当前用它注入动态 Asset Preview 产物链接规范。参数值直接作为一个 argv 传入，不经 shell 拼接。独立调用者能使用这个参数，因此 Agent CLI 提供的是通用“追加系统上下文”能力，不认识 domain、channel、device 或 workspace。
+
+`--genehub-session-id` 是 daemon 传入的公开会话 id，和 `--session` 指向的 Agent 私有 JSONL 不同。daemon 同时设置 `GENEHUB_SESSION_ID` 与指向当前构建的 `GENEHUB_CLI`；内置 Skill 和压缩子会话由此调用通用、只读的 `genet session` 接口，不解析产品目录。
 
 ### 3.2 帧格式
 
@@ -108,9 +111,9 @@ genet-agent --mode rpc
 
 思考档位在协议里走的是 effort 轴（`ModelInfo.efforts` + `session.setEffort`），不是 `mode`——`mode` 留给「动手前问不问」那类策略，而这个 agent 没有审批流程，也就没有模式可选。旧会话把档位记在 `mode` 上，启动时仍然认这个名字，重开一个旧会话不会悄悄掉回默认档。
 | `get_session_stats` | token / 成本 | `{tokens, cost}` |
-| `get_commands` | 斜杠命令（MVP 只返回 skills） | `{commands: [...]}` |
+| `get_commands` | 斜杠命令（Skills 与 compact） | `{commands: [...]}` |
 | `set_auto_compaction` | 记录开关 | 无 |
-| `compact` | 桩：发 `compaction_start` + `compaction_end` 即可 | 无 |
+| `compact` | 用 `genet session context` 取得确定性投影，在禁用工具的纯内存子会话中生成带引用摘要，再以 append-only compaction entry 替换活跃模型上下文 | `{agentInvoked: true}` |
 
 未识别的 `type`：回 `success: false` + `error`，不要崩。
 
@@ -171,6 +174,8 @@ agent_end                {messages}
 - 注入：把「名称 + 描述」清单写进系统提示；技能正文在被调用时才读入，避免撑爆上下文
 - 相对路径：技能文件里的相对路径按 `SKILL.md` 所在目录解析
 - 同时通过 `get_commands` 暴露为 `/skill:<name>`，`source: "skill"`
+- 内建 `genehub-session-history` 会物化到 Agent 数据目录的 `builtin-skills/`，保证按需 `read` 有真实路径；用户或项目同名 Skill 优先，可覆盖内建 fallback
+- `/skill:genehub-session-history [goal]` 可强制加载完整 SOP；普通会话只注入名称、描述和路径
 
 ---
 
@@ -181,6 +186,7 @@ agent_end                {messages}
 - `--no-session`：纯内存
 - 默认（都没给）：写到 agent 数据目录下 `<时间戳>_<sessionId>.jsonl`
 - `get_state` 里的 `sessionFile` / `sessionId` / `messageCount` 必须真实反映持久化状态
+- `compaction` entry 不删除旧行；回放到该 entry 时清空旧 provider context，只恢复带 `ghref`、coverage、source digest 与 `genet` 回查命令的压缩上下文。生成摘要的子会话使用 `Session::in_memory`，不写文件、不出现在会话列表，且不能执行工具
 
 ---
 
@@ -226,7 +232,7 @@ agent_end                {messages}
 | 阶段 | 内容 |
 |------|------|
 | **A（MVP，本次）** | 本文 §2.1 + §2.2 全部；能被真实 daemon 拉起并跑完一轮带工具调用的任务 |
-| **B** | 真正的 compaction、图片输入、steering/follow-up 队列、auto-retry、更完整的模型目录 |
+| **B** | 图片输入、steering/follow-up 队列、auto-retry、更完整的模型目录 |
 | **C** | subagents、extensions、MCP、fork/branch/tree |
 
 阶段 B/C 的取舍视桌面端实际使用反馈决定，不预先承诺。

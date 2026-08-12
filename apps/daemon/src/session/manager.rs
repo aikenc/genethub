@@ -11,20 +11,45 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    Attachment, BlobPayload, BlobRef, Catalog, ItemDelta, PermissionOptionKind, PermissionOutcome,
-    PermissionRequest, PermissionRequestKind, RoundLayer, RoundLayerOutcome, RoundSummary,
-    RoundTrunk, SequencedEvent, SessionEvent, SessionSnapshot, SessionStatus, SessionSummary,
-    TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
+    Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, HistoryCoverage,
+    ImportContinuation, ItemDelta, PermissionOptionKind, PermissionOutcome, PermissionRequest,
+    PermissionRequestKind, ProbeState, RetrievalCapability, RoundLayer, RoundLayerOutcome,
+    RoundSummary, RoundTrunk, SequencedEvent, SessionContext, SessionEvent, SessionImportCandidate,
+    SessionImportListing, SessionImportSource, SessionInspection, SessionLineage,
+    SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot, SessionStatus,
+    SessionSummary, TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
+use super::context_seed::{build_context_seed, prompt_with_seed, seed_token_budget};
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
-use super::store::{self, now_ms, title_from, SessionMeta, Store, SESSION_FORMAT};
+use super::store::{
+    self, now_ms, title_from, ContextSeedState, ImportedSessionMeta, SessionMeta, Store,
+    SESSION_FORMAT,
+};
 use crate::adapter::registry::Registry;
 use crate::adapter::{AgentSession, PersistHandle, PromptInput, ProviderMap, SessionConfig};
 
 const BROADCAST_CAPACITY: usize = 1024;
+const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
+/// A snapshot is one RPC body (`MAX_RPC_BODY_BYTES` is 2.9 MiB). Leave room for
+/// summary/round metadata and JSON escaping instead of importing a transcript
+/// that can be written successfully but never opened.
+const IMPORT_VISIBLE_BYTES: usize = 1_800_000;
+const IMPORT_VISIBLE_ITEMS: usize = 4_000;
+
+#[derive(Debug, Clone)]
+struct CachedImportCandidate {
+    workspace_id: String,
+    cwd: PathBuf,
+    agent_id: String,
+    source_id: String,
+    source_key: String,
+    title: String,
+    expires_at_ms: i64,
+}
 
 /// One live session.
 struct Live {
@@ -133,6 +158,14 @@ struct RoundView {
     trunk_count: u32,
 }
 
+struct SessionReadView {
+    meta: SessionMeta,
+    items: Vec<TimelineItem>,
+    rounds: Vec<RoundSummary>,
+    source: SessionReadSource,
+    coverage: HistoryCoverage,
+}
+
 impl ActiveRound {
     /// Feeds one item into this round's trunk pagination, if the item is one
     /// of the three kinds trunks track (`TrunkItem`). A no-op for every
@@ -163,6 +196,7 @@ pub struct SessionManager {
     registry: Arc<Registry>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
     replay_window: usize,
+    import_candidates: Mutex<HashMap<String, CachedImportCandidate>>,
 }
 
 impl SessionManager {
@@ -172,6 +206,7 @@ impl SessionManager {
             registry,
             sessions: RwLock::new(HashMap::new()),
             replay_window: replay_window.max(1),
+            import_candidates: Mutex::new(HashMap::new()),
         }
     }
 
@@ -203,6 +238,8 @@ impl SessionManager {
             archived: false,
             persist: None,
             pending_permission: None,
+            lineage: None,
+            imported: None,
         };
         self.store.save_meta(&meta)?;
         let summary = meta.summary(SessionStatus::Idle);
@@ -217,6 +254,7 @@ impl SessionManager {
         &self,
         session_id: &str,
         turn_id: &str,
+        target: Option<ForkTarget>,
         providers: &ProviderMap,
     ) -> Result<SessionSummary> {
         let source = self.live(session_id).await?;
@@ -227,13 +265,14 @@ impl SessionManager {
             anyhow::bail!("wait for the current turn to finish before forking");
         }
         let source_meta = source.meta.lock().await.clone();
-        let adapter = self.registry.require(&source_meta.agent_id)?;
-        if !adapter.capabilities().fork {
-            anyhow::bail!(
-                "the {} agent does not support forking",
-                source_meta.agent_id
-            );
-        }
+        let source_adapter = self.registry.require(&source_meta.agent_id)?;
+        let source_round_id = source
+            .rounds
+            .lock()
+            .await
+            .iter()
+            .find(|round| round.adapter_turn_ids.iter().any(|id| id == turn_id))
+            .map(|round| round.round_id.clone());
 
         let (items, checkpoint) = {
             let items = source.items.lock().await;
@@ -247,24 +286,94 @@ impl SessionManager {
                 })
                 .ok_or_else(|| anyhow!("no completed turn called {turn_id}"))?;
             let checkpoint = match &items[at] {
-                TimelineItem::TurnSummary { stats, .. } => stats
-                    .fork_checkpoint
-                    .clone()
-                    .ok_or_else(|| anyhow!("that turn has no Agent fork checkpoint"))?,
+                TimelineItem::TurnSummary { stats, .. } => stats.fork_checkpoint.clone(),
                 _ => unreachable!("the index was selected by the same variant"),
             };
             (items[..=at].to_vec(), checkpoint)
         };
 
-        self.ensure_started(&source, providers).await?;
-        let persist = source
-            .agent
-            .lock()
-            .await
-            .as_ref()
-            .ok_or_else(|| anyhow!("the source session has no running agent"))?
-            .fork(&checkpoint)
-            .await?;
+        let explicit_target = target.is_some();
+        let target = target.unwrap_or_else(|| ForkTarget {
+            agent_id: source_meta.agent_id.clone(),
+            model_id: source_meta.model_id.clone(),
+            mode_id: source_meta.mode_id.clone(),
+            effort_id: source_meta.effort_id.clone(),
+        });
+        let same_agent = target.agent_id == source_meta.agent_id;
+        let native = same_agent && source_adapter.capabilities().fork && checkpoint.is_some();
+        if !explicit_target && !source_adapter.capabilities().fork {
+            anyhow::bail!(
+                "the {} agent does not support forking",
+                source_meta.agent_id
+            );
+        }
+        if !explicit_target && checkpoint.is_none() {
+            anyhow::bail!("that turn has no Agent fork checkpoint");
+        }
+
+        let target_adapter = self.registry.require(&target.agent_id)?;
+        if !native {
+            match target_adapter.probe().await {
+                ProbeState::Ready => {}
+                ProbeState::NotInstalled => {
+                    anyhow::bail!("the {} agent is not installed", target.agent_id)
+                }
+                ProbeState::Unavailable { reason } => {
+                    anyhow::bail!("the {} agent is unavailable: {reason}", target.agent_id)
+                }
+            }
+        }
+
+        let model_id = target
+            .model_id
+            .or_else(|| same_agent.then(|| source_meta.model_id.clone()).flatten());
+        let mode_id = target
+            .mode_id
+            .or_else(|| same_agent.then(|| source_meta.mode_id.clone()).flatten());
+        let effort_id = target
+            .effort_id
+            .or_else(|| same_agent.then(|| source_meta.effort_id.clone()).flatten());
+
+        let (persist, method, context_seed, context) = if native {
+            self.ensure_started(&source, providers).await?;
+            let checkpoint = checkpoint.expect("native was selected only with a checkpoint");
+            let persist = source
+                .agent
+                .lock()
+                .await
+                .as_ref()
+                .ok_or_else(|| anyhow!("the source session has no running agent"))?
+                .fork(&checkpoint)
+                .await?;
+            (Some(persist), ForkMethod::NativeCheckpoint, None, None)
+        } else {
+            let catalog = target_adapter.catalog(providers).await;
+            let context_window = model_id
+                .as_deref()
+                .and_then(|id| catalog.models.iter().find(|model| model.id == id))
+                .or_else(|| {
+                    catalog
+                        .default_model
+                        .as_deref()
+                        .and_then(|id| catalog.models.iter().find(|model| model.id == id))
+                })
+                .and_then(|model| model.context_window);
+            let built = build_context_seed(
+                session_id,
+                turn_id,
+                source_round_id.as_deref(),
+                &source_meta.agent_id,
+                &items,
+                seed_token_budget(context_window),
+                coverage_for_meta(&source_meta, items.len()),
+            );
+            (
+                None,
+                ForkMethod::ReconstructedContext,
+                Some(built.seed),
+                Some(built.stats),
+            )
+        };
 
         let now = now_ms();
         let title = source_meta
@@ -275,23 +384,42 @@ impl SessionManager {
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: source_meta.workspace_id,
             format: SESSION_FORMAT,
-            agent_id: source_meta.agent_id,
+            agent_id: target.agent_id,
             title,
             cwd: source_meta.cwd,
-            model_id: source_meta.model_id,
-            mode_id: source_meta.mode_id,
-            effort_id: source_meta.effort_id,
+            model_id,
+            mode_id,
+            effort_id,
             created_at_ms: now,
             updated_at_ms: now,
             archived: false,
-            persist: Some(persist),
+            persist,
             pending_permission: None,
+            lineage: Some(SessionLineage {
+                source_session_id: session_id.to_string(),
+                source_turn_id: turn_id.to_string(),
+                source_agent_id: source_meta.agent_id,
+                method,
+                context,
+            }),
+            imported: None,
         };
-        self.store.save_meta(&meta)?;
-        // The fork inherits the conversation, not the source's round layer:
-        // its rounds happened in another session and stay addressable there.
-        self.store
-            .append_chat_items(&meta.workspace_id, &meta.id, &items)?;
+        let write = || -> Result<()> {
+            self.store.save_meta(&meta)?;
+            // The fork inherits the conversation, not the source's round
+            // layer: its rounds happened in another session and stay
+            // addressable through lineage.
+            self.store
+                .append_chat_items(&meta.workspace_id, &meta.id, &items)?;
+            if let Some(seed) = &context_seed {
+                self.store.save_seed(&meta.workspace_id, &meta.id, seed)?;
+            }
+            Ok(())
+        };
+        if let Err(error) = write() {
+            let _ = self.store.delete(&meta.workspace_id, &meta.id);
+            return Err(error);
+        }
         let summary = meta.summary(SessionStatus::Idle);
         let forked = Arc::new(Live::new(meta, self.store.clone()));
         *forked.items.lock().await = items;
@@ -299,6 +427,222 @@ impl SessionManager {
             .write()
             .await
             .insert(summary.id.clone(), forked);
+        Ok(summary)
+    }
+
+    /// Lightweight discovery pass. Every provider is asked in parallel and
+    /// returns only descriptors; the full selected transcript is read later.
+    pub async fn list_imports(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        limit: Option<u32>,
+    ) -> Result<SessionImportListing> {
+        let limit = limit.unwrap_or(20).clamp(1, 100) as usize;
+        let now = now_ms();
+        let expires_at_ms = now.saturating_add(IMPORT_CANDIDATE_TTL_MS);
+        let duplicate_keys: HashSet<String> = self
+            .store
+            .list_meta()?
+            .into_iter()
+            .filter(|meta| meta.workspace_id == workspace_id)
+            .filter_map(|meta| meta.imported.map(|imported| imported.source_key))
+            .collect();
+        let discovered = self.registry.import_candidates(&cwd, limit).await;
+        let mut filtered_duplicates = 0_u32;
+        let mut cached = self.import_candidates.lock().await;
+        cached.retain(|_, candidate| {
+            candidate.expires_at_ms > now && candidate.workspace_id != workspace_id
+        });
+        let mut sources = Vec::new();
+        for (agent_id, label, result) in discovered {
+            match result {
+                Ok(Some(candidates)) => {
+                    let mut public = Vec::new();
+                    for candidate in candidates {
+                        let source_key = import_source_key(&agent_id, &cwd, &candidate.source_id);
+                        if duplicate_keys.contains(&source_key) {
+                            filtered_duplicates = filtered_duplicates.saturating_add(1);
+                            continue;
+                        }
+                        let candidate_id = format!("ic_{}", uuid::Uuid::new_v4().simple());
+                        cached.insert(
+                            candidate_id.clone(),
+                            CachedImportCandidate {
+                                workspace_id: workspace_id.to_string(),
+                                cwd: cwd.clone(),
+                                agent_id: agent_id.clone(),
+                                source_id: candidate.source_id,
+                                source_key,
+                                title: candidate.title.clone(),
+                                expires_at_ms,
+                            },
+                        );
+                        public.push(SessionImportCandidate {
+                            candidate_id,
+                            agent_id: agent_id.clone(),
+                            title: candidate.title,
+                            preview: candidate.preview,
+                            updated_at_ms: candidate.updated_at_ms,
+                            continuation: candidate.continuation,
+                        });
+                    }
+                    sources.push(SessionImportSource {
+                        agent_id,
+                        label,
+                        supported: true,
+                        candidates: public,
+                        error: None,
+                    });
+                }
+                Ok(None) => sources.push(SessionImportSource {
+                    agent_id,
+                    label,
+                    supported: false,
+                    candidates: Vec::new(),
+                    error: None,
+                }),
+                Err(error) => {
+                    tracing::warn!(agent = %agent_id, %error, "session import discovery failed");
+                    sources.push(SessionImportSource {
+                        agent_id,
+                        label,
+                        supported: true,
+                        candidates: Vec::new(),
+                        // Provider paths and native handles stay out of RPC
+                        // errors; the daemon log retains the detailed cause.
+                        error: Some("读取失败，请查看日志".into()),
+                    });
+                }
+            }
+        }
+        Ok(SessionImportListing {
+            sources,
+            expires_at_ms,
+            filtered_duplicates,
+        })
+    }
+
+    /// Full-history pass for exactly one expiring candidate. The candidate is
+    /// consumed before provider I/O, so a retry always starts with a fresh
+    /// discovery result rather than accidentally importing twice.
+    pub async fn import(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        candidate_id: &str,
+    ) -> Result<SessionSummary> {
+        let candidate = self
+            .import_candidates
+            .lock()
+            .await
+            .remove(candidate_id)
+            .ok_or_else(|| anyhow!("that import candidate expired; refresh the list"))?;
+        if candidate.expires_at_ms <= now_ms()
+            || candidate.workspace_id != workspace_id
+            || candidate.cwd != cwd
+        {
+            anyhow::bail!("that import candidate expired; refresh the list");
+        }
+        if self.store.list_meta()?.into_iter().any(|meta| {
+            meta.workspace_id == workspace_id
+                && meta
+                    .imported
+                    .as_ref()
+                    .is_some_and(|imported| imported.source_key == candidate.source_key)
+        }) {
+            anyhow::bail!("that Agent session has already been imported");
+        }
+        let mut history = self
+            .registry
+            .import_history(&candidate.agent_id, &cwd, &candidate.source_id)
+            .await?;
+        let source_item_count = history.items.len();
+        let (bounded_items, omitted_items, altered_items) = bound_imported_items(history.items);
+        history.items = bounded_items;
+        let unavailable_items = omitted_items.saturating_add(altered_items);
+        if unavailable_items > 0 {
+            history.warnings.push(format!(
+                "历史过长：GeneHub 完整保留 {} 项，省略或裁剪 {unavailable_items} 项；原 Agent 会话可能仍保留完整上下文",
+                source_item_count.saturating_sub(unavailable_items)
+            ));
+        }
+        let mut continuation = history.continuation;
+        if continuation == ImportContinuation::Native && history.persist.is_none() {
+            continuation = ImportContinuation::ReadOnly;
+            history
+                .warnings
+                .push("Agent 没有返回可恢复句柄，已按只读历史导入".into());
+        }
+        let now = now_ms();
+        let created_at_ms = if history.created_at_ms > 0 {
+            history.created_at_ms
+        } else {
+            now
+        };
+        let updated_at_ms = if history.updated_at_ms > 0 {
+            history.updated_at_ms
+        } else {
+            now
+        };
+        let meta = SessionMeta {
+            id: format!("s_{}", uuid::Uuid::new_v4().simple()),
+            workspace_id: workspace_id.to_string(),
+            format: SESSION_FORMAT,
+            agent_id: candidate.agent_id.clone(),
+            title: history.title.or(Some(candidate.title)),
+            cwd,
+            model_id: None,
+            mode_id: None,
+            effort_id: None,
+            created_at_ms,
+            updated_at_ms,
+            archived: false,
+            persist: history.persist,
+            pending_permission: None,
+            lineage: None,
+            imported: Some(ImportedSessionMeta {
+                source_key: candidate.source_key,
+                agent_id: candidate.agent_id,
+                continuation,
+                warnings: history.warnings,
+                coverage: Some(HistoryCoverage {
+                    source_item_count: Some(u64::try_from(source_item_count).unwrap_or(u64::MAX)),
+                    retained_item_count: u64::try_from(
+                        source_item_count.saturating_sub(unavailable_items),
+                    )
+                    .unwrap_or(u64::MAX),
+                    omitted_item_count: u64::try_from(unavailable_items).unwrap_or(u64::MAX),
+                    retrieval: if unavailable_items == 0 {
+                        RetrievalCapability::Genehub
+                    } else if continuation == ImportContinuation::Native {
+                        RetrievalCapability::NativeOnly
+                    } else {
+                        RetrievalCapability::Unavailable
+                    },
+                    reason: (unavailable_items > 0).then(|| {
+                        "the import retained a recent bounded window and clipped oversized records to finish promptly".into()
+                    }),
+                }),
+            }),
+        };
+        let write = || -> Result<()> {
+            self.store.save_meta(&meta)?;
+            self.store
+                .append_chat_items(workspace_id, &meta.id, &history.items)?;
+            Ok(())
+        };
+        if let Err(error) = write() {
+            let _ = self.store.delete(workspace_id, &meta.id);
+            return Err(error);
+        }
+        let summary = meta.summary(SessionStatus::Idle);
+        let imported = Arc::new(Live::new(meta, self.store.clone()));
+        *imported.items.lock().await = history.items;
+        self.sessions
+            .write()
+            .await
+            .insert(summary.id.clone(), imported);
         Ok(summary)
     }
 
@@ -372,6 +716,177 @@ impl SessionManager {
     pub async fn snapshot(&self, session_id: &str) -> Result<SessionSnapshot> {
         let live = self.live(session_id).await?;
         live.snapshot().await
+    }
+
+    /// A bounded-reader view frozen at an optional round boundary. This is the
+    /// single source for the CLI pages below, so inspect/narrative/rounds agree
+    /// on both the digest and what "through round" means.
+    async fn read_view(
+        &self,
+        session_id: &str,
+        through_round_id: Option<&str>,
+    ) -> Result<SessionReadView> {
+        let live = self.live(session_id).await?;
+        let meta = live.meta.lock().await.clone();
+        let views = self.round_views(&live).await;
+        let boundary = match through_round_id {
+            Some(round_id) => Some(
+                views
+                    .iter()
+                    .position(|view| view.round_id == round_id)
+                    .ok_or_else(|| anyhow!("no such round: {round_id}"))?,
+            ),
+            None => views.len().checked_sub(1),
+        };
+        let selected_views = boundary.map(|index| &views[..=index]).unwrap_or(&[]);
+        let rounds: Vec<RoundSummary> = selected_views.iter().map(round_summary).collect();
+
+        let all_items = live.items.lock().await.clone();
+        // The next round's user item is a stronger boundary than an adapter
+        // turn id: imported and stitched rounds can contain a different number
+        // of adapter turns, while every round begins with at most one stable
+        // user narrative item.
+        let end = boundary
+            .and_then(|index| views.get(index + 1))
+            .and_then(|next| next.user_item_id.as_deref())
+            .and_then(|next_user| all_items.iter().position(|item| item.id() == next_user))
+            .unwrap_or(all_items.len());
+        let items: Vec<TimelineItem> = all_items[..end]
+            .iter()
+            .filter(|item| !store::is_work_item(item))
+            .cloned()
+            .collect();
+
+        let encoded = serde_json::to_vec(&(items.as_slice(), rounds.as_slice()))?;
+        let digest = format!("sha256:{:x}", Sha256::digest(&encoded));
+        let through_round_id = boundary.map(|index| views[index].round_id.clone());
+        let coverage = meta
+            .imported
+            .as_ref()
+            .and_then(|imported| imported.coverage.clone())
+            .unwrap_or_else(|| HistoryCoverage {
+                source_item_count: Some(u64::try_from(items.len()).unwrap_or(u64::MAX)),
+                retained_item_count: u64::try_from(items.len()).unwrap_or(u64::MAX),
+                omitted_item_count: 0,
+                retrieval: RetrievalCapability::Genehub,
+                reason: None,
+            });
+        Ok(SessionReadView {
+            meta,
+            items,
+            rounds,
+            source: SessionReadSource {
+                session_id: session_id.to_string(),
+                through_round_id,
+                digest,
+                untrusted: true,
+            },
+            coverage,
+        })
+    }
+
+    pub async fn inspect(
+        &self,
+        session_id: &str,
+        through_round_id: Option<&str>,
+    ) -> Result<SessionInspection> {
+        let view = self.read_view(session_id, through_round_id).await?;
+        let status = *self.live(session_id).await?.status.lock().await;
+        Ok(SessionInspection {
+            summary: view.meta.summary(status),
+            source: view.source,
+            narrative_item_count: u64::try_from(view.items.len()).unwrap_or(u64::MAX),
+            round_count: u64::try_from(view.rounds.len()).unwrap_or(u64::MAX),
+            latest_round_id: view.rounds.last().map(|round| round.round_id.clone()),
+            coverage: view.coverage,
+            layers: vec![
+                "narrative".into(),
+                "rounds".into(),
+                "trunks".into(),
+                "blobs".into(),
+                "context".into(),
+            ],
+        })
+    }
+
+    pub async fn narrative_page(
+        &self,
+        session_id: &str,
+        through_round_id: Option<&str>,
+        item_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<SessionNarrativePage> {
+        let view = self.read_view(session_id, through_round_id).await?;
+        if let Some(item_id) = item_id {
+            if cursor.is_some() {
+                anyhow::bail!("itemId and cursor are mutually exclusive");
+            }
+            let item = view
+                .items
+                .iter()
+                .find(|item| item.id() == item_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("no such narrative item: {item_id}"))?;
+            return Ok(SessionNarrativePage {
+                source: view.source,
+                items: vec![item],
+                next_cursor: None,
+            });
+        }
+        let end = parse_trunk_cursor(cursor, view.items.len())?;
+        let limit = limit.unwrap_or(20).clamp(1, 100) as usize;
+        let start = end.saturating_sub(limit);
+        Ok(SessionNarrativePage {
+            source: view.source,
+            items: view.items[start..end].to_vec(),
+            next_cursor: (start > 0).then(|| format!("before:{start}")),
+        })
+    }
+
+    pub async fn round_page(
+        &self,
+        session_id: &str,
+        through_round_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<SessionRoundPage> {
+        let view = self.read_view(session_id, through_round_id).await?;
+        let end = parse_trunk_cursor(cursor, view.rounds.len())?;
+        let limit = limit.unwrap_or(20).clamp(1, 100) as usize;
+        let start = end.saturating_sub(limit);
+        Ok(SessionRoundPage {
+            source: view.source,
+            rounds: view.rounds[start..end].to_vec(),
+            next_cursor: (start > 0).then(|| format!("before:{start}")),
+        })
+    }
+
+    pub async fn session_context(
+        &self,
+        session_id: &str,
+        through_round_id: Option<&str>,
+        token_budget: Option<u64>,
+    ) -> Result<SessionContext> {
+        let view = self.read_view(session_id, through_round_id).await?;
+        let boundary = view
+            .source
+            .through_round_id
+            .as_deref()
+            .unwrap_or("latest")
+            .to_string();
+        let built = build_context_seed(
+            session_id,
+            &boundary,
+            view.source.through_round_id.as_deref(),
+            &view.meta.agent_id,
+            &view.items,
+            token_budget
+                .unwrap_or(super::context_seed::DEFAULT_SEED_TOKEN_BUDGET)
+                .clamp(2_048, 64_000),
+            view.coverage,
+        );
+        Ok(built.context)
     }
 
     async fn snapshot_for_open(
@@ -659,6 +1174,18 @@ impl SessionManager {
         continues_round: Option<String>,
     ) -> Result<String> {
         let live = self.live(session_id).await?;
+        if live
+            .meta
+            .lock()
+            .await
+            .imported
+            .as_ref()
+            .is_some_and(|imported| imported.continuation == ImportContinuation::ReadOnly)
+        {
+            anyhow::bail!(
+                "this imported conversation is read-only because its Agent cannot resume it"
+            );
+        }
         // Preview locators are rebound in the workbench Markdown renderer from
         // relative/absolute workspace paths. A deployment-specific URL prefix
         // must not be injected into Agent system prompts — only path-linking
@@ -729,6 +1256,29 @@ impl SessionManager {
         }
         self.ensure_started(live, providers).await?;
 
+        let seed_owner = {
+            let meta = live.meta.lock().await;
+            (meta.workspace_id.clone(), meta.id.clone())
+        };
+        let mut applying_seed = match self.store.load_seed(&seed_owner.0, &seed_owner.1)? {
+            Some(mut seed) if seed.state == ContextSeedState::Pending => {
+                seed.state = ContextSeedState::Applying;
+                self.store.save_seed(&seed_owner.0, &seed_owner.1, &seed)?;
+                Some(seed)
+            }
+            Some(seed) if seed.state == ContextSeedState::Applying => {
+                anyhow::bail!(
+                    "the reconstructed history may already have been handed to the Agent; \
+                     create a new Fork instead of sending it twice"
+                )
+            }
+            Some(_) | None => None,
+        };
+        let agent_text = applying_seed
+            .as_ref()
+            .map(|seed| prompt_with_seed(&seed.text, &text))
+            .unwrap_or_else(|| text.clone());
+
         // Record the prompt before handing it over: if the agent dies on the
         // next line, the user's question is still in the log.
         let item = TimelineItem::UserMessage {
@@ -771,9 +1321,41 @@ impl SessionManager {
             .as_ref()
             .ok_or_else(|| anyhow!("the session has no running agent"))?;
         let turn_id = agent
-            .send(PromptInput { text, attachments })
-            .await
-            .context("handing the prompt to the agent")?;
+            .send(PromptInput {
+                text: agent_text,
+                attachments,
+            })
+            .await;
+        let turn_id = match turn_id {
+            Ok(turn_id) => {
+                if let Some(seed) = &mut applying_seed {
+                    seed.state = ContextSeedState::Applied;
+                    self.store
+                        .save_seed(&seed_owner.0, &seed_owner.1, seed)
+                        .context("marking reconstructed history as applied")?;
+                }
+                turn_id
+            }
+            Err(error) => {
+                // A returned error means the adapter did not accept a turn.
+                // Put the seed back for an explicit retry. A daemon crash while
+                // the await is pending leaves `Applying`, which is intentionally
+                // blocked above because its outcome is unknowable.
+                if let Some(seed) = &mut applying_seed {
+                    seed.state = ContextSeedState::Pending;
+                    if let Err(save_error) =
+                        self.store.save_seed(&seed_owner.0, &seed_owner.1, seed)
+                    {
+                        tracing::error!(
+                            %save_error,
+                            session = %seed_owner.1,
+                            "could not restore reconstructed history seed after a failed send"
+                        );
+                    }
+                }
+                return Err(error).context("handing the prompt to the agent");
+            }
+        };
         // Only recorded once the handover actually succeeded: a failed send
         // must not leave a round with zero adapter turns behind (`send`
         // resets status to Idle on this same error, as if it never happened).
@@ -1254,6 +1836,89 @@ impl SessionManager {
     }
 }
 
+fn import_source_key(agent_id: &str, cwd: &std::path::Path, source_id: &str) -> String {
+    let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let mut digest = Sha256::new();
+    digest.update(agent_id.as_bytes());
+    digest.update([0]);
+    digest.update(canonical.to_string_lossy().as_bytes());
+    digest.update([0]);
+    digest.update(source_id.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+fn bound_imported_items(items: Vec<TimelineItem>) -> (Vec<TimelineItem>, usize, usize) {
+    let total = items.len();
+    let mut kept = Vec::new();
+    let mut bytes = 0_usize;
+    let mut altered = 0_usize;
+    for mut item in items.into_iter().rev() {
+        if kept.len() >= IMPORT_VISIBLE_ITEMS {
+            break;
+        }
+        let mut item_bytes = serde_json::to_vec(&item)
+            .map(|encoded| encoded.len().saturating_add(1))
+            .unwrap_or(IMPORT_VISIBLE_BYTES);
+        if item_bytes > IMPORT_VISIBLE_BYTES {
+            let original = item.clone();
+            item = truncate_import_item(item, IMPORT_VISIBLE_BYTES / 2);
+            if item != original {
+                altered = altered.saturating_add(1);
+            }
+            item_bytes = serde_json::to_vec(&item)
+                .map(|encoded| encoded.len().saturating_add(1))
+                .unwrap_or(IMPORT_VISIBLE_BYTES);
+        }
+        if !kept.is_empty() && bytes.saturating_add(item_bytes) > IMPORT_VISIBLE_BYTES {
+            break;
+        }
+        bytes = bytes.saturating_add(item_bytes);
+        kept.push(item);
+    }
+    kept.reverse();
+    let omitted = total.saturating_sub(kept.len());
+    if omitted > 0 {
+        kept.insert(
+            0,
+            TimelineItem::Compaction {
+                id: format!("import-{}", uuid::Uuid::new_v4().simple()),
+                reason: format!("导入历史过长，较早的 {omitted} 项未放入当前可见窗口"),
+            },
+        );
+    }
+    (kept, omitted, altered)
+}
+
+fn truncate_import_item(mut item: TimelineItem, max_bytes: usize) -> TimelineItem {
+    let id = item.id().to_string();
+    let text = match &mut item {
+        TimelineItem::UserMessage { text, .. }
+        | TimelineItem::AssistantMessage { text, .. }
+        | TimelineItem::Reasoning { text, .. } => Some(text),
+        TimelineItem::Compaction { reason, .. } => Some(reason),
+        TimelineItem::Error { message, .. } => Some(message),
+        _ => None,
+    };
+    if let Some(text) = text {
+        if text.len() > max_bytes {
+            let mut boundary = max_bytes.min(text.len());
+            while boundary > 0 && !text.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            text.truncate(boundary);
+            text.push_str("\n\n[单条消息过长，导入时已截断]");
+        }
+    }
+    if serde_json::to_vec(&item).is_ok_and(|encoded| encoded.len() <= max_bytes) {
+        item
+    } else {
+        TimelineItem::Compaction {
+            id,
+            reason: "单条历史记录过长，导入时已省略".into(),
+        }
+    }
+}
+
 fn round_summary(view: &RoundView) -> RoundSummary {
     RoundSummary {
         round_id: view.round_id.clone(),
@@ -1263,6 +1928,19 @@ fn round_summary(view: &RoundView) -> RoundSummary {
         outcome: view.outcome,
         trunk_count: view.trunk_count,
     }
+}
+
+fn coverage_for_meta(meta: &SessionMeta, retained_items: usize) -> HistoryCoverage {
+    meta.imported
+        .as_ref()
+        .and_then(|imported| imported.coverage.clone())
+        .unwrap_or_else(|| HistoryCoverage {
+            source_item_count: Some(u64::try_from(retained_items).unwrap_or(u64::MAX)),
+            retained_item_count: u64::try_from(retained_items).unwrap_or(u64::MAX),
+            omitted_item_count: 0,
+            retrieval: RetrievalCapability::Genehub,
+            reason: None,
+        })
 }
 
 fn parse_trunk_cursor(cursor: Option<&str>, len: usize) -> Result<usize> {
@@ -2419,6 +3097,8 @@ mod tests {
             archived: false,
             persist: None,
             pending_permission: None,
+            lineage: None,
+            imported: None,
         }
     }
 
@@ -2455,6 +3135,93 @@ mod tests {
     struct ContextRecorder(Arc<std::sync::Mutex<Option<String>>>);
 
     struct Blank(tokio::sync::broadcast::Sender<SessionEvent>);
+
+    struct ForkHarness {
+        id: &'static str,
+        native_fork: bool,
+        prompts: Arc<std::sync::Mutex<Vec<PromptInput>>>,
+        starts: Arc<std::sync::Mutex<Vec<Option<PersistHandle>>>>,
+    }
+
+    struct ForkHarnessSession {
+        id: &'static str,
+        native_fork: bool,
+        prompts: Arc<std::sync::Mutex<Vec<PromptInput>>>,
+        events: tokio::sync::broadcast::Sender<SessionEvent>,
+    }
+
+    struct ImportHarness;
+
+    #[async_trait::async_trait]
+    impl crate::adapter::AgentAdapter for ImportHarness {
+        fn id(&self) -> &str {
+            "historian"
+        }
+
+        fn label(&self) -> &str {
+            "Historian"
+        }
+
+        fn capabilities(&self) -> genehub_proto::Capabilities {
+            genehub_proto::Capabilities {
+                resume: true,
+                ..Default::default()
+            }
+        }
+
+        async fn probe(&self) -> genehub_proto::ProbeState {
+            genehub_proto::ProbeState::Ready
+        }
+
+        async fn catalog(&self, _providers: &ProviderMap) -> genehub_proto::Catalog {
+            Default::default()
+        }
+
+        async fn start(
+            &self,
+            _config: SessionConfig,
+        ) -> Result<Box<dyn crate::adapter::AgentSession>> {
+            anyhow::bail!("not needed by the import test")
+        }
+
+        async fn list_import_candidates(
+            &self,
+            _cwd: &std::path::Path,
+            _limit: usize,
+        ) -> Result<Option<Vec<crate::adapter::ImportCandidate>>> {
+            Ok(Some(vec![crate::adapter::ImportCandidate {
+                source_id: "native-secret-42".into(),
+                title: "Imported work".into(),
+                preview: "first prompt".into(),
+                updated_at_ms: 20,
+                continuation: ImportContinuation::Native,
+            }]))
+        }
+
+        async fn import_history(
+            &self,
+            _cwd: &std::path::Path,
+            source_id: &str,
+        ) -> Result<crate::adapter::ImportedHistory> {
+            assert_eq!(source_id, "native-secret-42");
+            Ok(crate::adapter::ImportedHistory {
+                title: Some("Imported work".into()),
+                created_at_ms: 10,
+                updated_at_ms: 20,
+                items: vec![TimelineItem::UserMessage {
+                    id: "import-user".into(),
+                    text: "first prompt".into(),
+                    attachments: Vec::new(),
+                }],
+                persist: Some(PersistHandle {
+                    agent_id: "historian".into(),
+                    value: serde_json::json!({ "sessionId": source_id }),
+                }),
+                continuation: ImportContinuation::Native,
+                warnings: Vec::new(),
+            })
+        }
+    }
 
     #[async_trait::async_trait]
     impl crate::adapter::AgentAdapter for Amnesiac {
@@ -2563,6 +3330,485 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::adapter::AgentAdapter for ForkHarness {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn label(&self) -> &str {
+            self.id
+        }
+
+        fn capabilities(&self) -> genehub_proto::Capabilities {
+            genehub_proto::Capabilities {
+                fork: self.native_fork,
+                ..Default::default()
+            }
+        }
+
+        async fn probe(&self) -> genehub_proto::ProbeState {
+            genehub_proto::ProbeState::Ready
+        }
+
+        async fn catalog(&self, _providers: &ProviderMap) -> genehub_proto::Catalog {
+            genehub_proto::Catalog {
+                models: vec![genehub_proto::ModelInfo {
+                    id: "model".into(),
+                    label: "Model".into(),
+                    context_window: Some(10_000),
+                    reasoning: true,
+                    efforts: Vec::new(),
+                }],
+                modes: Vec::new(),
+                commands: Vec::new(),
+                default_model: Some("model".into()),
+                default_mode: None,
+                default_effort: None,
+            }
+        }
+
+        async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
+            self.starts.lock().unwrap().push(config.resume);
+            Ok(Box::new(ForkHarnessSession {
+                id: self.id,
+                native_fork: self.native_fork,
+                prompts: self.prompts.clone(),
+                events: tokio::sync::broadcast::channel(8).0,
+            }))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentSession for ForkHarnessSession {
+        fn events(&self) -> tokio::sync::broadcast::Receiver<SessionEvent> {
+            self.events.subscribe()
+        }
+
+        async fn send(&self, input: PromptInput) -> Result<String> {
+            self.prompts.lock().unwrap().push(input);
+            Ok(format!("turn-{}", self.prompts.lock().unwrap().len()))
+        }
+
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_model(&self, _model_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_mode(&self, _mode_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn fork(&self, checkpoint: &str) -> Result<PersistHandle> {
+            if !self.native_fork {
+                anyhow::bail!("native fork disabled");
+            }
+            Ok(PersistHandle {
+                agent_id: self.id.into(),
+                value: serde_json::json!({ "checkpoint": checkpoint }),
+            })
+        }
+
+        async fn respond_permission(
+            &self,
+            _request_id: &str,
+            _outcome: genehub_proto::PermissionOutcome,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn completed_turn(checkpoint: Option<&str>) -> Vec<TimelineItem> {
+        vec![
+            TimelineItem::UserMessage {
+                id: "user-1".into(),
+                text: "Investigate the failing deploy".into(),
+                attachments: Vec::new(),
+            },
+            TimelineItem::AssistantMessage {
+                id: "assistant-1".into(),
+                text: "The health check path is stale".into(),
+            },
+            TimelineItem::TurnSummary {
+                id: "summary-1".into(),
+                stats: TurnStats {
+                    turn_id: "source-turn".into(),
+                    outcome: TurnOutcome::Completed,
+                    started_at_ms: 1,
+                    finished_at_ms: 2,
+                    duration_ms: 1,
+                    usage: Usage::default(),
+                    tool_calls: 3,
+                    fork_checkpoint: checkpoint.map(str::to_string),
+                },
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn cross_agent_fork_uses_a_bounded_seed_without_reusing_the_source_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let source_starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![
+                Arc::new(ForkHarness {
+                    id: "source",
+                    native_fork: true,
+                    prompts: source_prompts.clone(),
+                    starts: source_starts.clone(),
+                }),
+                Arc::new(ForkHarness {
+                    id: "target",
+                    native_fork: false,
+                    prompts: target_prompts.clone(),
+                    starts: target_starts.clone(),
+                }),
+            ])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "source",
+                None,
+                None,
+                Some("Deploy".into()),
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        let inherited = completed_turn(Some("native-checkpoint"));
+        *source_live.items.lock().await = inherited.clone();
+        sessions
+            .store
+            .append_chat_items("w1", &source.id, &inherited)
+            .unwrap();
+
+        let inspection = sessions.inspect(&source.id, None).await.unwrap();
+        assert_eq!(inspection.narrative_item_count, 3);
+        assert_eq!(inspection.coverage.omitted_item_count, 0);
+        assert!(inspection.layers.iter().any(|layer| layer == "blobs"));
+        let exact = sessions
+            .narrative_page(&source.id, None, Some("assistant-1"), None, Some(1))
+            .await
+            .unwrap();
+        assert_eq!(exact.items.len(), 1);
+        let context = sessions
+            .session_context(&source.id, None, Some(2_048))
+            .await
+            .unwrap();
+        assert!(context.text.contains("ghref:item"));
+        assert!(context
+            .retrieval_commands
+            .iter()
+            .any(|command| command.contains("session narrative")));
+        assert!(!context.references.is_empty());
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "source-turn",
+                Some(ForkTarget {
+                    agent_id: "target".into(),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fork.agent_id, "target");
+        let lineage = fork.lineage.as_ref().unwrap();
+        assert_eq!(lineage.method, ForkMethod::ReconstructedContext);
+        assert!(lineage.context.as_ref().unwrap().token_budget <= 3_500);
+        let meta = sessions.store.load_meta("w1", &fork.id).unwrap();
+        assert!(
+            meta.persist.is_none(),
+            "a cross-Agent handle must never leak"
+        );
+        assert_eq!(
+            sessions
+                .store
+                .load_seed("w1", &fork.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ContextSeedState::Pending
+        );
+
+        sessions
+            .send(
+                &fork.id,
+                "Continue with the fix".into(),
+                Vec::new(),
+                &ProviderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        {
+            let prompts = target_prompts.lock().unwrap();
+            assert_eq!(prompts.len(), 1);
+            assert!(prompts[0].text.contains("Investigate the failing deploy"));
+            assert!(prompts[0].text.contains("<current-user-message>"));
+            assert!(prompts[0].text.contains("Continue with the fix"));
+        }
+        assert_eq!(target_starts.lock().unwrap().as_slice(), &[None]);
+        assert!(source_starts.lock().unwrap().is_empty());
+        assert!(source_prompts.lock().unwrap().is_empty());
+        assert_eq!(
+            sessions
+                .store
+                .load_seed("w1", &fork.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ContextSeedState::Applied
+        );
+        let stored = sessions.store.load_chat("w1", &fork.id).unwrap();
+        assert!(stored.items.iter().any(|item| {
+            matches!(item, TimelineItem::UserMessage { text, .. } if text == "Continue with the fix")
+        }));
+        assert!(!stored.items.iter().any(|item| {
+            matches!(item, TimelineItem::UserMessage { text, .. } if text.contains("genehub-chat-history"))
+        }));
+
+        // The capsule is a one-time bootstrap. Later turns go to the target
+        // Agent as ordinary user messages and cannot pay the history cost a
+        // second time.
+        let fork_live = sessions.live(&fork.id).await.unwrap();
+        *fork_live.status.lock().await = SessionStatus::Idle;
+        sessions
+            .send(
+                &fork.id,
+                "Run the focused test".into(),
+                Vec::new(),
+                &ProviderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let prompts = target_prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[1].text, "Run the focused test");
+    }
+
+    #[tokio::test]
+    async fn same_agent_with_a_checkpoint_keeps_the_native_fork_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: starts.clone(),
+            })])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        *source_live.items.lock().await = completed_turn(Some("native-checkpoint"));
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "source-turn",
+                Some(ForkTarget {
+                    agent_id: "source".into(),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fork.lineage.unwrap().method, ForkMethod::NativeCheckpoint);
+        let meta = sessions.store.load_meta("w1", &fork.id).unwrap();
+        assert_eq!(meta.persist.as_ref().unwrap().agent_id, "source");
+        assert!(sessions.store.load_seed("w1", &fork.id).unwrap().is_none());
+        assert_eq!(starts.lock().unwrap().as_slice(), &[None]);
+    }
+
+    #[tokio::test]
+    async fn explicit_same_agent_without_a_checkpoint_reconstructs_but_legacy_fork_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        *source_live.items.lock().await = completed_turn(None);
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "source-turn",
+                Some(ForkTarget {
+                    agent_id: "source".into(),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fork.lineage.unwrap().method,
+            ForkMethod::ReconstructedContext
+        );
+        assert!(sessions.store.load_seed("w1", &fork.id).unwrap().is_some());
+
+        let error = sessions
+            .fork(&source.id, "source-turn", None, &ProviderMap::new())
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("that turn has no Agent fork checkpoint"));
+    }
+
+    #[tokio::test]
+    async fn import_discovery_is_opaque_two_stage_and_filters_durable_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ImportHarness)])),
+            16,
+        );
+
+        let listing = sessions
+            .list_imports("w1", dir.path().to_path_buf(), Some(20))
+            .await
+            .unwrap();
+        let candidate = &listing.sources[0].candidates[0];
+        assert!(candidate.candidate_id.starts_with("ic_"));
+        assert!(
+            !serde_json::to_string(&listing)
+                .unwrap()
+                .contains("native-secret-42"),
+            "a provider handle crossed the RPC boundary"
+        );
+
+        let imported = sessions
+            .import("w1", dir.path().to_path_buf(), &candidate.candidate_id)
+            .await
+            .unwrap();
+        assert_eq!(imported.agent_id, "historian");
+        assert_eq!(
+            imported.imported.as_ref().unwrap().continuation,
+            ImportContinuation::Native
+        );
+        let coverage = imported
+            .imported
+            .as_ref()
+            .and_then(|origin| origin.coverage.as_ref())
+            .expect("new imports report structured coverage");
+        assert_eq!(coverage.source_item_count, Some(1));
+        assert_eq!(coverage.retained_item_count, 1);
+        assert_eq!(coverage.omitted_item_count, 0);
+        assert_eq!(coverage.retrieval, RetrievalCapability::Genehub);
+        assert_eq!(
+            sessions.snapshot(&imported.id).await.unwrap().items.len(),
+            1
+        );
+
+        let refreshed = sessions
+            .list_imports("w1", dir.path().to_path_buf(), Some(20))
+            .await
+            .unwrap();
+        assert!(refreshed.sources[0].candidates.is_empty());
+        assert_eq!(refreshed.filtered_duplicates, 1);
+    }
+
+    #[test]
+    fn oversized_imports_keep_a_bounded_recent_window_that_can_fit_one_rpc() {
+        let items = (0..(IMPORT_VISIBLE_ITEMS + 100))
+            .map(|index| TimelineItem::AssistantMessage {
+                id: format!("i-{index}"),
+                text: "reply".into(),
+            })
+            .collect();
+        let (bounded, omitted, altered) = bound_imported_items(items);
+        assert_eq!(omitted, 100);
+        assert_eq!(altered, 0);
+        assert!(matches!(
+            bounded.first(),
+            Some(TimelineItem::Compaction { .. })
+        ));
+        assert!(bounded.len() <= IMPORT_VISIBLE_ITEMS + 1);
+
+        let huge = vec![TimelineItem::AssistantMessage {
+            id: "huge".into(),
+            text: "四".repeat(IMPORT_VISIBLE_BYTES),
+        }];
+        let (bounded, omitted, altered) = bound_imported_items(huge);
+        assert_eq!((omitted, altered), (0, 1));
+        assert!(serde_json::to_vec(&bounded).unwrap().len() < IMPORT_VISIBLE_BYTES);
+
+        let huge_tool = vec![TimelineItem::ToolCall {
+            id: "huge-tool".into(),
+            name: "external".into(),
+            status: ToolStatus::Ok,
+            detail: ToolCallDetail::Unknown {
+                raw: serde_json::json!({ "payload": "x".repeat(IMPORT_VISIBLE_BYTES * 2) }),
+            },
+        }];
+        let (bounded, omitted, altered) = bound_imported_items(huge_tool);
+        assert_eq!((omitted, altered), (0, 1));
+        assert!(matches!(
+            bounded.first(),
+            Some(TimelineItem::Compaction { reason, .. })
+                if reason.contains("单条历史记录过长")
+        ));
+        assert!(serde_json::to_vec(&bounded).unwrap().len() < IMPORT_VISIBLE_BYTES);
     }
 
     #[tokio::test]

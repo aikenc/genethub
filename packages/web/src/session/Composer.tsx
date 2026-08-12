@@ -34,6 +34,7 @@ export type ComposerPhase = "idle" | "sending" | "running";
 export function Composer({
   phase,
   disabled,
+  disabledReason,
   agents,
   agentId,
   modelId,
@@ -54,6 +55,8 @@ export function Composer({
 }: {
   phase: ComposerPhase;
   disabled?: boolean;
+  /** Why this transcript cannot accept a new turn, when the state is durable. */
+  disabledReason?: string;
   agents: AgentInfo[];
   agentId: string | null;
   modelId: string | null;
@@ -226,6 +229,11 @@ export function Composer({
             ))}
           </ul>
         </div>
+      ) : null}
+      {disabledReason ? (
+        <p className="pointer-events-auto mx-auto mb-2 max-w-chat rounded-lg border border-line bg-surface/95 px-3 py-2 text-xs text-muted shadow backdrop-blur">
+          {disabledReason}
+        </p>
       ) : null}
       <div
         ref={card}

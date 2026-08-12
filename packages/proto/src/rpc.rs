@@ -76,6 +76,44 @@ pub enum Request {
     },
     #[serde(rename = "session.get", rename_all = "camelCase")]
     SessionGet { session_id: String },
+    #[serde(rename = "session.inspect", rename_all = "camelCase")]
+    SessionInspect {
+        session_id: String,
+        #[serde(default)]
+        through_round_id: Option<String>,
+    },
+    #[serde(rename = "session.narrative", rename_all = "camelCase")]
+    SessionNarrative {
+        session_id: String,
+        #[serde(default)]
+        through_round_id: Option<String>,
+        /// Exact item lookup. Mutually exclusive with `cursor` on the CLI.
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    #[serde(rename = "session.rounds", rename_all = "camelCase")]
+    SessionRounds {
+        session_id: String,
+        #[serde(default)]
+        through_round_id: Option<String>,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    #[serde(rename = "session.context", rename_all = "camelCase")]
+    SessionContext {
+        session_id: String,
+        #[serde(default)]
+        through_round_id: Option<String>,
+        #[serde(default)]
+        #[ts(type = "number")]
+        token_budget: Option<u64>,
+    },
     #[serde(rename = "round.trunk.list", rename_all = "camelCase")]
     RoundTrunkList {
         session_id: String,
@@ -118,7 +156,31 @@ pub enum Request {
         continues_round: Option<String>,
     },
     #[serde(rename = "session.fork", rename_all = "camelCase")]
-    SessionFork { session_id: String, turn_id: String },
+    SessionFork {
+        session_id: String,
+        turn_id: String,
+        /// Absent is the legacy native-only request. New clients send an
+        /// explicit target to opt into provider-agnostic reconstruction when
+        /// a native checkpoint cannot be used.
+        #[serde(default)]
+        #[ts(optional)]
+        target: Option<ForkTarget>,
+    },
+    /// Lists lightweight, workspace-scoped candidates from every installed
+    /// Agent. Full histories are not read until `session.import` selects one.
+    #[serde(rename = "session.importList", rename_all = "camelCase")]
+    SessionImportList {
+        workspace_id: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Imports one candidate from the most recent discovery pass. The opaque
+    /// token expires and cannot be replayed for another workspace.
+    #[serde(rename = "session.import", rename_all = "camelCase")]
+    SessionImport {
+        workspace_id: String,
+        candidate_id: String,
+    },
     #[serde(rename = "session.interrupt", rename_all = "camelCase")]
     SessionInterrupt { session_id: String },
     #[serde(rename = "session.close", rename_all = "camelCase")]
@@ -445,7 +507,12 @@ pub enum Reply {
     UpdateDownload(UpdateDownload),
     Session(SessionSummary),
     Sessions(Vec<SessionSummary>),
+    SessionImports(SessionImportListing),
     Snapshot(SessionSnapshot),
+    SessionInspection(SessionInspection),
+    SessionNarrative(SessionNarrativePage),
+    SessionRounds(SessionRoundPage),
+    SessionContext(SessionContext),
     RoundLayer(RoundLayer),
     RoundTrunk(RoundTrunk),
     Blob(BlobPayload),

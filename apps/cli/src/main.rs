@@ -58,7 +58,11 @@ async fn main() {
         // Reading and writing the same resource split here, so `query.rs` can
         // keep guaranteeing it never mutates anything.
         Some("session") => match args.get(1).map(String::as_str) {
-            Some("list" | "get") | None => query::run(&args, &selection).await,
+            Some(
+                "list" | "get" | "inspect" | "narrative" | "rounds" | "trunks" | "trunk" | "blob"
+                | "context",
+            )
+            | None => query::run(&args, &selection).await,
             Some(_) => converse::session(&args[1..], &selection).await,
         },
         Some("agent") => converse::agent(&args[1..], &selection).await,
@@ -91,6 +95,16 @@ pub fn usage() -> i32 {
   genet session list [--workspace <id>]
                                     list local daemon sessions
   genet session get <id>            get one session snapshot
+  genet session inspect <id>        inspect session structure and coverage
+  genet session narrative <id>      read a bounded narrative page
+  genet session rounds <id>         read a bounded round-summary page
+  genet session trunks <id> --round <round-id>
+                                    list bounded work trunks for one round
+  genet session trunk <id> --round <round-id> --index <n>
+                                    read one work trunk and opaque blob refs
+  genet session blob <id> --ref <opaque-ref>
+                                    resolve one blob ref
+  genet session context <id>        build bounded, cited context without an LLM
   genet agent list                  agents installed on this machine
   genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>]
                                     start a session and stream it as JSON Lines

@@ -9,6 +9,8 @@ import type {
 import { useEffect, useRef, useState } from "react";
 import { stringify as toYaml } from "yaml";
 
+import { canStartAgent } from "../presentation/catalog/resolve";
+import { ForkDialog } from "./ForkDialog";
 import { Markdown } from "./Markdown";
 
 import { attachmentPreviewUrl } from "./attachments";
@@ -54,14 +56,17 @@ export function TimelineView({ state }: { state: TimelineState }) {
   const bottom = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
+  const [forkRequest, setForkRequest] = useState<{
+    turnId: string;
+    hasNativeCheckpoint: boolean;
+  } | null>(null);
   const forkSession = useWorkbench((workbench) => workbench.forkSession);
   const rounds = useWorkbench((workbench) => workbench.timeline.rounds);
   const activeSessionId = useWorkbench((workbench) => workbench.activeSessionId);
-  const canFork = useWorkbench((workbench) => {
-    const session = workbench.sessions.find((entry) => entry.id === activeSessionId);
-    const agent = workbench.agents.find((entry) => entry.id === session?.agentId);
-    return agent?.capabilities.fork ?? false;
-  });
+  const sessions = useWorkbench((workbench) => workbench.sessions);
+  const agents = useWorkbench((workbench) => workbench.agents);
+  const activeSession = sessions.find((entry) => entry.id === activeSessionId);
+  const canFork = Boolean(activeSession && agents.some(canStartAgent));
   const agentLabel = useWorkbench((workbench) => {
     const session = workbench.sessions.find((entry) => entry.id === activeSessionId);
     return workbench.agents.find((entry) => entry.id === session?.agentId)?.label ?? null;
@@ -78,85 +83,106 @@ export function TimelineView({ state }: { state: TimelineState }) {
   }, [state.items, state.pending, rounds, pinned]);
 
   return (
-    <div
-      ref={scroller}
-      className="mx-auto h-full min-w-0 max-w-chat flex-1 space-y-4 overflow-x-hidden overflow-y-auto px-4 py-6"
-      data-testid="timeline"
-      onScroll={(event) => {
-        const element = event.currentTarget;
-        const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
-        setPinned(distance < 40);
-      }}
-    >
-      {contextualTurns.map(
-        ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
-          const hasRound = Boolean(round);
-          const narrative =
-            rounds.length === 0
-              ? turn.items
-              : turn.items.filter(
-                  (item) =>
-                    item.type !== "reasoning" &&
-                    item.type !== "toolCall" &&
-                    (!hasRound || item.type !== "assistantMessage"),
-                );
-          return (
-            <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
-              {narrative.map((item) => <Item key={item.id} item={item} />)}
-              {startedRounds.map((startedRound) => (
-                <RoundProgress
-                  key={startedRound.roundId}
-                  round={startedRound}
-                  finalSummaryText={roundFinalText}
-                />
-              ))}
-              {finalAssistant ? <Item item={finalAssistant} /> : null}
-              {turn.stats ? (
-                <TurnFooter
-                  stats={turn.stats}
-                  text={hasRound ? (finalAssistant?.text ?? "") : assistantText(turn.items)}
-                  canFork={canFork && Boolean(turn.stats.forkCheckpoint)}
-                  onFork={() => void forkSession(turn.stats!.turnId)}
-                />
-              ) : index === turns.length - 1 && state.activeTurn ? (
-                <TurnFooter
-                  liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
-                  liveTools={countTools(turn.items)}
-                  text={hasRound ? "" : assistantText(turn.items)}
-                  canFork={false}
-                />
-              ) : null}
-            </section>
-          );
-        },
-      )}
+    <>
+      <div
+        ref={scroller}
+        className="mx-auto h-full min-w-0 max-w-chat flex-1 space-y-4 overflow-x-hidden overflow-y-auto px-4 py-6"
+        data-testid="timeline"
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
+          setPinned(distance < 40);
+        }}
+      >
+        {contextualTurns.map(
+          ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
+            const hasRound = Boolean(round);
+            const narrative =
+              rounds.length === 0
+                ? turn.items
+                : turn.items.filter(
+                    (item) =>
+                      item.type !== "reasoning" &&
+                      item.type !== "toolCall" &&
+                      (!hasRound || item.type !== "assistantMessage"),
+                  );
+            return (
+              <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
+                {narrative.map((item) => <Item key={item.id} item={item} />)}
+                {startedRounds.map((startedRound) => (
+                  <RoundProgress
+                    key={startedRound.roundId}
+                    round={startedRound}
+                    finalSummaryText={roundFinalText}
+                  />
+                ))}
+                {finalAssistant ? <Item item={finalAssistant} /> : null}
+                {turn.stats ? (
+                  <TurnFooter
+                    stats={turn.stats}
+                    text={hasRound ? (finalAssistant?.text ?? "") : assistantText(turn.items)}
+                    canFork={canFork}
+                    onFork={() =>
+                      setForkRequest({
+                        turnId: turn.stats!.turnId,
+                        hasNativeCheckpoint: Boolean(turn.stats!.forkCheckpoint),
+                      })
+                    }
+                  />
+                ) : index === turns.length - 1 && state.activeTurn ? (
+                  <TurnFooter
+                    liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
+                    liveTools={countTools(turn.items)}
+                    text={hasRound ? "" : assistantText(turn.items)}
+                    canFork={false}
+                  />
+                ) : null}
+              </section>
+            );
+          },
+        )}
 
-      {rounds
-        .filter(
-          (round) =>
-            !round.userItemId ||
-            !state.items.some(
-              (item) => item.type === "userMessage" && item.id === round.userItemId,
-            ),
-        )
-        .map((round) => <RoundProgress key={round.roundId} round={round} />)}
+        {rounds
+          .filter(
+            (round) =>
+              !round.userItemId ||
+              !state.items.some(
+                (item) => item.type === "userMessage" && item.id === round.userItemId,
+              ),
+          )
+          .map((round) => <RoundProgress key={round.roundId} round={round} />)}
 
-      {state.pending ? (
-        <PendingBubble pending={state.pending} agentLabel={agentLabel} />
+        {state.pending ? (
+          <PendingBubble pending={state.pending} agentLabel={agentLabel} />
+        ) : null}
+
+        {state.lastError ? (
+          <div
+            className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-danger"
+            role="alert"
+          >
+            <p>{state.lastError.message}</p>
+            <LogLink />
+          </div>
+        ) : null}
+
+        <div ref={bottom} />
+      </div>
+      {forkRequest && activeSession ? (
+        <ForkDialog
+          agents={agents}
+          sourceAgentId={activeSession.agentId}
+          hasNativeCheckpoint={forkRequest.hasNativeCheckpoint}
+          onClose={() => setForkRequest(null)}
+          onConfirm={(agentId) =>
+            forkSession(
+              forkRequest.turnId,
+              agentId === activeSession.agentId ? undefined : { agentId },
+            )
+          }
+        />
       ) : null}
-
-      {state.lastError ? (
-        <div
-          className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-danger"
-          role="alert"
-        >
-          <p>{state.lastError.message}</p>
-          <LogLink />
-        </div>
-      ) : null}
-
-      <div ref={bottom} />
-    </div>
+    </>
   );
 }
 
@@ -813,10 +839,10 @@ function TurnFooter({
   const usage = stats?.usage;
   const tools = stats?.toolCalls ?? liveTools;
   const forkTitle = canFork
-    ? "从这个 turn 创建独立分支"
+    ? "从这个 turn 创建分支并选择 Agent"
     : live
       ? "turn 完成后才能 Fork"
-      : "当前 Agent 不支持从这个 turn Fork";
+      : "当前没有可用的目标 Agent";
 
   return (
     <footer className="ml-auto max-w-full text-xs text-muted" data-testid="turn-footer">

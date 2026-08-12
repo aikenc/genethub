@@ -6,6 +6,8 @@ pub struct Args {
     pub model: Option<String>,
     pub thinking: Option<String>,
     pub session: Option<String>,
+    /// GeneHub's public session id, distinct from the agent-private JSONL path.
+    pub genehub_session_id: Option<String>,
     pub no_session: bool,
     /// Repeatable product/host guidance appended to the built-in system prompt.
     pub add_system_prompt: Vec<String>,
@@ -34,6 +36,9 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
             "--model" => args.model = Some(value("--model")?),
             "--thinking" => args.thinking = Some(value("--thinking")?),
             "--session" => args.session = Some(value("--session")?),
+            "--genehub-session-id" => {
+                args.genehub_session_id = Some(value("--genehub-session-id")?)
+            }
             "--add-system-prompt" => args.add_system_prompt.push(value("--add-system-prompt")?),
             "--no-session" => args.no_session = true,
             "--mcp-config" | "--extension" => {
@@ -66,6 +71,8 @@ mod tests {
             "high",
             "--session",
             "/tmp/s.jsonl",
+            "--genehub-session-id",
+            "s_public",
             "--add-system-prompt",
             "link artifacts through Preview",
         ]);
@@ -73,6 +80,7 @@ mod tests {
         assert_eq!(args.model.as_deref(), Some("anthropic/claude-sonnet-4"));
         assert_eq!(args.thinking.as_deref(), Some("high"));
         assert_eq!(args.session.as_deref(), Some("/tmp/s.jsonl"));
+        assert_eq!(args.genehub_session_id.as_deref(), Some("s_public"));
         assert_eq!(args.add_system_prompt, ["link artifacts through Preview"]);
         assert!(!args.no_session);
     }
