@@ -196,6 +196,10 @@ pub enum Request {
         #[serde(default)]
         name: Option<String>,
     },
+    /// A bounded, allowlisted diagnostic snapshot safe to attach to feedback.
+    /// This never returns `daemon.log`, agent output or request payloads.
+    #[serde(rename = "diagnostics.snapshot")]
+    DiagnosticsSnapshot,
 
     // -- updates -----------------------------------------------------------
     /// Whether a newer build has been published. Sent when a person asks, and
@@ -398,6 +402,7 @@ pub enum Reply {
     RemoteAccess(RemoteAccess),
     Settings(Settings),
     Log(LogTail),
+    Diagnostics(DaemonDiagnosticSnapshot),
     Update(UpdateStatus),
     UpdateDownload(UpdateDownload),
     Session(SessionSummary),

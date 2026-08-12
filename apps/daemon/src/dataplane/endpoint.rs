@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
@@ -30,6 +31,23 @@ pub const RESET_REFUSED: u32 = 3;
 pub const RESET_TOO_LARGE: u32 = 4;
 pub const RESET_TIMEOUT: u32 = 5;
 pub const RESET_ENDPOINT_CLOSED: u32 = 6;
+
+#[derive(Clone, Copy)]
+pub enum CarrierKind {
+    WebSocket,
+    Fabric,
+    Rtc,
+}
+
+impl CarrierKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WebSocket => "websocket",
+            Self::Fabric => "fabric",
+            Self::Rtc => "rtc",
+        }
+    }
+}
 
 /// Message-preserving records supplied by local WebSocket, Relay Fabric, or
 /// WebRTC.  No business handler receives these channels directly.
@@ -189,6 +207,9 @@ pub(super) struct ServerStream {
     local_sequence: u32,
     local_bytes: u64,
     expected_local_bytes: Option<u64>,
+    response_status: Option<u16>,
+    diagnostic_operation: Option<String>,
+    diagnostic_path: Option<String>,
     local_head_sent: bool,
     local_finished: bool,
 }
@@ -260,6 +281,7 @@ impl ServerStream {
             })
             .await?;
         self.expected_local_bytes = head.body_length;
+        self.response_status = Some(head.status);
         self.local_head_sent = true;
         Ok(())
     }
@@ -350,6 +372,10 @@ impl ServerStream {
             .await;
         let _ = self.commands.send(EndpointCommand::Retire(self.id)).await;
     }
+
+    pub(super) fn set_diagnostic_path(&mut self, path: &str) {
+        self.diagnostic_path = Some(path.to_string());
+    }
 }
 
 pub(super) struct PeerServices {
@@ -358,6 +384,7 @@ pub(super) struct PeerServices {
     event_sender: mpsc::Sender<ServerFrame>,
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
     subscriptions: tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    carrier_kind: CarrierKind,
 }
 
 /// Serves one already mutually-authenticated peer until its carrier closes.
@@ -366,6 +393,7 @@ pub async fn serve(
     key: SessionKey,
     access: PeerAccess,
     mut carrier: Carrier,
+    carrier_kind: CarrierKind,
 ) -> Result<()> {
     let (writer_tx, writer_rx) = mpsc::channel(WRITER_COMMAND_QUEUE);
     let writer = Writer {
@@ -386,7 +414,25 @@ pub async fn serve(
         event_sender,
         event_receiver: tokio::sync::Mutex::new(Some(event_receiver)),
         subscriptions: tokio::sync::Mutex::new(HashMap::new()),
+        carrier_kind,
     });
+
+    state.diagnostics.record(
+        genehub_proto::DaemonDiagnosticEvent {
+            at_ms: 0,
+            kind: "connection".into(),
+            operation: "data.endpoint".into(),
+            request_id: None,
+            transport: Some(carrier_kind.as_str().into()),
+            outcome: "connected".into(),
+            status: None,
+            duration_ms: None,
+            request_bytes: None,
+            response_bytes: None,
+            path: None,
+        },
+        access.workspace_id.as_deref(),
+    );
 
     let fanout_task = state.fanout.get().map(|fanout| {
         let mut receiver = fanout.subscribe();
@@ -469,6 +515,27 @@ pub async fn serve(
     if let Some(device_id) = &access.device_id {
         state.devices.mark_disconnected(device_id);
     }
+    state.diagnostics.record(
+        genehub_proto::DaemonDiagnosticEvent {
+            at_ms: 0,
+            kind: "connection".into(),
+            operation: "data.endpoint".into(),
+            request_id: None,
+            transport: Some(carrier_kind.as_str().into()),
+            outcome: if outcome.is_ok() {
+                "disconnected"
+            } else {
+                "error"
+            }
+            .into(),
+            status: None,
+            duration_ms: None,
+            request_bytes: None,
+            response_bytes: None,
+            path: None,
+        },
+        access.workspace_id.as_deref(),
+    );
     outcome
 }
 
@@ -559,6 +626,9 @@ fn dispatch(
             local_sequence: 0,
             local_bytes: 0,
             expected_local_bytes: None,
+            response_status: None,
+            diagnostic_operation: None,
+            diagnostic_path: None,
             local_head_sent: false,
             local_finished: false,
         };
@@ -653,6 +723,10 @@ fn dispatch(
 }
 
 async fn handle_stream(mut stream: ServerStream, services: Arc<PeerServices>) -> Result<()> {
+    let started = Instant::now();
+    let request_id = diagnostic_id(&stream.head.metadata);
+    let exchange_method = stream.head.method.clone();
+    let request_bytes = stream.head.body_length;
     let result = match stream.head.method.as_str() {
         "rpc" => handle_rpc(&mut stream, &services).await,
         "events" => handle_events(&mut stream, &services).await,
@@ -671,12 +745,63 @@ async fn handle_stream(mut stream: ServerStream, services: Arc<PeerServices>) ->
     if result.is_err() {
         stream.reset(RESET_PROTOCOL).await;
     }
+    if exchange_method != "events" {
+        let operation = stream
+            .diagnostic_operation
+            .clone()
+            .unwrap_or_else(|| exchange_method.clone());
+        let status = stream.response_status;
+        let outcome = if result.is_ok() && status.is_some_and(|value| value < 400) {
+            "ok"
+        } else {
+            "error"
+        };
+        let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        services.state.diagnostics.record(
+            genehub_proto::DaemonDiagnosticEvent {
+                at_ms: 0,
+                kind: "operation".into(),
+                operation: operation.clone(),
+                request_id: request_id.clone(),
+                transport: Some(services.carrier_kind.as_str().into()),
+                outcome: outcome.into(),
+                status,
+                duration_ms: Some(duration_ms),
+                request_bytes,
+                response_bytes: Some(stream.local_bytes),
+                path: stream.diagnostic_path.clone(),
+            },
+            services.access.workspace_id.as_deref(),
+        );
+        if outcome == "error" {
+            tracing::warn!(
+                target: "diagnostic",
+                operation,
+                request_id,
+                transport = services.carrier_kind.as_str(),
+                status,
+                duration_ms,
+                "data operation failed"
+            );
+        } else if exchange_method == "asset.preview" || exchange_method == "rtc.negotiate" {
+            tracing::info!(
+                target: "diagnostic",
+                operation,
+                request_id,
+                transport = services.carrier_kind.as_str(),
+                status,
+                duration_ms,
+                "data operation completed"
+            );
+        }
+    }
     result
 }
 
 async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     let body = stream.read_body(MAX_RPC_BODY_BYTES).await?;
     let request: Request = serde_json::from_slice(&body).context("invalid RPC operation body")?;
+    stream.diagnostic_operation = diagnostic_operation(&stream.head.metadata);
     if let Some(scope) = &services.access.workspace_id {
         if let Some(requested) = request_workspace(&request) {
             if requested != scope {
@@ -734,7 +859,13 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         .await;
     }
 
-    let handled = router::handle(&services.state, services.access.transport, request).await;
+    let handled = router::handle(
+        &services.state,
+        services.access.transport,
+        services.access.workspace_id.as_deref(),
+        request,
+    )
+    .await;
     match handled.reply {
         Ok(reply) => {
             send_reply(stream, reply).await?;
@@ -743,6 +874,34 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         }
         Err(error) => send_protocol_error(stream, error).await,
     }
+}
+
+fn diagnostic_id(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("diagnosticId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 96
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+        .map(str::to_string)
+}
+
+fn diagnostic_operation(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+        .map(str::to_string)
 }
 
 async fn send_reply(stream: &mut ServerStream, reply: Reply) -> Result<()> {
@@ -997,5 +1156,17 @@ mod tests {
         enqueue_writer(command(3), &mut queues, &mut runnable);
         enqueue_writer(command(1), &mut queues, &mut runnable);
         assert_eq!(runnable, VecDeque::from([1, 3]));
+    }
+
+    #[test]
+    fn diagnostic_metadata_accepts_only_bounded_opaque_labels() {
+        assert_eq!(
+            diagnostic_operation(&serde_json::json!({ "operation": "file.tree" })).as_deref(),
+            Some("file.tree")
+        );
+        assert_eq!(
+            diagnostic_operation(&serde_json::json!({ "operation": "settings/get?token=x" })),
+            None
+        );
     }
 }

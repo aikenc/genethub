@@ -9,6 +9,7 @@ pub mod channel_auth;
 pub mod config;
 pub mod dataplane;
 pub mod devices;
+pub mod diagnostics;
 pub mod files;
 pub mod git;
 pub mod hub;
