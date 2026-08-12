@@ -326,10 +326,7 @@ pub enum Request {
     },
     /// Creates a folder on the daemon machine (project picker, outside a workspace).
     #[serde(rename = "directory.mkdir", rename_all = "camelCase")]
-    DirectoryMkdir {
-        parent: String,
-        name: String,
-    },
+    DirectoryMkdir { parent: String, name: String },
 
     // -- files -------------------------------------------------------------
     #[serde(rename = "file.tree", rename_all = "camelCase")]
@@ -348,10 +345,7 @@ pub enum Request {
     },
     /// Creates a directory inside a registered workspace.
     #[serde(rename = "file.mkdir", rename_all = "camelCase")]
-    FileMkdir {
-        workspace_id: String,
-        path: String,
-    },
+    FileMkdir { workspace_id: String, path: String },
     /// Copies a file or directory tree within a workspace (`to` is the full destination path).
     #[serde(rename = "file.copy", rename_all = "camelCase")]
     FileCopy {

@@ -992,6 +992,13 @@ mod tests {
         assert!(listing.roots);
         assert_eq!(listing.path, "");
         assert!(listing.parent.is_none());
+        assert!(!listing.directories.is_empty());
+        #[cfg(windows)]
+        assert!(listing
+            .directories
+            .iter()
+            .any(|entry| entry.path.ends_with(":\\") || entry.path.ends_with(':')));
+        #[cfg(not(windows))]
         assert!(listing.directories.iter().any(|entry| entry.path == "/"));
     }
 

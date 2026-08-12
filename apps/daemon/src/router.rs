@@ -678,10 +678,7 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             }
         }
 
-        Request::FileMkdir {
-            workspace_id,
-            path,
-        } => {
+        Request::FileMkdir { workspace_id, path } => {
             let target = match state.workspaces.resolve(&workspace_id, &path).await {
                 Ok(target) => target,
                 Err(error) => return failed(error),
