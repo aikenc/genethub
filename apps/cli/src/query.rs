@@ -1504,6 +1504,8 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::RoundLayer(_) => "round layer",
         Reply::RoundTrunk(_) => "round trunk",
         Reply::Blob(_) => "blob",
+        Reply::SessionArtifactUpload(_) => "session artifact upload",
+        Reply::SessionArtifact(_) => "session artifact",
         Reply::Workspace(_) => "workspace",
         Reply::Workspaces(_) => "workspaces",
         Reply::Directory(_) => "directory",
