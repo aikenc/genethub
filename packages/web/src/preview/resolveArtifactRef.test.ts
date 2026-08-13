@@ -74,4 +74,54 @@ describe("resolveArtifactRef", () => {
       }),
     ).toBeNull();
   });
+
+  it("maps cwd-relative ../ paths onto a sibling registered root", () => {
+    const resolved = resolveArtifactRef("../docs/guide.md", context, "https://app.example");
+    expect(resolved).toMatchObject({
+      kind: "preview",
+      path: "r_docs/guide.md",
+    });
+  });
+
+  it("maps Agent cwd-relative prototype HTML onto the ancestor workspace root", () => {
+    const pipespace = {
+      ...context,
+      folders: [
+        {
+          root: "/data/workspace/genethub-work/genethub-spaces/spaces/dev-ui",
+          rootHandle: "r_ui",
+        },
+        {
+          root: "/data/workspace/genethub-work/genethub-spaces",
+          rootHandle: "r_spaces",
+        },
+      ],
+    };
+    const resolved = resolveArtifactRef(
+      "../../worktrees/dev-0/genethub/prototypes/produce-manager/genet-ds/v1/index.html",
+      pipespace,
+      "https://app.example",
+    );
+    expect(resolved).toEqual({
+      kind: "preview",
+      path: "r_spaces/worktrees/dev-0/genethub/prototypes/produce-manager/genet-ds/v1/index.html",
+      href: "https://app.example/assets/preview/v2/m_device/w_docs/r_spaces/worktrees/dev-0/genethub/prototypes/produce-manager/genet-ds/v1/index.html",
+    });
+  });
+
+  it("blocks cwd-relative paths that leave every registered root", () => {
+    expect(resolveArtifactRef("../../etc/passwd", context).kind).toBe("blocked");
+  });
+
+  it("maps Windows cwd-relative ../ paths onto a sibling registered root", () => {
+    expect(
+      resolveWorkspacePath("../docs/guide.md", {
+        ...context,
+        folders: [
+          { root: "C:/Users/me/product", rootHandle: "r_product" },
+          { root: "C:/Users/me/docs", rootHandle: "r_docs" },
+        ],
+      }),
+    ).toBe("r_docs/guide.md");
+  });
 });
