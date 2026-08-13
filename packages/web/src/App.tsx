@@ -32,6 +32,7 @@ import { TerminalPanel } from "./terminal/TerminalPanel";
 import { UpdateToast } from "./updates/UpdateToast";
 import { OpenProject } from "./workspace/OpenProject";
 import { WorkspaceIcon } from "./workspace/WorkspaceIcon";
+import type { SpeechInputProblem } from "./speech/useSpeechInput";
 
 /**
  * Both defaults live out here, and they have to.
@@ -69,6 +70,7 @@ export function App({
   welcome,
   mobileTools,
   desktopTools,
+  onReportSpeechProblem,
 }: {
   host?: Host;
   /**
@@ -98,6 +100,8 @@ export function App({
   mobileTools?: React.ReactNode;
   /** Product-specific actions shown with the workbench tools on desktop. */
   desktopTools?: React.ReactNode;
+  /** Opens the embedding product's feedback flow with content-free speech metadata. */
+  onReportSpeechProblem?(problem: SpeechInputProblem): void;
 }) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">(
     "loading",
@@ -652,6 +656,24 @@ export function App({
                       }
                       commands={currentAgent?.catalog.commands}
                       restoreDraft={workbench.restoreDraft}
+                      speech={
+                        workbench.client &&
+                        workbench.activeWorkspaceId &&
+                        workbench.client.identity?.features?.includes("speech.transcribe.v2")
+                          ? {
+                              client: workbench.client,
+                              workspaceId: workbench.activeWorkspaceId,
+                              ...(workbench.activeSessionId
+                                ? { sessionId: workbench.activeSessionId }
+                                : {}),
+                              onOpenSettings: () => workbench.openTab("settings"),
+                              onOpenLogs: () => workbench.openTab("logs"),
+                              ...(onReportSpeechProblem
+                                ? { onReportProblem: onReportSpeechProblem }
+                                : {}),
+                            }
+                          : undefined
+                      }
                       onRestoreDraft={workbench.restoredDraft}
                       onHeightChange={setComposerHeight}
                       onSend={(text, attachments) =>

@@ -529,6 +529,19 @@ export class Client {
     return reply.data;
   }
 
+  /**
+   * Opens the Qwen3-ASR speech stream. The community model runtime terminates
+   * at a user device; this logical stream can travel over loopback, Fabric or
+   * RTC without exposing runtime-specific transport to the UI.
+   */
+  openSpeechStream(): DataStream {
+    return this.requireReadyEndpoint().open({
+      version: DATA_PLANE_VERSION,
+      method: "speech.transcribe",
+      metadata: null,
+    });
+  }
+
   async subscribe(
     sessionId: string,
     handlers: Pick<Subscription, "onEvent" | "onResync">,
