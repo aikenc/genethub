@@ -150,12 +150,37 @@ impl Cli {
     /// Everything the command printed, unparsed. A streaming command emits one
     /// envelope per line and the order is part of the contract.
     fn raw(&self, arguments: &[&str]) -> (String, i32) {
-        let output = Command::new(env!("CARGO_BIN_EXE_genet-dev"))
+        self.piping(arguments, None)
+    }
+
+    /// The same, with something on standard input — which is how the CLI is
+    /// told what to give the command it runs.
+    fn piping(&self, arguments: &[&str], input: Option<&str>) -> (String, i32) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_genet-dev"));
+        command
             .args(arguments)
             .env("GENEHUB_DEV_DATA_DIR", self.home())
-            .env("GENEHUB_DEV_WORKSPACE_DIR", self.home())
-            .output()
+            .env("GENEHUB_DEV_WORKSPACE_DIR", self.home());
+        let Some(input) = input else {
+            let output = command.output().expect("the CLI could not be run");
+            return (
+                String::from_utf8(output.stdout).expect("the CLI printed invalid UTF-8"),
+                output.status.code().unwrap_or(-1),
+            );
+        };
+        use std::io::Write;
+        let mut child = command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
             .expect("the CLI could not be run");
+        child
+            .stdin
+            .take()
+            .expect("the CLI was given a pipe")
+            .write_all(input.as_bytes())
+            .expect("the input could not be written");
+        let output = child.wait_with_output().expect("the CLI could not finish");
         (
             String::from_utf8(output.stdout).expect("the CLI printed invalid UTF-8"),
             output.status.code().unwrap_or(-1),
@@ -449,6 +474,52 @@ async fn a_command_typed_here_runs_there_and_reports_what_it_did() {
     let last = lines.last().expect("the CLI printed nothing");
     assert_eq!(last["type"], "shell.exit", "{raw}");
     assert_eq!(last["data"]["exitCode"], 0, "{raw}");
+
+    // What is piped in here is what the command reads over there. Nothing else
+    // in the CLI carries bytes the caller chose rather than typed, and the
+    // whole point of it is that the data does not have to become a file on
+    // somebody's machine first.
+    let (raw, code) = cli.piping(
+        &[
+            "--machine",
+            &machine_id,
+            "--cwd",
+            &project.to_string_lossy(),
+            "shell",
+            "--",
+            "/bin/cat",
+        ],
+        Some("piped-from-here"),
+    );
+    assert_eq!(code, 0, "{raw}");
+    assert!(
+        raw.contains("piped-from-here"),
+        "the input never reached the command: {raw}"
+    );
+
+    // A limit is kept by the machine, and the answer says that is why the
+    // command stopped — not just that it was killed, which is what every other
+    // way of ending it also reports.
+    let (raw, code) = cli.raw(&[
+        "--machine",
+        &machine_id,
+        "--cwd",
+        &project.to_string_lossy(),
+        "shell",
+        "--timeout",
+        "1",
+        "--",
+        "/bin/sleep",
+        "60",
+    ]);
+    assert_eq!(code, 0, "{raw}");
+    let last: Value = raw
+        .lines()
+        .rfind(|line| line.trim_start().starts_with('{'))
+        .map(|line| serde_json::from_str(line).expect("the CLI printed invalid JSON"))
+        .expect("the CLI printed nothing");
+    assert_eq!(last["type"], "shell.exit", "{raw}");
+    assert_eq!(last["data"]["timedOut"], true, "{raw}");
 
     // A command that fails over there fails here in the same words, and still
     // is not confused with the CLI itself failing.

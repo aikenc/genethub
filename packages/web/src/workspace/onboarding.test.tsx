@@ -55,6 +55,7 @@ function stubClient(answers: Partial<Record<Request["type"], (payload: never) =>
     onPty: () => () => {},
     onNotice: () => () => {},
     onUpdateDownload: () => () => {},
+    onBackgroundProcesses: () => () => {},
     onStateChange: (listener: (state: string) => void) => {
       onState = listener;
       return () => {};

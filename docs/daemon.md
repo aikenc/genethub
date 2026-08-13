@@ -97,7 +97,7 @@ DataEndpoint method 只有四个：
 | `rpc` | 现有版本化 `Request/Reply` 业务 schema，作为 body；不再是 connection envelope |
 | `events` | 长期 response stream；`u32be length + ServerFrame JSON` |
 | `asset.preview` | workspace-relative、完整或失败、≤4 MiB 的文件 Preview |
-| `shell.run` | 在 workspace 内跑一条命令；metadata 带 argv 数组与 cwd，response 是 `u32be length + ShellFrame JSON`，stdout/stderr 分开、末帧带退出码。与 `pty.*` 同属 `pty` 能力，隔离决策也共用一处 |
+| `shell.run` | 在 workspace 内跑一条命令；metadata 带 argv 数组、cwd、env 与可选 `timeoutMs`，**request body 即命令的 stdin**（≤1 MiB，一次给全；需要一问一答的交互输入用 `pty.open`）。response 是 `u32be length + ShellFrame JSON`，stdout/stderr 分开、末帧带退出码与 `timedOut`。与 `pty.*` 同属 `pty` 能力，隔离决策也共用一处 |
 | `rtc.negotiate` | 在已认证基线连接内交换非 trickle SDP |
 
 `rpc` body 的 MVP 方法集：
@@ -115,6 +115,7 @@ DataEndpoint method 只有四个：
 | 目录选择 | `directory.list`（`path: ""` 为机器根/盘符）/ `directory.mkdir`（选夹时新建） |
 | Git | `git.status` / `git.diff` / `git.commit` |
 | 终端 | `pty.open` / `write` / `resize` / `close`（输出走推送） |
+| 后台进程 | `process.list` / `process.kill` / `process.killAll`；回合结束时 daemon 主动推 `BackgroundProcesses`（见 §5.1） |
 | 更新 | `update.check` / `update.download` / `update.downloadState` / `update.dismiss`（见 §7） |
 
 **断线重连**：客户端带上最后收到的事件序号，`subscribe` 时 daemon 回补缺口；补不齐（超出保留窗口）就回全量快照并明确告知，不做静默半量。回合进行中掉线也一样：回合不会因为没人看着就停，重连时缺的那段照样补得回来。
@@ -228,6 +229,25 @@ daemon 不发明一套目录权限系统。已知 Agent 默认以最高模式启
 **同一种 agent 一次只起一个进程(仅限启动那一段)。** 第三方 CLI 的"第一次运行"做的是整机范围的事:OpenCode 会在用户数据目录里建它自己的 SQLite 并跑建表迁移。两个实例同时做,有一个会输在 `CREATE TABLE workspace` 上直接退出,用户看到的是「OpenCode 还没就绪就退出了」后面挂一段 SQL。同时开两个会话各问一句是很正常的事,能不能用不该取决于谁先摸到 schema。所以 `ensure_started` 里按 agent 种类串行化**启动**:不同 agent 仍然并行起,进程起来之后就完全离开这条路径。门闩挂在进程上而不是挂在 SessionManager 上——它保护的东西不是我们的,是那台机器上属于那个 CLI 的状态。
 
 **一次只跑一个回合。** 会话正在 `Running` 时进来的 `session.send` 被拒(`conflict`)。这条在 daemon 里判,不靠"UI 把发送按钮藏起来"——同一个会话开两个窗口就是两个发送按钮。回合中被塞进第二个提问的 agent 不会干净地失败,它会把两段对话织成一段。
+
+### 5.1 后台进程
+
+Agent 就是跑命令的东西,一个回合下来往往起过几十条。有些不会自己结束:`npm run dev`、`cargo watch`、为了 curl 一次而起的测试服务。没有人决定过这些该继续跑,只是回合结束时它们恰好还在,而在一台长期开着的机器上,它们会一直占着端口直到有人发现。
+
+**让人看见就是这个功能的全部。** daemon 不自作主张停任何东西,它回答的是"还有什么在跑、是哪个会话起的",然后由人决定。顺序是刻意的:允许进程活过它那个回合,只有在能看见、能结束它之后才值得拥有。
+
+**归属靠操作系统推断,不在启动时记账**——命令不是我们跑的,是 agent CLI 在它自己的进程里跑的。两条规则互相补位:
+
+- 仍在 agent 的**进程组**里(agent 由 `adapter::owned_child` 起在自己的组里,子进程继承)。这条能抓到父进程已死、被 init 收养的进程。
+- 仍是 agent 的**后代**。这条能抓到自己 `setsid` 出去的进程,而那正是一个规矩的命令执行器会对它的子进程做的事。
+
+两条都逃掉的进程已经脱离了两次,那是 POSIX 范围内能表达的最清楚的"我打算活过起我的人"。
+
+**只在 agent 还在时认领。** pid 是会被操作系统重新发出去的小整数;一小时前退出的 agent,它的号可能已经归了别人的编辑器。所以注册表记下观察时刻,认领前先核对 agent 本人还在、且运行时长对得上冒名者对不上。代价是 agent 崩溃后它的遗留物一并失去可见性;反过来的代价是把陌生进程列进别人的会话并提供一个结束按钮,那不是个可以权衡的选项。
+
+**会话结束时先收尾再关 agent。** 关掉 agent 会带走它进程组里的东西,但带不走那些 `setsid` 出去的——而那些恰恰是活得最久的。顺序不能反:agent 一死,后代就被 init 收养,再也认不出是谁的了。
+
+**结束进程是先问后杀**:`SIGTERM` → 2 秒宽限 → `SIGKILL`。被直接硬杀的服务永远跑不到自己的清理代码,socket 文件不删、写到一半的文件停在一半。守规矩的进程毫秒级退出,不付这 2 秒。只有断连这一条路径仍然直接硬杀——那时已经没有人在等这次清理了。
 
 ---
 

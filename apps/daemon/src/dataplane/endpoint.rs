@@ -422,7 +422,7 @@ pub async fn serve(
     //
     // Decided once, at connection: grants are fixed when a device is paired,
     // and revoking one drops its connections rather than editing them.
-    let watches_terminals = Principal::of(&state, &access).allows(Capability::Pty);
+    let watcher = Principal::of(&state, &access);
     state
         .diagnostics
         .record("stream", "data.endpoint", "online", None);
@@ -433,7 +433,9 @@ pub async fn serve(
             loop {
                 match receiver.recv().await {
                     Ok(frame) => {
-                        if !watches_terminals && terminal_frame(&frame) {
+                        if frame_requires(&frame)
+                            .is_some_and(|capability| !watcher.allows(capability))
+                        {
                             continue;
                         }
                         if events.send(frame).await.is_err() {
@@ -790,18 +792,22 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
     }
 }
 
-/// Whether a frame carries terminal traffic.
+/// What a peer must have been granted to be told this.
 ///
-/// Matched by name with no wildcard so that a new terminal-bearing frame has
-/// to be classified here before it can be broadcast to peers that were never
-/// granted a terminal.
-fn terminal_frame(frame: &ServerFrame) -> bool {
+/// Matched by name with no wildcard so that a new frame has to be classified
+/// here before it can be broadcast. Anything unsaid would be broadcast to
+/// every authenticated peer, which is the wrong default for a push: the peer
+/// never asked, so it never had a request for the usual check to refuse.
+fn frame_requires(frame: &ServerFrame) -> Option<Capability> {
     match frame {
-        ServerFrame::PtyOutput { .. } | ServerFrame::PtyClosed { .. } => true,
+        ServerFrame::PtyOutput { .. } | ServerFrame::PtyClosed { .. } => Some(Capability::Pty),
+        // Command lines of what an agent ran. The same material as the tool
+        // calls in a timeline, and gated the same way.
+        ServerFrame::BackgroundProcesses { .. } => Some(Capability::Session),
         ServerFrame::Event { .. }
         | ServerFrame::Desync { .. }
         | ServerFrame::Notice { .. }
-        | ServerFrame::UpdateDownloadChanged { .. } => false,
+        | ServerFrame::UpdateDownloadChanged { .. } => None,
     }
 }
 

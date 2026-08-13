@@ -1014,6 +1014,28 @@ async fn dispatch(
             Ok(()) => Handled::ok(Reply::Ack),
             Err(error) => failed(error),
         },
+
+        Request::ProcessList => Handled::ok(Reply::Processes(state.processes.list().await)),
+        Request::ProcessKill { session_id, pid } => {
+            match state.processes.stop(&session_id, pid).await {
+                crate::processes::Stopped::Yes => Handled::ok(Reply::Ack),
+                // One answer for "no such session" and for "not that
+                // session's", so that a caller who guessed a pid learns only
+                // that the guess was refused.
+                crate::processes::Stopped::NotThisSession => Handled::err(
+                    ErrorCode::NotFound,
+                    format!("no process {pid} belongs to {session_id}"),
+                ),
+                crate::processes::Stopped::Unknown => Handled::err(
+                    ErrorCode::Internal,
+                    "this machine could not be asked what is running",
+                ),
+            }
+        }
+        Request::ProcessKillAll { session_id } => {
+            state.processes.stop_all(&session_id).await;
+            Handled::ok(Reply::Ack)
+        }
     }
 }
 

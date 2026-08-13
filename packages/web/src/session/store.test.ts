@@ -1037,6 +1037,7 @@ describe("returning after a disconnection", () => {
       },
       onNotice: () => {},
       onUpdateDownload: () => {},
+      onBackgroundProcesses: () => {},
       call: async () => undefined,
       lastCloseReason: close,
       failure: undefined,

@@ -401,12 +401,19 @@ impl Rpc {
     /// Its own stream rather than a request: output has to arrive while the
     /// command is still running, and an RPC that answered once at the end
     /// would turn a build into a long silence followed by a wall of text.
-    pub async fn run_command(&self, request: &ShellRunRequest) -> Result<Running, RpcError> {
+    /// The body is the command's standard input, sent with the request rather
+    /// than after it: the command must not start before its input is known, or
+    /// a reader would reach end-of-file on input that was on its way.
+    pub async fn run_command(
+        &self,
+        request: &ShellRunRequest,
+        stdin: Vec<u8>,
+    ) -> Result<Running, RpcError> {
         let metadata = serde_json::to_value(request)
             .map_err(|error| RpcError::Transport(format!("encode shell.run: {error}")))?;
         let mut stream = self
             .endpoint
-            .open_stream("shell.run", metadata, Vec::new(), None)
+            .open_stream("shell.run", metadata, stdin, None)
             .await
             .map_err(|error| RpcError::Transport(format!("open the command stream: {error:#}")))?;
         let head = stream

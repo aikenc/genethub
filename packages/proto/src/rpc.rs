@@ -474,6 +474,26 @@ pub enum Request {
     },
     #[serde(rename = "pty.close", rename_all = "camelCase")]
     PtyClose { pty_id: String },
+
+    // -- background processes ----------------------------------------------
+    /// What every session's agent has left running.
+    ///
+    /// Not scoped to one session: the count belongs on screen wherever the
+    /// person is, and a process forgotten by the conversation they have since
+    /// navigated away from is the one most worth showing.
+    #[serde(rename = "process.list")]
+    ProcessList,
+    /// Ends one process and everything below it.
+    ///
+    /// The session is part of the request rather than looked up from the pid,
+    /// because it is the half that is checked: a pid alone is a guessable
+    /// integer, and the daemon will only end one the named session is
+    /// currently answerable for.
+    #[serde(rename = "process.kill", rename_all = "camelCase")]
+    ProcessKill { session_id: String, pid: u32 },
+    /// Ends everything one session left running, but not its agent.
+    #[serde(rename = "process.killAll", rename_all = "camelCase")]
+    ProcessKillAll { session_id: String },
 }
 
 /// Successful payloads, one per request that returns something.
@@ -542,8 +562,28 @@ pub enum Reply {
     Pty {
         pty_id: String,
     },
+    Processes(Vec<BackgroundProcess>),
     /// Nothing to return, but the call succeeded.
     Ack,
+}
+
+/// A process an agent started and did not stop.
+///
+/// Assembled from what the operating system says rather than from what was
+/// recorded when it started, because we did not start it — the agent did, and
+/// what it started is only visible from the outside.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct BackgroundProcess {
+    /// The conversation whose agent is answerable for this.
+    pub session_id: String,
+    pub pid: u32,
+    pub parent_pid: u32,
+    /// The full command line, as the operating system reports it.
+    pub command: String,
+    #[ts(type = "number")]
+    pub running_for_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -630,6 +670,15 @@ pub enum ServerFrame {
     /// "下载中" forever.
     #[serde(rename = "updateDownload", rename_all = "camelCase")]
     UpdateDownloadChanged { download: UpdateDownload },
+    /// What is still running now that a turn has ended.
+    ///
+    /// Sampled at the end of a turn because that is the moment the question
+    /// becomes answerable: while the agent is working, everything it has
+    /// started is supposed to be running. Pushed rather than answered so the
+    /// count can sit on screen without the client polling the operating
+    /// system through us.
+    #[serde(rename = "processes", rename_all = "camelCase")]
+    BackgroundProcesses { processes: Vec<BackgroundProcess> },
     /// This connection fell behind and events for a session were dropped.
     ///
     /// Addressed to the client rather than to the person: a hole in a timeline is

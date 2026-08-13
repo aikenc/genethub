@@ -171,7 +171,7 @@ head 是最多 8 KiB 的 UTF-8 JSON；body 是原始 bytes，不做 base64。met
 - `rpc`：现有业务 `Request/Reply` schema 作为 exchange body；它已不再是连接层 envelope，也没有全连接 request id、pending sequence 或 authenticated wrapper。
 - `events`：一个长期 response body，消息使用 `u32be length + JSON`。
 - `asset.preview`：文件系统 Preview，见下文档。
-- `shell.run`：在 workspace 内执行一条命令，response body 是 `u32be length + JSON` 的 `ShellFrame` 序列（`stdout` / `stderr` / 末帧 `exit`）。
+- `shell.run`：在 workspace 内执行一条命令。request body 是命令的 stdin（可以为空），response body 是 `u32be length + JSON` 的 `ShellFrame` 序列（`stdout` / `stderr` / 末帧 `exit`）。stdin 随请求一次给全而不是边打边送：命令必须等输入齐了再启动，否则先读的那一方会读到一个提前到来的 EOF；要让输入取决于命令的输出，那是终端而不是这里。
 - `rtc.negotiate`：E2EE SDP 协商。
 
 保留 `Request/Reply` 作为业务 schema 是刻意的最小迁移，不是 legacy transport fallback。连接层、加密、关联、并发、背压和取消已经全部由 v3 stream 承担。

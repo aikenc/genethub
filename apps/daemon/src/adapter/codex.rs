@@ -326,7 +326,7 @@ impl AgentAdapter for CodexAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        super::without_a_window(&mut command);
+        super::owned_child(&mut command);
 
         let mut child = command
             .spawn()
@@ -590,7 +590,7 @@ async fn import_rpc(program: &Path, cwd: &Path, method: &str, params: Value) -> 
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    super::without_a_window(&mut command);
+    super::owned_child(&mut command);
     let mut child = command
         .spawn()
         .with_context(|| format!("spawning {} for session import", program.display()))?;
@@ -660,7 +660,7 @@ async fn discover(program: &Path) -> Option<Hello> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    super::without_a_window(&mut command);
+    super::owned_child(&mut command);
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -750,7 +750,7 @@ async fn logged_in(program: &Path) -> Option<bool> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    super::without_a_window(&mut command);
+    super::owned_child(&mut command);
 
     let output = tokio::time::timeout(LOGIN_TIMEOUT, command.output())
         .await
@@ -1121,6 +1121,14 @@ impl AgentSession for CodexSession {
         )
         .await?;
         Ok(())
+    }
+
+    async fn pid(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|child| child.id())
     }
 
     async fn close(&self) -> Result<()> {

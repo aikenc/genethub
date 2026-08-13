@@ -91,20 +91,14 @@ impl Terminals {
             })
             .context("allocating a pty")?;
 
-        let mut command = match &confinement {
-            None => CommandBuilder::new(default_shell()),
-            Some(policy) => {
-                let argv = policy.wrap(Path::new(&default_shell()))?;
-                let (helper, arguments) = argv
-                    .split_first()
-                    .ok_or_else(|| anyhow!("the confinement wrapper has no command"))?;
-                let mut command = CommandBuilder::new(helper);
-                for argument in arguments {
-                    command.arg(argument);
-                }
-                command
-            }
-        };
+        let argv = crate::process::launch_argv(&default_shell(), confinement.as_ref())?;
+        let (helper, arguments) = argv
+            .split_first()
+            .ok_or_else(|| anyhow!("the confinement wrapper has no command"))?;
+        let mut command = CommandBuilder::new(helper);
+        for argument in arguments {
+            command.arg(argument);
+        }
         command.cwd(cwd);
         // Without this many tools emit escape sequences xterm.js cannot render.
         command.env("TERM", "xterm-256color");
@@ -197,9 +191,16 @@ impl Terminals {
         Ok(())
     }
 
+    /// Closes a terminal by hanging it up, and deliberately no harder than
+    /// that.
+    ///
+    /// A command stops with everything it started (`process.rs`); a terminal
+    /// does not, and the difference is not an oversight in one of them. A
+    /// person who typed `nohup make &` into this terminal meant for it to
+    /// survive the terminal, which is what a terminal has meant since before
+    /// any of this. Dropping the master hangs up the session; what chose to
+    /// ignore the hangup chose it.
     pub async fn close(&self, pty_id: &str) -> Result<()> {
-        // Dropping the master closes the pty, which ends the reader thread and
-        // sends the shell a hangup.
         self.sessions.lock().await.remove(pty_id);
         Ok(())
     }

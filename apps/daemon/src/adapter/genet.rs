@@ -201,7 +201,7 @@ impl AgentAdapter for GenetAdapter {
         if let Ok(cli) = std::env::current_exe() {
             command.env("GENEHUB_CLI", cli);
         }
-        super::without_a_window(&mut command);
+        super::owned_child(&mut command);
 
         // Under the daemon, `models.json` is the only source of models. The
         // agent also picks up provider keys straight from its environment when

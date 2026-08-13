@@ -197,6 +197,11 @@ pub struct SessionManager {
     registry: Arc<Registry>,
     diagnostics: Arc<Diagnostics>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
+    /// What each session's agent has left running. Owned here because that is
+    /// where the ownership is: a stray process belongs to the conversation
+    /// whose agent started it, and there is no such thing as one without a
+    /// session to answer for it (`crate::processes`).
+    processes: Arc<crate::processes::Processes>,
     replay_window: usize,
     import_candidates: Mutex<HashMap<String, CachedImportCandidate>>,
 }
@@ -217,9 +222,16 @@ impl SessionManager {
             registry,
             diagnostics,
             sessions: RwLock::new(HashMap::new()),
+            processes: crate::processes::Processes::new(),
             replay_window: replay_window.max(1),
             import_candidates: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// A handle for the parts of the daemon that answer questions about
+    /// processes without going through a session.
+    pub fn processes(&self) -> Arc<crate::processes::Processes> {
+        self.processes.clone()
     }
 
     pub async fn create(
@@ -1539,6 +1551,12 @@ impl SessionManager {
                 self.store.save_meta(&meta)?;
             }
         }
+        // Recorded before the pump starts, so that a turn which ends quickly
+        // still finds an agent to attribute its leftovers to.
+        if let Some(pid) = session.pid().await {
+            let session_id = live.meta.lock().await.id.clone();
+            self.processes.watch(&session_id, pid).await;
+        }
         *live.agent.lock().await = Some(session);
 
         if let Some(previous) = live.pump.lock().await.take() {
@@ -1551,6 +1569,7 @@ impl SessionManager {
             receiver,
             self.store.clone(),
             self.replay_window,
+            self.processes.clone(),
             self.diagnostics.clone(),
         ));
         *live.pump.lock().await = Some(pump);
@@ -1842,8 +1861,10 @@ impl SessionManager {
         // appending to a timeline we just removed, and the session would
         // reappear a moment after being deleted.
         if let Some(live) = live {
+            self.end_what_it_left(session_id).await;
             live.shutdown().await;
         }
+        self.processes.forget(session_id).await;
         let Some(workspace_id) = workspace_id else {
             return Ok(());
         };
@@ -1855,21 +1876,38 @@ impl SessionManager {
             Some(live) => live,
             None => return Ok(()),
         };
+        self.end_what_it_left(session_id).await;
         live.shutdown().await;
+        self.processes.forget(session_id).await;
         Ok(())
+    }
+
+    /// Ends the processes a session left running, before the agent that
+    /// answers for them goes away.
+    ///
+    /// Killing the agent stops its process group, which is most of what it
+    /// started — but not a process that started a session of its own, and
+    /// those are exactly the ones long enough lived to still be here. Left
+    /// alone they would keep running with nothing left that knows whose they
+    /// were: not listed, not stoppable, just a held port. So they are ended
+    /// here, while the agent is still alive to identify them.
+    ///
+    /// Before, not after, for that reason: once the agent is gone the
+    /// descendants are reparented and there is no longer any way to tell they
+    /// were ever this session's.
+    async fn end_what_it_left(&self, session_id: &str) {
+        let ended = self.processes.stop_all(session_id).await;
+        if ended > 0 {
+            tracing::info!(session = %session_id, count = ended, "ended what the session left running");
+        }
     }
 
     /// Stops every agent process. Called on daemon shutdown so no orphan
     /// children survive the tray exiting.
     pub async fn shutdown(&self) {
-        let sessions: Vec<Arc<Live>> = self
-            .sessions
-            .write()
-            .await
-            .drain()
-            .map(|(_, v)| v)
-            .collect();
-        for live in sessions {
+        let sessions: Vec<(String, Arc<Live>)> = self.sessions.write().await.drain().collect();
+        for (session_id, live) in sessions {
+            self.end_what_it_left(&session_id).await;
             live.shutdown().await;
         }
     }
@@ -2573,6 +2611,7 @@ async fn pump_events(
     mut receiver: broadcast::Receiver<SessionEvent>,
     store: Store,
     replay_window: usize,
+    processes: Arc<crate::processes::Processes>,
     diagnostics: Arc<Diagnostics>,
 ) {
     let (workspace_id, session_id) = {
@@ -2863,6 +2902,10 @@ async fn pump_events(
         if settle {
             thinking.clear();
             flush_turn(&live, &store).await;
+            // The end of a turn is when "what is still running" starts to mean
+            // something. Until then everything the agent started is running
+            // because the agent is still working.
+            processes.announce_now().await;
         }
     }
     flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
@@ -4780,6 +4823,7 @@ mod tests {
             agent_events.subscribe(),
             store.clone(),
             64,
+            crate::processes::Processes::new(),
             Arc::new(Diagnostics::new()),
         ));
         for event in script {
@@ -5301,6 +5345,7 @@ mod tests {
             events.subscribe(),
             sessions.store.clone(),
             64,
+            sessions.processes(),
             sessions.diagnostics.clone(),
         ));
         *live.pump.lock().await = Some(pump);
@@ -5856,6 +5901,7 @@ mod tests {
             events.subscribe(),
             sessions.store.clone(),
             64,
+            sessions.processes(),
             sessions.diagnostics.clone(),
         ));
         *live.pump.lock().await = Some(pump);
@@ -6429,6 +6475,7 @@ mod tests {
             agent_events.subscribe(),
             store,
             64,
+            crate::processes::Processes::new(),
             diagnostics.clone(),
         ));
 

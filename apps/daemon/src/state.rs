@@ -29,6 +29,8 @@ pub struct AppState {
     pub sessions: SessionManager,
     pub workspaces: Workspaces,
     pub terminals: Arc<Terminals>,
+    /// What each session's agent has left running.
+    pub processes: Arc<crate::processes::Processes>,
     /// Bounded categorical facts safe for explicit feedback attachment.
     pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
     pub version: String,
@@ -138,6 +140,7 @@ impl AppState {
             }
         }
 
+        let processes = sessions.processes();
         let (terminals, pty_rx) = Terminals::new();
         let updates_dir = paths.updates_dir();
 
@@ -150,6 +153,7 @@ impl AppState {
             sessions,
             workspaces,
             terminals,
+            processes,
             diagnostics,
             version: env!("CARGO_PKG_VERSION").to_string(),
             token: uuid::Uuid::new_v4().simple().to_string(),

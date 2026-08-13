@@ -96,7 +96,7 @@ impl AgentAdapter for OpenCodeAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        super::without_a_window(&mut command);
+        super::owned_child(&mut command);
         let mut child = command
             .spawn()
             .with_context(|| format!("spawning {}", binary.display()))?;
@@ -316,7 +316,7 @@ impl OpenCodeImportServer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        super::without_a_window(&mut command);
+        super::owned_child(&mut command);
         let mut child = command
             .spawn()
             .context("spawning OpenCode for session import")?;
@@ -474,6 +474,14 @@ impl AgentSession for OpenCodeSession {
             .send()
             .await?;
         Ok(())
+    }
+
+    async fn pid(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|child| child.id())
     }
 
     async fn close(&self) -> Result<()> {

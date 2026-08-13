@@ -166,7 +166,8 @@ impl Client {
                         ServerFrame::Notice { message, .. } => {
                             let _ = notice_tx.send(message);
                         }
-                        ServerFrame::UpdateDownloadChanged { .. } => {}
+                        ServerFrame::UpdateDownloadChanged { .. }
+                        | ServerFrame::BackgroundProcesses { .. } => {}
                         ServerFrame::Desync { session_id, missed } => {
                             panic!("the daemon dropped {missed} events for {session_id}");
                         }
@@ -271,9 +272,14 @@ impl Client {
         let access = accepted.access.clone();
         let daemon_key = key.clone();
         let peer = tokio::spawn(async move {
-            let _ =
-                genet_daemon::dataplane::endpoint::serve(state, daemon_key, access, daemon_carrier)
-                    .await;
+            let _ = genet_daemon::dataplane::endpoint::serve(
+                state,
+                daemon_key,
+                access,
+                daemon_carrier,
+                genet_daemon::dataplane::endpoint::CarrierKind::Fabric,
+            )
+            .await;
         });
         let uplink = tokio::spawn(async move {
             while let Some(record) = from_client.recv().await {
@@ -357,14 +363,21 @@ impl Client {
         genehub_proto::ExchangeResponseHead,
         Vec<genehub_proto::ShellFrame>,
     )> {
+        self.run_command_with_input(request, Vec::new()).await
+    }
+
+    /// The body is the command's standard input.
+    pub async fn run_command_with_input(
+        &self,
+        request: genehub_proto::ShellRunRequest,
+        stdin: Vec<u8>,
+    ) -> Result<(
+        genehub_proto::ExchangeResponseHead,
+        Vec<genehub_proto::ShellFrame>,
+    )> {
         let mut stream = self
             .endpoint
-            .open_stream(
-                "shell.run",
-                serde_json::to_value(&request)?,
-                Vec::new(),
-                None,
-            )
+            .open_stream("shell.run", serde_json::to_value(&request)?, stdin, None)
             .await?;
         let head = tokio::time::timeout(WAIT_TIMEOUT, stream.response_head())
             .await
