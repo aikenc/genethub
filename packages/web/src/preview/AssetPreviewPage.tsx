@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssetPreviewMetadata, SessionArtifactBundle } from "@genehub/proto";
+import modernScreenshotSource from "modern-screenshot/dist/index.js?raw";
 
 import { emitClientDiagnostic, registerDiagnosticClient } from "../diagnostics";
 import { detectHost, type Endpoint, type Host } from "../host";
@@ -14,6 +15,7 @@ import {
   type PreviewRuntimeEvent,
   type RuntimeArtifactSubmit,
 } from "./PreviewRuntimeControls";
+import type { PixelSnapshot } from "./runtimeCapture";
 import type { AssetPreviewLocation } from "./url";
 import { uploadSessionArtifact } from "./sessionArtifactUpload";
 
@@ -364,6 +366,16 @@ export function HtmlDocument({
       }
     >(),
   );
+  const renderRequestsRef = useRef(
+    new Map<
+      string,
+      {
+        resolve: (snapshot: PixelSnapshot) => void;
+        reject: (error: Error) => void;
+        timer: number;
+      }
+    >(),
+  );
 
   const requestDomSnapshot = useCallback(() => {
     const frame = frameRef.current;
@@ -386,6 +398,27 @@ export function HtmlDocument({
     });
   }, []);
 
+  const requestRenderedSnapshot = useCallback(() => {
+    const frame = frameRef.current;
+    if (!frame?.contentWindow) return Promise.reject(new Error("Preview 画面尚未就绪"));
+    const requestId = previewRequestId();
+    return new Promise<PixelSnapshot>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        renderRequestsRef.current.delete(requestId);
+        reject(new Error("生成 Preview 画面超时"));
+      }, 15_000);
+      renderRequestsRef.current.set(requestId, { resolve, reject, timer });
+      frame.contentWindow?.postMessage(
+        {
+          source: PREVIEW_RUNTIME_COMMAND_SOURCE,
+          command: "snapshot-render",
+          requestId,
+        },
+        "*",
+      );
+    });
+  }, []);
+
   useEffect(() => {
     const receive = (event: MessageEvent) => {
       if (event.source !== frameRef.current?.contentWindow) return;
@@ -395,7 +428,7 @@ export function HtmlDocument({
         source?: string;
         kind?: string;
         requestId?: string;
-        detail?: Record<string, string | number | boolean | null>;
+        detail?: unknown;
       };
       if (data.source === PREVIEW_RUNTIME_SOURCE && data.kind === "dom-snapshot") {
         const pending = data.requestId ? domRequestsRef.current.get(data.requestId) : null;
@@ -405,8 +438,20 @@ export function HtmlDocument({
         pending.resolve(data.detail);
         return;
       }
+      if (data.source === PREVIEW_RUNTIME_SOURCE && data.kind === "render-snapshot") {
+        const pending = data.requestId ? renderRequestsRef.current.get(data.requestId) : null;
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        renderRequestsRef.current.delete(data.requestId!);
+        if (isPreviewRenderedSnapshot(data.detail)) {
+          pending.resolve(data.detail);
+        } else {
+          pending.reject(new Error(previewRenderError(data.detail)));
+        }
+        return;
+      }
       if (data.source === PREVIEW_DIAG_SOURCE && isPreviewDiagnosticKind(data.kind)) {
-        const detail = data.detail ?? {};
+        const detail = isPreviewDiagnosticDetail(data.detail) ? data.detail : {};
         const next = [...eventsRef.current, { at: Date.now(), kind: data.kind, detail }].slice(
           -1_000,
         );
@@ -426,6 +471,11 @@ export function HtmlDocument({
         pending.reject(new Error("Preview 已关闭"));
       }
       domRequestsRef.current.clear();
+      for (const pending of renderRequestsRef.current.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error("Preview 已关闭"));
+      }
+      renderRequestsRef.current.clear();
     };
   }, []);
 
@@ -523,6 +573,7 @@ export function HtmlDocument({
             eventsRef={eventsRef}
             eventCount={eventCount}
             requestDomSnapshot={requestDomSnapshot}
+            requestRenderedSnapshot={requestRenderedSnapshot}
             onSubmit={onRuntimeArtifact}
           />
           {/* iOS WebKit stretches a srcDoc iframe to its content height,
@@ -670,7 +721,9 @@ export function isolatedHtml(source: string): string {
   // part of the runtime artifact as well.
   const bridge = document_.createElement("script");
   bridge.textContent = PREVIEW_DIAG_BRIDGE;
-  document_.head.prepend(policy, base, bridge);
+  const renderer = document_.createElement("script");
+  renderer.textContent = modernScreenshotSource;
+  document_.head.prepend(policy, base, renderer, bridge);
   return `<!doctype html>\n${document_.documentElement.outerHTML}`;
 }
 
@@ -691,6 +744,41 @@ function isPreviewDomSnapshot(value: unknown): value is PreviewDomSnapshot {
     typeof snapshot.truncated === "boolean" &&
     typeof snapshot.viewportWidth === "number" &&
     typeof snapshot.viewportHeight === "number"
+  );
+}
+
+function isPreviewRenderedSnapshot(value: unknown): value is PixelSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const snapshot = value as Partial<PixelSnapshot> & { error?: unknown };
+  return (
+    snapshot.error === undefined &&
+    snapshot.blob instanceof Blob &&
+    snapshot.blob.size > 0 &&
+    typeof snapshot.width === "number" &&
+    snapshot.width > 0 &&
+    typeof snapshot.height === "number" &&
+    snapshot.height > 0 &&
+    typeof snapshot.capturedAt === "number" &&
+    snapshot.mode === "dom-render"
+  );
+}
+
+function previewRenderError(value: unknown): string {
+  if (!value || typeof value !== "object") return "无法生成 Preview 画面";
+  const error = (value as { error?: unknown }).error;
+  return typeof error === "string" && error ? error : "无法生成 Preview 画面";
+}
+
+function isPreviewDiagnosticDetail(
+  value: unknown,
+): value is Record<string, string | number | boolean | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value).every(
+    (item) =>
+      item === null ||
+      typeof item === "string" ||
+      typeof item === "number" ||
+      typeof item === "boolean",
   );
 }
 
@@ -742,6 +830,7 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
   function captureDom(){
     var root = document.documentElement;
     var clone = root.cloneNode(true);
+    Array.prototype.forEach.call(clone.querySelectorAll("[data-genehub-render-sandbox]"), function(node){ node.remove(); });
     Array.prototype.forEach.call(clone.querySelectorAll("script,style"), function(node){
       node.textContent = "[omitted from runtime DOM snapshot]";
     });
@@ -794,14 +883,102 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       mutationCount: mutationCount
     };
   }
+  function captureRenderedFrame(requestId){
+    var api = window.modernScreenshot;
+    if (!api || typeof api.createContext !== "function" || typeof api.domToBlob !== "function") {
+      sendRuntime("render-snapshot", requestId, { error: "Preview 画面采样器未就绪" });
+      return;
+    }
+    var root = document.documentElement;
+    var viewportWidth = Math.max(1, Math.round(window.innerWidth || root.clientWidth || 1));
+    var viewportHeight = Math.max(1, Math.round(window.innerHeight || root.clientHeight || 1));
+    var edgeScale = 1600 / Math.max(viewportWidth, viewportHeight);
+    var scale = Math.max(0.25, Math.min(window.devicePixelRatio || 1, edgeScale));
+    var background = "#ffffff";
+    try {
+      var bodyBackground = document.body ? getComputedStyle(document.body).backgroundColor : "";
+      var rootBackground = getComputedStyle(root).backgroundColor;
+      background = bodyBackground && bodyBackground !== "rgba(0, 0, 0, 0)" && bodyBackground !== "transparent"
+        ? bodyBackground
+        : rootBackground && rootBackground !== "rgba(0, 0, 0, 0)" && rootBackground !== "transparent"
+          ? rootBackground
+          : background;
+    } catch (e) {}
+    // Descendant iframes inherit this Preview's opaque sandbox origin, so the
+    // renderer cannot read its usual style-probe iframe. A hidden shadow root
+    // supplies uncontaminated UA default styles without weakening the Preview.
+    var sandboxHost = document.createElement("div");
+    sandboxHost.setAttribute("data-genehub-render-sandbox", "");
+    sandboxHost.style.setProperty("position", "fixed", "important");
+    sandboxHost.style.setProperty("left", "-10000px", "important");
+    sandboxHost.style.setProperty("top", "-10000px", "important");
+    sandboxHost.style.setProperty("width", "1px", "important");
+    sandboxHost.style.setProperty("height", "1px", "important");
+    sandboxHost.style.setProperty("overflow", "hidden", "important");
+    sandboxHost.style.setProperty("visibility", "hidden", "important");
+    var sandboxRoot = sandboxHost.attachShadow ? sandboxHost.attachShadow({ mode: "closed" }) : sandboxHost;
+    document.documentElement.appendChild(sandboxHost);
+    var sandboxDocument = {
+      createElement: document.createElement.bind(document),
+      createElementNS: document.createElementNS.bind(document),
+      body: {
+        appendChild: function(node){ return sandboxRoot.appendChild(node); },
+        removeChild: function(node){ return sandboxRoot.removeChild(node); }
+      }
+    };
+    var sandboxFrame = {
+      contentWindow: {
+        document: sandboxDocument,
+        getComputedStyle: window.getComputedStyle.bind(window)
+      },
+      remove: function(){ sandboxHost.remove(); }
+    };
+    Promise.resolve(api.createContext(root, {
+      width: viewportWidth,
+      height: viewportHeight,
+      scale: scale,
+      type: "image/webp",
+      quality: 0.78,
+      backgroundColor: background,
+      maximumCanvasSize: 1600,
+      timeout: 10000,
+      features: { restoreScrollPosition: true },
+      filter: function(node){
+        return !(node && node.nodeType === 1 && node.hasAttribute && node.hasAttribute("data-genehub-render-sandbox"));
+      },
+      autoDestruct: true
+    })).then(function(context){
+      context.sandbox = sandboxFrame;
+      return api.domToBlob(context);
+    }).then(function(blob){
+      if (!blob || !blob.size) throw new Error("Preview 画面为空");
+      sendRuntime("render-snapshot", requestId, {
+        blob: blob,
+        width: Math.max(1, Math.floor(viewportWidth * scale)),
+        height: Math.max(1, Math.floor(viewportHeight * scale)),
+        capturedAt: Date.now(),
+        mode: "dom-render"
+      });
+    }).catch(function(error){
+      sendRuntime("render-snapshot", requestId, { error: text(error, 500) || "无法生成 Preview 画面" });
+    }).finally(function(){
+      sandboxHost.remove();
+    });
+  }
   window.addEventListener("message", function(event){
     if (event.source !== parent) return;
     var data = event.data;
-    if (!data || data.source !== ${JSON.stringify(PREVIEW_RUNTIME_COMMAND_SOURCE)} || data.command !== "snapshot-dom") return;
+    if (!data || data.source !== ${JSON.stringify(PREVIEW_RUNTIME_COMMAND_SOURCE)}) return;
+    var requestId = String(data.requestId || "");
+    if (data.command === "snapshot-render") {
+      captureRenderedFrame(requestId);
+      return;
+    }
+    if (data.command !== "snapshot-dom") return;
     try {
-      sendRuntime("dom-snapshot", String(data.requestId || ""), captureDom());
+      sendRuntime("dom-snapshot", requestId, captureDom());
     } catch (error) {
-      sendRuntime("dom-snapshot", String(data.requestId || ""), {
+      sendRuntime("dom-snapshot", requestId, {
         capturedAt: Date.now(), html: "<!-- DOM snapshot failed: " + text(error, 500) + " -->", truncated: false,
         title: String(document.title || ""), location: safeUrl(location.href), viewportWidth: window.innerWidth || 0,
         viewportHeight: window.innerHeight || 0, scrollX: 0, scrollY: 0, activeElement: "unknown", mutationCount: mutationCount

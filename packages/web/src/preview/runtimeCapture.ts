@@ -1,4 +1,4 @@
-export type PreviewCaptureMode = "element" | "region" | "viewport-crop";
+export type PreviewCaptureMode = "element" | "region" | "viewport-crop" | "dom-render";
 
 export type PixelSnapshot = {
   blob: Blob;
@@ -44,6 +44,19 @@ type FrameVideo = HTMLVideoElement & {
 const MAX_SCREENSHOT_EDGE = 1_600;
 const SCREENSHOT_QUALITY = 0.86;
 const MAX_SCREENSHOT_BYTES = 1_450_000;
+
+export function supportsDisplayCapture(): boolean {
+  try {
+    return (
+      typeof navigator !== "undefined" &&
+      Boolean(
+        (navigator.mediaDevices as CaptureMediaDevices | undefined)?.getDisplayMedia,
+      )
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Captures the browser compositor's real pixels. Element/Region Capture is
@@ -182,7 +195,7 @@ export class PreviewPixelCapture {
     this.dispose();
     const mediaDevices = navigator.mediaDevices as CaptureMediaDevices | undefined;
     if (!mediaDevices?.getDisplayMedia) {
-      throw new Error("当前浏览器不支持屏幕捕获，请使用桌面版 Chromium");
+      throw new Error("当前浏览器没有向网页开放系统屏幕流");
     }
 
     await Promise.resolve(

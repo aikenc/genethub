@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   PreviewPixelCapture,
+  supportsDisplayCapture,
   type PixelRecording,
   type PixelSnapshot,
 } from "./runtimeCapture";
@@ -58,11 +59,23 @@ export type RuntimeArtifactSubmit = (
 type RuntimeFrame = {
   at: number;
   reason: "manual" | "recording-start" | "recording-sample" | "recording-end" | "upload";
-  pixel: PixelSnapshot;
+  pixel: PixelSnapshot | null;
+  pixelError: string | null;
   dom: PreviewDomSnapshot;
 };
 
+export type RuntimeRecording =
+  | ({ kind: "video" } & PixelRecording)
+  | {
+      kind: "frame-sequence";
+      durationMs: number;
+      requestedFps: number;
+      actualFps: number | null;
+      mode: "dom-render";
+    };
+
 const RECORDING_FPS = 30;
+const FRAME_SEQUENCE_FPS = 1;
 const DOM_SAMPLE_MS = 1_000;
 const MAX_RECORDING_MS = 60_000;
 const MAX_RUNTIME_FRAMES = 60;
@@ -75,6 +88,7 @@ export function PreviewRuntimeControls({
   eventsRef,
   eventCount,
   requestDomSnapshot,
+  requestRenderedSnapshot,
   onSubmit,
 }: {
   frameRef: React.RefObject<HTMLIFrameElement>;
@@ -84,6 +98,7 @@ export function PreviewRuntimeControls({
   eventsRef: React.MutableRefObject<PreviewRuntimeEvent[]>;
   eventCount: number;
   requestDomSnapshot(): Promise<PreviewDomSnapshot>;
+  requestRenderedSnapshot(): Promise<PixelSnapshot>;
   onSubmit?: RuntimeArtifactSubmit;
 }) {
   const captureHandle = useMemo(
@@ -95,6 +110,10 @@ export function PreviewRuntimeControls({
   const frameInFlight = useRef(false);
   const recordingRef = useRef(false);
   const recordingStartedAt = useRef(0);
+  const captureStrategyRef = useRef<"display" | "dom-render">(
+    supportsDisplayCapture() ? "display" : "dom-render",
+  );
+  const recordingKindRef = useRef<RuntimeRecording["kind"] | null>(null);
   const sampleTimer = useRef<number | null>(null);
   const elapsedTimer = useRef<number | null>(null);
   const maximumTimer = useRef<number | null>(null);
@@ -103,7 +122,7 @@ export function PreviewRuntimeControls({
   const [busy, setBusy] = useState<"screenshot" | "recording" | "upload" | null>(null);
   const [recording, setRecording] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [recordingResult, setRecordingResult] = useState<PixelRecording | null>(null);
+  const [recordingResult, setRecordingResult] = useState<RuntimeRecording | null>(null);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
   const [notice, setNotice] = useState("日志已开始记录");
 
@@ -124,6 +143,8 @@ export function PreviewRuntimeControls({
     });
     engineRef.current = engine;
     framesRef.current = [];
+    captureStrategyRef.current = supportsDisplayCapture() ? "display" : "dom-render";
+    recordingKindRef.current = null;
     setFrameCount(0);
     setCaptureActive(false);
     setRecordingResult(null);
@@ -137,7 +158,7 @@ export function PreviewRuntimeControls({
   }, [captureHandle, clearRecordingTimers]);
 
   useEffect(() => {
-    if (!recordingResult) {
+    if (!recordingResult || recordingResult.kind !== "video") {
       setRecordingUrl(null);
       return;
     }
@@ -147,15 +168,46 @@ export function PreviewRuntimeControls({
   }, [recordingResult]);
 
   const captureFrame = useCallback(
-    async (reason: RuntimeFrame["reason"]): Promise<RuntimeFrame | null> => {
+    async (
+      reason: RuntimeFrame["reason"],
+      { allowDomOnly = false }: { allowDomOnly?: boolean } = {},
+    ): Promise<RuntimeFrame | null> => {
       if (frameInFlight.current) return null;
       const target = frameRef.current;
       const engine = engineRef.current;
       if (!target || !engine || !ready) throw new Error("Preview 尚未准备好");
       frameInFlight.current = true;
       try {
-        const [pixel, dom] = await Promise.all([engine.capture(target), requestDomSnapshot()]);
-        const frame = { at: Date.now(), reason, pixel, dom } satisfies RuntimeFrame;
+        const capturePixel = async (): Promise<PixelSnapshot> => {
+          if (captureStrategyRef.current === "dom-render") {
+            return requestRenderedSnapshot();
+          }
+          try {
+            return await engine.capture(target);
+          } catch (error) {
+            if (!shouldFallBackToDomRender(error)) throw error;
+            engine.dispose();
+            captureStrategyRef.current = "dom-render";
+            setCaptureActive(false);
+            return requestRenderedSnapshot();
+          }
+        };
+        const pixelPromise = capturePixel().then(
+          (pixel) => ({ pixel, error: null }),
+          (error: unknown) => ({ pixel: null, error }),
+        );
+        const domPromise = requestDomSnapshot().catch((error) =>
+          failedDomSnapshot(error, target),
+        );
+        const [{ pixel, error }, dom] = await Promise.all([pixelPromise, domPromise]);
+        if (!pixel && !allowDomOnly) throw error;
+        const frame = {
+          at: Date.now(),
+          reason,
+          pixel,
+          pixelError: pixel ? null : errorMessage(error),
+          dom,
+        } satisfies RuntimeFrame;
         const next = [...framesRef.current, frame].slice(-MAX_RUNTIME_FRAMES);
         framesRef.current = next;
         setFrameCount(next.length);
@@ -164,18 +216,24 @@ export function PreviewRuntimeControls({
         frameInFlight.current = false;
       }
     },
-    [frameRef, ready, requestDomSnapshot],
+    [frameRef, ready, requestDomSnapshot, requestRenderedSnapshot],
   );
 
   const takeScreenshot = useCallback(async () => {
     setBusy("screenshot");
-    setNotice("请选择共享当前标签页…");
+    setNotice(
+      captureStrategyRef.current === "display"
+        ? "请选择共享当前标签页…"
+        : "正在生成 Preview 画面…",
+    );
     try {
       const frame = await captureFrame("manual");
-      if (frame) {
-        setCaptureActive(true);
+      if (frame?.pixel) {
+        setCaptureActive(Boolean(engineRef.current?.active));
         setNotice(
-          `已截取真实渲染图 ${frame.pixel.width}×${frame.pixel.height} 和 DOM 状态`,
+          frame.pixel.mode === "dom-render"
+            ? `已截取 Preview 画面 ${frame.pixel.width}×${frame.pixel.height} 和 DOM 状态`
+            : `已截取真实渲染图 ${frame.pixel.width}×${frame.pixel.height} 和 DOM 状态`,
         );
       }
     } catch (error) {
@@ -190,19 +248,40 @@ export function PreviewRuntimeControls({
     setBusy("recording");
     clearRecordingTimers();
     try {
-      await captureFrame("recording-end");
-      const result = await engineRef.current?.stopRecording();
+      await captureFrame("recording-end", { allowDomOnly: true }).catch(() => null);
+      const durationMs = Math.max(0, Date.now() - recordingStartedAt.current);
+      let result: RuntimeRecording | null = null;
+      if (recordingKindRef.current === "video") {
+        const video = await engineRef.current?.stopRecording();
+        if (video) result = { kind: "video", ...video };
+      } else if (recordingKindRef.current === "frame-sequence") {
+        const imageCount = framesRef.current.filter(
+          (frame) => frame.at >= recordingStartedAt.current && frame.pixel,
+        ).length;
+        result = {
+          kind: "frame-sequence",
+          durationMs,
+          requestedFps: FRAME_SEQUENCE_FPS,
+          actualFps: durationMs > 0 ? imageCount / (durationMs / 1_000) : null,
+          mode: "dom-render",
+        };
+      }
       recordingRef.current = false;
+      recordingKindRef.current = null;
       setRecording(false);
+      setCaptureActive(Boolean(engineRef.current?.active));
       if (result) {
         setRecordingResult(result);
         setNotice(
-          `体验录制完成：${formatSeconds(result.durationMs)}，视频 ${displayFps(result)}，DOM 1fps`,
+          result.kind === "video"
+            ? `体验录制完成：${formatSeconds(result.durationMs)}，视频 ${displayFps(result)}，DOM 1fps`
+            : `体验录制完成：${formatSeconds(result.durationMs)}，画面与 DOM 1fps`,
         );
       }
       return result ?? null;
     } catch (error) {
       recordingRef.current = false;
+      recordingKindRef.current = null;
       setRecording(false);
       setNotice(errorMessage(error));
       return null;
@@ -216,18 +295,31 @@ export function PreviewRuntimeControls({
     const engine = engineRef.current;
     if (!target || !engine || !ready) return;
     setBusy("recording");
-    setNotice("请选择共享当前标签页…");
+    let displayCapture = captureStrategyRef.current === "display";
+    setNotice(displayCapture ? "请选择共享当前标签页…" : "正在启动移动端画面采样…");
     try {
-      await engine.startRecording(target, RECORDING_FPS);
-      setCaptureActive(true);
+      if (displayCapture) {
+        try {
+          await engine.startRecording(target, RECORDING_FPS);
+        } catch (error) {
+          if (!shouldFallBackToDomRender(error)) throw error;
+          engine.dispose();
+          captureStrategyRef.current = "dom-render";
+          displayCapture = false;
+        }
+      }
+      recordingKindRef.current = displayCapture ? "video" : "frame-sequence";
+      setCaptureActive(displayCapture);
       recordingStartedAt.current = Date.now();
       recordingRef.current = true;
       setRecording(true);
       setElapsedSeconds(0);
       setRecordingResult(null);
-      await captureFrame("recording-start");
+      await captureFrame("recording-start", { allowDomOnly: true });
       sampleTimer.current = window.setInterval(() => {
-        void captureFrame("recording-sample").catch((error) => setNotice(errorMessage(error)));
+        void captureFrame("recording-sample", { allowDomOnly: true }).catch((error) =>
+          setNotice(errorMessage(error)),
+        );
       }, DOM_SAMPLE_MS);
       elapsedTimer.current = window.setInterval(() => {
         setElapsedSeconds(Math.floor((Date.now() - recordingStartedAt.current) / 1_000));
@@ -235,10 +327,17 @@ export function PreviewRuntimeControls({
       maximumTimer.current = window.setTimeout(() => {
         void stopRecording();
       }, MAX_RECORDING_MS);
-      setNotice("体验录制中：视频 30fps，DOM 与关键帧 1fps");
+      setNotice(
+        displayCapture
+          ? "体验录制中：视频 30fps，DOM 与关键帧 1fps"
+          : "体验录制中：画面与 DOM 1fps，日志持续记录",
+      );
     } catch (error) {
       recordingRef.current = false;
+      recordingKindRef.current = null;
       setRecording(false);
+      engine.dispose();
+      setCaptureActive(false);
       setNotice(errorMessage(error));
     } finally {
       setBusy(null);
@@ -254,10 +353,16 @@ export function PreviewRuntimeControls({
     try {
       let recordingForReport = recordingResult;
       if (recordingRef.current) recordingForReport = await stopRecording();
-      const finalFrame = await captureFrame("upload");
-      if (!finalFrame && framesRef.current.length === 0) {
-        throw new Error("没有可上传的运行现场");
-      }
+      await captureFrame("upload", { allowDomOnly: true }).catch((error) => {
+        eventsRef.current = [
+          ...eventsRef.current,
+          {
+            at: Date.now(),
+            kind: "error",
+            detail: { topic: "artifact-capture", message: errorMessage(error) },
+          },
+        ].slice(-1_000);
+      });
       const artifact = await buildRuntimeArtifactSubmission({
         entryPath,
         sourceVersion,
@@ -284,7 +389,10 @@ export function PreviewRuntimeControls({
   }, [captureFrame, entryPath, eventsRef, onSubmit, recordingResult, sourceVersion, stopRecording]);
 
   const disabled = !ready || busy !== null;
-  const videoExtension = recordingResult?.mimeType.includes("mp4") ? "mp4" : "webm";
+  const videoExtension =
+    recordingResult?.kind === "video" && recordingResult.mimeType.includes("mp4")
+      ? "mp4"
+      : "webm";
 
   return (
     <div className="flex min-h-9 shrink-0 items-center gap-1.5 border-b border-line bg-surface px-2 text-[11px] text-muted">
@@ -328,7 +436,11 @@ export function PreviewRuntimeControls({
         className="shrink-0 rounded border border-line px-2 py-1 hover:bg-raised disabled:opacity-45"
         disabled={disabled || recording}
         onClick={() => void takeScreenshot()}
-        title="截取 Preview 的真实渲染像素和当前 DOM"
+        title={
+          captureStrategyRef.current === "display"
+            ? "截取 Preview 的真实渲染像素和当前 DOM"
+            : "截取 Preview 的 DOM 渲染画面和当前 DOM"
+        }
       >
         截图
       </button>
@@ -341,7 +453,13 @@ export function PreviewRuntimeControls({
         }`}
         disabled={!ready || busy !== null}
         onClick={() => void (recording ? stopRecording() : startRecording())}
-        title={recording ? "停止体验录制" : "以 30fps 录制真实像素，1fps 采集 DOM"}
+        title={
+          recording
+            ? "停止体验录制"
+            : captureStrategyRef.current === "display"
+              ? "以 30fps 录制真实像素，1fps 采集 DOM"
+              : "以 1fps 采集 Preview 画面和 DOM，日志持续记录"
+        }
       >
         {recording ? "停止" : "录制"}
       </button>
@@ -352,7 +470,7 @@ export function PreviewRuntimeControls({
         onClick={() => void uploadArtifact()}
         title={
           onSubmit
-            ? "把日志、DOM、截图和视频写入 daemon 当前 session，并把路径加入输入框"
+            ? "把日志、DOM、截图和体验录制写入 daemon 当前 session，并把路径加入输入框"
             : "需要关联会话后保存"
         }
       >
@@ -373,7 +491,7 @@ export async function buildRuntimeArtifactSubmission({
   sourceVersion?: string;
   events: PreviewRuntimeEvent[];
   frames: RuntimeFrame[];
-  recording: PixelRecording | null;
+  recording: RuntimeRecording | null;
 }): Promise<RuntimeArtifactSubmission> {
   const eventLines = events.map((event) =>
     JSON.stringify({
@@ -388,12 +506,15 @@ export async function buildRuntimeArtifactSubmission({
       at: new Date(frame.at).toISOString(),
       atMs: relativeMs(frame.at, frames),
       reason: frame.reason,
-      pixel: {
-        width: frame.pixel.width,
-        height: frame.pixel.height,
-        capturedAt: new Date(frame.pixel.capturedAt).toISOString(),
-        mode: frame.pixel.mode,
-      },
+      pixel: frame.pixel
+        ? {
+            width: frame.pixel.width,
+            height: frame.pixel.height,
+            capturedAt: new Date(frame.pixel.capturedAt).toISOString(),
+            mode: frame.pixel.mode,
+          }
+        : null,
+      pixelError: frame.pixelError,
       dom: frame.dom,
     }),
   );
@@ -414,24 +535,29 @@ export async function buildRuntimeArtifactSubmission({
     },
   ];
   const frameSummary = frames.map((frame, index) => {
-    const extension = imageExtension(frame.pixel.blob.type);
-    const name = `frame-${String(index + 1).padStart(3, "0")}.${extension}`;
-    files.push({
-      name,
-      mime: frame.pixel.blob.type || "image/webp",
-      blob: frame.pixel.blob,
-    });
+    const pixel = frame.pixel;
+    let name: string | null = null;
+    if (pixel) {
+      const extension = imageExtension(pixel.blob.type);
+      name = `frame-${String(index + 1).padStart(3, "0")}.${extension}`;
+      files.push({
+        name,
+        mime: pixel.blob.type || "image/webp",
+        blob: pixel.blob,
+      });
+    }
     return {
       file: name,
       atMs: relativeMs(frame.at, frames),
       reason: frame.reason,
-      width: frame.pixel.width,
-      height: frame.pixel.height,
-      captureMode: frame.pixel.mode,
+      width: pixel?.width ?? null,
+      height: pixel?.height ?? null,
+      captureMode: pixel?.mode ?? "dom-only",
+      pixelError: frame.pixelError,
       domMutations: frame.dom.mutationCount,
     };
   });
-  if (recording) {
+  if (recording?.kind === "video") {
     const extension = recording.mimeType.includes("mp4") ? "mp4" : "webm";
     files.push({
       name: `recording.${extension}`,
@@ -439,21 +565,42 @@ export async function buildRuntimeArtifactSubmission({
       blob: recording.blob,
     });
   }
-  const recordingSummary = recording
-    ? {
-        file: recording.mimeType.includes("mp4") ? "recording.mp4" : "recording.webm",
-        durationMs: recording.durationMs,
-        mimeType: recording.mimeType,
-        bytes: recording.blob.size,
-        requestedFps: recording.requestedFps,
-        actualFps: recording.actualFps,
-        captureMode: recording.mode,
-      }
+  const sampledFrames = frames.filter(
+    (frame) => frame.reason.startsWith("recording-") && frame.pixel,
+  );
+  const sampledBytes = sampledFrames.reduce(
+    (total, frame) => total + (frame.pixel?.blob.size ?? 0),
+    0,
+  );
+  const recordingSummary: RuntimeArtifactJson = recording
+    ? recording.kind === "video"
+      ? {
+          kind: recording.kind,
+          file: recording.mimeType.includes("mp4") ? "recording.mp4" : "recording.webm",
+          durationMs: recording.durationMs,
+          mimeType: recording.mimeType,
+          bytes: recording.blob.size,
+          requestedFps: recording.requestedFps,
+          actualFps: recording.actualFps,
+          captureMode: recording.mode,
+          frameCount: null,
+        }
+      : {
+          kind: recording.kind,
+          file: null,
+          durationMs: recording.durationMs,
+          mimeType: null,
+          bytes: sampledBytes,
+          requestedFps: recording.requestedFps,
+          actualFps: recording.actualFps,
+          captureMode: recording.mode,
+          frameCount: sampledFrames.length,
+        }
     : null;
   return {
     files,
     metadata: {
-      schema: "genehub.preview-runtime.v2",
+      schema: "genehub.preview-runtime.v3",
       source: { path: entryPath, version: sourceVersion ?? null },
       capturedAt: new Date().toISOString(),
       eventCount: events.length,
@@ -465,7 +612,10 @@ export async function buildRuntimeArtifactSubmission({
       eventCount: events.length,
       frameCount: frames.length,
       recording: recording
-        ? { durationMs: recording.durationMs, bytes: recording.blob.size }
+        ? {
+            durationMs: recording.durationMs,
+            bytes: recording.kind === "video" ? recording.blob.size : sampledBytes,
+          }
         : null,
     },
   };
@@ -483,8 +633,10 @@ function runtimeId(prefix: string): string {
   }
 }
 
-function imageExtension(mime: string): "png" | "webp" {
-  return mime === "image/png" ? "png" : "webp";
+function imageExtension(mime: string): "jpg" | "png" | "webp" {
+  if (mime === "image/png") return "png";
+  if (mime === "image/jpeg") return "jpg";
+  return "webp";
 }
 
 function displayFps(recording: PixelRecording): string {
@@ -501,4 +653,31 @@ function errorMessage(error: unknown): string {
     return "未获得捕获权限；请重试并选择当前标签页";
   }
   return error instanceof Error ? error.message : "运行产物采集失败";
+}
+
+function shouldFallBackToDomRender(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "NotSupportedError") return true;
+  if (!(error instanceof Error)) return false;
+  return (
+    error.message.includes("没有向网页开放系统屏幕流") ||
+    error.message.includes("不支持 MediaRecorder") ||
+    error.message.includes("请选择“当前标签页”")
+  );
+}
+
+function failedDomSnapshot(error: unknown, target: HTMLElement): PreviewDomSnapshot {
+  const message = errorMessage(error);
+  return {
+    capturedAt: Date.now(),
+    html: `<!-- DOM snapshot failed: ${message.replaceAll("--", "—")} -->`,
+    truncated: false,
+    title: "",
+    location: "",
+    viewportWidth: Math.max(0, Math.round(target.clientWidth)),
+    viewportHeight: Math.max(0, Math.round(target.clientHeight)),
+    scrollX: 0,
+    scrollY: 0,
+    activeElement: "unknown",
+    mutationCount: 0,
+  };
 }

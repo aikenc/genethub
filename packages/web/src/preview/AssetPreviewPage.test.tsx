@@ -14,7 +14,7 @@ describe("active single-file HTML Preview", () => {
       </head><body><script id="application-script">globalThis.rendered = true</script></body></html>`);
     const parsed = new DOMParser().parseFromString(output, "text/html");
 
-    expect(parsed.querySelector("script")?.textContent).toContain("rendered");
+    expect(parsed.querySelector("#application-script")?.textContent).toContain("rendered");
     expect(parsed.querySelector("base")?.getAttribute("href")).toBe(
       "https://preview.invalid/",
     );
@@ -31,12 +31,18 @@ describe("active single-file HTML Preview", () => {
     const bridge = Array.from(parsed.querySelectorAll("script")).find((node) =>
       (node.textContent ?? "").includes("genehub-preview-diag"),
     );
+    const renderer = Array.from(parsed.querySelectorAll("script")).find((node) =>
+      (node.textContent ?? "").includes("modernScreenshot"),
+    );
     const application = parsed.querySelector<HTMLScriptElement>("#application-script");
     expect(bridge?.textContent).toContain('source: "genehub-preview-diag"');
     expect(bridge?.textContent).toContain("securitypolicyviolation");
     expect(bridge?.textContent).toContain('["debug", "log", "info", "warn", "error"]');
+    expect(bridge?.textContent).toContain('data.command === "snapshot-render"');
     expect(bridge?.textContent).toContain('data.command !== "snapshot-dom"');
     expect(bridge?.textContent).toContain("MutationObserver");
+    expect(renderer?.textContent).toContain("domToBlob");
+    expect(renderer?.compareDocumentPosition(bridge!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect(bridge?.compareDocumentPosition(application!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
