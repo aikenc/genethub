@@ -17,7 +17,6 @@ mod state;
 mod tools;
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -96,7 +95,7 @@ async fn main() {
         streaming: false,
         compacting: false,
         tools_enabled: true,
-        abort: Arc::new(AtomicBool::new(false)),
+        abort: Arc::new(state::Abort::new()),
         running: None,
     }));
 
@@ -156,10 +155,11 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
             state.lock().await.running = Some(handle);
         }
         "abort" => {
-            {
+            let already_requested = {
                 let guard = state.lock().await;
-                guard.abort.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
+                guard.abort.request()
+            };
+            eprintln!("event=interrupt_requested already_requested={already_requested}");
             emitter.send(response(id, kind, None));
         }
         "get_state" => {
@@ -374,9 +374,7 @@ async fn run_compaction(state: Arc<Mutex<State>>) {
         guard.stats.add(&child_usage);
         guard.streaming = false;
         guard.compacting = false;
-        guard
-            .abort
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        guard.abort.reset();
     }
 
     if child_usage.total_tokens > 0 {
@@ -626,7 +624,7 @@ mod tests {
             streaming: true,
             compacting: true,
             tools_enabled: true,
-            abort: Arc::new(AtomicBool::new(false)),
+            abort: Arc::new(state::Abort::new()),
             running: None,
         }));
 

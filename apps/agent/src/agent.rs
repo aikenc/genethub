@@ -2,7 +2,6 @@
 //! daemon rebuilds conversation history from these frames, so turns must open
 //! and close in the documented sequence.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -22,7 +21,7 @@ pub async fn run_prompt(state: Arc<Mutex<State>>, text: String) {
     let (emitter, prompt_message) = {
         let mut guard = state.lock().await;
         guard.streaming = true;
-        guard.abort.store(false, Ordering::SeqCst);
+        guard.abort.reset();
         let message = Message::user(text);
         guard.session.append_message(message.clone());
         (guard.emitter.clone(), message)
@@ -119,13 +118,18 @@ pub async fn run_prompt(state: Arc<Mutex<State>>, text: String) {
             "toolResults": result_values,
         }));
 
+        if state.lock().await.abort.requested() {
+            eprintln!("event=turn_cancelled_after_tools");
+            break;
+        }
+
         emitter.send(json!({ "type": "turn_start" }));
     }
 
     {
         let mut guard = state.lock().await;
         guard.streaming = false;
-        guard.abort.store(false, Ordering::SeqCst);
+        guard.abort.reset();
     }
     emitter.send(json!({ "type": "agent_end", "messages": produced }));
 }
@@ -176,11 +180,16 @@ async fn stream_assistant(
     let mut stop_reason = StopReason::Stop;
     let mut aborted = false;
 
-    while let Some(event) = rx.recv().await {
-        if abort.load(Ordering::SeqCst) {
-            aborted = true;
-            break;
-        }
+    loop {
+        let event = tokio::select! {
+            event = rx.recv() => event,
+            () = abort.cancelled() => {
+                aborted = true;
+                eprintln!("event=provider_stream_cancelled");
+                None
+            }
+        };
+        let Some(event) = event else { break };
         match event {
             ProviderEvent::TextStart => {
                 draft.content.push(Content::text(""));
@@ -271,9 +280,13 @@ async fn stream_assistant(
         }
     }
 
+    if aborted {
+        handle.abort();
+    }
     let provider_error = match handle.await {
         Ok(Ok(())) => None,
         Ok(Err(err)) => Some(err.to_string()),
+        Err(err) if aborted && err.is_cancelled() => None,
         Err(err) => Some(format!("provider task failed: {err}")),
     };
 
@@ -357,10 +370,16 @@ async fn execute_calls(
         async move {
             let result = if !tools_enabled {
                 tools::ToolResult::error("Tools are disabled for this private analysis run")
-            } else if abort.load(Ordering::SeqCst) {
+            } else if abort.requested() {
                 tools::ToolResult::error("Operation aborted")
             } else {
-                tools::execute(name, arguments, &cwd).await
+                tokio::select! {
+                    result = tools::execute(name, arguments, &cwd) => result,
+                    () = abort.cancelled() => {
+                        eprintln!("event=tool_cancelled tool={name} tool_call_id={id}");
+                        tools::ToolResult::error("Operation aborted")
+                    }
+                }
             };
             emitter.send(json!({
                 "type": "tool_execution_end",
@@ -440,7 +459,6 @@ mod tests {
     use crate::session::Session;
     use crate::skills::Skill;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicBool;
 
     fn fake_model() -> ModelConfig {
         ModelConfig {
@@ -473,7 +491,7 @@ mod tests {
             streaming: false,
             compacting: false,
             tools_enabled: true,
-            abort: Arc::new(AtomicBool::new(false)),
+            abort: Arc::new(crate::state::Abort::new()),
             running: None,
         }))
     }
@@ -605,5 +623,43 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("output token limit"));
+    }
+
+    #[tokio::test]
+    async fn an_in_flight_tool_is_released_by_abort() {
+        let dir = std::env::temp_dir();
+        let (emitter, _rx) = capture();
+        let state = state_with(Some(fake_model()), emitter.clone(), dir.clone());
+        let snapshot = Snapshot {
+            model: fake_model(),
+            messages: Vec::new(),
+            system_prompt: String::new(),
+            tools_enabled: true,
+            thinking_level: "medium".into(),
+            cwd: dir,
+        };
+        let calls = vec![(
+            "call_1".to_string(),
+            "bash".to_string(),
+            json!({"command": "sleep 30"}),
+        )];
+        let running = execute_calls(&state, &emitter, &snapshot, &calls);
+        tokio::pin!(running);
+
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                state.lock().await.abort.request();
+            }
+            _ = &mut running => panic!("the command unexpectedly finished before cancellation"),
+        }
+        let results = tokio::time::timeout(std::time::Duration::from_secs(2), &mut running)
+            .await
+            .expect("the tool await is cancellation-aware");
+        assert_eq!(results.len(), 1);
+        assert!(matches!(
+            &results[0],
+            Message::ToolResult { is_error: true, content, .. }
+                if matches!(content.first(), Some(Content::Text { text }) if text == "Operation aborted")
+        ));
     }
 }

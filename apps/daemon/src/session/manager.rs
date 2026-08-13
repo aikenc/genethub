@@ -1578,12 +1578,38 @@ impl SessionManager {
 
     pub async fn interrupt(&self, session_id: &str) -> Result<()> {
         let live = self.live(session_id).await?;
+        let agent_id = live.meta.lock().await.agent_id.clone();
+        let started = std::time::Instant::now();
+        tracing::info!(
+            event = "session_interrupt_requested",
+            session = %session_id,
+            agent = %agent_id,
+            "forwarding a user interrupt to the active agent"
+        );
         let agent = live.agent.lock().await;
-        match agent.as_ref() {
+        let result = match agent.as_ref() {
             Some(agent) => agent.interrupt().await,
             // Nothing running is not a failure: the user pressed stop late.
             None => Ok(()),
+        };
+        match &result {
+            Ok(()) => tracing::info!(
+                event = "session_interrupt_forwarded",
+                session = %session_id,
+                agent = %agent_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "the agent accepted the interrupt request"
+            ),
+            Err(error) => tracing::warn!(
+                event = "session_interrupt_failed",
+                session = %session_id,
+                agent = %agent_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                %error,
+                "the agent rejected the interrupt request"
+            ),
         }
+        result
     }
 
     /// What this session's agent says it offers, for checking a choice against

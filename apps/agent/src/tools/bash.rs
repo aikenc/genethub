@@ -14,20 +14,22 @@ use super::{
 };
 
 pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
-    let Some(command) = arg_str(args, "command") else {
+    let Some(command_text) = arg_str(args, "command") else {
         return ToolResult::error("bash: 'command' is required");
     };
 
-    let mut child = Command::new(shell());
-    child
+    let mut command = Command::new(shell());
+    command
         .arg(shell_flag())
-        .arg(&command)
+        .arg(&command_text)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    own_process_group(&mut command);
 
-    let started = child.output();
+    let started = output(command);
     let timeout_secs = arg_usize(args, "timeout");
     let output = match timeout_secs {
         Some(seconds) => {
@@ -75,6 +77,73 @@ pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
         // Killed by a signal: no exit code to report.
         None => ToolResult::error(append_status(&text, "Command terminated by signal")),
     }
+}
+
+/// Runs a command while retaining a synchronous teardown guard. Dropping this
+/// future—because the turn was interrupted or its timeout elapsed—kills the
+/// whole process group, not only the shell at its root.
+async fn output(mut command: Command) -> std::io::Result<std::process::Output> {
+    let child = command.spawn()?;
+    let mut group = ProcessGroup::new(child.id());
+    let output = child.wait_with_output().await;
+    group.disarm();
+    output
+}
+
+struct ProcessGroup {
+    pid: Option<u32>,
+}
+
+impl ProcessGroup {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        let Some(pid) = self.pid else { return };
+        eprintln!("event=tool_process_tree_kill pid={pid}");
+        kill_process_group(pid);
+    }
+}
+
+#[cfg(unix)]
+fn own_process_group(command: &mut Command) {
+    // SAFETY: the child-side closure performs only the async-signal-safe setsid
+    // syscall between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn own_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    // Negative pid addresses every process in the group created by setsid.
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn kill_process_group(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn finish(
@@ -343,6 +412,44 @@ mod tests {
         assert!(std::fs::read_to_string(saved).unwrap().contains("5000"));
         // The tail is what the model sees.
         assert!(result.text.ends_with("5000"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_a_command_stops_its_descendants() {
+        let dir = std::env::temp_dir().join(format!("genet-bash-cancel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("pid");
+        let args = json!({
+            "command": format!("sleep 30 & echo $! > '{}'; wait", pid_file.display())
+        });
+        let cwd = dir.clone();
+        let task = tokio::spawn(async move { run(&args, &cwd).await });
+
+        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                    break text.trim().parse::<i32>().unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the shell started its child");
+
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if unsafe { libc::kill(pid, 0) } == -1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropping the tool future kills the whole process group");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
