@@ -272,9 +272,14 @@ impl Client {
         let access = accepted.access.clone();
         let daemon_key = key.clone();
         let peer = tokio::spawn(async move {
-            let _ =
-                genet_daemon::dataplane::endpoint::serve(state, daemon_key, access, daemon_carrier)
-                    .await;
+            let _ = genet_daemon::dataplane::endpoint::serve(
+                state,
+                daemon_key,
+                access,
+                daemon_carrier,
+                genet_daemon::dataplane::endpoint::CarrierKind::Fabric,
+            )
+            .await;
         });
         let uplink = tokio::spawn(async move {
             while let Some(record) = from_client.recv().await {

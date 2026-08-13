@@ -149,7 +149,7 @@ npm start
 | `RELAY_CONTROL_TOKEN` | 无 | control 模式必填 |
 | `RELAY_JOIN_TOKEN` | 无 | rendezvous 绑非 literal loopback 必须为 32–256 个 base64url/hex 字符 |
 
-公网必须经 HTTPS/WSS 反向代理；不要把 endpoint ticket 写入 access log。query ticket 是一次性短期材料，但仍应对 URL/query 做日志脱敏。Relay 日志只记录服务状态、容量和低基数错误，不记录 OPEN payload、proof、route ticket 或业务 bytes。
+公网必须经 HTTPS/WSS 反向代理；不要把 endpoint ticket 写入 access log。query ticket 是一次性短期材料，但仍应对 URL/query 做日志脱敏。Relay 日志只记录服务状态、容量、低基数错误，以及不透明的 endpoint handle / connection generation / relay epoch / stream id 生命周期；`RELAY_LOG=debug` 才输出逐流 OPEN/ACCEPT/FIN/RESET。任何级别都不记录完整请求 URL、OPEN payload、proof、route ticket、用户/设备/workspace 语义或业务 bytes。
 
 ## 7. 代码边界与验证
 

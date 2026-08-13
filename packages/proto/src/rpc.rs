@@ -266,7 +266,6 @@ pub enum Request {
         #[serde(default)]
         name: Option<String>,
     },
-
     /// Returns the daemon's bounded, privacy-safe support record.
     ///
     /// Unlike `log.tail`, this contains only fixed operation names, outcomes,

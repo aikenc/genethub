@@ -20,5 +20,11 @@ export { AssetPreviewPage } from "./preview/AssetPreviewPage";
 export { PreviewFloat } from "./preview/PreviewFloat";
 export { assetPreviewUrl, parseAssetPreviewPath } from "./preview/url";
 export { useWorkbench } from "./session/store";
+export {
+  activeDiagnosticClient,
+  CLIENT_DIAGNOSTIC_EVENT,
+  registerDiagnosticClient,
+} from "./diagnostics";
+export type { ClientDiagnosticEvent, ClientDiagnosticKind } from "./protocol/client";
 export type { SupportDiagnostics } from "@genehub/proto";
 export type { ExtraTab } from "./shell/tabs";

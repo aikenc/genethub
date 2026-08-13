@@ -152,7 +152,9 @@ export class RemoteFabricAuthority implements FabricAuthority {
           await this.streamRevocations(controller.signal, options.onReconnect);
         } catch (error) {
           if (!stopped) {
-            log.warn("fabric: the revocation stream dropped", { error: String(error) });
+            log.warn("fabric: the revocation stream dropped", {
+              error: authorityErrorKind(error),
+            });
           }
         }
         if (stopped) return;
@@ -349,12 +351,16 @@ export class RemoteFabricAuthority implements FabricAuthority {
         `Fabric authority response ${path}`,
       );
     } catch (error) {
-      log.warn("fabric: control plane unreachable", { path, error: String(error) });
+      log.warn("fabric: control plane unreachable", { path, error: authorityErrorKind(error) });
       throw error;
     } finally {
       controller.abort();
     }
   }
+}
+
+function authorityErrorKind(error: unknown): string {
+  return error instanceof Error ? error.name : typeof error;
 }
 
 function positiveTimeout(value: number | undefined, fallback: number, name: string): number {

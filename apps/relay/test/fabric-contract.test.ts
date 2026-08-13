@@ -126,10 +126,19 @@ describe("the opaque Fabric authority contract", () => {
     reply = new Response(null, { status: 204 });
     assert.equal(await authority().authorizeEndpoint("expired"), null);
 
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => lines.push(args.map(String).join(" "));
     const broken = new RemoteFabricAuthority("http://control.test", null, async () => {
-      throw new Error("ECONNREFUSED");
+      throw new Error("ECONNREFUSED credential-that-must-not-be-logged");
     });
-    await assert.rejects(broken.authorizeRoute("source", "route"), /ECONNREFUSED/);
+    try {
+      await assert.rejects(broken.authorizeRoute("source", "route"), /ECONNREFUSED/);
+    } finally {
+      console.error = original;
+    }
+    assert.match(lines.join("\n"), /"error":"Error"/);
+    assert.doesNotMatch(lines.join("\n"), /credential-that-must-not-be-logged/);
   });
 
   it("aborts and fails closed when an authority POST exceeds its deadline", async () => {

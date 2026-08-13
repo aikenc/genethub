@@ -19,7 +19,12 @@ export type AssetPreviewMetadata = { kind: AssetPreviewKind, mediaType: string, 
  */
 version: string, };
 
-export type AssetPreviewRequest = { source: WorkspaceFileSource, };
+export type AssetPreviewRequest = { source: WorkspaceFileSource, 
+/**
+ * Opaque per-operation id used only to correlate the browser and daemon's
+ * bounded diagnostic rings. It carries no account, workspace or path data.
+ */
+diagnosticId?: string, };
 
 export type Attachment = { name: string, mime: string, path?: string, 
 /**

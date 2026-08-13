@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
@@ -31,6 +32,23 @@ pub const RESET_REFUSED: u32 = 3;
 pub const RESET_TOO_LARGE: u32 = 4;
 pub const RESET_TIMEOUT: u32 = 5;
 pub const RESET_ENDPOINT_CLOSED: u32 = 6;
+
+#[derive(Clone, Copy)]
+pub enum CarrierKind {
+    WebSocket,
+    Fabric,
+    Rtc,
+}
+
+impl CarrierKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WebSocket => "websocket",
+            Self::Fabric => "fabric",
+            Self::Rtc => "rtc",
+        }
+    }
+}
 
 /// Message-preserving records supplied by local WebSocket, Relay Fabric, or
 /// WebRTC.  No business handler receives these channels directly.
@@ -190,6 +208,8 @@ pub(super) struct ServerStream {
     local_sequence: u32,
     local_bytes: u64,
     expected_local_bytes: Option<u64>,
+    response_status: Option<u16>,
+    diagnostic_operation: Option<String>,
     local_head_sent: bool,
     local_finished: bool,
 }
@@ -261,6 +281,7 @@ impl ServerStream {
             })
             .await?;
         self.expected_local_bytes = head.body_length;
+        self.response_status = Some(head.status);
         self.local_head_sent = true;
         Ok(())
     }
@@ -359,6 +380,7 @@ pub(super) struct PeerServices {
     event_sender: mpsc::Sender<ServerFrame>,
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
     subscriptions: tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    carrier_kind: CarrierKind,
 }
 
 /// Serves one already mutually-authenticated peer until its carrier closes.
@@ -367,6 +389,7 @@ pub async fn serve(
     key: SessionKey,
     access: PeerAccess,
     mut carrier: Carrier,
+    carrier_kind: CarrierKind,
 ) -> Result<()> {
     let (writer_tx, writer_rx) = mpsc::channel(WRITER_COMMAND_QUEUE);
     let writer = Writer {
@@ -387,6 +410,7 @@ pub async fn serve(
         event_sender,
         event_receiver: tokio::sync::Mutex::new(Some(event_receiver)),
         subscriptions: tokio::sync::Mutex::new(HashMap::new()),
+        carrier_kind,
     });
 
     // A terminal is shared across a user's own devices on purpose, but this
@@ -399,6 +423,9 @@ pub async fn serve(
     // Decided once, at connection: grants are fixed when a device is paired,
     // and revoking one drops its connections rather than editing them.
     let watcher = Principal::of(&state, &access);
+    state
+        .diagnostics
+        .record("stream", "data.endpoint", "online", None);
     let fanout_task = state.fanout.get().map(|fanout| {
         let mut receiver = fanout.subscribe();
         let events = services.event_sender.clone();
@@ -485,6 +512,16 @@ pub async fn serve(
     if let Some(device_id) = &access.device_id {
         state.devices.mark_disconnected(device_id);
     }
+    state.diagnostics.record(
+        "stream",
+        "data.endpoint",
+        if outcome.is_ok() { "offline" } else { "error" },
+        if outcome.is_ok() {
+            None
+        } else {
+            Some("carrier")
+        },
+    );
     outcome
 }
 
@@ -575,6 +612,8 @@ fn dispatch(
             local_sequence: 0,
             local_bytes: 0,
             expected_local_bytes: None,
+            response_status: None,
+            diagnostic_operation: None,
             local_head_sent: false,
             local_finished: false,
         };
@@ -669,9 +708,59 @@ fn dispatch(
 }
 
 async fn handle_stream(mut stream: ServerStream, services: Arc<PeerServices>) -> Result<()> {
+    let started = Instant::now();
+    let request_id = diagnostic_id(&stream.head.metadata);
+    let exchange_method = stream.head.method.clone();
+    let request_bytes = stream.head.body_length;
     let result = serve_stream(&mut stream, &services).await;
     if result.is_err() {
         stream.reset(RESET_PROTOCOL).await;
+    }
+    if exchange_method != "events" {
+        let operation = stream
+            .diagnostic_operation
+            .clone()
+            .unwrap_or_else(|| exchange_method.clone());
+        let status = stream.response_status;
+        let outcome = if result.is_ok() && status.is_some_and(|value| value < 400) {
+            "ok"
+        } else {
+            "error"
+        };
+        let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        if let Some(operation) = support_stream_operation(&exchange_method) {
+            services.state.diagnostics.record(
+                "stream",
+                operation,
+                outcome,
+                support_status_code(status, result.is_err()),
+            );
+        }
+        if outcome == "error" {
+            tracing::warn!(
+                target: "diagnostic",
+                operation,
+                request_id,
+                transport = services.carrier_kind.as_str(),
+                status,
+                duration_ms,
+                request_bytes,
+                response_bytes = stream.local_bytes,
+                "data operation failed"
+            );
+        } else if exchange_method == "asset.preview" || exchange_method == "rtc.negotiate" {
+            tracing::info!(
+                target: "diagnostic",
+                operation,
+                request_id,
+                transport = services.carrier_kind.as_str(),
+                status,
+                duration_ms,
+                request_bytes,
+                response_bytes = stream.local_bytes,
+                "data operation completed"
+            );
+        }
     }
     result
 }
@@ -743,6 +832,7 @@ async fn refuse(stream: &mut ServerStream, needed: Capability) -> Result<()> {
 async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     let body = stream.read_body(MAX_RPC_BODY_BYTES).await?;
     let request: Request = serde_json::from_slice(&body).context("invalid RPC operation body")?;
+    stream.diagnostic_operation = diagnostic_operation(&stream.head.metadata);
     if let Some(scope) = &services.access.workspace_id {
         if let Some(requested) = request_workspace(&request) {
             if requested != scope {
@@ -822,6 +912,55 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
             Ok(())
         }
         Err(error) => send_protocol_error(stream, error).await,
+    }
+}
+
+fn diagnostic_id(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("diagnosticId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 96
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+        .map(str::to_string)
+}
+
+fn diagnostic_operation(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+        .map(str::to_string)
+}
+
+fn support_stream_operation(method: &str) -> Option<&'static str> {
+    match method {
+        "asset.preview" => Some("asset.preview"),
+        "rtc.negotiate" => Some("rtc.negotiate"),
+        "shell.run" => Some("shell.run"),
+        _ => None,
+    }
+}
+
+fn support_status_code(status: Option<u16>, transport_error: bool) -> Option<&'static str> {
+    if transport_error {
+        Some("transport")
+    } else {
+        match status {
+            Some(400..=499) => Some("clientError"),
+            Some(500..=599) => Some("serverError"),
+            _ => None,
+        }
     }
 }
 
@@ -1087,5 +1226,17 @@ mod tests {
         enqueue_writer(command(3), &mut queues, &mut runnable);
         enqueue_writer(command(1), &mut queues, &mut runnable);
         assert_eq!(runnable, VecDeque::from([1, 3]));
+    }
+
+    #[test]
+    fn diagnostic_metadata_accepts_only_bounded_opaque_labels() {
+        assert_eq!(
+            diagnostic_operation(&serde_json::json!({ "operation": "file.tree" })).as_deref(),
+            Some("file.tree")
+        );
+        assert_eq!(
+            diagnostic_operation(&serde_json::json!({ "operation": "settings/get?token=x" })),
+            None
+        );
     }
 }
