@@ -4242,7 +4242,27 @@ mod tests {
             .truncate(false)
             .open(dir.path().join(".genethub/owner.lock"))
             .unwrap();
-        fs2::FileExt::try_lock_exclusive(&legacy).unwrap();
+        // Dropping the manager releases its locks asynchronously because the
+        // event pump owns a final Store clone. Under the full parallel suite
+        // that task may need a scheduler turn before the legacy writer can
+        // take over, so exercise the real retry boundary instead of racing it.
+        let mut locked = false;
+        for _ in 0..40 {
+            match fs2::FileExt::try_lock_exclusive(&legacy) {
+                Ok(()) => {
+                    locked = true;
+                    break;
+                }
+                Err(error) if crate::lifecycle::lock_contended(&error) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("locking the legacy writer failed: {error}"),
+            }
+        }
+        assert!(
+            locked,
+            "the dropped manager did not release its legacy lock"
+        );
 
         let restarted = manager(dir.path());
         assert!(restarted.list(None, false).await.unwrap().is_empty());
