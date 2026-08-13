@@ -814,6 +814,7 @@ mod tests {
             transport: TransportKind::Loopback,
             machine_name: "local".into(),
             rtc_supported: true,
+            features: None,
             isolation: None,
         };
         (admission, hello)

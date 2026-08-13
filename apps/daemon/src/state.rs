@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use genehub_proto::{ProviderInfo, ServerFrame, Settings};
+use genehub_proto::{ProviderInfo, ServerFrame, Settings, SpeechCapabilities, SpeechRuntimeStatus};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 use crate::adapter::registry::Registry;
@@ -26,6 +26,7 @@ pub struct AppState {
     /// each other's fields from independently loaded snapshots.
     machine_state_write: Mutex<()>,
     pub registry: Arc<Registry>,
+    pub speech: Arc<crate::speech::SpeechBroker>,
     pub sessions: SessionManager,
     pub workspaces: Workspaces,
     pub terminals: Arc<Terminals>,
@@ -150,6 +151,7 @@ impl AppState {
             machine,
             machine_state_write: Mutex::new(()),
             registry,
+            speech: Arc::new(crate::speech::SpeechBroker::new()),
             sessions,
             workspaces,
             terminals,
@@ -239,7 +241,10 @@ impl AppState {
     }
 
     pub async fn settings(&self) -> Settings {
-        let stored = self.config.read().await.agents.providers.clone();
+        let (stored, speech) = {
+            let config = self.config.read().await;
+            (config.agents.providers.clone(), config.speech.clone())
+        };
         let discovered = self.discover(&stored).await;
         Settings {
             providers: stored
@@ -271,7 +276,88 @@ impl AppState {
                 })
                 .collect(),
             lan_enabled: config_lan(&self.config).await,
+            speech: Some(crate::speech::settings(&speech)),
         }
+    }
+
+    pub async fn speech_capabilities(&self) -> SpeechCapabilities {
+        let config = self.config.read().await.speech.clone();
+        self.speech.capabilities(&config).await
+    }
+
+    pub async fn probe_speech_runtime(&self) -> SpeechRuntimeStatus {
+        let config = self.config.read().await.speech.clone();
+        self.speech.probe(&config).await
+    }
+
+    pub async fn configure_speech_runtime(
+        &self,
+        command: Option<String>,
+        args: Vec<String>,
+    ) -> Result<SpeechCapabilities> {
+        let runtime = match command {
+            Some(command) => Some(self.speech.validate_registration(command, args).await?),
+            None if args.is_empty() => None,
+            None => anyhow::bail!("移除 runtime 时不能提供参数"),
+        };
+        {
+            let mut config = self.config.write().await;
+            if runtime.is_some() {
+                // A successfully probed real adapter becomes active
+                // immediately; the user can still re-enable the Stub later.
+                config.speech.stub_enabled = false;
+            }
+            config.speech.runtime = runtime;
+            config.save(&self.paths.config_file())?;
+        }
+        crate::config::restrict_to_owner(&self.paths.config_file())?;
+        Ok(self.speech_capabilities().await)
+    }
+
+    pub async fn set_qwen3_speech(
+        &self,
+        stub_enabled: Option<bool>,
+        context_enabled: bool,
+        pinned_terms: Vec<String>,
+        language_hints: Vec<String>,
+        collect_corrections: bool,
+        workspace_id: Option<String>,
+    ) -> Result<Settings> {
+        let (pinned_terms, language_hints) =
+            crate::speech::validate_settings(pinned_terms, language_hints)?;
+        if collect_corrections && workspace_id.is_none() {
+            anyhow::bail!("开启纠正收集时必须选择一个工作区");
+        }
+        if let Some(workspace_id) = workspace_id.as_deref() {
+            self.workspaces.get(workspace_id).await?;
+        }
+        {
+            let mut config = self.config.write().await;
+            if let Some(stub_enabled) = stub_enabled {
+                config.speech.stub_enabled = stub_enabled;
+            }
+            config.speech.context_enabled = context_enabled;
+            config.speech.pinned_terms = pinned_terms;
+            config.speech.language_hints = language_hints;
+            // Old releases had one machine-wide switch. Clearing it prevents a
+            // previously saved true value from acting as a wildcard after this
+            // project-scoped migration.
+            config.speech.collect_corrections = false;
+            if let Some(workspace_id) = workspace_id {
+                config
+                    .speech
+                    .correction_workspaces
+                    .retain(|configured| configured != &workspace_id);
+                if collect_corrections {
+                    config.speech.correction_workspaces.push(workspace_id);
+                    config.speech.correction_workspaces.sort();
+                    config.speech.correction_workspaces.dedup();
+                }
+            }
+            config.save(&self.paths.config_file())?;
+        }
+        crate::config::restrict_to_owner(&self.paths.config_file())?;
+        Ok(self.settings().await)
     }
 
     /// Asks every configured provider for its models, once per set of details.

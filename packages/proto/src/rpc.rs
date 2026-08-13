@@ -6,6 +6,7 @@ use ts_rs::TS;
 
 use crate::domain::*;
 use crate::event::{PermissionOutcome, SequencedEvent};
+use crate::speech::*;
 use crate::timeline::Attachment;
 
 /// Bumped when a change would break an older client. Clients that see a version
@@ -259,6 +260,69 @@ pub enum Request {
     /// Removes a provider the user added, key and all.
     #[serde(rename = "settings.forgetProvider", rename_all = "camelCase")]
     SettingsForgetProvider { provider_id: String },
+
+    // -- speech input ------------------------------------------------------
+    /// Describes the stable GeneHub speech contract and this machine's
+    /// readiness without contacting the provider.
+    #[serde(rename = "speech.capabilities")]
+    SpeechCapabilities,
+    /// Stores the Qwen3 prompt and project-local correction preferences.
+    #[serde(rename = "speech.settings.setQwen3", rename_all = "camelCase")]
+    SpeechSettingsSetQwen3 {
+        /// Selects the deterministic no-model protocol Stub. Optional so an
+        /// older client changing prompt terms does not change runtime mode.
+        #[serde(default)]
+        #[ts(optional)]
+        stub_enabled: Option<bool>,
+        context_enabled: bool,
+        pinned_terms: Vec<String>,
+        language_hints: Vec<String>,
+        collect_corrections: bool,
+        /// Required when changing project-local correction consent. Optional
+        /// for wire compatibility with clients that only change prompt terms.
+        #[serde(default)]
+        #[ts(optional)]
+        workspace_id: Option<String>,
+    },
+    /// User-triggered check of the active Qwen3 runtime adapter.
+    #[serde(rename = "speech.runtime.probe")]
+    SpeechRuntimeProbe,
+    /// Registers or removes the one trusted machine-local community adapter.
+    /// The daemon accepts this mutation only over its loopback transport.
+    #[serde(rename = "speech.runtime.configure", rename_all = "camelCase")]
+    SpeechRuntimeConfigure {
+        #[serde(default)]
+        command: Option<String>,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    /// Compiles the exact bounded context pack for the next recording.
+    #[serde(rename = "speech.context.preview", rename_all = "camelCase")]
+    SpeechContextPreview {
+        workspace_id: String,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        draft: Option<String>,
+    },
+    /// Records an explicit human choice among one Qwen3 N-best result. New
+    /// clients send segment/span scope and the immediately rejected candidate;
+    /// both remain optional for compatibility with utterance-only clients.
+    #[serde(rename = "speech.feedback.record", rename_all = "camelCase")]
+    SpeechFeedbackRecord {
+        workspace_id: String,
+        request_id: String,
+        context_snapshot_id: String,
+        candidates: Vec<SpeechCandidate>,
+        selected_candidate_id: String,
+        #[serde(default)]
+        #[ts(optional)]
+        rejected_candidate_id: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        scope: Option<SpeechFeedbackScope>,
+        score_kind: SpeechScoreKind,
+    },
 
     /// The end of a log file on this machine.
     ///
@@ -537,6 +601,10 @@ pub enum Reply {
     Claimed(DeviceCredential),
     RemoteAccess(RemoteAccess),
     Settings(Settings),
+    SpeechCapabilities(SpeechCapabilities),
+    SpeechRuntimeStatus(SpeechRuntimeStatus),
+    SpeechContext(SpeechContextPack),
+    SpeechFeedbackReceipt(SpeechFeedbackReceipt),
     Log(LogTail),
     Diagnostics(SupportDiagnostics),
     Update(UpdateStatus),

@@ -16,7 +16,7 @@ use crate::output::{self, CliFailure, CLI_SCHEMA};
 use crate::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use crate::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 31] = [
+const COMMAND_NAMES: [&str; 35] = [
     "schema",
     "context",
     "capabilities",
@@ -48,6 +48,10 @@ const COMMAND_NAMES: [&str; 31] = [
     "device.list",
     "device.invite",
     "device.revoke",
+    "speech.runtime.status",
+    "speech.runtime.probe",
+    "speech.runtime.register",
+    "speech.runtime.unregister",
 ];
 
 /// The capability vocabulary a machine grants a device, named here so `genet
@@ -87,6 +91,8 @@ fn mutates(name: &str) -> bool {
             | "machine.forget"
             | "device.invite"
             | "device.revoke"
+            | "speech.runtime.register"
+            | "speech.runtime.unregister"
     )
 }
 
@@ -950,6 +956,40 @@ fn command_schema(name: &str) -> Value {
         ),
         "context" => ("genet context", true, object_input(json!({}), &[])),
         "capabilities" => ("genet capabilities", false, object_input(json!({}), &[])),
+        "speech.runtime.status" => (
+            "genet speech runtime status",
+            true,
+            object_input(json!({}), &[]),
+        ),
+        "speech.runtime.probe" => (
+            "genet speech runtime probe",
+            true,
+            object_input(json!({}), &[]),
+        ),
+        "speech.runtime.register" => (
+            "genet speech runtime register --command <absolute-path> [--arg <value>...]",
+            true,
+            object_input(
+                json!({
+                    "command": {
+                        "type": "string",
+                        "minLength": 1,
+                        "$comment": "an absolute executable path; never resolved through PATH or a shell",
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 32,
+                    },
+                }),
+                &["command"],
+            ),
+        ),
+        "speech.runtime.unregister" => (
+            "genet speech runtime unregister",
+            true,
+            object_input(json!({}), &[]),
+        ),
         "workspace.list" => ("genet workspace list", true, object_input(json!({}), &[])),
         "workspace.show" => (
             "genet workspace show <id>",
@@ -1489,6 +1529,10 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Claimed(_) => "claimed device",
         Reply::RemoteAccess(_) => "remote access",
         Reply::Settings(_) => "settings",
+        Reply::SpeechCapabilities(_) => "speech capabilities",
+        Reply::SpeechRuntimeStatus(_) => "speech runtime status",
+        Reply::SpeechContext(_) => "speech context",
+        Reply::SpeechFeedbackReceipt(_) => "speech feedback receipt",
         Reply::Log(_) => "log",
         Reply::Diagnostics(_) => "diagnostics",
         Reply::Update(_) => "update",
@@ -1728,6 +1772,7 @@ mod tests {
             transport: TransportKind::Loopback,
             machine_name: "desk".into(),
             rtc_supported: false,
+            features: None,
             isolation: None,
         }
     }

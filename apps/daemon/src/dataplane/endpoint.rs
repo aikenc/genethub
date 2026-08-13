@@ -198,9 +198,9 @@ enum EndpointCommand {
     Retire(u32),
 }
 
-pub(super) struct ServerStream {
+pub(crate) struct ServerStream {
     id: u32,
-    pub(super) head: ExchangeRequestHead,
+    pub(crate) head: ExchangeRequestHead,
     inbound: mpsc::Receiver<Incoming>,
     writer: Writer,
     commands: mpsc::Sender<EndpointCommand>,
@@ -214,33 +214,54 @@ pub(super) struct ServerStream {
     local_finished: bool,
 }
 
+pub(crate) enum StreamInput {
+    Chunk(Vec<u8>),
+    Fin,
+    Reset(u32),
+}
+
 impl ServerStream {
-    pub(super) async fn read_body(&mut self, maximum: usize) -> Result<Vec<u8>> {
+    /// Reads one request-side chunk and returns its stream credit immediately
+    /// after ownership has moved into the business handler. Duplex handlers
+    /// use this instead of waiting for a finite request body.
+    pub(crate) async fn next_input(&mut self) -> Result<StreamInput> {
+        match self.inbound.recv().await {
+            Some(Incoming::Chunk(chunk)) => {
+                let IncomingChunk { bytes, _permit } = chunk;
+                let credit = bytes.len() as u32;
+                drop(_permit);
+                self.writer
+                    .send(Frame {
+                        kind: Kind::WindowUpdate,
+                        stream_id: self.id,
+                        value: credit,
+                        payload: Vec::new(),
+                    })
+                    .await?;
+                Ok(StreamInput::Chunk(bytes))
+            }
+            Some(Incoming::Fin) => Ok(StreamInput::Fin),
+            Some(Incoming::Reset(code)) => Ok(StreamInput::Reset(code)),
+            None => anyhow::bail!("peer stream ended before request FIN"),
+        }
+    }
+
+    pub(crate) async fn read_body(&mut self, maximum: usize) -> Result<Vec<u8>> {
         let mut body = Vec::new();
-        while let Some(incoming) = self.inbound.recv().await {
-            match incoming {
-                Incoming::Chunk(chunk) => {
+        loop {
+            match self.next_input().await? {
+                StreamInput::Chunk(bytes) => {
                     let next = body
                         .len()
-                        .checked_add(chunk.bytes.len())
+                        .checked_add(bytes.len())
                         .ok_or_else(|| anyhow!("request body length overflow"))?;
                     if next > maximum {
                         self.reset(RESET_TOO_LARGE).await;
                         anyhow::bail!("request body is too large");
                     }
-                    body.extend_from_slice(&chunk.bytes);
-                    let credit = chunk.bytes.len() as u32;
-                    drop(chunk);
-                    self.writer
-                        .send(Frame {
-                            kind: Kind::WindowUpdate,
-                            stream_id: self.id,
-                            value: credit,
-                            payload: Vec::new(),
-                        })
-                        .await?;
+                    body.extend_from_slice(&bytes);
                 }
-                Incoming::Fin => {
+                StreamInput::Fin => {
                     if self
                         .head
                         .body_length
@@ -251,13 +272,12 @@ impl ServerStream {
                     }
                     return Ok(body);
                 }
-                Incoming::Reset(code) => anyhow::bail!("peer reset stream ({code})"),
+                StreamInput::Reset(code) => anyhow::bail!("peer reset stream ({code})"),
             }
         }
-        anyhow::bail!("peer stream ended before request FIN")
     }
 
-    pub(super) async fn respond(&mut self, head: &ExchangeResponseHead) -> Result<()> {
+    pub(crate) async fn respond(&mut self, head: &ExchangeResponseHead) -> Result<()> {
         if self.local_head_sent || self.local_finished {
             anyhow::bail!("response head was already sent");
         }
@@ -286,7 +306,7 @@ impl ServerStream {
         Ok(())
     }
 
-    pub(super) async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+    pub(crate) async fn write(&mut self, bytes: &[u8]) -> Result<()> {
         if !self.local_head_sent || self.local_finished {
             anyhow::bail!("response body cannot be written in this stream state");
         }
@@ -330,7 +350,7 @@ impl ServerStream {
         self.write(&wire).await
     }
 
-    pub(super) async fn finish(&mut self) -> Result<()> {
+    pub(crate) async fn finish(&mut self) -> Result<()> {
         if self.local_finished {
             return Ok(());
         }
@@ -374,9 +394,9 @@ impl ServerStream {
     }
 }
 
-pub(super) struct PeerServices {
-    pub(super) state: Shared,
-    pub(super) access: PeerAccess,
+pub(crate) struct PeerServices {
+    pub(crate) state: Shared,
+    pub(crate) access: PeerAccess,
     event_sender: mpsc::Sender<ServerFrame>,
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
     subscriptions: tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
@@ -789,6 +809,7 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
         StreamMethod::AssetPreview => crate::dataplane::preview::handle(stream, services).await,
         StreamMethod::ShellRun => crate::dataplane::exec::handle(stream, services).await,
         StreamMethod::RtcNegotiate => crate::dataplane::rtc::handle(stream, services).await,
+        StreamMethod::SpeechTranscribe => crate::speech::handle(stream, services).await,
     }
 }
 
@@ -1004,7 +1025,7 @@ async fn send_protocol_error(stream: &mut ServerStream, error: ProtocolError) ->
     stream.finish().await
 }
 
-pub(super) async fn send_error(
+pub(crate) async fn send_error(
     stream: &mut ServerStream,
     status: u16,
     code: ErrorCode,
@@ -1114,6 +1135,8 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::GitDiff { workspace_id, .. }
         | Request::GitCommit { workspace_id, .. }
         | Request::PtyOpen { workspace_id, .. }
+        | Request::SpeechContextPreview { workspace_id, .. }
+        | Request::SpeechFeedbackRecord { workspace_id, .. }
         | Request::WorkspaceRename { workspace_id, .. }
         | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
         _ => None,
