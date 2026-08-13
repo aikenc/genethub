@@ -1,6 +1,7 @@
 import type {
   AgentInfo,
   Attachment,
+  BackgroundProcess,
   DeviceInfo,
   DeviceInvite,
   FileNode,
@@ -48,6 +49,7 @@ export type TabKind =
   | "settings"
   | "devices"
   | "logs"
+  | "processes"
   | `extra:${string}`;
 
 export interface WorkbenchTab {
@@ -158,6 +160,15 @@ interface WorkbenchState {
   claim: HubClaim | null;
   /** Who this machine lets in from outside. Owned by the daemon, not by us. */
   devices: DeviceInfo[];
+  /**
+   * What each session's agent left running.
+   *
+   * Pushed by the daemon at the end of every turn, so this is a count that can
+   * sit on screen without anyone asking for it. Refetched when the panel opens
+   * and after anything is ended, because those are the moments a stale answer
+   * would be visible as a wrong one.
+   */
+  backgroundProcesses: BackgroundProcess[];
   remote: RemoteAccess | null;
   tree: FileNode | null;
   git: GitStatus | null;
@@ -282,6 +293,9 @@ interface WorkbenchState {
   claimLink(): Promise<HubClaim | null>;
   unpair(): Promise<void>;
   refreshDevices(): Promise<void>;
+  refreshBackgroundProcesses(): Promise<void>;
+  killBackgroundProcess(sessionId: string, pid: number): Promise<void>;
+  killBackgroundProcesses(sessionId: string): Promise<void>;
   invite(): Promise<DeviceInvite | null>;
   revokeDevice(deviceId: string): Promise<void>;
   attachRelay(relayUrl: string, joinToken: string): Promise<void>;
@@ -459,6 +473,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   client: null,
   connection: "connecting",
   agents: [],
+  backgroundProcesses: [],
   workspaces: [],
   activeWorkspaceId: null,
   sessions: [],
@@ -530,6 +545,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     });
     client.onNotice((_level, message) => set({ notice: message }));
     client.onUpdateDownload((download) => set({ download }));
+    client.onBackgroundProcesses((backgroundProcesses) => set({ backgroundProcesses }));
     try {
       // Hub status and the download prompt do not read anything the catalog
       // loads, so they fly alongside it instead of queueing behind two relay
@@ -901,6 +917,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       settings: "设置",
       devices: "设备",
       logs: "日志",
+      processes: "后台进程",
     };
     set((state) => {
       if (state.tabs.some((tab) => tab.id === id)) {
@@ -1397,8 +1414,32 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async invite() {
-    const reply = await require_(get().client).call({ type: "device.invite" });
+    // Null, not a grant list: the workbench pairs a device the owner will use
+    // as themselves. Narrowing belongs to whoever is deliberately handing out
+    // less, and inventing a default here would decide that for them.
+    const reply = await require_(get().client).call({
+      type: "device.invite",
+      payload: null,
+    });
     return reply?.type === "invite" ? reply.data : null;
+  },
+
+  async refreshBackgroundProcesses() {
+    const client = require_(get().client);
+    const reply = await client
+      .call({ type: "process.list" })
+      .catch(unattended(client, get, set));
+    if (reply?.type === "processes") set({ backgroundProcesses: reply.data });
+  },
+
+  async killBackgroundProcess(sessionId, pid) {
+    await require_(get().client).call({ type: "process.kill", payload: { sessionId, pid } });
+    await get().refreshBackgroundProcesses();
+  },
+
+  async killBackgroundProcesses(sessionId) {
+    await require_(get().client).call({ type: "process.killAll", payload: { sessionId } });
+    await get().refreshBackgroundProcesses();
   },
 
   async revokeDevice(deviceId) {
@@ -1527,6 +1568,7 @@ async function start(
         modelId: draft.modelId,
         modeId: draft.modeId,
         title: null,
+        cwd: null,
       },
     }),
   );

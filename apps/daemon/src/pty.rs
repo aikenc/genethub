@@ -56,7 +56,21 @@ impl Terminals {
         )
     }
 
-    pub async fn open(&self, cwd: &Path, cols: u16, rows: u16) -> Result<String> {
+    /// Opens a terminal, optionally one the operating system holds to a policy.
+    ///
+    /// `portable_pty` owns everything between fork and exec, so a confined
+    /// terminal is not this shell with restrictions bolted on: it is a small
+    /// re-run of our own binary that restricts itself and then becomes the
+    /// shell (`isolation.rs`). That indirection is the whole reason the
+    /// restriction cannot be skipped — there is no path from here to an exec
+    /// that has not gone through it.
+    pub async fn open(
+        &self,
+        cwd: &Path,
+        cols: u16,
+        rows: u16,
+        confinement: Option<crate::isolation::Policy>,
+    ) -> Result<String> {
         validate_dimensions(cols, rows)?;
         self.sessions
             .lock()
@@ -77,7 +91,14 @@ impl Terminals {
             })
             .context("allocating a pty")?;
 
-        let mut command = CommandBuilder::new(default_shell());
+        let argv = crate::process::launch_argv(&default_shell(), confinement.as_ref())?;
+        let (helper, arguments) = argv
+            .split_first()
+            .ok_or_else(|| anyhow!("the confinement wrapper has no command"))?;
+        let mut command = CommandBuilder::new(helper);
+        for argument in arguments {
+            command.arg(argument);
+        }
         command.cwd(cwd);
         // Without this many tools emit escape sequences xterm.js cannot render.
         command.env("TERM", "xterm-256color");
@@ -170,9 +191,16 @@ impl Terminals {
         Ok(())
     }
 
+    /// Closes a terminal by hanging it up, and deliberately no harder than
+    /// that.
+    ///
+    /// A command stops with everything it started (`process.rs`); a terminal
+    /// does not, and the difference is not an oversight in one of them. A
+    /// person who typed `nohup make &` into this terminal meant for it to
+    /// survive the terminal, which is what a terminal has meant since before
+    /// any of this. Dropping the master hangs up the session; what chose to
+    /// ignore the hangup chose it.
     pub async fn close(&self, pty_id: &str) -> Result<()> {
-        // Dropping the master closes the pty, which ends the reader thread and
-        // sends the shell a hangup.
         self.sessions.lock().await.remove(pty_id);
         Ok(())
     }
@@ -330,7 +358,7 @@ mod tests {
     async fn a_terminal_echoes_what_it_is_given() {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, mut inbound) = Terminals::new();
-        let id = terminals.open(dir.path(), 80, 24).await.unwrap();
+        let id = terminals.open(dir.path(), 80, 24, None).await.unwrap();
 
         wait_until_ready(&terminals, &id, &mut inbound).await;
         terminals.write(&id, "echo genehub-marker\r").await.unwrap();
@@ -344,7 +372,7 @@ mod tests {
     async fn a_closed_terminal_reports_it_and_stops_accepting_writes() {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, mut inbound) = Terminals::new();
-        let id = terminals.open(dir.path(), 80, 24).await.unwrap();
+        let id = terminals.open(dir.path(), 80, 24, None).await.unwrap();
         wait_until_ready(&terminals, &id, &mut inbound).await;
         // xterm sends carriage return for Enter. A bare line feed is output
         // translation on a terminal, not the key that submits the command.
@@ -376,7 +404,7 @@ mod tests {
     async fn resizing_an_open_terminal_succeeds_and_an_unknown_one_fails() {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, _inbound) = Terminals::new();
-        let id = terminals.open(dir.path(), 80, 24).await.unwrap();
+        let id = terminals.open(dir.path(), 80, 24, None).await.unwrap();
         assert!(terminals.resize(&id, 120, 40).await.is_ok());
         assert!(terminals.resize("nope", 120, 40).await.is_err());
     }
@@ -385,13 +413,13 @@ mod tests {
     async fn terminal_dimensions_and_input_are_bounded() {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, _inbound) = Terminals::new();
-        assert!(terminals.open(dir.path(), 0, 24).await.is_err());
+        assert!(terminals.open(dir.path(), 0, 24, None).await.is_err());
         assert!(terminals
-            .open(dir.path(), 80, MAX_DIMENSION + 1)
+            .open(dir.path(), 80, MAX_DIMENSION + 1, None)
             .await
             .is_err());
 
-        let id = terminals.open(dir.path(), 80, 24).await.unwrap();
+        let id = terminals.open(dir.path(), 80, 24, None).await.unwrap();
         assert!(terminals
             .write(&id, &"x".repeat(MAX_INPUT_BYTES + 1))
             .await

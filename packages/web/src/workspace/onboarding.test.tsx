@@ -55,6 +55,7 @@ function stubClient(answers: Partial<Record<Request["type"], (payload: never) =>
     onPty: () => () => {},
     onNotice: () => () => {},
     onUpdateDownload: () => () => {},
+    onBackgroundProcesses: () => () => {},
     onStateChange: (listener: (state: string) => void) => {
       onState = listener;
       return () => {};
@@ -267,12 +268,13 @@ describe("the first run", () => {
       "directory.list": (payload: { path: string | null }) => ({
         type: "directory",
         data: payload.path
-          ? { path: "/srv/app", parent: "/srv", directories: [], workspaceFiles: [] }
+          ? { path: "/srv/app", parent: "/srv", directories: [], workspaceFiles: [], roots: false }
           : {
               path: "/srv",
               parent: "/",
               directories: [{ name: "app", path: "/srv/app" }],
               workspaceFiles: [],
+              roots: false,
             },
       }),
     });
@@ -308,6 +310,7 @@ describe("the first run", () => {
           parent: "/srv",
           directories: [],
           workspaceFiles: [],
+          roots: false,
         },
       }),
     });
@@ -337,6 +340,7 @@ describe("the first run", () => {
           parent: "/srv",
           directories: [],
           workspaceFiles: [],
+          roots: false,
         },
       }),
     });
@@ -382,6 +386,7 @@ describe("the first run", () => {
           workspaceFiles: [
             { name: "suite.code-workspace", path: "/srv/suite.code-workspace" },
           ],
+          roots: false,
         },
       }),
     });
@@ -401,6 +406,109 @@ describe("the first run", () => {
     });
   });
 
+  it("climbs from a Windows drive root into the machine roots listing", async () => {
+    const { client, calls } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({ type: "workspaces", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "session.list": () => ({ type: "sessions", data: [] }),
+      "directory.list": (payload: { path: string | null }) => {
+        if (payload.path === "") {
+          return {
+            type: "directory",
+            data: {
+              path: "",
+              parent: null,
+              directories: [
+                { name: "C:", path: "C:\\" },
+                { name: "D:", path: "D:\\" },
+              ],
+              workspaceFiles: [],
+              roots: true,
+            },
+          };
+        }
+        return {
+          type: "directory",
+          data: {
+            path: "C:\\",
+            parent: "",
+            directories: [{ name: "Users", path: "C:\\Users" }],
+            workspaceFiles: [],
+            roots: false,
+          },
+        };
+      },
+    });
+    await start(client, hostWith());
+
+    await userEvent.click(
+      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+    );
+    expect(await screen.findByText("C:\\")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /所有磁盘/ }));
+    expect(await screen.findByRole("heading", { name: "选择磁盘" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /D:/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "选择当前文件夹" })).toBeDisabled();
+    expect(calls.some((call) => call.type === "directory.list" && call.payload.path === "")).toBe(
+      true,
+    );
+  });
+
+  it("creates a folder from the remote project picker", async () => {
+    let directories = [{ name: "app", path: "/srv/app" }];
+    const { client, calls } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({ type: "workspaces", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "session.list": () => ({ type: "sessions", data: [] }),
+      "directory.list": () => ({
+        type: "directory",
+        data: {
+          path: "/srv",
+          parent: "/",
+          directories,
+          workspaceFiles: [],
+          roots: false,
+        },
+      }),
+      "directory.mkdir": (payload: { parent: string; name: string }) => {
+        directories = [
+          ...directories,
+          { name: payload.name, path: `${payload.parent}/${payload.name}` },
+        ];
+        return {
+          type: "directory",
+          data: {
+            path: payload.parent,
+            parent: "/",
+            directories,
+            workspaceFiles: [],
+            roots: false,
+          },
+        };
+      },
+    });
+    await start(client, hostWith());
+
+    await userEvent.click(
+      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "新建文件夹" }));
+    const input = await screen.findByLabelText("新文件夹名称");
+    await userEvent.clear(input);
+    await userEvent.type(input, "fresh");
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
+
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "directory.mkdir")?.payload).toEqual({
+        parent: "/srv",
+        name: "fresh",
+      });
+    });
+    expect(await screen.findByRole("button", { name: /fresh/ })).toBeInTheDocument();
+  });
+
   it("says a directory that is not there is not there, instead of doing nothing", async () => {
     const { client } = stubClient({
       "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
@@ -415,7 +523,7 @@ describe("the first run", () => {
       if (request.type === "directory.list") {
         return {
           type: "directory",
-          data: { path: "/nope", parent: "/", directories: [], workspaceFiles: [] },
+          data: { path: "/nope", parent: "/", directories: [], workspaceFiles: [], roots: false },
         };
       }
       if (request.type === "agent.list") return { type: "agents", data: [READY_AGENT] };

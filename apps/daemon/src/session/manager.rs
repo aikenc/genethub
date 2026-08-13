@@ -17,7 +17,7 @@ use genehub_proto::{
     RoundSummary, RoundTrunk, SequencedEvent, SessionContext, SessionEvent, SessionImportCandidate,
     SessionImportListing, SessionImportSource, SessionInspection, SessionLineage,
     SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot, SessionStatus,
-    SessionSummary, TimelineItem, ToolStatus, TurnOutcome, TurnStats, Usage,
+    SessionSummary, TimelineItem, ToolStatus, TurnErrorCode, TurnOutcome, TurnStats, Usage,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
@@ -31,6 +31,7 @@ use super::store::{
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::{AgentSession, PersistHandle, PromptInput, ProviderMap, SessionConfig};
+use crate::diagnostics::Diagnostics;
 
 const BROADCAST_CAPACITY: usize = 1024;
 const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
@@ -194,20 +195,43 @@ impl ActiveRound {
 pub struct SessionManager {
     store: Store,
     registry: Arc<Registry>,
+    diagnostics: Arc<Diagnostics>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
+    /// What each session's agent has left running. Owned here because that is
+    /// where the ownership is: a stray process belongs to the conversation
+    /// whose agent started it, and there is no such thing as one without a
+    /// session to answer for it (`crate::processes`).
+    processes: Arc<crate::processes::Processes>,
     replay_window: usize,
     import_candidates: Mutex<HashMap<String, CachedImportCandidate>>,
 }
 
 impl SessionManager {
     pub fn new(store: Store, registry: Arc<Registry>, replay_window: usize) -> Self {
+        Self::new_with_diagnostics(store, registry, replay_window, Arc::new(Diagnostics::new()))
+    }
+
+    pub fn new_with_diagnostics(
+        store: Store,
+        registry: Arc<Registry>,
+        replay_window: usize,
+        diagnostics: Arc<Diagnostics>,
+    ) -> Self {
         SessionManager {
             store,
             registry,
+            diagnostics,
             sessions: RwLock::new(HashMap::new()),
+            processes: crate::processes::Processes::new(),
             replay_window: replay_window.max(1),
             import_candidates: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// A handle for the parts of the daemon that answer questions about
+    /// processes without going through a session.
+    pub fn processes(&self) -> Arc<crate::processes::Processes> {
+        self.processes.clone()
     }
 
     pub async fn create(
@@ -313,6 +337,13 @@ impl SessionManager {
                         .downcast_ref::<super::store::SessionWriteContended>()
                         .is_some() =>
                 {
+                    tracing::info!(
+                        event = "fork_fallback_reconstructed",
+                        workspace = %source_meta.workspace_id,
+                        session = %source_meta.id,
+                        turn = %turn_id,
+                        "native fork was unavailable because another daemon owns the source session"
+                    );
                     false
                 }
                 Err(error) => return Err(error),
@@ -1520,6 +1551,12 @@ impl SessionManager {
                 self.store.save_meta(&meta)?;
             }
         }
+        // Recorded before the pump starts, so that a turn which ends quickly
+        // still finds an agent to attribute its leftovers to.
+        if let Some(pid) = session.pid().await {
+            let session_id = live.meta.lock().await.id.clone();
+            self.processes.watch(&session_id, pid).await;
+        }
         *live.agent.lock().await = Some(session);
 
         if let Some(previous) = live.pump.lock().await.take() {
@@ -1532,6 +1569,8 @@ impl SessionManager {
             receiver,
             self.store.clone(),
             self.replay_window,
+            self.processes.clone(),
+            self.diagnostics.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         Ok(())
@@ -1822,8 +1861,10 @@ impl SessionManager {
         // appending to a timeline we just removed, and the session would
         // reappear a moment after being deleted.
         if let Some(live) = live {
+            self.end_what_it_left(session_id).await;
             live.shutdown().await;
         }
+        self.processes.forget(session_id).await;
         let Some(workspace_id) = workspace_id else {
             return Ok(());
         };
@@ -1835,21 +1876,38 @@ impl SessionManager {
             Some(live) => live,
             None => return Ok(()),
         };
+        self.end_what_it_left(session_id).await;
         live.shutdown().await;
+        self.processes.forget(session_id).await;
         Ok(())
+    }
+
+    /// Ends the processes a session left running, before the agent that
+    /// answers for them goes away.
+    ///
+    /// Killing the agent stops its process group, which is most of what it
+    /// started — but not a process that started a session of its own, and
+    /// those are exactly the ones long enough lived to still be here. Left
+    /// alone they would keep running with nothing left that knows whose they
+    /// were: not listed, not stoppable, just a held port. So they are ended
+    /// here, while the agent is still alive to identify them.
+    ///
+    /// Before, not after, for that reason: once the agent is gone the
+    /// descendants are reparented and there is no longer any way to tell they
+    /// were ever this session's.
+    async fn end_what_it_left(&self, session_id: &str) {
+        let ended = self.processes.stop_all(session_id).await;
+        if ended > 0 {
+            tracing::info!(session = %session_id, count = ended, "ended what the session left running");
+        }
     }
 
     /// Stops every agent process. Called on daemon shutdown so no orphan
     /// children survive the tray exiting.
     pub async fn shutdown(&self) {
-        let sessions: Vec<Arc<Live>> = self
-            .sessions
-            .write()
-            .await
-            .drain()
-            .map(|(_, v)| v)
-            .collect();
-        for live in sessions {
+        let sessions: Vec<(String, Arc<Live>)> = self.sessions.write().await.drain().collect();
+        for (session_id, live) in sessions {
+            self.end_what_it_left(&session_id).await;
             live.shutdown().await;
         }
     }
@@ -2553,6 +2611,8 @@ async fn pump_events(
     mut receiver: broadcast::Receiver<SessionEvent>,
     store: Store,
     replay_window: usize,
+    processes: Arc<crate::processes::Processes>,
+    diagnostics: Arc<Diagnostics>,
 ) {
     let (workspace_id, session_id) = {
         let meta = live.meta.lock().await;
@@ -2600,6 +2660,7 @@ async fn pump_events(
         let mut event = match receiver.recv().await {
             Ok(event) => event,
             Err(broadcast::error::RecvError::Closed) => {
+                diagnostics.record("agent", "event-stream", "error", Some("closed"));
                 flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
                 // No `TurnFailed`, no `TurnCanceled` — the adapter's own sender
                 // just vanished (a crashed process is the ordinary cause). The
@@ -2611,10 +2672,25 @@ async fn pump_events(
                 break;
             }
             Err(broadcast::error::RecvError::Lagged(missed)) => {
+                diagnostics.record("agent", "event-stream", "error", Some("dropped"));
                 tracing::warn!("dropped {missed} agent events: the pump fell behind");
                 continue;
             }
         };
+
+        match &event {
+            SessionEvent::TurnStarted { .. } => {
+                diagnostics.record("agent", "turn", "started", None)
+            }
+            SessionEvent::TurnCompleted { .. } => diagnostics.record("agent", "turn", "ok", None),
+            SessionEvent::TurnFailed { error, .. } => {
+                diagnostics.record("agent", "turn", "error", Some(turn_error_code(error.code)))
+            }
+            SessionEvent::TurnCanceled { .. } => {
+                diagnostics.record("agent", "turn", "canceled", None)
+            }
+            _ => {}
+        }
 
         if let SessionEvent::TurnStarted {
             turn_id,
@@ -2826,6 +2902,10 @@ async fn pump_events(
         if settle {
             thinking.clear();
             flush_turn(&live, &store).await;
+            // The end of a turn is when "what is still running" starts to mean
+            // something. Until then everything the agent started is running
+            // because the agent is still working.
+            processes.announce_now().await;
         }
     }
     flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
@@ -2834,6 +2914,18 @@ async fn pump_events(
     let _ = blob_writer.await;
     if channel_closed {
         finalize_after_channel_closed(&live, &store).await;
+    }
+}
+
+fn turn_error_code(code: TurnErrorCode) -> &'static str {
+    match code {
+        TurnErrorCode::MissingCredentials => "missingCredentials",
+        TurnErrorCode::RateLimited => "rateLimited",
+        TurnErrorCode::Upstream => "upstream",
+        TurnErrorCode::Timeout => "timeout",
+        TurnErrorCode::AgentCrashed => "agentCrashed",
+        TurnErrorCode::Canceled => "canceled",
+        TurnErrorCode::Internal => "internal",
     }
 }
 
@@ -4731,6 +4823,8 @@ mod tests {
             agent_events.subscribe(),
             store.clone(),
             64,
+            crate::processes::Processes::new(),
+            Arc::new(Diagnostics::new()),
         ));
         for event in script {
             agent_events.send(event).expect("the pump is listening");
@@ -5251,6 +5345,8 @@ mod tests {
             events.subscribe(),
             sessions.store.clone(),
             64,
+            sessions.processes(),
+            sessions.diagnostics.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         (sessions, events, turn_ids)
@@ -5805,6 +5901,8 @@ mod tests {
             events.subscribe(),
             sessions.store.clone(),
             64,
+            sessions.processes(),
+            sessions.diagnostics.clone(),
         ));
         *live.pump.lock().await = Some(pump);
 
@@ -6361,5 +6459,67 @@ mod tests {
             resumed = current.store.save_meta(&meta());
         }
         resumed.expect("the current build had to restart after the legacy owner exited");
+    }
+
+    #[tokio::test]
+    async fn event_pump_records_agent_failure_without_the_runtime_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let live = Arc::new(Live::new(meta(), store.clone()));
+        live.begin_round(None, "t", "u0").await;
+        let (agent_events, _) = broadcast::channel(64);
+        let mut seen = live.events.subscribe();
+        let diagnostics = Arc::new(Diagnostics::new());
+        let pump = tokio::spawn(pump_events(
+            live,
+            agent_events.subscribe(),
+            store,
+            64,
+            crate::processes::Processes::new(),
+            diagnostics.clone(),
+        ));
+
+        agent_events
+            .send(SessionEvent::TurnStarted {
+                turn_id: "t".into(),
+                started_at_ms: now_ms(),
+            })
+            .unwrap();
+        agent_events
+            .send(SessionEvent::TurnFailed {
+                turn_id: "t".into(),
+                error: genehub_proto::TurnError {
+                    code: TurnErrorCode::RateLimited,
+                    message: "secret prompt and provider response".into(),
+                },
+            })
+            .unwrap();
+        loop {
+            if matches!(
+                seen.recv().await.unwrap().event,
+                SessionEvent::TurnFailed { .. }
+            ) {
+                break;
+            }
+        }
+
+        let snapshot = diagnostics.snapshot(
+            "test",
+            &genehub_proto::HubStatus::Unpaired,
+            &genehub_proto::RemoteAccess {
+                relay_url: None,
+                rendezvous_url: None,
+                online: false,
+            },
+        );
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        assert!(snapshot.events.iter().any(|event| {
+            event.component == "agent"
+                && event.operation == "turn"
+                && event.outcome == "error"
+                && event.code.as_deref() == Some("rateLimited")
+        }));
+        assert!(!encoded.contains("secret prompt"));
+        pump.abort();
     }
 }

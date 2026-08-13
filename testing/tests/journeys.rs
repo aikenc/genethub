@@ -1044,6 +1044,45 @@ async fn changes_made_by_the_agent_show_up_in_git_and_can_be_committed() {
 }
 
 #[tokio::test]
+async fn what_an_agent_left_running_is_answerable_to_the_session_that_started_it() {
+    // The daemon only ends a process the named session is currently
+    // answerable for. Nothing has been started here, so every pid is somebody
+    // else's — including the ones that certainly exist, which is the point: a
+    // pid is a small integer anyone can name.
+    let journey = Journey::start().await.expect("journey starts");
+
+    let listed = match journey.client.call(Request::ProcessList).await.unwrap() {
+        Reply::Processes(processes) => processes,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert!(
+        listed.is_empty(),
+        "nothing has been started yet: {listed:?}"
+    );
+
+    let refused = journey
+        .client
+        .expect_error(Request::ProcessKill {
+            session_id: "s_nobody".into(),
+            pid: 1,
+        })
+        .await;
+    assert!(refused.contains("NotFound"), "{refused}");
+
+    // Asking a session with nothing to end is not an error. The caller wanted
+    // none of them running, and none of them are.
+    journey
+        .client
+        .call(Request::ProcessKillAll {
+            session_id: "s_nobody".into(),
+        })
+        .await
+        .expect("clearing nothing succeeds");
+
+    journey.finish().await;
+}
+
+#[tokio::test]
 async fn files_can_be_browsed_and_edited_through_the_workspace() {
     let journey = Journey::start().await.expect("journey starts");
     let root_handle = &journey.workspace.folders[0].root_handle;
@@ -2281,4 +2320,88 @@ async fn a_log_request_cannot_reach_outside_the_log_directory() {
             .await;
         assert!(refused.is_err(), "{attempt} was served");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Working directory
+// ---------------------------------------------------------------------------
+
+/// A task that only makes sense in the right directory is the common case, not
+/// an exotic one, so the proof has to be where the agent's own relative path
+/// landed — not what the session metadata claims.
+#[tokio::test]
+async fn a_session_starts_where_it_was_told_to_and_cannot_be_told_to_leave() {
+    let journey = Journey::start().await.expect("journey starts");
+    mock_only!(journey);
+    std::fs::create_dir_all(journey.project().join("services/api")).expect("subdirectory exists");
+
+    let created = journey
+        .client
+        .call(Request::SessionCreate {
+            workspace_id: journey.workspace.id.clone(),
+            agent_id: "genet".into(),
+            model_id: Some(journey.model_id()),
+            mode_id: None,
+            title: None,
+            cwd: Some("services/api".into()),
+        })
+        .await
+        .expect("the session is created");
+    let Reply::Session(summary) = created else {
+        panic!("expected a session, got {created:?}");
+    };
+    journey
+        .client
+        .call(Request::Subscribe {
+            session_id: summary.id.clone(),
+            since_seq: None,
+            expand_last_round: false,
+        })
+        .await
+        .expect("subscribed");
+
+    script_the_task(&journey).await;
+    journey
+        .send(&summary.id, TASK)
+        .await
+        .expect("prompt accepted");
+    let events = journey.client.drain_turn().await.expect("the turn ends");
+    assert!(
+        events.completed(),
+        "the turn should complete; saw {:?}",
+        events.failure()
+    );
+
+    assert_eq!(
+        journey
+            .read_file("services/api/result.txt")
+            .as_deref()
+            .map(str::trim),
+        Some("DONE"),
+        "the agent's relative write belongs in the directory the session was given"
+    );
+    assert!(
+        !journey.file_exists("result.txt"),
+        "nothing should have been written at the workspace root"
+    );
+
+    // Refusing beats clamping to the root: a task quietly run somewhere else
+    // looks exactly like a task that worked.
+    let escaped = journey
+        .client
+        .call(Request::SessionCreate {
+            workspace_id: journey.workspace.id.clone(),
+            agent_id: "genet".into(),
+            model_id: Some(journey.model_id()),
+            mode_id: None,
+            title: None,
+            cwd: Some("../elsewhere".into()),
+        })
+        .await;
+    assert!(
+        escaped.is_err(),
+        "a cwd outside the workspace must not create a session; got {escaped:?}"
+    );
+
+    journey.finish().await;
 }

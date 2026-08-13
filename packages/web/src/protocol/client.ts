@@ -1,6 +1,7 @@
 import type {
   AssetPreviewError,
   AssetPreviewMetadata,
+  BackgroundProcess,
   HelloResult,
   PeerWelcome,
   ProtocolError,
@@ -8,6 +9,7 @@ import type {
   Request,
   SequencedEvent,
   ServerFrame,
+  SupportDiagnostics,
   UpdateDownload,
 } from "@genehub/proto";
 
@@ -83,6 +85,16 @@ export type RtcState =
   | "connected"
   | "failed";
 
+export type ClientDiagnosticKind = "connection" | "transport" | "rtc" | "operation" | "error";
+export type ClientDiagnosticDetail = Record<string, string | number | boolean | null>;
+
+/** Safe, transport-independent evidence emitted by the business client. */
+export interface ClientDiagnosticEvent {
+  at: string;
+  kind: ClientDiagnosticKind;
+  detail: ClientDiagnosticDetail;
+}
+
 export interface ClientOptions {
   url: string;
   redial?: (signal?: AbortSignal) => Promise<string | ProtocolDial>;
@@ -94,7 +106,7 @@ export interface ClientOptions {
   inviteCredential?: InviteChannelCredential;
   rtcEnabled?: boolean;
   /** Test/embedding seam; production uses the browser WebRTC implementation. */
-  rtcFactory?: (base: DataEndpoint) => Promise<RtcDataLink>;
+  rtcFactory?: (base: DataEndpoint, diagnosticId?: string) => Promise<RtcDataLink>;
   socketFactory?: (url: string) => WebSocketLike;
   backoffMs?: (attempt: number) => number;
   connectTimeoutMs?: number;
@@ -111,6 +123,7 @@ export interface ClientOptions {
   heartbeatTimeoutMs?: number;
   now?: () => number;
   onError?: (error: unknown) => void;
+  onDiagnostic?: (event: ClientDiagnosticEvent) => void;
 }
 
 export interface WebSocketLike extends BinaryWebSocketLike {}
@@ -182,6 +195,9 @@ interface Subscription {
 }
 
 interface PendingCall {
+  id: string;
+  operation: string;
+  queuedAt: number;
   request: Request;
   bytes: number;
   resolve(value: Reply | undefined): void;
@@ -216,6 +232,7 @@ export class Client {
   private readonly ptyListeners = new Set<(ptyId: string, data: string | null) => void>();
   private readonly noticeListeners = new Set<(level: string, message: string) => void>();
   private readonly downloadListeners = new Set<(download: UpdateDownload) => void>();
+  private readonly processListeners = new Set<(processes: BackgroundProcess[]) => void>();
   private state: ConnectionState = "connecting";
   private stopped = false;
   private attempt = 0;
@@ -234,6 +251,9 @@ export class Client {
   private rtcState_: RtcState;
   private rtcLink: RtcDataLink | null = null;
   private rtcGeneration = 0;
+  private connectionEpoch = 0;
+  private connectionAttemptId: string | null = null;
+  private carrier: "websocket" | "fabric" | null = null;
 
   failure: ProtocolError | null = null;
   identity: HelloResult | null = null;
@@ -297,6 +317,11 @@ export class Client {
     return () => this.downloadListeners.delete(listener);
   }
 
+  onBackgroundProcesses(listener: (processes: BackgroundProcess[]) => void): () => void {
+    this.processListeners.add(listener);
+    return () => this.processListeners.delete(listener);
+  }
+
   connect(): void {
     if (this.stopped || this.socket || this.fabricLink || this.dialingTransport || this.redialing) return;
     this.attachLifecycle();
@@ -339,21 +364,48 @@ export class Client {
   }
 
   async call(request: Request): Promise<Reply | undefined> {
+    const operation = request.type;
+    const id = diagnosticId("op");
+    const queuedAt = this.now();
     const bytes = encoder.encode(JSON.stringify(request)).byteLength;
     if (bytes > MAX_RPC_BODY_BYTES) {
+      this.diagnostic("operation", {
+        operation,
+        requestId: id,
+        phase: "rejected",
+        outcome: "too-large",
+        requestBytes: bytes,
+      });
       throw new ClientRequestTooLargeError();
     }
     if (
       this.queue.length + this.active.size >= (this.options.maxPendingRequests ?? 128) ||
       this.pendingBytes + bytes > (this.options.maxPendingBytes ?? 16 * 1024 * 1024)
     ) {
+      this.diagnostic("operation", {
+        operation,
+        requestId: id,
+        phase: "rejected",
+        outcome: "queue-full",
+        requestBytes: bytes,
+      });
       throw new ClientQueueFullError();
     }
     if (!this.endpoint && this.queue.length >= (this.options.maxQueuedRequests ?? 128)) {
+      this.diagnostic("operation", {
+        operation,
+        requestId: id,
+        phase: "rejected",
+        outcome: "queue-full",
+        requestBytes: bytes,
+      });
       throw new ClientQueueFullError();
     }
     return new Promise<Reply | undefined>((resolve, reject) => {
       const pending: PendingCall = {
+        id,
+        operation,
+        queuedAt,
         request,
         bytes,
         resolve,
@@ -372,6 +424,14 @@ export class Client {
           if (index < 0) return;
           this.queue.splice(index, 1);
           this.release(pending);
+          this.diagnostic("operation", {
+            operation,
+            requestId: id,
+            phase: "finish",
+            outcome: "queue-timeout",
+            queueMs: Math.round(this.now() - queuedAt),
+            requestBytes: bytes,
+          });
           reject(new ClientRequestTimeoutError("the request waited too long for a connection"));
         }, this.options.maxQueueAgeMs ?? 30_000);
         this.queue.push(pending);
@@ -381,11 +441,22 @@ export class Client {
 
   async preview(workspaceHandle: string, path: string): Promise<AssetPreviewResult> {
     const endpoint = this.requireReadyEndpoint();
+    const requestId = diagnosticId("preview");
+    const started = this.now();
+    const transport = this.transportFor(endpoint);
+    this.diagnostic("operation", {
+      operation: "asset.preview",
+      requestId,
+      phase: "start",
+      transport,
+      path,
+    });
     const stream = endpoint.open({
       version: DATA_PLANE_VERSION,
       method: "asset.preview",
       metadata: {
         source: { kind: "workspaceFile", workspaceHandle, path },
+        diagnosticId: requestId,
       },
       bodyLength: 0,
       timeoutMs: 15_000,
@@ -420,9 +491,42 @@ export class Client {
       }
       return { metadata, bytes };
     })();
-    return withTimeout(operation, 15_000, "asset preview timed out", () =>
-      stream.reset(DataReset.Timeout),
-    );
+    try {
+      const result = await withTimeout(operation, 15_000, "asset preview timed out", () =>
+        stream.reset(DataReset.Timeout),
+      );
+      this.diagnostic("operation", {
+        operation: "asset.preview",
+        requestId,
+        phase: "finish",
+        outcome: "ok",
+        transport,
+        path,
+        durationMs: Math.round(this.now() - started),
+        responseBytes: result.bytes.byteLength,
+      });
+      return result;
+    } catch (error) {
+      this.diagnostic("operation", {
+        operation: "asset.preview",
+        requestId,
+        phase: "finish",
+        outcome: errorName(error),
+        transport,
+        path,
+        durationMs: Math.round(this.now() - started),
+      });
+      throw error;
+    }
+  }
+
+  /** Fetches only the daemon's bounded allowlisted ring, never its raw log. */
+  async diagnostics(): Promise<SupportDiagnostics> {
+    const reply = await this.call({ type: "diagnostics.snapshot" });
+    if (reply?.type !== "diagnostics") {
+      throw new Error(`unexpected reply to diagnostics.snapshot: ${reply?.type}`);
+    }
+    return reply.data;
   }
 
   async subscribe(
@@ -459,6 +563,14 @@ export class Client {
     this.activeChannelCredential = dial.channelCredential;
     this.activeLocalServerProof = dial.localServerProof;
     this.activeFabricRouteTicket = dial.fabricRouteTicket;
+    this.connectionEpoch += 1;
+    this.connectionAttemptId = diagnosticId("conn");
+    this.carrier = dial.fabricRouteTicket ? "fabric" : "websocket";
+    this.diagnostic("transport", {
+      phase: "dial",
+      transport: this.carrier,
+      attempt: this.attempt,
+    });
     if (dial.fabricRouteTicket) {
       this.dialFabric(dial);
       return;
@@ -468,7 +580,12 @@ export class Client {
       const factory =
         this.options.socketFactory ?? ((url: string) => new WebSocket(url) as WebSocketLike);
       socket = factory(dial.url);
-    } catch {
+    } catch (error) {
+      this.diagnostic("transport", {
+        phase: "dial-failed",
+        transport: "websocket",
+        outcome: errorName(error),
+      });
       this.scheduleReconnect();
       return;
     }
@@ -682,8 +799,41 @@ export class Client {
     if (pending.queueTimer !== null) clearTimeout(pending.queueTimer);
     pending.queueTimer = null;
     this.active.add(pending);
-    void this.rpc(endpoint, pending.request)
-      .then(pending.resolve, (error: unknown) => {
+    const started = this.now();
+    const transport = this.transportFor(endpoint);
+    this.diagnostic("operation", {
+      ...diagnosticContext(pending.request),
+      operation: pending.operation,
+      requestId: pending.id,
+      phase: "start",
+      transport,
+      queueMs: Math.round(started - pending.queuedAt),
+      requestBytes: pending.bytes,
+    });
+    void this.rpc(endpoint, pending.request, undefined, pending.id)
+      .then((reply) => {
+        this.diagnostic("operation", {
+          ...diagnosticContext(pending.request),
+          operation: pending.operation,
+          requestId: pending.id,
+          phase: "finish",
+          outcome: "ok",
+          transport,
+          durationMs: Math.round(this.now() - started),
+          requestBytes: pending.bytes,
+        });
+        pending.resolve(reply);
+      }, (error: unknown) => {
+        this.diagnostic("operation", {
+          ...diagnosticContext(pending.request),
+          operation: pending.operation,
+          requestId: pending.id,
+          phase: "finish",
+          outcome: errorName(error),
+          transport,
+          durationMs: Math.round(this.now() - started),
+          requestBytes: pending.bytes,
+        });
         if (
           error instanceof ProtocolError_ ||
           error instanceof ClientRequestTimeoutError ||
@@ -706,13 +856,14 @@ export class Client {
     endpoint: DataEndpoint,
     request: Request,
     timeoutMs?: number,
+    requestId = diagnosticId("internal"),
   ): Promise<Reply | undefined> {
     const budget = timeoutMs ?? this.options.requestTimeoutMs ?? 60_000;
     const body = encoder.encode(JSON.stringify(request));
     const stream = endpoint.open({
       version: DATA_PLANE_VERSION,
       method: "rpc",
-      metadata: null,
+      metadata: { diagnosticId: requestId, operation: request.type },
       bodyLength: body.byteLength,
       timeoutMs: budget,
     });
@@ -821,6 +972,10 @@ export class Client {
         return;
       case "notice":
         for (const listener of this.noticeListeners) this.callListener(() => listener(frame.level, frame.message));
+        return;
+      case "processes":
+        for (const listener of this.processListeners)
+          this.callListener(() => listener(frame.processes));
         return;
       case "updateDownload":
         for (const listener of this.downloadListeners) this.callListener(() => listener(frame.download));
@@ -982,6 +1137,12 @@ export class Client {
     const delay = this.options.backoffMs
       ? base
       : Math.round(base * (0.75 + Math.random() * 0.5));
+    this.diagnostic("connection", {
+      state: "reconnecting",
+      phase: "retry-scheduled",
+      delayMs: delay,
+      attempt: Math.max(0, this.attempt - 1),
+    });
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.connect();
@@ -1119,10 +1280,18 @@ export class Client {
       return;
     }
     const generation = ++this.rtcGeneration;
+    const requestId = diagnosticId("rtc");
+    const started = this.now();
     this.closeRtc(false);
     this.setRtcState("connecting");
+    this.diagnostic("operation", {
+      operation: "rtc.negotiate",
+      requestId,
+      phase: "start",
+      transport: this.carrier,
+    });
     try {
-      const link = await (this.options.rtcFactory ?? openRtcDataLink)(base);
+      const link = await (this.options.rtcFactory ?? openRtcDataLink)(base, requestId);
       if (
         generation !== this.rtcGeneration ||
         this.stopped ||
@@ -1153,10 +1322,26 @@ export class Client {
         if (this.rtcEnabled && this.state === "ready") this.setRtcState("failed");
       });
       this.setRtcState("connected");
+      this.diagnostic("operation", {
+        operation: "rtc.negotiate",
+        requestId,
+        phase: "finish",
+        outcome: "ok",
+        transport: "rtc",
+        durationMs: Math.round(this.now() - started),
+      });
     } catch (error) {
       if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base) return;
       this.report(error);
       this.setRtcState("failed");
+      this.diagnostic("operation", {
+        operation: "rtc.negotiate",
+        requestId,
+        phase: "finish",
+        outcome: errorName(error),
+        transport: this.carrier,
+        durationMs: Math.round(this.now() - started),
+      });
     }
   }
 
@@ -1197,12 +1382,18 @@ export class Client {
   private setState(state: ConnectionState): void {
     if (this.state === state) return;
     this.state = state;
+    this.diagnostic("connection", {
+      state,
+      closeCode: this.lastClose?.code ?? null,
+      closeReason: this.lastClose?.reason ?? null,
+    });
     for (const listener of this.stateListeners) this.callListener(() => listener(state));
   }
 
   private setRtcState(state: RtcState): void {
     if (this.rtcState_ === state) return;
     this.rtcState_ = state;
+    this.diagnostic("rtc", { state });
     for (const listener of this.rtcListeners) this.callListener(() => listener(state));
   }
 
@@ -1215,11 +1406,41 @@ export class Client {
   }
 
   private report(error: unknown): void {
+    this.diagnostic("error", {
+      name: errorName(error),
+      message: error instanceof Error ? error.message : String(error),
+    });
     try {
       this.options.onError?.(error);
     } catch {
       // Observability never owns transport state.
     }
+  }
+
+  private diagnostic(kind: ClientDiagnosticKind, detail: ClientDiagnosticDetail): void {
+    try {
+      this.options.onDiagnostic?.({
+        at: new Date(this.now()).toISOString(),
+        kind,
+        detail: {
+          connectionEpoch: this.connectionEpoch,
+          connectionAttemptId: this.connectionAttemptId,
+          carrier: this.carrier,
+          ...detail,
+        },
+      });
+    } catch {
+      // Diagnostics are one-way evidence and never own client state.
+    }
+  }
+
+  private transportFor(endpoint: DataEndpoint): "websocket" | "fabric" | "rtc" {
+    if (this.rtcLink?.endpoint === endpoint) return "rtc";
+    return this.carrier ?? "websocket";
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
   }
 
   private clearConnectTimer(): void {
@@ -1317,6 +1538,43 @@ function withTimeout<T>(
       },
     );
   });
+}
+
+function diagnosticId(prefix: string): string {
+  try {
+    return `${prefix}_${crypto.randomUUID()}`;
+  } catch {
+    return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+  }
+}
+
+function errorName(error: unknown): string {
+  if (error instanceof ProtocolError_) return `protocol.${error.detail.code}`;
+  if (error instanceof AssetPreviewError_) return `preview.${error.detail}`;
+  if (error instanceof Error && error.name) return error.name.slice(0, 80);
+  return "Error";
+}
+
+/** Only stable opaque ids and workspace-relative paths leave request payloads. */
+function diagnosticContext(request: Request): ClientDiagnosticDetail {
+  switch (request.type) {
+    case "file.tree":
+    case "file.write":
+    case "git.diff":
+      return {
+        workspaceId: request.payload.workspaceId,
+        path: request.payload.path ?? null,
+      };
+    case "git.status":
+    case "git.commit":
+    case "pty.open":
+    case "workspace.rename":
+    case "workspace.remove":
+    case "session.create":
+      return { workspaceId: request.payload.workspaceId };
+    default:
+      return {};
+  }
 }
 
 function validLocalServerProof(value: LocalServerProof, now: number): boolean {

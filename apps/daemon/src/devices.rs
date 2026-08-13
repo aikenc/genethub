@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
+use crate::authz::GrantSet;
 use crate::channel_auth::{self, SessionKey};
 
 /// How long an invite is worth anything. Short because it is the one moment
@@ -45,6 +46,10 @@ struct Device {
     secret: String,
     paired_at: DateTime<Utc>,
     last_seen_at: Option<DateTime<Utc>>,
+    /// What this device may ask for. Absent in files written before grants
+    /// existed, which `GrantSet::default` reads as everything.
+    #[serde(default)]
+    grants: GrantSet,
 }
 
 /// Invites are not persisted. An invite means "right now I am waiting for a new
@@ -53,6 +58,9 @@ struct Invite {
     id: String,
     secret: String,
     expires_at: DateTime<Utc>,
+    /// Decided when the invitation is minted, not when it is redeemed. The
+    /// device being paired does not get to say how much it is worth.
+    grants: GrantSet,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -116,14 +124,30 @@ impl Devices {
                 paired_at: device.paired_at.to_rfc3339(),
                 last_seen_at: device.last_seen_at.map(|at| at.to_rfc3339()),
                 connected: state.connected.contains_key(&device.id),
+                grants: Some(device.grants.names()),
             })
             .collect()
+    }
+
+    /// What a device may ask for, or `None` if it is no longer authorized.
+    pub fn grants(&self, device_id: &str) -> Option<GrantSet> {
+        let state = self.state.lock().unwrap();
+        state
+            .devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .map(|device| device.grants.clone())
     }
 
     /// Mints a one-time code. `rendezvous_url` is filled in by the caller,
     /// which is the only part of the system that knows whether this machine is
     /// currently reachable from outside.
     pub fn invite(&self) -> DeviceInvite {
+        self.invite_with(GrantSet::full())
+    }
+
+    /// Mints an invitation worth only part of this machine.
+    pub fn invite_with(&self, grants: GrantSet) -> DeviceInvite {
         let id = format!("inv_{}", uuid::Uuid::new_v4().simple());
         let secret = random_token();
         let code = format!("{id}.{secret}");
@@ -134,15 +158,18 @@ impl Devices {
         if state.invites.len() >= MAX_INVITES {
             state.invites.remove(0);
         }
+        let names = grants.names();
         state.invites.push(Invite {
             id,
             secret,
             expires_at,
+            grants,
         });
         DeviceInvite {
             code,
             rendezvous_url: None,
             expires_at: expires_at.to_rfc3339(),
+            grants: Some(names),
         }
     }
 
@@ -198,13 +225,14 @@ impl Devices {
                 "this machine has reached its authorized-device limit"
             ));
         }
-        state.invites.remove(position);
+        let invite = state.invites.remove(position);
         let device = Device {
             id: format!("d_{}", random_token()),
             name: device_name,
             secret: random_token(),
             paired_at: now,
             last_seen_at: None,
+            grants: invite.grants,
         };
         let credential = DeviceCredential {
             device_id: device.id.clone(),

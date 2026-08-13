@@ -69,6 +69,7 @@ mod tests {
             json!({"type": "pty.resize", "payload": {"ptyId": "p", "cols": 80, "rows": 24}}),
             json!({"type": "workspace.rename", "payload": {"workspaceId": "w", "name": "demo"}}),
             json!({"type": "session.fork", "payload": {"sessionId": "s", "turnId": "t"}}),
+            json!({"type": "diagnostics.snapshot"}),
         ];
         for case in cases {
             let raw = case.to_string();
@@ -98,6 +99,20 @@ mod tests {
         )
         .expect("parse legacy fork");
         assert!(matches!(fork, Request::SessionFork { target: None, .. }));
+    }
+
+    #[test]
+    fn diagnostics_omit_an_absent_categorical_code() {
+        let event = SupportDiagnosticEvent {
+            at: "2026-08-12T00:00:00.000Z".into(),
+            component: "daemon".into(),
+            operation: "lifecycle".into(),
+            outcome: "started".into(),
+            code: None,
+            count: 1,
+        };
+        let encoded = serde_json::to_value(event).expect("serialize diagnostic event");
+        assert_eq!(encoded.get("code"), None, "None must be absent, not null");
     }
 
     #[test]
@@ -163,5 +178,31 @@ mod tests {
             !todo.append_text("b"),
             "a text delta for a todo item is a protocol error, not a no-op"
         );
+    }
+
+    #[test]
+    fn an_invite_sent_the_way_it_was_sent_before_grants_still_means_no_limits() {
+        // Pairing is the exchange that has to keep working on the machine
+        // nobody can walk over to and fix, so an older client that never heard
+        // of grants must still be understood, and understood as asking for
+        // what it always got.
+        let old: Request = serde_json::from_value(json!({"type": "device.invite"})).unwrap();
+        assert_eq!(old, Request::DeviceInvite(None));
+
+        let narrowed: Request = serde_json::from_value(
+            json!({"type": "device.invite", "payload": {"grants": ["read", "session"]}}),
+        )
+        .unwrap();
+        assert_eq!(
+            narrowed,
+            Request::DeviceInvite(Some(InviteScope {
+                grants: vec!["read".into(), "session".into()]
+            }))
+        );
+
+        round_trip(Request::DeviceInvite(None));
+        round_trip(Request::DeviceInvite(Some(InviteScope {
+            grants: vec!["pty".into()],
+        })));
     }
 }

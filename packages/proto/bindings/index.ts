@@ -19,13 +19,35 @@ export type AssetPreviewMetadata = { kind: AssetPreviewKind, mediaType: string, 
  */
 version: string, };
 
-export type AssetPreviewRequest = { source: WorkspaceFileSource, };
+export type AssetPreviewRequest = { source: WorkspaceFileSource, 
+/**
+ * Opaque per-operation id used only to correlate the browser and daemon's
+ * bounded diagnostic rings. It carries no account, workspace or path data.
+ */
+diagnosticId?: string, };
 
 export type Attachment = { name: string, mime: string, path?: string, 
 /**
  * Inline payload, base64. Only set for small pastes such as screenshots.
  */
 dataBase64?: string, };
+
+/**
+ * A process an agent started and did not stop.
+ *
+ * Assembled from what the operating system says rather than from what was
+ * recorded when it started, because we did not start it — the agent did, and
+ * what it started is only visible from the outside.
+ */
+export type BackgroundProcess = { 
+/**
+ * The conversation whose agent is answerable for this.
+ */
+sessionId: string, pid: number, parentPid: number, 
+/**
+ * The full command line, as the operating system reports it.
+ */
+command: string, runningForSeconds: number, };
 
 export type BlobKind = "reasoning" | "toolCall";
 
@@ -106,6 +128,24 @@ name: string, description?: string,
 argumentHint?: string, };
 
 /**
+ * What the operating system is holding a process to, told to whoever asked
+ * for the process.
+ *
+ * Without this a confined caller has to infer the rule from the symptoms, and
+ * the symptoms differ by backend: a namespace makes the rest of the filesystem
+ * *absent* (`ENOENT`), Landlock leaves it there and *refuses* it (`EACCES`).
+ * An agent reading "no such file" concludes the directory does not exist and
+ * sets about creating it. Saying the rule up front is cheaper than every
+ * caller guessing it wrong differently.
+ */
+export type Confinement = { backend: IsolationBackend, 
+/**
+ * Absolute paths the process can reach and write. Everything outside them
+ * is absent or refused; which of the two depends on `backend`.
+ */
+roots: Array<string>, };
+
+/**
  * A client proving it is on the authorized list, without sending its secret.
  */
 export type DeviceAuth = { deviceId: string, 
@@ -137,7 +177,12 @@ export type DeviceInfo = { id: string, name: string, pairedAt: string, lastSeenA
 /**
  * True while this device has a live connection to the machine.
  */
-connected: boolean, };
+connected: boolean, 
+/**
+ * What this device may ask for. Absent from machines that predate grants,
+ * where every authorized device could do everything.
+ */
+grants?: Array<string>, };
 
 /**
  * A one-time chance to become an authorized device.
@@ -155,7 +200,12 @@ export type DeviceInvite = { code: string,
  * a relay first for that reason; privileged LAN transport is deliberately
  * unsupported.
  */
-rendezvousUrl?: string, expiresAt: string, };
+rendezvousUrl?: string, expiresAt: string, 
+/**
+ * What redeeming this invitation will be worth. Shown before anyone
+ * accepts it, because a grant nobody was told about is not a choice.
+ */
+grants?: Array<string>, };
 
 export type DirectoryEntry = { name: string, path: string, };
 
@@ -163,9 +213,13 @@ export type DirectoryListing = { path: string, parent: string | null, directorie
 /**
  * Openable VS Code workspace definitions in this directory.
  */
-workspaceFiles: Array<DirectoryEntry>, };
+workspaceFiles: Array<DirectoryEntry>, 
+/**
+ * Machine roots view (Windows drives). Not a selectable project folder.
+ */
+roots: boolean, };
 
-export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "protocolVersion";
+export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "protocolVersion" | "isolationUnavailable";
 
 /**
  * The first encrypted record on a client-opened logical stream.
@@ -222,7 +276,12 @@ fingerprint: string, transport: TransportKind, machineName: string,
  * Advertised inside the encrypted data plane. The viewer's local RTC
  * preference still decides whether negotiation is attempted.
  */
-rtcSupported: boolean, };
+rtcSupported: boolean, 
+/**
+ * What this machine can actually enforce on a process it starts on a
+ * caller's behalf. Absent from older daemons, which is why it is optional.
+ */
+isolation?: IsolationInfo, };
 
 /**
  * Honest coverage for a full, clipped or imported history view.
@@ -331,6 +390,37 @@ export type InteractionQuestion = { id: string, prompt: string, allowMultiple: b
  * Proof of the PSK carried in the fragment half of a pairing link.
  */
 export type InviteAuth = { inviteId: string, nonce: string, proof: string, };
+
+/**
+ * How much of a machine an invitation is worth.
+ *
+ * Its own type rather than a bare list of strings so that the request carrying
+ * it can grow other limits — an expiry, a workspace — without changing shape
+ * again.
+ */
+export type InviteScope = { grants: Array<string>, };
+
+export type IsolationBackend = "landlock" | "namespaces" | "seatbelt" | "appContainer" | "none";
+
+/**
+ * The operating system confinement this machine can put a spawned process in.
+ *
+ * Reported rather than promised. A caller decides whether to run something it
+ * does not fully trust by reading this, so it has to describe what is actually
+ * in force on this kernel right now — not what the build supports and not what
+ * a configuration file asked for.
+ */
+export type IsolationInfo = { backend: IsolationBackend, 
+/**
+ * Whether a confined process would really be confined. False means every
+ * request that needs confinement is refused, never quietly downgraded.
+ */
+enforced: boolean, 
+/**
+ * Why, in a sentence a person can act on. Present whether or not it worked,
+ * because "landlock, abi 4" is as worth saying as "kernel 5.4 has none".
+ */
+detail: string, };
 
 /**
  * Streaming increment for an item already on the timeline.
@@ -473,14 +563,23 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
  * Prefetches the last round's trunk index and final trunk details in
  * the subscription response.
  */
-expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, 
+/**
+ * Where the agent starts, inside the workspace. Absent means the
+ * workspace root, which is what every client sent before this field
+ * existed. Relative paths resolve against the root; an absolute path
+ * must still fall inside it, and the daemon refuses the rest rather
+ * than clamping — a task silently run in the wrong directory is worse
+ * than one that refused to start.
+ */
+cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */
@@ -528,11 +627,11 @@ models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payloa
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */
-paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } };
+paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } } | { "type": "process.list" } | { "type": "process.kill", "payload": { sessionId: string, pid: number, } } | { "type": "process.killAll", "payload": { sessionId: string, } };
 
 /**
  * Whether text outside the retained GeneHub window can be read again.
@@ -593,7 +692,7 @@ export type SequencedEvent = { seq: number, sessionId: string, event: SessionEve
 /**
  * Anything the daemon sends to a client.
  */
-export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "desync", sessionId: string, missed: number, };
+export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "processes", processes: Array<BackgroundProcess>, } | { "type": "desync", sessionId: string, missed: number, };
 
 /**
  * Deterministic, model-free context projection used directly by Agents and
@@ -726,6 +825,91 @@ export type Settings = { providers: Array<ProviderInfo>,
  * Whether the daemon accepts connections from the local network.
  */
 lanEnabled: boolean, };
+
+/**
+ * One message from a running command.
+ *
+ * The two output streams stay apart the whole way. A terminal merges them
+ * because a person is reading both at once; a caller that has to tell a
+ * diagnostic from a result cannot un-merge them afterwards.
+ */
+export type ShellFrame = { "type": "stdout", data: string, } | { "type": "stderr", data: string, } | { "type": "exit", 
+/**
+ * Absent when a signal ended the process, which is the one case where
+ * there is no exit status to report.
+ */
+code?: number, signal?: number, 
+/**
+ * Whether the command was ended because it ran out of time rather
+ * than because it finished.
+ *
+ * Not inferable from the rest: a command ended this way reports
+ * exactly what one killed for any other reason reports, and "killed
+ * by SIGKILL" would leave the caller to guess between "it hung" and
+ * "somebody stopped it". The difference decides whether retrying with
+ * a longer limit is sensible.
+ */
+timed_out: boolean, };
+
+/**
+ * What to run on a machine, and where.
+ *
+ * `argv` is a list, never a command line: the machine does not parse it, so
+ * nothing in it can turn into a second command. A caller that wants a shell's
+ * help says so out loud with `["bash", "-lc", "..."]`, and that is then
+ * visibly a shell rather than something that became one by quoting.
+ * The request body, if there is one, is the command's standard input. It is
+ * sent whole rather than as it is typed, because a single exchange cannot
+ * carry a conversation: a command that reads, prints a question and reads
+ * again needs the answer to depend on the question, and that is a terminal
+ * (`pty.open`), not this. What this covers is the input that was already
+ * decided before the command started — a patch, a here-document, the output
+ * of something else in a pipeline.
+ */
+export type ShellRunRequest = { workspaceId: string, argv: Array<string>, 
+/**
+ * Somewhere inside the workspace. Absent means its root.
+ */
+cwd?: string, 
+/**
+ * Added to the environment the daemon runs with, overriding it name by
+ * name.
+ *
+ * Additions only: there is no way to ask for a cleared environment. A
+ * command that loses `PATH` and `HOME` fails in ways that look like the
+ * machine is broken, and this grants no authority that choosing the argv
+ * did not already grant — the caller could have run `env FOO=bar ...`
+ * itself.
+ */
+env: { [key in string]?: string }, 
+/**
+ * How long the command may run before it is ended, in milliseconds.
+ *
+ * Absent means no limit, which is not what a one-shot tool call would
+ * choose but is right here: this streams, so the caller sees the output
+ * as it arrives and can stop the command by going away. A caller that
+ * cannot wait — an agent, which has no way to press Ctrl-C — says so.
+ */
+timeoutMs?: bigint, };
+
+/**
+ * One daemon-owned diagnostic fact. Values are intentionally categorical.
+ */
+export type SupportDiagnosticEvent = { at: string, component: string, operation: string, outcome: string, code?: string, 
+/**
+ * Consecutive identical events are coalesced so a reconnect loop cannot
+ * evict every earlier clue from the bounded record.
+ */
+count: number, };
+
+/**
+ * A bounded support record that is safe to attach to explicit user feedback.
+ *
+ * Every string in this shape comes from a daemon-owned allowlist. User input,
+ * local paths, URLs, identifiers, prompts, terminal output and Agent output do
+ * not have a field in the schema.
+ */
+export type SupportDiagnostics = { version: number, capturedAt: string, daemonVersion: string, os: string, arch: string, uptimeSeconds: number, hubState: string, remoteState: string, events: Array<SupportDiagnosticEvent>, droppedEvents: number, };
 
 /**
  * One entry in a session's timeline.

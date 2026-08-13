@@ -31,6 +31,7 @@ function stubDaemon(answers: Partial<Record<Request["type"], (payload: never) =>
     onPty: () => () => {},
     onNotice: () => () => {},
     onUpdateDownload: () => () => {},
+    onBackgroundProcesses: () => () => {},
     onStateChange: () => () => {},
     identity: {
       daemonVersion: "test",
@@ -176,6 +177,71 @@ describe("the files panel", () => {
     expect(calls.some((call) => call.type === "file.write")).toBe(false);
   });
 
+  it("creates copies and deletes paths through the light file manager", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { client, calls } = stubDaemon({
+      "file.tree": () => ({
+        type: "fileTree",
+        data: {
+          name: "demo",
+          path: "r_demo",
+          isDir: true,
+          children: [
+            { name: "docs", path: "r_demo/docs", isDir: true, children: [] },
+            { name: "notes.md", path: "r_demo/notes.md", isDir: false },
+          ],
+        },
+      }),
+      "file.mkdir": () => ({ type: "ack" }),
+      "file.copy": () => ({ type: "ack" }),
+      "file.delete": () => ({ type: "ack" }),
+    });
+    install(client);
+
+    render(<FilesPanel />);
+    await screen.findByText("notes.md");
+
+    await userEvent.click(screen.getByRole("button", { name: "新建文件夹" }));
+    const input = await screen.findByLabelText("新文件夹名称");
+    await userEvent.clear(input);
+    await userEvent.type(input, "assets");
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "file.mkdir")?.payload).toEqual({
+        workspaceId: "w1",
+        path: "r_demo/assets",
+      });
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "复制" }));
+    expect(screen.getByRole("button", { name: "确认复制" })).toBeDisabled();
+    await userEvent.click(screen.getByText("notes.md"));
+    // Selecting for copy must not open Preview.
+    expect(useWorkbench.getState().previewFloat).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "确认复制" }));
+    await userEvent.click(screen.getByText("docs"));
+    await userEvent.click(screen.getByRole("button", { name: "粘贴" }));
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "file.copy")?.payload).toEqual({
+        workspaceId: "w1",
+        from: "r_demo/notes.md",
+        to: "r_demo/docs/notes.md",
+      });
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "删除" }));
+    await userEvent.click(screen.getByText("notes.md"));
+    await userEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "file.delete")?.payload).toEqual({
+        workspaceId: "w1",
+        paths: ["r_demo/notes.md"],
+      });
+    });
+    expect(confirm).toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
   it("does not load file bytes into the workbench store", async () => {
     const { client } = stubDaemon({
       "file.tree": () => ({
@@ -238,7 +304,7 @@ describe("the files panel", () => {
       type: "file.tree",
       payload: { workspaceId: "w1", path: "r_demo/docs", depth: 1 },
     });
-    expect(screen.getByText(/单个文件上限 4 MiB/)).toBeInTheDocument();
+    expect(screen.getByText(/单个预览上限 4 MiB/)).toBeInTheDocument();
   });
 
   it("refreshes the root without requiring a page reload", async () => {

@@ -32,6 +32,8 @@ const MAX_PEERS: usize = 32;
 const MAX_PENDING: usize = 8;
 const WRITER_QUEUE: usize = 256;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Matches the browser half of this wire (`packages/web/src/fabric/frame.ts`).
+const MAX_ROUTE_TICKET_BYTES: usize = 4096;
 const BACKOFF: [u64; 6] = [1, 2, 5, 10, 30, 60];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,11 +176,22 @@ impl FabricUplink {
                         &admission.url,
                         PeerAdmissionSource::Hosted(enrollment.clone()),
                         &task_online,
+                        "managed.uplink",
                     )
                     .await
                 }
                 .await;
                 task_online.store(false, Ordering::Relaxed);
+                state.diagnostics.record(
+                    "fabric",
+                    "managed.uplink",
+                    "offline",
+                    Some(if result.is_err() {
+                        "connection"
+                    } else {
+                        "closed"
+                    }),
+                );
                 if let Err(error) = result {
                     tracing::warn!(%error, "Fabric uplink disconnected");
                 }
@@ -203,9 +216,20 @@ impl FabricUplink {
                     &url,
                     PeerAdmissionSource::DeviceRequired,
                     &task_online,
+                    "rendezvous.uplink",
                 )
                 .await;
                 task_online.store(false, Ordering::Relaxed);
+                state.diagnostics.record(
+                    "fabric",
+                    "rendezvous.uplink",
+                    "offline",
+                    Some(if result.is_err() {
+                        "connection"
+                    } else {
+                        "closed"
+                    }),
+                );
                 if let Err(error) = result {
                     tracing::warn!(%error, "rendezvous Fabric uplink disconnected");
                 }
@@ -232,6 +256,7 @@ async fn run_once(
     url: &str,
     admission_source: PeerAdmissionSource,
     online: &AtomicBool,
+    diagnostic_operation: &'static str,
 ) -> Result<()> {
     validate_fabric_url(url)?;
     let request = url
@@ -250,6 +275,9 @@ async fn run_once(
     .await
     .context("Fabric WebSocket handshake timed out")??;
     online.store(true, Ordering::Relaxed);
+    state
+        .diagnostics
+        .record("fabric", diagnostic_operation, "online", None);
     tracing::info!("Fabric v2 uplink established");
 
     let (mut sink, mut source) = socket.split();
@@ -526,6 +554,7 @@ async fn serve_peer_inner(
         accepted.key,
         accepted.access,
         carrier,
+        endpoint::CarrierKind::Fabric,
     ));
     let expiry = async move {
         match admitted.expires_at {
@@ -684,6 +713,353 @@ pub(crate) fn validate_fabric_url(value: &str) -> Result<()> {
             "remote Fabric admissions require wss; ws is allowed only for a literal loopback IP"
         ),
         other => anyhow::bail!("unsupported Fabric endpoint URL scheme '{other}'"),
+    }
+}
+
+/// One authenticated peer link to a machine that is somewhere else.
+pub struct FabricLink {
+    pub welcome: genehub_proto::PeerWelcome,
+    pub carrier: endpoint::Carrier,
+    /// Kept alongside the carrier rather than inside this struct's own `Drop`,
+    /// so a caller can take the carrier and still hold the socket open.
+    pub pump: FabricPump,
+}
+
+/// Keeps the socket and its two pumps alive for as long as it is held.
+pub struct FabricPump(Vec<tokio::task::JoinHandle<()>>);
+
+impl Drop for FabricPump {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
+/// Why a Fabric route could not be opened.
+///
+/// Separated from the message because the caller has to decide whether to wait
+/// and retry: a machine that is asleep and a credential that was withdrawn are
+/// both "no", and treating them the same teaches people to retry forever or to
+/// re-pair a machine that was only offline.
+#[derive(Debug)]
+pub enum DialError {
+    /// Something answered, and would not carry this call.
+    Refused { reason: Refusal, message: String },
+    /// Nothing answered, or the answer never arrived.
+    Unavailable(String),
+    /// Something answered and did not speak this protocol.
+    Protocol(String),
+}
+
+/// The kinds of "no" a dial can get, told apart by what to do about them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// Nothing is holding the far end of that route at the moment. Nothing was
+    /// spent finding out, so trying again later is free and often right.
+    Offline,
+    /// The far end is there and will not accept this credential. Waiting
+    /// changes nothing; pairing again does.
+    Credential,
+    /// The relay itself cannot take another route right now.
+    Busy,
+    /// An answer this build does not recognise.
+    Other,
+}
+
+impl std::fmt::Display for DialError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DialError::Refused { message, .. }
+            | DialError::Unavailable(message)
+            | DialError::Protocol(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for DialError {}
+
+/// Opens the client half of a Fabric route: the same wire the daemon serves on
+/// the other side, driven from the end that placed the call.
+///
+/// Deliberately in this file rather than beside its caller. Both halves speak
+/// one codec, and a second implementation of it somewhere else is the kind of
+/// thing that agrees on the golden vector and disagrees about flow control at
+/// three in the morning.
+pub async fn dial(
+    url: &str,
+    route_ticket: &str,
+    hello: &genehub_proto::PeerHello,
+) -> std::result::Result<FabricLink, DialError> {
+    let request = url
+        .into_client_request()
+        .map_err(|error| DialError::Protocol(format!("that endpoint is not usable: {error}")))?;
+    let config = WebSocketConfig {
+        max_write_buffer_size: 512 * 1024,
+        max_message_size: Some(MAX_WIRE_FRAME_BYTES),
+        max_frame_size: Some(MAX_WIRE_FRAME_BYTES),
+        ..WebSocketConfig::default()
+    };
+    let (socket, _) = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async_with_config(request, Some(config), false),
+    )
+    .await
+    .map_err(|_| DialError::Unavailable("the relay did not answer in time".into()))?
+    .map_err(dial_error)?;
+    let (mut sink, mut source) = socket.split();
+
+    let mut stream_id = [0u8; STREAM_ID_BYTES];
+    stream_id.copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    // A client stream id of all zeroes is the control channel, and the codec
+    // refuses it. One in 2^128 is not a risk worth a retry loop, but it is
+    // worth a byte.
+    if stream_id == [0; STREAM_ID_BYTES] {
+        stream_id[0] = 1;
+    }
+    let hello_wire =
+        serde_json::to_vec(hello).map_err(|error| DialError::Protocol(error.to_string()))?;
+    let open = Frame {
+        kind: Kind::Open,
+        stream_id,
+        value: INITIAL_CREDIT,
+        payload: open_payload(route_ticket, &hello_wire)
+            .map_err(|error| DialError::Protocol(format!("{error:#}")))?,
+    };
+    let wire = encode(&open).map_err(|error| DialError::Protocol(format!("{error:#}")))?;
+    sink.send(Message::Binary(wire))
+        .await
+        .map_err(|error| DialError::Unavailable(format!("sending the peer hello: {error}")))?;
+
+    let accept = tokio::time::timeout(CONNECT_TIMEOUT, next_frame(&mut source, stream_id))
+        .await
+        .map_err(|_| DialError::Unavailable("the peer handshake timed out".into()))?
+        .map_err(|error| DialError::Unavailable(format!("{error:#}")))?;
+    if accept.kind == Kind::Reset {
+        return Err(reset_error(accept.value));
+    }
+    if accept.kind != Kind::Accept {
+        return Err(DialError::Unavailable(
+            "the route closed before it was accepted".into(),
+        ));
+    }
+    let welcome: genehub_proto::PeerWelcome = serde_json::from_slice(&accept.payload)
+        .map_err(|_| DialError::Protocol("that machine returned an invalid peer welcome".into()))?;
+    let credit =
+        Credit::new(accept.value).map_err(|error| DialError::Protocol(format!("{error:#}")))?;
+
+    let (messages_tx, mut messages_rx) = mpsc::channel::<Message>(WRITER_QUEUE);
+    let socket_writer = tokio::spawn(async move {
+        while let Some(message) = messages_rx.recv().await {
+            if sink.send(message).await.is_err() {
+                return;
+            }
+        }
+    });
+    let writer = Writer {
+        messages: messages_tx,
+    };
+    let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
+
+    let reader_writer = writer.clone();
+    let reader_credit = credit.clone();
+    let reader = tokio::spawn(async move {
+        let mut sequence = 0u64;
+        while let Ok(frame) = next_frame(&mut source, stream_id).await {
+            if matches!(frame.kind, Kind::Fin | Kind::Reset) {
+                return;
+            }
+            match frame.kind {
+                Kind::Data => {
+                    let bytes = frame.payload.len() as u64;
+                    if bytes == 0 || frame.value != sequence + 1 {
+                        return;
+                    }
+                    sequence = frame.value;
+                    if inbound.send(frame.payload).await.is_err() {
+                        return;
+                    }
+                    // Returned only once the bounded carrier queue has taken
+                    // ownership, so credit tracks what was consumed rather
+                    // than what was merely read off the socket.
+                    if reader_writer
+                        .frame(Frame {
+                            kind: Kind::WindowUpdate,
+                            stream_id,
+                            value: bytes,
+                            payload: Vec::new(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Kind::WindowUpdate => {
+                    if !reader_credit.add(frame.value) {
+                        return;
+                    }
+                }
+                Kind::Ping => {
+                    let _ = reader_writer
+                        .frame(Frame {
+                            kind: Kind::Pong,
+                            ..frame
+                        })
+                        .await;
+                }
+                Kind::Pong => {}
+                _ => return,
+            }
+        }
+    });
+
+    let sender = tokio::spawn(async move {
+        let mut sequence = 0u64;
+        while let Some(record) = outbound.recv().await {
+            if record.is_empty() || record.len() > genehub_proto::MAX_DATA_FRAME_BYTES {
+                return;
+            }
+            if credit.take(record.len()).await.is_err() {
+                return;
+            }
+            sequence += 1;
+            if writer
+                .frame(Frame {
+                    kind: Kind::Data,
+                    stream_id,
+                    value: sequence,
+                    payload: record,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+
+    Ok(FabricLink {
+        welcome,
+        carrier,
+        pump: FabricPump(vec![socket_writer, reader, sender]),
+    })
+}
+
+/// Says what a reset on a freshly opened route means.
+///
+/// The codes are the relay's and the machine's, and the split that matters to
+/// a caller is not their numbering but whether waiting would change the
+/// answer.
+fn reset_error(code: u64) -> DialError {
+    match code {
+        5 => DialError::Refused {
+            reason: Refusal::Offline,
+            message: "that machine is not currently connected to its relay".into(),
+        },
+        10 => DialError::Refused {
+            reason: Refusal::Busy,
+            message: "the relay is too busy to open another route right now".into(),
+        },
+        // RouteDenied from the relay means the ticket names no route; from the
+        // machine it means the peer handshake did not verify. Neither improves
+        // by retrying.
+        4 => DialError::Refused {
+            reason: Refusal::Credential,
+            message: "that machine would not accept this credential".into(),
+        },
+        8 | 9 => DialError::Refused {
+            reason: Refusal::Credential,
+            message: "the credential behind this route was revoked or has expired".into(),
+        },
+        other => DialError::Refused {
+            reason: Refusal::Other,
+            message: format!("the route was refused (reset {other})"),
+        },
+    }
+}
+
+/// Turns a failed WebSocket upgrade into something a caller can act on.
+fn dial_error(error: tokio_tungstenite::tungstenite::Error) -> DialError {
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => match response.status().as_u16() {
+            // A relay refuses a client slot it has no online machine for with
+            // the same answer it gives a slot that never existed. It cannot
+            // tell those apart, and saying "offline" is the reading that costs
+            // a caller a wait rather than an unnecessary re-pairing.
+            403 => DialError::Refused {
+                reason: Refusal::Offline,
+                message: "the relay has no route to that machine; it may be offline".into(),
+            },
+            401 => DialError::Refused {
+                reason: Refusal::Credential,
+                message: "the relay refused the credential for that address".into(),
+            },
+            503 => DialError::Refused {
+                reason: Refusal::Busy,
+                message: "the relay is up but cannot authorize routes right now".into(),
+            },
+            other => DialError::Refused {
+                reason: Refusal::Other,
+                message: format!("the relay refused this call with status {other}"),
+            },
+        },
+        other => DialError::Unavailable(format!("the relay could not be reached: {other}")),
+    }
+}
+
+/// The OPEN body: the route ticket the relay consumes, then the peer hello it
+/// must not be able to read into.
+///
+/// The relay strips the ticket and forwards the remainder verbatim, which is
+/// why the split is by length rather than by any structure the relay could be
+/// tempted to parse.
+fn open_payload(route_ticket: &str, hello: &[u8]) -> Result<Vec<u8>> {
+    let ticket = route_ticket.as_bytes();
+    if ticket.is_empty() || ticket.len() > MAX_ROUTE_TICKET_BYTES {
+        anyhow::bail!("a Fabric route ticket must be 1..{MAX_ROUTE_TICKET_BYTES} bytes");
+    }
+    if hello.len() > genehub_proto::MAX_EXCHANGE_HEAD_BYTES {
+        anyhow::bail!("the peer hello exceeds its bounded field");
+    }
+    let mut out = Vec::with_capacity(2 + ticket.len() + hello.len());
+    out.extend_from_slice(&(ticket.len() as u16).to_be_bytes());
+    out.extend_from_slice(ticket);
+    out.extend_from_slice(hello);
+    Ok(out)
+}
+
+/// The next frame on this route, skipping control traffic addressed elsewhere.
+async fn next_frame<S>(source: &mut S, stream_id: [u8; STREAM_ID_BYTES]) -> Result<Frame>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    loop {
+        let message = source
+            .next()
+            .await
+            .ok_or_else(|| anyhow!("the Fabric route closed"))??;
+        match message {
+            Message::Binary(bytes) => {
+                let frame = decode(&bytes).ok_or_else(|| anyhow!("malformed Fabric frame"))?;
+                match frame.kind {
+                    // Returned rather than raised: the reset code is the only
+                    // thing that separates "that machine is asleep" from "that
+                    // credential is no longer honoured", and the caller is the
+                    // one that has to say which happened.
+                    Kind::Fin | Kind::Reset if frame.stream_id == stream_id => return Ok(frame),
+                    // Ping arrives on the control stream, so it is the one
+                    // frame that legitimately does not carry this route's id.
+                    Kind::Ping | Kind::Pong => return Ok(frame),
+                    _ if frame.stream_id != stream_id => continue,
+                    _ => return Ok(frame),
+                }
+            }
+            Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Close(_) => anyhow::bail!("the Fabric route closed"),
+            Message::Text(_) => anyhow::bail!("Fabric sent a text WebSocket message"),
+            _ => continue,
+        }
     }
 }
 

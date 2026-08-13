@@ -58,6 +58,14 @@ pub enum Request {
         mode_id: Option<String>,
         #[serde(default)]
         title: Option<String>,
+        /// Where the agent starts, inside the workspace. Absent means the
+        /// workspace root, which is what every client sent before this field
+        /// existed. Relative paths resolve against the root; an absolute path
+        /// must still fall inside it, and the daemon refuses the rest rather
+        /// than clamping — a task silently run in the wrong directory is worse
+        /// than one that refused to start.
+        #[serde(default)]
+        cwd: Option<String>,
     },
     #[serde(rename = "session.list", rename_all = "camelCase")]
     SessionList {
@@ -258,6 +266,14 @@ pub enum Request {
         #[serde(default)]
         name: Option<String>,
     },
+    /// Returns the daemon's bounded, privacy-safe support record.
+    ///
+    /// Unlike `log.tail`, this contains only fixed operation names, outcomes,
+    /// error classes and coarse connectivity state. It is safe for an official
+    /// client to attach to an explicit feedback submission without copying
+    /// terminal, Agent, prompt, filesystem path or credential text.
+    #[serde(rename = "diagnostics.snapshot")]
+    DiagnosticsSnapshot,
 
     // -- updates -----------------------------------------------------------
     /// Whether a newer build has been published. Sent when a person asks, and
@@ -331,8 +347,14 @@ pub enum Request {
     ///
     /// The new device names itself when it redeems the invite — it is the one
     /// that knows whether it is a phone or a laptop.
+    ///
+    /// The payload narrows what the invitation is worth. It is optional, and
+    /// deliberately a payload rather than a field: a client built before grants
+    /// existed sends `{"type":"device.invite"}` with no `payload` key at all,
+    /// and pairing is the one exchange that must keep working on the machine
+    /// nobody can walk over to and fix.
     #[serde(rename = "device.invite")]
-    DeviceInvite,
+    DeviceInvite(Option<InviteScope>),
     /// Redeems an invite. The only request a stranger may send, and only once
     /// per invite: everything else needs a credential this call hands out.
     #[serde(rename = "device.claim", rename_all = "camelCase")]
@@ -364,11 +386,17 @@ pub enum Request {
     #[serde(rename = "workspace.remove", rename_all = "camelCase")]
     WorkspaceRemove { workspace_id: String },
     /// Lists folders on the daemon's machine before a workspace exists.
+    ///
+    /// Pass `path: ""` to list machine roots (Windows drive letters). A volume
+    /// root listing returns `parent: Some("")` so the picker can climb there.
     #[serde(rename = "directory.list", rename_all = "camelCase")]
     DirectoryList {
         #[serde(default)]
         path: Option<String>,
     },
+    /// Creates a folder on the daemon machine (project picker, outside a workspace).
+    #[serde(rename = "directory.mkdir", rename_all = "camelCase")]
+    DirectoryMkdir { parent: String, name: String },
 
     // -- files -------------------------------------------------------------
     #[serde(rename = "file.tree", rename_all = "camelCase")]
@@ -384,6 +412,29 @@ pub enum Request {
         workspace_id: String,
         path: String,
         content: String,
+    },
+    /// Creates a directory inside a registered workspace.
+    #[serde(rename = "file.mkdir", rename_all = "camelCase")]
+    FileMkdir { workspace_id: String, path: String },
+    /// Copies a file or directory tree within a workspace (`to` is the full destination path).
+    #[serde(rename = "file.copy", rename_all = "camelCase")]
+    FileCopy {
+        workspace_id: String,
+        from: String,
+        to: String,
+    },
+    /// Moves or renames a file or directory within a workspace.
+    #[serde(rename = "file.move", rename_all = "camelCase")]
+    FileMove {
+        workspace_id: String,
+        from: String,
+        to: String,
+    },
+    /// Deletes files and/or directories (recursive) inside a workspace.
+    #[serde(rename = "file.delete", rename_all = "camelCase")]
+    FileDelete {
+        workspace_id: String,
+        paths: Vec<String>,
     },
 
     // -- git ---------------------------------------------------------------
@@ -423,6 +474,26 @@ pub enum Request {
     },
     #[serde(rename = "pty.close", rename_all = "camelCase")]
     PtyClose { pty_id: String },
+
+    // -- background processes ----------------------------------------------
+    /// What every session's agent has left running.
+    ///
+    /// Not scoped to one session: the count belongs on screen wherever the
+    /// person is, and a process forgotten by the conversation they have since
+    /// navigated away from is the one most worth showing.
+    #[serde(rename = "process.list")]
+    ProcessList,
+    /// Ends one process and everything below it.
+    ///
+    /// The session is part of the request rather than looked up from the pid,
+    /// because it is the half that is checked: a pid alone is a guessable
+    /// integer, and the daemon will only end one the named session is
+    /// currently answerable for.
+    #[serde(rename = "process.kill", rename_all = "camelCase")]
+    ProcessKill { session_id: String, pid: u32 },
+    /// Ends everything one session left running, but not its agent.
+    #[serde(rename = "process.killAll", rename_all = "camelCase")]
+    ProcessKillAll { session_id: String },
 }
 
 /// Successful payloads, one per request that returns something.
@@ -460,6 +531,7 @@ pub enum Reply {
     RemoteAccess(RemoteAccess),
     Settings(Settings),
     Log(LogTail),
+    Diagnostics(SupportDiagnostics),
     Update(UpdateStatus),
     UpdateDownload(UpdateDownload),
     Session(SessionSummary),
@@ -490,8 +562,28 @@ pub enum Reply {
     Pty {
         pty_id: String,
     },
+    Processes(Vec<BackgroundProcess>),
     /// Nothing to return, but the call succeeded.
     Ack,
+}
+
+/// A process an agent started and did not stop.
+///
+/// Assembled from what the operating system says rather than from what was
+/// recorded when it started, because we did not start it — the agent did, and
+/// what it started is only visible from the outside.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct BackgroundProcess {
+    /// The conversation whose agent is answerable for this.
+    pub session_id: String,
+    pub pid: u32,
+    pub parent_pid: u32,
+    /// The full command line, as the operating system reports it.
+    pub command: String,
+    #[ts(type = "number")]
+    pub running_for_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -503,6 +595,9 @@ pub struct DirectoryListing {
     pub directories: Vec<DirectoryEntry>,
     /// Openable VS Code workspace definitions in this directory.
     pub workspace_files: Vec<DirectoryEntry>,
+    /// Machine roots view (Windows drives). Not a selectable project folder.
+    #[serde(default)]
+    pub roots: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -528,6 +623,11 @@ pub enum ErrorCode {
     Forbidden,
     Internal,
     ProtocolVersion,
+    /// The request needed the process to be confined by the operating system,
+    /// and this machine cannot do that. Distinct from `Forbidden` because
+    /// nothing about the caller is wrong: the same request on a machine with a
+    /// working backend would succeed, and no grant will fix this one.
+    IsolationUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -570,6 +670,15 @@ pub enum ServerFrame {
     /// "下载中" forever.
     #[serde(rename = "updateDownload", rename_all = "camelCase")]
     UpdateDownloadChanged { download: UpdateDownload },
+    /// What is still running now that a turn has ended.
+    ///
+    /// Sampled at the end of a turn because that is the moment the question
+    /// becomes answerable: while the agent is working, everything it has
+    /// started is supposed to be running. Pushed rather than answered so the
+    /// count can sit on screen without the client polling the operating
+    /// system through us.
+    #[serde(rename = "processes", rename_all = "camelCase")]
+    BackgroundProcesses { processes: Vec<BackgroundProcess> },
     /// This connection fell behind and events for a session were dropped.
     ///
     /// Addressed to the client rather than to the person: a hole in a timeline is

@@ -22,7 +22,10 @@ export interface RtcDataLink {
 }
 
 /** Negotiates one reliable ordered DataChannel through the base E2EE link. */
-export async function openRtcDataLink(base: DataEndpoint): Promise<RtcDataLink> {
+export async function openRtcDataLink(
+  base: DataEndpoint,
+  diagnosticId?: string,
+): Promise<RtcDataLink> {
   if (typeof RTCPeerConnection !== "function") {
     throw new Error("this browser does not support WebRTC");
   }
@@ -47,7 +50,7 @@ export async function openRtcDataLink(base: DataEndpoint): Promise<RtcDataLink> 
     const stream = base.open({
       version: DATA_PLANE_VERSION,
       method: "rtc.negotiate",
-      metadata: null,
+      metadata: diagnosticId ? { diagnosticId } : null,
       bodyLength: body.byteLength,
       timeoutMs: CONNECT_TIMEOUT_MS,
     });

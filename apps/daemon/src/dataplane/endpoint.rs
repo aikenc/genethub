@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
@@ -9,6 +10,7 @@ use genehub_proto::{
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
+use crate::authz::{self, Capability, Principal, StreamMethod};
 use crate::channel_auth::{self, Direction, SessionKey};
 use crate::dataplane::frame::{Frame, Kind, MAX_PAYLOAD_BYTES};
 use crate::router::{self, SideEffect};
@@ -30,6 +32,23 @@ pub const RESET_REFUSED: u32 = 3;
 pub const RESET_TOO_LARGE: u32 = 4;
 pub const RESET_TIMEOUT: u32 = 5;
 pub const RESET_ENDPOINT_CLOSED: u32 = 6;
+
+#[derive(Clone, Copy)]
+pub enum CarrierKind {
+    WebSocket,
+    Fabric,
+    Rtc,
+}
+
+impl CarrierKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WebSocket => "websocket",
+            Self::Fabric => "fabric",
+            Self::Rtc => "rtc",
+        }
+    }
+}
 
 /// Message-preserving records supplied by local WebSocket, Relay Fabric, or
 /// WebRTC.  No business handler receives these channels directly.
@@ -189,6 +208,8 @@ pub(super) struct ServerStream {
     local_sequence: u32,
     local_bytes: u64,
     expected_local_bytes: Option<u64>,
+    response_status: Option<u16>,
+    diagnostic_operation: Option<String>,
     local_head_sent: bool,
     local_finished: bool,
 }
@@ -260,6 +281,7 @@ impl ServerStream {
             })
             .await?;
         self.expected_local_bytes = head.body_length;
+        self.response_status = Some(head.status);
         self.local_head_sent = true;
         Ok(())
     }
@@ -299,7 +321,7 @@ impl ServerStream {
         Ok(())
     }
 
-    async fn write_message<T: serde::Serialize>(&mut self, message: &T) -> Result<()> {
+    pub(super) async fn write_message<T: serde::Serialize>(&mut self, message: &T) -> Result<()> {
         let body = serde_json::to_vec(message)?;
         let length = u32::try_from(body.len()).context("event message is too large")?;
         let mut wire = Vec::with_capacity(4 + body.len());
@@ -358,6 +380,7 @@ pub(super) struct PeerServices {
     event_sender: mpsc::Sender<ServerFrame>,
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
     subscriptions: tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    carrier_kind: CarrierKind,
 }
 
 /// Serves one already mutually-authenticated peer until its carrier closes.
@@ -366,6 +389,7 @@ pub async fn serve(
     key: SessionKey,
     access: PeerAccess,
     mut carrier: Carrier,
+    carrier_kind: CarrierKind,
 ) -> Result<()> {
     let (writer_tx, writer_rx) = mpsc::channel(WRITER_COMMAND_QUEUE);
     let writer = Writer {
@@ -386,8 +410,22 @@ pub async fn serve(
         event_sender,
         event_receiver: tokio::sync::Mutex::new(Some(event_receiver)),
         subscriptions: tokio::sync::Mutex::new(HashMap::new()),
+        carrier_kind,
     });
 
+    // A terminal is shared across a user's own devices on purpose, but this
+    // fanout reaches every authenticated peer, and a device that was never
+    // granted `pty` must not be sent the terminal anyway. Gating only
+    // `pty.open` would leave the output arriving unasked, which is the half
+    // that matters: a shell shows keystrokes, paths, and whatever the user
+    // pastes into it.
+    //
+    // Decided once, at connection: grants are fixed when a device is paired,
+    // and revoking one drops its connections rather than editing them.
+    let watcher = Principal::of(&state, &access);
+    state
+        .diagnostics
+        .record("stream", "data.endpoint", "online", None);
     let fanout_task = state.fanout.get().map(|fanout| {
         let mut receiver = fanout.subscribe();
         let events = services.event_sender.clone();
@@ -395,6 +433,11 @@ pub async fn serve(
             loop {
                 match receiver.recv().await {
                     Ok(frame) => {
+                        if frame_requires(&frame)
+                            .is_some_and(|capability| !watcher.allows(capability))
+                        {
+                            continue;
+                        }
                         if events.send(frame).await.is_err() {
                             return;
                         }
@@ -469,6 +512,16 @@ pub async fn serve(
     if let Some(device_id) = &access.device_id {
         state.devices.mark_disconnected(device_id);
     }
+    state.diagnostics.record(
+        "stream",
+        "data.endpoint",
+        if outcome.is_ok() { "offline" } else { "error" },
+        if outcome.is_ok() {
+            None
+        } else {
+            Some("carrier")
+        },
+    );
     outcome
 }
 
@@ -559,6 +612,8 @@ fn dispatch(
             local_sequence: 0,
             local_bytes: 0,
             expected_local_bytes: None,
+            response_status: None,
+            diagnostic_operation: None,
             local_head_sent: false,
             local_finished: false,
         };
@@ -653,30 +708,131 @@ fn dispatch(
 }
 
 async fn handle_stream(mut stream: ServerStream, services: Arc<PeerServices>) -> Result<()> {
-    let result = match stream.head.method.as_str() {
-        "rpc" => handle_rpc(&mut stream, &services).await,
-        "events" => handle_events(&mut stream, &services).await,
-        "asset.preview" => crate::dataplane::preview::handle(&mut stream, &services).await,
-        "rtc.negotiate" => crate::dataplane::rtc::handle(&mut stream, &services).await,
-        _ => {
-            send_error(
-                &mut stream,
-                404,
-                ErrorCode::NotFound,
-                "unknown exchange method",
-            )
-            .await
-        }
-    };
+    let started = Instant::now();
+    let request_id = diagnostic_id(&stream.head.metadata);
+    let exchange_method = stream.head.method.clone();
+    let request_bytes = stream.head.body_length;
+    let result = serve_stream(&mut stream, &services).await;
     if result.is_err() {
         stream.reset(RESET_PROTOCOL).await;
     }
+    if exchange_method != "events" {
+        let operation = stream
+            .diagnostic_operation
+            .clone()
+            .unwrap_or_else(|| exchange_method.clone());
+        let status = stream.response_status;
+        let outcome = if result.is_ok() && status.is_some_and(|value| value < 400) {
+            "ok"
+        } else {
+            "error"
+        };
+        let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        if let Some(operation) = support_stream_operation(&exchange_method) {
+            services.state.diagnostics.record(
+                "stream",
+                operation,
+                outcome,
+                support_status_code(status, result.is_err()),
+            );
+        }
+        if outcome == "error" {
+            tracing::warn!(
+                target: "diagnostic",
+                operation,
+                request_id,
+                transport = services.carrier_kind.as_str(),
+                status,
+                duration_ms,
+                request_bytes,
+                response_bytes = stream.local_bytes,
+                "data operation failed"
+            );
+        } else if exchange_method == "asset.preview" || exchange_method == "rtc.negotiate" {
+            tracing::info!(
+                target: "diagnostic",
+                operation,
+                request_id,
+                transport = services.carrier_kind.as_str(),
+                status,
+                duration_ms,
+                request_bytes,
+                response_bytes = stream.local_bytes,
+                "data operation completed"
+            );
+        }
+    }
     result
+}
+
+async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
+    if stream.head.method == "rpc" {
+        // Per-request rather than per-stream: one RPC stream carries one
+        // operation, and they do not all cost the same.
+        return handle_rpc(stream, services).await;
+    }
+    let Some(method) = StreamMethod::parse(&stream.head.method) else {
+        return send_error(stream, 404, ErrorCode::NotFound, "unknown exchange method").await;
+    };
+    let needed = method.required();
+    if !Principal::of(&services.state, &services.access).allows(needed) {
+        services.state.diagnostics.record(
+            "stream",
+            "authorization",
+            "error",
+            Some(needed.as_str()),
+        );
+        return refuse(stream, needed).await;
+    }
+    match method {
+        StreamMethod::Events => handle_events(stream, services).await,
+        StreamMethod::AssetPreview => crate::dataplane::preview::handle(stream, services).await,
+        StreamMethod::ShellRun => crate::dataplane::exec::handle(stream, services).await,
+        StreamMethod::RtcNegotiate => crate::dataplane::rtc::handle(stream, services).await,
+    }
+}
+
+/// What a peer must have been granted to be told this.
+///
+/// Matched by name with no wildcard so that a new frame has to be classified
+/// here before it can be broadcast. Anything unsaid would be broadcast to
+/// every authenticated peer, which is the wrong default for a push: the peer
+/// never asked, so it never had a request for the usual check to refuse.
+fn frame_requires(frame: &ServerFrame) -> Option<Capability> {
+    match frame {
+        ServerFrame::PtyOutput { .. } | ServerFrame::PtyClosed { .. } => Some(Capability::Pty),
+        // Command lines of what an agent ran. The same material as the tool
+        // calls in a timeline, and gated the same way.
+        ServerFrame::BackgroundProcesses { .. } => Some(Capability::Session),
+        ServerFrame::Event { .. }
+        | ServerFrame::Desync { .. }
+        | ServerFrame::Notice { .. }
+        | ServerFrame::UpdateDownloadChanged { .. } => None,
+    }
+}
+
+/// The one wording for "you are authenticated, and this is still not yours".
+///
+/// It names the missing capability rather than the request, so that a caller
+/// that was narrowed on purpose can tell that apart from a request it got
+/// wrong, and ask for the right invitation instead of retrying.
+async fn refuse(stream: &mut ServerStream, needed: Capability) -> Result<()> {
+    send_error(
+        stream,
+        403,
+        ErrorCode::Forbidden,
+        format!(
+            "this device was not granted `{}` on this machine",
+            needed.as_str()
+        ),
+    )
+    .await
 }
 
 async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     let body = stream.read_body(MAX_RPC_BODY_BYTES).await?;
     let request: Request = serde_json::from_slice(&body).context("invalid RPC operation body")?;
+    stream.diagnostic_operation = diagnostic_operation(&stream.head.metadata);
     if let Some(scope) = &services.access.workspace_id {
         if let Some(requested) = request_workspace(&request) {
             if requested != scope {
@@ -734,7 +890,21 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         .await;
     }
 
-    let handled = router::handle(&services.state, services.access.transport, request).await;
+    // Resolved once and carried into the router: a request that decides what
+    // to enforce on a spawned process must be looking at the same caller the
+    // gate just admitted, not at a second lookup that could disagree with it.
+    let caller = Principal::of(&services.state, &services.access);
+    let needed = authz::required(&request);
+    if !caller.allows(needed) {
+        services
+            .state
+            .diagnostics
+            .record("rpc", "authorization", "error", Some(needed.as_str()));
+        return refuse(stream, needed).await;
+    }
+
+    let handled =
+        router::handle(&services.state, services.access.transport, &caller, request).await;
     match handled.reply {
         Ok(reply) => {
             send_reply(stream, reply).await?;
@@ -742,6 +912,55 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
             Ok(())
         }
         Err(error) => send_protocol_error(stream, error).await,
+    }
+}
+
+fn diagnostic_id(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("diagnosticId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 96
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+        .map(str::to_string)
+}
+
+fn diagnostic_operation(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+        .map(str::to_string)
+}
+
+fn support_stream_operation(method: &str) -> Option<&'static str> {
+    match method {
+        "asset.preview" => Some("asset.preview"),
+        "rtc.negotiate" => Some("rtc.negotiate"),
+        "shell.run" => Some("shell.run"),
+        _ => None,
+    }
+}
+
+fn support_status_code(status: Option<u16>, transport_error: bool) -> Option<&'static str> {
+    if transport_error {
+        Some("transport")
+    } else {
+        match status {
+            Some(400..=499) => Some("clientError"),
+            Some(500..=599) => Some("serverError"),
+            _ => None,
+        }
     }
 }
 
@@ -769,6 +988,10 @@ async fn send_protocol_error(stream: &mut ServerStream, error: ProtocolError) ->
         ErrorCode::Unsupported => 422,
         ErrorCode::ProtocolVersion => 426,
         ErrorCode::Internal => 500,
+        // Not 403: the caller is allowed, the machine is unable. Retrying with
+        // a wider grant would not help, and neither would retrying at all
+        // until this machine gains a backend.
+        ErrorCode::IsolationUnavailable => 501,
     };
     stream
         .respond(&ExchangeResponseHead {
@@ -878,6 +1101,10 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::SessionImport { workspace_id, .. }
         | Request::FileTree { workspace_id, .. }
         | Request::FileWrite { workspace_id, .. }
+        | Request::FileMkdir { workspace_id, .. }
+        | Request::FileCopy { workspace_id, .. }
+        | Request::FileMove { workspace_id, .. }
+        | Request::FileDelete { workspace_id, .. }
         | Request::GitStatus { workspace_id }
         | Request::GitDiff { workspace_id, .. }
         | Request::GitCommit { workspace_id, .. }
@@ -999,5 +1226,17 @@ mod tests {
         enqueue_writer(command(3), &mut queues, &mut runnable);
         enqueue_writer(command(1), &mut queues, &mut runnable);
         assert_eq!(runnable, VecDeque::from([1, 3]));
+    }
+
+    #[test]
+    fn diagnostic_metadata_accepts_only_bounded_opaque_labels() {
+        assert_eq!(
+            diagnostic_operation(&serde_json::json!({ "operation": "file.tree" })).as_deref(),
+            Some("file.tree")
+        );
+        assert_eq!(
+            diagnostic_operation(&serde_json::json!({ "operation": "settings/get?token=x" })),
+            None
+        );
     }
 }

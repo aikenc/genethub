@@ -322,6 +322,126 @@ pub fn write(root: &Path, path: &Path, content: &str) -> Result<()> {
         .with_context(|| format!("writing {}", relative.display()))
 }
 
+/// Creates a directory (and missing parents) inside the workspace capability.
+pub fn mkdir(root: &Path, path: &Path) -> Result<()> {
+    let directory = workspace_dir(root)?;
+    let relative = workspace_relative(root, path)?;
+    if relative.as_os_str().is_empty() {
+        anyhow::bail!("cannot create the workspace root");
+    }
+    if entry_exists(&directory, &relative)? {
+        anyhow::bail!("{} already exists", relative.display());
+    }
+    directory
+        .create_dir_all(&relative)
+        .with_context(|| format!("creating {}", relative.display()))
+}
+
+/// Deletes a file or directory tree inside the workspace capability.
+pub fn delete_path(root: &Path, path: &Path) -> Result<()> {
+    let directory = workspace_dir(root)?;
+    let relative = workspace_relative(root, path)?;
+    if relative.as_os_str().is_empty() {
+        anyhow::bail!("cannot delete the workspace root");
+    }
+    let metadata = directory
+        .symlink_metadata(&relative)
+        .with_context(|| format!("reading {}", relative.display()))?;
+    if metadata.is_dir() {
+        directory
+            .remove_dir_all(&relative)
+            .with_context(|| format!("deleting {}", relative.display()))
+    } else {
+        directory
+            .remove_file(&relative)
+            .with_context(|| format!("deleting {}", relative.display()))
+    }
+}
+
+/// Moves or renames a path inside the same workspace root.
+pub fn move_path(root: &Path, from: &Path, to: &Path) -> Result<()> {
+    let directory = workspace_dir(root)?;
+    let from_rel = workspace_relative(root, from)?;
+    let to_rel = workspace_relative(root, to)?;
+    validate_transfer(&from_rel, &to_rel)?;
+    if entry_exists(&directory, &to_rel)? {
+        anyhow::bail!("{} already exists", to_rel.display());
+    }
+    if let Some(parent) = to_rel.parent() {
+        if !parent.as_os_str().is_empty() {
+            directory.create_dir_all(parent)?;
+        }
+    }
+    directory
+        .rename(&from_rel, &directory, &to_rel)
+        .with_context(|| format!("moving {} → {}", from_rel.display(), to_rel.display()))
+}
+
+/// Copies a file or directory tree inside the same workspace root.
+pub fn copy_path(root: &Path, from: &Path, to: &Path) -> Result<()> {
+    let directory = workspace_dir(root)?;
+    let from_rel = workspace_relative(root, from)?;
+    let to_rel = workspace_relative(root, to)?;
+    validate_transfer(&from_rel, &to_rel)?;
+    if entry_exists(&directory, &to_rel)? {
+        anyhow::bail!("{} already exists", to_rel.display());
+    }
+    copy_recursive(&directory, &from_rel, &to_rel)
+}
+
+fn validate_transfer(from: &Path, to: &Path) -> Result<()> {
+    if from.as_os_str().is_empty() || to.as_os_str().is_empty() {
+        anyhow::bail!("cannot transfer the workspace root");
+    }
+    if to == from || to.starts_with(from) {
+        anyhow::bail!("cannot place a path inside itself");
+    }
+    Ok(())
+}
+
+fn entry_exists(directory: &Dir, relative: &Path) -> Result<bool> {
+    match directory.symlink_metadata(relative) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("reading {}", relative.display())),
+    }
+}
+
+fn copy_recursive(directory: &Dir, from: &Path, to: &Path) -> Result<()> {
+    let metadata = directory
+        .symlink_metadata(from)
+        .with_context(|| format!("reading {}", from.display()))?;
+    if metadata.is_symlink() {
+        anyhow::bail!("refusing to copy a symbolic link: {}", from.display());
+    }
+    if metadata.is_file() {
+        if let Some(parent) = to.parent() {
+            if !parent.as_os_str().is_empty() {
+                directory.create_dir_all(parent)?;
+            }
+        }
+        directory
+            .copy(from, directory, to)
+            .with_context(|| format!("copying {} → {}", from.display(), to.display()))?;
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        directory
+            .create_dir_all(to)
+            .with_context(|| format!("creating {}", to.display()))?;
+        for entry in directory
+            .read_dir(from)
+            .with_context(|| format!("listing {}", from.display()))?
+            .flatten()
+        {
+            let name = entry.file_name();
+            copy_recursive(directory, &from.join(&name), &to.join(&name))?;
+        }
+        return Ok(());
+    }
+    anyhow::bail!("unsupported file type: {}", from.display())
+}
+
 /// Opens the registered workspace as a directory capability.
 ///
 /// All later lookups are relative to the opened handle. `cap-std` resolves
@@ -425,6 +545,40 @@ mod tests {
         let path = dir.path().join("a/b/c.txt");
         write(dir.path(), &path, "hi").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hi");
+    }
+
+    #[test]
+    fn mkdir_copy_move_and_delete_stay_inside_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        mkdir(dir.path(), &dir.path().join("src/assets")).unwrap();
+        std::fs::write(dir.path().join("src/assets/note.txt"), "keep").unwrap();
+
+        copy_path(
+            dir.path(),
+            &dir.path().join("src/assets"),
+            &dir.path().join("src/assets-copy"),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/assets-copy/note.txt")).unwrap(),
+            "keep"
+        );
+
+        move_path(
+            dir.path(),
+            &dir.path().join("src/assets-copy"),
+            &dir.path().join("media"),
+        )
+        .unwrap();
+        assert!(!dir.path().join("src/assets-copy").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("media/note.txt")).unwrap(),
+            "keep"
+        );
+
+        delete_path(dir.path(), &dir.path().join("media")).unwrap();
+        assert!(!dir.path().join("media").exists());
+        assert!(dir.path().join("src/assets/note.txt").exists());
     }
 
     #[test]

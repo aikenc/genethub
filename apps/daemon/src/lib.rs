@@ -4,17 +4,22 @@
 //! real daemon in-process instead of asserting against a mock of one.
 
 pub mod adapter;
+pub mod authz;
 pub mod channel;
 pub mod channel_auth;
 pub mod config;
 pub mod dataplane;
 pub mod devices;
+pub mod diagnostics;
 pub mod files;
 pub mod git;
 pub mod hub;
+pub mod isolation;
 pub mod lifecycle;
 pub mod link;
 pub mod logs;
+pub mod process;
+pub mod processes;
 pub mod provider;
 pub mod pty;
 pub mod remote;
@@ -40,11 +45,15 @@ pub struct Daemon {
 impl Daemon {
     pub async fn start(paths: config::Paths) -> Result<Self> {
         let (state, pty_rx) = AppState::build(paths).await?;
+        state
+            .diagnostics
+            .record("daemon", "lifecycle", "started", None);
         let pty = transport::local::pty_fanout(pty_rx);
         // The same channel every client already listens on, handed to the state
         // so anything the machine wants to volunteer — download progress, for
         // one — reaches them without a second bus to subscribe to.
         let _ = state.fanout.set(pty.clone());
+        state.processes.announce_to(pty.clone());
         let listener = transport::local::serve(state.clone(), pty.clone()).await?;
         state.publish_endpoint(listener.port)?;
 

@@ -80,13 +80,46 @@ fn failed(error: anyhow::Error) -> Handled {
     } else {
         ErrorCode::Internal
     };
+    // Default filter is info; warn keeps the sentence the client already saw in
+    // daemon.log so a feedback pull of log.tail can explain the same failure.
+    tracing::warn!(?code, error = %message, "rpc failed");
     Handled {
         reply: Err(ProtocolError { code, message }),
         effect: SideEffect::None,
     }
 }
 
-pub async fn handle(state: &Shared, transport: TransportKind, request: Request) -> Handled {
+/// Handles one request on behalf of `caller`.
+///
+/// The caller is passed in rather than re-derived here because the gate above
+/// has already resolved it, and two answers to "who is this" is one too many.
+/// Most requests only need to have passed that gate; the ones that start a
+/// process need to know *which* caller, because what the operating system is
+/// asked to enforce on it depends on the answer.
+pub async fn handle(
+    state: &Shared,
+    transport: TransportKind,
+    caller: &crate::authz::Principal,
+    request: Request,
+) -> Handled {
+    let operation = diagnostic_operation(&request);
+    let handled = dispatch(state, transport, caller, request).await;
+    if let Some(operation) = operation {
+        let (outcome, code) = match &handled.reply {
+            Ok(_) => ("ok", None),
+            Err(error) => ("error", Some(error_code_name(error.code))),
+        };
+        state.diagnostics.record("rpc", operation, outcome, code);
+    }
+    handled
+}
+
+async fn dispatch(
+    state: &Shared,
+    transport: TransportKind,
+    caller: &crate::authz::Principal,
+    request: Request,
+) -> Handled {
     match request {
         Request::ConnectionIdentity => Handled::ok(Reply::Hello(HelloResult {
             daemon_version: state.version.clone(),
@@ -96,6 +129,7 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             transport,
             machine_name: crate::link::default_display_name(),
             rtc_supported: true,
+            isolation: Some(crate::isolation::report()),
         })),
 
         Request::Subscribe {
@@ -142,21 +176,38 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             model_id,
             mode_id,
             title,
+            cwd,
         } => {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
+            let start_in = match cwd {
+                // Any of the workspace's folders, not only the first: a
+                // multi-folder workspace is one project, and a task started in
+                // its second folder is not a different workspace.
+                Some(cwd) => {
+                    let candidate = std::path::Path::new(&cwd);
+                    match workspace
+                        .folders
+                        .iter()
+                        .find_map(|folder| {
+                            crate::session::store::ensure_within(&folder.root, candidate).ok()
+                        })
+                        .or_else(|| {
+                            crate::session::store::ensure_within(&workspace.root, candidate).ok()
+                        }) {
+                        Some(resolved) => resolved,
+                        // Refusing beats clamping to the root: a task quietly
+                        // run in the wrong directory looks like it worked.
+                        None => return failed(anyhow::anyhow!("cwd {cwd} escapes the workspace")),
+                    }
+                }
+                None => workspace.root,
+            };
             match state
                 .sessions
-                .create(
-                    &workspace_id,
-                    workspace.root,
-                    &agent_id,
-                    model_id,
-                    mode_id,
-                    title,
-                )
+                .create(&workspace_id, start_in, &agent_id, model_id, mode_id, title)
                 .await
             {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
@@ -489,6 +540,19 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             }
         }
 
+        Request::DiagnosticsSnapshot => {
+            let hub = match state.link.get() {
+                Some(link) => link.status().await,
+                None => genehub_proto::HubStatus::Unpaired,
+            };
+            let remote = remote_status(state).await;
+            Handled::ok(Reply::Diagnostics(state.diagnostics.snapshot(
+                &state.version,
+                &hub,
+                &remote,
+            )))
+        }
+
         Request::UpdateCheck => automatic_update_refusal(),
 
         Request::UpdateDownload => automatic_update_refusal(),
@@ -603,8 +667,29 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             remote: remote_status(state).await,
         }),
 
-        Request::DeviceInvite => {
-            let mut invite = state.devices.invite();
+        Request::DeviceInvite(scope) => {
+            let grants = match scope {
+                None => crate::authz::GrantSet::full(),
+                Some(scope) => {
+                    let mut named = Vec::with_capacity(scope.grants.len());
+                    for raw in &scope.grants {
+                        match crate::authz::Capability::parse(raw) {
+                            Some(capability) => named.push(capability),
+                            // Refused rather than dropped: an invitation minted
+                            // from a misspelled grant would silently be worth
+                            // less than whoever sent it believes.
+                            None => {
+                                return Handled::err(
+                                    ErrorCode::BadRequest,
+                                    format!("unknown grant `{raw}`"),
+                                )
+                            }
+                        }
+                    }
+                    crate::authz::GrantSet::of(named)
+                }
+            };
+            let mut invite = state.devices.invite_with(grants);
             invite.rendezvous_url = remote_status(state).await.rendezvous_url;
             Handled::ok(Reply::Invite(invite))
         }
@@ -709,6 +794,16 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             }
         }
 
+        Request::DirectoryMkdir { parent, name } => {
+            match crate::workspace::mkdir_directory(Path::new(&parent), &name) {
+                Ok(listing) => {
+                    tracing::info!(%parent, %name, "directory.mkdir");
+                    Handled::ok(Reply::Directory(listing))
+                }
+                Err(error) => failed(error),
+            }
+        }
+
         Request::FileTree {
             workspace_id,
             path,
@@ -737,6 +832,105 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
+        }
+
+        Request::FileMkdir { workspace_id, path } => {
+            let target = match state.workspaces.resolve(&workspace_id, &path).await {
+                Ok(target) => target,
+                Err(error) => return failed(error),
+            };
+            match files::mkdir(&target.root, &target.absolute) {
+                Ok(()) => {
+                    tracing::info!(%workspace_id, %path, "file.mkdir");
+                    Handled::ok(Reply::Ack)
+                }
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::FileCopy {
+            workspace_id,
+            from,
+            to,
+        } => {
+            let source = match state.workspaces.resolve(&workspace_id, &from).await {
+                Ok(source) => source,
+                Err(error) => return failed(error),
+            };
+            let destination = match state.workspaces.resolve(&workspace_id, &to).await {
+                Ok(destination) => destination,
+                Err(error) => return failed(error),
+            };
+            if source.root_handle != destination.root_handle {
+                tracing::warn!(
+                    %workspace_id,
+                    %from,
+                    %to,
+                    "file.copy refused: must stay inside the same workspace root"
+                );
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "copy must stay inside the same workspace root",
+                );
+            }
+            match files::copy_path(&source.root, &source.absolute, &destination.absolute) {
+                Ok(()) => {
+                    tracing::info!(%workspace_id, %from, %to, "file.copy");
+                    Handled::ok(Reply::Ack)
+                }
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::FileMove {
+            workspace_id,
+            from,
+            to,
+        } => {
+            let source = match state.workspaces.resolve(&workspace_id, &from).await {
+                Ok(source) => source,
+                Err(error) => return failed(error),
+            };
+            let destination = match state.workspaces.resolve(&workspace_id, &to).await {
+                Ok(destination) => destination,
+                Err(error) => return failed(error),
+            };
+            if source.root_handle != destination.root_handle {
+                tracing::warn!(
+                    %workspace_id,
+                    %from,
+                    %to,
+                    "file.move refused: must stay inside the same workspace root"
+                );
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "move must stay inside the same workspace root",
+                );
+            }
+            match files::move_path(&source.root, &source.absolute, &destination.absolute) {
+                Ok(()) => {
+                    tracing::info!(%workspace_id, %from, %to, "file.move");
+                    Handled::ok(Reply::Ack)
+                }
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::FileDelete {
+            workspace_id,
+            paths,
+        } => {
+            for path in &paths {
+                let target = match state.workspaces.resolve(&workspace_id, path).await {
+                    Ok(target) => target,
+                    Err(error) => return failed(error),
+                };
+                if let Err(error) = files::delete_path(&target.root, &target.absolute) {
+                    return failed(error);
+                }
+            }
+            tracing::info!(%workspace_id, count = paths.len(), "file.delete");
+            Handled::ok(Reply::Ack)
         }
 
         Request::GitStatus { workspace_id } => {
@@ -785,9 +979,18 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
+            let confinement = match crate::isolation::required_for(caller, &workspace) {
+                Ok(confinement) => confinement,
+                Err(refusal) => return Handled::err(ErrorCode::IsolationUnavailable, refusal),
+            };
             match state
                 .terminals
-                .open(&workspace.root, cols.unwrap_or(80), rows.unwrap_or(24))
+                .open(
+                    &workspace.root,
+                    cols.unwrap_or(80),
+                    rows.unwrap_or(24),
+                    confinement,
+                )
                 .await
             {
                 Ok(pty_id) => Handled::ok(Reply::Pty { pty_id }),
@@ -811,6 +1014,88 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             Ok(()) => Handled::ok(Reply::Ack),
             Err(error) => failed(error),
         },
+
+        Request::ProcessList => Handled::ok(Reply::Processes(state.processes.list().await)),
+        Request::ProcessKill { session_id, pid } => {
+            match state.processes.stop(&session_id, pid).await {
+                crate::processes::Stopped::Yes => Handled::ok(Reply::Ack),
+                // One answer for "no such session" and for "not that
+                // session's", so that a caller who guessed a pid learns only
+                // that the guess was refused.
+                crate::processes::Stopped::NotThisSession => Handled::err(
+                    ErrorCode::NotFound,
+                    format!("no process {pid} belongs to {session_id}"),
+                ),
+                crate::processes::Stopped::Unknown => Handled::err(
+                    ErrorCode::Internal,
+                    "this machine could not be asked what is running",
+                ),
+            }
+        }
+        Request::ProcessKillAll { session_id } => {
+            state.processes.stop_all(&session_id).await;
+            Handled::ok(Reply::Ack)
+        }
+    }
+}
+
+/// Only operations useful during support triage enter the automatic record.
+/// Payload values are deliberately ignored; names are compile-time constants.
+fn diagnostic_operation(request: &Request) -> Option<&'static str> {
+    match request {
+        Request::AgentRefresh => Some("agent.refresh"),
+        Request::SessionCreate { .. } => Some("session.create"),
+        Request::SessionSend { .. } => Some("session.send"),
+        Request::SessionFork { .. } => Some("session.fork"),
+        Request::SessionImport { .. } => Some("session.import"),
+        Request::SessionInterrupt { .. } => Some("session.interrupt"),
+        Request::SessionDelete { .. } => Some("session.delete"),
+        Request::SessionRespondPermission { .. } => Some("session.respondPermission"),
+        Request::SettingsSetProvider { .. } => Some("settings.setProvider"),
+        Request::SettingsForgetProvider { .. } => Some("settings.forgetProvider"),
+        Request::HubPair { .. } => Some("hub.pair"),
+        Request::HubTrial { .. } => Some("hub.trial"),
+        Request::HubClaimLink => Some("hub.claimLink"),
+        Request::HubConnect { .. } => Some("hub.connect"),
+        Request::HubUnpair => Some("hub.unpair"),
+        Request::DeviceInvite(..) => Some("device.invite"),
+        Request::DeviceClaim { .. } => Some("device.claim"),
+        Request::DeviceRevoke { .. } => Some("device.revoke"),
+        Request::DeviceRemoteAttach { .. } => Some("device.remoteAttach"),
+        Request::DeviceRemoteDetach => Some("device.remoteDetach"),
+        Request::WorkspaceOpen { .. } => Some("workspace.open"),
+        Request::WorkspaceCreate { .. } => Some("workspace.create"),
+        Request::WorkspaceRename { .. } => Some("workspace.rename"),
+        Request::WorkspaceRemove { .. } => Some("workspace.remove"),
+        Request::DirectoryList { .. } => Some("directory.list"),
+        Request::DirectoryMkdir { .. } => Some("directory.mkdir"),
+        Request::FileTree { .. } => Some("file.tree"),
+        Request::FileWrite { .. } => Some("file.write"),
+        Request::FileMkdir { .. } => Some("file.mkdir"),
+        Request::FileCopy { .. } => Some("file.copy"),
+        Request::FileMove { .. } => Some("file.move"),
+        Request::FileDelete { .. } => Some("file.delete"),
+        Request::GitStatus { .. } => Some("git.status"),
+        Request::GitDiff { .. } => Some("git.diff"),
+        Request::GitCommit { .. } => Some("git.commit"),
+        Request::PtyOpen { .. } => Some("pty.open"),
+        Request::PtyResize { .. } => Some("pty.resize"),
+        Request::PtyClose { .. } => Some("pty.close"),
+        _ => None,
+    }
+}
+
+fn error_code_name(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::BadRequest => "badRequest",
+        ErrorCode::Unauthorized => "unauthorized",
+        ErrorCode::NotFound => "notFound",
+        ErrorCode::Conflict => "conflict",
+        ErrorCode::Unsupported => "unsupported",
+        ErrorCode::Forbidden => "forbidden",
+        ErrorCode::Internal => "internal",
+        ErrorCode::ProtocolVersion => "protocolVersion",
+        ErrorCode::IsolationUnavailable => "isolationUnavailable",
     }
 }
 

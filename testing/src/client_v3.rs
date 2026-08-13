@@ -103,6 +103,26 @@ impl Client {
             let _ = endpoint_task.await;
         });
 
+        let (events_rx, pty_rx, notice_rx, event_reader) = Self::read_events(&endpoint).await?;
+
+        Ok(Self {
+            endpoint,
+            events: Mutex::new(events_rx),
+            pty: Mutex::new(pty_rx),
+            notices: Mutex::new(notice_rx),
+            tasks: vec![writer, reader, endpoint_monitor, event_reader],
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn read_events(
+        endpoint: &ClientEndpoint,
+    ) -> Result<(
+        mpsc::UnboundedReceiver<SequencedEvent>,
+        mpsc::UnboundedReceiver<(String, String)>,
+        mpsc::UnboundedReceiver<String>,
+        tokio::task::JoinHandle<()>,
+    )> {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (pty_tx, pty_rx) = mpsc::unbounded_channel();
         let (notice_tx, notice_rx) = mpsc::unbounded_channel();
@@ -146,7 +166,8 @@ impl Client {
                         ServerFrame::Notice { message, .. } => {
                             let _ = notice_tx.send(message);
                         }
-                        ServerFrame::UpdateDownloadChanged { .. } => {}
+                        ServerFrame::UpdateDownloadChanged { .. }
+                        | ServerFrame::BackgroundProcesses { .. } => {}
                         ServerFrame::Desync { session_id, missed } => {
                             panic!("the daemon dropped {missed} events for {session_id}");
                         }
@@ -154,13 +175,137 @@ impl Client {
                 }
             }
         });
+        Ok((events_rx, pty_rx, notice_rx, event_reader))
+    }
 
+    /// Connects as a paired device, over the same peer code path a relay would
+    /// carry but without one in the way.
+    ///
+    /// The carrier is the only thing simulated. The handshake, the device
+    /// authentication, the grant gate and the event fanout are the daemon's
+    /// own, which is the whole point: a test that stubbed those would prove
+    /// something about the stub.
+    pub async fn connect_as_device(
+        daemon: &genet_daemon::Daemon,
+        credential: &genehub_proto::DeviceCredential,
+    ) -> Result<Self> {
+        let nonce = challenge();
+        let context = genet_daemon::channel_auth::device_context(&credential.device_id);
+        let hello = PeerHello {
+            version: genehub_proto::DATA_PLANE_VERSION,
+            client_name: "genehub-testing-device".into(),
+            auth: PeerAuth::Device {
+                device_id: credential.device_id.clone(),
+                nonce: nonce.clone(),
+                proof: genet_daemon::channel_auth::client_proof(
+                    &credential.secret,
+                    &context,
+                    &nonce,
+                ),
+            },
+            rtc_supported: false,
+        };
+        Self::over_carrier(daemon, hello, &credential.secret, &context, &nonce).await
+    }
+
+    /// Connects with a pairing invitation, the way a device that owns nothing
+    /// yet has to start.
+    pub async fn connect_with_invite(
+        daemon: &genet_daemon::Daemon,
+        code: &str,
+    ) -> Result<(Self, String)> {
+        let (invite_id, secret) = code
+            .split_once('.')
+            .ok_or_else(|| anyhow!("a pairing code is `<inviteId>.<secret>`"))?;
+        let nonce = challenge();
+        let context = format!("invite:{invite_id}");
+        let hello = PeerHello {
+            version: genehub_proto::DATA_PLANE_VERSION,
+            client_name: "genehub-testing-invite".into(),
+            auth: PeerAuth::Invite {
+                invite_id: invite_id.to_string(),
+                nonce: nonce.clone(),
+                proof: genet_daemon::channel_auth::client_proof(secret, &context, &nonce),
+            },
+            rtc_supported: false,
+        };
+        let client = Self::over_carrier(daemon, hello, secret, &context, &nonce).await?;
+        Ok((client, invite_id.to_string()))
+    }
+
+    async fn over_carrier(
+        daemon: &genet_daemon::Daemon,
+        hello: PeerHello,
+        secret: &str,
+        context: &str,
+        nonce: &str,
+    ) -> Result<Self> {
+        let accepted = genet_daemon::dataplane::handshake::accept(
+            &daemon.state,
+            genehub_proto::TransportKind::Forwarded,
+            genet_daemon::transport::admission::Admission::DeviceRequired,
+            &serde_json::to_vec(&hello)?,
+            None,
+            None,
+        )?;
+        genet_daemon::channel_auth::verify_proof(
+            &genet_daemon::channel_auth::server_proof(
+                secret,
+                context,
+                nonce,
+                &accepted.welcome.server_nonce,
+            ),
+            &accepted.welcome.proof,
+        )?;
+        let key = genet_daemon::channel_auth::derive_key(
+            secret,
+            context,
+            nonce,
+            &accepted.welcome.server_nonce,
+        );
+
+        let (to_client, mut from_daemon, daemon_carrier) =
+            genet_daemon::dataplane::endpoint::carrier_channels();
+        let (to_daemon, mut from_client, client_carrier) =
+            genet_daemon::dataplane::endpoint::carrier_channels();
+        let state = daemon.state.clone();
+        let access = accepted.access.clone();
+        let daemon_key = key.clone();
+        let peer = tokio::spawn(async move {
+            let _ = genet_daemon::dataplane::endpoint::serve(
+                state,
+                daemon_key,
+                access,
+                daemon_carrier,
+                genet_daemon::dataplane::endpoint::CarrierKind::Fabric,
+            )
+            .await;
+        });
+        let uplink = tokio::spawn(async move {
+            while let Some(record) = from_client.recv().await {
+                if to_client.send(record).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let downlink = tokio::spawn(async move {
+            while let Some(record) = from_daemon.recv().await {
+                if to_daemon.send(record).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let (endpoint, endpoint_task) = ClientEndpoint::start(key, client_carrier);
+        let endpoint_monitor = tokio::spawn(async move {
+            let _ = endpoint_task.await;
+        });
+        let (events_rx, pty_rx, notice_rx, event_reader) = Self::read_events(&endpoint).await?;
         Ok(Self {
             endpoint,
             events: Mutex::new(events_rx),
             pty: Mutex::new(pty_rx),
             notices: Mutex::new(notice_rx),
-            tasks: vec![writer, reader, endpoint_monitor, event_reader],
+            tasks: vec![peer, uplink, downlink, endpoint_monitor, event_reader],
         })
     }
 
@@ -179,6 +324,89 @@ impl Client {
             bail!("daemon returned status {}", response.head.status);
         }
         Ok(serde_json::from_slice(&response.body)?)
+    }
+
+    /// Asks for a file's bytes the way the workbench does: a stream of its own,
+    /// not an rpc. Returns the whole response head, because a refusal by the
+    /// gate and a refusal by the preview itself share a status code and differ
+    /// only in what they say.
+    pub async fn preview(
+        &self,
+        workspace_id: &str,
+        path: &str,
+    ) -> Result<(genehub_proto::ExchangeResponseHead, Vec<u8>)> {
+        let response = tokio::time::timeout(
+            WAIT_TIMEOUT,
+            self.endpoint.exchange(
+                "asset.preview",
+                serde_json::json!({
+                    "source": { "kind": "workspaceFile", "workspaceHandle": workspace_id, "path": path }
+                }),
+                Vec::new(),
+                None,
+            ),
+        )
+        .await
+        .context("timed out waiting for a preview")??;
+        Ok((response.head, response.body))
+    }
+
+    /// Runs a command and collects everything it produced.
+    ///
+    /// Returns the response head beside the frames, because a refusal arrives
+    /// there and a caller has to be able to tell "this machine would not run
+    /// it" from "it ran and printed nothing".
+    pub async fn run_command(
+        &self,
+        request: genehub_proto::ShellRunRequest,
+    ) -> Result<(
+        genehub_proto::ExchangeResponseHead,
+        Vec<genehub_proto::ShellFrame>,
+    )> {
+        self.run_command_with_input(request, Vec::new()).await
+    }
+
+    /// The body is the command's standard input.
+    pub async fn run_command_with_input(
+        &self,
+        request: genehub_proto::ShellRunRequest,
+        stdin: Vec<u8>,
+    ) -> Result<(
+        genehub_proto::ExchangeResponseHead,
+        Vec<genehub_proto::ShellFrame>,
+    )> {
+        let mut stream = self
+            .endpoint
+            .open_stream("shell.run", serde_json::to_value(&request)?, stdin, None)
+            .await?;
+        let head = tokio::time::timeout(WAIT_TIMEOUT, stream.response_head())
+            .await
+            .context("timed out waiting for the command to start")??;
+        let mut frames = Vec::new();
+        if head.status != 200 {
+            return Ok((head, frames));
+        }
+        let mut buffered = Vec::<u8>::new();
+        loop {
+            while buffered.len() >= 4 {
+                let length = u32::from_be_bytes(buffered[..4].try_into().unwrap()) as usize;
+                if buffered.len() < 4 + length {
+                    break;
+                }
+                frames.push(serde_json::from_slice(&buffered[4..4 + length])?);
+                buffered.drain(..4 + length);
+            }
+            if matches!(frames.last(), Some(genehub_proto::ShellFrame::Exit { .. })) {
+                return Ok((head, frames));
+            }
+            match tokio::time::timeout(WAIT_TIMEOUT, stream.next_chunk()).await? {
+                Some(Ok(chunk)) => buffered.extend_from_slice(&chunk),
+                Some(Err(error)) => return Err(error),
+                // No exit frame and nothing more coming: the caller needs to
+                // see that as different from a command that finished.
+                None => return Ok((head, frames)),
+            }
+        }
     }
 
     pub async fn expect_error(&self, request: Request) -> String {
@@ -362,6 +590,11 @@ impl Client {
             task.abort();
         }
     }
+}
+
+/// The 16 random bytes a peer challenge has to be, in lowercase hexadecimal.
+fn challenge() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 pub trait EventsExt {

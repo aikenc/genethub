@@ -122,7 +122,7 @@ export class FakeSocket implements WebSocketLike {
     secret = this.options.secret ?? TEST_PEER_SECRET,
     identity: Partial<HelloResult> = {},
   ): void {
-    void this.accept(secret, identity);
+    this.background(this.accept(secret, identity));
   }
 
   /** Answers an RPC captured by `lastOf`. */
@@ -130,19 +130,21 @@ export class FakeSocket implements WebSocketLike {
     const bytes = payload === undefined
       ? new Uint8Array()
       : new TextEncoder().encode(JSON.stringify(payload));
-    void this.respond(id, { status: 200, metadata: null }, bytes);
+    this.background(this.respond(id, { status: 200, metadata: null }, bytes));
   }
 
   /** Returns a protocol error on one captured logical stream. */
   fail(id: string, code = "internal", message = "nope"): void {
-    void this.respond(
-      id,
-      {
-        status: code === "unauthorized" ? 401 : 400,
-        metadata: null,
-        error: { code: code as ProtocolError["code"], message },
-      },
-      new Uint8Array(),
+    this.background(
+      this.respond(
+        id,
+        {
+          status: code === "unauthorized" ? 401 : 400,
+          metadata: null,
+          error: { code: code as ProtocolError["code"], message },
+        },
+        new Uint8Array(),
+      ),
     );
   }
 
@@ -153,10 +155,12 @@ export class FakeSocket implements WebSocketLike {
     metadata: unknown,
     bytes: Uint8Array = new Uint8Array(),
   ): void {
-    void this.respond(
-      id,
-      { status, metadata: metadata as never, bodyLength: bytes.byteLength },
-      bytes,
+    this.background(
+      this.respond(
+        id,
+        { status, metadata: metadata as never, bodyLength: bytes.byteLength },
+        bytes,
+      ),
     );
   }
 
@@ -173,7 +177,7 @@ export class FakeSocket implements WebSocketLike {
     const packet = new Uint8Array(4 + body.byteLength);
     new DataView(packet.buffer).setUint32(0, body.byteLength, false);
     packet.set(body, 4);
-    void stream.write(packet);
+    this.background(stream.write(packet));
   }
 
   /** The last business request or exchange of a given type. */
@@ -304,6 +308,21 @@ export class FakeSocket implements WebSocketLike {
     });
     if (bytes.byteLength > 0) await stream.write(bytes);
     await stream.finish();
+  }
+
+  /**
+   * Public fake-peer controls stay synchronous for tests, while their real
+   * encrypted writes are asynchronous. Closing the carrier in the same turn
+   * legitimately rejects an in-flight write; consume only that shutdown race
+   * and keep every error from a live fake peer visible to Vitest.
+   */
+  private background(task: Promise<void>): void {
+    void task.catch((error) => {
+      if (this.closed) return;
+      queueMicrotask(() => {
+        throw error;
+      });
+    });
   }
 }
 

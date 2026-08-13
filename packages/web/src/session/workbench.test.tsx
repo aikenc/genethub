@@ -419,6 +419,65 @@ describe("what the user sees in a session", () => {
     expect(within(trunks[1]!).getByRole("button")).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("keeps streaming progress headers on one line as their text grows", () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    const batch = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 1,
+      text: "正在核对信息面板",
+    };
+    const progress = (title: string, monologue: string) => {
+      const summary = {
+        index: 0,
+        firstItemId: "a1",
+        blobCount: 1,
+        title,
+        batches: [batch],
+      };
+      return showRounds(
+        apply(emptyTimeline(), {
+          type: "item",
+          turnId: "t1",
+          item: { type: "userMessage", id: "u1", text: "继续", attachments: [] },
+        }),
+        {
+          rounds: [round],
+          roundLayers: { r1: { round, trunks: [summary] } },
+          roundTrunks: {
+            "r1:0": {
+              summary,
+              batches: [{ summary: batch, monologue, blobs: [] }],
+            },
+          },
+        },
+      );
+    };
+
+    const view = render(<TimelineView state={progress("正在核对", "正在核对")} />);
+    view.rerender(
+      <TimelineView
+        state={progress(
+          "正在核对对话中持续刷新的信息面板与布局边界。",
+          "正在核对对话中持续刷新的信息面板与布局边界。",
+        )}
+      />,
+    );
+
+    const header = within(screen.getByTestId("round-trunk")).getByRole("button");
+    expect(header.querySelector(".truncate")).toHaveAttribute(
+      "title",
+      "正在核对对话中持续刷新的信息面板与布局边界。",
+    );
+  });
+
   it("moves the open tail along with the round and lets a reader hold one open", async () => {
     const round = {
       roundId: "r1",
@@ -522,6 +581,10 @@ describe("what the user sees in a session", () => {
     expect(batches[0]!).toHaveTextContent("💭");
     expect(batches[0]!).toHaveTextContent("核对入口与权限");
     expect(batches[0]!).toHaveTextContent("2 项");
+    expect(within(batches[0]!).getByRole("button").querySelector(".truncate")).toHaveAttribute(
+      "title",
+      "核对入口与权限。",
+    );
 
     const batchHeader = within(batches[0]!).getByRole("button");
     await userEvent.click(batchHeader);

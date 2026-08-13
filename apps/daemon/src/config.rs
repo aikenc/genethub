@@ -71,6 +71,13 @@ impl Paths {
         self.root.join("devices.json")
     }
 
+    /// The other machines this installation has paired with, and the secrets
+    /// it proves itself with. The mirror image of `devices_file`: that one is
+    /// who may call in, this one is who this may call out to.
+    pub fn machines_file(&self) -> PathBuf {
+        self.root.join("machines.json")
+    }
+
     /// One directory for everything anyone would ask for when something is
     /// wrong: the daemon's log, and whatever the desktop shell writes.
     ///
@@ -577,7 +584,7 @@ impl MachineState {
 }
 
 /** Writes secrets without a world-readable creation window and survives crashes. */
-pub(crate) fn save_private(path: &Path, body: &[u8]) -> Result<()> {
+pub fn save_private(path: &Path, body: &[u8]) -> Result<()> {
     #[cfg(test)]
     if take_injected_save_failure(path) {
         anyhow::bail!("injected private-save failure for {}", path.display());

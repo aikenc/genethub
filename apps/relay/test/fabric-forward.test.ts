@@ -14,6 +14,7 @@ import {
 } from "../src/forward/fabric-frame.js";
 import { AuthorityHttpError } from "../src/shared/authority-error.js";
 import { config } from "../src/shared/config.js";
+import { endpointDiagnosticRef } from "../src/shared/diagnostic-ref.js";
 import {
   closed,
   connect,
@@ -183,6 +184,55 @@ describe("Fabric v2 over real WebSockets", () => {
       streams: 3,
       pendingOpens: 0,
     });
+  });
+
+  it("logs opaque endpoint correlation without credentials or payloads", async () => {
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+    try {
+      const source = await endpoint("credential:log-source", "endpoint:log-source");
+      const target = await endpoint("credential:log-target", "endpoint:log-target");
+      await openRoute(
+        source,
+        target,
+        id(99),
+        "ticket:log-secret",
+        "endpoint:log-target",
+      );
+      source.close();
+      await closed(source);
+      await waitFor(
+        () => lines.some((line) => line.includes('"msg":"fabric: endpoint disconnected"')),
+        "expected a structured disconnect record",
+      );
+
+      const records = lines.flatMap((line) => {
+        try {
+          return [JSON.parse(line) as Record<string, unknown>];
+        } catch {
+          return [];
+        }
+      });
+      const connected = records.find(
+        (record) => record.msg === "fabric: endpoint connected" &&
+          record.endpointRef === endpointDiagnosticRef("endpoint:log-source"),
+      );
+      assert.equal(connected?.connectionGeneration, 1);
+      const disconnected = records.find(
+        (record) => record.msg === "fabric: endpoint disconnected" &&
+          record.endpointRef === endpointDiagnosticRef("endpoint:log-source"),
+      );
+      assert.equal(typeof disconnected?.closeCode, "number");
+
+      const output = lines.join("\n");
+      assert.doesNotMatch(
+        output,
+        /credential:log|ticket:log-secret|hello:ticket|accepted:ticket|endpoint:log/,
+      );
+    } finally {
+      console.log = original;
+    }
   });
 
   it("scopes equal and guessed stream ids to the actual socket", async () => {

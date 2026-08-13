@@ -511,6 +511,12 @@ impl WorkspaceHomes {
                     .map(|text| text.trim().to_string())
                     .filter(|text| !text.is_empty())
                     .unwrap_or_else(|| "an older GeneHub".to_string());
+                tracing::warn!(
+                    event = "legacy_workspace_writer_contended",
+                    workspace = %workspace_id,
+                    %holder,
+                    "an older GeneHub is holding the workspace-wide session lock"
+                );
                 return Err(anyhow!(
                     "{holder} uses the older workspace-wide session lock; close or upgrade it before writing here"
                 ));
@@ -566,6 +572,13 @@ impl WorkspaceHomes {
                     .map(|text| text.trim().to_string())
                     .filter(|text| !text.is_empty())
                     .unwrap_or_else(|| "another GeneHub".to_string());
+                tracing::warn!(
+                    event = "session_writer_contended",
+                    workspace = %workspace_id,
+                    session = %session_id,
+                    %holder,
+                    "another daemon is writing this session"
+                );
                 return Err(SessionWriteContended { holder }.into());
             }
             Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
@@ -945,22 +958,30 @@ impl Store {
             return;
         };
         if let Err(error) = self.homes.claim_compatibility(workspace_id, &home) {
-            tracing::warn!(session = %session_id, %error, "deleted session cleanup is waiting for an older GeneHub");
+            tracing::warn!(event = "session_cleanup_deferred", reason = "legacy_writer", workspace = %workspace_id, session = %session_id, %error, "deleted session cleanup is waiting for an older GeneHub");
             return;
         }
         if !self.homes.holds(workspace_id, session_id) {
             if let Err(error) = self.homes.claim(workspace_id, session_id, dir) {
-                tracing::warn!(session = %session_id, %error, "deleted session cleanup is waiting for its writer");
+                tracing::warn!(event = "session_cleanup_deferred", reason = "session_writer", workspace = %workspace_id, session = %session_id, %error, "deleted session cleanup is waiting for its writer");
                 return;
             }
         }
         if let Err(error) = self.homes.release(workspace_id, session_id) {
-            tracing::warn!(session = %session_id, %error, "could not release deleted session before cleanup");
+            tracing::warn!(event = "session_cleanup_deferred", reason = "lock_release", workspace = %workspace_id, session = %session_id, %error, "could not release deleted session before cleanup");
             return;
         }
-        if let Err(error) = fs::remove_dir_all(dir) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(session = %session_id, %error, "deleted session is still awaiting physical cleanup");
+        match fs::remove_dir_all(dir) {
+            Ok(()) => tracing::info!(
+                event = "session_cleanup_succeeded",
+                workspace = %workspace_id,
+                session = %session_id,
+                "removed files left by a logically deleted session"
+            ),
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(event = "session_cleanup_deferred", reason = "filesystem", workspace = %workspace_id, session = %session_id, %error, "deleted session is still awaiting physical cleanup");
+                }
             }
         }
     }
@@ -1388,6 +1409,12 @@ impl Store {
             "deletedAtMs": now_ms(),
         });
         crate::config::save_private(&tombstone, serde_json::to_vec_pretty(&marker)?.as_slice())?;
+        tracing::info!(
+            event = "session_tombstoned",
+            workspace = %workspace_id,
+            session = %session_id,
+            "session was logically deleted"
+        );
 
         // The durable marker is the atomic logical deletion. Releasing the
         // Windows lock before unlinking is now safe: every future claimant
@@ -1395,8 +1422,15 @@ impl Store {
         self.homes.release(workspace_id, session_id)?;
         if let Err(error) = fs::remove_dir_all(&dir) {
             if error.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(session = %session_id, %error, "session was deleted logically but awaits physical cleanup");
+                tracing::warn!(event = "session_cleanup_deferred", reason = "filesystem", workspace = %workspace_id, session = %session_id, %error, "session was deleted logically but awaits physical cleanup");
             }
+        } else {
+            tracing::info!(
+                event = "session_cleanup_succeeded",
+                workspace = %workspace_id,
+                session = %session_id,
+                "removed files for a logically deleted session"
+            );
         }
         Ok(())
     }
@@ -1477,6 +1511,22 @@ fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod project_home_tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn meta(id: &str, workspace_id: &str, cwd: &Path) -> SessionMeta {
         SessionMeta {
@@ -1531,5 +1581,42 @@ mod project_home_tests {
 
         homes.attach_project("w_folder", "folder", root.path());
         assert_eq!(store.list_meta().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn session_contention_and_deletion_leave_feedback_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        let holder_homes = WorkspaceHomes::default();
+        holder_homes.attach_project("w1", "folder", root.path());
+        let holder = Store::new(holder_homes);
+        let other_homes = WorkspaceHomes::default();
+        other_homes.attach_project("w1", "folder", root.path());
+        let other = Store::new(other_homes);
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let captured = Captured(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || captured.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            holder.save_meta(&meta("s1", "w1", root.path())).unwrap();
+            other.save_meta(&meta("s1", "w1", root.path())).unwrap_err();
+            holder.delete("w1", "s1").unwrap();
+        });
+
+        let log = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        for event in [
+            "session_writer_contended",
+            "session_tombstoned",
+            "session_cleanup_succeeded",
+        ] {
+            assert!(
+                log.contains(event),
+                "missing {event} from diagnostics: {log}"
+            );
+        }
+        assert!(!log.contains(&root.path().display().to_string()));
     }
 }

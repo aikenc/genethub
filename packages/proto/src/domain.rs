@@ -714,6 +714,44 @@ pub struct HelloResult {
     /// Advertised inside the encrypted data plane. The viewer's local RTC
     /// preference still decides whether negotiation is attempted.
     pub rtc_supported: bool,
+    /// What this machine can actually enforce on a process it starts on a
+    /// caller's behalf. Absent from older daemons, which is why it is optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub isolation: Option<IsolationInfo>,
+}
+
+/// The operating system confinement this machine can put a spawned process in.
+///
+/// Reported rather than promised. A caller decides whether to run something it
+/// does not fully trust by reading this, so it has to describe what is actually
+/// in force on this kernel right now — not what the build supports and not what
+/// a configuration file asked for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct IsolationInfo {
+    pub backend: IsolationBackend,
+    /// Whether a confined process would really be confined. False means every
+    /// request that needs confinement is refused, never quietly downgraded.
+    pub enforced: bool,
+    /// Why, in a sentence a person can act on. Present whether or not it worked,
+    /// because "landlock, abi 4" is as worth saying as "kernel 5.4 has none".
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum IsolationBackend {
+    Landlock,
+    /// Unprivileged user and mount namespaces: a filesystem view built to hold
+    /// only what the caller is allowed to see. Older than Landlock by a
+    /// decade, and the only thing available on a kernel that predates it.
+    Namespaces,
+    Seatbelt,
+    AppContainer,
+    None,
 }
 
 /// Whether a newer build has been published, and where a person gets it.
@@ -878,6 +916,46 @@ pub struct LogEntry {
     pub bytes: u64,
 }
 
+/// A bounded support record that is safe to attach to explicit user feedback.
+///
+/// Every string in this shape comes from a daemon-owned allowlist. User input,
+/// local paths, URLs, identifiers, prompts, terminal output and Agent output do
+/// not have a field in the schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SupportDiagnostics {
+    pub version: u32,
+    pub captured_at: String,
+    pub daemon_version: String,
+    pub os: String,
+    pub arch: String,
+    #[ts(type = "number")]
+    pub uptime_seconds: u64,
+    pub hub_state: String,
+    pub remote_state: String,
+    pub events: Vec<SupportDiagnosticEvent>,
+    #[ts(type = "number")]
+    pub dropped_events: u64,
+}
+
+/// One daemon-owned diagnostic fact. Values are intentionally categorical.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SupportDiagnosticEvent {
+    pub at: String,
+    pub component: String,
+    pub operation: String,
+    pub outcome: String,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Consecutive identical events are coalesced so a reconnect loop cannot
+    /// evict every earlier clue from the bounded record.
+    pub count: u32,
+}
+
 /// Where this machine stands with a Hub.
 ///
 /// One shape covers every stage of pairing so the UI polls a single call and
@@ -1000,6 +1078,11 @@ pub struct DeviceInfo {
     pub last_seen_at: Option<String>,
     /// True while this device has a live connection to the machine.
     pub connected: bool,
+    /// What this device may ask for. Absent from machines that predate grants,
+    /// where every authorized device could do everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub grants: Option<Vec<String>>,
 }
 
 /// A one-time chance to become an authorized device.
@@ -1021,6 +1104,23 @@ pub struct DeviceInvite {
     #[ts(optional)]
     pub rendezvous_url: Option<String>,
     pub expires_at: String,
+    /// What redeeming this invitation will be worth. Shown before anyone
+    /// accepts it, because a grant nobody was told about is not a choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub grants: Option<Vec<String>>,
+}
+
+/// How much of a machine an invitation is worth.
+///
+/// Its own type rather than a bare list of strings so that the request carrying
+/// it can grow other limits — an expiry, a workspace — without changing shape
+/// again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct InviteScope {
+    pub grants: Vec<String>,
 }
 
 /// What a client keeps after redeeming an invite.
