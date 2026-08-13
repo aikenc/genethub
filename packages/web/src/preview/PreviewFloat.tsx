@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -6,8 +7,10 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
+import type { Attachment } from "@genehub/proto";
+
 import type { Host } from "../host";
-import { useWorkbench, type PreviewFloatTarget } from "../session/store";
+import { defaultAgent, useWorkbench, type PreviewFloatTarget } from "../session/store";
 import { AssetPreviewPage, type PreviewMeta } from "./AssetPreviewPage";
 import { assetPreviewUrl } from "./url";
 
@@ -225,6 +228,30 @@ export function PreviewFloat({
     }, CLICK_DELAY_MS);
   };
 
+  const submitRuntimeArtifact = useCallback(
+    async (artifact: { text: string; image?: Attachment }) => {
+      const state = useWorkbench.getState();
+      const pending = state.timeline.pending;
+      if ((pending && !pending.error) || state.timeline.status === "running" || state.timeline.status === "waiting") {
+        throw new Error("当前 Agent 正在处理上一条消息，请稍后再上传运行产物");
+      }
+      if (!state.client || !state.activeWorkspaceId) {
+        throw new Error("尚未连接到可接收运行产物的会话");
+      }
+      const session = state.sessions.find((item) => item.id === state.activeSessionId);
+      const agentId = session?.agentId ?? state.draft?.agentId ?? null;
+      const agent = state.agents.find((item) => item.id === agentId) ?? defaultAgent(state.agents);
+      const forwardsImage = Boolean(agent?.capabilities.attachments && artifact.image);
+      const text = forwardsImage
+        ? artifact.text
+        : `${artifact.text}\n\n> 当前 Agent 不接收图片附件；本次仍已上传日志、DOM 和截图元数据。`;
+      await state.send(text, forwardsImage && artifact.image ? [artifact.image] : []);
+      const failure = useWorkbench.getState().notice;
+      if (failure) throw new Error(failure);
+    },
+    [],
+  );
+
   const preview = client ? (
     <AssetPreviewPage
       source={source}
@@ -232,6 +259,7 @@ export function PreviewFloat({
       chrome="embedded"
       client={client}
       onMetaChange={setMeta}
+      onRuntimeArtifact={submitRuntimeArtifact}
     />
   ) : (
     <p role="status" className="m-auto p-6 text-center text-sm text-muted">

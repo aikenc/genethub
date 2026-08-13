@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { AssetPreviewMetadata } from "@genehub/proto";
@@ -11,7 +11,7 @@ describe("active single-file HTML Preview", () => {
       <html><head>
         <base href="https://attacker.example/">
         <meta http-equiv="Content-Security-Policy" content="default-src *">
-      </head><body><script>globalThis.rendered = true</script></body></html>`);
+      </head><body><script id="application-script">globalThis.rendered = true</script></body></html>`);
     const parsed = new DOMParser().parseFromString(output, "text/html");
 
     expect(parsed.querySelector("script")?.textContent).toContain("rendered");
@@ -31,8 +31,13 @@ describe("active single-file HTML Preview", () => {
     const bridge = Array.from(parsed.querySelectorAll("script")).find((node) =>
       (node.textContent ?? "").includes("genehub-preview-diag"),
     );
+    const application = parsed.querySelector<HTMLScriptElement>("#application-script");
     expect(bridge?.textContent).toContain('source: "genehub-preview-diag"');
     expect(bridge?.textContent).toContain("securitypolicyviolation");
+    expect(bridge?.textContent).toContain('["debug", "log", "info", "warn", "error"]');
+    expect(bridge?.textContent).toContain('data.command !== "snapshot-dom"');
+    expect(bridge?.textContent).toContain("MutationObserver");
+    expect(bridge?.compareDocumentPosition(application!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
   it("pins the iframe to a fixed box so iOS WebKit cannot stretch it to content height", async () => {
@@ -54,6 +59,9 @@ describe("active single-file HTML Preview", () => {
     );
 
     const frame = await screen.findByTitle("HTML 文件预览");
+    expect(screen.getByRole("button", { name: "截图" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "录制" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "上传运行产物" })).toBeDisabled();
     expect(frame.className).toContain("absolute");
     expect(frame.className).toContain("inset-0");
     expect(frame.parentElement?.className).toContain("relative");
@@ -84,10 +92,12 @@ describe("active single-file HTML Preview", () => {
       detail: { message: "render failed" },
     };
 
-    window.dispatchEvent(new MessageEvent("message", { data, source: window }));
+    act(() => window.dispatchEvent(new MessageEvent("message", { data, source: window })));
     expect(received).not.toHaveBeenCalled();
 
-    window.dispatchEvent(new MessageEvent("message", { data, source: frame.contentWindow }));
+    act(() =>
+      window.dispatchEvent(new MessageEvent("message", { data, source: frame.contentWindow })),
+    );
     expect(received).toHaveBeenCalledTimes(1);
     expect(received.mock.calls[0]?.[0].detail).toEqual({
       kind: "error",
