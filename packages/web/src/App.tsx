@@ -515,7 +515,13 @@ export function App({
                       }
                       commands={currentAgent?.catalog.commands}
                       restoreDraft={workbench.restoreDraft}
+                      insertDraft={
+                        workbench.composerDraftInserts.find(
+                          (insert) => insert.sessionId === workbench.activeSessionId,
+                        ) ?? null
+                      }
                       onRestoreDraft={workbench.restoredDraft}
+                      onInsertDraft={workbench.consumedComposerDraftInsert}
                       onHeightChange={setComposerHeight}
                       onSend={(text, attachments) =>
                         void workbench.send(text, attachments)

@@ -4,7 +4,7 @@ import type { Request, SessionArtifactBundle } from "@genehub/proto";
 
 import { ConnectionOutcomeUnknownError, type Client } from "../protocol/client";
 import type { RuntimeArtifactSubmission } from "./PreviewRuntimeControls";
-import { runtimeArtifactReference, uploadSessionArtifact } from "./sessionArtifactUpload";
+import { runtimeArtifactDraftLine, uploadSessionArtifact } from "./sessionArtifactUpload";
 
 const bundle: SessionArtifactBundle = {
   relativePath: "artifacts/260813-221500-a3f1",
@@ -136,11 +136,9 @@ describe("session artifact upload", () => {
     expect(finishCalls).toBe(2);
   });
 
-  it("builds a small Chat reference without payload bytes", () => {
-    const message = runtimeArtifactReference(bundle, artifact());
-    expect(message).toContain(bundle.manifestPath);
-    expect(message).toContain("Chat 未附带图片、视频、DOM 或日志字节");
-    expect(message.length).toBeLessThan(800);
-    expect(message).not.toContain("dataBase64");
+  it("builds exactly one concise composer draft line", () => {
+    expect(runtimeArtifactDraftLine(bundle.workspacePath)).toBe(
+      "运行产物Bundle：`.genethub/sessions/s_demo/artifacts/260813-221500-a3f1`",
+    );
   });
 });

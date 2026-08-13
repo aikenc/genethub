@@ -59,6 +59,7 @@ beforeEach(() => {
     activeTabId: null,
     notice: null,
     restoreDraft: null,
+    composerDraftInserts: [],
     // Fresh, not carried over: a test that leaves a message pending must not
     // hand it to the next one.
     timeline: emptyTimeline(),
@@ -69,6 +70,21 @@ beforeEach(() => {
 });
 
 describe("warm chat tabs", () => {
+  it("queues composer lines for their session until the composer consumes them", () => {
+    const store = useWorkbench.getState();
+    store.appendComposerDraftLine("s1", "运行产物Bundle：`first`");
+    store.appendComposerDraftLine("s2", "运行产物Bundle：`second`");
+
+    const queued = useWorkbench.getState().composerDraftInserts;
+    expect(queued.map(({ sessionId, text }) => ({ sessionId, text }))).toEqual([
+      { sessionId: "s1", text: "运行产物Bundle：`first`" },
+      { sessionId: "s2", text: "运行产物Bundle：`second`" },
+    ]);
+
+    useWorkbench.getState().consumedComposerDraftInsert(queued[0]!.id);
+    expect(useWorkbench.getState().composerDraftInserts).toEqual([queued[1]]);
+  });
+
   it("keeps an opened session subscribed and reactivates it without another snapshot", async () => {
     const other = { ...SESSION, id: "s2" };
     let subscriptions = 0;

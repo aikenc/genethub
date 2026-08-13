@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { AssetPreviewMetadata } from "@genehub/proto";
+import type { AssetPreviewMetadata, SessionArtifactBundle } from "@genehub/proto";
 
 import { emitClientDiagnostic, registerDiagnosticClient } from "../diagnostics";
 import { detectHost, type Endpoint, type Host } from "../host";
@@ -15,6 +15,7 @@ import {
   type RuntimeArtifactSubmit,
 } from "./PreviewRuntimeControls";
 import type { AssetPreviewLocation } from "./url";
+import { uploadSessionArtifact } from "./sessionArtifactUpload";
 
 type ViewState =
   | { kind: "loading" }
@@ -33,6 +34,8 @@ export function AssetPreviewPage({
   client: sharedClient = null,
   onMetaChange,
   onRuntimeArtifact,
+  runtimeSessionId = null,
+  onRuntimeArtifactSaved,
 }: {
   source: AssetPreviewLocation;
   host?: Host;
@@ -47,6 +50,10 @@ export function AssetPreviewPage({
   onMetaChange?: (meta: PreviewMeta | null) => void;
   /** Persists runtime files to the daemon-owned active session bundle. */
   onRuntimeArtifact?: RuntimeArtifactSubmit;
+  /** Session carried by a standalone Preview link opened from the workbench. */
+  runtimeSessionId?: string | null;
+  /** Reports a standalone upload back to the originating workbench window. */
+  onRuntimeArtifactSaved?: (bundle: SessionArtifactBundle) => void;
 }) {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [pageInfoOpen, setPageInfoOpen] = useState(false);
@@ -140,6 +147,32 @@ export function AssetPreviewPage({
     };
   }, [host, sharedClient, source.deviceHandle, source.path, source.workspaceHandle]);
 
+  const submitStandaloneArtifact = useCallback<RuntimeArtifactSubmit>(
+    async (artifact, onProgress) => {
+      if (state.kind !== "ready" || !runtimeSessionId) {
+        throw new Error("这个 Preview 没有关联可保存运行产物的会话");
+      }
+      const bundle = await uploadSessionArtifact(
+        state.client,
+        runtimeSessionId,
+        artifact,
+        ({ uploadedBytes, totalBytes }) => onProgress(uploadedBytes, totalBytes),
+      );
+      onRuntimeArtifactSaved?.(bundle);
+      return {
+        relativePath: bundle.relativePath,
+        addedToDraft: Boolean(onRuntimeArtifactSaved),
+        ...(!onRuntimeArtifactSaved
+          ? { draftError: "原会话输入框未连接" }
+          : {}),
+      };
+    },
+    [onRuntimeArtifactSaved, runtimeSessionId, state],
+  );
+
+  const runtimeArtifactSubmit =
+    onRuntimeArtifact ?? (runtimeSessionId ? submitStandaloneArtifact : undefined);
+
   return (
     <main className="flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg">
       {chrome === "page" ? (
@@ -172,7 +205,7 @@ export function AssetPreviewPage({
           workspaceHandle={source.workspaceHandle}
           client={state.client}
           onMetaChange={reportMeta}
-          onRuntimeArtifact={onRuntimeArtifact}
+          onRuntimeArtifact={runtimeArtifactSubmit}
         />
       )}
       {chrome === "page" && pageInfoOpen ? (

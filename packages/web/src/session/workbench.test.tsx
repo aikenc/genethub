@@ -1140,6 +1140,53 @@ describe("the controls offered to the user", () => {
     );
   });
 
+  it("appends each runtime bundle on its own line without sending or erasing feedback", async () => {
+    const onSend = vi.fn();
+    const onInsertDraft = vi.fn();
+    const view = render(<Composer {...composerProps({ onSend, onInsertDraft })} />);
+    const box = screen.getByLabelText("任务描述");
+    await userEvent.type(box, "点击提交后页面空白");
+
+    view.rerender(
+      <Composer
+        {...composerProps({
+          onSend,
+          onInsertDraft,
+          insertDraft: {
+            id: "bundle-1",
+            sessionId: "s1",
+            text: "运行产物Bundle：`.genethub/sessions/s1/artifacts/first`",
+          },
+        })}
+      />,
+    );
+    await waitFor(() => expect(onInsertDraft).toHaveBeenCalledWith("bundle-1"));
+
+    view.rerender(
+      <Composer
+        {...composerProps({
+          onSend,
+          onInsertDraft,
+          insertDraft: {
+            id: "bundle-2",
+            sessionId: "s1",
+            text: "运行产物Bundle：`.genethub/sessions/s1/artifacts/second`",
+          },
+        })}
+      />,
+    );
+    await waitFor(() => expect(onInsertDraft).toHaveBeenCalledWith("bundle-2"));
+
+    expect(box).toHaveValue(
+      [
+        "点击提交后页面空白",
+        "运行产物Bundle：`.genethub/sessions/s1/artifacts/first`",
+        "运行产物Bundle：`.genethub/sessions/s1/artifacts/second`",
+      ].join("\n"),
+    );
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it("expands from one idle line when focused and collapses again on blur", async () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
 

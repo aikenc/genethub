@@ -114,6 +114,14 @@ export function defaultAgent(agents: AgentInfo[]): AgentInfo | undefined {
 /** The tab an unstarted conversation lives in. There is only ever one. */
 const DRAFT_TAB = "chat:draft";
 
+export type ComposerDraftInsert = {
+  id: string;
+  sessionId: string;
+  text: string;
+};
+
+let composerDraftInsertSequence = 0;
+
 interface WorkbenchState {
   client: Client | null;
   connection: ConnectionState;
@@ -149,6 +157,8 @@ interface WorkbenchState {
    * clears it with `restoredDraft`.
    */
   restoreDraft: { text: string; attachments: Attachment[] } | null;
+  /** Lines waiting to be appended to a session's composer without sending it. */
+  composerDraftInserts: ComposerDraftInsert[];
   hub: HubStatus | null;
   /**
    * The last way into this machine's identity the Hub handed out.
@@ -274,6 +284,10 @@ interface WorkbenchState {
   editPending(): void;
   /** Acknowledges that the composer has taken `restoreDraft` back. */
   restoredDraft(): void;
+  /** Adds one intact line to a session's current composer draft. */
+  appendComposerDraftLine(sessionId: string, text: string): void;
+  /** Acknowledges that one queued composer insertion has been applied. */
+  consumedComposerDraftInsert(id: string): void;
   /** Creates an independent Agent context through one completed turn. */
   forkSession(turnId: string, target?: ForkTarget): Promise<boolean>;
   /** Lightweight provider discovery; full history is read only after selection. */
@@ -489,6 +503,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   tabLimit: 16,
   notice: null,
   restoreDraft: null,
+  composerDraftInserts: [],
   hub: null,
   claim: null,
   devices: [],
@@ -1116,6 +1131,22 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   restoredDraft() {
     set({ restoreDraft: null });
+  },
+
+  appendComposerDraftLine(sessionId, text) {
+    if (!sessionId || !text || text.includes("\n")) return;
+    const insert = {
+      id: `composer-insert-${Date.now().toString(36)}-${++composerDraftInsertSequence}`,
+      sessionId,
+      text,
+    } satisfies ComposerDraftInsert;
+    set((state) => ({ composerDraftInserts: [...state.composerDraftInserts, insert] }));
+  },
+
+  consumedComposerDraftInsert(id) {
+    set((state) => ({
+      composerDraftInserts: state.composerDraftInserts.filter((insert) => insert.id !== id),
+    }));
   },
 
   async forkSession(turnId, target) {

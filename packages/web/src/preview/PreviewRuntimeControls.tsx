@@ -46,8 +46,8 @@ export type RuntimeArtifactJson =
 
 export type RuntimeArtifactSaveResult = {
   relativePath: string;
-  notified: boolean;
-  notificationError?: string;
+  addedToDraft: boolean;
+  draftError?: string;
 };
 
 export type RuntimeArtifactSubmit = (
@@ -272,9 +272,9 @@ export function PreviewRuntimeControls({
       engineRef.current?.dispose();
       setCaptureActive(false);
       setNotice(
-        saved.notified
-          ? `已保存到 ${saved.relativePath}，并通知 Agent`
-          : `已保存到 ${saved.relativePath}；${saved.notificationError ?? "Agent 正忙，未自动通知"}`,
+        saved.addedToDraft
+          ? `已保存到 ${saved.relativePath}，已加入输入框`
+          : `已保存到 ${saved.relativePath}；${saved.draftError ?? "未加入输入框"}`,
       );
     } catch (error) {
       setNotice(errorMessage(error));
@@ -352,8 +352,8 @@ export function PreviewRuntimeControls({
         onClick={() => void uploadArtifact()}
         title={
           onSubmit
-            ? "把日志、DOM、截图和视频写入 daemon 当前 session，再向 Agent 发送路径"
-            : "仅会话内 Preview 可保存"
+            ? "把日志、DOM、截图和视频写入 daemon 当前 session，并把路径加入输入框"
+            : "需要关联会话后保存"
         }
       >
         保存运行产物

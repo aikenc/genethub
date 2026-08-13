@@ -4,6 +4,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "re
 
 import { attachmentPreviewUrl, AttachmentTooLarge, fileToAttachment, imageFilesFromClipboard } from "./attachments";
 import { ComposerControls } from "./ComposerControls";
+import type { ComposerDraftInsert } from "./store";
 
 /**
  * What the composer is in the middle of.
@@ -44,6 +45,7 @@ export function Composer({
   attachmentsSupported,
   commands,
   restoreDraft,
+  insertDraft,
   onSend,
   onInterrupt,
   onPickAgent,
@@ -52,6 +54,7 @@ export function Composer({
   onPickEffort,
   onHeightChange,
   onRestoreDraft,
+  onInsertDraft,
 }: {
   phase: ComposerPhase;
   disabled?: boolean;
@@ -72,6 +75,8 @@ export function Composer({
   commands?: CommandInfo[];
   /** A message coming back for editing after it failed to send. */
   restoreDraft?: { text: string; attachments: Attachment[] } | null;
+  /** One line produced outside Chat that should be appended, never sent. */
+  insertDraft?: ComposerDraftInsert | null;
   onSend(text: string, attachments: Attachment[]): void;
   onInterrupt(): void;
   onPickAgent(id: string): void;
@@ -84,6 +89,8 @@ export function Composer({
   onHeightChange?(height: number): void;
   /** Acknowledges that `restoreDraft` has been taken into the field. */
   onRestoreDraft?(): void;
+  /** Acknowledges that `insertDraft` has been appended to the field. */
+  onInsertDraft?(id: string): void;
 }) {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -148,6 +155,12 @@ export function Composer({
     onRestoreDraft?.();
     textarea.current?.focus();
   }, [restoreDraft, onRestoreDraft]);
+
+  useEffect(() => {
+    if (!insertDraft) return;
+    setDraft((current) => appendDraftLine(current, insertDraft.text));
+    onInsertDraft?.(insertDraft.id);
+  }, [insertDraft, onInsertDraft]);
 
   const addFiles = async (files: File[]) => {
     if (!attachmentsSupported) {
@@ -478,6 +491,11 @@ export const COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT = 192;
 export const COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT = 104;
 export const COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT = 176;
 export const COMPOSER_DESKTOP_BREAKPOINT = 768;
+
+export function appendDraftLine(current: string, line: string): string {
+  if (!current) return line;
+  return `${current}${current.endsWith("\n") ? "" : "\n"}${line}`;
+}
 
 /** Idle is one line: 36px on a phone and 24px on a wider screen. Focus expands
  * to roughly three-to-five phone lines or four-to-seven desktop lines, then

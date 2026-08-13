@@ -10,8 +10,9 @@ import {
 import type { Host } from "../host";
 import { useWorkbench, type PreviewFloatTarget } from "../session/store";
 import { AssetPreviewPage, type PreviewMeta } from "./AssetPreviewPage";
+import { createPreviewPopoutChannel, createPreviewPopoutUrl } from "./popout";
 import type { RuntimeArtifactSubmit } from "./PreviewRuntimeControls";
-import { runtimeArtifactReference, uploadSessionArtifact } from "./sessionArtifactUpload";
+import { runtimeArtifactDraftLine, uploadSessionArtifact } from "./sessionArtifactUpload";
 import { assetPreviewUrl } from "./url";
 
 type Mode = "expanded" | "float";
@@ -41,6 +42,8 @@ export function PreviewFloat({
   onClose(): void;
 }) {
   const client = useWorkbench((state) => state.client);
+  const activeSessionId = useWorkbench((state) => state.activeSessionId);
+  const appendComposerDraftLine = useWorkbench((state) => state.appendComposerDraftLine);
   const [mode, setMode] = useState<Mode>("expanded");
   const [sizeLevel, setSizeLevel] = useState(0);
   const [pos, setPos] = useState(() => ({
@@ -59,6 +62,8 @@ export function PreviewFloat({
   } | null>(null);
   const skipClick = useRef(false);
   const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const popouts = useRef(new Map<string, string | null>());
+  const linkedBundles = useRef(new Set<string>());
 
   const externalUrl = assetPreviewUrl(
     source.deviceHandle,
@@ -78,7 +83,12 @@ export function PreviewFloat({
   const blockContentGestures = mode === "float" && !contentInteractive;
   const contentShieldRef = useRef<HTMLDivElement | null>(null);
 
-  const shrinkToSmallFloat = () => {
+  const clampPos = useCallback((x: number, y: number, w: number, h: number) => ({
+    x: Math.min(Math.max(EDGE, x), Math.max(EDGE, window.innerWidth - w - EDGE)),
+    y: Math.min(Math.max(EDGE, y), Math.max(EDGE, window.innerHeight - h - EDGE)),
+  }), []);
+
+  const shrinkToSmallFloat = useCallback(() => {
     if (clickTimer.current) {
       clearTimeout(clickTimer.current);
       clickTimer.current = null;
@@ -88,7 +98,7 @@ export function PreviewFloat({
     setSizeLevel(0);
     setPos((current) => clampPos(current.x, current.y, nextW, nextH));
     setMode("float");
-  };
+  }, [clampPos]);
 
   /** Float chrome hit targets; keep left-aligned so mobile does not push controls right. */
   const chromeBtnLarge =
@@ -110,6 +120,25 @@ export function PreviewFloat({
       if (clickTimer.current) clearTimeout(clickTimer.current);
     };
   }, []);
+
+  useEffect(() => {
+    const channel = createPreviewPopoutChannel((message) => {
+      const expectedSessionId = popouts.current.get(message.id);
+      if (expectedSessionId === undefined || expectedSessionId !== message.sessionId) return;
+      if (message.type === "ready") {
+        shrinkToSmallFloat();
+        return;
+      }
+      const bundleKey = `${message.sessionId}:${message.workspacePath}`;
+      if (linkedBundles.current.has(bundleKey)) return;
+      linkedBundles.current.add(bundleKey);
+      appendComposerDraftLine(
+        message.sessionId,
+        runtimeArtifactDraftLine(message.workspacePath),
+      );
+    });
+    return () => channel.close();
+  }, [appendComposerDraftLine, shrinkToSmallFloat]);
 
   // iOS WebKit still delivers pan gestures into nested iframes even when the
   // scaled preview has pointer-events:none. Capture touchmove on a shield.
@@ -154,11 +183,6 @@ export function PreviewFloat({
       }),
     );
   }, [mode, sizeLevel, source.path, source.workspaceHandle]);
-
-  const clampPos = (x: number, y: number, w: number, h: number) => ({
-    x: Math.min(Math.max(EDGE, x), Math.max(EDGE, window.innerWidth - w - EDGE)),
-    y: Math.min(Math.max(EDGE, y), Math.max(EDGE, window.innerHeight - h - EDGE)),
-  });
 
   const snapPos = (x: number, y: number, w: number, h: number) => {
     let nextX = x;
@@ -242,30 +266,14 @@ export function PreviewFloat({
         ({ uploadedBytes, totalBytes }) => onProgress(uploadedBytes, totalBytes),
       );
 
-      // Persistence is independent of Agent availability. A busy conversation
-      // merely skips the small reference message; the bundle is already safe.
       const afterSave = useWorkbench.getState();
-      if (afterSave.activeSessionId !== sessionId) {
-        return {
-          relativePath: bundle.relativePath,
-          notified: false,
-          notificationError: "保存期间已切换会话，未向其他会话发送引用",
-        };
-      }
-      const pending = afterSave.timeline.pending;
-      if (
-        (pending && !pending.error) ||
-        afterSave.timeline.status === "running" ||
-        afterSave.timeline.status === "waiting"
-      ) {
-        return { relativePath: bundle.relativePath, notified: false };
-      }
-      await afterSave.send(runtimeArtifactReference(bundle, artifact), []);
-      const failure = useWorkbench.getState().notice;
+      afterSave.appendComposerDraftLine(
+        sessionId,
+        runtimeArtifactDraftLine(bundle.workspacePath),
+      );
       return {
         relativePath: bundle.relativePath,
-        notified: !failure,
-        ...(failure ? { notificationError: `通知 Agent 失败：${failure}` } : {}),
+        addedToDraft: true,
       };
     },
     [],
@@ -365,12 +373,18 @@ export function PreviewFloat({
               title="新窗口打开"
               className={`${expandedIconBtn} text-accent`}
               onClick={() => {
+                const popout = createPreviewPopoutUrl(externalUrl, activeSessionId);
+                popouts.current.set(popout.id, activeSessionId);
                 window.dispatchEvent(
                   new CustomEvent("genehub:preview-open", {
-                    detail: { path: source.path, url: externalUrl },
+                    detail: { path: source.path, url: popout.url },
                   }),
                 );
-                window.open(externalUrl, "_blank", "noopener,noreferrer");
+                try {
+                  window.open(popout.url, "_blank", "noopener,noreferrer");
+                } catch {
+                  popouts.current.delete(popout.id);
+                }
               }}
             >
               <ExternalLinkIcon />
