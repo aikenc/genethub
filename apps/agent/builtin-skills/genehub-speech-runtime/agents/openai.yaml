@@ -1,0 +1,4 @@
+interface:
+  display_name: "本地语音模型与协议测试"
+  short_description: "用协议 Stub 验证链路，并安全安装、登记和诊断本地 ASR 模型"
+  default_prompt: "使用 $genehub-speech-runtime 先用 Stub 验证语音链路，再检查电脑并接入合适的本地语音模型。"
