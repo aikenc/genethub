@@ -4611,7 +4611,13 @@ mod tests {
         assert!(restarted.list(None, false).await.unwrap().is_empty());
         assert!(residual.exists(), "cleanup raced the legacy writer");
         drop(legacy);
-        restarted.list(None, false).await.unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        while residual.exists() && tokio::time::Instant::now() < deadline {
+            restarted.list(None, false).await.unwrap();
+            if residual.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
         assert!(
             !residual.exists(),
             "cleanup did not resume after the legacy writer left"

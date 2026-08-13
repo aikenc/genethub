@@ -129,6 +129,12 @@ async fn dispatch(
             transport,
             machine_name: crate::link::default_display_name(),
             rtc_supported: true,
+            features: Some(vec![
+                genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
+                genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
+                genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
+                genehub_proto::SPEECH_FEATURE_FEEDBACK.to_string(),
+            ]),
             isolation: Some(crate::isolation::report()),
         })),
 
@@ -568,6 +574,91 @@ async fn dispatch(
         }
 
         Request::SettingsGet => Handled::ok(Reply::Settings(state.settings().await)),
+
+        Request::SpeechCapabilities => {
+            Handled::ok(Reply::SpeechCapabilities(state.speech_capabilities().await))
+        }
+
+        Request::SpeechSettingsSetQwen3 {
+            stub_enabled,
+            context_enabled,
+            pinned_terms,
+            language_hints,
+            collect_corrections,
+            workspace_id,
+        } => match state
+            .set_qwen3_speech(
+                stub_enabled,
+                context_enabled,
+                pinned_terms,
+                language_hints,
+                collect_corrections,
+                workspace_id,
+            )
+            .await
+        {
+            Ok(settings) => Handled::ok(Reply::Settings(settings)),
+            Err(error) => failed(error),
+        },
+
+        Request::SpeechRuntimeProbe => Handled::ok(Reply::SpeechRuntimeStatus(
+            state.probe_speech_runtime().await,
+        )),
+
+        Request::SpeechRuntimeConfigure { command, args } => {
+            if transport != TransportKind::Loopback {
+                Handled::err(
+                    ErrorCode::Forbidden,
+                    "语音 runtime 只能由这台电脑上的本地用户注册或移除",
+                )
+            } else {
+                match state.configure_speech_runtime(command, args).await {
+                    Ok(capabilities) => Handled::ok(Reply::SpeechCapabilities(capabilities)),
+                    Err(error) => failed(error),
+                }
+            }
+        }
+
+        Request::SpeechContextPreview {
+            workspace_id,
+            session_id,
+            draft,
+        } => match crate::speech::compile_context_for_state(
+            state,
+            &workspace_id,
+            session_id.as_deref(),
+            draft.as_deref(),
+        )
+        .await
+        {
+            Ok(context) => Handled::ok(Reply::SpeechContext(context)),
+            Err(error) => failed(error),
+        },
+
+        Request::SpeechFeedbackRecord {
+            workspace_id,
+            request_id,
+            context_snapshot_id: _,
+            candidates: _,
+            selected_candidate_id,
+            rejected_candidate_id,
+            scope,
+            score_kind: _,
+        } => match crate::speech::record_feedback_for_state(
+            state,
+            crate::speech::FeedbackSubmission {
+                workspace_id,
+                request_id,
+                selected_candidate_id,
+                rejected_candidate_id,
+                scope,
+            },
+        )
+        .await
+        {
+            Ok(receipt) => Handled::ok(Reply::SpeechFeedbackReceipt(receipt)),
+            Err(error) => failed(error),
+        },
 
         Request::SettingsSetProvider {
             provider_id,

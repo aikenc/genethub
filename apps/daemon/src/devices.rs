@@ -34,6 +34,7 @@ const NONCE_MEMORY: usize = 1024;
 const MAX_INVITES: usize = 32;
 const MAX_DEVICES: usize = 128;
 const MAX_DEVICE_NAME_CHARS: usize = 64;
+const GRANTS_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +51,10 @@ struct Device {
     /// existed, which `GrantSet::default` reads as everything.
     #[serde(default)]
     grants: GrantSet,
+    /// Distinguishes an old full grant set from a new set that deliberately
+    /// omits a capability added later.
+    #[serde(default)]
+    grants_version: u8,
 }
 
 /// Invites are not persisted. An invite means "right now I am waiting for a new
@@ -88,7 +93,7 @@ pub struct Devices {
 impl Devices {
     pub fn load(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let devices = std::fs::read_to_string(&path)
+        let mut devices: Vec<Device> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str::<Persisted>(&raw).ok())
             .map(|file| file.devices)
@@ -96,6 +101,12 @@ impl Devices {
             .into_iter()
             .take(MAX_DEVICES)
             .collect();
+        for device in &mut devices {
+            if device.grants_version == 0 {
+                device.grants.add_speech_to_legacy_full();
+                device.grants_version = GRANTS_VERSION;
+            }
+        }
         let (revoked, _) = broadcast::channel(16);
         Devices {
             path,
@@ -233,6 +244,7 @@ impl Devices {
             paired_at: now,
             last_seen_at: None,
             grants: invite.grants,
+            grants_version: GRANTS_VERSION,
         };
         let credential = DeviceCredential {
             device_id: device.id.clone(),

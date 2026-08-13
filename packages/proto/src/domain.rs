@@ -741,6 +741,11 @@ pub struct HelloResult {
     /// Advertised inside the encrypted data plane. The viewer's local RTC
     /// preference still decides whether negotiation is attempted.
     pub rtc_supported: bool,
+    /// Additive product capabilities. Older daemons omit this field; clients
+    /// must treat that exactly like an empty list rather than guessing support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub features: Option<Vec<String>>,
     /// What this machine can actually enforce on a process it starts on a
     /// caller's behalf. Absent from older daemons, which is why it is optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -882,6 +887,11 @@ pub struct Settings {
     pub providers: Vec<ProviderInfo>,
     /// Whether the daemon accepts connections from the local network.
     pub lan_enabled: bool,
+    /// Qwen3 speech is independent of LLM providers. GeneHub exposes prompt,
+    /// N-best and correction contracts while the model runtime stays local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub speech: Option<crate::speech::SpeechSettings>,
 }
 
 /// A provider's configuration, minus the secret.
