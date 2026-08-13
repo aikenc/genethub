@@ -18,6 +18,8 @@ import { readRtcEnabled } from "./settings/rtc";
 import { Composer, type ComposerPhase } from "./session/Composer";
 import { PermissionCard } from "./session/Permission";
 import { TimelineView } from "./session/TimelineView";
+import type { ForkController } from "./session/TimelineView";
+import type { ForkMachineOption } from "./session/ForkDialog";
 import { defaultAgent, useWorkbench } from "./session/store";
 import { Sidebar } from "./shell/Sidebar";
 import { DesktopToolsDrawer } from "./shell/DesktopToolsDrawer";
@@ -119,6 +121,7 @@ export function App({
   // desktop asking for the room back, which starts false because the left
   // column is how the workbench is read.
   const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [pendingForkSession, setPendingForkSession] = useState<string | null>(null);
   const workbench = useWorkbench();
   const theme = useTheme((state) => state.resolved);
   const pairing = workbench.hub?.state === "pairing";
@@ -289,6 +292,21 @@ export function App({
     return () => client.close();
   }, [endpoint, connect, host, target]);
 
+  useEffect(() => {
+    if (
+      !pendingForkSession ||
+      workbench.connection !== "ready" ||
+      !workbench.sessions.some((entry) => entry.id === pendingForkSession)
+    ) return;
+    const sessionId = pendingForkSession;
+    setPendingForkSession(null);
+    void useWorkbench.getState().selectSession(sessionId).catch((error: unknown) => {
+      useWorkbench.setState({
+        notice: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }, [pendingForkSession, workbench.connection, workbench.sessions]);
+
   const pickTarget = (picked: Target, next: Endpoint) => {
     // The local machine goes back to following the shell, which is the only
     // thing that knows where its daemon moved to.
@@ -300,6 +318,122 @@ export function App({
       current !== "loading" && current?.url === next.url ? current : next,
     );
   };
+
+  const sourceMachineId = workbench.client?.identity?.machineId ?? "current";
+  const sourceMachine: ForkMachineOption = {
+    id: sourceMachineId,
+    routeId: target ?? sourceMachineId,
+    label:
+      endpoint !== "loading" && endpoint !== null ? endpoint.label : "当前机器",
+    kind: target === null && host.kind === "desktop" ? "local" : "remote",
+    online: workbench.connection === "ready",
+  };
+  const forkController: ForkController | undefined =
+    host.targets && host.openTarget
+      ? {
+          sourceMachine,
+          async listMachines() {
+            const listed = await host.targets!();
+            const machines = listed.map((machine): ForkMachineOption => ({
+              id: machine.deviceHandle ?? machine.id,
+              routeId: machine.id,
+              label: machine.label,
+              kind: machine.kind,
+              ...(machine.online === undefined ? {} : { online: machine.online }),
+            }));
+            const current = machines.find((machine) => machine.id === sourceMachine.id);
+            if (current) {
+              current.label = sourceMachine.label;
+              current.online = true;
+            } else {
+              machines.unshift(sourceMachine);
+            }
+            return machines;
+          },
+          async loadCatalog(machine) {
+            if (machine.id === sourceMachine.id) {
+              const state = useWorkbench.getState();
+              return { agents: state.agents, workspaces: state.workspaces };
+            }
+            return withForkClient(
+              connect,
+              await host.openTarget!(machine.routeId, { remember: false }),
+              async () => dialOf(await host.openTarget!(machine.routeId, { remember: false })),
+              async (client) => {
+                const [agents, workspaces] = await Promise.all([
+                  client.call({ type: "agent.list" }),
+                  client.call({ type: "workspace.list" }),
+                ]);
+                if (agents?.type !== "agents" || workspaces?.type !== "workspaces") {
+                  throw new Error("目标机器没有返回可用的 Agent 和工作区列表。");
+                }
+                return { agents: agents.data, workspaces: workspaces.data };
+              },
+            );
+          },
+          async fork(turnId, selection) {
+            const state = useWorkbench.getState();
+            const source = state.sessions.find((entry) => entry.id === state.activeSessionId);
+            if (!source || !state.client) return false;
+            const unchanged =
+              selection.machine.id === sourceMachine.id &&
+              selection.workspaceId === source.workspaceId &&
+              selection.agentId === source.agentId;
+            if (selection.machine.id === sourceMachine.id) {
+              return state.forkSession(
+                turnId,
+                unchanged
+                  ? undefined
+                  : {
+                      agentId: selection.agentId,
+                      workspaceId: selection.workspaceId,
+                    },
+              );
+            }
+
+            const exported = await state.client.call({
+              type: "session.forkExport",
+              payload: { sessionId: source.id, turnId },
+            });
+            if (exported?.type !== "forkTransfer") {
+              throw new Error("源机器没有返回可迁移的 Fork 历史。");
+            }
+            const created = await withForkClient(
+              connect,
+              await host.openTarget!(selection.machine.routeId, { remember: false }),
+              async () => dialOf(
+                await host.openTarget!(selection.machine.routeId, { remember: false }),
+              ),
+              (client) => client.call({
+                type: "session.forkImport",
+                payload: {
+                  transfer: exported.data,
+                  target: {
+                    agentId: selection.agentId,
+                    workspaceId: selection.workspaceId,
+                  },
+                },
+              }),
+            );
+            if (created?.type !== "session") {
+              throw new Error("目标机器没有创建 Fork 会话。");
+            }
+            const next = await host.openTarget!(selection.machine.routeId);
+            setPendingForkSession(created.data.id);
+            pickTarget(
+              {
+                id: selection.machine.routeId,
+                deviceHandle: selection.machine.id,
+                label: selection.machine.label,
+                kind: selection.machine.kind,
+                online: true,
+              },
+              next,
+            );
+            return true;
+          },
+        }
+      : undefined;
 
   if (claiming === "working") return <Splash>正在和这台机器配对…</Splash>;
   if (claiming !== "idle") {
@@ -473,7 +607,10 @@ export function App({
                       className="min-h-0 flex-1 overflow-hidden"
                       style={{ paddingBottom: composerSpace }}
                     >
-                      <TimelineView state={workbench.timeline} />
+                      <TimelineView
+                        state={workbench.timeline}
+                        {...(forkController ? { forkController } : {})}
+                      />
                     </div>
                     {workbench.timeline.pendingPermission ? (
                       <div
@@ -634,6 +771,44 @@ function importCoverageLabel(coverage: HistoryCoverage): string {
     unavailable: "省略部分不可找回",
   }[coverage.retrieval];
   return `保留 ${coverage.retainedItemCount}/${source} 条，省略 ${coverage.omittedItemCount} 条 · ${recovery}`;
+}
+
+async function withForkClient<T>(
+  connect: (
+    endpoint: Endpoint,
+    redial: () => Promise<string | ProtocolDial>,
+  ) => Client,
+  endpoint: Endpoint,
+  redial: () => Promise<string | ProtocolDial>,
+  exchange: (client: Client) => Promise<T>,
+): Promise<T> {
+  const client = connect(endpoint, redial);
+  let stop = () => {};
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const ready = client.connectionState === "ready"
+    ? Promise.resolve()
+    : new Promise<void>((resolve, reject) => {
+        timer = setTimeout(() => {
+          stop();
+          reject(new Error("目标机器连接超时。"));
+        }, 8_000);
+        stop = client.onStateChange((state) => {
+          if (state !== "ready" && state !== "closed") return;
+          if (timer !== null) clearTimeout(timer);
+          stop();
+          if (state === "ready") resolve();
+          else reject(new Error(client.failure?.message ?? "目标机器连接已关闭。"));
+        });
+      });
+  client.connect();
+  try {
+    await ready;
+    return await exchange(client);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    stop();
+    client.close();
+  }
 }
 
 function dialOf(endpoint: Endpoint): ProtocolDial {

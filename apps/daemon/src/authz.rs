@@ -310,6 +310,8 @@ pub fn required(request: &Request) -> Capability {
         Request::SessionCreate { .. }
         | Request::SessionSend { .. }
         | Request::SessionFork { .. }
+        | Request::SessionForkExport { .. }
+        | Request::SessionForkImport { .. }
         | Request::SessionImport { .. }
         | Request::SessionInterrupt { .. }
         | Request::SessionClose { .. }

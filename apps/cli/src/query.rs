@@ -1494,6 +1494,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Update(_) => "update",
         Reply::UpdateDownload(_) => "update download",
         Reply::Session(_) => "session",
+        Reply::ForkTransfer(_) => "forkTransfer",
         Reply::Sessions(_) => "sessions",
         Reply::SessionImports(_) => "session imports",
         Reply::Snapshot(_) => "session snapshot",

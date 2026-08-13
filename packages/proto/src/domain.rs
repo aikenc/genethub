@@ -1,5 +1,6 @@
 //! Domain objects shared by requests, responses and the frontend's caches.
 
+use crate::timeline::TimelineItem;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -195,13 +196,19 @@ pub struct SessionLineage {
 /// The explicit destination chosen in the Fork UI.
 ///
 /// Omitting this object on the RPC keeps the native Fork semantics of the
-/// current Agent. A client sends it only when the user explicitly switches
-/// Agent, which is the opt-in boundary for reconstructed context.
+/// source machine, workspace and Agent. A client sends it when the user
+/// explicitly switches any destination dimension, which is the opt-in boundary
+/// for reconstructed context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct ForkTarget {
     pub agent_id: String,
+    /// Required destination workspace for a directed fork. Older clients omit
+    /// it and keep the source workspace on the current machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub model_id: Option<String>,
@@ -211,6 +218,26 @@ pub struct ForkTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub effort_id: Option<String>,
+}
+
+/// Portable, untrusted material exported by the source daemon for a fork on a
+/// different machine. The destination daemon applies its own Agent catalog,
+/// context budget and workspace validation; clients cannot supply a seed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ForkTransfer {
+    pub source_session_id: String,
+    pub source_turn_id: String,
+    pub source_agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_round_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub title: Option<String>,
+    pub items: Vec<TimelineItem>,
+    pub coverage: HistoryCoverage,
 }
 
 /// Whether an imported conversation can keep talking through its original

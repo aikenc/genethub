@@ -365,9 +365,72 @@ async fn dispatch(
             target,
         } => {
             let providers = state.providers().await;
+            if let Some(target) = target
+                .as_ref()
+                .filter(|target| target.workspace_id.is_some())
+            {
+                let workspace_id = target.workspace_id.as_deref().expect("filtered above");
+                let workspace = match state.workspaces.get(workspace_id).await {
+                    Ok(workspace) => workspace,
+                    Err(error) => return failed(error),
+                };
+                let transfer = match state.sessions.fork_export(&session_id, &turn_id).await {
+                    Ok(transfer) => transfer,
+                    Err(error) => return failed(error),
+                };
+                return match state
+                    .sessions
+                    .fork_import(
+                        workspace_id,
+                        workspace.root,
+                        transfer,
+                        target.clone(),
+                        &providers,
+                        true,
+                    )
+                    .await
+                {
+                    Ok(summary) => Handled::ok(Reply::Session(summary)),
+                    Err(error) => failed(error),
+                };
+            }
             match state
                 .sessions
                 .fork(&session_id, &turn_id, target, &providers)
+                .await
+            {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionForkExport {
+            session_id,
+            turn_id,
+        } => match state.sessions.fork_export(&session_id, &turn_id).await {
+            Ok(transfer) => Handled::ok(Reply::ForkTransfer(transfer)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionForkImport { transfer, target } => {
+            let Some(workspace_id) = target.workspace_id.clone() else {
+                return Handled::err(ErrorCode::BadRequest, "directed fork requires workspaceId");
+            };
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let providers = state.providers().await;
+            match state
+                .sessions
+                .fork_import(
+                    &workspace_id,
+                    workspace.root,
+                    transfer,
+                    target,
+                    &providers,
+                    false,
+                )
                 .await
             {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
@@ -1047,6 +1110,8 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::SessionCreate { .. } => Some("session.create"),
         Request::SessionSend { .. } => Some("session.send"),
         Request::SessionFork { .. } => Some("session.fork"),
+        Request::SessionForkExport { .. } => Some("session.forkExport"),
+        Request::SessionForkImport { .. } => Some("session.forkImport"),
         Request::SessionImport { .. } => Some("session.import"),
         Request::SessionInterrupt { .. } => Some("session.interrupt"),
         Request::SessionDelete { .. } => Some("session.delete"),

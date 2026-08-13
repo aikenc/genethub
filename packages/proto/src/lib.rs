@@ -69,6 +69,7 @@ mod tests {
             json!({"type": "pty.resize", "payload": {"ptyId": "p", "cols": 80, "rows": 24}}),
             json!({"type": "workspace.rename", "payload": {"workspaceId": "w", "name": "demo"}}),
             json!({"type": "session.fork", "payload": {"sessionId": "s", "turnId": "t"}}),
+            json!({"type": "session.forkExport", "payload": {"sessionId": "s", "turnId": "t"}}),
             json!({"type": "diagnostics.snapshot"}),
         ];
         for case in cases {
@@ -122,10 +123,33 @@ mod tests {
             turn_id: "turn-7".into(),
             target: Some(ForkTarget {
                 agent_id: "claude".into(),
+                workspace_id: Some("target-workspace".into()),
                 model_id: Some("sonnet".into()),
                 mode_id: None,
                 effort_id: None,
             }),
+        });
+    }
+
+    #[test]
+    fn portable_fork_transfer_survives_the_wire() {
+        round_trip(ForkTransfer {
+            source_session_id: "source".into(),
+            source_turn_id: "turn-7".into(),
+            source_agent_id: "codex".into(),
+            source_round_id: Some("round-3".into()),
+            title: Some("Investigate".into()),
+            items: vec![TimelineItem::AssistantMessage {
+                id: "a1".into(),
+                text: "done".into(),
+            }],
+            coverage: HistoryCoverage {
+                source_item_count: Some(1),
+                retained_item_count: 1,
+                omitted_item_count: 0,
+                retrieval: RetrievalCapability::Genehub,
+                reason: None,
+            },
         });
     }
 

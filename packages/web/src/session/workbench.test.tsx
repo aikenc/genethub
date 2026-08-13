@@ -64,6 +64,7 @@ afterEach(() => {
     sessions: [],
     activeSessionId: null,
     agents: [],
+    workspaces: [],
     retryPending,
     editPending,
   });
@@ -1487,6 +1488,13 @@ describe("a whole turn as the timeline sees it", () => {
         },
       ],
       activeSessionId: "s1",
+      workspaces: [{
+        id: "w1",
+        name: "GeneHub",
+        root: "/work/genehub",
+        isGitRepo: true,
+        folders: [],
+      }],
       agents: [
         agent({
           id: "codex",
@@ -1529,11 +1537,11 @@ describe("a whole turn as the timeline sees it", () => {
     render(<TimelineView state={state} />);
     await userEvent.click(screen.getByRole("button", { name: "Fork" }));
 
-    expect(screen.getByRole("dialog", { name: "Fork 到 Agent" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Fork 会话" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Codex" })).toBeChecked();
     expect(screen.getByText("当前回合不可原生 Fork")).toBeInTheDocument();
     expect(screen.queryByText("重建会话")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "无法原生 Fork" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeDisabled();
   });
 });
 

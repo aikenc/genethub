@@ -161,10 +161,17 @@ pub enum Request {
         turn_id: String,
         /// Absent is the legacy native-only request. New clients send an
         /// explicit target to opt into provider-agnostic reconstruction when
-        /// a native checkpoint cannot be used.
+        /// any destination dimension changes or a native checkpoint cannot be used.
         #[serde(default)]
         #[ts(optional)]
         target: Option<ForkTarget>,
+    },
+    #[serde(rename = "session.forkExport", rename_all = "camelCase")]
+    SessionForkExport { session_id: String, turn_id: String },
+    #[serde(rename = "session.forkImport", rename_all = "camelCase")]
+    SessionForkImport {
+        transfer: ForkTransfer,
+        target: ForkTarget,
     },
     /// Lists lightweight, workspace-scoped candidates from every installed
     /// Agent. Full histories are not read until `session.import` selects one.
@@ -535,6 +542,7 @@ pub enum Reply {
     Update(UpdateStatus),
     UpdateDownload(UpdateDownload),
     Session(SessionSummary),
+    ForkTransfer(ForkTransfer),
     Sessions(Vec<SessionSummary>),
     SessionImports(SessionImportListing),
     Snapshot(SessionSnapshot),
