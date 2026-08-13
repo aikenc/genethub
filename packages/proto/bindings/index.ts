@@ -563,7 +563,7 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -599,7 +599,7 @@ artifactPreviewBaseUrl: string | null,
  * round that already ended, this is treated as a new round — a
  * wrong stitch is a worse failure than an extra round.
  */
-continuesRound: string | null, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, 
+continuesRound: string | null, } } | { "type": "session.artifact.begin", "payload": { sessionId: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } } | { "type": "session.artifact.chunk", "payload": { sessionId: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } } | { "type": "session.artifact.finish", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.artifact.abort", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, 
 /**
  * Absent is the legacy native-only request. New clients send an
  * explicit target to opt into provider-agnostic reconstruction when
@@ -693,6 +693,36 @@ export type SequencedEvent = { seq: number, sessionId: string, event: SessionEve
  * Anything the daemon sends to a client.
  */
 export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "processes", processes: Array<BackgroundProcess>, } | { "type": "desync", sessionId: string, missed: number, };
+
+/**
+ * A complete daemon-owned artifact bundle. Chat needs only these locators and
+ * counts; the payload remains on the machine that owns the session.
+ */
+export type SessionArtifactBundle = { relativePath: string, workspacePath: string, manifestPath: string, createdAtMs: number, totalBytes: number, files: Array<SessionArtifactStoredFile>, };
+
+/**
+ * One file the browser intends to place in a session artifact bundle.
+ */
+export type SessionArtifactFile = { name: string, mime: string, bytes: number, };
+
+/**
+ * Daemon-computed identity of one finalized file.
+ */
+export type SessionArtifactStoredFile = { name: string, mime: string, bytes: number, sha256: string, };
+
+/**
+ * Upload lease returned by `session.artifact.begin`.
+ */
+export type SessionArtifactUpload = { uploadId: string, 
+/**
+ * Relative to the physical session directory, e.g.
+ * `artifacts/260813-221500-a3f1`.
+ */
+relativePath: string, 
+/**
+ * Relative to the workspace, so a local Agent can open it directly.
+ */
+workspacePath: string, maxChunkBytes: number, };
 
 /**
  * Deterministic, model-free context projection used directly by Agents and

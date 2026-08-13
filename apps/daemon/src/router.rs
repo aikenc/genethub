@@ -57,7 +57,20 @@ impl Handled {
 /// something actionable rather than render blank.
 fn failed(error: anyhow::Error) -> Handled {
     let message = format!("{error:#}");
-    let code = if message.contains("Asset Preview base URL") {
+    let code = if message.contains("invalid session artifact")
+        || message.contains("session artifact chunk")
+        || message.contains("session artifact metadata")
+        || message.contains("session artifact exceeds")
+        || message.contains("artifact upload incomplete")
+    {
+        ErrorCode::BadRequest
+    } else if message.contains("artifact upload conflict") {
+        ErrorCode::Conflict
+    } else if message.contains("no such artifact upload") {
+        ErrorCode::NotFound
+    } else if message.contains("artifact upload does not belong") {
+        ErrorCode::Forbidden
+    } else if message.contains("Asset Preview base URL") {
         ErrorCode::BadRequest
     } else if message.contains("escapes the workspace")
         || message.contains("not a member of this workspace")
@@ -358,6 +371,54 @@ async fn dispatch(
                 Err(error) => failed(error),
             }
         }
+
+        Request::SessionArtifactBegin {
+            session_id,
+            files,
+            metadata,
+        } => match state
+            .sessions
+            .begin_artifact(&session_id, files, metadata)
+            .await
+        {
+            Ok(upload) => Handled::ok(Reply::SessionArtifactUpload(upload)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionArtifactChunk {
+            session_id,
+            upload_id,
+            file_index,
+            offset,
+            data_base64,
+        } => match state
+            .sessions
+            .write_artifact_chunk(&session_id, &upload_id, file_index, offset, &data_base64)
+            .await
+        {
+            Ok(()) => Handled::ok(Reply::Ack),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionArtifactFinish {
+            session_id,
+            upload_id,
+        } => match state
+            .sessions
+            .finish_artifact(&session_id, &upload_id)
+            .await
+        {
+            Ok(bundle) => Handled::ok(Reply::SessionArtifact(bundle)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionArtifactAbort {
+            session_id,
+            upload_id,
+        } => match state.sessions.abort_artifact(&session_id, &upload_id).await {
+            Ok(()) => Handled::ok(Reply::Ack),
+            Err(error) => failed(error),
+        },
 
         Request::SessionFork {
             session_id,
@@ -1046,6 +1107,10 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::AgentRefresh => Some("agent.refresh"),
         Request::SessionCreate { .. } => Some("session.create"),
         Request::SessionSend { .. } => Some("session.send"),
+        Request::SessionArtifactBegin { .. } => Some("session.artifact.begin"),
+        Request::SessionArtifactChunk { .. } => Some("session.artifact.chunk"),
+        Request::SessionArtifactFinish { .. } => Some("session.artifact.finish"),
+        Request::SessionArtifactAbort { .. } => Some("session.artifact.abort"),
         Request::SessionFork { .. } => Some("session.fork"),
         Request::SessionImport { .. } => Some("session.import"),
         Request::SessionInterrupt { .. } => Some("session.interrupt"),
@@ -1169,6 +1234,28 @@ mod tests {
         match handled.reply {
             Err(error) => assert_eq!(error.code, ErrorCode::NotFound),
             Ok(_) => panic!("expected an error"),
+        }
+    }
+
+    #[test]
+    fn artifact_input_failures_keep_their_client_visible_class() {
+        for (message, expected) in [
+            ("invalid session artifact file name", ErrorCode::BadRequest),
+            (
+                "artifact upload conflict: wrong offset",
+                ErrorCode::Conflict,
+            ),
+            ("no such artifact upload: u_1", ErrorCode::NotFound),
+            (
+                "artifact upload does not belong to this session",
+                ErrorCode::Forbidden,
+            ),
+        ] {
+            let handled = failed(anyhow::anyhow!(message));
+            match handled.reply {
+                Err(error) => assert_eq!(error.code, expected, "{message}"),
+                Ok(_) => panic!("expected an error for {message}"),
+            }
         }
     }
 

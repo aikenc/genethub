@@ -14,7 +14,8 @@ use genehub_proto::{
     Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, HistoryCoverage,
     ImportContinuation, ItemDelta, PermissionOptionKind, PermissionOutcome, PermissionRequest,
     PermissionRequestKind, ProbeState, RetrievalCapability, RoundLayer, RoundLayerOutcome,
-    RoundSummary, RoundTrunk, SequencedEvent, SessionContext, SessionEvent, SessionImportCandidate,
+    RoundSummary, RoundTrunk, SequencedEvent, SessionArtifactBundle, SessionArtifactFile,
+    SessionArtifactUpload, SessionContext, SessionEvent, SessionImportCandidate,
     SessionImportListing, SessionImportSource, SessionInspection, SessionLineage,
     SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot, SessionStatus,
     SessionSummary, TimelineItem, ToolStatus, TurnErrorCode, TurnOutcome, TurnStats, Usage,
@@ -734,6 +735,56 @@ impl SessionManager {
         let status = *live.status.lock().await;
         let summary = live.meta.lock().await.summary(status);
         Ok(summary)
+    }
+
+    pub async fn begin_artifact(
+        &self,
+        session_id: &str,
+        files: Vec<SessionArtifactFile>,
+        metadata: serde_json::Value,
+    ) -> Result<SessionArtifactUpload> {
+        let live = self.live(session_id).await?;
+        let workspace_id = live.meta.lock().await.workspace_id.clone();
+        self.store
+            .begin_artifact(&workspace_id, session_id, files, metadata)
+    }
+
+    pub async fn write_artifact_chunk(
+        &self,
+        session_id: &str,
+        upload_id: &str,
+        file_index: u32,
+        offset: u64,
+        data_base64: &str,
+    ) -> Result<()> {
+        let live = self.live(session_id).await?;
+        let workspace_id = live.meta.lock().await.workspace_id.clone();
+        self.store.write_artifact_chunk(
+            &workspace_id,
+            session_id,
+            upload_id,
+            file_index,
+            offset,
+            data_base64,
+        )
+    }
+
+    pub async fn finish_artifact(
+        &self,
+        session_id: &str,
+        upload_id: &str,
+    ) -> Result<SessionArtifactBundle> {
+        let live = self.live(session_id).await?;
+        let workspace_id = live.meta.lock().await.workspace_id.clone();
+        self.store
+            .finish_artifact(&workspace_id, session_id, upload_id)
+    }
+
+    pub async fn abort_artifact(&self, session_id: &str, upload_id: &str) -> Result<()> {
+        let live = self.live(session_id).await?;
+        let workspace_id = live.meta.lock().await.workspace_id.clone();
+        self.store
+            .abort_artifact(&workspace_id, session_id, upload_id)
     }
 
     pub async fn list(

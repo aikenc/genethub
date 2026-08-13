@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { buildRuntimeArtifactReport } from "./PreviewRuntimeControls";
+import { buildRuntimeArtifactSubmission } from "./PreviewRuntimeControls";
 
 describe("Preview runtime artifact", () => {
-  it("projects bounded recent logs, spaced DOM states, and recording identity", () => {
+  it("keeps full bounded logs, every pixel/DOM frame, and the recording as files", async () => {
     const events = Array.from({ length: 250 }, (_, index) => ({
       at: 1_700_000_000_000 + index,
       kind: "console",
@@ -34,7 +34,7 @@ describe("Preview runtime artifact", () => {
       },
     }));
 
-    const report = buildRuntimeArtifactReport({
+    const artifact = await buildRuntimeArtifactSubmission({
       entryPath: "r_demo/prototype/index.html",
       sourceVersion: "sha256:test",
       events,
@@ -49,13 +49,35 @@ describe("Preview runtime artifact", () => {
       },
     });
 
-    expect(report).toContain('"schema": "genehub.preview-runtime.v1"');
-    expect(report).toContain('"path": "r_demo/prototype/index.html"');
-    expect(report).toContain('"requestedFps": 30');
-    expect(report).toContain('"captureMode": "element"');
-    expect(report).toContain("event-249");
-    expect(report).not.toContain("event-0\"");
-    expect(report.match(/^### DOM /gm)).toHaveLength(8);
-    expect(report).toContain('data-frame="9"');
+    expect(artifact.metadata).toMatchObject({
+      schema: "genehub.preview-runtime.v2",
+      source: { path: "r_demo/prototype/index.html", version: "sha256:test" },
+      eventCount: 250,
+      frameCount: 10,
+      recording: { requestedFps: 30, captureMode: "element" },
+    });
+    expect(artifact.files.map((file) => file.name)).toEqual([
+      "events.jsonl",
+      "dom.jsonl",
+      ...Array.from({ length: 10 }, (_, index) =>
+        `frame-${String(index + 1).padStart(3, "0")}.webp`,
+      ),
+      "recording.webm",
+    ]);
+    const eventsText = await readBlob(artifact.files[0]!.blob);
+    const domText = await readBlob(artifact.files[1]!.blob);
+    expect(eventsText).toContain("event-0");
+    expect(eventsText).toContain("event-249");
+    expect(domText).toContain('data-frame=\\"9\\"');
+    expect(domText.trim().split("\n")).toHaveLength(10);
   });
 });
+
+function readBlob(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(blob);
+  });
+}

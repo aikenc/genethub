@@ -12,7 +12,7 @@ import {
   PreviewRuntimeControls,
   type PreviewDomSnapshot,
   type PreviewRuntimeEvent,
-  type RuntimeArtifactSubmission,
+  type RuntimeArtifactSubmit,
 } from "./PreviewRuntimeControls";
 import type { AssetPreviewLocation } from "./url";
 
@@ -45,8 +45,8 @@ export function AssetPreviewPage({
    */
   client?: Client | null;
   onMetaChange?: (meta: PreviewMeta | null) => void;
-  /** Sends a bounded log/DOM/pixel projection to the active conversation. */
-  onRuntimeArtifact?: (artifact: RuntimeArtifactSubmission) => Promise<void>;
+  /** Persists runtime files to the daemon-owned active session bundle. */
+  onRuntimeArtifact?: RuntimeArtifactSubmit;
 }) {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [pageInfoOpen, setPageInfoOpen] = useState(false);
@@ -202,7 +202,7 @@ function PreviewDocument({
   workspaceHandle: string;
   client: Client;
   onMetaChange?: (meta: PreviewMeta | null) => void;
-  onRuntimeArtifact?: (artifact: RuntimeArtifactSubmission) => Promise<void>;
+  onRuntimeArtifact?: RuntimeArtifactSubmit;
 }) {
   const { metadata, bytes } = result;
   const rootHandle = path.split("/")[0] ?? "";
@@ -314,7 +314,7 @@ export function HtmlDocument({
   entryPath: string;
   fetchAsset: (path: string) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
   onMetaChange?: (meta: PreviewMeta | null) => void;
-  onRuntimeArtifact?: (artifact: RuntimeArtifactSubmission) => Promise<void>;
+  onRuntimeArtifact?: RuntimeArtifactSubmit;
 }) {
   const [srcDoc, setSrcDoc] = useState<string | null>(null);
   const [frameReady, setFrameReady] = useState(false);

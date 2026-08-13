@@ -7,11 +7,11 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
-import type { Attachment } from "@genehub/proto";
-
 import type { Host } from "../host";
-import { defaultAgent, useWorkbench, type PreviewFloatTarget } from "../session/store";
+import { useWorkbench, type PreviewFloatTarget } from "../session/store";
 import { AssetPreviewPage, type PreviewMeta } from "./AssetPreviewPage";
+import type { RuntimeArtifactSubmit } from "./PreviewRuntimeControls";
+import { runtimeArtifactReference, uploadSessionArtifact } from "./sessionArtifactUpload";
 import { assetPreviewUrl } from "./url";
 
 type Mode = "expanded" | "float";
@@ -228,26 +228,45 @@ export function PreviewFloat({
     }, CLICK_DELAY_MS);
   };
 
-  const submitRuntimeArtifact = useCallback(
-    async (artifact: { text: string; image?: Attachment }) => {
+  const submitRuntimeArtifact = useCallback<RuntimeArtifactSubmit>(
+    async (artifact, onProgress) => {
       const state = useWorkbench.getState();
-      const pending = state.timeline.pending;
-      if ((pending && !pending.error) || state.timeline.status === "running" || state.timeline.status === "waiting") {
-        throw new Error("当前 Agent 正在处理上一条消息，请稍后再上传运行产物");
+      if (!state.client || !state.activeSessionId) {
+        throw new Error("尚未连接到可保存运行产物的会话");
       }
-      if (!state.client || !state.activeWorkspaceId) {
-        throw new Error("尚未连接到可接收运行产物的会话");
+      const sessionId = state.activeSessionId;
+      const bundle = await uploadSessionArtifact(
+        state.client,
+        sessionId,
+        artifact,
+        ({ uploadedBytes, totalBytes }) => onProgress(uploadedBytes, totalBytes),
+      );
+
+      // Persistence is independent of Agent availability. A busy conversation
+      // merely skips the small reference message; the bundle is already safe.
+      const afterSave = useWorkbench.getState();
+      if (afterSave.activeSessionId !== sessionId) {
+        return {
+          relativePath: bundle.relativePath,
+          notified: false,
+          notificationError: "保存期间已切换会话，未向其他会话发送引用",
+        };
       }
-      const session = state.sessions.find((item) => item.id === state.activeSessionId);
-      const agentId = session?.agentId ?? state.draft?.agentId ?? null;
-      const agent = state.agents.find((item) => item.id === agentId) ?? defaultAgent(state.agents);
-      const forwardsImage = Boolean(agent?.capabilities.attachments && artifact.image);
-      const text = forwardsImage
-        ? artifact.text
-        : `${artifact.text}\n\n> 当前 Agent 不接收图片附件；本次仍已上传日志、DOM 和截图元数据。`;
-      await state.send(text, forwardsImage && artifact.image ? [artifact.image] : []);
+      const pending = afterSave.timeline.pending;
+      if (
+        (pending && !pending.error) ||
+        afterSave.timeline.status === "running" ||
+        afterSave.timeline.status === "waiting"
+      ) {
+        return { relativePath: bundle.relativePath, notified: false };
+      }
+      await afterSave.send(runtimeArtifactReference(bundle, artifact), []);
       const failure = useWorkbench.getState().notice;
-      if (failure) throw new Error(failure);
+      return {
+        relativePath: bundle.relativePath,
+        notified: !failure,
+        ...(failure ? { notificationError: `通知 Agent 失败：${failure}` } : {}),
+      };
     },
     [],
   );

@@ -155,6 +155,40 @@ pub enum Request {
         #[serde(default)]
         continues_round: Option<String>,
     },
+    /// Starts a daemon-owned runtime artifact bundle inside this session.
+    ///
+    /// File bytes travel separately through bounded chunks. The declared
+    /// lengths let the daemon reject an upload before it reserves unbounded
+    /// disk, and `metadata` is copied into the generated manifest as untrusted
+    /// capture context rather than interpreted by the daemon.
+    #[serde(rename = "session.artifact.begin", rename_all = "camelCase")]
+    SessionArtifactBegin {
+        session_id: String,
+        files: Vec<SessionArtifactFile>,
+        metadata: serde_json::Value,
+    },
+    #[serde(rename = "session.artifact.chunk", rename_all = "camelCase")]
+    SessionArtifactChunk {
+        session_id: String,
+        upload_id: String,
+        file_index: u32,
+        #[ts(type = "number")]
+        offset: u64,
+        data_base64: String,
+    },
+    /// Publishes the bundle atomically after every declared byte is present.
+    #[serde(rename = "session.artifact.finish", rename_all = "camelCase")]
+    SessionArtifactFinish {
+        session_id: String,
+        upload_id: String,
+    },
+    /// Cancels only an unfinished upload. Completed bundles are immutable to
+    /// this protocol and follow the lifecycle of their owning session.
+    #[serde(rename = "session.artifact.abort", rename_all = "camelCase")]
+    SessionArtifactAbort {
+        session_id: String,
+        upload_id: String,
+    },
     #[serde(rename = "session.fork", rename_all = "camelCase")]
     SessionFork {
         session_id: String,
@@ -545,6 +579,8 @@ pub enum Reply {
     RoundLayer(RoundLayer),
     RoundTrunk(RoundTrunk),
     Blob(BlobPayload),
+    SessionArtifactUpload(SessionArtifactUpload),
+    SessionArtifact(SessionArtifactBundle),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),
     Directory(DirectoryListing),
@@ -565,6 +601,59 @@ pub enum Reply {
     Processes(Vec<BackgroundProcess>),
     /// Nothing to return, but the call succeeded.
     Ack,
+}
+
+/// One file the browser intends to place in a session artifact bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionArtifactFile {
+    pub name: String,
+    pub mime: String,
+    #[ts(type = "number")]
+    pub bytes: u64,
+}
+
+/// Upload lease returned by `session.artifact.begin`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionArtifactUpload {
+    pub upload_id: String,
+    /// Relative to the physical session directory, e.g.
+    /// `artifacts/260813-221500-a3f1`.
+    pub relative_path: String,
+    /// Relative to the workspace, so a local Agent can open it directly.
+    pub workspace_path: String,
+    pub max_chunk_bytes: u32,
+}
+
+/// Daemon-computed identity of one finalized file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionArtifactStoredFile {
+    pub name: String,
+    pub mime: String,
+    #[ts(type = "number")]
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// A complete daemon-owned artifact bundle. Chat needs only these locators and
+/// counts; the payload remains on the machine that owns the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionArtifactBundle {
+    pub relative_path: String,
+    pub workspace_path: String,
+    pub manifest_path: String,
+    #[ts(type = "number")]
+    pub created_at_ms: i64,
+    #[ts(type = "number")]
+    pub total_bytes: u64,
+    pub files: Vec<SessionArtifactStoredFile>,
 }
 
 /// A process an agent started and did not stop.

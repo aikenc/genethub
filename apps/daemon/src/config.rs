@@ -676,7 +676,7 @@ impl Drop for PrivateTemp {
     }
 }
 
-fn ensure_real_directory(path: &Path) -> Result<()> {
+pub(crate) fn ensure_real_directory(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             reject_link_or_reparse(path, &metadata)?;
@@ -701,7 +701,7 @@ fn ensure_real_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn reject_link_or_reparse(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+pub(crate) fn reject_link_or_reparse(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     if metadata.file_type().is_symlink() {
         anyhow::bail!(
             "refusing symbolic link in sensitive data: {}",
@@ -712,7 +712,7 @@ fn reject_link_or_reparse(path: &Path, metadata: &fs::Metadata) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn reject_link_or_reparse(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+pub(crate) fn reject_link_or_reparse(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     use std::os::windows::fs::MetadataExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
@@ -726,7 +726,7 @@ fn reject_link_or_reparse(path: &Path, metadata: &fs::Metadata) -> Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn reject_link_or_reparse(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+pub(crate) fn reject_link_or_reparse(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     if metadata.file_type().is_symlink() {
         anyhow::bail!(
             "refusing symbolic link in sensitive data: {}",

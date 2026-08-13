@@ -309,6 +309,10 @@ pub fn required(request: &Request) -> Capability {
 
         Request::SessionCreate { .. }
         | Request::SessionSend { .. }
+        | Request::SessionArtifactBegin { .. }
+        | Request::SessionArtifactChunk { .. }
+        | Request::SessionArtifactFinish { .. }
+        | Request::SessionArtifactAbort { .. }
         | Request::SessionFork { .. }
         | Request::SessionImport { .. }
         | Request::SessionInterrupt { .. }
@@ -462,5 +466,31 @@ mod tests {
             Some(Capability::Handshake)
         );
         assert_eq!(StreamMethod::parse("rpc"), None);
+    }
+
+    #[test]
+    fn artifact_bytes_are_scoped_to_their_session_not_general_files() {
+        assert_eq!(
+            required(&Request::SessionArtifactBegin {
+                session_id: "s".into(),
+                files: vec![genehub_proto::SessionArtifactFile {
+                    name: "events.jsonl".into(),
+                    mime: "application/x-ndjson".into(),
+                    bytes: 0,
+                }],
+                metadata: serde_json::json!({}),
+            }),
+            Capability::Session
+        );
+        assert_eq!(
+            required(&Request::SessionArtifactChunk {
+                session_id: "s".into(),
+                upload_id: "u".into(),
+                file_index: 0,
+                offset: 0,
+                data_base64: String::new(),
+            }),
+            Capability::Session
+        );
     }
 }

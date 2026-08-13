@@ -58,6 +58,7 @@
   rounds/r-001/…
   blobs/b-9f.jsonl                 blob 正文，按内容 id 前两位合批
   state/                           adapter 私有 scratch
+  artifacts/YYMMDD-hhmmss-<hash4>/ 浏览器运行产物；manifest + 图片/视频/文本
 <workspace>/.genethub/tombstones/<session-id>.json  持锁写入的逻辑删除标记
 ```
 
@@ -142,6 +143,14 @@ pub struct BlobRef {
 **内容寻址在这里买的是不可变与稳定命名，不是去重。** 每个 payload 都嵌着它所属 item 的唯一 id，所以两个不同 item 永远不会哈希相同，没有可折叠的东西。曾经加过一张进程内 id→引用表想「顺手去重」，实测命中率为零，却让每个会话常驻一张随 blob 数无上限增长的 map——正是这次重排要消除的那类内存。已经删掉。真要跨重启去重，代价是打开会话时加载全量 id 索引，等于把刚砍掉的 O(N) 请回来。
 
 **桶文件可以很大，这不是问题。** 一条 100MB 的构建日志就是桶里的一行。读取按 offset 定长取，不受文件总长影响；写入是追加，也不受影响。真正会被文件大小拖垮的是顺序扫描，而这里已经没有顺序扫描了。
+
+### 3.3.1 artifacts/
+
+Preview 采集的日志、DOM、真实渲染截图和体验视频直接存到 daemon 所在电脑的当前会话目录，不经过 Chat 搬运大字节。目录名由 daemon 生成，格式为 `YYMMDD-hhmmss-<hash4>`；浏览器只能声明一组平面文件名、MIME 和大小，不能选择磁盘路径。
+
+传输采用 `session.artifact.begin / chunk / finish / abort`：原始 chunk 最大 512 KiB，单 bundle 最大 512 MiB。上传时数据位于 `artifacts/.upload-*` 隐藏 staging 目录；daemon 校验 session 归属、文件名、offset、声明大小和总量，并在完成时计算每个文件的 SHA-256。只有所有文件完整且 `manifest.json` 已写入后，才通过同目录 rename 一次性发布正式目录。断线导致 chunk 或 finish 重试时按 upload id 幂等；失败或取消只清理尚未发布的 staging，已完成 bundle 不会被 abort 删除。
+
+Chat 只发送 `manifest.json` 的工作区相对路径、文件数和总字节等小摘要，不附带图片、视频、DOM 或日志正文。Agent 与第三方 Agent 都在 daemon 电脑上从该路径按需读取；采集内容一律视为不可信输入。删除 session 会连同其 artifacts 一起删除。
 
 ### 3.4 跨 channel 共用一个工作目录
 

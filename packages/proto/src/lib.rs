@@ -69,6 +69,11 @@ mod tests {
             json!({"type": "pty.resize", "payload": {"ptyId": "p", "cols": 80, "rows": 24}}),
             json!({"type": "workspace.rename", "payload": {"workspaceId": "w", "name": "demo"}}),
             json!({"type": "session.fork", "payload": {"sessionId": "s", "turnId": "t"}}),
+            json!({"type": "session.artifact.begin", "payload": {
+                "sessionId": "s",
+                "files": [{"name": "events.jsonl", "mime": "application/x-ndjson", "bytes": 0}],
+                "metadata": {"schema": "genehub.preview-runtime.v2"}
+            }}),
             json!({"type": "diagnostics.snapshot"}),
         ];
         for case in cases {

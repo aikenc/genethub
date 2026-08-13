@@ -13,6 +13,7 @@
 //! <workspace>/.genethub/sessions/<session>/rounds/r-000/t-0000.jsonl  one trunk's batches and blob rows
 //! <workspace>/.genethub/sessions/<session>/blobs/b-9f.jsonl           blob payloads, bucketed by content id
 //! <workspace>/.genethub/sessions/<session>/state/                     adapter scratch
+//! <workspace>/.genethub/sessions/<session>/artifacts/<time>-<hash>/   browser runtime evidence
 //! ```
 //!
 //! Deltas are never written. Only settled items reach disk, which keeps a
@@ -740,7 +741,12 @@ impl Store {
     ///
     /// Reads deliberately do not come here. A build that cannot write a
     /// workspace can still show every conversation in it.
-    fn prepare_write(&self, workspace_id: &str, session_id: &str, dir: &Path) -> Result<()> {
+    pub(super) fn prepare_write(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        dir: &Path,
+    ) -> Result<()> {
         self.ensure_not_deleted(workspace_id, session_id)?;
         let home = self.homes.home_dir(workspace_id)?;
         if !self.homes.holds(workspace_id, session_id) {
