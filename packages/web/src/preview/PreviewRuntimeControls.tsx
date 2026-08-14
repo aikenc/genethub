@@ -124,7 +124,7 @@ export function PreviewRuntimeControls({
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [recordingResult, setRecordingResult] = useState<RuntimeRecording | null>(null);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
-  const [notice, setNotice] = useState("日志已开始记录");
+  const [notice, setNotice] = useState("正在连接日志采集…");
 
   const clearRecordingTimers = useCallback(() => {
     for (const timer of [sampleTimer, elapsedTimer, maximumTimer]) {
@@ -149,13 +149,17 @@ export function PreviewRuntimeControls({
     setCaptureActive(false);
     setRecordingResult(null);
     setRecordingUrl(null);
-    setNotice("日志已开始记录");
+    setNotice("正在连接日志采集…");
     return () => {
       clearRecordingTimers();
       engine.dispose();
       engineRef.current = null;
     };
   }, [captureHandle, clearRecordingTimers]);
+
+  useEffect(() => {
+    setNotice(ready ? "日志已开始记录" : "正在连接日志采集…");
+  }, [ready]);
 
   useEffect(() => {
     if (!recordingResult || recordingResult.kind !== "video") {

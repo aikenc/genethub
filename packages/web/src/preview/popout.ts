@@ -1,13 +1,29 @@
+import type { Client } from "../protocol/client";
+import type { AssetPreviewLocation } from "./url";
+
 const POPOUT_PARAM = "genehubPreviewPopout";
 const SESSION_PARAM = "genehubPreviewSession";
 const CHANNEL_NAME = "genehub-preview-popout-v1";
 const STORAGE_KEY = "__genehub_preview_popout_v1__";
 const MESSAGE_SOURCE = "genehub-preview-popout-v1";
+const OPENER_BRIDGE_KEY = "__genehub_preview_popout_clients_v1__";
 
 export type PreviewPopoutContext = {
   id: string;
   sessionId: string | null;
 };
+
+type PreviewPopoutClientEntry = {
+  context: PreviewPopoutContext;
+  source: AssetPreviewLocation;
+  client: Client;
+};
+
+type PreviewPopoutBridgeOwner = Window & {
+  [OPENER_BRIDGE_KEY]?: Map<string, PreviewPopoutClientEntry>;
+};
+
+const inheritedClients = new Map<string, Client>();
 
 export type PreviewPopoutMessage =
   | {
@@ -28,11 +44,20 @@ export function createPreviewPopoutUrl(
   previewUrl: string,
   sessionId: string | null,
   id = runtimeId(),
+  connectionHash = typeof window === "undefined" ? "" : window.location.hash,
 ): { id: string; url: string } {
   const url = new URL(previewUrl, window.location.href);
   url.searchParams.set(POPOUT_PARAM, id);
   if (sessionId) url.searchParams.set(SESSION_PARAM, sessionId);
   else url.searchParams.delete(SESSION_PARAM);
+  // Asset Preview locators deliberately omit connection details. A popout is
+  // still the same browser on the same origin, though, and needs the current
+  // machine rendezvous address to create its own daemon connection. Keep only
+  // that fragment field: fragments never reach the HTTP server or access log.
+  if (!url.hash) {
+    const endpoint = new URLSearchParams(connectionHash.replace(/^#/, "")).get("endpoint");
+    if (endpoint) url.hash = new URLSearchParams({ endpoint }).toString();
+  }
   return { id, url: url.toString() };
 }
 
@@ -44,6 +69,62 @@ export function parsePreviewPopout(search: string): PreviewPopoutContext | null 
   const sessionId = rawSessionId === null ? null : safeToken(rawSessionId);
   if (rawSessionId !== null && !sessionId) return null;
   return { id, sessionId };
+}
+
+/**
+ * Makes the already-connected workbench Client available to one same-origin
+ * popout. This avoids opening a second Fabric session with the same browser
+ * credential, which would evict the workbench connection. The random popout id
+ * is the capability and the entry is removed as soon as the child consumes it.
+ */
+export function registerPreviewPopoutClient(
+  context: PreviewPopoutContext,
+  source: AssetPreviewLocation,
+  client: Client,
+  owner: PreviewPopoutBridgeOwner = window,
+): () => void {
+  const clients = owner[OPENER_BRIDGE_KEY] ?? new Map<string, PreviewPopoutClientEntry>();
+  owner[OPENER_BRIDGE_KEY] = clients;
+  const entry = { context, source, client } satisfies PreviewPopoutClientEntry;
+  clients.set(context.id, entry);
+  return () => {
+    if (clients.get(context.id) === entry) clients.delete(context.id);
+  };
+}
+
+/** Consumes the opener's shared Client, then severs the child-to-opener link. */
+export function takePreviewPopoutClient(
+  context: PreviewPopoutContext,
+  source: AssetPreviewLocation,
+  child: Pick<Window, "opener"> = window,
+): Client | null {
+  const cached = inheritedClients.get(context.id);
+  if (cached) return cached;
+  try {
+    const owner = child.opener as PreviewPopoutBridgeOwner | null;
+    const clients = owner?.[OPENER_BRIDGE_KEY];
+    const entry = clients?.get(context.id);
+    if (
+      !entry ||
+      entry.context.sessionId !== context.sessionId ||
+      !sameSource(entry.source, source)
+    ) {
+      return null;
+    }
+    clients?.delete(context.id);
+    inheritedClients.set(context.id, entry.client);
+    return entry.client;
+  } catch {
+    return null;
+  } finally {
+    // The H5 itself runs in an opaque sandbox and cannot reach this property;
+    // sever it anyway once the trusted shell has consumed the one-time entry.
+    try {
+      child.opener = null;
+    } catch {
+      // Some embedded browsers expose opener as read-only.
+    }
+  }
 }
 
 export function previewPopoutReady(context: PreviewPopoutContext): PreviewPopoutMessage {
@@ -135,6 +216,14 @@ function validMessage(value: unknown): PreviewPopoutMessage | null {
 function safeToken(value: unknown): string | null {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,160}$/.test(value)) return null;
   return value;
+}
+
+function sameSource(left: AssetPreviewLocation, right: AssetPreviewLocation): boolean {
+  return (
+    left.deviceHandle === right.deviceHandle &&
+    left.workspaceHandle === right.workspaceHandle &&
+    left.path === right.path
+  );
 }
 
 function runtimeId(): string {

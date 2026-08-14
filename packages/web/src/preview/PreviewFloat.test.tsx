@@ -103,7 +103,12 @@ describe("PreviewFloat", () => {
   it("opens fullscreen with title chrome and keeps preview mounted across minimize", async () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const onClose = vi.fn();
-    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const open = vi.spyOn(window, "open").mockImplementation(() => {
+      expect(
+        screen.getByRole("button", { name: "预览浮窗 Cursor Demo Title" }),
+      ).toBeInTheDocument();
+      return window;
+    });
     const host = { kind: "browser" } as Host;
 
     render(
@@ -145,7 +150,10 @@ describe("PreviewFloat", () => {
     expect(opened.pathname).toContain("/assets/preview/v2/");
     expect(opened.searchParams.get("genehubPreviewSession")).toBe("s_demo");
     const popoutId = opened.searchParams.get("genehubPreviewPopout")!;
-    expect(screen.getByRole("dialog", { name: "文件预览" })).toBeInTheDocument();
+    expect(open.mock.calls[0]?.[1]).toBe(`genehub-preview-${popoutId}`);
+    expect(
+      screen.getByRole("button", { name: "预览浮窗 Cursor Demo Title" }),
+    ).toBeInTheDocument();
 
     emitPopoutMessage({
       source: "genehub-preview-popout-v1",
@@ -172,6 +180,28 @@ describe("PreviewFloat", () => {
 
     await user.click(screen.getByRole("button", { name: "关闭预览" }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("restores the maximized Preview when opening the window throws", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    vi.spyOn(window, "open").mockImplementation(() => {
+      throw new Error("popup blocked");
+    });
+
+    render(
+      <PreviewFloat
+        source={{
+          deviceHandle: "m_demo",
+          workspaceHandle: "w_demo",
+          path: "r_root/demos/index.html",
+        }}
+        host={{ kind: "browser" } as Host}
+        onClose={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "新窗口打开" }));
+    expect(screen.getByRole("dialog", { name: "文件预览" })).toBeInTheDocument();
   });
 
   it("saves embedded artifacts into the draft without sending Chat", async () => {

@@ -1,9 +1,11 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import type { AssetPreviewMetadata } from "@genehub/proto";
 
 import { HtmlDocument, isolatedHtml } from "./AssetPreviewPage";
+import type { RuntimeArtifactSubmission } from "./PreviewRuntimeControls";
 
 describe("active single-file HTML Preview", () => {
   it("keeps scripts but replaces document-controlled origin and network policy", () => {
@@ -110,5 +112,118 @@ describe("active single-file HTML Preview", () => {
       detail: { surface: "html-preview-iframe", message: "render failed" },
     });
     window.removeEventListener("genehub:preview-diagnostic", received);
+  });
+
+  it("collects new-window logs and DOM before saving its own runtime bundle", async () => {
+    const bytes = new TextEncoder().encode("<!doctype html><html><body>popout</body></html>");
+    const metadata = {
+      kind: "html",
+      mediaType: "text/html",
+      sourceBytes: bytes.byteLength,
+      version: "sha256:popout",
+    } as AssetPreviewMetadata;
+    const onRuntimeReady = vi.fn();
+    const submissions: RuntimeArtifactSubmission[] = [];
+    const onRuntimeArtifact = vi.fn(async (artifact: RuntimeArtifactSubmission) => {
+      submissions.push(artifact);
+      return {
+        relativePath: "artifacts/260814-091500-abcd",
+        addedToDraft: true,
+      };
+    });
+    const user = userEvent.setup();
+
+    render(
+      <HtmlDocument
+        bytes={bytes}
+        metadata={metadata}
+        entryPath="r_root/index.html"
+        fetchAsset={async () => null}
+        onRuntimeArtifact={onRuntimeArtifact}
+        onRuntimeReady={onRuntimeReady}
+      />,
+    );
+
+    const frame = await screen.findByTitle<HTMLIFrameElement>("HTML 文件预览");
+    const frameWindow = frame.contentWindow!;
+    vi.spyOn(frameWindow, "postMessage").mockImplementation((message: unknown) => {
+      const command = message as { command?: string; requestId?: string };
+      const detail =
+        command.command === "snapshot-render"
+          ? {
+              blob: new Blob(["popout frame"], { type: "image/webp" }),
+              width: 390,
+              height: 844,
+              capturedAt: Date.now(),
+              mode: "dom-render",
+            }
+          : {
+              capturedAt: Date.now(),
+              html: "<main>new-window state</main>",
+              truncated: false,
+              title: "Popout",
+              location: "https://preview.invalid/",
+              viewportWidth: 390,
+              viewportHeight: 844,
+              scrollX: 0,
+              scrollY: 0,
+              activeElement: "body",
+              mutationCount: 2,
+            };
+      const kind = command.command === "snapshot-render" ? "render-snapshot" : "dom-snapshot";
+      queueMicrotask(() => {
+        act(() =>
+          window.dispatchEvent(
+            new MessageEvent("message", {
+              source: frameWindow,
+              data: {
+                source: "genehub-preview-runtime",
+                kind,
+                requestId: command.requestId,
+                detail,
+              },
+            }),
+          ),
+        );
+      });
+    });
+
+    fireEvent.load(frame);
+    act(() =>
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          source: frameWindow,
+          data: {
+            source: "genehub-preview-diag",
+            kind: "log",
+            detail: { topic: "html-preview-iframe", phase: "bridge-ready" },
+          },
+        }),
+      ),
+    );
+    await waitFor(() => expect(onRuntimeReady).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "保存运行产物" })).toBeEnabled();
+
+    act(() =>
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          source: frameWindow,
+          data: {
+            source: "genehub-preview-diag",
+            kind: "console",
+            detail: { level: "log", text: "new-window interaction" },
+          },
+        }),
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "保存运行产物" }));
+    await waitFor(() => expect(onRuntimeArtifact).toHaveBeenCalledTimes(1));
+
+    expect(submissions[0]?.summary).toMatchObject({ eventCount: 2, frameCount: 1 });
+    expect(submissions[0]?.files.map((file) => file.name)).toEqual([
+      "events.jsonl",
+      "dom.jsonl",
+      "frame-001.webp",
+    ]);
   });
 });

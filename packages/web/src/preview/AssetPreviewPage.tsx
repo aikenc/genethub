@@ -38,15 +38,16 @@ export function AssetPreviewPage({
   onRuntimeArtifact,
   runtimeSessionId = null,
   onRuntimeArtifactSaved,
+  onRuntimeReady,
 }: {
   source: AssetPreviewLocation;
   host?: Host;
   /** `embedded` omits page chrome when hosted inside the workbench float. */
   chrome?: "page" | "embedded";
   /**
-   * Workbench float must reuse the live Client. Opening a second Fabric
-   * session here closes the workbench socket and, under reconnect, storms the
-   * control plane ("too many connection attempts").
+   * Workbench float and its same-origin popout reuse the live Client. Opening
+   * a second Fabric session closes the workbench socket and, under reconnect,
+   * storms the control plane ("too many connection attempts").
    */
   client?: Client | null;
   onMetaChange?: (meta: PreviewMeta | null) => void;
@@ -56,6 +57,8 @@ export function AssetPreviewPage({
   runtimeSessionId?: string | null;
   /** Reports a standalone upload back to the originating workbench window. */
   onRuntimeArtifactSaved?: (bundle: SessionArtifactBundle) => void;
+  /** Fires when the HTML diagnostic bridge can collect logs and DOM state. */
+  onRuntimeReady?: () => void;
 }) {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [pageInfoOpen, setPageInfoOpen] = useState(false);
@@ -208,6 +211,7 @@ export function AssetPreviewPage({
           client={state.client}
           onMetaChange={reportMeta}
           onRuntimeArtifact={runtimeArtifactSubmit}
+          onRuntimeReady={onRuntimeReady}
         />
       )}
       {chrome === "page" && pageInfoOpen ? (
@@ -230,6 +234,7 @@ function PreviewDocument({
   client,
   onMetaChange,
   onRuntimeArtifact,
+  onRuntimeReady,
 }: {
   result: AssetPreviewResult;
   path: string;
@@ -238,6 +243,7 @@ function PreviewDocument({
   client: Client;
   onMetaChange?: (meta: PreviewMeta | null) => void;
   onRuntimeArtifact?: RuntimeArtifactSubmit;
+  onRuntimeReady?: () => void;
 }) {
   const { metadata, bytes } = result;
   const rootHandle = path.split("/")[0] ?? "";
@@ -303,6 +309,7 @@ function PreviewDocument({
         fetchAsset={loadPreview}
         onMetaChange={onMetaChange}
         onRuntimeArtifact={onRuntimeArtifact}
+        onRuntimeReady={onRuntimeReady}
       />
     );
   }
@@ -343,6 +350,7 @@ export function HtmlDocument({
   fetchAsset,
   onMetaChange,
   onRuntimeArtifact,
+  onRuntimeReady,
 }: {
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
@@ -350,12 +358,15 @@ export function HtmlDocument({
   fetchAsset: (path: string) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
   onMetaChange?: (meta: PreviewMeta | null) => void;
   onRuntimeArtifact?: RuntimeArtifactSubmit;
+  onRuntimeReady?: () => void;
 }) {
   const [srcDoc, setSrcDoc] = useState<string | null>(null);
   const [frameReady, setFrameReady] = useState(false);
+  const [collectorReady, setCollectorReady] = useState(false);
   const [eventCount, setEventCount] = useState(0);
   const frameRef = useRef<HTMLIFrameElement>(null);
   const eventsRef = useRef<PreviewRuntimeEvent[]>([]);
+  const collectorReadyRef = useRef(false);
   const domRequestsRef = useRef(
     new Map<
       string,
@@ -452,6 +463,14 @@ export function HtmlDocument({
       }
       if (data.source === PREVIEW_DIAG_SOURCE && isPreviewDiagnosticKind(data.kind)) {
         const detail = isPreviewDiagnosticDetail(data.detail) ? data.detail : {};
+        if (
+          detail.topic === "html-preview-iframe" &&
+          detail.phase === "bridge-ready" &&
+          !collectorReadyRef.current
+        ) {
+          collectorReadyRef.current = true;
+          setCollectorReady(true);
+        }
         const next = [...eventsRef.current, { at: Date.now(), kind: data.kind, detail }].slice(
           -1_000,
         );
@@ -483,7 +502,13 @@ export function HtmlDocument({
     eventsRef.current = [];
     setEventCount(0);
     setFrameReady(false);
+    collectorReadyRef.current = false;
+    setCollectorReady(false);
   }, [entryPath, metadata.version]);
+
+  useEffect(() => {
+    if (frameReady && collectorReady) onRuntimeReady?.();
+  }, [collectorReady, frameReady, onRuntimeReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -567,7 +592,7 @@ export function HtmlDocument({
         <>
           <PreviewRuntimeControls
             frameRef={frameRef}
-            ready={frameReady}
+            ready={frameReady && collectorReady}
             entryPath={entryPath}
             sourceVersion={metadata.version}
             eventsRef={eventsRef}

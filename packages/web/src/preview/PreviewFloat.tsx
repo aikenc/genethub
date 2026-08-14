@@ -6,11 +6,16 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { flushSync } from "react-dom";
 
 import type { Host } from "../host";
 import { useWorkbench, type PreviewFloatTarget } from "../session/store";
 import { AssetPreviewPage, type PreviewMeta } from "./AssetPreviewPage";
-import { createPreviewPopoutChannel, createPreviewPopoutUrl } from "./popout";
+import {
+  createPreviewPopoutChannel,
+  createPreviewPopoutUrl,
+  registerPreviewPopoutClient,
+} from "./popout";
 import type { RuntimeArtifactSubmit } from "./PreviewRuntimeControls";
 import { runtimeArtifactDraftLine, uploadSessionArtifact } from "./sessionArtifactUpload";
 import { assetPreviewUrl } from "./url";
@@ -63,6 +68,7 @@ export function PreviewFloat({
   const skipClick = useRef(false);
   const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const popouts = useRef(new Map<string, string | null>());
+  const popoutBridges = useRef(new Map<string, () => void>());
   const linkedBundles = useRef(new Set<string>());
 
   const externalUrl = assetPreviewUrl(
@@ -118,6 +124,8 @@ export function PreviewFloat({
   useEffect(() => {
     return () => {
       if (clickTimer.current) clearTimeout(clickTimer.current);
+      for (const release of popoutBridges.current.values()) release();
+      popoutBridges.current.clear();
     };
   }, []);
 
@@ -126,7 +134,8 @@ export function PreviewFloat({
       const expectedSessionId = popouts.current.get(message.id);
       if (expectedSessionId === undefined || expectedSessionId !== message.sessionId) return;
       if (message.type === "ready") {
-        shrinkToSmallFloat();
+        popoutBridges.current.get(message.id)?.();
+        popoutBridges.current.delete(message.id);
         return;
       }
       const bundleKey = `${message.sessionId}:${message.workspacePath}`;
@@ -138,7 +147,7 @@ export function PreviewFloat({
       );
     });
     return () => channel.close();
-  }, [appendComposerDraftLine, shrinkToSmallFloat]);
+  }, [appendComposerDraftLine]);
 
   // iOS WebKit still delivers pan gestures into nested iframes even when the
   // scaled preview has pointer-events:none. Capture touchmove on a shield.
@@ -375,15 +384,39 @@ export function PreviewFloat({
               onClick={() => {
                 const popout = createPreviewPopoutUrl(externalUrl, activeSessionId);
                 popouts.current.set(popout.id, activeSessionId);
+                if (client) {
+                  const release = registerPreviewPopoutClient(
+                    { id: popout.id, sessionId: activeSessionId },
+                    source,
+                    client,
+                  );
+                  const timer = window.setTimeout(release, 60_000);
+                  popoutBridges.current.set(popout.id, () => {
+                    window.clearTimeout(timer);
+                    release();
+                  });
+                }
                 window.dispatchEvent(
                   new CustomEvent("genehub:preview-open", {
                     detail: { path: source.path, url: popout.url },
                   }),
                 );
+                // Keep window.open in this exact user gesture so mobile popup
+                // blockers allow it. flushSync commits the float first; if the
+                // browser backgrounds this tab immediately, no later ready
+                // message is needed to make the original Preview collapse.
+                flushSync(() => shrinkToSmallFloat());
                 try {
-                  window.open(popout.url, "_blank", "noopener,noreferrer");
+                  // A named same-origin window keeps `opener` just long enough
+                  // for the trusted shell to take the shared Client. `_blank`
+                  // is implicitly noopener in some mobile browsers.
+                  const opened = window.open(popout.url, `genehub-preview-${popout.id}`);
+                  if (!opened) throw new Error("浏览器阻止了新窗口");
                 } catch {
                   popouts.current.delete(popout.id);
+                  popoutBridges.current.get(popout.id)?.();
+                  popoutBridges.current.delete(popout.id);
+                  flushSync(() => maximize());
                 }
               }}
             >

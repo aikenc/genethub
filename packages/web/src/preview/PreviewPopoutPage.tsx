@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import type { SessionArtifactBundle } from "@genehub/proto";
 
@@ -7,6 +7,7 @@ import {
   createPreviewPopoutChannel,
   previewPopoutArtifact,
   previewPopoutReady,
+  takePreviewPopoutClient,
   type PreviewPopoutContext,
 } from "./popout";
 import type { AssetPreviewLocation } from "./url";
@@ -19,16 +20,24 @@ export function PreviewPopoutPage({
   context: PreviewPopoutContext | null;
 }) {
   const channelRef = useRef<ReturnType<typeof createPreviewPopoutChannel> | null>(null);
+  const sharedClient = useMemo(
+    () => (context ? takePreviewPopoutClient(context, source) : null),
+    [context, source.deviceHandle, source.path, source.workspaceHandle],
+  );
 
   useEffect(() => {
     if (!context) return;
     const channel = createPreviewPopoutChannel(() => {});
     channelRef.current = channel;
-    channel.post(previewPopoutReady(context));
     return () => {
       channelRef.current = null;
       channel.close();
     };
+  }, [context]);
+
+  const reportReady = useCallback(() => {
+    if (!context) return;
+    channelRef.current?.post(previewPopoutReady(context));
   }, [context]);
 
   const reportSaved = useCallback(
@@ -47,8 +56,10 @@ export function PreviewPopoutPage({
   return (
     <AssetPreviewPage
       source={source}
+      client={sharedClient}
       runtimeSessionId={context?.sessionId ?? null}
       onRuntimeArtifactSaved={context?.sessionId ? reportSaved : undefined}
+      onRuntimeReady={context ? reportReady : undefined}
     />
   );
 }
