@@ -51,10 +51,16 @@ vi.mock("./AssetPreviewPage", () => ({
 
 describe("standalone Preview window", () => {
   const posted: unknown[] = [];
+  const writeText = vi.fn(async () => {});
 
   beforeEach(() => {
     posted.length = 0;
     previewMock.props = null;
+    writeText.mockClear();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
     const opener = {} as Window;
     registerPreviewPopoutClient(
       { id: "popout_demo", sessionId: "s_demo" },
@@ -120,6 +126,41 @@ describe("standalone Preview window", () => {
       sessionId: "s_demo",
       workspacePath: ".genethub/sessions/s_demo/artifacts/260813-230004-fbe1",
     });
+
+    const receipt = screen.getByRole("dialog", { name: "运行产物已保存" });
+    expect(receipt).toBeInTheDocument();
+    const draftLine =
+      "运行产物Bundle：`.genethub/sessions/s_demo/artifacts/260813-230004-fbe1`";
+    expect(screen.getByRole("textbox", { name: "运行产物引用" })).toHaveValue(draftLine);
+
+    await userEvent.click(screen.getByRole("button", { name: "复制" }));
+    expect(writeText).toHaveBeenCalledWith(draftLine);
+    expect(screen.getByRole("button", { name: "已复制" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "关闭" }));
+    expect(screen.queryByRole("dialog", { name: "运行产物已保存" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the Bundle line selectable when browser copy permission fails", async () => {
+    writeText.mockRejectedValueOnce(new Error("denied"));
+    render(
+      <PreviewPopoutPage
+        source={{
+          deviceHandle: "m_demo",
+          workspaceHandle: "w_demo",
+          path: "r_root/index.html",
+        }}
+        context={{ id: "popout_demo", sessionId: "s_demo" }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "simulate save" }));
+    await userEvent.click(screen.getByRole("button", { name: "复制" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("请长按或选中");
+    expect(screen.getByRole("textbox", { name: "运行产物引用" })).toHaveValue(
+      "运行产物Bundle：`.genethub/sessions/s_demo/artifacts/260813-230004-fbe1`",
+    );
   });
 
   it("recovers the session from the opener bridge when the URL lost it", () => {
