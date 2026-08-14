@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import type { SessionArtifactBundle } from "@genehub/proto";
 
+import type { Host } from "../host";
 import { AssetPreviewPage } from "./AssetPreviewPage";
 import {
   createPreviewPopoutChannel,
@@ -15,9 +16,11 @@ import type { AssetPreviewLocation } from "./url";
 export function PreviewPopoutPage({
   source,
   context,
+  host,
 }: {
   source: AssetPreviewLocation;
   context: PreviewPopoutContext | null;
+  host?: Host;
 }) {
   const channelRef = useRef<ReturnType<typeof createPreviewPopoutChannel> | null>(null);
   const inherited = useMemo(
@@ -58,6 +61,7 @@ export function PreviewPopoutPage({
   return (
     <AssetPreviewPage
       source={source}
+      host={host}
       client={sharedClient}
       runtimeSessionId={effectiveContext?.sessionId ?? null}
       onRuntimeArtifactSaved={effectiveContext?.sessionId ? reportSaved : undefined}

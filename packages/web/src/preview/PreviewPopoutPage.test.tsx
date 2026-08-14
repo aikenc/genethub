@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionArtifactBundle } from "@genehub/proto";
 
 import type { Client } from "../protocol/client";
+import type { Host } from "../host";
 import { registerPreviewPopoutClient } from "./popout";
 import { PreviewPopoutPage } from "./PreviewPopoutPage";
 
@@ -12,6 +13,7 @@ const sharedClient = { identity: { machineId: "m_demo" } } as unknown as Client;
 const previewMock = vi.hoisted(() => ({
   props: null as null | {
     client?: Client | null;
+    host?: Host;
     runtimeSessionId?: string | null;
     onRuntimeArtifactSaved?: (bundle: SessionArtifactBundle) => void;
     onRuntimeReady?: () => void;
@@ -152,5 +154,29 @@ describe("standalone Preview window", () => {
     expect(previewMock.props?.runtimeSessionId).toBe("s_demo");
     expect(previewMock.props?.client).toBe(sharedClient);
     expect(previewMock.props?.onRuntimeArtifactSaved).toBeTypeOf("function");
+  });
+
+  it("keeps the embedding host available when the shared opener client is unavailable", () => {
+    Object.defineProperty(window, "opener", {
+      configurable: true,
+      writable: true,
+      value: null,
+    });
+    const host = { kind: "browser" } as Host;
+
+    render(
+      <PreviewPopoutPage
+        source={{
+          deviceHandle: "m_demo",
+          workspaceHandle: "w_demo",
+          path: "r_root/index.html",
+        }}
+        context={{ id: "popout_direct", sessionId: "s_demo" }}
+        host={host}
+      />,
+    );
+
+    expect(previewMock.props?.host).toBe(host);
+    expect(previewMock.props?.runtimeSessionId).toBe("s_demo");
   });
 });
