@@ -12,6 +12,65 @@ import {
 } from "./PreviewRuntimeControls";
 
 describe("Preview runtime artifacts without display capture", () => {
+  it("lets a linked popout save logs before the capture bridge is ready", async () => {
+    const frameRef = {
+      current: document.createElement("iframe"),
+    } as React.RefObject<HTMLIFrameElement>;
+    const eventsRef = {
+      current: [
+        {
+          at: 1_700_000_000_000,
+          kind: "console",
+          detail: { level: "error", text: "boot failed before first render" },
+        },
+      ],
+    } as React.MutableRefObject<PreviewRuntimeEvent[]>;
+    const submitted: RuntimeArtifactSubmission[] = [];
+    const onSubmit = vi.fn(async (artifact: RuntimeArtifactSubmission) => {
+      submitted.push(artifact);
+      return {
+        relativePath: ".genethub/sessions/s_popout/artifacts/260814-001100-efgh",
+        addedToDraft: true,
+      };
+    });
+    const requestDomSnapshot = vi.fn<() => Promise<PreviewDomSnapshot>>();
+    const requestRenderedSnapshot = vi.fn();
+    const user = userEvent.setup();
+
+    render(
+      <PreviewRuntimeControls
+        frameRef={frameRef}
+        ready={false}
+        entryPath="mobile/index.html"
+        eventsRef={eventsRef}
+        eventCount={1}
+        requestDomSnapshot={requestDomSnapshot}
+        requestRenderedSnapshot={requestRenderedSnapshot}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "截图" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "录制" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存运行产物" })).toBeEnabled();
+    expect(screen.getByRole("status")).toHaveTextContent("可先保存当前日志");
+
+    await user.click(screen.getByRole("button", { name: "保存运行产物" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+
+    expect(requestDomSnapshot).not.toHaveBeenCalled();
+    expect(requestRenderedSnapshot).not.toHaveBeenCalled();
+    expect(submitted[0]!.summary).toEqual({
+      eventCount: 2,
+      frameCount: 0,
+      recording: null,
+    });
+    expect(submitted[0]!.files.map((file) => file.name)).toEqual([
+      "events.jsonl",
+      "dom.jsonl",
+    ]);
+  });
+
   it("records rendered frames and still saves logs and DOM on mobile", async () => {
     const frame = document.createElement("iframe");
     document.body.append(frame);

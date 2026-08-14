@@ -158,8 +158,14 @@ export function PreviewRuntimeControls({
   }, [captureHandle, clearRecordingTimers]);
 
   useEffect(() => {
-    setNotice(ready ? "日志已开始记录" : "正在连接日志采集…");
-  }, [ready]);
+    setNotice(
+      ready
+        ? "日志已开始记录"
+        : onSubmit
+          ? "可先保存当前日志；截图与录制正在就绪…"
+          : "正在连接日志采集…",
+    );
+  }, [onSubmit, ready]);
 
   useEffect(() => {
     if (!recordingResult || recordingResult.kind !== "video") {
@@ -392,7 +398,8 @@ export function PreviewRuntimeControls({
     }
   }, [captureFrame, entryPath, eventsRef, onSubmit, recordingResult, sourceVersion, stopRecording]);
 
-  const disabled = !ready || busy !== null;
+  const captureDisabled = !ready || busy !== null;
+  const saveDisabled = busy !== null || !onSubmit;
   const videoExtension =
     recordingResult?.kind === "video" && recordingResult.mimeType.includes("mp4")
       ? "mp4"
@@ -438,7 +445,7 @@ export function PreviewRuntimeControls({
       <button
         type="button"
         className="shrink-0 rounded border border-line px-2 py-1 hover:bg-raised disabled:opacity-45"
-        disabled={disabled || recording}
+        disabled={captureDisabled || recording}
         onClick={() => void takeScreenshot()}
         title={
           captureStrategyRef.current === "display"
@@ -470,11 +477,13 @@ export function PreviewRuntimeControls({
       <button
         type="button"
         className="shrink-0 rounded bg-accent px-2 py-1 text-white hover:opacity-90 disabled:opacity-45"
-        disabled={disabled || !onSubmit}
+        disabled={saveDisabled}
         onClick={() => void uploadArtifact()}
         title={
           onSubmit
-            ? "把日志、DOM、截图和体验录制写入 daemon 当前 session，并把路径加入输入框"
+            ? ready
+              ? "把日志、DOM、截图和体验录制写入 daemon 当前 session，并把路径加入输入框"
+              : "先把当前日志写入 daemon；截图和 DOM 会在采集就绪后加入"
             : "需要关联会话后保存"
         }
       >
