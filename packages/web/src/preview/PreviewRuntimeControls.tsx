@@ -163,7 +163,7 @@ export function PreviewRuntimeControls({
         ? "日志已开始记录"
         : onSubmit
           ? "可先保存当前日志；截图与录制正在就绪…"
-          : "正在连接日志采集…",
+          : "未关联会话，无法保存运行产物",
     );
   }, [onSubmit, ready]);
 

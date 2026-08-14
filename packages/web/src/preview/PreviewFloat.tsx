@@ -47,7 +47,6 @@ export function PreviewFloat({
   onClose(): void;
 }) {
   const client = useWorkbench((state) => state.client);
-  const activeSessionId = useWorkbench((state) => state.activeSessionId);
   const appendComposerDraftLine = useWorkbench((state) => state.appendComposerDraftLine);
   const [mode, setMode] = useState<Mode>("expanded");
   const [sizeLevel, setSizeLevel] = useState(0);
@@ -264,10 +263,10 @@ export function PreviewFloat({
   const submitRuntimeArtifact = useCallback<RuntimeArtifactSubmit>(
     async (artifact, onProgress) => {
       const state = useWorkbench.getState();
-      if (!state.client || !state.activeSessionId) {
+      if (!state.client || !source.sessionId) {
         throw new Error("尚未连接到可保存运行产物的会话");
       }
-      const sessionId = state.activeSessionId;
+      const sessionId = source.sessionId;
       const bundle = await uploadSessionArtifact(
         state.client,
         sessionId,
@@ -285,7 +284,7 @@ export function PreviewFloat({
         addedToDraft: true,
       };
     },
-    [],
+    [source.sessionId],
   );
 
   const preview = client ? (
@@ -296,6 +295,7 @@ export function PreviewFloat({
       client={client}
       onMetaChange={setMeta}
       onRuntimeArtifact={submitRuntimeArtifact}
+      runtimeSessionId={source.sessionId}
     />
   ) : (
     <p role="status" className="m-auto p-6 text-center text-sm text-muted">
@@ -382,11 +382,11 @@ export function PreviewFloat({
               title="新窗口打开"
               className={`${expandedIconBtn} text-accent`}
               onClick={() => {
-                const popout = createPreviewPopoutUrl(externalUrl, activeSessionId);
-                popouts.current.set(popout.id, activeSessionId);
+                const popout = createPreviewPopoutUrl(externalUrl, source.sessionId);
+                popouts.current.set(popout.id, source.sessionId);
                 if (client) {
                   const release = registerPreviewPopoutClient(
-                    { id: popout.id, sessionId: activeSessionId },
+                    { id: popout.id, sessionId: source.sessionId },
                     source,
                     client,
                   );

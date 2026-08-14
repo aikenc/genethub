@@ -14,14 +14,15 @@ const previewMock = vi.hoisted(() => ({
 const storeMock = vi.hoisted(() => {
   const client = {
     identity: { machineId: "m_demo" },
-    call: vi.fn(async (request: { type: string }) => {
+    call: vi.fn(async (request: { type: string; payload?: { sessionId?: string } }) => {
+      const sessionId = request.payload?.sessionId ?? "s_demo";
       if (request.type === "session.artifact.begin") {
         return {
           type: "sessionArtifactUpload",
           data: {
             uploadId: `u_${"1".repeat(32)}`,
             relativePath: "artifacts/260813-230004-fbe1",
-            workspacePath: ".genethub/sessions/s_demo/artifacts/260813-230004-fbe1",
+            workspacePath: `.genethub/sessions/${sessionId}/artifacts/260813-230004-fbe1`,
             maxChunkBytes: 512 * 1024,
           },
         };
@@ -31,9 +32,9 @@ const storeMock = vi.hoisted(() => {
           type: "sessionArtifact",
           data: {
             relativePath: "artifacts/260813-230004-fbe1",
-            workspacePath: ".genethub/sessions/s_demo/artifacts/260813-230004-fbe1",
+            workspacePath: `.genethub/sessions/${sessionId}/artifacts/260813-230004-fbe1`,
             manifestPath:
-              ".genethub/sessions/s_demo/artifacts/260813-230004-fbe1/manifest.json",
+              `.genethub/sessions/${sessionId}/artifacts/260813-230004-fbe1/manifest.json`,
             createdAtMs: 1,
             totalBytes: 0,
             files: [],
@@ -86,6 +87,7 @@ describe("PreviewFloat", () => {
   beforeEach(() => {
     mountCount.current = 0;
     previewMock.runtimeSubmit = null;
+    storeMock.state.activeSessionId = "s_demo";
     storeMock.state.appendComposerDraftLine.mockClear();
     storeMock.state.send.mockClear();
     storeMock.state.client.call.mockClear();
@@ -117,6 +119,7 @@ describe("PreviewFloat", () => {
           deviceHandle: "m_demo",
           workspaceHandle: "w_demo",
           path: "r_root/demos/index.html",
+          sessionId: "s_demo",
         }}
         host={host}
         onClose={onClose}
@@ -194,6 +197,7 @@ describe("PreviewFloat", () => {
           deviceHandle: "m_demo",
           workspaceHandle: "w_demo",
           path: "r_root/demos/index.html",
+          sessionId: "s_demo",
         }}
         host={{ kind: "browser" } as Host}
         onClose={() => {}}
@@ -211,6 +215,7 @@ describe("PreviewFloat", () => {
           deviceHandle: "m_demo",
           workspaceHandle: "w_demo",
           path: "r_root/demos/index.html",
+          sessionId: "s_demo",
         }}
         host={{ kind: "browser" } as Host}
         onClose={() => {}}
@@ -240,6 +245,51 @@ describe("PreviewFloat", () => {
     expect(storeMock.state.send).not.toHaveBeenCalled();
   });
 
+  it("keeps the originating session after the active chat changes", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const open = vi.spyOn(window, "open").mockReturnValue(window);
+    storeMock.state.activeSessionId = "s_other";
+
+    render(
+      <PreviewFloat
+        source={{
+          deviceHandle: "m_demo",
+          workspaceHandle: "w_demo",
+          path: "r_root/demos/index.html",
+          sessionId: "s_origin",
+        }}
+        host={{ kind: "browser" } as Host}
+        onClose={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "新窗口打开" }));
+    const opened = new URL(String(open.mock.calls[0]?.[0]));
+    expect(opened.searchParams.get("genehubPreviewSession")).toBe("s_origin");
+
+    await act(async () => {
+      await previewMock.runtimeSubmit?.(
+        {
+          files: [{ name: "events.jsonl", mime: "application/x-ndjson", blob: new Blob([]) }],
+          metadata: { schema: "genehub.preview-runtime.v3" },
+          summary: { eventCount: 0, frameCount: 0, recording: null },
+        },
+        () => {},
+      );
+    });
+
+    expect(storeMock.state.client.call).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "session.artifact.begin",
+        payload: expect.objectContaining({ sessionId: "s_origin" }),
+      }),
+    );
+    expect(storeMock.state.appendComposerDraftLine).toHaveBeenCalledWith(
+      "s_origin",
+      "运行产物Bundle：`.genethub/sessions/s_origin/artifacts/260813-230004-fbe1`",
+    );
+  });
+
   it("keeps maximize/close on every float size and only large is content-interactive", async () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const onClose = vi.fn();
@@ -251,6 +301,7 @@ describe("PreviewFloat", () => {
           deviceHandle: "m_demo",
           workspaceHandle: "w_demo",
           path: "r_root/demos/index.html",
+          sessionId: "s_demo",
         }}
         host={host}
         onClose={onClose}

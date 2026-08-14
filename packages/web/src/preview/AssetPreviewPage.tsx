@@ -211,6 +211,7 @@ export function AssetPreviewPage({
           client={state.client}
           onMetaChange={reportMeta}
           onRuntimeArtifact={runtimeArtifactSubmit}
+          runtimeSessionId={runtimeSessionId}
           onRuntimeReady={onRuntimeReady}
         />
       )}
@@ -234,6 +235,7 @@ function PreviewDocument({
   client,
   onMetaChange,
   onRuntimeArtifact,
+  runtimeSessionId,
   onRuntimeReady,
 }: {
   result: AssetPreviewResult;
@@ -243,6 +245,7 @@ function PreviewDocument({
   client: Client;
   onMetaChange?: (meta: PreviewMeta | null) => void;
   onRuntimeArtifact?: RuntimeArtifactSubmit;
+  runtimeSessionId?: string | null;
   onRuntimeReady?: () => void;
 }) {
   const { metadata, bytes } = result;
@@ -284,6 +287,7 @@ function PreviewDocument({
               workspaceHandle,
               folders: [{ root: "", rootHandle }],
               documentPath: path,
+              ...(runtimeSessionId ? { sessionId: runtimeSessionId } : {}),
               loadPreview,
             }}
           />

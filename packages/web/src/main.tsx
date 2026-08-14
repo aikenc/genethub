@@ -36,7 +36,9 @@ watchSystemTheme((theme) => useTheme.getState().systemChanged(theme));
 watchViewport();
 
 const preview = parseAssetPreviewPath(window.location.pathname);
-const previewPopout = preview ? parsePreviewPopout(window.location.search) : null;
+const previewPopout = preview
+  ? parsePreviewPopout(window.location.search, window.location.hash)
+  : null;
 
 createRoot(root).render(
   <StrictMode>

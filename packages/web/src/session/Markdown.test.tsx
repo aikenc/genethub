@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { HighlightedCode, languageForPath, Markdown } from "./Markdown";
+import { useWorkbench } from "./store";
 
 vi.mock("mermaid", () => ({
   default: {
@@ -92,6 +93,30 @@ describe("an agent's reply", () => {
       "href",
       "http://localhost:3000/assets/preview/v2/m_device/w_docs/r_product/reports/a.md",
     );
+  });
+
+  it("keeps the owning session when a Preview link is opened", async () => {
+    useWorkbench.setState({ previewFloat: null });
+    render(
+      <Markdown
+        text="[打开 H5](demos/index.html)"
+        artifact={{
+          deviceHandle: "m_device",
+          workspaceHandle: "w_docs",
+          folders: [{ root: "/srv/product", rootHandle: "r_product" }],
+          sessionId: "s_origin",
+        }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("link", { name: "打开 H5" }));
+    expect(useWorkbench.getState().previewFloat).toEqual({
+      deviceHandle: "m_device",
+      workspaceHandle: "w_docs",
+      path: "r_product/demos/index.html",
+      sessionId: "s_origin",
+    });
+    useWorkbench.setState({ previewFloat: null });
   });
 
   it("puts a code block behind a copy button rather than in the prose", async () => {

@@ -23,7 +23,10 @@ type PreviewPopoutBridgeOwner = Window & {
   [OPENER_BRIDGE_KEY]?: Map<string, PreviewPopoutClientEntry>;
 };
 
-const inheritedClients = new Map<string, Client>();
+const inheritedClients = new Map<
+  string,
+  PreviewPopoutClientEntry
+>();
 
 export type PreviewPopoutMessage =
   | {
@@ -52,20 +55,32 @@ export function createPreviewPopoutUrl(
   else url.searchParams.delete(SESSION_PARAM);
   // Asset Preview locators deliberately omit connection details. A popout is
   // still the same browser on the same origin, though, and needs the current
-  // machine rendezvous address to create its own daemon connection. Keep only
-  // that fragment field: fragments never reach the HTTP server or access log.
-  if (!url.hash) {
-    const endpoint = new URLSearchParams(connectionHash.replace(/^#/, "")).get("endpoint");
-    if (endpoint) url.hash = new URLSearchParams({ endpoint }).toString();
-  }
+  // machine rendezvous address to create its own daemon connection. Fragments
+  // never reach the HTTP server or access log, so they also carry a fallback
+  // copy of the popout/session context.
+  const endpoint = new URLSearchParams(
+    (url.hash || connectionHash).replace(/^#/, ""),
+  ).get("endpoint");
+  const fragment = new URLSearchParams();
+  if (endpoint) fragment.set("endpoint", endpoint);
+  // Keep a fragment copy as a redirect-proof fallback. It never reaches the
+  // HTTP server, while the query copy keeps old clients compatible.
+  fragment.set(POPOUT_PARAM, id);
+  if (sessionId) fragment.set(SESSION_PARAM, sessionId);
+  url.hash = fragment.toString();
   return { id, url: url.toString() };
 }
 
-export function parsePreviewPopout(search: string): PreviewPopoutContext | null {
+export function parsePreviewPopout(
+  search: string,
+  hash = "",
+): PreviewPopoutContext | null {
   const params = new URLSearchParams(search);
-  const id = safeToken(params.get(POPOUT_PARAM));
+  const fragment = new URLSearchParams(hash.replace(/^#/, ""));
+  const rawId = params.get(POPOUT_PARAM) ?? fragment.get(POPOUT_PARAM);
+  const id = safeToken(rawId);
   if (!id) return null;
-  const rawSessionId = params.get(SESSION_PARAM);
+  const rawSessionId = params.get(SESSION_PARAM) ?? fragment.get(SESSION_PARAM);
   const sessionId = rawSessionId === null ? null : safeToken(rawSessionId);
   if (rawSessionId !== null && !sessionId) return null;
   return { id, sessionId };
@@ -98,22 +113,44 @@ export function takePreviewPopoutClient(
   source: AssetPreviewLocation,
   child: Pick<Window, "opener"> = window,
 ): Client | null {
+  return takePreviewPopoutBridge(context, source, child)?.client ?? null;
+}
+
+/** Takes the shared Client and the opener-authoritative session context. */
+export function takePreviewPopoutBridge(
+  context: PreviewPopoutContext,
+  source: AssetPreviewLocation,
+  child: Pick<Window, "opener"> = window,
+): { context: PreviewPopoutContext; client: Client } | null {
   const cached = inheritedClients.get(context.id);
-  if (cached) return cached;
+  if (cached) {
+    if (
+      (context.sessionId !== null && cached.context.sessionId !== context.sessionId) ||
+      !sameSource(cached.source, source)
+    ) {
+      return null;
+    }
+    return { context: cached.context, client: cached.client };
+  }
   try {
     const owner = child.opener as PreviewPopoutBridgeOwner | null;
     const clients = owner?.[OPENER_BRIDGE_KEY];
     const entry = clients?.get(context.id);
     if (
       !entry ||
-      entry.context.sessionId !== context.sessionId ||
+      (context.sessionId !== null && entry.context.sessionId !== context.sessionId) ||
       !sameSource(entry.source, source)
     ) {
       return null;
     }
     clients?.delete(context.id);
-    inheritedClients.set(context.id, entry.client);
-    return entry.client;
+    const inherited = {
+      context: entry.context,
+      source: entry.source,
+      client: entry.client,
+    };
+    inheritedClients.set(context.id, inherited);
+    return { context: inherited.context, client: inherited.client };
   } catch {
     return null;
   } finally {

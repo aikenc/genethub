@@ -14,7 +14,14 @@ type SelectIntent = "copy" | "cut" | "delete";
 
 /** File-system entry point for the in-workbench Asset Preview float. */
 export function FilesPanel() {
-  const { tree, loadTree, client, activeWorkspaceId, openPreviewFloat } = useWorkbench();
+  const {
+    tree,
+    loadTree,
+    client,
+    activeWorkspaceId,
+    activeSessionId,
+    openPreviewFloat,
+  } = useWorkbench();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [focusIsDir, setFocusIsDir] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -73,6 +80,7 @@ export function FilesPanel() {
       deviceHandle,
       workspaceHandle: activeWorkspaceId,
       path,
+      sessionId: activeSessionId,
     });
   };
 

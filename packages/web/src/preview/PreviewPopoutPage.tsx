@@ -7,7 +7,7 @@ import {
   createPreviewPopoutChannel,
   previewPopoutArtifact,
   previewPopoutReady,
-  takePreviewPopoutClient,
+  takePreviewPopoutBridge,
   type PreviewPopoutContext,
 } from "./popout";
 import type { AssetPreviewLocation } from "./url";
@@ -20,46 +20,48 @@ export function PreviewPopoutPage({
   context: PreviewPopoutContext | null;
 }) {
   const channelRef = useRef<ReturnType<typeof createPreviewPopoutChannel> | null>(null);
-  const sharedClient = useMemo(
-    () => (context ? takePreviewPopoutClient(context, source) : null),
+  const inherited = useMemo(
+    () => (context ? takePreviewPopoutBridge(context, source) : null),
     [context, source.deviceHandle, source.path, source.workspaceHandle],
   );
+  const effectiveContext = inherited?.context ?? context;
+  const sharedClient = inherited?.client ?? null;
 
   useEffect(() => {
-    if (!context) return;
+    if (!effectiveContext) return;
     const channel = createPreviewPopoutChannel(() => {});
     channelRef.current = channel;
     return () => {
       channelRef.current = null;
       channel.close();
     };
-  }, [context]);
+  }, [effectiveContext]);
 
   const reportReady = useCallback(() => {
-    if (!context) return;
-    channelRef.current?.post(previewPopoutReady(context));
-  }, [context]);
+    if (!effectiveContext) return;
+    channelRef.current?.post(previewPopoutReady(effectiveContext));
+  }, [effectiveContext]);
 
   const reportSaved = useCallback(
     (bundle: SessionArtifactBundle) => {
-      if (!context?.sessionId) return;
+      if (!effectiveContext?.sessionId) return;
       channelRef.current?.post(
         previewPopoutArtifact(
-          { id: context.id, sessionId: context.sessionId },
+          { id: effectiveContext.id, sessionId: effectiveContext.sessionId },
           bundle.workspacePath,
         ),
       );
     },
-    [context],
+    [effectiveContext],
   );
 
   return (
     <AssetPreviewPage
       source={source}
       client={sharedClient}
-      runtimeSessionId={context?.sessionId ?? null}
-      onRuntimeArtifactSaved={context?.sessionId ? reportSaved : undefined}
-      onRuntimeReady={context ? reportReady : undefined}
+      runtimeSessionId={effectiveContext?.sessionId ?? null}
+      onRuntimeArtifactSaved={effectiveContext?.sessionId ? reportSaved : undefined}
+      onRuntimeReady={effectiveContext ? reportReady : undefined}
     />
   );
 }

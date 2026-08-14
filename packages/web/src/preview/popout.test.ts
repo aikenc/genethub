@@ -20,7 +20,11 @@ describe("Preview popout context", () => {
     );
     const url = new URL(opened.url);
 
-    expect(parsePreviewPopout(url.search)).toEqual({
+    expect(parsePreviewPopout(url.search, url.hash)).toEqual({
+      id: "popout_demo",
+      sessionId: "s_demo",
+    });
+    expect(parsePreviewPopout("", url.hash)).toEqual({
       id: "popout_demo",
       sessionId: "s_demo",
     });

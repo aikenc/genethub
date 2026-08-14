@@ -68,6 +68,12 @@ export type PreviewFloatTarget = {
   deviceHandle: string;
   workspaceHandle: string;
   path: string;
+  /** Session that owned the link when Preview was opened; stable across tab changes. */
+  sessionId: string | null;
+};
+
+export type PreviewFloatRequest = Omit<PreviewFloatTarget, "sessionId"> & {
+  sessionId?: string | null;
 };
 
 /**
@@ -275,7 +281,7 @@ interface WorkbenchState {
   closeTab(tabId: string): void;
   setTabLimit(limit: number): void;
   setRightPanel(panel: RightPanel): void;
-  openPreviewFloat(target: PreviewFloatTarget): void;
+  openPreviewFloat(target: PreviewFloatRequest): void;
   closePreviewFloat(): void;
   send(text: string, attachments?: Attachment[]): Promise<void>;
   /** Sends a failed message again, unchanged. */
@@ -1026,6 +1032,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         deviceHandle: target.deviceHandle,
         workspaceHandle: target.workspaceHandle,
         path: target.path,
+        sessionId:
+          target.sessionId === undefined ? get().activeSessionId : target.sessionId,
       },
     });
   },

@@ -243,6 +243,8 @@ export function languageForPath(path: string): string | undefined {
 export type MarkdownVariant = "chat" | "document";
 
 export type MarkdownArtifactProps = ArtifactResolveContext & {
+  /** Session that owns links rendered in this Markdown. */
+  sessionId?: string;
   /** Authenticated workspace read used to inline local images. */
   loadPreview?: (
     path: string,
@@ -302,6 +304,7 @@ export const Markdown = memo(function Markdown({
                       deviceHandle: artifact.deviceHandle,
                       workspaceHandle: artifact.workspaceHandle,
                       path: resolved.path,
+                      sessionId: artifact.sessionId ?? null,
                     });
                   }}
                 >

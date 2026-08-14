@@ -119,4 +119,38 @@ describe("standalone Preview window", () => {
       workspacePath: ".genethub/sessions/s_demo/artifacts/260813-230004-fbe1",
     });
   });
+
+  it("recovers the session from the opener bridge when the URL lost it", () => {
+    const opener = {} as Window;
+    registerPreviewPopoutClient(
+      { id: "popout_recovered", sessionId: "s_demo" },
+      {
+        deviceHandle: "m_demo",
+        workspaceHandle: "w_demo",
+        path: "r_root/index.html",
+      },
+      sharedClient,
+      opener,
+    );
+    Object.defineProperty(window, "opener", {
+      configurable: true,
+      writable: true,
+      value: opener,
+    });
+
+    render(
+      <PreviewPopoutPage
+        source={{
+          deviceHandle: "m_demo",
+          workspaceHandle: "w_demo",
+          path: "r_root/index.html",
+        }}
+        context={{ id: "popout_recovered", sessionId: null }}
+      />,
+    );
+
+    expect(previewMock.props?.runtimeSessionId).toBe("s_demo");
+    expect(previewMock.props?.client).toBe(sharedClient);
+    expect(previewMock.props?.onRuntimeArtifactSaved).toBeTypeOf("function");
+  });
 });

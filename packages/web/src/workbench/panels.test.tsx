@@ -172,6 +172,7 @@ describe("the files panel", () => {
       deviceHandle: "m_device",
       workspaceHandle: "w1",
       path: "r_demo/notes.md",
+      sessionId: null,
     });
     expect(calls.some((call) => call.type === "file.tree")).toBe(true);
     expect(calls.some((call) => call.type === "file.write")).toBe(false);
