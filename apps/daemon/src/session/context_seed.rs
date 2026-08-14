@@ -25,6 +25,11 @@ pub struct BuiltContextSeed {
     pub context: SessionContext,
 }
 
+struct ContextSeedOptions {
+    base_coverage: HistoryCoverage,
+    source_accessible: bool,
+}
+
 /// Reserves most of the target model's window for the new conversation. A
 /// missing catalog is normal for ACP Agents, so the fallback is deliberately
 /// conservative rather than treating discovery as a prerequisite.
@@ -52,8 +57,10 @@ pub fn build_context_seed(
         source_agent_id,
         items,
         token_budget,
-        base_coverage,
-        true,
+        ContextSeedOptions {
+            base_coverage,
+            source_accessible: true,
+        },
     )
 }
 
@@ -73,8 +80,10 @@ pub fn build_portable_context_seed(
         source_agent_id,
         items,
         token_budget,
-        base_coverage,
-        false,
+        ContextSeedOptions {
+            base_coverage,
+            source_accessible: false,
+        },
     )
 }
 
@@ -85,9 +94,12 @@ fn build_context_seed_with_source_access(
     source_agent_id: &str,
     items: &[TimelineItem],
     token_budget: u64,
-    base_coverage: HistoryCoverage,
-    source_accessible: bool,
+    options: ContextSeedOptions,
 ) -> BuiltContextSeed {
+    let ContextSeedOptions {
+        base_coverage,
+        source_accessible,
+    } = options;
     let char_budget = usize::try_from(token_budget)
         .unwrap_or(usize::MAX / CHARS_PER_TOKEN)
         .saturating_mul(CHARS_PER_TOKEN);

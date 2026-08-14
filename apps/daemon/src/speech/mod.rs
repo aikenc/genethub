@@ -194,6 +194,9 @@ struct FeedbackEvidence {
     scores_calibrated: bool,
 }
 
+type CapabilityCacheKey = (bool, Option<SpeechRuntimeConfig>);
+type CapabilityCache = Option<(CapabilityCacheKey, SpeechRuntimeCapabilities)>;
+
 impl RuntimeSession {
     async fn send(&self, command: RuntimeCommand) -> Result<(), SpeechFailure> {
         self.commands.send(command).await.map_err(|_| {
@@ -209,12 +212,7 @@ impl RuntimeSession {
 pub struct SpeechBroker {
     external_runtime: Arc<dyn SpeechRuntime>,
     stub_runtime: Arc<dyn SpeechRuntime>,
-    capability_cache: tokio::sync::RwLock<
-        Option<(
-            (bool, Option<SpeechRuntimeConfig>),
-            SpeechRuntimeCapabilities,
-        )>,
-    >,
+    capability_cache: tokio::sync::RwLock<CapabilityCache>,
     slots: Arc<Semaphore>,
     feedback_writes: tokio::sync::Mutex<()>,
     feedback_results: tokio::sync::Mutex<VecDeque<FeedbackEvidence>>,
@@ -274,8 +272,10 @@ impl SpeechBroker {
         args: Vec<String>,
     ) -> Result<crate::config::SpeechRuntimeConfig> {
         let runtime = external::validate_registration(command, args)?;
-        let mut candidate = SpeechConfig::default();
-        candidate.runtime = Some(runtime.clone());
+        let candidate = SpeechConfig {
+            runtime: Some(runtime.clone()),
+            ..SpeechConfig::default()
+        };
         let capabilities = self
             .external_runtime
             .probe(&candidate)
@@ -1673,8 +1673,10 @@ mod tests {
         assert_eq!(defaults.runtime.id, "unconfigured");
         assert_eq!(defaults.runtime.implementation, "unconfigured");
         assert!(!defaults.stub_enabled);
-        let mut stub = SpeechConfig::default();
-        stub.stub_enabled = true;
+        let stub = SpeechConfig {
+            stub_enabled: true,
+            ..SpeechConfig::default()
+        };
         let settings = settings(&stub);
         assert_eq!(settings.runtime.id, "genehub-speech-stub");
         assert_eq!(settings.runtime.implementation, "stub");
@@ -1696,8 +1698,10 @@ mod tests {
     #[tokio::test]
     async fn persisted_stub_selection_switches_runtime_without_an_external_registration() {
         let broker = SpeechBroker::new();
-        let mut config = SpeechConfig::default();
-        config.stub_enabled = true;
+        let mut config = SpeechConfig {
+            stub_enabled: true,
+            ..SpeechConfig::default()
+        };
         let stub = broker.capabilities(&config).await;
         assert_eq!(stub.runtime_status, SpeechRuntimeStatus::Ready);
         assert_eq!(stub.runtime.implementation, "stub");
