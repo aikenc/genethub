@@ -12,6 +12,78 @@ import {
 } from "./PreviewRuntimeControls";
 
 describe("Preview runtime artifacts without display capture", () => {
+  it("saves with a rendered snapshot without opening the desktop share picker", async () => {
+    const mediaDevicesDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "mediaDevices",
+    );
+    const getDisplayMedia = vi.fn(() => new Promise<MediaStream>(() => {}));
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getDisplayMedia },
+    });
+
+    try {
+      const frameRef = {
+        current: document.createElement("iframe"),
+      } as React.RefObject<HTMLIFrameElement>;
+      const eventsRef = {
+        current: [],
+      } as React.MutableRefObject<PreviewRuntimeEvent[]>;
+      const requestDomSnapshot = vi.fn(async (): Promise<PreviewDomSnapshot> => ({
+        capturedAt: Date.now(),
+        html: "<main>desktop live state</main>",
+        truncated: false,
+        title: "Desktop preview",
+        location: "https://preview.invalid/",
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        scrollX: 0,
+        scrollY: 0,
+        activeElement: "body",
+        mutationCount: 1,
+      }));
+      const requestRenderedSnapshot = vi.fn(async () => ({
+        blob: new Blob(["rendered"], { type: "image/webp" }),
+        width: 1280,
+        height: 720,
+        capturedAt: Date.now(),
+        mode: "dom-render" as const,
+      }));
+      const onSubmit = vi.fn(async () => ({
+        relativePath: ".genethub/sessions/s_desktop/artifacts/260814-001200-ijkl",
+        addedToDraft: false,
+      }));
+      const user = userEvent.setup();
+
+      render(
+        <PreviewRuntimeControls
+          frameRef={frameRef}
+          ready
+          entryPath="desktop/index.html"
+          eventsRef={eventsRef}
+          eventCount={0}
+          requestDomSnapshot={requestDomSnapshot}
+          requestRenderedSnapshot={requestRenderedSnapshot}
+          onSubmit={onSubmit}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "保存运行产物" }));
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+
+      expect(getDisplayMedia).not.toHaveBeenCalled();
+      expect(requestRenderedSnapshot).toHaveBeenCalledTimes(1);
+      expect(requestDomSnapshot).toHaveBeenCalledTimes(1);
+    } finally {
+      if (mediaDevicesDescriptor) {
+        Object.defineProperty(navigator, "mediaDevices", mediaDevicesDescriptor);
+      } else {
+        delete (navigator as Navigator & { mediaDevices?: MediaDevices }).mediaDevices;
+      }
+    }
+  });
+
   it("lets a linked popout save logs before the capture bridge is ready", async () => {
     const frameRef = {
       current: document.createElement("iframe"),

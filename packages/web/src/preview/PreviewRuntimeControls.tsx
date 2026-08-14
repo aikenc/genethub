@@ -180,7 +180,10 @@ export function PreviewRuntimeControls({
   const captureFrame = useCallback(
     async (
       reason: RuntimeFrame["reason"],
-      { allowDomOnly = false }: { allowDomOnly?: boolean } = {},
+      {
+        allowDomOnly = false,
+        nonInteractive = false,
+      }: { allowDomOnly?: boolean; nonInteractive?: boolean } = {},
     ): Promise<RuntimeFrame | null> => {
       if (frameInFlight.current) return null;
       const target = frameRef.current;
@@ -189,7 +192,7 @@ export function PreviewRuntimeControls({
       frameInFlight.current = true;
       try {
         const capturePixel = async (): Promise<PixelSnapshot> => {
-          if (captureStrategyRef.current === "dom-render") {
+          if (nonInteractive || captureStrategyRef.current === "dom-render") {
             return requestRenderedSnapshot();
           }
           try {
@@ -363,7 +366,12 @@ export function PreviewRuntimeControls({
     try {
       let recordingForReport = recordingResult;
       if (recordingRef.current) recordingForReport = await stopRecording();
-      await captureFrame("upload", { allowDomOnly: true }).catch((error) => {
+      // Saving must never open a screen-share picker. A picker can remain pending
+      // forever in a popout and prevent the artifact receipt from being shown.
+      await captureFrame("upload", {
+        allowDomOnly: true,
+        nonInteractive: true,
+      }).catch((error) => {
         eventsRef.current = [
           ...eventsRef.current,
           {
