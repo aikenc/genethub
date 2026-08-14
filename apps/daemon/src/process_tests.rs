@@ -76,7 +76,9 @@ async fn a_command_is_over_when_it_exits_not_when_its_pipe_closes() {
 /// process has always said so: it leaves the group, and leaving the group is
 /// what puts it out of reach. Nothing else counts — `nohup` only declines a
 /// hangup and stays in the group, so `nohup` does not survive this.
-#[cfg(unix)]
+// This is specifically the userland `setsid` integration path. macOS exposes
+// the syscall used by the daemon but does not ship a `setsid` executable.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_process_that_leaves_the_group_on_purpose_is_left_alone() {
     let directory = tempfile::tempdir().expect("a temporary directory");

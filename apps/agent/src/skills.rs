@@ -82,9 +82,7 @@ fn materialize_builtins(agent_dir: &Path) -> Option<PathBuf> {
         if std::fs::read_to_string(&target).ok().as_deref() == Some(file.contents) {
             continue;
         }
-        let Some(parent) = target.parent() else {
-            return None;
-        };
+        let parent = target.parent()?;
         if let Err(error) = std::fs::create_dir_all(parent) {
             eprintln!(
                 "genet-agent: could not create built-in skill directory for {}: {error}",
