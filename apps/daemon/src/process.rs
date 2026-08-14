@@ -167,6 +167,13 @@ pub async fn end_tree(pid: u32) {
         "a process ignored the request to finish and was stopped"
     );
     signal_tree(pid, libc::SIGKILL);
+    wait_for_tree_exit(pid, tokio::time::Instant::now() + GRACE).await;
+}
+
+async fn wait_for_tree_exit(pid: u32, deadline: tokio::time::Instant) {
+    while tokio::time::Instant::now() < deadline && tree_exists(pid) {
+        tokio::time::sleep(GRACE_POLL).await;
+    }
 }
 
 /// Whether there is still anything in the group. A group outlives its leader
@@ -402,6 +409,11 @@ impl Group {
 
         signal_group(pid, KILL);
         let _ = self.wait().await;
+        // Reaping the leader does not synchronously reap every descendant.
+        // Wait until the killed group has actually disappeared so callers do
+        // not observe a process tree that is already dead but still pending
+        // adoption and reaping by the operating system.
+        wait_for_tree_exit(pid, tokio::time::Instant::now() + GRACE).await;
         self.status
     }
 }
