@@ -23,6 +23,7 @@ export { parsePreviewPopout } from "./preview/popout";
 export type { PreviewPopoutContext } from "./preview/popout";
 export { assetPreviewUrl, parseAssetPreviewPath } from "./preview/url";
 export { useWorkbench } from "./session/store";
+export type { SpeechInputProblem } from "./speech/useSpeechInput";
 export {
   activeDiagnosticClient,
   CLIENT_DIAGNOSTIC_EVENT,

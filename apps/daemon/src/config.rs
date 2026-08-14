@@ -164,6 +164,10 @@ pub struct Config {
     /// not something that happens because they installed the app.
     pub lan_enabled: bool,
     pub agents: AgentsConfig,
+    /// Qwen3-ASR input is independent of Agent/LLM providers. GeneHub stores
+    /// only prompt and local correction preferences; model installation and
+    /// runtime configuration belong to the community adapter.
+    pub speech: SpeechConfig,
     /// Device-local, project-independent filesystem roots.
     ///
     /// Projects only reference these opaque handles. Keeping the mapping here
@@ -198,6 +202,7 @@ impl Default for Config {
             port: 0,
             lan_enabled: false,
             agents: AgentsConfig::default(),
+            speech: SpeechConfig::default(),
             workspace_roots: Vec::new(),
             workspaces: Vec::new(),
             workspace_catalog_generation: String::new(),
@@ -216,6 +221,49 @@ pub struct AgentsConfig {
     /// Extra agents declared by the user. `extends` names a built-in adapter
     /// shape, so adding a new ACP-speaking CLI needs no code change.
     pub custom: std::collections::BTreeMap<String, CustomAgent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SpeechConfig {
+    /// A machine-level community adapter. GeneHub never invokes this through a
+    /// shell and never stores it in project files.
+    pub runtime: Option<SpeechRuntimeConfig>,
+    /// Runs GeneHub's deterministic no-model protocol Stub instead of the
+    /// registered community adapter. The registration is preserved so turning
+    /// the Stub off returns to the real runtime without reinstalling it.
+    pub stub_enabled: bool,
+    pub context_enabled: bool,
+    pub pinned_terms: Vec<String>,
+    pub language_hints: Vec<String>,
+    /// Deprecated machine-wide consent. Kept only so old config files can be
+    /// read and rewritten without accidentally turning that consent into a
+    /// project-wide wildcard.
+    pub collect_corrections: bool,
+    /// Explicit project-local correction consent, keyed by stable workspace id.
+    pub correction_workspaces: Vec<String>,
+}
+
+impl Default for SpeechConfig {
+    fn default() -> Self {
+        Self {
+            runtime: None,
+            stub_enabled: false,
+            context_enabled: true,
+            pinned_terms: Vec::new(),
+            language_hints: Vec::new(),
+            collect_corrections: false,
+            correction_workspaces: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechRuntimeConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -298,7 +346,30 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
             Ok(raw) => {
-                serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+                let mut value: serde_json::Value = serde_json::from_str(&raw)
+                    .with_context(|| format!("parsing {}", path.display()))?;
+                let remove_legacy_speech_provider = value
+                    .get_mut("speech")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .is_some_and(|speech| {
+                        ["region", "dashscopeWorkspaceId", "apiKey"]
+                            .iter()
+                            .filter_map(|field| speech.remove(*field))
+                            .count()
+                            > 0
+                    });
+                if remove_legacy_speech_provider {
+                    let rewritten = serde_json::to_string_pretty(&value)?;
+                    save_private(path, rewritten.as_bytes()).with_context(|| {
+                        format!(
+                            "removing obsolete speech credentials from {}",
+                            path.display()
+                        )
+                    })?;
+                }
+                let config: Self = serde_json::from_value(value)
+                    .with_context(|| format!("parsing {}", path.display()))?;
+                Ok(config)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
@@ -1128,6 +1199,7 @@ mod tests {
         let config = Config::load(&dir.path().join("nope.json")).unwrap();
         assert_eq!(config.port, 0);
         assert!(!config.lan_enabled);
+        assert!(!config.speech.stub_enabled);
     }
 
     #[test]
@@ -1138,6 +1210,11 @@ mod tests {
             port: 1234,
             ..Default::default()
         };
+        config.speech.runtime = Some(SpeechRuntimeConfig {
+            command: "/opt/genehub-speech/adapter".into(),
+            args: vec!["--model".into(), "Qwen/Qwen3-ASR-1.7B-hf".into()],
+        });
+        config.speech.stub_enabled = true;
         config.workspaces.push(WorkspaceEntry {
             id: "w1".into(),
             name: "demo".into(),
@@ -1157,6 +1234,41 @@ mod tests {
         assert_eq!(loaded.port, 1234);
         assert_eq!(loaded.workspaces.len(), 1);
         assert_eq!(loaded.workspaces[0].name, "demo");
+        assert_eq!(loaded.speech.runtime, config.speech.runtime);
+        assert!(loaded.speech.stub_enabled);
+    }
+
+    #[test]
+    fn loading_removes_obsolete_cloud_speech_credentials_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "port": 1234,
+                "speech": {
+                    "region": "beijing",
+                    "dashscopeWorkspaceId": "legacy-workspace",
+                    "apiKey": "legacy-secret",
+                    "contextEnabled": false,
+                    "pinnedTerms": ["GeneHub"],
+                    "languageHints": ["zh"]
+                },
+                "futureField": {"keep": true}
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+
+        assert!(!loaded.speech.context_enabled);
+        assert_eq!(loaded.speech.pinned_terms, ["GeneHub"]);
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(!rewritten.contains("legacy-secret"));
+        assert!(!rewritten.contains("legacy-workspace"));
+        assert!(!rewritten.contains("dashscopeWorkspaceId"));
+        assert!(!rewritten.contains("\"region\""));
+        assert!(rewritten.contains("futureField"));
     }
 
     #[test]

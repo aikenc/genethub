@@ -18,6 +18,7 @@ import type {
   SessionImportListing,
   SessionSummary,
   Settings,
+  SpeechRuntimeStatus,
   UpdateDownload,
   UpdateStatus,
   WorkspaceInfo,
@@ -258,6 +259,15 @@ interface WorkbenchState {
     /** Written by hand, for an endpoint that cannot list its own models. */
     models?: string[];
   }): Promise<void>;
+  setSpeechQwen3(input: {
+    stubEnabled: boolean;
+    contextEnabled: boolean;
+    pinnedTerms: string[];
+    languageHints: string[];
+    collectCorrections: boolean;
+    workspaceId?: string;
+  }): Promise<void>;
+  probeSpeechRuntime(): Promise<SpeechRuntimeStatus | null>;
   /** Removes a provider the user added. */
   forgetProvider(providerId: string): Promise<void>;
   /**
@@ -1397,6 +1407,39 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // fills the model picker.
     const agents = await require_(get().client).call({ type: "agent.refresh" });
     if (agents?.type === "agents") set({ agents: agents.data });
+  },
+
+  async setSpeechQwen3({
+    stubEnabled,
+    contextEnabled,
+    pinnedTerms,
+    languageHints,
+    collectCorrections,
+    workspaceId,
+  }) {
+    set({ notice: null });
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "speech.settings.setQwen3",
+        payload: {
+          stubEnabled,
+          contextEnabled,
+          pinnedTerms,
+          languageHints,
+          collectCorrections,
+          ...(workspaceId ? { workspaceId } : {}),
+        },
+      }),
+    );
+    if (reply?.type === "settings") set({ settings: reply.data });
+  },
+
+  async probeSpeechRuntime() {
+    set({ notice: null });
+    const reply = await asked(set, () =>
+      require_(get().client).call({ type: "speech.runtime.probe" }),
+    );
+    return reply?.type === "speechRuntimeStatus" ? reply.data : null;
   },
 
   async forgetProvider(providerId) {

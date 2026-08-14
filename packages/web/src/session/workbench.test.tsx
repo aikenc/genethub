@@ -5,6 +5,7 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useWorkbench } from "./store";
+import type { Client } from "../protocol/client";
 import {
   COMPOSER_TEXTAREA_COLLAPSED_HEIGHT,
   COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT,
@@ -64,6 +65,7 @@ afterEach(() => {
     sessions: [],
     activeSessionId: null,
     agents: [],
+    workspaces: [],
     retryPending,
     editPending,
   });
@@ -907,6 +909,54 @@ function composerProps(overrides: Partial<ComponentProps<typeof Composer>> = {})
 }
 
 describe("the controls offered to the user", () => {
+  it("routes an unavailable Qwen3 runtime to settings", async () => {
+    const onOpenSettings = vi.fn();
+    const onSend = vi.fn();
+    const client = {
+      call: vi.fn(async () => ({
+        type: "speechCapabilities",
+        data: {
+          protocolVersion: 2,
+          runtimeStatus: { state: "unavailable", message: "Qwen3 runtime 尚未就绪" },
+          runtime: {
+            id: "qwen3-asr",
+            model: "Qwen3-ASR-1.7B",
+            label: "Qwen3-ASR 1.7B",
+            implementation: "mock",
+          },
+          audio: [{ encoding: "pcmS16Le", sampleRateHz: 16_000, channels: 1 }],
+          languages: ["zh"],
+          maxLanguageHints: 4,
+          maxDurationMs: 300_000,
+          context: {
+            maxBytes: 16_384,
+            maxPromptChars: 4_000,
+            maxPinnedTerms: 50,
+            maxAutomaticTerms: 150,
+          },
+          nBest: { maxCandidates: 5, scoreKind: "mockRelative", calibrated: false },
+          segmentation: {
+            maxSegments: 32,
+            partialResults: false,
+            localNBest: true,
+            uncertainSpans: true,
+          },
+        },
+      })),
+    } as unknown as Client;
+    render(
+      <Composer
+        {...composerProps({ onSend })}
+        speech={{ client, workspaceId: "w1", onOpenSettings }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "语音输入" }));
+    await waitFor(() => expect(onOpenSettings).toHaveBeenCalledOnce());
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByText("Qwen3 runtime 尚未就绪")).toBeInTheDocument();
+  });
+
   it("does not offer a model section for an agent that cannot switch models", async () => {
     const fixed = agent({
       id: "fixed",
@@ -1534,6 +1584,13 @@ describe("a whole turn as the timeline sees it", () => {
         },
       ],
       activeSessionId: "s1",
+      workspaces: [{
+        id: "w1",
+        name: "GeneHub",
+        root: "/work/genehub",
+        isGitRepo: true,
+        folders: [],
+      }],
       agents: [
         agent({
           id: "codex",
@@ -1576,11 +1633,11 @@ describe("a whole turn as the timeline sees it", () => {
     render(<TimelineView state={state} />);
     await userEvent.click(screen.getByRole("button", { name: "Fork" }));
 
-    expect(screen.getByRole("dialog", { name: "Fork 到 Agent" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Fork 会话" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Codex" })).toBeChecked();
     expect(screen.getByText("当前回合不可原生 Fork")).toBeInTheDocument();
     expect(screen.queryByText("重建会话")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "无法原生 Fork" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeDisabled();
   });
 });
 

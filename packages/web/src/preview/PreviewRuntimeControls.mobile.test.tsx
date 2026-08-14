@@ -79,7 +79,7 @@ describe("Preview runtime artifacts without display capture", () => {
       if (mediaDevicesDescriptor) {
         Object.defineProperty(navigator, "mediaDevices", mediaDevicesDescriptor);
       } else {
-        delete (navigator as Navigator & { mediaDevices?: MediaDevices }).mediaDevices;
+        delete (navigator as unknown as { mediaDevices?: MediaDevices }).mediaDevices;
       }
     }
   });

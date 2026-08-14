@@ -333,6 +333,12 @@ input:focus-visible {
 }
 
 .gh-markdown a:hover { text-decoration-color: currentColor; }
+
+.gh-blocked-link {
+  text-decoration: underline dotted;
+  text-decoration-color: rgb(var(--muted) / 0.7);
+  cursor: help;
+}
 .gh-markdown hr { margin: 1.75em 0; border: 0; border-top: 1px solid rgb(var(--line)); }
 
 .gh-inline-code {

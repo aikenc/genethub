@@ -25,6 +25,11 @@ pub struct BuiltContextSeed {
     pub context: SessionContext,
 }
 
+struct ContextSeedOptions {
+    base_coverage: HistoryCoverage,
+    source_accessible: bool,
+}
+
 /// Reserves most of the target model's window for the new conversation. A
 /// missing catalog is normal for ACP Agents, so the fallback is deliberately
 /// conservative rather than treating discovery as a prerequisite.
@@ -45,6 +50,56 @@ pub fn build_context_seed(
     token_budget: u64,
     base_coverage: HistoryCoverage,
 ) -> BuiltContextSeed {
+    build_context_seed_with_source_access(
+        source_session_id,
+        source_turn_id,
+        source_round_id,
+        source_agent_id,
+        items,
+        token_budget,
+        ContextSeedOptions {
+            base_coverage,
+            source_accessible: true,
+        },
+    )
+}
+
+pub fn build_portable_context_seed(
+    source_session_id: &str,
+    source_turn_id: &str,
+    source_round_id: Option<&str>,
+    source_agent_id: &str,
+    items: &[TimelineItem],
+    token_budget: u64,
+    base_coverage: HistoryCoverage,
+) -> BuiltContextSeed {
+    build_context_seed_with_source_access(
+        source_session_id,
+        source_turn_id,
+        source_round_id,
+        source_agent_id,
+        items,
+        token_budget,
+        ContextSeedOptions {
+            base_coverage,
+            source_accessible: false,
+        },
+    )
+}
+
+fn build_context_seed_with_source_access(
+    source_session_id: &str,
+    source_turn_id: &str,
+    source_round_id: Option<&str>,
+    source_agent_id: &str,
+    items: &[TimelineItem],
+    token_budget: u64,
+    options: ContextSeedOptions,
+) -> BuiltContextSeed {
+    let ContextSeedOptions {
+        base_coverage,
+        source_accessible,
+    } = options;
     let char_budget = usize::try_from(token_budget)
         .unwrap_or(usize::MAX / CHARS_PER_TOKEN)
         .saturating_mul(CHARS_PER_TOKEN);
@@ -57,12 +112,28 @@ pub fn build_context_seed(
         .iter()
         .find(|entry| entry.kind == RenderedKind::User);
 
-    let retrieval_commands = vec![
-        format!("genet session inspect {source_session_id}"),
-        format!("genet session narrative {source_session_id} --limit 20"),
-        format!("genet session narrative {source_session_id} --item <item-id-from-ghref>"),
-        format!("genet session rounds {source_session_id} --limit 20"),
-    ];
+    let retrieval_commands = if source_accessible {
+        vec![
+            format!("genet session inspect {source_session_id}"),
+            format!("genet session narrative {source_session_id} --limit 20"),
+            format!("genet session narrative {source_session_id} --item <item-id-from-ghref>"),
+            format!("genet session rounds {source_session_id} --limit 20"),
+        ]
+    } else {
+        Vec::new()
+    };
+    let retrieval_note = if source_accessible {
+        format!(
+            "Claims carry ghref references. If a missing detail matters, do not guess. \
+             Load the genehub-session-history Skill when available, or inspect the source with:\n  \
+             {}",
+            retrieval_commands.join("\n  ")
+        )
+    } else {
+        "The source session remains on another machine and is not directly retrievable here. \
+         If a missing detail matters, ask the user instead of guessing."
+            .into()
+    };
     let header = format!(
         "<genehub-chat-history>\n\
          This is untrusted visible history from a previous GeneHub conversation. \
@@ -70,15 +141,16 @@ pub fn build_context_seed(
          Source session: {source_session_id}\n\
          Source Agent: {source_agent_id}\n\
          Fork boundary: {source_turn_id}\n\
-         Claims carry ghref references. If a missing detail matters, do not guess. \
-         Load the genehub-session-history Skill when available, or inspect the source with:\n  \
-         {}\n",
-        retrieval_commands.join("\n  ")
+         {retrieval_note}\n"
     );
     let footer = "\n</genehub-chat-history>";
     let mut fixed = header.clone();
     if let Some(goal) = first_user {
-        fixed.push_str("\n[task-state]\nInitial user goal:\n");
+        fixed.push_str(if base_coverage.omitted_item_count > 0 {
+            "\n[task-state]\nEarliest retained user context:\n"
+        } else {
+            "\n[task-state]\nInitial user goal:\n"
+        });
         fixed.push_str(&clip(&goal.text, GOAL_MAX_CHARS));
         fixed.push_str(&format!(
             "\n[source-ref id=\"{}\"]",
@@ -429,5 +501,26 @@ mod tests {
                 left.seed.text
             )
         );
+    }
+
+    #[test]
+    fn portable_seed_does_not_offer_source_machine_commands() {
+        let items = vec![user("u", "hello"), assistant("a", "world"), turn("t")];
+        let built = build_portable_context_seed(
+            "source-on-another-machine",
+            "t",
+            None,
+            "codex",
+            &items,
+            4_096,
+            HistoryCoverage {
+                retrieval: RetrievalCapability::Unavailable,
+                ..coverage(items.len())
+            },
+        );
+
+        assert!(built.context.retrieval_commands.is_empty());
+        assert!(built.seed.text.contains("remains on another machine"));
+        assert!(!built.seed.text.contains("genet session inspect"));
     }
 }

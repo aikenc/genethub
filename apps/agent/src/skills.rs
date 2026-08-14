@@ -8,8 +8,35 @@ use ignore::WalkBuilder;
 
 const MAX_NAME_LENGTH: usize = 64;
 const MAX_DESCRIPTION_LENGTH: usize = 1024;
-const BUILTIN_SESSION_HISTORY: &str =
-    include_str!("../builtin-skills/genehub-session-history/SKILL.md");
+struct BuiltinFile {
+    relative_path: &'static str,
+    contents: &'static str,
+}
+
+const BUILTIN_FILES: &[BuiltinFile] = &[
+    BuiltinFile {
+        relative_path: "genehub-session-history/SKILL.md",
+        contents: include_str!("../builtin-skills/genehub-session-history/SKILL.md"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/SKILL.md",
+        contents: include_str!("../builtin-skills/genehub-speech-runtime/SKILL.md"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/agents/openai.yaml",
+        contents: include_str!("../builtin-skills/genehub-speech-runtime/agents/openai.yaml"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/references/models.md",
+        contents: include_str!("../builtin-skills/genehub-speech-runtime/references/models.md"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/references/runtime-contract.md",
+        contents: include_str!(
+            "../builtin-skills/genehub-speech-runtime/references/runtime-contract.md"
+        ),
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
@@ -50,33 +77,45 @@ pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
 
 fn materialize_builtins(agent_dir: &Path) -> Option<PathBuf> {
     let root = agent_dir.join("builtin-skills");
-    let skill_dir = root.join("genehub-session-history");
-    let target = skill_dir.join("SKILL.md");
-    if std::fs::read_to_string(&target).ok().as_deref() == Some(BUILTIN_SESSION_HISTORY) {
-        return Some(root);
-    }
-    if let Err(error) = std::fs::create_dir_all(&skill_dir) {
-        eprintln!("genet-agent: could not create built-in skill directory: {error}");
-        return None;
-    }
-    let temporary = skill_dir.join(format!(".SKILL.md.{}.tmp", std::process::id()));
-    let installed = std::fs::write(&temporary, BUILTIN_SESSION_HISTORY).and_then(|_| {
-        std::fs::rename(&temporary, &target).or_else(|first_error| {
-            // Windows does not replace an existing destination with rename.
-            // This fallback loses atomic replacement but keeps upgrades from
-            // silently dropping the built-in Skill on that platform.
-            if target.exists() {
-                std::fs::remove_file(&target)?;
-                std::fs::rename(&temporary, &target)
-            } else {
-                Err(first_error)
-            }
-        })
-    });
-    if let Err(error) = installed {
-        let _ = std::fs::remove_file(&temporary);
-        eprintln!("genet-agent: could not install built-in session skill: {error}");
-        return None;
+    for file in BUILTIN_FILES {
+        let target = root.join(file.relative_path);
+        if std::fs::read_to_string(&target).ok().as_deref() == Some(file.contents) {
+            continue;
+        }
+        let parent = target.parent()?;
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            eprintln!(
+                "genet-agent: could not create built-in skill directory for {}: {error}",
+                file.relative_path
+            );
+            return None;
+        }
+        let file_name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("builtin");
+        let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+        let installed = std::fs::write(&temporary, file.contents).and_then(|_| {
+            std::fs::rename(&temporary, &target).or_else(|first_error| {
+                // Windows does not replace an existing destination with rename.
+                // This fallback loses atomic replacement but keeps upgrades from
+                // silently dropping a built-in Skill on that platform.
+                if target.exists() {
+                    std::fs::remove_file(&target)?;
+                    std::fs::rename(&temporary, &target)
+                } else {
+                    Err(first_error)
+                }
+            })
+        });
+        if let Err(error) = installed {
+            let _ = std::fs::remove_file(&temporary);
+            eprintln!(
+                "genet-agent: could not install built-in file {}: {error}",
+                file.relative_path
+            );
+            return None;
+        }
     }
     Some(root)
 }
@@ -394,6 +433,26 @@ mod tests {
         assert!(std::fs::read_to_string(&skill.file_path)
             .unwrap()
             .contains("GENEHUB_SESSION_ID"));
+    }
+
+    #[test]
+    fn built_in_speech_runtime_skill_and_references_are_materialized() {
+        let cwd = temp_dir("speech-builtin-cwd");
+        let agent_dir = temp_dir("speech-builtin-agent");
+        let skills = load(&cwd, &agent_dir);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "genehub-speech-runtime")
+            .expect("built-in speech runtime skill");
+        assert!(std::fs::read_to_string(&skill.file_path)
+            .unwrap()
+            .contains("speech runtime register"));
+        assert!(skill.base_dir.join("references/models.md").is_file());
+        assert!(skill
+            .base_dir
+            .join("references/runtime-contract.md")
+            .is_file());
+        assert!(skill.base_dir.join("agents/openai.yaml").is_file());
     }
 
     #[test]

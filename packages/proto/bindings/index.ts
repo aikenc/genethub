@@ -256,10 +256,23 @@ export type ForkMethod = "nativeCheckpoint" | "reconstructedContext";
  * The explicit destination chosen in the Fork UI.
  *
  * Omitting this object on the RPC keeps the native Fork semantics of the
- * current Agent. A client sends it only when the user explicitly switches
- * Agent, which is the opt-in boundary for reconstructed context.
+ * source machine, workspace and Agent. A client sends it when the user
+ * explicitly switches any destination dimension, which is the opt-in boundary
+ * for reconstructed context.
  */
-export type ForkTarget = { agentId: string, modelId?: string, modeId?: string, effortId?: string, };
+export type ForkTarget = { agentId: string, 
+/**
+ * Required destination workspace for a directed fork. Older clients omit
+ * it and keep the source workspace on the current machine.
+ */
+workspaceId?: string, modelId?: string, modeId?: string, effortId?: string, };
+
+/**
+ * Portable, untrusted material exported by the source daemon for a fork on a
+ * different machine. The destination daemon applies its own Agent catalog,
+ * context budget and workspace validation; clients cannot supply a seed.
+ */
+export type ForkTransfer = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, sourceRoundId?: string, title?: string, items: Array<TimelineItem>, coverage: HistoryCoverage, };
 
 export type GitChange = { path: string, kind: GitChangeKind, staged: boolean, };
 
@@ -277,6 +290,11 @@ fingerprint: string, transport: TransportKind, machineName: string,
  * preference still decides whether negotiation is attempted.
  */
 rtcSupported: boolean, 
+/**
+ * Additive product capabilities. Older daemons omit this field; clients
+ * must treat that exactly like an empty list rather than guessing support.
+ */
+features?: Array<string>, 
 /**
  * What this machine can actually enforce on a process it starts on a
  * caller's behalf. Absent from older daemons, which is why it is optional.
@@ -563,7 +581,7 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -603,9 +621,9 @@ continuesRound: string | null, } } | { "type": "session.artifact.begin", "payloa
 /**
  * Absent is the legacy native-only request. New clients send an
  * explicit target to opt into provider-agnostic reconstruction when
- * a native checkpoint cannot be used.
+ * any destination dimension changes or a native checkpoint cannot be used.
  */
-target?: ForkTarget, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+target?: ForkTarget, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -622,7 +640,17 @@ dialect: string | null,
 /**
  * Models by hand, for an endpoint that cannot list its own.
  */
-models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payload": { providerId: string, } } | { "type": "log.tail", "payload": { 
+models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payload": { providerId: string, } } | { "type": "speech.capabilities" } | { "type": "speech.settings.setQwen3", "payload": { 
+/**
+ * Selects the deterministic no-model protocol Stub. Optional so an
+ * older client changing prompt terms does not change runtime mode.
+ */
+stubEnabled?: boolean, contextEnabled: boolean, pinnedTerms: Array<string>, languageHints: Array<string>, collectCorrections: boolean, 
+/**
+ * Required when changing project-local correction consent. Optional
+ * for wire compatibility with clients that only change prompt terms.
+ */
+workspaceId?: string, } } | { "type": "speech.runtime.probe" } | { "type": "speech.runtime.configure", "payload": { command: string | null, args: Array<string>, } } | { "type": "speech.context.preview", "payload": { workspaceId: string, sessionId: string | null, draft: string | null, } } | { "type": "speech.feedback.record", "payload": { workspaceId: string, requestId: string, contextSnapshotId: string, candidates: Array<SpeechCandidate>, selectedCandidateId: string, rejectedCandidateId?: string, scope?: SpeechFeedbackScope, scoreKind: SpeechScoreKind, } } | { "type": "log.tail", "payload": { 
 /**
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
@@ -854,7 +882,12 @@ export type Settings = { providers: Array<ProviderInfo>,
 /**
  * Whether the daemon accepts connections from the local network.
  */
-lanEnabled: boolean, };
+lanEnabled: boolean, 
+/**
+ * Qwen3 speech is independent of LLM providers. GeneHub exposes prompt,
+ * N-best and correction contracts while the model runtime stays local.
+ */
+speech?: SpeechSettings, };
 
 /**
  * One message from a running command.
@@ -921,6 +954,151 @@ env: { [key in string]?: string },
  * cannot wait — an agent, which has no way to press Ctrl-C — says so.
  */
 timeoutMs?: bigint, };
+
+export type SpeechAudioFormat = { encoding: SpeechEncoding, sampleRateHz: number, channels: number, };
+
+export type SpeechCancelReason = "user" | "pageHidden" | "targetChanged" | "clientBackpressure";
+
+export type SpeechCandidate = { candidateId: string, rank: number, text: string, score: number, matchedTerms: Array<string>, };
+
+export type SpeechCapabilities = { protocolVersion: number, runtimeStatus: SpeechRuntimeStatus, runtime: SpeechRuntimeDescriptor, audio: Array<SpeechAudioFormat>, languages: Array<string>, maxLanguageHints: number, maxDurationMs: number, context: SpeechContextLimits, nBest: SpeechNBestCapabilities, segmentation: SpeechSegmentationCapabilities, };
+
+export type SpeechCompleted = { requestId: string, text: string, durationMs: number, contextSnapshotId: string, candidates: Array<SpeechCandidate>, defaultCandidateId: string, scoreKind: SpeechScoreKind, scoresCalibrated: boolean, 
+/**
+ * Optional for wire compatibility with clients and runtimes that only
+ * understand whole-utterance N-best.
+ */
+segments?: Array<SpeechSegment>, };
+
+export type SpeechContextLimits = { maxBytes: number, maxPromptChars: number, maxPinnedTerms: number, maxAutomaticTerms: number, };
+
+export type SpeechContextOmissions = { pinnedTerms: number, automaticTerms: number, messages: number, projectIndexUnavailable: boolean, projectContextTruncated: boolean, };
+
+/**
+ * The exact bounded Qwen3 prompt snapshot used for one transcription.
+ */
+export type SpeechContextPack = { snapshotId: string, prompt: string, terms: Array<SpeechContextTerm>, languageHints: Array<string>, compilerVersion: string, omitted: SpeechContextOmissions, };
+
+export type SpeechContextSource = "pinned" | "correction" | "projectConfig" | "workspace" | "projectFile";
+
+export type SpeechContextTerm = { text: string, source: SpeechContextSource, score: number, };
+
+export type SpeechContextUpdate = { revision: number, context: SpeechContextPack, };
+
+export type SpeechEncoding = "pcmS16Le";
+
+export type SpeechFailure = { code: SpeechFailureCode, message: string, retryable: boolean, retryAfterMs?: number, correlationId?: string, };
+
+export type SpeechFailureCode = "runtimeUnavailable" | "unsupportedLanguage" | "contextRejected" | "timeout" | "protocolMismatch" | "canceled" | "internal";
+
+export type SpeechFeedbackLevel = "utterance" | "segment" | "span";
+
+export type SpeechFeedbackReceipt = { stored: boolean, learnedTerms: Array<string>, 
+/**
+ * Stable id of the authoritative preference pair. It is safe to include
+ * in diagnostics and lets support correlate a UI report without copying
+ * transcript or candidate text.
+ */
+feedbackId?: string, relativePath?: string, };
+
+/**
+ * Conditioning retained with a preference pair. A segment/span correction
+ * stays fine-grained while `utterance_text` and its neighbours preserve the
+ * context needed by a later reranker or preference-tuning pipeline.
+ */
+export type SpeechFeedbackScope = { level: SpeechFeedbackLevel, utteranceText: string, segmentId?: string, segmentStartMs?: number, segmentEndMs?: number, precedingText?: string, followingText?: string, uncertainSpanId?: string, spanStartChar?: number, spanEndChar?: number, };
+
+export type SpeechNBestCapabilities = { maxCandidates: number, scoreKind: SpeechScoreKind, calibrated: boolean, };
+
+/**
+ * A complete replacement for the current Best-1 preview. Revisions increase
+ * monotonically within one request; `stable_prefix_chars` uses Unicode scalar
+ * offsets and tells the UI which prefix the runtime does not expect to revise.
+ */
+export type SpeechPartial = { requestId: string, revision: number, text: string, audioEndMs: number, stablePrefixChars: number, };
+
+export type SpeechReady = { requestId: string, runtimeId: string, modelId: string, contextRevision: number, };
+
+/**
+ * The bounded document printed by a community runtime for
+ * `--genehub-probe`. GeneHub validates every field before advertising it to a
+ * client; installing the model and implementing this adapter remain outside
+ * the GeneHub distribution.
+ */
+export type SpeechRuntimeCapabilities = { schema: string, speechProtocolVersion: number, runtime: SpeechRuntimeDescriptor, audio: Array<SpeechAudioFormat>, languages: Array<string>, maxLanguageHints: number, maxDurationMs: number, nBest: SpeechNBestCapabilities, segmentation: SpeechSegmentationCapabilities, };
+
+export type SpeechRuntimeDescriptor = { id: string, model: string, label: string, 
+/**
+ * `stub` identifies GeneHub's no-model protocol test runtime; a community
+ * adapter reports its own stable implementation identifier.
+ */
+implementation: string, };
+
+export type SpeechRuntimeStatus = { "state": "ready" } | { "state": "unavailable", message: string, };
+
+export type SpeechScoreKind = "unavailable" | "mockRelative" | "lengthNormalizedLogProbability";
+
+/**
+ * A final acoustic/linguistic segment. Text character offsets locate the
+ * segment inside `SpeechCompleted.text`; time offsets locate it in the one
+ * recording. Segment alternatives are full segment strings, while
+ * `uncertain_spans` makes the local disagreement directly reviewable.
+ */
+export type SpeechSegment = { segmentId: string, startMs: number, endMs: number, textStartChar: number, textEndChar: number, text: string, candidates: Array<SpeechCandidate>, defaultCandidateId: string, uncertainSpans: Array<SpeechUncertainSpan>, boundary: SpeechSegmentBoundary, };
+
+export type SpeechSegmentBoundary = { kind: SpeechSegmentBoundaryKind, confidence: number, };
+
+export type SpeechSegmentBoundaryKind = "voiceActivity" | "decoderEndpoint" | "maxDuration" | "final";
+
+export type SpeechSegmentationCapabilities = { maxSegments: number, 
+/**
+ * Whether the runtime can return revisioned Best-1 replacements while
+ * audio is arriving. Segments and candidate review remain final-only.
+ */
+partialResults: boolean, localNBest: boolean, uncertainSpans: boolean, };
+
+/**
+ * Machine-local Qwen3 prompt and preference settings.
+ */
+export type SpeechSettings = { runtime: SpeechRuntimeDescriptor, 
+/**
+ * The deterministic no-model protocol Stub is selected instead of the
+ * registered community runtime. Stub output is never training evidence.
+ */
+stubEnabled: boolean, contextEnabled: boolean, pinnedTerms: Array<string>, languageHints: Array<string>, 
+/**
+ * Legacy machine-wide flag retained on the wire for clients that predate
+ * project-scoped consent. New daemons always return false and use
+ * `correction_workspaces` instead.
+ */
+collectCorrections: boolean, 
+/**
+ * Stable workspace ids for which the user explicitly enabled local
+ * preference collection. Consent for one project must never silently
+ * enable collection in another project on the same machine.
+ */
+correctionWorkspaces: Array<string>, };
+
+/**
+ * One alternative for a locally ambiguous character span. `candidate_id`
+ * references a candidate in the containing segment, so choosing a span never
+ * needs to replace unrelated segments in the utterance.
+ */
+export type SpeechSpanAlternative = { alternativeId: string, candidateId: string, text: string, score: number, };
+
+export type SpeechStart = { requestId: string, workspaceId: string, sessionId?: string, audio: SpeechAudioFormat, languageHints: Array<string>, context: SpeechContextPack, contextRevision: number, 
+/**
+ * Older v2 clients omit this and receive only the final result. New
+ * clients opt in so adding Partial does not break an already shipped
+ * decoder.
+ */
+acceptPartial: boolean, };
+
+/**
+ * Character offsets are Unicode scalar-value offsets inside the segment's
+ * default text, not UTF-8 bytes or JavaScript UTF-16 code units.
+ */
+export type SpeechUncertainSpan = { spanId: string, startChar: number, endChar: number, alternatives: Array<SpeechSpanAlternative>, defaultAlternativeId: string, };
 
 /**
  * One daemon-owned diagnostic fact. Values are intentionally categorical.

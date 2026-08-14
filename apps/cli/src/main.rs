@@ -17,6 +17,7 @@ mod process;
 mod query;
 mod rpc;
 mod shell;
+mod speech;
 mod target;
 mod update;
 
@@ -90,6 +91,7 @@ async fn run(args: Vec<String>) {
         },
         Some("agent") => converse::agent(&args[1..], &selection).await,
         Some("shell") => shell::shell(&args[1..], &selection).await,
+        Some("speech") => speech::speech(&args[1..], &selection).await,
         Some("process") => process::process(&args[1..], &selection).await,
         Some("machine") => machine::machine(&args[1..]).await,
         Some("device") => machine::device(&args[1..], &selection).await,
@@ -144,6 +146,11 @@ pub fn usage() -> i32 {
                                     end one of them, and what it started
   genet process kill-all --session <id>
                                     end everything one conversation left
+  genet speech runtime status      inspect the registered local speech adapter
+  genet speech runtime probe       actively check the registered adapter
+  genet speech runtime register --command <absolute-path> [--arg <value>...]
+                                    probe and register a community adapter
+  genet speech runtime unregister  remove the adapter registration only
   genet session send <id> \"<text>\"  continue a session
   genet session respond <id> --request <rid> --choose <optionId>
                                     answer what a waiting session asked

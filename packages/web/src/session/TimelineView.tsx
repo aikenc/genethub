@@ -10,7 +10,12 @@ import { useEffect, useRef, useState } from "react";
 import { stringify as toYaml } from "yaml";
 
 import { canStartAgent } from "../presentation/catalog/resolve";
-import { ForkDialog } from "./ForkDialog";
+import {
+  ForkDialog,
+  type ForkCatalog,
+  type ForkMachineOption,
+  type ForkSelection,
+} from "./ForkDialog";
 import { Markdown } from "./Markdown";
 
 import { attachmentPreviewUrl } from "./attachments";
@@ -52,7 +57,28 @@ function LogLink() {
   );
 }
 
-export function TimelineView({ state }: { state: TimelineState }) {
+export interface ForkController {
+  sourceMachine: ForkMachineOption;
+  listMachines(): Promise<ForkMachineOption[]>;
+  loadCatalog(machine: ForkMachineOption): Promise<ForkCatalog>;
+  fork(turnId: string, selection: ForkSelection): Promise<boolean>;
+}
+
+const CURRENT_MACHINE: ForkMachineOption = {
+  id: "current",
+  routeId: "current",
+  label: "当前机器",
+  kind: "local",
+  online: true,
+};
+
+export function TimelineView({
+  state,
+  forkController,
+}: {
+  state: TimelineState;
+  forkController?: ForkController;
+}) {
   const bottom = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
@@ -65,6 +91,7 @@ export function TimelineView({ state }: { state: TimelineState }) {
   const activeSessionId = useWorkbench((workbench) => workbench.activeSessionId);
   const sessions = useWorkbench((workbench) => workbench.sessions);
   const agents = useWorkbench((workbench) => workbench.agents);
+  const workspaces = useWorkbench((workbench) => workbench.workspaces);
   const activeSession = sessions.find((entry) => entry.id === activeSessionId);
   const canFork = Boolean(activeSession && agents.some(canStartAgent));
   const agentLabel = useWorkbench((workbench) => {
@@ -170,16 +197,27 @@ export function TimelineView({ state }: { state: TimelineState }) {
       </div>
       {forkRequest && activeSession ? (
         <ForkDialog
-          agents={agents}
+          sourceMachine={forkController?.sourceMachine ?? CURRENT_MACHINE}
+          sourceWorkspaceId={activeSession.workspaceId}
           sourceAgentId={activeSession.agentId}
+          sourceCatalog={{ agents, workspaces }}
           hasNativeCheckpoint={forkRequest.hasNativeCheckpoint}
+          listMachines={forkController?.listMachines}
+          loadCatalog={forkController?.loadCatalog}
           onClose={() => setForkRequest(null)}
-          onConfirm={(agentId) =>
-            forkSession(
+          onConfirm={(selection) => {
+            if (forkController) return forkController.fork(forkRequest.turnId, selection);
+            const unchanged =
+              selection.machine.id === CURRENT_MACHINE.id &&
+              selection.workspaceId === activeSession.workspaceId &&
+              selection.agentId === activeSession.agentId;
+            return forkSession(
               forkRequest.turnId,
-              agentId === activeSession.agentId ? undefined : { agentId },
-            )
-          }
+              unchanged
+                ? undefined
+                : { agentId: selection.agentId, workspaceId: selection.workspaceId },
+            );
+          }}
         />
       ) : null}
     </>

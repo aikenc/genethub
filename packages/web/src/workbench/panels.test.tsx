@@ -642,6 +642,70 @@ describe("the settings panel", () => {
   });
 });
 
+describe("speech settings", () => {
+  it("configures project context, labels an explicit mock, and probes the runtime", async () => {
+    let correctionWorkspaces: string[] = [];
+    const speech = () => ({
+      runtime: {
+        id: "qwen3-asr",
+        model: "Qwen3-ASR-1.7B",
+        label: "Qwen3-ASR 1.7B",
+        implementation: "mock",
+      },
+      stubEnabled: false,
+      contextEnabled: true,
+      pinnedTerms: [] as string[],
+      languageHints: ["zh"],
+      collectCorrections: false,
+      correctionWorkspaces,
+    });
+    const { client, calls } = stubDaemon({
+      "settings.get": () => ({
+        type: "settings",
+        data: { lanEnabled: false, providers: [], speech: speech() },
+      }),
+      "speech.settings.setQwen3": () => {
+        correctionWorkspaces = ["w1"];
+        return {
+          type: "settings",
+          data: { lanEnabled: false, providers: [], speech: speech() },
+        };
+      },
+      "speech.runtime.probe": () => ({ type: "speechRuntimeStatus", data: { state: "ready" } }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    (client.identity as { features?: string[] }).features = ["speech.transcribe.v2"];
+    install(client);
+
+    render(<SettingsPanel host={browserHost()} />);
+    expect(await screen.findByText("Qwen3-ASR-1.7B")).toBeInTheDocument();
+    expect(screen.getByText(/开发 Mock 已启用/)).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "语音协议 Stub" })).not.toBeChecked();
+    expect(screen.queryByRole("combobox", { name: /模型/ })).not.toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText("固定专业术语"), "GeneHub\nPipeSpace");
+    await userEvent.clear(screen.getByLabelText("语音语言提示"));
+    await userEvent.type(screen.getByLabelText("语音语言提示"), "zh, en");
+    await userEvent.click(screen.getByRole("switch", { name: "语音协议 Stub" }));
+    await userEvent.click(screen.getByText("为当前项目沉淀我主动选择的候选"));
+    await userEvent.click(screen.getByTestId("save-speech-qwen3"));
+
+    await waitFor(() => {
+      const sent = calls.find((call) => call.type === "speech.settings.setQwen3");
+      expect(sent?.payload).toMatchObject({
+        stubEnabled: true,
+        pinnedTerms: ["GeneHub", "PipeSpace"],
+        languageHints: ["zh", "en"],
+        collectCorrections: true,
+        workspaceId: "w1",
+      });
+    });
+
+    await userEvent.click(screen.getByTestId("probe-speech-qwen3"));
+    expect(await screen.findByText("语音 runtime 就绪")).toBeInTheDocument();
+  });
+});
+
 describe("the version section", () => {
   // The prefix is the tree's channel, not a pinned one: the tree stamps
   // `dev`, a release build stamps its own, and either is correct.

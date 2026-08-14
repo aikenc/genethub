@@ -142,6 +142,12 @@ async fn dispatch(
             transport,
             machine_name: crate::link::default_display_name(),
             rtc_supported: true,
+            features: Some(vec![
+                genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
+                genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
+                genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
+                genehub_proto::SPEECH_FEATURE_FEEDBACK.to_string(),
+            ]),
             isolation: Some(crate::isolation::report()),
         })),
 
@@ -426,9 +432,72 @@ async fn dispatch(
             target,
         } => {
             let providers = state.providers().await;
+            if let Some(target) = target
+                .as_ref()
+                .filter(|target| target.workspace_id.is_some())
+            {
+                let workspace_id = target.workspace_id.as_deref().expect("filtered above");
+                let workspace = match state.workspaces.get(workspace_id).await {
+                    Ok(workspace) => workspace,
+                    Err(error) => return failed(error),
+                };
+                let transfer = match state.sessions.fork_export(&session_id, &turn_id).await {
+                    Ok(transfer) => transfer,
+                    Err(error) => return failed(error),
+                };
+                return match state
+                    .sessions
+                    .fork_import(
+                        workspace_id,
+                        workspace.root,
+                        transfer,
+                        target.clone(),
+                        &providers,
+                        true,
+                    )
+                    .await
+                {
+                    Ok(summary) => Handled::ok(Reply::Session(summary)),
+                    Err(error) => failed(error),
+                };
+            }
             match state
                 .sessions
                 .fork(&session_id, &turn_id, target, &providers)
+                .await
+            {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionForkExport {
+            session_id,
+            turn_id,
+        } => match state.sessions.fork_export(&session_id, &turn_id).await {
+            Ok(transfer) => Handled::ok(Reply::ForkTransfer(transfer)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionForkImport { transfer, target } => {
+            let Some(workspace_id) = target.workspace_id.clone() else {
+                return Handled::err(ErrorCode::BadRequest, "directed fork requires workspaceId");
+            };
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let providers = state.providers().await;
+            match state
+                .sessions
+                .fork_import(
+                    &workspace_id,
+                    workspace.root,
+                    transfer,
+                    target,
+                    &providers,
+                    false,
+                )
                 .await
             {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
@@ -566,6 +635,91 @@ async fn dispatch(
         }
 
         Request::SettingsGet => Handled::ok(Reply::Settings(state.settings().await)),
+
+        Request::SpeechCapabilities => {
+            Handled::ok(Reply::SpeechCapabilities(state.speech_capabilities().await))
+        }
+
+        Request::SpeechSettingsSetQwen3 {
+            stub_enabled,
+            context_enabled,
+            pinned_terms,
+            language_hints,
+            collect_corrections,
+            workspace_id,
+        } => match state
+            .set_qwen3_speech(
+                stub_enabled,
+                context_enabled,
+                pinned_terms,
+                language_hints,
+                collect_corrections,
+                workspace_id,
+            )
+            .await
+        {
+            Ok(settings) => Handled::ok(Reply::Settings(settings)),
+            Err(error) => failed(error),
+        },
+
+        Request::SpeechRuntimeProbe => Handled::ok(Reply::SpeechRuntimeStatus(
+            state.probe_speech_runtime().await,
+        )),
+
+        Request::SpeechRuntimeConfigure { command, args } => {
+            if transport != TransportKind::Loopback {
+                Handled::err(
+                    ErrorCode::Forbidden,
+                    "语音 runtime 只能由这台电脑上的本地用户注册或移除",
+                )
+            } else {
+                match state.configure_speech_runtime(command, args).await {
+                    Ok(capabilities) => Handled::ok(Reply::SpeechCapabilities(capabilities)),
+                    Err(error) => failed(error),
+                }
+            }
+        }
+
+        Request::SpeechContextPreview {
+            workspace_id,
+            session_id,
+            draft,
+        } => match crate::speech::compile_context_for_state(
+            state,
+            &workspace_id,
+            session_id.as_deref(),
+            draft.as_deref(),
+        )
+        .await
+        {
+            Ok(context) => Handled::ok(Reply::SpeechContext(context)),
+            Err(error) => failed(error),
+        },
+
+        Request::SpeechFeedbackRecord {
+            workspace_id,
+            request_id,
+            context_snapshot_id: _,
+            candidates: _,
+            selected_candidate_id,
+            rejected_candidate_id,
+            scope,
+            score_kind: _,
+        } => match crate::speech::record_feedback_for_state(
+            state,
+            crate::speech::FeedbackSubmission {
+                workspace_id,
+                request_id,
+                selected_candidate_id,
+                rejected_candidate_id,
+                scope,
+            },
+        )
+        .await
+        {
+            Ok(receipt) => Handled::ok(Reply::SpeechFeedbackReceipt(receipt)),
+            Err(error) => failed(error),
+        },
 
         Request::SettingsSetProvider {
             provider_id,
@@ -1112,6 +1266,8 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::SessionArtifactFinish { .. } => Some("session.artifact.finish"),
         Request::SessionArtifactAbort { .. } => Some("session.artifact.abort"),
         Request::SessionFork { .. } => Some("session.fork"),
+        Request::SessionForkExport { .. } => Some("session.forkExport"),
+        Request::SessionForkImport { .. } => Some("session.forkImport"),
         Request::SessionImport { .. } => Some("session.import"),
         Request::SessionInterrupt { .. } => Some("session.interrupt"),
         Request::SessionDelete { .. } => Some("session.delete"),

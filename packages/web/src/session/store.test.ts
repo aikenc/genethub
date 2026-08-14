@@ -529,6 +529,7 @@ describe("forking a completed turn", () => {
     const forked: SessionSummary = {
       ...SESSION,
       id: "s-fork",
+      workspaceId: "w2",
       title: "Fix the redirect · 分支",
       updatedAtMs: 10,
     };
@@ -552,18 +553,22 @@ describe("forking a completed turn", () => {
     } as unknown as Client;
     useWorkbench.setState({ client, activeSessionId: SESSION.id });
 
-    await useWorkbench.getState().forkSession("turn-7", { agentId: "claude" });
+    await useWorkbench.getState().forkSession("turn-7", {
+      agentId: "claude",
+      workspaceId: "w2",
+    });
 
     expect(calls).toContainEqual({
       type: "session.fork",
       payload: {
         sessionId: SESSION.id,
         turnId: "turn-7",
-        target: { agentId: "claude" },
+        target: { agentId: "claude", workspaceId: "w2" },
       },
     });
     expect(useWorkbench.getState().sessions[0]).toEqual(forked);
     expect(useWorkbench.getState().activeSessionId).toBe(forked.id);
+    expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
   });
 });
 

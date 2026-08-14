@@ -288,7 +288,11 @@ export const Markdown = memo(function Markdown({
           a: ({ href, children }) => {
             const resolved = resolveArtifactRef(href, artifact);
             if (resolved.kind === "blocked") {
-              return <span className="gh-blocked-link">{children}</span>;
+              return (
+                <span className="gh-blocked-link" title="此链接不在当前工作区内">
+                  {children}
+                </span>
+              );
             }
             if (
               resolved.kind === "preview" &&

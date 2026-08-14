@@ -65,12 +65,15 @@ pub enum Capability {
     Devices,
     /// Machine configuration and stored provider credentials.
     Settings,
+    /// Capturing audio, compiling workspace context and spending speech
+    /// provider quota. Separate from Agent sessions and from file access.
+    Speech,
     /// Replacing the software this machine runs.
     Update,
 }
 
 impl Capability {
-    pub const ALL: [Capability; 10] = [
+    pub const ALL: [Capability; 11] = [
         Capability::Handshake,
         Capability::Read,
         Capability::Session,
@@ -80,6 +83,7 @@ impl Capability {
         Capability::PtyUnconfined,
         Capability::Devices,
         Capability::Settings,
+        Capability::Speech,
         Capability::Update,
     ];
 
@@ -94,6 +98,7 @@ impl Capability {
             Capability::PtyUnconfined => "pty:unconfined",
             Capability::Devices => "devices",
             Capability::Settings => "settings",
+            Capability::Speech => "speech",
             Capability::Update => "update",
         }
     }
@@ -138,6 +143,30 @@ impl GrantSet {
             .iter()
             .map(|capability| capability.as_str().to_string())
             .collect()
+    }
+
+    /// Files written before the speech grant existed represented "full" as
+    /// every then-known capability. Migrate only that exact legacy shape;
+    /// deliberately narrowed devices keep their narrower authority.
+    pub(crate) fn add_speech_to_legacy_full(&mut self) {
+        const LEGACY_FULL: [Capability; 9] = [
+            Capability::Handshake,
+            Capability::Read,
+            Capability::Session,
+            Capability::Files,
+            Capability::Git,
+            Capability::Pty,
+            Capability::Devices,
+            Capability::Settings,
+            Capability::Update,
+        ];
+        if !self.0.contains(&Capability::Speech)
+            && LEGACY_FULL
+                .iter()
+                .all(|capability| self.0.contains(capability))
+        {
+            self.0.insert(Capability::Speech);
+        }
     }
 }
 
@@ -227,6 +256,8 @@ pub enum StreamMethod {
     ShellRun,
     /// Moves this same authenticated peer onto a direct carrier.
     RtcNegotiate,
+    /// Provider-neutral speech-to-text duplex flow.
+    SpeechTranscribe,
 }
 
 impl StreamMethod {
@@ -236,6 +267,7 @@ impl StreamMethod {
             "asset.preview" => Some(StreamMethod::AssetPreview),
             "shell.run" => Some(StreamMethod::ShellRun),
             "rtc.negotiate" => Some(StreamMethod::RtcNegotiate),
+            genehub_proto::SPEECH_TRANSCRIBE_METHOD => Some(StreamMethod::SpeechTranscribe),
             _ => None,
         }
     }
@@ -256,6 +288,7 @@ impl StreamMethod {
             // A transport upgrade for an already authenticated peer, which
             // inherits that peer's device identity and scope.
             StreamMethod::RtcNegotiate => Capability::Handshake,
+            StreamMethod::SpeechTranscribe => Capability::Speech,
         }
     }
 }
@@ -293,6 +326,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::DiagnosticsSnapshot
         | Request::HubStatus
         | Request::HubMachines
+        | Request::SpeechCapabilities
         | Request::UpdateCheck
         | Request::UpdateDownloadState => Capability::Read,
 
@@ -314,6 +348,8 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionArtifactFinish { .. }
         | Request::SessionArtifactAbort { .. }
         | Request::SessionFork { .. }
+        | Request::SessionForkExport { .. }
+        | Request::SessionForkImport { .. }
         | Request::SessionImport { .. }
         | Request::SessionInterrupt { .. }
         | Request::SessionClose { .. }
@@ -324,6 +360,10 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionSetMode { .. }
         | Request::SessionSetEffort { .. }
         | Request::SessionRespondPermission { .. } => Capability::Session,
+
+        Request::SpeechContextPreview { .. } | Request::SpeechFeedbackRecord { .. } => {
+            Capability::Speech
+        }
 
         Request::PtyOpen { .. }
         | Request::PtyWrite { .. }
@@ -348,6 +388,9 @@ pub fn required(request: &Request) -> Capability {
         | Request::SettingsGet
         | Request::SettingsSetProvider { .. }
         | Request::SettingsForgetProvider { .. }
+        | Request::SpeechSettingsSetQwen3 { .. }
+        | Request::SpeechRuntimeProbe
+        | Request::SpeechRuntimeConfigure { .. }
         | Request::HubPair { .. }
         | Request::HubTrial { .. }
         | Request::HubClaimLink
@@ -492,5 +535,57 @@ mod tests {
             }),
             Capability::Session
         );
+    }
+
+    #[test]
+    fn speech_has_an_explicit_request_and_stream_gate() {
+        assert_eq!(
+            StreamMethod::parse(genehub_proto::SPEECH_TRANSCRIBE_METHOD)
+                .map(StreamMethod::required),
+            Some(Capability::Speech)
+        );
+        assert_eq!(
+            required(&Request::SpeechContextPreview {
+                workspace_id: "w".into(),
+                session_id: None,
+                draft: None,
+            }),
+            Capability::Speech
+        );
+        assert_eq!(required(&Request::SpeechCapabilities), Capability::Read);
+        assert_eq!(required(&Request::SpeechRuntimeProbe), Capability::Settings);
+        assert_eq!(
+            required(&Request::SpeechFeedbackRecord {
+                workspace_id: "w".into(),
+                request_id: "r".into(),
+                context_snapshot_id: "sc".into(),
+                candidates: vec![],
+                selected_candidate_id: "c".into(),
+                rejected_candidate_id: None,
+                scope: None,
+                score_kind: genehub_proto::SpeechScoreKind::MockRelative,
+            }),
+            Capability::Speech
+        );
+    }
+
+    #[test]
+    fn only_the_exact_legacy_full_shape_gains_speech_during_migration() {
+        let mut legacy_full = GrantSet::of([
+            Capability::Read,
+            Capability::Session,
+            Capability::Files,
+            Capability::Git,
+            Capability::Pty,
+            Capability::Devices,
+            Capability::Settings,
+            Capability::Update,
+        ]);
+        legacy_full.add_speech_to_legacy_full();
+        assert!(legacy_full.allows(Capability::Speech));
+
+        let mut narrowed = GrantSet::of([Capability::Read, Capability::Session]);
+        narrowed.add_speech_to_legacy_full();
+        assert!(!narrowed.allows(Capability::Speech));
     }
 }

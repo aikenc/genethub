@@ -11,19 +11,22 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, HistoryCoverage,
-    ImportContinuation, ItemDelta, PermissionOptionKind, PermissionOutcome, PermissionRequest,
-    PermissionRequestKind, ProbeState, RetrievalCapability, RoundLayer, RoundLayerOutcome,
-    RoundSummary, RoundTrunk, SequencedEvent, SessionArtifactBundle, SessionArtifactFile,
-    SessionArtifactUpload, SessionContext, SessionEvent, SessionImportCandidate,
-    SessionImportListing, SessionImportSource, SessionInspection, SessionLineage,
-    SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot, SessionStatus,
-    SessionSummary, TimelineItem, ToolStatus, TurnErrorCode, TurnOutcome, TurnStats, Usage,
+    Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ForkTransfer,
+    HistoryCoverage, ImportContinuation, ItemDelta, PermissionOptionKind, PermissionOutcome,
+    PermissionRequest, PermissionRequestKind, ProbeState, RetrievalCapability, RoundLayer,
+    RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionArtifactBundle,
+    SessionArtifactFile, SessionArtifactUpload, SessionContext, SessionEvent,
+    SessionImportCandidate, SessionImportListing, SessionImportSource, SessionInspection,
+    SessionLineage, SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot,
+    SessionStatus, SessionSummary, TimelineItem, ToolStatus, TurnErrorCode, TurnOutcome, TurnStats,
+    Usage,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
-use super::context_seed::{build_context_seed, prompt_with_seed, seed_token_budget};
+use super::context_seed::{
+    build_context_seed, build_portable_context_seed, prompt_with_seed, seed_token_budget,
+};
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
@@ -320,6 +323,7 @@ impl SessionManager {
         let explicit_target = target.is_some();
         let target = target.unwrap_or_else(|| ForkTarget {
             agent_id: source_meta.agent_id.clone(),
+            workspace_id: None,
             model_id: source_meta.model_id.clone(),
             mode_id: source_meta.mode_id.clone(),
             effort_id: source_meta.effort_id.clone(),
@@ -433,7 +437,7 @@ impl SessionManager {
             .and_then(|title| title_from(&format!("{title} · 分支")));
         let meta = SessionMeta {
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
-            workspace_id: source_meta.workspace_id,
+            workspace_id: target.workspace_id.unwrap_or(source_meta.workspace_id),
             format: SESSION_FORMAT,
             agent_id: target.agent_id,
             title,
@@ -478,6 +482,193 @@ impl SessionManager {
             .write()
             .await
             .insert(summary.id.clone(), forked);
+        Ok(summary)
+    }
+
+    pub async fn fork_export(&self, session_id: &str, turn_id: &str) -> Result<ForkTransfer> {
+        let source = self.live(session_id).await?;
+        if matches!(
+            *source.status.lock().await,
+            SessionStatus::Running | SessionStatus::Waiting
+        ) {
+            anyhow::bail!("wait for the current turn to finish before forking");
+        }
+        let meta = source.meta.lock().await.clone();
+        let source_round_id = source
+            .rounds
+            .lock()
+            .await
+            .iter()
+            .find(|round| round.adapter_turn_ids.iter().any(|id| id == turn_id))
+            .map(|round| round.round_id.clone());
+        let items = source.items.lock().await;
+        let at = items
+            .iter()
+            .position(|item| {
+                matches!(item,
+            TimelineItem::TurnSummary { stats, .. } if stats.turn_id == turn_id)
+            })
+            .ok_or_else(|| anyhow!("no completed turn called {turn_id}"))?;
+        let through_boundary = at.saturating_add(1);
+        let portable = items[..=at]
+            .iter()
+            .cloned()
+            .map(portable_fork_item)
+            .collect();
+        let (selected, omitted, altered) = bound_imported_items(portable);
+        let mut coverage = coverage_for_meta(&meta, through_boundary);
+        let prior_omitted = coverage.omitted_item_count;
+        coverage.retained_item_count =
+            u64::try_from(through_boundary.saturating_sub(omitted)).unwrap_or(u64::MAX);
+        coverage.omitted_item_count =
+            prior_omitted.saturating_add(u64::try_from(omitted).unwrap_or(u64::MAX));
+        coverage.source_item_count = Some(
+            coverage
+                .retained_item_count
+                .saturating_add(coverage.omitted_item_count),
+        );
+        if omitted > 0 || altered > 0 {
+            coverage.reason =
+                Some("the portable fork retained a bounded recent visible-history window".into());
+        }
+        Ok(ForkTransfer {
+            source_session_id: session_id.to_string(),
+            source_turn_id: turn_id.to_string(),
+            source_agent_id: meta.agent_id.clone(),
+            source_round_id,
+            title: meta.title.clone(),
+            coverage,
+            items: selected,
+        })
+    }
+
+    pub async fn fork_import(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        transfer: ForkTransfer,
+        target: ForkTarget,
+        providers: &ProviderMap,
+        source_accessible: bool,
+    ) -> Result<SessionSummary> {
+        if target.workspace_id.as_deref() != Some(workspace_id) {
+            anyhow::bail!("the fork target workspace does not match the validated workspace");
+        }
+        if !matches!(
+            transfer.items.last(),
+            Some(TimelineItem::TurnSummary { stats, .. })
+                if stats.turn_id == transfer.source_turn_id
+        ) {
+            anyhow::bail!("the portable fork does not end at its declared completed turn");
+        }
+        let raw_count = transfer.items.len();
+        let portable = transfer.items.into_iter().map(portable_fork_item).collect();
+        let (items, omitted, altered) = bound_imported_items(portable);
+        let mut coverage = transfer.coverage;
+        if omitted > 0 || altered > 0 {
+            coverage.retained_item_count = coverage
+                .retained_item_count
+                .min(u64::try_from(raw_count.saturating_sub(omitted)).unwrap_or(u64::MAX));
+            coverage.omitted_item_count = coverage
+                .omitted_item_count
+                .saturating_add(u64::try_from(omitted).unwrap_or(u64::MAX));
+            coverage.source_item_count = Some(
+                coverage.source_item_count.unwrap_or(0).max(
+                    coverage
+                        .retained_item_count
+                        .saturating_add(coverage.omitted_item_count),
+                ),
+            );
+            coverage.reason =
+                Some("the destination bounded the portable fork before reconstruction".into());
+        }
+        if !source_accessible {
+            coverage.retrieval = RetrievalCapability::Unavailable;
+            if coverage.reason.is_none() {
+                coverage.reason =
+                    Some("the source session remains on another machine after this fork".into());
+            }
+        }
+        let adapter = self.registry.require(&target.agent_id)?;
+        match adapter.probe().await {
+            ProbeState::Ready => {}
+            ProbeState::NotInstalled => {
+                anyhow::bail!("the {} agent is not installed", target.agent_id)
+            }
+            ProbeState::Unavailable { reason } => {
+                anyhow::bail!("the {} agent is unavailable: {reason}", target.agent_id)
+            }
+        }
+        let catalog = adapter.catalog(providers).await;
+        let model_id = target.model_id.or_else(|| catalog.default_model.clone());
+        let context_window = model_id
+            .as_deref()
+            .and_then(|id| catalog.models.iter().find(|model| model.id == id))
+            .and_then(|model| model.context_window);
+        let built = if source_accessible {
+            build_context_seed(
+                &transfer.source_session_id,
+                &transfer.source_turn_id,
+                transfer.source_round_id.as_deref(),
+                &transfer.source_agent_id,
+                &items,
+                seed_token_budget(context_window),
+                coverage,
+            )
+        } else {
+            build_portable_context_seed(
+                &transfer.source_session_id,
+                &transfer.source_turn_id,
+                transfer.source_round_id.as_deref(),
+                &transfer.source_agent_id,
+                &items,
+                seed_token_budget(context_window),
+                coverage,
+            )
+        };
+        let now = now_ms();
+        let meta = SessionMeta {
+            id: format!("s_{}", uuid::Uuid::new_v4().simple()),
+            workspace_id: workspace_id.to_string(),
+            format: SESSION_FORMAT,
+            agent_id: target.agent_id,
+            title: transfer
+                .title
+                .as_deref()
+                .and_then(|title| title_from(&format!("{title} · 分支"))),
+            cwd,
+            model_id,
+            mode_id: target.mode_id,
+            effort_id: target.effort_id,
+            created_at_ms: now,
+            updated_at_ms: now,
+            archived: false,
+            persist: None,
+            pending_permission: None,
+            lineage: Some(SessionLineage {
+                source_session_id: transfer.source_session_id,
+                source_turn_id: transfer.source_turn_id,
+                source_agent_id: transfer.source_agent_id,
+                method: ForkMethod::ReconstructedContext,
+                context: Some(built.stats),
+            }),
+            imported: None,
+        };
+        let write = || -> Result<()> {
+            self.store.save_meta(&meta)?;
+            self.store
+                .append_chat_items(workspace_id, &meta.id, &items)?;
+            self.store.save_seed(workspace_id, &meta.id, &built.seed)?;
+            Ok(())
+        };
+        if let Err(error) = write() {
+            let _ = self.store.delete(workspace_id, &meta.id);
+            return Err(error);
+        }
+        let summary = meta.summary(SessionStatus::Idle);
+        let live = Arc::new(Live::new(meta, self.store.clone()));
+        *live.items.lock().await = items;
+        self.sessions.write().await.insert(summary.id.clone(), live);
         Ok(summary)
     }
 
@@ -1999,6 +2190,26 @@ fn import_source_key(agent_id: &str, cwd: &std::path::Path, source_id: &str) -> 
     digest.update([0]);
     digest.update(source_id.as_bytes());
     format!("{:x}", digest.finalize())
+}
+
+fn portable_fork_item(mut item: TimelineItem) -> TimelineItem {
+    match &mut item {
+        TimelineItem::TurnSummary { stats, .. } => {
+            // A native checkpoint belongs to the source Agent process. It is
+            // neither useful nor safe as portable history on another machine.
+            stats.fork_checkpoint = None;
+        }
+        TimelineItem::UserMessage { attachments, .. } => {
+            // Absolute paths name the source machine's filesystem. Inline
+            // payloads remain portable; path-only attachments remain visible
+            // by name without pretending the target can open that path.
+            for attachment in attachments {
+                attachment.path = None;
+            }
+        }
+        _ => {}
+    }
+    item
 }
 
 fn bound_imported_items(items: Vec<TimelineItem>) -> (Vec<TimelineItem>, usize, usize) {
@@ -3712,6 +3923,7 @@ mod tests {
                 "source-turn",
                 Some(ForkTarget {
                     agent_id: "target".into(),
+                    workspace_id: None,
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
@@ -3799,6 +4011,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn portable_fork_moves_visible_history_to_a_validated_workspace_without_a_checkpoint() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = SessionManager::new(
+            test_store(source_dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let summary = source
+            .create(
+                "w1",
+                source_dir.path().to_path_buf(),
+                "source",
+                None,
+                None,
+                Some("Portable".into()),
+            )
+            .await
+            .unwrap();
+        let live = source.live(&summary.id).await.unwrap();
+        let mut source_items = completed_turn(Some("source-machine-secret"));
+        if let TimelineItem::UserMessage { attachments, .. } = &mut source_items[0] {
+            attachments.push(Attachment {
+                name: "screen.png".into(),
+                mime: "image/png".into(),
+                path: Some("/source/private/screen.png".into()),
+                data_base64: Some("aW1hZ2U=".into()),
+            });
+        }
+        *live.items.lock().await = source_items;
+
+        let transfer = source
+            .fork_export(&summary.id, "source-turn")
+            .await
+            .unwrap();
+        assert!(matches!(
+            transfer.items.last(),
+            Some(TimelineItem::TurnSummary { stats, .. }) if stats.fork_checkpoint.is_none()
+        ));
+        assert!(matches!(
+            transfer.items.first(),
+            Some(TimelineItem::UserMessage { attachments, .. })
+                if attachments[0].path.is_none() && attachments[0].data_base64.is_some()
+        ));
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let target_homes = crate::session::WorkspaceHomes::default();
+        target_homes.attach("target-workspace", target_dir.path());
+        let target = SessionManager::new(
+            Store::new(target_homes),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "target",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let mismatch = target
+            .fork_import(
+                "other-workspace",
+                target_dir.path().to_path_buf(),
+                transfer.clone(),
+                ForkTarget {
+                    agent_id: "target".into(),
+                    workspace_id: Some("target-workspace".into()),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                },
+                &ProviderMap::new(),
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(mismatch.to_string().contains("validated workspace"));
+
+        let forked = target
+            .fork_import(
+                "target-workspace",
+                target_dir.path().to_path_buf(),
+                transfer,
+                ForkTarget {
+                    agent_id: "target".into(),
+                    workspace_id: Some("target-workspace".into()),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                },
+                &ProviderMap::new(),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(forked.workspace_id, "target-workspace");
+        assert_eq!(forked.agent_id, "target");
+        assert_eq!(
+            forked.lineage.as_ref().unwrap().method,
+            ForkMethod::ReconstructedContext
+        );
+        let meta = target
+            .store
+            .load_meta("target-workspace", &forked.id)
+            .unwrap();
+        assert!(meta.persist.is_none());
+        let seed = target
+            .store
+            .load_seed("target-workspace", &forked.id)
+            .unwrap()
+            .unwrap();
+        assert!(seed.text.contains("remains on another machine"));
+        assert!(!seed.text.contains("genet session inspect"));
+        assert!(target
+            .store
+            .load_chat("target-workspace", &forked.id)
+            .unwrap()
+            .items
+            .iter()
+            .all(|item| !matches!(
+                item,
+                TimelineItem::TurnSummary { stats, .. } if stats.fork_checkpoint.is_some()
+            )));
+    }
+
+    #[tokio::test]
     async fn same_agent_with_a_checkpoint_keeps_the_native_fork_path() {
         let dir = tempfile::tempdir().unwrap();
         let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3832,6 +4173,7 @@ mod tests {
                 "source-turn",
                 Some(ForkTarget {
                     agent_id: "source".into(),
+                    workspace_id: None,
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
@@ -3939,6 +4281,7 @@ mod tests {
                 "source-turn",
                 Some(ForkTarget {
                     agent_id: "source".into(),
+                    workspace_id: None,
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
@@ -4319,7 +4662,13 @@ mod tests {
         assert!(restarted.list(None, false).await.unwrap().is_empty());
         assert!(residual.exists(), "cleanup raced the legacy writer");
         drop(legacy);
-        restarted.list(None, false).await.unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        while residual.exists() && tokio::time::Instant::now() < deadline {
+            restarted.list(None, false).await.unwrap();
+            if residual.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
         assert!(
             !residual.exists(),
             "cleanup did not resume after the legacy writer left"

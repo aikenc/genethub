@@ -45,7 +45,7 @@
 - Codex 接 DeepSeek：不是我们的待办，是 Codex（只认 Responses API）与 DeepSeek（只有 Chat Completions）两个上游之间的协议缺口，见 [third-party-agents.md](./third-party-agents.md) §4；换成原生 `app-server` 传输不会让这个缺口消失
 - 应用内自动更新（手动重装）
 - 平台级零知识与前向保密（M4；当前转发业务帧已对 Relay 加密，但托管 Control 生成对称会话 secret，见 [security-model.md](./security-model.md) §1.1）
-- 前端长尾能力：语音、定时任务、分屏、fork / rewind 等，清单见 [web-workbench.md](./web-workbench.md) §4
+- 前端长尾能力：实时语音对话 / TTS、定时任务、分屏、fork / rewind 等，清单见 [web-workbench.md](./web-workbench.md) §4；离线 Qwen3 语音转文本 UI、N-best、项目上下文和无 GPU Mock 已实现，真实模型由社区 runtime 接入，见[语音输入提案](./speech-input-proposal.md)
 - Agent 的 subagents / MCP / 真压缩（见 [builtin-agent.md](./builtin-agent.md) §8）；`genet` 自身的图片输入也在此列——贴图现在能发给 claude / acp / opencode（它们各自把图片转给自己的模型），但 `genet` 的 provider 层（Anthropic / OpenAI / DeepSeek 请求构造）还不接受图片内容块
 - 会话中途动态切换 agent：`claude`、`opencode` 各自维护一份进程私有的会话状态（CLI 自己的 `--resume` id、HTTP session），把 `TimelineItem` 转存到另一个 agent 不等于真的迁移了上下文，效果只会更糟；有对话内容后前端直接锁定 agent 选择器（`ComposerControls.tsx`），而不是假装能无缝换
 - OpenCode 的真实模型目录（当前 `catalog.models` 恒为空，选择器因此不出现）、各 adapter 的速度 / 质量档位、权限的历史面板

@@ -1,9 +1,9 @@
-import type { AgentInfo } from "@genehub/proto";
+import type { AgentInfo, WorkspaceInfo } from "@genehub/proto";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { ForkDialog } from "./ForkDialog";
+import { ForkDialog, type ForkMachineOption } from "./ForkDialog";
 
 function agent(id: string, label: string, fork: boolean, ready = true): AgentInfo {
   return {
@@ -29,18 +29,35 @@ function agent(id: string, label: string, fork: boolean, ready = true): AgentInf
   };
 }
 
+function workspace(id: string, name: string): WorkspaceInfo {
+  return { id, name, root: `/work/${id}`, isGitRepo: true, folders: [] };
+}
+
+const sourceMachine: ForkMachineOption = {
+  id: "machine-source",
+  routeId: "local",
+  label: "开发机",
+  kind: "local",
+  online: true,
+};
+
 describe("ForkDialog", () => {
-  it("defaults to the current Agent's native checkpoint and explains cross-Agent reconstruction", async () => {
+  it("defaults to an unchanged native target and reconstructs after switching Agent", async () => {
     const onConfirm = vi.fn(async () => true);
     const onClose = vi.fn();
     render(
       <ForkDialog
-        agents={[
-          agent("codex", "Codex", true),
-          agent("claude", "Claude Code", false),
-          agent("cursor", "Cursor", false, false),
-        ]}
+        sourceMachine={sourceMachine}
+        sourceWorkspaceId="w1"
         sourceAgentId="codex"
+        sourceCatalog={{
+          agents: [
+            agent("codex", "Codex", true),
+            agent("claude", "Claude Code", false),
+            agent("cursor", "Cursor", false, false),
+          ],
+          workspaces: [workspace("w1", "GeneHub")],
+        }}
         hasNativeCheckpoint
         onClose={onClose}
         onConfirm={onConfirm}
@@ -54,17 +71,26 @@ describe("ForkDialog", () => {
     await userEvent.click(screen.getByRole("radio", { name: "Claude Code" }));
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByText(/上下文窗口的 35%/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "用 Claude Code 重建" }));
+    await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
 
-    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith("claude"));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({
+      machine: sourceMachine,
+      workspaceId: "w1",
+      agentId: "claude",
+    }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
-  it("never falls back to a history capsule for the unchanged Agent", () => {
+  it("allows a same-Agent reconstruction only after the workspace changes", async () => {
     render(
       <ForkDialog
-        agents={[agent("codex", "Codex", true)]}
+        sourceMachine={sourceMachine}
+        sourceWorkspaceId="w1"
         sourceAgentId="codex"
+        sourceCatalog={{
+          agents: [agent("codex", "Codex", true)],
+          workspaces: [workspace("w1", "Source"), workspace("w2", "Destination")],
+        }}
         hasNativeCheckpoint={false}
         onClose={vi.fn()}
         onConfirm={vi.fn(async () => true)}
@@ -72,7 +98,62 @@ describe("ForkDialog", () => {
     );
 
     expect(screen.getByText("当前回合不可原生 Fork")).toBeInTheDocument();
-    expect(screen.queryByText(/上下文窗口的 35%/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "无法原生 Fork" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeDisabled();
+
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "目标工作区" }), "w2");
+    expect(screen.getByText("重建会话")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
+  });
+
+  it("loads only the selected machine's existing workspaces and Agents", async () => {
+    const remote: ForkMachineOption = {
+      id: "machine-remote",
+      routeId: "hub-row-7",
+      label: "GPU 工作站",
+      kind: "remote",
+      online: true,
+    };
+    const offline: ForkMachineOption = {
+      id: "machine-offline",
+      routeId: "hub-row-8",
+      label: "离线机器",
+      kind: "remote",
+      online: false,
+    };
+    const onConfirm = vi.fn(async () => true);
+    const loadCatalog = vi.fn(async () => ({
+      agents: [agent("claude", "Claude Code", false)],
+      workspaces: [workspace("remote-w", "模型仓库")],
+    }));
+    render(
+      <ForkDialog
+        sourceMachine={sourceMachine}
+        sourceWorkspaceId="w1"
+        sourceAgentId="codex"
+        sourceCatalog={{
+          agents: [agent("codex", "Codex", true)],
+          workspaces: [workspace("w1", "GeneHub")],
+        }}
+        hasNativeCheckpoint
+        listMachines={async () => [sourceMachine, remote, offline]}
+        loadCatalog={loadCatalog}
+        onClose={vi.fn()}
+        onConfirm={onConfirm}
+      />,
+    );
+
+    expect(await screen.findByRole("radio", { name: "GPU 工作站" })).toBeEnabled();
+    expect(screen.getByRole("radio", { name: "离线机器 离线" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("radio", { name: "GPU 工作站" }));
+
+    expect(await screen.findByRole("option", { name: /模型仓库/ })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Claude Code" })).toBeChecked();
+    expect(loadCatalog).toHaveBeenCalledWith(remote);
+    await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({
+      machine: remote,
+      workspaceId: "remote-w",
+      agentId: "claude",
+    }));
   });
 });

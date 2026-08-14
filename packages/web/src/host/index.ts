@@ -125,7 +125,7 @@ export interface Host {
    * mints one here must mint a fresh one each time, and one that does not
    * simply returns the same address.
    */
-  openTarget?(id: string): Promise<Endpoint>;
+  openTarget?(id: string, options?: { remember?: boolean }): Promise<Endpoint>;
   notify(notification: Notification): void;
   openExternal(url: string): void;
   /**
@@ -294,14 +294,16 @@ export function browserHost(
         fingerprint: machine.fingerprint,
       }));
     },
-    async openTarget(id) {
+    async openTarget(id, options) {
       const machine = listMachines().find((entry) => entry.machineId === id);
       if (!machine)
         throw new Error("这台机器不在本地名册里，可能已经被忘掉了。");
       // The address bar follows the switch, so a reload stays on the machine
       // the user is looking at rather than jumping back to the one they
       // arrived on.
-      window.location.hash = `endpoint=${encodeURIComponent(machine.endpoint)}`;
+      if (options?.remember !== false) {
+        window.location.hash = `endpoint=${encodeURIComponent(machine.endpoint)}`;
+      }
       return reach(machine, machine.endpoint);
     },
     notify({ title, body }) {

@@ -95,6 +95,49 @@ describe("an agent's reply", () => {
     );
   });
 
+  it("rewrites cwd-relative ../ links that land in another workspace root", () => {
+    render(
+      <Markdown
+        text="[《我的产品》闭环控制台原型 V1](../../worktrees/dev-0/genethub/prototypes/produce-manager/genet-ds/v1/index.html)"
+        artifact={{
+          deviceHandle: "m_device",
+          workspaceHandle: "w_docs",
+          folders: [
+            {
+              root: "/data/workspace/genethub-work/genethub-spaces/spaces/dev-ui",
+              rootHandle: "r_ui",
+            },
+            {
+              root: "/data/workspace/genethub-work/genethub-spaces",
+              rootHandle: "r_spaces",
+            },
+          ],
+        }}
+      />,
+    );
+    expect(
+      screen.getByRole("link", { name: "《我的产品》闭环控制台原型 V1" }),
+    ).toHaveAttribute(
+      "href",
+      "http://localhost:3000/assets/preview/v2/m_device/w_docs/r_spaces/worktrees/dev-0/genethub/prototypes/produce-manager/genet-ds/v1/index.html",
+    );
+  });
+
+  it("does not turn workspace-escaping paths into clickable links", () => {
+    render(
+      <Markdown
+        text="见 [秘密](../../etc/passwd)"
+        artifact={{
+          deviceHandle: "m_device",
+          workspaceHandle: "w_docs",
+          folders: [{ root: "/srv/product", rootHandle: "r_product" }],
+        }}
+      />,
+    );
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getByText("秘密")).toHaveAttribute("title", "此链接不在当前工作区内");
+  });
+
   it("keeps the owning session when a Preview link is opened", async () => {
     useWorkbench.setState({ previewFloat: null });
     render(

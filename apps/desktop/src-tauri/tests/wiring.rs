@@ -121,6 +121,13 @@ fn privileged_plugins_are_not_exposed_directly_to_the_renderer() {
     }
 }
 
+#[test]
+fn macos_bundle_explains_microphone_access_for_speech_input() {
+    let plist = read(repo().join("apps/desktop/src-tauri/Info.plist"));
+    assert!(plist.contains("NSMicrophoneUsageDescription"));
+    assert!(plist.contains("语音转换为可编辑文字"));
+}
+
 /// Turning the decorations off takes away the only way the OS gives anyone to
 /// move, maximise or close the window — so the page has to put all three back,
 /// and the shell has to permit the drag. Any one of the three missing is a
