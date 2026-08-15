@@ -55,8 +55,8 @@ second native business router and no native session/adapter/provider/workspace
 implementation. A real daemon without a verified artifact fails before opening
 its listener.
 
-The current guest-owned crates have 25,097 Rust source lines; the shared
-`genehub-proto` dependency adds 4,015, for 29,112 lines in the complete guest
+The current guest-owned crates have 25,436 Rust source lines; the shared
+`genehub-proto` dependency adds 4,015, for 29,451 lines in the complete guest
 compile graph. Business domains remain modules inside `daemon-core` at this
 size. When real guest code reaches roughly 40–60k lines, coherent domains may
 become normal library crates to improve parallel and incremental compilation.
@@ -93,6 +93,13 @@ Hub/relay attachment is intentionally a coarse carrier capability rather than
 dozens of HTTP/string calls. It is native because it owns resident uplinks and
 serves inbound transports back into the daemon. Product request routing and
 authorization are still guest-owned; there is no native fallback path.
+
+Capability execution uses the daemon's Tokio runtime even though the Wasm call
+itself runs on a blocking worker. The synchronous capability bridge must never
+create a private current-thread runtime: a carrier spawned there can later
+re-enter the guest and request another capability, which would make that one
+thread wait on itself. A full self-hosted pairing journey covers this re-entry
+path.
 
 ## Boundary and complex values
 
@@ -173,19 +180,19 @@ workspace-rooted stores and therefore also survives process restart.
 
 The merge diff deletes whole native business files, so a file list looks like a
 large code reduction even when the replacement is present elsewhere. Against
-the mainline tree used for the integration audit, the architecture change has
-35,475 added lines and 32,434 deleted lines after including the new portable
-artifact-guidance module: net **+3,041**. On a daemon-focused, like-for-like
-Rust scope (native daemon plus guest/platform/system source and tests), mainline
-has 48,217 lines and the integrated tree has 48,972: net **+755**. It is a move
-and consolidation, not a 32k-line feature deletion.
+`origin/main` at `701e812`, the non-documentation implementation and test diff
+has 35,408 added lines and 32,431 deleted lines: net **+2,977**. On a
+daemon-focused, like-for-like Rust scope (native daemon plus guest/platform/
+system source and tests), mainline has 48,282 lines and the integrated tree has
+49,193: net **+911**. It is a move and consolidation, not a 32k-line feature
+deletion.
 
 The largest deletion/replacement groups are:
 
 | Deleted native implementation | Old lines | Replacement and effect |
 | --- | ---: | --- |
 | five Agent adapters plus registry/shared adapter plumbing | 12,298 | 6,245 lines of portable catalog/driver code plus one shared serialized process/session loop; per-Agent Tokio/server boilerplate is no longer repeated |
-| session manager/store/artifacts/context/round builders | 10,994 | 9,295 portable session-core lines plus 5,355 adapter-driver lines; state, replay, fork/import, permissions and persistence now share one durable model |
+| session manager/store/artifacts/context/round builders | 11,059 | 9,295 portable session-core lines plus 5,355 adapter-driver lines; state, replay, fork/import, permissions and persistence now share one durable model |
 | workspace/device/provider/git/PTY/process/update/speech policy files | 6,262 | 4,108 portable domain lines plus policy-free `daemon-system` capabilities; the old automatic-update downloader was already unreachable because the public router returned `Unsupported` |
 
 Line count alone is not a parity argument. The pre-merge audit therefore also
@@ -201,8 +208,9 @@ checks the following behavior boundaries:
 | VM/update | signature, ABI/hash/size, malformed module, limits, side-by-side restore, rollback, torn state, concurrent calls and trap fallback are covered without PID/listener restart |
 | OS resources | rooted files/locks, process streams/dialogue, PTY, HTTP/WebSocket and WebRTC resource lifecycles are covered in `daemon-system` integration tests |
 
-The old daemon had 458 test functions under `apps/daemon/src`; the corresponding
-integrated native/guest/platform/system scope currently has 251 test functions.
+The old daemon had 461 test functions under `apps/daemon/src`; the corresponding
+integrated native/guest/platform/system source-and-integration-test scope has
+253 test functions.
 That number dropped because many table-like assertions were consolidated into
 protocol and real-capability scenarios, but it is still a review signal rather
 than an automatic improvement. Merge readiness requires the workspace suites,
@@ -212,13 +220,14 @@ coverage limitation.
 
 ## Current build cost
 
-Measured on 2026-08-15 with Rust 1.95.0, Linux x64 and 96 logical CPUs against
-the final 29,112-line guest compile graph. Both runnable profiles deliberately
-use `opt-level = 1`; an
+Measured on 2026-08-15 with Rust 1.95.0, Linux x64 and 96 logical CPUs. The
+controlled invalidation benchmark used the 29,112-line pre-final-audit graph;
+the final graph is 29,451 lines. Both runnable profiles deliberately use
+`opt-level = 1`; an
 `opt=0` full guest exhausted the 500-million-instruction request budget and is
 not a viable live-reload artifact.
 
-| Build | Wall time | Peak RSS | Raw Wasm | Signed single file |
+| Controlled baseline | Wall time | Peak RSS | Raw Wasm | Signed single file |
 | --- | ---: | ---: | ---: | ---: |
 | guest-wide dev rebuild + signing | 27.18 s | 1,077 MiB | 10,110,589 B | 10,110,923 B |
 | guest-wide release rebuild | 33.69 s | 1,093 MiB | 9,604,944 B | 9,605,289 B measurement version |
@@ -226,11 +235,14 @@ not a viable live-reload artifact.
 | no-op dev build + dev signing | 0.98 s | 87 MiB | 10,110,589 B | 10,110,923 B |
 
 The signed-section overhead is 334 bytes for the current dev version; it varies
-by the embedded version string (345 bytes in the release measurement above).
-Release intentionally uses `opt-level = 1`, no LTO and 16
-codegen units. The daemon is not CPU-bound, so high optimization and `wasm-opt`
-are not default release taxes. Larger shared-crate edits observed during the
-migration took roughly 10.5–15.4 seconds to a runnable signed dev file.
+by the embedded version string. On the final audited source, the current dev
+file is 10,115,035 B (10,114,701 B raw) and the release file is 9,609,985 B
+(9,609,644 B raw). A final cached dev invocation including signing took 1.10 s;
+a final release invocation took 18.01 s with 1,024,236 KiB peak RSS. Release
+intentionally uses `opt-level = 1`, no LTO and 16 codegen units. The daemon is
+not CPU-bound, so high optimization and `wasm-opt` are not default release
+taxes. Larger shared-crate edits observed during the migration took roughly
+10.5–15.4 seconds to a runnable signed dev file.
 
 For a future 100–200k-line guest, the correct structure is 8–15 cohesive
 library crates plus one entry crate, still one artifact. Current evidence gives
@@ -279,15 +291,33 @@ The landed suites cover:
 - public CLI update/rollback with unchanged PID and port;
 - real journey fixtures that can no longer start without the signed guest.
 
-The final counts for this main-integration candidate are recorded only after the
-post-merge workspace run. Before that final gate, the focused audit has passed
-108 `daemon-core` tests plus 137 native daemon/platform/system tests (six more
-are explicitly ignored real-environment gates). The required final gate is
-`cargo test --workspace --no-fail-fast` with the signed artifact, followed by
-every ignored application/update/CLI/handoff test, Relay/Web/Desktop checks,
-formatting and workspace/all-target Clippy with warnings denied. The five-OS
-GitHub matrix is configured to consume the exact Linux-produced bytes; only
-that public run can supply evidence from non-Linux kernels.
+Final local Linux evidence for this candidate:
+
+- `cargo fmt --all -- --check`, workspace/all-target Clippy with warnings
+  denied, and `cargo build --workspace --bins` pass;
+- `cargo test --workspace --no-fail-fast` with the signed guest reports **705
+  passed, 0 failed, 7 ignored**;
+- all seven ignored release gates were then run explicitly and passed: two real
+  signed-application tests, two real daemon hot-update tests, one public CLI
+  update-contract test, and the exact Linux producer/consumer portable-artifact
+  handoff pair;
+- Relay passes clean install, typecheck, **89/89 tests**, and build;
+- Web passes typecheck, **49/49 files and 487 tests** (one intentional skip),
+  including **5/5 self-hosted relay journeys**, and production build.
+
+The integration audit found and fixed five real cross-boundary regressions:
+portable working-directory rebasing, metadata stamping on every portable write,
+persisted-directory revalidation before Agent launch, workspace-removal/session
+tombstone behavior, and a re-entrant capability deadlock caused by carrier tasks
+living on a private one-thread runtime. The last issue was visible only in the
+complete Web→Relay→daemon→Wasm journey, which is why that journey is a required
+gate.
+
+This Linux host cannot compile the desktop shell because its GLib/WebKitGTK
+development libraries are older than the desktop toolchain requires. The
+five-OS GitHub matrix is configured to consume the exact Linux-produced bytes;
+Windows/macOS desktop integration and non-Linux kernel evidence therefore
+remain public-CI merge gates rather than locally claimed results.
 
 Local development:
 
