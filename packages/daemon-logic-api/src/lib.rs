@@ -29,8 +29,8 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
 }
 
 /// Core-Wasm export contract implemented by `genet-daemon-logic`.
-pub const ABI_VERSION: u32 = 6;
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 7;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 pub const MAX_CAPABILITY_BATCH: usize = 64;
 pub const MAX_CAPABILITY_CHUNK_BYTES: usize = 3 * 1024 * 1024;
 
@@ -53,6 +53,10 @@ pub struct LogicBoot {
     pub default_workspace: Option<String>,
     #[serde(default)]
     pub home_directory: Option<String>,
+    /// Platform-resolved path of the bundled Agent executable. The guest owns
+    /// launch policy; native code only resolves the OS-specific sibling name.
+    #[serde(default)]
+    pub builtin_agent_binary: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -311,6 +315,11 @@ pub enum FileRequest {
         locator: FileLocator,
         max_bytes: u32,
     },
+    ReadRange {
+        locator: FileLocator,
+        offset: u64,
+        length: u32,
+    },
     WriteAtomic {
         locator: FileLocator,
         bytes: Vec<u8>,
@@ -401,6 +410,11 @@ pub enum FileKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum ProcessRequest {
+    /// Resolves a native executable exactly as process launch would, including
+    /// `PATH` and Windows `PATHEXT`, without starting it.
+    ResolveProgram {
+        program: String,
+    },
     Run {
         spec: ProcessSpec,
         stdin: Vec<u8>,

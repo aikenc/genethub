@@ -49,6 +49,14 @@ impl Processes {
         request: ProcessRequest,
     ) -> Result<CapabilityValue, CapabilityFailure> {
         match request {
+            ProcessRequest::ResolveProgram { program } => resolve_program(&program)
+                .map(|path| CapabilityValue::Text(path.display().to_string()))
+                .ok_or_else(|| {
+                    failure(
+                        CapabilityFailureKind::NotFound,
+                        format!("executable is not installed: {program}"),
+                    )
+                }),
             ProcessRequest::Run {
                 spec,
                 stdin,
@@ -303,6 +311,41 @@ impl Processes {
         }
         self.inner.resources.write().await.clear();
     }
+}
+
+fn resolve_program(program: &str) -> Option<std::path::PathBuf> {
+    if program.is_empty() || program.contains('\0') {
+        return None;
+    }
+    let direct = std::path::PathBuf::from(program);
+    if direct.components().count() > 1 || direct.is_absolute() {
+        return direct.is_file().then_some(direct);
+    }
+    let path = std::env::var_os("PATH")?;
+    #[cfg(windows)]
+    let extensions = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".to_string())
+        .split(';')
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    #[cfg(not(windows))]
+    let extensions = vec![String::new()];
+    for directory in std::env::split_paths(&path) {
+        for extension in &extensions {
+            let candidate = if extension.is_empty()
+                || program.to_ascii_lowercase().ends_with(extension.as_str())
+            {
+                directory.join(program)
+            } else {
+                directory.join(format!("{program}{extension}"))
+            };
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 async fn read_output(

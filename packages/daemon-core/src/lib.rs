@@ -3,10 +3,12 @@
 //! Platform crates must not depend on this crate. The Wasm entry crate links it
 //! normally, preserving Rust ownership, visibility and memory safety.
 
+mod agents;
 mod capability;
 mod config;
 mod files;
 mod git;
+mod session;
 mod terminal;
 mod workspace;
 
@@ -36,6 +38,8 @@ pub struct LogicApp {
     pending: std::collections::BTreeMap<u64, Pending>,
     config: Option<config::Config>,
     discoveries: BTreeMap<String, config::Discovery>,
+    agent_cache: Option<Vec<genehub_proto::AgentInfo>>,
+    sessions: session::Sessions,
     terminals: HashMap<String, u64>,
     workspace_roots_ready: bool,
 }
@@ -50,6 +54,8 @@ struct Snapshot {
     pending: BTreeMap<u64, Pending>,
     config: Option<config::Config>,
     discoveries: BTreeMap<String, config::Discovery>,
+    agent_cache: Option<Vec<genehub_proto::AgentInfo>>,
+    sessions: session::Sessions,
     terminals: HashMap<String, u64>,
 }
 
@@ -84,6 +90,8 @@ impl LogicApp {
             pending: BTreeMap::new(),
             config: None,
             discoveries: BTreeMap::new(),
+            agent_cache: None,
+            sessions: session::Sessions::default(),
             terminals: HashMap::new(),
             workspace_roots_ready: false,
         })
@@ -106,7 +114,20 @@ impl LogicApp {
             LogicInput::CapabilityResults(results) => self.handle_capability_results(results),
             // Unknown or stale resource events are intentionally harmless so a
             // late OS close from a replaced instance cannot trap its successor.
-            LogicInput::CapabilityEvent(event) => terminal::event(&mut self.terminals, event),
+            LogicInput::CapabilityEvent(event) => {
+                let mut output = terminal::event(&mut self.terminals, event.clone());
+                let mut session = session::event(
+                    &mut self.sessions,
+                    event,
+                    capabilities,
+                    &mut self.next_capability_id,
+                );
+                output.publications.append(&mut session.publications);
+                output
+                    .capability_batches
+                    .append(&mut session.capability_batches);
+                output
+            }
         }
     }
 
@@ -117,6 +138,21 @@ impl LogicApp {
     ) -> LogicOutput {
         let call_id = input.call_id;
         let transport = input.transport;
+        if session::handles(&input.request) {
+            if let Err(error) = self.ensure_workspaces(capabilities) {
+                return LogicOutput::completed(call_id, LogicOutcome::Error(error));
+            }
+            let config = self.config.as_ref().expect("config loaded").clone();
+            return session::request(
+                &mut self.sessions,
+                call_id,
+                input.request,
+                &self.boot,
+                &config,
+                capabilities,
+                &mut self.next_capability_id,
+            );
+        }
         let outcome = match input.request {
             Request::DaemonLogicStatus => {
                 return self.request_artifact(call_id, LogicArtifactRequest::Status)
@@ -155,6 +191,8 @@ impl LogicApp {
                     rtc_supported: self.boot.rtc_supported,
                 })))
             }
+            Request::AgentList => self.agent_list(false, capabilities),
+            Request::AgentRefresh => self.agent_list(true, capabilities),
             Request::UpdateCheck | Request::UpdateDownload => LogicOutcome::Error(ProtocolError {
                 code: ErrorCode::Unsupported,
                 message: AUTOMATIC_UPDATE_REFUSAL.to_string(),
@@ -421,6 +459,30 @@ impl LogicApp {
         ))))
     }
 
+    fn agent_list(
+        &mut self,
+        refresh: bool,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_config(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        if refresh || self.agent_cache.is_none() {
+            match agents::list(
+                &self.boot,
+                self.config.as_ref().expect("config loaded"),
+                capabilities,
+                &mut self.next_capability_id,
+            ) {
+                Ok(agents) => self.agent_cache = Some(agents),
+                Err(error) => return LogicOutcome::Error(error),
+            }
+        }
+        LogicOutcome::Reply(Box::new(Reply::Agents(
+            self.agent_cache.clone().unwrap_or_default(),
+        )))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn set_provider(
         &mut self,
@@ -451,6 +513,7 @@ impl LogicApp {
         }
         self.config = Some(next);
         self.discoveries.remove(&provider_id);
+        self.agent_cache = None;
         self.settings(capabilities)
     }
 
@@ -470,6 +533,7 @@ impl LogicApp {
         }
         self.config = Some(next);
         self.discoveries.remove(&provider_id);
+        self.agent_cache = None;
         self.settings(capabilities)
     }
 
@@ -734,6 +798,8 @@ impl LogicApp {
                 pending: self.pending.clone(),
                 config: self.config.clone(),
                 discoveries: self.discoveries.clone(),
+                agent_cache: self.agent_cache.clone(),
+                sessions: self.sessions.clone(),
                 terminals: self.terminals.clone(),
             },
         )
@@ -755,6 +821,8 @@ impl LogicApp {
             pending: snapshot.pending,
             config: snapshot.config,
             discoveries: snapshot.discoveries,
+            agent_cache: snapshot.agent_cache,
+            sessions: snapshot.sessions,
             terminals: snapshot.terminals,
             workspace_roots_ready: false,
         })
@@ -900,6 +968,47 @@ mod tests {
 
     struct TestLogs(std::path::PathBuf);
 
+    #[cfg(unix)]
+    struct RealCapabilities {
+        runtime: tokio::runtime::Runtime,
+        host: std::sync::Arc<genet_daemon_system::SystemHost>,
+        events: tokio::sync::mpsc::Receiver<genet_daemon_logic_api::CapabilityEvent>,
+    }
+
+    #[cfg(unix)]
+    impl RealCapabilities {
+        fn new(private: &std::path::Path, logs: &std::path::Path) -> Self {
+            let host =
+                std::sync::Arc::new(genet_daemon_system::SystemHost::new(private, logs).unwrap());
+            let events = host.take_events().unwrap();
+            Self {
+                runtime: tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap(),
+                host,
+                events,
+            }
+        }
+
+        fn event(&mut self) -> genet_daemon_logic_api::CapabilityEvent {
+            self.runtime
+                .block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_secs(5), self.events.recv())
+                        .await
+                })
+                .expect("capability event before timeout")
+                .expect("capability event stream remains open")
+        }
+    }
+
+    #[cfg(unix)]
+    impl CapabilityExecutor for RealCapabilities {
+        fn execute(&mut self, batch: CapabilityBatch) -> Result<CapabilityResults, String> {
+            Ok(self.runtime.block_on(self.host.execute(batch)))
+        }
+    }
+
     impl CapabilityExecutor for TestLogs {
         fn execute(&mut self, batch: CapabilityBatch) -> Result<CapabilityResults, String> {
             let results = batch
@@ -974,6 +1083,7 @@ mod tests {
             log_display_directory: "/host/logs".to_string(),
             default_workspace: None,
             home_directory: None,
+            builtin_agent_binary: None,
         }
     }
 
@@ -1109,6 +1219,140 @@ mod tests {
                     }),
                     ..
                 }])
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_session_owns_persistence_process_protocol_and_hot_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        let logs = directory.path().join("logs");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let agent = directory.path().join("fake-genet-agent");
+        std::fs::write(
+            &agent,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  turn=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  [ -n "$turn" ] || continue
+  printf '%s\n' '{"type":"agent_start"}'
+  printf '%s\n' '{"type":"text_start"}'
+  printf '%s\n' '{"type":"text_delta","delta":"portable "}'
+  printf '%s\n' '{"type":"text_end","content":"portable reply"}'
+  printf '%s\n' '{"type":"agent_end"}'
+done
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&agent).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&agent, permissions).unwrap();
+
+        let mut boot = boot();
+        boot.builtin_agent_binary = Some(agent.display().to_string());
+        let mut app = LogicApp::new(boot).unwrap();
+        let mut capabilities = RealCapabilities::new(&private, &logs);
+        let call = |app: &mut LogicApp, capabilities: &mut RealCapabilities, call_id, request| {
+            app.handle_with(
+                LogicInput::Request(LogicRequest {
+                    call_id,
+                    transport: TransportKind::Loopback,
+                    request,
+                }),
+                capabilities,
+            )
+        };
+        let opened = call(
+            &mut app,
+            &mut capabilities,
+            1,
+            Request::WorkspaceOpen {
+                root: workspace.display().to_string(),
+            },
+        );
+        let workspace_id = match &opened.completions[0].outcome {
+            LogicOutcome::Reply(reply) => match &**reply {
+                Reply::Workspace(workspace) => workspace.id.clone(),
+                other => panic!("wrong workspace reply: {other:?}"),
+            },
+            other => panic!("workspace open failed: {other:?}"),
+        };
+        let created = call(
+            &mut app,
+            &mut capabilities,
+            2,
+            Request::SessionCreate {
+                workspace_id,
+                agent_id: "genet".to_string(),
+                model_id: None,
+                mode_id: None,
+                title: None,
+            },
+        );
+        let session_id = match &created.completions[0].outcome {
+            LogicOutcome::Reply(reply) => match &**reply {
+                Reply::Session(session) => session.id.clone(),
+                other => panic!("wrong session reply: {other:?}"),
+            },
+            other => panic!("session create failed: {other:?}"),
+        };
+        let sent = call(
+            &mut app,
+            &mut capabilities,
+            3,
+            Request::SessionSend {
+                session_id: session_id.clone(),
+                text: "hello portable world".to_string(),
+                attachments: Vec::new(),
+                artifact_preview_base_url: None,
+                continues_round: None,
+            },
+        );
+        assert!(matches!(
+            sent.completions[0].outcome,
+            LogicOutcome::Reply(ref reply) if matches!(**reply, Reply::Ack)
+        ));
+
+        let mut completed = false;
+        for _ in 0..8 {
+            let event = capabilities.event();
+            let output = app.handle_with(LogicInput::CapabilityEvent(event), &mut capabilities);
+            completed |= output.publications.iter().any(|publication| {
+                matches!(
+                    publication,
+                    genet_daemon_logic_api::Publication::Session(genehub_proto::SequencedEvent {
+                        event: genehub_proto::SessionEvent::TurnCompleted { .. },
+                        ..
+                    })
+                )
+            });
+            if completed {
+                break;
+            }
+        }
+        assert!(completed, "the portable Agent turn never completed");
+
+        let restored = LogicApp::restore(&app.snapshot().unwrap()).unwrap();
+        app = restored;
+        let snapshot = call(
+            &mut app,
+            &mut capabilities,
+            4,
+            Request::SessionGet { session_id },
+        );
+        assert!(matches!(
+            &snapshot.completions[0].outcome,
+            LogicOutcome::Reply(reply)
+                if matches!(&**reply, Reply::Snapshot(snapshot)
+                    if snapshot.items.iter().any(|item| matches!(
+                        item,
+                        genehub_proto::TimelineItem::AssistantMessage { text, .. }
+                            if text == "portable reply"
+                    )))
         ));
     }
 }

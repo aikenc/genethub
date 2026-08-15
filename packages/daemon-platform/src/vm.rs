@@ -63,7 +63,12 @@ impl Default for VmLimits {
             max_memories: 8,
             max_tables: 8,
             max_wasm_stack_bytes: 2 * 1024 * 1024,
-            fuel_per_call: 5_000_000,
+            // Unoptimized portable Rust deliberately trades runtime speed for
+            // sub-second edit builds. A normal request through serde and the
+            // session state machine now exceeds five million instructions in
+            // that profile. Fuel remains a last-resort runaway guard, not a
+            // product timeout; resource actors have their own bounded I/O.
+            fuel_per_call: 500_000_000,
             max_message_bytes: 4 * 1024 * 1024,
         }
     }

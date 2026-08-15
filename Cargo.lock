@@ -1343,13 +1343,16 @@ dependencies = [
 name = "genet-daemon-core"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "genehub-proto",
  "genet-daemon-common",
  "genet-daemon-logic-api",
+ "genet-daemon-system",
  "json5",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "url",
 ]
 

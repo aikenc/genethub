@@ -11,7 +11,7 @@ use crate::capability::Client;
 use crate::CapabilityExecutor;
 
 const CONFIG_KEY: &str = "config.json";
-const MAX_CONFIG_BYTES: u32 = 4 * 1024 * 1024;
+const MAX_CONFIG_BYTES: u32 = 1024 * 1024;
 const MAX_MODEL_RESPONSE_BYTES: u32 = 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -130,6 +130,7 @@ fn boot_bytes() -> Vec<u8> {
             log_display_directory: "/host/logs".to_string(),
             default_workspace: None,
             home_directory: None,
+            builtin_agent_binary: None,
         },
     )
     .unwrap()

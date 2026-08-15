@@ -100,6 +100,16 @@ impl Paths {
         self.root.join("logic")
     }
 
+    /// Private persistence owned by the portable Wasm application.
+    ///
+    /// This must not be the daemon data root: that root also contains the
+    /// endpoint credential, device enrollment and trusted logic slots. The
+    /// guest receives this directory as its `FileRoot::Private` capability and
+    /// cannot name any of those platform-owned siblings.
+    pub fn portable_dir(&self) -> PathBuf {
+        self.root.join("portable")
+    }
+
     pub fn ensure(&self) -> Result<()> {
         ensure_real_directory(&self.root)
             .with_context(|| format!("creating data directory {}", self.root.display()))?;
@@ -112,6 +122,9 @@ impl Paths {
         restrict_dir_to_owner(&self.logs_dir())?;
         ensure_real_directory(&self.logic_dir())?;
         restrict_dir_to_owner(&self.logic_dir())?;
+        ensure_real_directory(&self.portable_dir())?;
+        restrict_dir_to_owner(&self.portable_dir())?;
+        migrate_portable_config(self)?;
         restrict_existing_sensitive_tree(&self.logs_dir())?;
         // Protect existing sensitive children too. Tightening a Windows parent
         // DACL does not retroactively rewrite ACLs inherited in older releases.
@@ -140,6 +153,23 @@ impl Paths {
         }
         Ok(())
     }
+}
+
+/// Seeds the portable application's configuration from installations created
+/// before the native/Wasm split. It is deliberately copy-once: after the
+/// split the guest owns provider/workspace policy, while native startup keeps
+/// reading only the bootstrap fields it still needs from the legacy file.
+fn migrate_portable_config(paths: &Paths) -> Result<()> {
+    let source = paths.config_file();
+    let target = paths.portable_dir().join("config.json");
+    if target.exists() || !source.exists() {
+        return Ok(());
+    }
+    let bytes =
+        fs::read(&source).with_context(|| format!("reading legacy config {}", source.display()))?;
+    save_private(&target, &bytes)
+        .with_context(|| format!("seeding portable config {}", target.display()))?;
+    Ok(())
 }
 
 /// The workspace override named by this channel, else a folder in the user's

@@ -163,6 +163,36 @@ pub async fn execute(
                 .map_err(io_failure)?;
             Ok(CapabilityValue::Bytes(bytes))
         }
+        FileRequest::ReadRange {
+            locator,
+            offset,
+            length,
+        } => {
+            let limit = checked_limit(length)?;
+            let path = resolve(roots, &locator, false).await?;
+            let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(failure(
+                    CapabilityFailureKind::Invalid,
+                    format!("not a regular file: {}", path.display()),
+                ));
+            }
+            if offset > metadata.len() {
+                return Err(failure(
+                    CapabilityFailureKind::Invalid,
+                    "file range starts after end of file",
+                ));
+            }
+            use std::io::{Seek, SeekFrom};
+            let mut file = fs::File::open(&path).map_err(io_failure)?;
+            file.seek(SeekFrom::Start(offset)).map_err(io_failure)?;
+            let available = metadata.len().saturating_sub(offset).min(limit as u64);
+            let mut bytes = Vec::with_capacity(available as usize);
+            file.take(available)
+                .read_to_end(&mut bytes)
+                .map_err(io_failure)?;
+            Ok(CapabilityValue::Bytes(bytes))
+        }
         FileRequest::WriteAtomic { locator, bytes } => {
             checked_bytes(&bytes)?;
             let path = resolve(roots, &locator, true).await?;

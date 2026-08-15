@@ -130,10 +130,11 @@ impl LogicHost {
                     .as_ref()
                     .map(|path| path.display().to_string()),
                 home_directory: dirs::home_dir().map(|path| path.display().to_string()),
+                builtin_agent_binary: builtin_agent_binary(),
             },
         )
         .map_err(anyhow::Error::msg)?;
-        let system = Arc::new(SystemHost::new(paths.root.clone(), paths.logs_dir())?);
+        let system = Arc::new(SystemHost::new(paths.portable_dir(), paths.logs_dir())?);
         let events = system.take_events()?;
         let broker = CapabilityBroker::start(system);
         let capability = broker.clone();
@@ -596,4 +597,22 @@ fn trusted_key() -> Result<(String, VerifyingKey)> {
         .map_err(|_| anyhow::anyhow!("daemon logic public key must be 32 bytes"))?;
     let key = VerifyingKey::from_bytes(&bytes).context("reading daemon logic public key")?;
     Ok((key_id.to_string(), key))
+}
+
+fn builtin_agent_binary() -> Option<String> {
+    if let Some(configured) = std::env::var_os(crate::channel::ENV_AGENT_COMMAND) {
+        if !configured.is_empty() {
+            return Some(PathBuf::from(configured).display().to_string());
+        }
+    }
+    let name = if cfg!(windows) {
+        format!("{}.exe", crate::channel::AGENT_BINARY)
+    } else {
+        crate::channel::AGENT_BINARY.to_string()
+    };
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(name)))
+        .filter(|path| path.is_file())
+        .map(|path| path.display().to_string())
 }
