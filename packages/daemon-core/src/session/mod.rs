@@ -42,9 +42,11 @@ use crate::capability::Client;
 use crate::config::{Config, WorkspaceEntry, WorkspaceFolderEntry};
 use crate::CapabilityExecutor;
 
-// 5 adds fork lineage and reconstructed context; 6 adds imported origin and
-// read-only continuation. Older builds must not reopen either as a blank
-// writable Agent context, so these are correctness-breaking format changes.
+// 4 is the path-as-index layout. 5 adds fork lineage and reconstructed
+// context; 6 adds imported origin and read-only continuation; 7 adds a
+// root-relative, platform-neutral working-directory locator. Older builds
+// must not reopen those shapes with weaker semantics, so these are
+// correctness-breaking format changes.
 pub(crate) const SESSION_FORMAT: u32 = 7;
 const META_BYTES: u32 = 1024 * 1024;
 const CHAT_BYTES: u32 = 3 * 1024 * 1024;
@@ -3132,7 +3134,16 @@ fn start_process(
     let mut args = definition.args().to_vec();
     let mut env = std::collections::BTreeMap::new();
     let workspace_root = workspace_root_for_meta(config, &live.meta)?;
-    let cwd_path = session_cwd_path(config, &live.meta)?;
+    // `cwd_path` comes from durable guest-owned metadata. Resolve it through
+    // the native filesystem capability again at the execution boundary: this
+    // canonicalizes symlinks, verifies the registered roots and refuses a
+    // tampered path before either the process API or ACP sees a native string.
+    let (cwd_handle, native_cwd, cwd_path) = resolve_session_cwd(
+        workspace(config, &live.meta.workspace_id)?,
+        Some(live.meta.root.clone()),
+        executor,
+        next,
+    )?;
     let product_guidance = artifact_links::guidance();
     let tagged_guidance = artifact_links::tagged_guidance();
     let choices = launch_choices(&definition.kind, &live.meta, catalog);
@@ -3290,7 +3301,7 @@ fn start_process(
         }
         AgentKind::Acp => Driver::Acp(acp::Driver::new(
             &definition.id,
-            live.meta.root.clone(),
+            native_cwd,
             live.meta
                 .persist
                 .as_ref()
@@ -3311,9 +3322,7 @@ fn start_process(
             args,
             env,
             cwd: Some(FileLocator {
-                root: FileRoot::Workspace {
-                    handle: live.meta.root_handle.clone(),
-                },
+                root: FileRoot::Workspace { handle: cwd_handle },
                 path: cwd_path,
             }),
             confinement: genet_daemon_logic_api::ConfinementMode::None,
@@ -3591,6 +3600,9 @@ fn codex_attachment_paths(
 }
 
 fn native_child_path(workspace_root: &str, relative: &str) -> String {
+    if relative.is_empty() {
+        return workspace_root.trim_end_matches(['/', '\\']).to_string();
+    }
     let separator = if workspace_root.contains('\\') {
         '\\'
     } else {
@@ -5026,16 +5038,22 @@ fn load_meta(
     meta.workspace_id = workspace.id.clone();
     meta.project_key = expected_project_key;
     meta.root_handle = folder.root_handle.clone();
-    if meta.root.is_empty() {
-        meta.root = folder.root.clone();
-    }
-    if meta.cwd_path.is_empty() {
-        meta.cwd_path = relative_native_path(&folder.root, &meta.root).ok_or_else(|| {
+    let cwd_path = if meta.cwd_path.is_empty() && meta.root.is_empty() {
+        String::new()
+    } else if meta.cwd_path.is_empty() {
+        relative_native_path(&folder.root, &meta.root).ok_or_else(|| {
             conflict(format!(
                 "session {id} working directory is outside its registered workspace root"
             ))
-        })?;
-    }
+        })?
+    } else {
+        meta.cwd_path.clone()
+    };
+    // `cwd` is a native projection for third-party Agent protocols, never a
+    // durable identity. Rebase it onto the root registered by this process so
+    // another channel (or a moved folder) does not reuse the writer's path.
+    meta.root = native_child_path(&folder.root, &cwd_path);
+    meta.cwd_path = cwd_path;
     Ok(meta)
 }
 
