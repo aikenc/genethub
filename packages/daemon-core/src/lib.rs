@@ -3073,6 +3073,14 @@ done
                 .is_file(),
             "the session with a second-root cwd must be stored under that root"
         );
+        let second_meta = second
+            .join(".genethub/sessions")
+            .join(&second_session_id)
+            .join("meta.json");
+        let mut old_meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&second_meta).unwrap()).unwrap();
+        old_meta["format"] = serde_json::json!(4);
+        std::fs::write(&second_meta, serde_json::to_vec_pretty(&old_meta).unwrap()).unwrap();
         let future_meta = first
             .join(".genethub/sessions")
             .join(&future_session_id)
@@ -3141,6 +3149,13 @@ done
             other => panic!("wrong rename reply: {other:?}"),
         };
         assert_eq!(renamed.title.as_deref(), Some("A durable name"));
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&second_meta).unwrap()).unwrap();
+        assert_eq!(
+            rewritten["format"],
+            serde_json::json!(session::SESSION_FORMAT),
+            "the first write by a newer build must stamp its session format"
+        );
         assert_eq!(
             call(
                 &mut app,

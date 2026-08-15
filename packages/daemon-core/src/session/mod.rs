@@ -4943,7 +4943,14 @@ fn save_meta(
     executor: &mut impl CapabilityExecutor,
     next: &mut u64,
 ) -> Result<(), ProtocolError> {
-    let bytes = serde_json::to_vec_pretty(meta)
+    // A read of an older session is deliberately non-mutating, but the first
+    // write by this build must make the one-way format transition explicit.
+    // Otherwise an older daemon can reopen metadata containing semantics it
+    // does not understand (fork context, imported read-only state, or cwdPath)
+    // and silently run the wrong Agent context.
+    let mut stamped = meta.clone();
+    stamped.format = SESSION_FORMAT;
+    let bytes = serde_json::to_vec_pretty(&stamped)
         .map_err(|error| internal(format!("encoding session meta: {error}")))?;
     let mut client = Client::new(executor, next);
     match client.call(CapabilityRequest::File(FileRequest::WriteAtomic {
