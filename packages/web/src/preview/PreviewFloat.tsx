@@ -1,14 +1,23 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { flushSync } from "react-dom";
 
 import type { Host } from "../host";
 import { useWorkbench, type PreviewFloatTarget } from "../session/store";
 import { AssetPreviewPage, type PreviewMeta } from "./AssetPreviewPage";
+import {
+  createPreviewPopoutChannel,
+  createPreviewPopoutUrl,
+  registerPreviewPopoutClient,
+} from "./popout";
+import type { RuntimeArtifactSubmit } from "./PreviewRuntimeControls";
+import { runtimeArtifactDraftLine, uploadSessionArtifact } from "./sessionArtifactUpload";
 import { assetPreviewUrl } from "./url";
 
 type Mode = "expanded" | "float";
@@ -38,6 +47,7 @@ export function PreviewFloat({
   onClose(): void;
 }) {
   const client = useWorkbench((state) => state.client);
+  const appendComposerDraftLine = useWorkbench((state) => state.appendComposerDraftLine);
   const [mode, setMode] = useState<Mode>("expanded");
   const [sizeLevel, setSizeLevel] = useState(0);
   const [pos, setPos] = useState(() => ({
@@ -56,6 +66,9 @@ export function PreviewFloat({
   } | null>(null);
   const skipClick = useRef(false);
   const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const popouts = useRef(new Map<string, string | null>());
+  const popoutBridges = useRef(new Map<string, () => void>());
+  const linkedBundles = useRef(new Set<string>());
 
   const externalUrl = assetPreviewUrl(
     source.deviceHandle,
@@ -75,7 +88,12 @@ export function PreviewFloat({
   const blockContentGestures = mode === "float" && !contentInteractive;
   const contentShieldRef = useRef<HTMLDivElement | null>(null);
 
-  const shrinkToSmallFloat = () => {
+  const clampPos = useCallback((x: number, y: number, w: number, h: number) => ({
+    x: Math.min(Math.max(EDGE, x), Math.max(EDGE, window.innerWidth - w - EDGE)),
+    y: Math.min(Math.max(EDGE, y), Math.max(EDGE, window.innerHeight - h - EDGE)),
+  }), []);
+
+  const shrinkToSmallFloat = useCallback(() => {
     if (clickTimer.current) {
       clearTimeout(clickTimer.current);
       clickTimer.current = null;
@@ -85,7 +103,7 @@ export function PreviewFloat({
     setSizeLevel(0);
     setPos((current) => clampPos(current.x, current.y, nextW, nextH));
     setMode("float");
-  };
+  }, [clampPos]);
 
   /** Float chrome hit targets; keep left-aligned so mobile does not push controls right. */
   const chromeBtnLarge =
@@ -105,8 +123,30 @@ export function PreviewFloat({
   useEffect(() => {
     return () => {
       if (clickTimer.current) clearTimeout(clickTimer.current);
+      for (const release of popoutBridges.current.values()) release();
+      popoutBridges.current.clear();
     };
   }, []);
+
+  useEffect(() => {
+    const channel = createPreviewPopoutChannel((message) => {
+      const expectedSessionId = popouts.current.get(message.id);
+      if (expectedSessionId === undefined || expectedSessionId !== message.sessionId) return;
+      if (message.type === "ready") {
+        popoutBridges.current.get(message.id)?.();
+        popoutBridges.current.delete(message.id);
+        return;
+      }
+      const bundleKey = `${message.sessionId}:${message.workspacePath}`;
+      if (linkedBundles.current.has(bundleKey)) return;
+      linkedBundles.current.add(bundleKey);
+      appendComposerDraftLine(
+        message.sessionId,
+        runtimeArtifactDraftLine(message.workspacePath),
+      );
+    });
+    return () => channel.close();
+  }, [appendComposerDraftLine]);
 
   // iOS WebKit still delivers pan gestures into nested iframes even when the
   // scaled preview has pointer-events:none. Capture touchmove on a shield.
@@ -151,11 +191,6 @@ export function PreviewFloat({
       }),
     );
   }, [mode, sizeLevel, source.path, source.workspaceHandle]);
-
-  const clampPos = (x: number, y: number, w: number, h: number) => ({
-    x: Math.min(Math.max(EDGE, x), Math.max(EDGE, window.innerWidth - w - EDGE)),
-    y: Math.min(Math.max(EDGE, y), Math.max(EDGE, window.innerHeight - h - EDGE)),
-  });
 
   const snapPos = (x: number, y: number, w: number, h: number) => {
     let nextX = x;
@@ -225,6 +260,33 @@ export function PreviewFloat({
     }, CLICK_DELAY_MS);
   };
 
+  const submitRuntimeArtifact = useCallback<RuntimeArtifactSubmit>(
+    async (artifact, onProgress) => {
+      const state = useWorkbench.getState();
+      if (!state.client || !source.sessionId) {
+        throw new Error("尚未连接到可保存运行产物的会话");
+      }
+      const sessionId = source.sessionId;
+      const bundle = await uploadSessionArtifact(
+        state.client,
+        sessionId,
+        artifact,
+        ({ uploadedBytes, totalBytes }) => onProgress(uploadedBytes, totalBytes),
+      );
+
+      const afterSave = useWorkbench.getState();
+      afterSave.appendComposerDraftLine(
+        sessionId,
+        runtimeArtifactDraftLine(bundle.workspacePath),
+      );
+      return {
+        relativePath: bundle.relativePath,
+        addedToDraft: true,
+      };
+    },
+    [source.sessionId],
+  );
+
   const preview = client ? (
     <AssetPreviewPage
       source={source}
@@ -232,6 +294,8 @@ export function PreviewFloat({
       chrome="embedded"
       client={client}
       onMetaChange={setMeta}
+      onRuntimeArtifact={submitRuntimeArtifact}
+      runtimeSessionId={source.sessionId}
     />
   ) : (
     <p role="status" className="m-auto p-6 text-center text-sm text-muted">
@@ -318,12 +382,42 @@ export function PreviewFloat({
               title="新窗口打开"
               className={`${expandedIconBtn} text-accent`}
               onClick={() => {
+                const popout = createPreviewPopoutUrl(externalUrl, source.sessionId);
+                popouts.current.set(popout.id, source.sessionId);
+                if (client) {
+                  const release = registerPreviewPopoutClient(
+                    { id: popout.id, sessionId: source.sessionId },
+                    source,
+                    client,
+                  );
+                  const timer = window.setTimeout(release, 60_000);
+                  popoutBridges.current.set(popout.id, () => {
+                    window.clearTimeout(timer);
+                    release();
+                  });
+                }
                 window.dispatchEvent(
                   new CustomEvent("genehub:preview-open", {
-                    detail: { path: source.path, url: externalUrl },
+                    detail: { path: source.path, url: popout.url },
                   }),
                 );
-                window.open(externalUrl, "_blank", "noopener,noreferrer");
+                // Keep window.open in this exact user gesture so mobile popup
+                // blockers allow it. flushSync commits the float first; if the
+                // browser backgrounds this tab immediately, no later ready
+                // message is needed to make the original Preview collapse.
+                flushSync(() => shrinkToSmallFloat());
+                try {
+                  // A named same-origin window keeps `opener` just long enough
+                  // for the trusted shell to take the shared Client. `_blank`
+                  // is implicitly noopener in some mobile browsers.
+                  const opened = window.open(popout.url, `genehub-preview-${popout.id}`);
+                  if (!opened) throw new Error("浏览器阻止了新窗口");
+                } catch {
+                  popouts.current.delete(popout.id);
+                  popoutBridges.current.get(popout.id)?.();
+                  popoutBridges.current.delete(popout.id);
+                  flushSync(() => maximize());
+                }
               }}
             >
               <ExternalLinkIcon />

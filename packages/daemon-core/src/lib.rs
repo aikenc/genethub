@@ -4,16 +4,18 @@
 //! normally, preserving Rust ownership, visibility and memory safety.
 
 mod agents;
+mod authz;
 mod capability;
 mod config;
 mod devices;
 mod files;
 mod git;
 mod session;
+mod speech;
 mod terminal;
 mod workspace;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use genehub_proto::{
     ErrorCode, HelloResult, LogicModuleStatus, ProtocolError, RemoteAccess, Reply, Request,
@@ -21,10 +23,11 @@ use genehub_proto::{
 };
 use genet_daemon_common::{decode_json, encode_json};
 use genet_daemon_logic_api::{
-    CapabilityBatch, CapabilityCall, CapabilityFailureKind, CapabilityRequest, CapabilityResults,
-    CapabilityValue, ConnectivityRequest, FileLocator, FileRequest, FileRoot, LogicArtifactRequest,
-    LogicBoot, LogicInput, LogicOutcome, LogicOutput, LogicRequest, PlatformCall,
-    PlatformCompletion, PlatformReply, PlatformRequest, SNAPSHOT_FORMAT_VERSION,
+    CallerContext, CapabilityBatch, CapabilityCall, CapabilityFailureKind, CapabilityRequest,
+    CapabilityResults, CapabilityValue, ConnectivityRequest, FileLocator, FileRequest, FileRoot,
+    LogicArtifactRequest, LogicBoot, LogicInput, LogicOutcome, LogicOutput, LogicRequest,
+    PlatformCall, PlatformCompletion, PlatformReply, PlatformRequest, SpeechCompletionEvidence,
+    SNAPSHOT_FORMAT_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +50,10 @@ pub struct LogicApp {
     remote_access: RemoteAccess,
     update_download: UpdateDownload,
     workspace_roots_ready: bool,
+    /// Short-lived, authoritative speech results. These intentionally do not
+    /// enter the hot-update snapshot: losing an unsubmitted correction during
+    /// replacement is safer than persisting dictated text beyond its TTL.
+    speech_results: VecDeque<SpeechCompletionEvidence>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -108,6 +115,7 @@ impl LogicApp {
             remote_access: offline_remote(),
             update_download: UpdateDownload::Idle,
             workspace_roots_ready: false,
+            speech_results: VecDeque::new(),
         })
     }
 
@@ -153,6 +161,10 @@ impl LogicApp {
     ) -> LogicOutput {
         let call_id = input.call_id;
         let transport = input.transport;
+        if let Err(error) = authz::authorize_request(&input.caller, &input.request, &self.devices) {
+            return LogicOutput::completed(call_id, LogicOutcome::Error(error));
+        }
+        let caller = input.caller;
         let outcome = match input.request {
             Request::DaemonLogicStatus => {
                 return self.request_artifact(call_id, LogicArtifactRequest::Status)
@@ -189,6 +201,8 @@ impl LogicApp {
                     transport,
                     machine_name: self.boot.machine_name.clone(),
                     rtc_supported: self.boot.rtc_supported,
+                    features: Some(self.boot.features.clone()),
+                    isolation: self.boot.isolation.clone(),
                 })))
             }
             Request::SessionSend {
@@ -206,11 +220,23 @@ impl LogicApp {
             | Request::SessionCreate { .. }
             | Request::SessionList { .. }
             | Request::SessionGet { .. }
+            | Request::SessionInspect { .. }
+            | Request::SessionNarrative { .. }
+            | Request::SessionRounds { .. }
+            | Request::SessionContext { .. }
             | Request::RoundTrunkList { .. }
             | Request::RoundTrunkGet { .. }
             | Request::BlobGet { .. }
             | Request::SessionSend { .. }
+            | Request::SessionArtifactBegin { .. }
+            | Request::SessionArtifactChunk { .. }
+            | Request::SessionArtifactFinish { .. }
+            | Request::SessionArtifactAbort { .. }
             | Request::SessionFork { .. }
+            | Request::SessionForkExport { .. }
+            | Request::SessionForkImport { .. }
+            | Request::SessionImportList { .. }
+            | Request::SessionImport { .. }
             | Request::SessionInterrupt { .. }
             | Request::SessionClose { .. }
             | Request::SessionArchive { .. }
@@ -219,7 +245,10 @@ impl LogicApp {
             | Request::SessionSetModel { .. }
             | Request::SessionSetMode { .. }
             | Request::SessionSetEffort { .. }
-            | Request::SessionRespondPermission { .. }) => {
+            | Request::SessionRespondPermission { .. }
+            | Request::ProcessList
+            | Request::ProcessKill { .. }
+            | Request::ProcessKillAll { .. }) => {
                 return self.request_session(call_id, request, capabilities)
             }
             Request::AgentList => self.agent_list(false, capabilities),
@@ -249,8 +278,25 @@ impl LogicApp {
                 })),
                 Err(error) => LogicOutcome::Error(error),
             },
-            Request::DeviceInvite => match self.refresh_remote(capabilities).and_then(|()| {
+            Request::DeviceInvite(scope) => match self.refresh_remote(capabilities).and_then(|()| {
+                let grants = match scope {
+                    None => authz::GrantSet::full(),
+                    Some(scope) => {
+                        let mut parsed = Vec::with_capacity(scope.grants.len());
+                        for name in scope.grants {
+                            let Some(capability) = authz::Capability::parse(&name) else {
+                                return Err(ProtocolError {
+                                    code: ErrorCode::BadRequest,
+                                    message: format!("unknown device grant `{name}`"),
+                                });
+                            };
+                            parsed.push(capability);
+                        }
+                        authz::GrantSet::of(parsed)
+                    }
+                };
                 self.devices.invite(
+                    grants,
                     &self.remote_access,
                     capabilities,
                     &mut self.next_capability_id,
@@ -357,6 +403,57 @@ impl LogicApp {
             Request::SettingsForgetProvider { provider_id } => {
                 self.forget_provider(provider_id, capabilities)
             }
+            Request::SpeechCapabilities => self.speech_capabilities(capabilities),
+            Request::SpeechSettingsSetQwen3 {
+                stub_enabled,
+                context_enabled,
+                pinned_terms,
+                language_hints,
+                collect_corrections,
+                workspace_id,
+            } => self.set_speech_settings(
+                stub_enabled,
+                context_enabled,
+                pinned_terms,
+                language_hints,
+                collect_corrections,
+                workspace_id,
+                capabilities,
+            ),
+            Request::SpeechRuntimeProbe => self.probe_speech(capabilities),
+            Request::SpeechRuntimeConfigure { command, args } => {
+                if transport != TransportKind::Loopback {
+                    LogicOutcome::Error(ProtocolError {
+                        code: ErrorCode::Forbidden,
+                        message: "语音 runtime 只能由这台电脑上的本地用户注册或移除".to_string(),
+                    })
+                } else {
+                    self.configure_speech(command, args, capabilities)
+                }
+            }
+            Request::SpeechContextPreview {
+                workspace_id,
+                session_id,
+                draft,
+            } => self.speech_context(workspace_id, session_id, draft, capabilities),
+            Request::SpeechFeedbackRecord {
+                workspace_id,
+                request_id,
+                context_snapshot_id: _,
+                candidates: _,
+                selected_candidate_id,
+                rejected_candidate_id,
+                scope,
+                score_kind: _,
+            } => self.record_speech_feedback(
+                workspace_id,
+                request_id,
+                selected_candidate_id,
+                rejected_candidate_id,
+                scope,
+                capabilities,
+            ),
+            Request::DiagnosticsSnapshot => self.diagnostics(capabilities),
             Request::WorkspaceList => self.workspace_list(capabilities),
             Request::WorkspaceOpen { root } => self.workspace_open(root, None, false, capabilities),
             Request::WorkspaceCreate { root, name } => {
@@ -379,6 +476,16 @@ impl LogicApp {
                     Err(error) => LogicOutcome::Error(error),
                 }
             }
+            Request::DirectoryMkdir { parent, name } => match workspace::mkdir_directory(
+                parent,
+                name,
+                self.boot.home_directory.as_deref(),
+                capabilities,
+                &mut self.next_capability_id,
+            ) {
+                Ok(directory) => LogicOutcome::Reply(Box::new(Reply::Directory(directory))),
+                Err(error) => LogicOutcome::Error(error),
+            },
             Request::FileTree {
                 workspace_id,
                 path,
@@ -389,6 +496,31 @@ impl LogicApp {
                 path,
                 content,
             } => self.file_write(workspace_id, path, content, capabilities),
+            Request::FileMkdir { workspace_id, path } => {
+                self.file_mutation(workspace_id, capabilities, |workspace, executor, next| {
+                    files::mkdir(workspace, &path, executor, next)
+                })
+            }
+            Request::FileCopy {
+                workspace_id,
+                from,
+                to,
+            } => self.file_mutation(workspace_id, capabilities, |workspace, executor, next| {
+                files::copy(workspace, &from, &to, executor, next)
+            }),
+            Request::FileMove {
+                workspace_id,
+                from,
+                to,
+            } => self.file_mutation(workspace_id, capabilities, |workspace, executor, next| {
+                files::move_path(workspace, &from, &to, executor, next)
+            }),
+            Request::FileDelete {
+                workspace_id,
+                paths,
+            } => self.file_mutation(workspace_id, capabilities, |workspace, executor, next| {
+                files::delete(workspace, &paths, executor, next)
+            }),
             Request::GitStatus { workspace_id } => self.git_status(workspace_id, capabilities),
             Request::GitDiff { workspace_id, path } => {
                 self.git_diff(workspace_id, path, capabilities)
@@ -406,6 +538,7 @@ impl LogicApp {
                 workspace_id,
                 cols.unwrap_or(80),
                 rows.unwrap_or(24),
+                &caller,
                 capabilities,
             ),
             Request::PtyWrite { pty_id, data } => terminal::reply(terminal::write(
@@ -442,6 +575,11 @@ impl LogicApp {
         if let Err(error) = self.ensure_workspaces(capabilities) {
             return LogicOutput::completed(call_id, LogicOutcome::Error(error));
         }
+        if session_request_needs_agent_catalog(&request) {
+            if let Err(error) = self.ensure_agent_cache(false, capabilities) {
+                return LogicOutput::completed(call_id, LogicOutcome::Error(error));
+            }
+        }
         let config = config::with_discoveries(
             self.config.as_ref().expect("config loaded"),
             &self.discoveries,
@@ -452,6 +590,7 @@ impl LogicApp {
             request,
             &self.boot,
             &config,
+            self.agent_cache.as_deref().unwrap_or_default(),
             capabilities,
             &mut self.next_capability_id,
         )
@@ -498,9 +637,32 @@ impl LogicApp {
                 capabilities,
                 &mut self.next_capability_id,
             ),
+            PlatformRequest::AuthorizeStream { caller, stream } => {
+                Ok(PlatformReply::StreamAuthorization(authz::authorize_stream(
+                    &caller,
+                    stream,
+                    &self.devices,
+                )))
+            }
             PlatformRequest::WorkspaceCatalog => self.platform_workspace_catalog(capabilities),
             PlatformRequest::ResolveWorkspaceFile { workspace_id, path } => {
                 self.platform_workspace_file(&workspace_id, &path, capabilities)
+            }
+            PlatformRequest::ResolveWorkspaceExecution { workspace_id, cwd } => {
+                self.platform_workspace_execution(&workspace_id, cwd, capabilities)
+            }
+            PlatformRequest::PrepareSpeech {
+                route_workspace_id,
+                start,
+            } => self.platform_prepare_speech(route_workspace_id.as_deref(), &start, capabilities),
+            PlatformRequest::RememberSpeechCompletion { evidence } => {
+                self.remember_speech_completion(evidence);
+                Ok(PlatformReply::Ack)
+            }
+            PlatformRequest::Shutdown => {
+                self.sessions
+                    .shutdown(capabilities, &mut self.next_capability_id);
+                Ok(PlatformReply::Ack)
             }
         };
         LogicOutput {
@@ -510,6 +672,33 @@ impl LogicApp {
             }],
             ..LogicOutput::default()
         }
+    }
+
+    fn platform_prepare_speech(
+        &mut self,
+        route_workspace_id: Option<&str>,
+        start: &genehub_proto::SpeechStart,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> Result<PlatformReply, ProtocolError> {
+        if route_workspace_id.is_some_and(|scope| scope != start.workspace_id) {
+            return Err(ProtocolError {
+                code: ErrorCode::Forbidden,
+                message: "the routed capability does not cover this workspace".to_string(),
+            });
+        }
+        self.ensure_workspaces(capabilities)?;
+        let config = self.config.as_ref().expect("config loaded").clone();
+        workspace::workspace(&config, &start.workspace_id)?;
+        if let Some(session_id) = start.session_id.as_deref() {
+            self.sessions.validate_membership(
+                session_id,
+                &start.workspace_id,
+                &config,
+                capabilities,
+                &mut self.next_capability_id,
+            )?;
+        }
+        Ok(PlatformReply::SpeechPrepared(config.speech))
     }
 
     fn platform_workspace_catalog(
@@ -554,6 +743,58 @@ impl LogicApp {
         Ok(PlatformReply::WorkspaceFile(files::resolve_locator(
             &workspace, path,
         )?))
+    }
+
+    fn platform_workspace_execution(
+        &mut self,
+        workspace_id: &str,
+        cwd: Option<String>,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> Result<PlatformReply, ProtocolError> {
+        self.ensure_workspaces(capabilities)?;
+        let workspace =
+            workspace::workspace(self.config.as_ref().expect("config loaded"), workspace_id)?;
+        let first = workspace.folders.first().ok_or_else(|| ProtocolError {
+            code: ErrorCode::BadRequest,
+            message: "workspace has no folders".to_string(),
+        })?;
+        let roots = workspace
+            .folders
+            .iter()
+            .map(|folder| genet_daemon_logic_api::WorkspaceRootPath {
+                handle: folder.root_handle.clone(),
+                native_path: folder.root.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut client = capability::Client::new(capabilities, &mut self.next_capability_id);
+        let cwd = match client.call(CapabilityRequest::File(FileRequest::ResolveWorkspacePath {
+            roots,
+            default_handle: first.root_handle.clone(),
+            path: cwd,
+        }))? {
+            CapabilityValue::FileLocator(locator) => locator,
+            _ => {
+                return Err(ProtocolError {
+                    code: ErrorCode::Internal,
+                    message: "workspace cwd resolver returned the wrong value".to_string(),
+                })
+            }
+        };
+        Ok(PlatformReply::WorkspaceExecution(
+            genet_daemon_logic_api::WorkspaceExecution {
+                cwd,
+                roots: workspace
+                    .folders
+                    .iter()
+                    .map(|folder| FileLocator {
+                        root: FileRoot::Workspace {
+                            handle: folder.root_handle.clone(),
+                        },
+                        path: String::new(),
+                    })
+                    .collect(),
+            },
+        ))
     }
 
     fn connectivity(
@@ -751,6 +992,20 @@ impl LogicApp {
         }
     }
 
+    fn diagnostics(&mut self, capabilities: &mut impl CapabilityExecutor) -> LogicOutcome {
+        let mut client = capability::Client::new(capabilities, &mut self.next_capability_id);
+        match client.call(CapabilityRequest::Diagnostics) {
+            Ok(CapabilityValue::Diagnostics(snapshot)) => {
+                LogicOutcome::Reply(Box::new(Reply::Diagnostics(snapshot)))
+            }
+            Ok(_) => LogicOutcome::Error(ProtocolError {
+                code: ErrorCode::Internal,
+                message: "diagnostics capability returned the wrong value".to_string(),
+            }),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
     fn take_capability_id(&mut self) -> u64 {
         let id = self.next_capability_id;
         self.next_capability_id = self.next_capability_id.saturating_add(1);
@@ -779,14 +1034,239 @@ impl LogicApp {
         ))))
     }
 
-    fn agent_list(
+    fn speech_capabilities(&mut self, capabilities: &mut impl CapabilityExecutor) -> LogicOutcome {
+        if let Err(error) = self.ensure_config(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        match speech::capabilities(
+            &self.config.as_ref().expect("config loaded").speech,
+            capabilities,
+            &mut self.next_capability_id,
+        ) {
+            Ok(value) => LogicOutcome::Reply(Box::new(Reply::SpeechCapabilities(value))),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn set_speech_settings(
         &mut self,
-        refresh: bool,
+        stub_enabled: Option<bool>,
+        context_enabled: bool,
+        pinned_terms: Vec<String>,
+        language_hints: Vec<String>,
+        collect_corrections: bool,
+        workspace_id: Option<String>,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_workspaces(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        let mut next = self.config.as_ref().expect("config loaded").clone();
+        let workspace = workspace_id
+            .as_deref()
+            .and_then(|id| workspace::workspace(&next, id).ok());
+        if let Err(error) = speech::update_settings(
+            &mut next,
+            stub_enabled,
+            context_enabled,
+            pinned_terms,
+            language_hints,
+            collect_corrections,
+            workspace_id,
+            workspace.as_ref(),
+        )
+        .and_then(|()| config::save(&next, capabilities, &mut self.next_capability_id))
+        {
+            return LogicOutcome::Error(error);
+        }
+        self.config = Some(next);
+        self.settings(capabilities)
+    }
+
+    fn probe_speech(&mut self, capabilities: &mut impl CapabilityExecutor) -> LogicOutcome {
+        if let Err(error) = self.ensure_config(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        match speech::probe(
+            &self.config.as_ref().expect("config loaded").speech,
+            capabilities,
+            &mut self.next_capability_id,
+        ) {
+            Ok(value) => LogicOutcome::Reply(Box::new(Reply::SpeechRuntimeStatus(value))),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
+    fn configure_speech(
+        &mut self,
+        command: Option<String>,
+        args: Vec<String>,
         capabilities: &mut impl CapabilityExecutor,
     ) -> LogicOutcome {
         if let Err(error) = self.ensure_config(capabilities) {
             return LogicOutcome::Error(error);
         }
+        let runtime = match command {
+            Some(command) => match speech::validate_registration(
+                command,
+                args,
+                capabilities,
+                &mut self.next_capability_id,
+            ) {
+                Ok(runtime) => Some(runtime),
+                Err(error) => return LogicOutcome::Error(error),
+            },
+            None if args.is_empty() => None,
+            None => {
+                return LogicOutcome::Error(ProtocolError {
+                    code: ErrorCode::BadRequest,
+                    message: "移除 runtime 时不能提供参数".to_string(),
+                })
+            }
+        };
+        let mut next = self.config.as_ref().expect("config loaded").clone();
+        if runtime.is_some() {
+            next.speech.stub_enabled = false;
+        }
+        next.speech.runtime = runtime;
+        if let Err(error) = config::save(&next, capabilities, &mut self.next_capability_id) {
+            return LogicOutcome::Error(error);
+        }
+        self.config = Some(next);
+        self.speech_capabilities(capabilities)
+    }
+
+    fn speech_context(
+        &mut self,
+        workspace_id: String,
+        session_id: Option<String>,
+        draft: Option<String>,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_workspaces(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        let config = self.config.as_ref().expect("config loaded").clone();
+        let workspace = match workspace::workspace(&config, &workspace_id) {
+            Ok(workspace) => workspace,
+            Err(error) => return LogicOutcome::Error(error),
+        };
+        let items = match session_id.as_deref() {
+            Some(session_id) => match self.sessions.context_items(
+                session_id,
+                &workspace_id,
+                &config,
+                capabilities,
+                &mut self.next_capability_id,
+            ) {
+                Ok(items) => items,
+                Err(error) => return LogicOutcome::Error(error),
+            },
+            None => Vec::new(),
+        };
+        match speech::compile_context(
+            &config.speech,
+            &workspace,
+            &items,
+            draft.as_deref(),
+            capabilities,
+            &mut self.next_capability_id,
+        ) {
+            Ok(context) => LogicOutcome::Reply(Box::new(Reply::SpeechContext(context))),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
+    fn remember_speech_completion(&mut self, evidence: SpeechCompletionEvidence) {
+        const MAX_RESULTS: usize = 64;
+        self.speech_results.retain(|stored| {
+            stored.workspace_id != evidence.workspace_id || stored.request_id != evidence.request_id
+        });
+        while self.speech_results.len() >= MAX_RESULTS {
+            self.speech_results.pop_front();
+        }
+        self.speech_results.push_back(evidence);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_speech_feedback(
+        &mut self,
+        workspace_id: String,
+        request_id: String,
+        selected_candidate_id: String,
+        rejected_candidate_id: Option<String>,
+        scope: Option<genehub_proto::SpeechFeedbackScope>,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_workspaces(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        let config = self.config.as_ref().expect("config loaded").clone();
+        let workspace = match workspace::workspace(&config, &workspace_id) {
+            Ok(workspace) => workspace,
+            Err(error) => return LogicOutcome::Error(error),
+        };
+        let now = match speech::clock(capabilities, &mut self.next_capability_id) {
+            Ok(now) => now,
+            Err(error) => return LogicOutcome::Error(error),
+        };
+        const TTL_MILLIS: i64 = 30 * 60 * 1_000;
+        self.speech_results.retain(|stored| {
+            now.saturating_sub(stored.recorded_at_millis) <= TTL_MILLIS
+                && stored.recorded_at_millis <= now.saturating_add(60_000)
+        });
+        let evidence = match self
+            .speech_results
+            .iter()
+            .find(|stored| {
+                stored.workspace_id == workspace_id && stored.request_id == request_id
+            })
+            .cloned()
+        {
+            Some(evidence) => evidence,
+            None => {
+                return LogicOutcome::Error(ProtocolError {
+                    code: ErrorCode::BadRequest,
+                    message: "本次语音候选已经过期或不属于当前项目；为避免伪造训练数据，请重新录音后再选择候选".to_string(),
+                })
+            }
+        };
+        match speech::record_feedback(
+            &config.speech,
+            &workspace,
+            evidence,
+            selected_candidate_id,
+            rejected_candidate_id,
+            scope,
+            now,
+            capabilities,
+            &mut self.next_capability_id,
+        ) {
+            Ok(receipt) => LogicOutcome::Reply(Box::new(Reply::SpeechFeedbackReceipt(receipt))),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
+    fn agent_list(
+        &mut self,
+        refresh: bool,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_agent_cache(refresh, capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        LogicOutcome::Reply(Box::new(Reply::Agents(
+            self.agent_cache.clone().unwrap_or_default(),
+        )))
+    }
+
+    fn ensure_agent_cache(
+        &mut self,
+        refresh: bool,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> Result<(), ProtocolError> {
+        self.ensure_config(capabilities)?;
         if refresh || self.agent_cache.is_none() {
             // Provider discovery is cached in the guest, not persisted as
             // user-authored configuration. Resolve one shared runtime view so
@@ -808,12 +1288,10 @@ impl LogicApp {
                 &mut self.next_capability_id,
             ) {
                 Ok(agents) => self.agent_cache = Some(agents),
-                Err(error) => return LogicOutcome::Error(error),
+                Err(error) => return Err(error),
             }
         }
-        LogicOutcome::Reply(Box::new(Reply::Agents(
-            self.agent_cache.clone().unwrap_or_default(),
-        )))
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1028,6 +1506,26 @@ impl LogicApp {
         }
     }
 
+    fn file_mutation<E, F>(
+        &mut self,
+        workspace_id: String,
+        capabilities: &mut E,
+        operation: F,
+    ) -> LogicOutcome
+    where
+        E: CapabilityExecutor,
+        F: FnOnce(&config::WorkspaceEntry, &mut E, &mut u64) -> Result<(), ProtocolError>,
+    {
+        let workspace = match self.workspace_for_operation(&workspace_id, capabilities) {
+            Ok(workspace) => workspace,
+            Err(error) => return LogicOutcome::Error(error),
+        };
+        match operation(&workspace, capabilities, &mut self.next_capability_id) {
+            Ok(()) => LogicOutcome::Reply(Box::new(Reply::Ack)),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
     fn workspace_for_operation(
         &mut self,
         workspace_id: &str,
@@ -1101,17 +1599,49 @@ impl LogicApp {
         workspace_id: String,
         cols: u16,
         rows: u16,
+        caller: &CallerContext,
         capabilities: &mut impl CapabilityExecutor,
     ) -> LogicOutcome {
         let workspace = match self.workspace_for_operation(&workspace_id, capabilities) {
             Ok(workspace) => workspace,
             Err(error) => return LogicOutcome::Error(error),
         };
+        let confinement_required = authz::authorize_stream(
+            caller,
+            genet_daemon_logic_api::StreamMethod::ShellRun,
+            &self.devices,
+        )
+        .confinement_required;
+        if confinement_required
+            && !self
+                .boot
+                .isolation
+                .as_ref()
+                .is_some_and(|report| report.enforced)
+        {
+            return LogicOutcome::Error(ProtocolError {
+                code: ErrorCode::IsolationUnavailable,
+                message: self
+                    .boot
+                    .isolation
+                    .as_ref()
+                    .map(|report| {
+                        format!(
+                            "this has to run confined to the workspace and this machine cannot do that: {}",
+                            report.detail
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        "this machine did not report a process-confinement backend".to_string()
+                    }),
+            });
+        }
         match terminal::open(
             &mut self.terminals,
             &workspace,
             cols,
             rows,
+            confinement_required,
             capabilities,
             &mut self.next_capability_id,
         ) {
@@ -1164,12 +1694,26 @@ impl LogicApp {
             remote_access: snapshot.remote_access,
             update_download: snapshot.update_download,
             workspace_roots_ready: false,
+            speech_results: VecDeque::new(),
         })
     }
 
     pub fn handled_requests(&self) -> u64 {
         self.handled_requests
     }
+}
+
+fn session_request_needs_agent_catalog(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::SessionSend { .. }
+            | Request::SessionFork { .. }
+            | Request::SessionForkImport { .. }
+            | Request::SessionSetModel { .. }
+            | Request::SessionSetMode { .. }
+            | Request::SessionSetEffort { .. }
+            | Request::SessionRespondPermission { .. }
+    )
 }
 
 fn offline_remote() -> RemoteAccess {
@@ -1314,8 +1858,12 @@ mod portable_logs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genehub_proto::{LogTail, TransportKind};
-    use genet_daemon_logic_api::FileKind;
+    use genehub_proto::{
+        AgentInfo, Capabilities, Catalog, LogTail, ModeInfo, PermissionOutcome, ProbeState,
+        SequencedEvent, SessionArtifactFile, SessionEvent, SessionStatus, TimelineItem,
+        TransportKind,
+    };
+    use genet_daemon_logic_api::{FileKind, Publication};
 
     struct TestLogs(std::path::PathBuf);
 
@@ -1430,12 +1978,271 @@ mod tests {
             fingerprint: "fingerprint".to_string(),
             machine_name: "workstation".to_string(),
             rtc_supported: true,
+            features: Vec::new(),
+            isolation: None,
             log_directory: ".".to_string(),
             log_display_directory: "/host/logs".to_string(),
             default_workspace: None,
             home_directory: None,
             builtin_agent_binary: None,
             builtin_agent_home_env: None,
+        }
+    }
+
+    fn call(
+        app: &mut LogicApp,
+        capabilities: &mut impl CapabilityExecutor,
+        call_id: u64,
+        request: Request,
+    ) -> Result<Reply, ProtocolError> {
+        let output = app.handle_with(
+            LogicInput::Request(LogicRequest {
+                call_id,
+                transport: TransportKind::Loopback,
+                caller: CallerContext::LocalUser,
+                request,
+            }),
+            capabilities,
+        );
+        let completion = output
+            .completions
+            .into_iter()
+            .find(|completion| completion.call_id == call_id)
+            .expect("a synchronous guest request completes exactly once");
+        match completion.outcome {
+            LogicOutcome::Reply(reply) => Ok(*reply),
+            LogicOutcome::Error(error) => Err(error),
+        }
+    }
+
+    #[cfg(unix)]
+    fn open_workspace(
+        app: &mut LogicApp,
+        capabilities: &mut RealCapabilities,
+        call_id: u64,
+        root: &std::path::Path,
+    ) -> genehub_proto::WorkspaceInfo {
+        match call(
+            app,
+            capabilities,
+            call_id,
+            Request::WorkspaceOpen {
+                root: root.display().to_string(),
+            },
+        )
+        .unwrap()
+        {
+            Reply::Workspace(workspace) => workspace,
+            other => panic!("wrong workspace reply: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_session(
+        app: &mut LogicApp,
+        capabilities: &mut RealCapabilities,
+        call_id: u64,
+        workspace_id: String,
+        cwd: Option<String>,
+    ) -> genehub_proto::SessionSummary {
+        match call(
+            app,
+            capabilities,
+            call_id,
+            Request::SessionCreate {
+                workspace_id,
+                agent_id: "genet".to_string(),
+                model_id: None,
+                mode_id: None,
+                title: None,
+                cwd,
+            },
+        )
+        .unwrap()
+        {
+            Reply::Session(session) => session,
+            other => panic!("wrong session reply: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    struct WaitingInteraction {
+        _directory: tempfile::TempDir,
+        app: LogicApp,
+        capabilities: RealCapabilities,
+        session_id: String,
+        private: std::path::PathBuf,
+        logs: std::path::PathBuf,
+        transcript: std::path::PathBuf,
+        spawns: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    fn waiting_interaction() -> WaitingInteraction {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        let logs = directory.path().join("logs");
+        let workspace = directory.path().join("workspace");
+        let marker = directory.path().join("asked");
+        let transcript = directory.path().join("transcript.jsonl");
+        let spawns = directory.path().join("spawns");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let agent = directory.path().join("fake-acp-agent");
+        std::fs::write(
+            &agent,
+            r#"#!/bin/sh
+marker=$1
+transcript=$2
+spawns=$3
+printf 'spawn\n' >> "$spawns"
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$transcript"
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"agentCapabilities":{"sessionCapabilities":{"resume":{}}}}}'
+      ;;
+    *'"method":"session/new"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"remote-1"}}'
+      ;;
+    *'"method":"session/resume"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"remote-1"}}'
+      ;;
+    *'"method":"session/set_mode"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{}}'
+      ;;
+    *'"method":"session/prompt"'*)
+      if [ ! -f "$marker" ]; then
+        : > "$marker"
+        printf '%s\n' '{"jsonrpc":"2.0","id":41,"method":"session/request_permission","params":{"toolCall":{"toolCallId":"tool-1","title":"Write a file"},"options":[{"optionId":"yes","name":"Allow once","kind":"allow_once"},{"optionId":"no","name":"Reject","kind":"reject_once"}]}}'
+      else
+        printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"resumed safely"}}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}'
+      fi
+      ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&agent).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&agent, permissions).unwrap();
+
+        let mut app = LogicApp::new(boot()).unwrap();
+        let mut config = config::Config::default();
+        config.agents.custom.insert(
+            "fixture".to_string(),
+            config::CustomAgent {
+                extends: "acp".to_string(),
+                command: vec![
+                    agent.display().to_string(),
+                    marker.display().to_string(),
+                    transcript.display().to_string(),
+                    spawns.display().to_string(),
+                ],
+                label: Some("Fixture ACP".to_string()),
+            },
+        );
+        app.config = Some(config);
+        app.agent_cache = Some(vec![AgentInfo {
+            id: "acp:fixture".to_string(),
+            label: "Fixture ACP".to_string(),
+            probe: ProbeState::Ready,
+            capabilities: Capabilities {
+                interrupt: true,
+                set_mode: true,
+                permissions: true,
+                resume: true,
+                ..Capabilities::default()
+            },
+            catalog: Catalog {
+                modes: vec![
+                    ModeInfo {
+                        id: "ask".to_string(),
+                        label: "Ask".to_string(),
+                        description: None,
+                    },
+                    ModeInfo {
+                        id: "agent".to_string(),
+                        label: "Agent".to_string(),
+                        description: None,
+                    },
+                ],
+                default_mode: Some("agent".to_string()),
+                ..Catalog::default()
+            },
+            builtin: false,
+        }]);
+        let mut capabilities = RealCapabilities::new(&private, &logs);
+        let workspace = open_workspace(&mut app, &mut capabilities, 1, &workspace);
+        let session = match call(
+            &mut app,
+            &mut capabilities,
+            2,
+            Request::SessionCreate {
+                workspace_id: workspace.id,
+                agent_id: "acp:fixture".to_string(),
+                model_id: None,
+                mode_id: Some("ask".to_string()),
+                title: None,
+                cwd: None,
+            },
+        )
+        .unwrap()
+        {
+            Reply::Session(session) => session,
+            other => panic!("wrong session reply: {other:?}"),
+        };
+        assert!(matches!(
+            call(
+                &mut app,
+                &mut capabilities,
+                3,
+                Request::SessionSend {
+                    session_id: session.id.clone(),
+                    text: "please write it".to_string(),
+                    attachments: Vec::new(),
+                    artifact_preview_base_url: None,
+                    continues_round: None,
+                },
+            )
+            .unwrap(),
+            Reply::Ack
+        ));
+
+        let mut waiting = false;
+        for _ in 0..16 {
+            let event = capabilities.event();
+            let output = app.handle_with(LogicInput::CapabilityEvent(event), &mut capabilities);
+            waiting |= output.publications.iter().any(|publication| {
+                matches!(
+                    publication,
+                    Publication::Session(SequencedEvent {
+                        event: SessionEvent::PermissionRequested { .. },
+                        ..
+                    })
+                )
+            });
+            if waiting {
+                break;
+            }
+        }
+        assert!(waiting, "the fake ACP agent never requested permission");
+        let state = serde_json::to_value(&app.sessions).unwrap();
+        assert!(state["loaded"][&session.id]["process"].is_null());
+        assert!(state["loaded"][&session.id]["activeTurn"].is_null());
+
+        WaitingInteraction {
+            _directory: directory,
+            app,
+            capabilities,
+            session_id: session.id,
+            private,
+            logs,
+            transcript,
+            spawns,
         }
     }
 
@@ -1446,6 +2253,7 @@ mod tests {
             app.handle(LogicInput::Request(LogicRequest {
                 call_id: 1,
                 transport: TransportKind::Loopback,
+                caller: CallerContext::LocalUser,
                 request: Request::ConnectionIdentity,
             })),
             LogicOutput { completions, .. }
@@ -1458,6 +2266,7 @@ mod tests {
             app.handle(LogicInput::Request(LogicRequest {
                 call_id: 2,
                 transport: TransportKind::Forwarded,
+                caller: CallerContext::LocalUser,
                 request: Request::UpdateDownload,
             })),
             LogicOutput { completions, .. }
@@ -1469,7 +2278,43 @@ mod tests {
                     ..
                 }])
         ));
-        assert_eq!(app.handled_requests(), 2);
+        for (call_id, request) in [(3, Request::UpdateCheck), (4, Request::UpdateDownload)] {
+            assert!(matches!(
+                app.handle(LogicInput::Request(LogicRequest {
+                    call_id,
+                    transport: TransportKind::Loopback,
+                    caller: CallerContext::LocalUser,
+                    request,
+                })),
+                LogicOutput { completions, .. }
+                    if matches!(completions.as_slice(), [genet_daemon_logic_api::LogicCompletion {
+                        outcome: LogicOutcome::Error(ProtocolError {
+                            code: ErrorCode::Unsupported,
+                            ..
+                        }),
+                        ..
+                    }])
+            ));
+        }
+        for (call_id, request) in [
+            (5, Request::UpdateDownloadState),
+            (6, Request::UpdateDismiss),
+        ] {
+            assert!(matches!(
+                app.handle(LogicInput::Request(LogicRequest {
+                    call_id,
+                    transport: TransportKind::Loopback,
+                    caller: CallerContext::LocalUser,
+                    request,
+                })),
+                LogicOutput { completions, .. }
+                    if matches!(completions.as_slice(), [genet_daemon_logic_api::LogicCompletion {
+                        outcome: LogicOutcome::Reply(reply),
+                        ..
+                    }] if matches!(**reply, Reply::UpdateDownload(UpdateDownload::Idle)))
+            ));
+        }
+        assert_eq!(app.handled_requests(), 6);
     }
 
     #[test]
@@ -1478,6 +2323,7 @@ mod tests {
         let _ = app.handle(LogicInput::Request(LogicRequest {
             call_id: 1,
             transport: TransportKind::Loopback,
+            caller: CallerContext::LocalUser,
             request: Request::AgentList,
         }));
         let restored = LogicApp::restore(&app.snapshot().unwrap()).unwrap();
@@ -1490,6 +2336,7 @@ mod tests {
         let output = app.handle(LogicInput::Request(LogicRequest {
             call_id: 41,
             transport: TransportKind::Loopback,
+            caller: CallerContext::LocalUser,
             request: Request::DaemonLogicStatus,
         }));
         assert!(output.completions.is_empty());
@@ -1543,6 +2390,7 @@ mod tests {
             LogicInput::Request(LogicRequest {
                 call_id: 1,
                 transport: TransportKind::Loopback,
+                caller: CallerContext::LocalUser,
                 request: Request::LogTail { name: None },
             }),
             &mut TestLogs(directory.path().to_path_buf()),
@@ -1559,6 +2407,7 @@ mod tests {
             app.handle(LogicInput::Request(LogicRequest {
                 call_id: 2,
                 transport: TransportKind::Forwarded,
+                caller: CallerContext::LocalUser,
                 request: Request::LogTail {
                     name: Some("../config.json".to_string()),
                 },
@@ -1613,6 +2462,7 @@ done
                 LogicInput::Request(LogicRequest {
                     call_id,
                     transport: TransportKind::Loopback,
+                    caller: CallerContext::LocalUser,
                     request,
                 }),
                 capabilities,
@@ -1643,6 +2493,7 @@ done
                 model_id: None,
                 mode_id: None,
                 title: None,
+                cwd: None,
             },
         );
         let session_id = match &created.completions[0].outcome {
@@ -1694,10 +2545,70 @@ done
             &mut app,
             &mut capabilities,
             4,
-            Request::SessionGet { session_id },
+            Request::SessionGet {
+                session_id: session_id.clone(),
+            },
+        );
+        let snapshot = match &snapshot.completions[0].outcome {
+            LogicOutcome::Reply(reply) => match &**reply {
+                Reply::Snapshot(snapshot) => snapshot,
+                other => panic!("wrong snapshot reply: {other:?}"),
+            },
+            other => panic!("session get failed: {other:?}"),
+        };
+        assert!(snapshot.items.iter().any(|item| matches!(
+            item,
+            genehub_proto::TimelineItem::AssistantMessage { text, .. }
+                if text == "portable reply"
+        )));
+        let completed_turn = snapshot
+            .items
+            .iter()
+            .find_map(|item| match item {
+                genehub_proto::TimelineItem::TurnSummary { stats, .. } => {
+                    Some(stats.turn_id.clone())
+                }
+                _ => None,
+            })
+            .expect("the completed source turn is durable");
+
+        let forked = call(
+            &mut app,
+            &mut capabilities,
+            5,
+            Request::SessionFork {
+                session_id,
+                turn_id: completed_turn,
+                target: Some(genehub_proto::ForkTarget {
+                    agent_id: "genet".to_string(),
+                    workspace_id: None,
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+            },
+        );
+        let forked = match &forked.completions[0].outcome {
+            LogicOutcome::Reply(reply) => match &**reply {
+                Reply::Session(session) => session,
+                other => panic!("wrong fork reply: {other:?}"),
+            },
+            other => panic!("portable fork failed: {other:?}"),
+        };
+        assert_eq!(
+            forked.lineage.as_ref().map(|lineage| lineage.method),
+            Some(genehub_proto::ForkMethod::ReconstructedContext)
+        );
+        let fork_snapshot = call(
+            &mut app,
+            &mut capabilities,
+            6,
+            Request::SessionGet {
+                session_id: forked.id.clone(),
+            },
         );
         assert!(matches!(
-            &snapshot.completions[0].outcome,
+            &fork_snapshot.completions[0].outcome,
             LogicOutcome::Reply(reply)
                 if matches!(&**reply, Reply::Snapshot(snapshot)
                     if snapshot.items.iter().any(|item| matches!(
@@ -1706,5 +2617,787 @@ done
                             if text == "portable reply"
                     )))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_interaction_survives_hot_swap_and_resumes_the_same_round() {
+        let mut fixture = waiting_interaction();
+        let waiting = match call(
+            &mut fixture.app,
+            &mut fixture.capabilities,
+            10,
+            Request::SessionGet {
+                session_id: fixture.session_id.clone(),
+            },
+        )
+        .unwrap()
+        {
+            Reply::Snapshot(snapshot) => snapshot,
+            other => panic!("wrong snapshot reply: {other:?}"),
+        };
+        assert_eq!(waiting.summary.status, SessionStatus::Waiting);
+        assert_eq!(waiting.pending_permissions.len(), 1);
+        assert_eq!(waiting.pending_permissions[0].id, "41");
+
+        fixture.app = LogicApp::restore(&fixture.app.snapshot().unwrap()).unwrap();
+        let mode_error = call(
+            &mut fixture.app,
+            &mut fixture.capabilities,
+            11,
+            Request::SessionSetMode {
+                session_id: fixture.session_id.clone(),
+                mode_id: "agent".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(mode_error.code, ErrorCode::Conflict);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(matches!(
+            call(
+                &mut fixture.app,
+                &mut fixture.capabilities,
+                12,
+                Request::SessionRespondPermission {
+                    session_id: fixture.session_id.clone(),
+                    request_id: "41".to_string(),
+                    outcome: PermissionOutcome::Selected {
+                        option_id: "yes".to_string(),
+                    },
+                },
+            )
+            .unwrap(),
+            Reply::Ack
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&fixture.spawns)
+                .unwrap()
+                .lines()
+                .count(),
+            2,
+            "approval must restart the stopped Agent exactly once"
+        );
+
+        let mut completed = false;
+        for _ in 0..20 {
+            let event = fixture.capabilities.event();
+            let output = fixture.app.handle_with(
+                LogicInput::CapabilityEvent(event),
+                &mut fixture.capabilities,
+            );
+            completed |= output.publications.iter().any(|publication| {
+                matches!(
+                    publication,
+                    Publication::Session(SequencedEvent {
+                        event: SessionEvent::TurnCompleted { .. },
+                        ..
+                    })
+                )
+            });
+            if completed {
+                break;
+            }
+        }
+        assert!(completed, "the resumed ACP turn never completed");
+
+        let transcript = std::fs::read_to_string(&fixture.transcript).unwrap();
+        assert!(transcript.contains(r#""modeId":"ask""#));
+        assert!(transcript.contains(r#""modeId":"agent""#));
+        assert!(transcript.contains("The user approved the interrupted permission request"));
+
+        let finished = match call(
+            &mut fixture.app,
+            &mut fixture.capabilities,
+            13,
+            Request::SessionGet {
+                session_id: fixture.session_id.clone(),
+            },
+        )
+        .unwrap()
+        {
+            Reply::Snapshot(snapshot) => snapshot,
+            other => panic!("wrong snapshot reply: {other:?}"),
+        };
+        assert_eq!(finished.summary.status, SessionStatus::Idle);
+        assert_eq!(finished.summary.mode_id.as_deref(), Some("ask"));
+        assert!(finished.pending_permissions.is_empty());
+        assert!(finished.items.iter().any(|item| {
+            matches!(item, TimelineItem::AssistantMessage { text, .. } if text == "resumed safely")
+        }));
+
+        let state = serde_json::to_value(&fixture.app.sessions).unwrap();
+        let round = &state["loaded"][&fixture.session_id]["rounds"][0];
+        assert_eq!(round["adapterTurnIds"].as_array().unwrap().len(), 2);
+        assert!(round["blockedMs"].as_i64().unwrap() > 0);
+        assert_eq!(round["outcome"], "completed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejecting_a_portable_interaction_cancels_without_restarting_the_agent() {
+        let mut fixture = waiting_interaction();
+        assert!(matches!(
+            call(
+                &mut fixture.app,
+                &mut fixture.capabilities,
+                20,
+                Request::SessionRespondPermission {
+                    session_id: fixture.session_id.clone(),
+                    request_id: "41".to_string(),
+                    outcome: PermissionOutcome::Selected {
+                        option_id: "no".to_string(),
+                    },
+                },
+            )
+            .unwrap(),
+            Reply::Ack
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&fixture.spawns)
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "rejection must not restart the stopped Agent"
+        );
+        let snapshot = match call(
+            &mut fixture.app,
+            &mut fixture.capabilities,
+            21,
+            Request::SessionGet {
+                session_id: fixture.session_id.clone(),
+            },
+        )
+        .unwrap()
+        {
+            Reply::Snapshot(snapshot) => snapshot,
+            other => panic!("wrong snapshot reply: {other:?}"),
+        };
+        assert_eq!(snapshot.summary.status, SessionStatus::Idle);
+        assert!(snapshot.pending_permissions.is_empty());
+        let state = serde_json::to_value(&fixture.app.sessions).unwrap();
+        let round = &state["loaded"][&fixture.session_id]["rounds"][0];
+        assert_eq!(round["adapterTurnIds"].as_array().unwrap().len(), 1);
+        assert_eq!(round["outcome"], "canceled");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_interaction_survives_a_cold_daemon_restart() {
+        let WaitingInteraction {
+            _directory,
+            app,
+            capabilities,
+            session_id,
+            private,
+            logs,
+            transcript,
+            spawns,
+        } = waiting_interaction();
+
+        // A process restart does not carry the guest snapshot or native
+        // resource table. Drop both sides, then reconstruct them exclusively
+        // from the portable files written before the Agent was stopped.
+        drop(app);
+        drop(capabilities);
+        let mut app = LogicApp::new(boot()).unwrap();
+        let mut capabilities = RealCapabilities::new(&private, &logs);
+
+        let waiting = match call(
+            &mut app,
+            &mut capabilities,
+            30,
+            Request::SessionGet {
+                session_id: session_id.clone(),
+            },
+        )
+        .unwrap()
+        {
+            Reply::Snapshot(snapshot) => snapshot,
+            other => panic!("wrong cold-restart snapshot reply: {other:?}"),
+        };
+        assert_eq!(waiting.summary.status, SessionStatus::Waiting);
+        assert_eq!(waiting.pending_permissions.len(), 1);
+        assert_eq!(waiting.pending_permissions[0].id, "41");
+
+        assert!(matches!(
+            call(
+                &mut app,
+                &mut capabilities,
+                31,
+                Request::SessionRespondPermission {
+                    session_id: session_id.clone(),
+                    request_id: "41".to_string(),
+                    outcome: PermissionOutcome::Selected {
+                        option_id: "yes".to_string(),
+                    },
+                },
+            )
+            .unwrap(),
+            Reply::Ack
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&spawns).unwrap().lines().count(),
+            3,
+            "cold recovery performs one catalog handshake and one session resume"
+        );
+        let mut completed = false;
+        for _ in 0..20 {
+            let event = capabilities.event();
+            let output = app.handle_with(LogicInput::CapabilityEvent(event), &mut capabilities);
+            completed |= output.publications.iter().any(|publication| {
+                matches!(
+                    publication,
+                    Publication::Session(SequencedEvent {
+                        event: SessionEvent::TurnCompleted { .. },
+                        ..
+                    })
+                )
+            });
+            if completed {
+                break;
+            }
+        }
+        assert!(completed, "the cold-restarted interaction never completed");
+        let resumed_transcript = std::fs::read_to_string(transcript).unwrap();
+        assert_eq!(
+            resumed_transcript
+                .lines()
+                .filter(|line| {
+                    serde_json::from_str::<serde_json::Value>(line)
+                        .ok()
+                        .is_some_and(|value| {
+                            value.get("method").and_then(serde_json::Value::as_str)
+                                == Some("session/resume")
+                        })
+                })
+                .count(),
+            1,
+            "the durable session itself must be resumed exactly once; transcript:\n{resumed_transcript}"
+        );
+        assert!(resumed_transcript.contains("The user approved the interrupted permission request"));
+
+        let finished = match call(
+            &mut app,
+            &mut capabilities,
+            32,
+            Request::SessionGet { session_id },
+        )
+        .unwrap()
+        {
+            Reply::Snapshot(snapshot) => snapshot,
+            other => panic!("wrong completed snapshot reply: {other:?}"),
+        };
+        assert_eq!(finished.summary.status, SessionStatus::Idle);
+        assert!(finished.pending_permissions.is_empty());
+        assert!(finished.items.iter().any(|item| {
+            matches!(item, TimelineItem::AssistantMessage { text, .. } if text == "resumed safely")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_artifact_upload_is_bounded_hashed_and_idempotent() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use sha2::{Digest, Sha256};
+
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        let logs = directory.path().join("logs");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let mut app = LogicApp::new(boot()).unwrap();
+        let mut capabilities = RealCapabilities::new(&private, &logs);
+        let workspace_info = open_workspace(&mut app, &mut capabilities, 1, &workspace);
+        let session = create_session(&mut app, &mut capabilities, 2, workspace_info.id, None);
+
+        let invalid = call(
+            &mut app,
+            &mut capabilities,
+            3,
+            Request::SessionArtifactBegin {
+                session_id: session.id.clone(),
+                files: vec![SessionArtifactFile {
+                    name: "../escape.txt".to_string(),
+                    mime: "text/plain".to_string(),
+                    bytes: 1,
+                }],
+                metadata: serde_json::json!({}),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(invalid.code, ErrorCode::BadRequest);
+
+        let payload = b"portable artifact bytes";
+        let upload = match call(
+            &mut app,
+            &mut capabilities,
+            4,
+            Request::SessionArtifactBegin {
+                session_id: session.id.clone(),
+                files: vec![SessionArtifactFile {
+                    name: "capture.txt".to_string(),
+                    mime: "text/plain".to_string(),
+                    bytes: payload.len() as u64,
+                }],
+                metadata: serde_json::json!({"source": "integration-test"}),
+            },
+        )
+        .unwrap()
+        {
+            Reply::SessionArtifactUpload(upload) => upload,
+            other => panic!("wrong artifact begin reply: {other:?}"),
+        };
+
+        let wrong_offset = call(
+            &mut app,
+            &mut capabilities,
+            5,
+            Request::SessionArtifactChunk {
+                session_id: session.id.clone(),
+                upload_id: upload.upload_id.clone(),
+                file_index: 0,
+                offset: 1,
+                data_base64: STANDARD.encode(payload),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(wrong_offset.code, ErrorCode::BadRequest);
+
+        assert!(matches!(
+            call(
+                &mut app,
+                &mut capabilities,
+                6,
+                Request::SessionArtifactChunk {
+                    session_id: session.id.clone(),
+                    upload_id: upload.upload_id.clone(),
+                    file_index: 0,
+                    offset: 0,
+                    data_base64: STANDARD.encode(payload),
+                },
+            )
+            .unwrap(),
+            Reply::Ack
+        ));
+
+        let finish = |app: &mut LogicApp, capabilities: &mut RealCapabilities, call_id| match call(
+            app,
+            capabilities,
+            call_id,
+            Request::SessionArtifactFinish {
+                session_id: session.id.clone(),
+                upload_id: upload.upload_id.clone(),
+            },
+        )
+        .unwrap()
+        {
+            Reply::SessionArtifact(bundle) => bundle,
+            other => panic!("wrong artifact finish reply: {other:?}"),
+        };
+        let bundle = finish(&mut app, &mut capabilities, 7);
+        assert_eq!(bundle.total_bytes, payload.len() as u64);
+        assert_eq!(bundle.files.len(), 1);
+        assert_eq!(
+            bundle.files[0].sha256,
+            format!("{:x}", Sha256::digest(payload))
+        );
+        assert_eq!(
+            std::fs::read(workspace.join(&bundle.workspace_path).join("capture.txt")).unwrap(),
+            payload
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(workspace.join(&bundle.manifest_path)).unwrap())
+                .unwrap();
+        assert_eq!(manifest["schema"], "genehub.session-artifact.v1");
+        assert_eq!(manifest["capture"]["source"], "integration-test");
+
+        assert_eq!(
+            finish(&mut app, &mut capabilities, 8),
+            bundle,
+            "retrying finish must return the same immutable receipt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_catalog_preserves_multi_root_future_format_and_deletion_contracts() {
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        let logs = directory.path().join("logs");
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let workspace_file = directory.path().join("project.code-workspace");
+        std::fs::write(
+            &workspace_file,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "folders": [
+                    {"path": first},
+                    {"path": second}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (workspace_id, second_session_id, future_session_id) = {
+            let mut app = LogicApp::new(boot()).unwrap();
+            let mut capabilities = RealCapabilities::new(&private, &logs);
+            let workspace = open_workspace(&mut app, &mut capabilities, 1, &workspace_file);
+            let second_session = create_session(
+                &mut app,
+                &mut capabilities,
+                2,
+                workspace.id.clone(),
+                Some(second.display().to_string()),
+            );
+            let future_session = create_session(
+                &mut app,
+                &mut capabilities,
+                3,
+                workspace.id.clone(),
+                Some(first.display().to_string()),
+            );
+            (workspace.id, second_session.id, future_session.id)
+        };
+
+        assert!(
+            second
+                .join(".genethub/sessions")
+                .join(&second_session_id)
+                .join("meta.json")
+                .is_file(),
+            "the session with a second-root cwd must be stored under that root"
+        );
+        let future_meta = first
+            .join(".genethub/sessions")
+            .join(&future_session_id)
+            .join("meta.json");
+        let written = session::SESSION_FORMAT + 1;
+        std::fs::write(
+            &future_meta,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "format": written,
+                "title": "来自未来",
+                "whatIsThis": [1, 2]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut app = LogicApp::new(boot()).unwrap();
+        let mut capabilities = RealCapabilities::new(&private, &logs);
+        let listed = match call(
+            &mut app,
+            &mut capabilities,
+            10,
+            Request::SessionList {
+                workspace_id: Some(workspace_id),
+                include_archived: false,
+            },
+        )
+        .unwrap()
+        {
+            Reply::Sessions(sessions) => sessions,
+            other => panic!("wrong session list reply: {other:?}"),
+        };
+        assert!(listed.iter().any(|session| session.id == second_session_id));
+        let future = listed
+            .iter()
+            .find(|session| session.id == future_session_id)
+            .expect("a newer session in the user's project must remain visible");
+        assert_eq!(future.title.as_deref(), Some("来自未来"));
+        assert_eq!(future.unsupported.as_ref().unwrap().written, written);
+        assert_eq!(
+            call(
+                &mut app,
+                &mut capabilities,
+                11,
+                Request::SessionGet {
+                    session_id: future_session_id.clone(),
+                },
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::Unsupported
+        );
+
+        let renamed = match call(
+            &mut app,
+            &mut capabilities,
+            12,
+            Request::SessionRename {
+                session_id: second_session_id.clone(),
+                title: "A durable name".to_string(),
+            },
+        )
+        .unwrap()
+        {
+            Reply::Session(session) => session,
+            other => panic!("wrong rename reply: {other:?}"),
+        };
+        assert_eq!(renamed.title.as_deref(), Some("A durable name"));
+        assert_eq!(
+            call(
+                &mut app,
+                &mut capabilities,
+                13,
+                Request::SessionRename {
+                    session_id: second_session_id.clone(),
+                    title: "   ".to_string(),
+                },
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::BadRequest
+        );
+
+        for (call_id, session_id) in [
+            (14, second_session_id.clone()),
+            (15, second_session_id.clone()),
+            (16, future_session_id.clone()),
+            (17, future_session_id.clone()),
+        ] {
+            assert!(matches!(
+                call(
+                    &mut app,
+                    &mut capabilities,
+                    call_id,
+                    Request::SessionDelete { session_id },
+                )
+                .unwrap(),
+                Reply::Ack
+            ));
+        }
+        let listed = match call(
+            &mut app,
+            &mut capabilities,
+            18,
+            Request::SessionList {
+                workspace_id: None,
+                include_archived: true,
+            },
+        )
+        .unwrap()
+        {
+            Reply::Sessions(sessions) => sessions,
+            other => panic!("wrong session list reply: {other:?}"),
+        };
+        assert!(listed.is_empty(), "tombstoned sessions must not reappear");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_session_honors_and_retries_the_legacy_workspace_owner_lock() {
+        use fs2::FileExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        let logs = directory.path().join("logs");
+        let workspace = directory.path().join("workspace");
+        let home = workspace.join(".genethub");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let mut app = LogicApp::new(boot()).unwrap();
+        let mut capabilities = RealCapabilities::new(&private, &logs);
+        let workspace_info = open_workspace(&mut app, &mut capabilities, 1, &workspace);
+
+        std::fs::write(home.join("owner"), "GeneHub Legacy\n").unwrap();
+        let legacy = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(home.join("owner.lock"))
+            .unwrap();
+        legacy.try_lock_exclusive().unwrap();
+        let refused = call(
+            &mut app,
+            &mut capabilities,
+            2,
+            Request::SessionCreate {
+                workspace_id: workspace_info.id.clone(),
+                agent_id: "genet".to_string(),
+                model_id: None,
+                mode_id: None,
+                title: None,
+                cwd: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Conflict);
+
+        legacy.unlock().unwrap();
+        drop(legacy);
+        let created = create_session(&mut app, &mut capabilities, 3, workspace_info.id, None);
+        assert!(
+            workspace
+                .join(".genethub/sessions")
+                .join(created.id)
+                .join("meta.json")
+                .is_file(),
+            "the current build must retry the compatibility lock without restarting"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_acp_import_is_two_stage_durable_and_non_replayable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        let logs = directory.path().join("logs");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let agent = directory.path().join("fixture-acp");
+        std::fs::write(
+            &agent,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"agentCapabilities":{"sessionCapabilities":{"list":{},"load":{}}}}}'
+      ;;
+    *'"method":"session/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessions":[{"sessionId":"source-session","title":"Imported fixture","updatedAt":123}]}}'
+      ;;
+    *'"method":"session/load"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello from source"}}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"portable imported answer"}}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+      ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&agent).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&agent, permissions).unwrap();
+
+        let mut config = config::Config::default();
+        config.agents.custom.insert(
+            "fixture".to_string(),
+            config::CustomAgent {
+                extends: "acp".to_string(),
+                command: vec![agent.display().to_string()],
+                label: Some("Fixture ACP".to_string()),
+            },
+        );
+        std::fs::write(
+            private.join("config.json"),
+            serde_json::to_vec_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        let mut app = LogicApp::new(boot()).unwrap();
+        let mut capabilities = RealCapabilities::new(&private, &logs);
+        let workspace = open_workspace(&mut app, &mut capabilities, 1, &workspace);
+        let listed = match call(
+            &mut app,
+            &mut capabilities,
+            2,
+            Request::SessionImportList {
+                workspace_id: workspace.id.clone(),
+                limit: Some(10),
+            },
+        )
+        .unwrap()
+        {
+            Reply::SessionImports(listing) => listing,
+            other => panic!("wrong import list reply: {other:?}"),
+        };
+        let candidate = listed
+            .sources
+            .iter()
+            .find(|source| source.agent_id == "acp:fixture")
+            .and_then(|source| source.candidates.first())
+            .expect("the custom ACP source must return an opaque candidate")
+            .clone();
+        assert!(candidate.candidate_id.starts_with("ic_"));
+        assert!(!candidate.candidate_id.contains("source-session"));
+
+        let imported = match call(
+            &mut app,
+            &mut capabilities,
+            3,
+            Request::SessionImport {
+                workspace_id: workspace.id.clone(),
+                candidate_id: candidate.candidate_id.clone(),
+            },
+        )
+        .unwrap()
+        {
+            Reply::Session(session) => session,
+            other => panic!("wrong import reply: {other:?}"),
+        };
+        assert_eq!(imported.imported.as_ref().unwrap().agent_id, "acp:fixture");
+
+        let snapshot = match call(
+            &mut app,
+            &mut capabilities,
+            4,
+            Request::SessionGet {
+                session_id: imported.id,
+            },
+        )
+        .unwrap()
+        {
+            Reply::Snapshot(snapshot) => snapshot,
+            other => panic!("wrong imported snapshot reply: {other:?}"),
+        };
+        assert!(snapshot.items.iter().any(|item| matches!(
+            item,
+            genehub_proto::TimelineItem::UserMessage { text, .. }
+                if text == "hello from source"
+        )));
+        assert!(snapshot.items.iter().any(|item| matches!(
+            item,
+            genehub_proto::TimelineItem::AssistantMessage { text, .. }
+                if text == "portable imported answer"
+        )));
+
+        assert_eq!(
+            call(
+                &mut app,
+                &mut capabilities,
+                5,
+                Request::SessionImport {
+                    workspace_id: workspace.id.clone(),
+                    candidate_id: candidate.candidate_id,
+                },
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::BadRequest,
+            "an opaque candidate is a one-use selection token"
+        );
+        let listed_again = match call(
+            &mut app,
+            &mut capabilities,
+            6,
+            Request::SessionImportList {
+                workspace_id: workspace.id,
+                limit: Some(10),
+            },
+        )
+        .unwrap()
+        {
+            Reply::SessionImports(listing) => listing,
+            other => panic!("wrong second import list reply: {other:?}"),
+        };
+        assert!(listed_again.filtered_duplicates >= 1);
+        assert!(listed_again
+            .sources
+            .iter()
+            .find(|source| source.agent_id == "acp:fixture")
+            .is_some_and(|source| source.candidates.is_empty()));
     }
 }

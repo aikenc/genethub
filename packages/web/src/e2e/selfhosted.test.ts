@@ -114,7 +114,7 @@ describe.skipIf(
 
   /** Everything a new browser does on its own: claim an invite, then connect. */
   async function pairedClient(name: string): Promise<Client> {
-    const invite = await owner.call({ type: "device.invite" });
+    const invite = await owner.call({ type: "device.invite", payload: null });
     if (invite?.type !== "invite") throw new Error("no invite was minted");
     const machine = await claimMachine(
       rendezvous,
@@ -134,7 +134,7 @@ describe.skipIf(
   }
 
   it("lets a paired device in and keeps everyone else out", async () => {
-    const invite = await owner.call({ type: "device.invite" });
+    const invite = await owner.call({ type: "device.invite", payload: null });
     if (invite?.type !== "invite") throw new Error("no invite was minted");
     expect(invite.data.rendezvousUrl).toBe(rendezvous);
 
@@ -236,6 +236,7 @@ describe.skipIf(
         modelId: null,
         modeId: null,
         title: null,
+        cwd: null,
       },
     });
     if (created?.type !== "session") throw new Error("no session was created");
@@ -316,7 +317,7 @@ describe.skipIf(
   }, 70_000);
 
   it("cuts off a revoked device while it is using the connection", async () => {
-    const invite = await owner.call({ type: "device.invite" });
+    const invite = await owner.call({ type: "device.invite", payload: null });
     if (invite?.type !== "invite") throw new Error("no invite was minted");
 
     const machine = await claimMachine(

@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use genehub_proto::{ErrorCode, ProtocolError, Reply, ServerFrame};
 use genet_daemon_logic_api::{
-    CapabilityEvent, CapabilityRequest, CapabilityValue, FileLocator, FileRoot, LogicOutcome,
-    LogicOutput, PtyRequest, Publication,
+    CapabilityEvent, CapabilityRequest, CapabilityValue, ConfinementMode, FileLocator, FileRoot,
+    LogicOutcome, LogicOutput, PtyRequest, Publication,
 };
 
 use crate::capability::Client;
@@ -15,6 +15,7 @@ pub fn open(
     workspace: &WorkspaceEntry,
     cols: u16,
     rows: u16,
+    confinement_required: bool,
     executor: &mut impl CapabilityExecutor,
     next: &mut u64,
 ) -> Result<String, ProtocolError> {
@@ -23,12 +24,27 @@ pub fn open(
         .first()
         .ok_or_else(|| bad_request("workspace has no folders"))?;
     let mut client = Client::new(executor, next);
+    let roots = workspace
+        .folders
+        .iter()
+        .map(|folder| FileLocator {
+            root: FileRoot::Workspace {
+                handle: folder.root_handle.clone(),
+            },
+            path: String::new(),
+        })
+        .collect();
     let resource_id = match client.call(CapabilityRequest::Pty(PtyRequest::Open {
         cwd: FileLocator {
             root: FileRoot::Workspace {
                 handle: folder.root_handle.clone(),
             },
             path: String::new(),
+        },
+        confinement: if confinement_required {
+            ConfinementMode::Workspace { roots }
+        } else {
+            ConfinementMode::None
         },
         cols,
         rows,

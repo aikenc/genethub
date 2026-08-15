@@ -57,6 +57,7 @@ export function DesktopToolsDrawer({
           <Entry label="Changes" onClick={() => openPanel("changes")} />
           <Entry label="文件" onClick={() => openPanel("files")} />
           <Entry label="终端" onClick={() => go("terminal")} />
+          <Entry label="后台进程" onClick={() => go("processes")} />
           <Entry label="设备" onClick={() => go("devices")} />
           {extraTabs.map((tab) => (
             <Entry key={tab.id} label={tab.label} onClick={() => go(`extra:${tab.id}`, tab.label)} />

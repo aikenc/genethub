@@ -1,9 +1,9 @@
 //! The same journey, driven through a third-party agent.
 //!
-//! OpenCode is the adapter that does not look like the others: an HTTP server
-//! with a separate event stream instead of a child process on stdio. Running a
-//! real one here is the only way to know the normalized layer is an abstraction
-//! rather than a rename of the built-in agent's transport
+//! OpenCode runs one official `run --format json` process per turn and resumes
+//! through its own session id. Running a real one here is the only way to know
+//! the normalized layer handles that lifecycle rather than merely renaming the
+//! built-in agent's long-lived stdio transport
 //! (`docs/architecture.md` §3.3).
 //!
 //! Everything except the model is real, as everywhere else: OpenCode is the
@@ -50,8 +50,8 @@ async fn a_third_party_agent_reaches_the_same_timeline_as_the_built_in_one() {
         .await
         .expect("prompt accepted");
     let events = journey.client.drain_turn().await.expect("the turn ends");
-    // OpenCode streams the prompt back as part of the conversation, which is
-    // exactly the echo case this shared assertion exists to catch.
+    // Some OpenCode versions echo the prompt in their JSON stream, which is
+    // exactly the case this shared assertion exists to catch.
     assert_normalized_reply(&events, PROMPT);
 
     journey.finish().await;

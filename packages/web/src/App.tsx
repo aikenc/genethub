@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from "react";
+import type { HistoryCoverage } from "@genehub/proto";
 
 import { ChangesPanel } from "./changes/ChangesPanel";
 import { claimMachine, deviceName } from "./devices/claim";
+import { emitClientDiagnostic } from "./diagnostics";
 import { DevicesPanel } from "./devices/DevicesPanel";
 import { FilesPanel } from "./files/FilesPanel";
+import { BackgroundBadge } from "./processes/BackgroundBadge";
+import { ProcessesPanel } from "./processes/ProcessesPanel";
 import { detectHost, type Endpoint, type Host } from "./host";
 import type { Target } from "./host";
 import { LogsPanel } from "./logs/LogsPanel";
@@ -14,6 +18,8 @@ import { readRtcEnabled } from "./settings/rtc";
 import { Composer, type ComposerPhase } from "./session/Composer";
 import { PermissionCard } from "./session/Permission";
 import { TimelineView } from "./session/TimelineView";
+import type { ForkController } from "./session/TimelineView";
+import type { ForkMachineOption } from "./session/ForkDialog";
 import { defaultAgent, useWorkbench } from "./session/store";
 import { Sidebar } from "./shell/Sidebar";
 import { DesktopToolsDrawer } from "./shell/DesktopToolsDrawer";
@@ -26,6 +32,7 @@ import { TerminalPanel } from "./terminal/TerminalPanel";
 import { UpdateToast } from "./updates/UpdateToast";
 import { OpenProject } from "./workspace/OpenProject";
 import { WorkspaceIcon } from "./workspace/WorkspaceIcon";
+import type { SpeechInputProblem } from "./speech/useSpeechInput";
 
 /**
  * Both defaults live out here, and they have to.
@@ -47,6 +54,7 @@ const openConnection = (
     fabricRouteTicket: endpoint.fabricRouteTicket,
     localServerProof: endpoint.localServerProof,
     rtcEnabled: readRtcEnabled(),
+    onDiagnostic: emitClientDiagnostic,
   });
 
 /**
@@ -62,6 +70,7 @@ export function App({
   welcome,
   mobileTools,
   desktopTools,
+  onReportSpeechProblem,
 }: {
   host?: Host;
   /**
@@ -91,6 +100,8 @@ export function App({
   mobileTools?: React.ReactNode;
   /** Product-specific actions shown with the workbench tools on desktop. */
   desktopTools?: React.ReactNode;
+  /** Opens the embedding product's feedback flow with content-free speech metadata. */
+  onReportSpeechProblem?(problem: SpeechInputProblem): void;
 }) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">(
     "loading",
@@ -114,6 +125,7 @@ export function App({
   // desktop asking for the room back, which starts false because the left
   // column is how the workbench is read.
   const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [pendingForkSession, setPendingForkSession] = useState<string | null>(null);
   const workbench = useWorkbench();
   const theme = useTheme((state) => state.resolved);
   const pairing = workbench.hub?.state === "pairing";
@@ -150,6 +162,7 @@ export function App({
   const draft = workbench.draft;
   const agentId = session?.agentId ?? draft?.agentId ?? null;
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
+  const importedReadOnly = session?.imported?.continuation === "readOnly";
   const composing = Boolean(workbench.activeSessionId || draft);
   const composerSpace = `calc(${composerHeight}px + var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)) + 0.5rem)`;
 
@@ -283,6 +296,21 @@ export function App({
     return () => client.close();
   }, [endpoint, connect, host, target]);
 
+  useEffect(() => {
+    if (
+      !pendingForkSession ||
+      workbench.connection !== "ready" ||
+      !workbench.sessions.some((entry) => entry.id === pendingForkSession)
+    ) return;
+    const sessionId = pendingForkSession;
+    setPendingForkSession(null);
+    void useWorkbench.getState().selectSession(sessionId).catch((error: unknown) => {
+      useWorkbench.setState({
+        notice: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }, [pendingForkSession, workbench.connection, workbench.sessions]);
+
   const pickTarget = (picked: Target, next: Endpoint) => {
     // The local machine goes back to following the shell, which is the only
     // thing that knows where its daemon moved to.
@@ -294,6 +322,122 @@ export function App({
       current !== "loading" && current?.url === next.url ? current : next,
     );
   };
+
+  const sourceMachineId = workbench.client?.identity?.machineId ?? "current";
+  const sourceMachine: ForkMachineOption = {
+    id: sourceMachineId,
+    routeId: target ?? sourceMachineId,
+    label:
+      endpoint !== "loading" && endpoint !== null ? endpoint.label : "当前机器",
+    kind: target === null && host.kind === "desktop" ? "local" : "remote",
+    online: workbench.connection === "ready",
+  };
+  const forkController: ForkController | undefined =
+    host.targets && host.openTarget
+      ? {
+          sourceMachine,
+          async listMachines() {
+            const listed = await host.targets!();
+            const machines = listed.map((machine): ForkMachineOption => ({
+              id: machine.deviceHandle ?? machine.id,
+              routeId: machine.id,
+              label: machine.label,
+              kind: machine.kind,
+              ...(machine.online === undefined ? {} : { online: machine.online }),
+            }));
+            const current = machines.find((machine) => machine.id === sourceMachine.id);
+            if (current) {
+              current.label = sourceMachine.label;
+              current.online = true;
+            } else {
+              machines.unshift(sourceMachine);
+            }
+            return machines;
+          },
+          async loadCatalog(machine) {
+            if (machine.id === sourceMachine.id) {
+              const state = useWorkbench.getState();
+              return { agents: state.agents, workspaces: state.workspaces };
+            }
+            return withForkClient(
+              connect,
+              await host.openTarget!(machine.routeId, { remember: false }),
+              async () => dialOf(await host.openTarget!(machine.routeId, { remember: false })),
+              async (client) => {
+                const [agents, workspaces] = await Promise.all([
+                  client.call({ type: "agent.list" }),
+                  client.call({ type: "workspace.list" }),
+                ]);
+                if (agents?.type !== "agents" || workspaces?.type !== "workspaces") {
+                  throw new Error("目标机器没有返回可用的 Agent 和工作区列表。");
+                }
+                return { agents: agents.data, workspaces: workspaces.data };
+              },
+            );
+          },
+          async fork(turnId, selection) {
+            const state = useWorkbench.getState();
+            const source = state.sessions.find((entry) => entry.id === state.activeSessionId);
+            if (!source || !state.client) return false;
+            const unchanged =
+              selection.machine.id === sourceMachine.id &&
+              selection.workspaceId === source.workspaceId &&
+              selection.agentId === source.agentId;
+            if (selection.machine.id === sourceMachine.id) {
+              return state.forkSession(
+                turnId,
+                unchanged
+                  ? undefined
+                  : {
+                      agentId: selection.agentId,
+                      workspaceId: selection.workspaceId,
+                    },
+              );
+            }
+
+            const exported = await state.client.call({
+              type: "session.forkExport",
+              payload: { sessionId: source.id, turnId },
+            });
+            if (exported?.type !== "forkTransfer") {
+              throw new Error("源机器没有返回可迁移的 Fork 历史。");
+            }
+            const created = await withForkClient(
+              connect,
+              await host.openTarget!(selection.machine.routeId, { remember: false }),
+              async () => dialOf(
+                await host.openTarget!(selection.machine.routeId, { remember: false }),
+              ),
+              (client) => client.call({
+                type: "session.forkImport",
+                payload: {
+                  transfer: exported.data,
+                  target: {
+                    agentId: selection.agentId,
+                    workspaceId: selection.workspaceId,
+                  },
+                },
+              }),
+            );
+            if (created?.type !== "session") {
+              throw new Error("目标机器没有创建 Fork 会话。");
+            }
+            const next = await host.openTarget!(selection.machine.routeId);
+            setPendingForkSession(created.data.id);
+            pickTarget(
+              {
+                id: selection.machine.routeId,
+                deviceHandle: selection.machine.id,
+                label: selection.machine.label,
+                kind: selection.machine.kind,
+                online: true,
+              },
+              next,
+            );
+            return true;
+          },
+        }
+      : undefined;
 
   if (claiming === "working") return <Splash>正在和这台机器配对…</Splash>;
   if (claiming !== "idle") {
@@ -399,6 +543,7 @@ export function App({
                 {workbench.connection === "closed" ? "已断开" : "连接中…"}
               </span>
             )}
+            <BackgroundBadge />
             <button
               type="button"
               aria-label="工作区工具"
@@ -432,13 +577,31 @@ export function App({
               </button>
             </p>
           ) : null}
+          {session?.imported ? (
+            <div className="shrink-0 border-b border-line bg-raised px-3 py-1.5 text-xs text-muted">
+              <span>
+                已从 {session.imported.agentId} 导入 · {session.imported.continuation === "native" ? "可继续对话" : "只读历史"}
+              </span>
+              {session.imported.warnings.map((warning) => (
+                <span key={warning} className="ml-2 text-faint">
+                  {warning}
+                </span>
+              ))}
+              {session.imported.coverage ? (
+                <span className="ml-2 text-faint">
+                  {importCoverageLabel(session.imported.coverage)}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
 
           <div className="flex min-h-0 flex-1">
             <section className="relative flex min-w-0 flex-1 flex-col">
               {showChat ? (
                 composing ? (
                   <>
-                    <div className="hidden items-center justify-end border-b border-line px-3 py-1 md:flex">
+                    <div className="hidden items-center justify-end gap-2 border-b border-line px-3 py-1 md:flex">
+                      <BackgroundBadge />
                       <ConnectionBadge
                         state={workbench.connection}
                         endpoint={endpoint}
@@ -448,7 +611,10 @@ export function App({
                       className="min-h-0 flex-1 overflow-hidden"
                       style={{ paddingBottom: composerSpace }}
                     >
-                      <TimelineView state={workbench.timeline} />
+                      <TimelineView
+                        state={workbench.timeline}
+                        {...(forkController ? { forkController } : {})}
+                      />
                     </div>
                     {workbench.timeline.pendingPermission ? (
                       <div
@@ -467,6 +633,12 @@ export function App({
                     ) : null}
                     <Composer
                       phase={phase}
+                      disabled={importedReadOnly}
+                      disabledReason={
+                        importedReadOnly
+                          ? "这是只读导入历史：原 Agent 没有提供可恢复会话。"
+                          : undefined
+                      }
                       agents={workbench.agents}
                       agentId={agentId}
                       modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}
@@ -484,7 +656,31 @@ export function App({
                       }
                       commands={currentAgent?.catalog.commands}
                       restoreDraft={workbench.restoreDraft}
+                      insertDraft={
+                        workbench.composerDraftInserts.find(
+                          (insert) => insert.sessionId === workbench.activeSessionId,
+                        ) ?? null
+                      }
+                      speech={
+                        workbench.client &&
+                        workbench.activeWorkspaceId &&
+                        workbench.client.identity?.features?.includes("speech.transcribe.v2")
+                          ? {
+                              client: workbench.client,
+                              workspaceId: workbench.activeWorkspaceId,
+                              ...(workbench.activeSessionId
+                                ? { sessionId: workbench.activeSessionId }
+                                : {}),
+                              onOpenSettings: () => workbench.openTab("settings"),
+                              onOpenLogs: () => workbench.openTab("logs"),
+                              ...(onReportSpeechProblem
+                                ? { onReportProblem: onReportSpeechProblem }
+                                : {}),
+                            }
+                          : undefined
+                      }
                       onRestoreDraft={workbench.restoredDraft}
+                      onInsertDraft={workbench.consumedComposerDraftInsert}
                       onHeightChange={setComposerHeight}
                       onSend={(text, attachments) =>
                         void workbench.send(text, attachments)
@@ -533,6 +729,11 @@ export function App({
               {kind === "devices" ? (
                 <div className="min-h-0 flex-1 overflow-y-auto">
                   <DevicesPanel host={host} />
+                </div>
+              ) : null}
+              {kind === "processes" ? (
+                <div className="min-h-0 flex-1">
+                  <ProcessesPanel />
                 </div>
               ) : null}
               {extraTabs.map((tab) =>
@@ -584,6 +785,58 @@ export function App({
       ) : null}
     </div>
   );
+}
+
+function importCoverageLabel(coverage: HistoryCoverage): string {
+  if (coverage.omittedItemCount === 0) {
+    return `历史完整（${coverage.retainedItemCount} 条）`;
+  }
+  const source = coverage.sourceItemCount ?? coverage.retainedItemCount + coverage.omittedItemCount;
+  const recovery = {
+    genehub: "可在 GeneHub 继续检索",
+    external: "需从原 Agent 继续检索",
+    nativeOnly: "仅原 Agent 原生会话可找回",
+    unavailable: "省略部分不可找回",
+  }[coverage.retrieval];
+  return `保留 ${coverage.retainedItemCount}/${source} 条，省略 ${coverage.omittedItemCount} 条 · ${recovery}`;
+}
+
+async function withForkClient<T>(
+  connect: (
+    endpoint: Endpoint,
+    redial: () => Promise<string | ProtocolDial>,
+  ) => Client,
+  endpoint: Endpoint,
+  redial: () => Promise<string | ProtocolDial>,
+  exchange: (client: Client) => Promise<T>,
+): Promise<T> {
+  const client = connect(endpoint, redial);
+  let stop = () => {};
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const ready = client.connectionState === "ready"
+    ? Promise.resolve()
+    : new Promise<void>((resolve, reject) => {
+        timer = setTimeout(() => {
+          stop();
+          reject(new Error("目标机器连接超时。"));
+        }, 8_000);
+        stop = client.onStateChange((state) => {
+          if (state !== "ready" && state !== "closed") return;
+          if (timer !== null) clearTimeout(timer);
+          stop();
+          if (state === "ready") resolve();
+          else reject(new Error(client.failure?.message ?? "目标机器连接已关闭。"));
+        });
+      });
+  client.connect();
+  try {
+    await ready;
+    return await exchange(client);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    stop();
+    client.close();
+  }
 }
 
 function dialOf(endpoint: Endpoint): ProtocolDial {

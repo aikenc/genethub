@@ -9,6 +9,13 @@ import type {
 import { useEffect, useRef, useState } from "react";
 import { stringify as toYaml } from "yaml";
 
+import { canStartAgent } from "../presentation/catalog/resolve";
+import {
+  ForkDialog,
+  type ForkCatalog,
+  type ForkMachineOption,
+  type ForkSelection,
+} from "./ForkDialog";
 import { Markdown } from "./Markdown";
 
 import { attachmentPreviewUrl } from "./attachments";
@@ -50,18 +57,43 @@ function LogLink() {
   );
 }
 
-export function TimelineView({ state }: { state: TimelineState }) {
+export interface ForkController {
+  sourceMachine: ForkMachineOption;
+  listMachines(): Promise<ForkMachineOption[]>;
+  loadCatalog(machine: ForkMachineOption): Promise<ForkCatalog>;
+  fork(turnId: string, selection: ForkSelection): Promise<boolean>;
+}
+
+const CURRENT_MACHINE: ForkMachineOption = {
+  id: "current",
+  routeId: "current",
+  label: "当前机器",
+  kind: "local",
+  online: true,
+};
+
+export function TimelineView({
+  state,
+  forkController,
+}: {
+  state: TimelineState;
+  forkController?: ForkController;
+}) {
   const bottom = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
+  const [forkRequest, setForkRequest] = useState<{
+    turnId: string;
+    hasNativeCheckpoint: boolean;
+  } | null>(null);
   const forkSession = useWorkbench((workbench) => workbench.forkSession);
   const rounds = useWorkbench((workbench) => workbench.timeline.rounds);
   const activeSessionId = useWorkbench((workbench) => workbench.activeSessionId);
-  const canFork = useWorkbench((workbench) => {
-    const session = workbench.sessions.find((entry) => entry.id === activeSessionId);
-    const agent = workbench.agents.find((entry) => entry.id === session?.agentId);
-    return agent?.capabilities.fork ?? false;
-  });
+  const sessions = useWorkbench((workbench) => workbench.sessions);
+  const agents = useWorkbench((workbench) => workbench.agents);
+  const workspaces = useWorkbench((workbench) => workbench.workspaces);
+  const activeSession = sessions.find((entry) => entry.id === activeSessionId);
+  const canFork = Boolean(activeSession && agents.some(canStartAgent));
   const agentLabel = useWorkbench((workbench) => {
     const session = workbench.sessions.find((entry) => entry.id === activeSessionId);
     return workbench.agents.find((entry) => entry.id === session?.agentId)?.label ?? null;
@@ -78,85 +110,117 @@ export function TimelineView({ state }: { state: TimelineState }) {
   }, [state.items, state.pending, rounds, pinned]);
 
   return (
-    <div
-      ref={scroller}
-      className="mx-auto h-full min-w-0 max-w-chat flex-1 space-y-4 overflow-x-hidden overflow-y-auto px-4 py-6"
-      data-testid="timeline"
-      onScroll={(event) => {
-        const element = event.currentTarget;
-        const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
-        setPinned(distance < 40);
-      }}
-    >
-      {contextualTurns.map(
-        ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
-          const hasRound = Boolean(round);
-          const narrative =
-            rounds.length === 0
-              ? turn.items
-              : turn.items.filter(
-                  (item) =>
-                    item.type !== "reasoning" &&
-                    item.type !== "toolCall" &&
-                    (!hasRound || item.type !== "assistantMessage"),
-                );
-          return (
-            <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
-              {narrative.map((item) => <Item key={item.id} item={item} />)}
-              {startedRounds.map((startedRound) => (
-                <RoundProgress
-                  key={startedRound.roundId}
-                  round={startedRound}
-                  finalSummaryText={roundFinalText}
-                />
-              ))}
-              {finalAssistant ? <Item item={finalAssistant} /> : null}
-              {turn.stats ? (
-                <TurnFooter
-                  stats={turn.stats}
-                  text={hasRound ? (finalAssistant?.text ?? "") : assistantText(turn.items)}
-                  canFork={canFork && Boolean(turn.stats.forkCheckpoint)}
-                  onFork={() => void forkSession(turn.stats!.turnId)}
-                />
-              ) : index === turns.length - 1 && state.activeTurn ? (
-                <TurnFooter
-                  liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
-                  liveTools={countTools(turn.items)}
-                  text={hasRound ? "" : assistantText(turn.items)}
-                  canFork={false}
-                />
-              ) : null}
-            </section>
-          );
-        },
-      )}
+    <>
+      <div
+        ref={scroller}
+        className="mx-auto h-full min-w-0 max-w-chat flex-1 space-y-4 overflow-x-hidden overflow-y-auto px-4 py-6"
+        data-testid="timeline"
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
+          setPinned(distance < 40);
+        }}
+      >
+        {contextualTurns.map(
+          ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
+            const hasRound = Boolean(round);
+            const narrative =
+              rounds.length === 0
+                ? turn.items
+                : turn.items.filter(
+                    (item) =>
+                      item.type !== "reasoning" &&
+                      item.type !== "toolCall" &&
+                      (!hasRound || item.type !== "assistantMessage"),
+                  );
+            return (
+              <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
+                {narrative.map((item) => <Item key={item.id} item={item} />)}
+                {startedRounds.map((startedRound) => (
+                  <RoundProgress
+                    key={startedRound.roundId}
+                    round={startedRound}
+                    finalSummaryText={roundFinalText}
+                  />
+                ))}
+                {finalAssistant ? <Item item={finalAssistant} /> : null}
+                {turn.stats ? (
+                  <TurnFooter
+                    stats={turn.stats}
+                    text={hasRound ? (finalAssistant?.text ?? "") : assistantText(turn.items)}
+                    canFork={canFork}
+                    onFork={() =>
+                      setForkRequest({
+                        turnId: turn.stats!.turnId,
+                        hasNativeCheckpoint: Boolean(turn.stats!.forkCheckpoint),
+                      })
+                    }
+                  />
+                ) : index === turns.length - 1 && state.activeTurn ? (
+                  <TurnFooter
+                    liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
+                    liveTools={countTools(turn.items)}
+                    text={hasRound ? "" : assistantText(turn.items)}
+                    canFork={false}
+                  />
+                ) : null}
+              </section>
+            );
+          },
+        )}
 
-      {rounds
-        .filter(
-          (round) =>
-            !round.userItemId ||
-            !state.items.some(
-              (item) => item.type === "userMessage" && item.id === round.userItemId,
-            ),
-        )
-        .map((round) => <RoundProgress key={round.roundId} round={round} />)}
+        {rounds
+          .filter(
+            (round) =>
+              !round.userItemId ||
+              !state.items.some(
+                (item) => item.type === "userMessage" && item.id === round.userItemId,
+              ),
+          )
+          .map((round) => <RoundProgress key={round.roundId} round={round} />)}
 
-      {state.pending ? (
-        <PendingBubble pending={state.pending} agentLabel={agentLabel} />
+        {state.pending ? (
+          <PendingBubble pending={state.pending} agentLabel={agentLabel} />
+        ) : null}
+
+        {state.lastError ? (
+          <div
+            className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-danger"
+            role="alert"
+          >
+            <p>{state.lastError.message}</p>
+            <LogLink />
+          </div>
+        ) : null}
+
+        <div ref={bottom} />
+      </div>
+      {forkRequest && activeSession ? (
+        <ForkDialog
+          sourceMachine={forkController?.sourceMachine ?? CURRENT_MACHINE}
+          sourceWorkspaceId={activeSession.workspaceId}
+          sourceAgentId={activeSession.agentId}
+          sourceCatalog={{ agents, workspaces }}
+          hasNativeCheckpoint={forkRequest.hasNativeCheckpoint}
+          listMachines={forkController?.listMachines}
+          loadCatalog={forkController?.loadCatalog}
+          onClose={() => setForkRequest(null)}
+          onConfirm={(selection) => {
+            if (forkController) return forkController.fork(forkRequest.turnId, selection);
+            const unchanged =
+              selection.machine.id === CURRENT_MACHINE.id &&
+              selection.workspaceId === activeSession.workspaceId &&
+              selection.agentId === activeSession.agentId;
+            return forkSession(
+              forkRequest.turnId,
+              unchanged
+                ? undefined
+                : { agentId: selection.agentId, workspaceId: selection.workspaceId },
+            );
+          }}
+        />
       ) : null}
-
-      {state.lastError ? (
-        <div
-          className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-danger"
-          role="alert"
-        >
-          <p>{state.lastError.message}</p>
-          <LogLink />
-        </div>
-      ) : null}
-
-      <div ref={bottom} />
-    </div>
+    </>
   );
 }
 
@@ -485,7 +549,12 @@ function TrunkCard({
         <span className="shrink-0" aria-hidden="true">
           🧭
         </span>
-        <span className="min-w-0 flex-1 break-words text-sm font-medium">
+        <span
+          className={`min-w-0 flex-1 text-sm font-medium ${
+            open ? "whitespace-pre-wrap break-words" : "truncate"
+          }`}
+          title={trunkTitle}
+        >
           {trunkTitle}
         </span>
         <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>
@@ -534,7 +603,12 @@ function BatchCard({ batch, active }: { batch: RoundBatch; active: boolean }) {
         <span className="shrink-0" aria-hidden="true">
           💭
         </span>
-        <span className="min-w-0 flex-1 break-words text-xs">
+        <span
+          className={`min-w-0 flex-1 text-xs ${
+            open ? "whitespace-pre-wrap break-words" : "truncate"
+          }`}
+          title={monologue.first || batch.summary.text}
+        >
           {monologue.first || batch.summary.text}
         </span>
         <span className="shrink-0 text-xs text-muted">{batch.summary.blobCount} 项</span>
@@ -570,8 +644,16 @@ function splitMonologue(monologue: string): { first: string; rest: string } {
   const lines = monologue.replace(/\r\n/gu, "\n").split("\n");
   while (lines[0]?.trim() === "") lines.shift();
   const firstLine = lines.shift()?.trim() ?? "";
-  const sentenceEnd = firstLine.search(/[。！？!?]|[.](?=\s|$)/u);
-  const end = sentenceEnd < 0 ? firstLine.length : sentenceEnd + 1;
+  const ends = [...firstLine.matchAll(/[。！？!?]|[.](?=\s|$)/gu)];
+  const longEnough = ends.find(
+    (match) =>
+      [...firstLine.slice(0, (match.index ?? 0) + match[0].length)].filter(
+        (character) => !/\s/u.test(character),
+      ).length > 15,
+  );
+  const end = longEnough
+    ? (longEnough.index ?? 0) + longEnough[0].length
+    : firstLine.length;
   const first = firstLine.slice(0, end).trim().replace(/(?:\.{3}|…)+$/u, "");
   const sameLineRest = firstLine.slice(end).trim();
   const rest = [sameLineRest, ...lines].filter(Boolean).join("\n").trim();
@@ -807,10 +889,10 @@ function TurnFooter({
   const usage = stats?.usage;
   const tools = stats?.toolCalls ?? liveTools;
   const forkTitle = canFork
-    ? "从这个 turn 创建独立分支"
+    ? "从这个 turn 创建分支并选择 Agent"
     : live
       ? "turn 完成后才能 Fork"
-      : "当前 Agent 不支持从这个 turn Fork";
+      : "当前没有可用的目标 Agent";
 
   return (
     <footer className="ml-auto max-w-full text-xs text-muted" data-testid="turn-footer">

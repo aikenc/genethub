@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use genet_daemon_logic_api::{
     CapabilityBatch, CapabilityCall, CapabilityEvent, CapabilityFailureKind, CapabilityRequest,
-    CapabilityValue, FileLocator, FileRequest, FileRoot, HttpRequest, ProcessRequest, ProcessSpec,
-    PtyRequest, RedirectPolicy, RtcRequest, SocketRequest, MAX_CAPABILITY_BATCH,
+    CapabilityValue, FileLocator, FileRequest, FileRoot, HttpRequest, ProcessDialogueStep,
+    ProcessRequest, ProcessSpec, PtyRequest, RedirectPolicy, RtcRequest, SocketRequest,
+    MAX_CAPABILITY_BATCH,
 };
 use genet_daemon_system::SystemHost;
 
@@ -88,6 +89,17 @@ async fn private_and_workspace_files_are_bounded_atomic_and_rooted() {
     .await
     .result
     .is_ok());
+    let root_locator = FileLocator {
+        root: FileRoot::Workspace {
+            handle: "r_test".into(),
+        },
+        path: String::new(),
+    };
+    assert_eq!(
+        host.workspace_path(&root_locator).await.unwrap(),
+        workspace.canonicalize().unwrap(),
+        "a locator for the root must preserve its canonical spelling"
+    );
     let locator = FileLocator {
         root: FileRoot::Workspace {
             handle: "r_test".into(),
@@ -259,6 +271,7 @@ async fn process_streams_are_ordered_and_survive_the_request_that_spawned_them()
                 root: FileRoot::NativePath,
                 path: root.path().display().to_string(),
             }),
+            confinement: genet_daemon_logic_api::ConfinementMode::None,
             capture_stdout: true,
             capture_stderr: true,
         })),
@@ -323,6 +336,54 @@ async fn process_streams_are_ordered_and_survive_the_request_that_spawned_them()
 
 #[cfg(unix)]
 #[tokio::test]
+async fn process_dialogue_preserves_one_process_across_bounded_request_steps() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SystemHost::new(root.path().join("private"), root.path().join("logs")).unwrap();
+    let result = one(
+        &host,
+        CapabilityRequest::Process(ProcessRequest::Dialogue {
+            spec: ProcessSpec {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "while IFS= read -r line; do printf 'reply:%s\\n' \"$line\"; done".into(),
+                ],
+                env: BTreeMap::new(),
+                cwd: Some(FileLocator {
+                    root: FileRoot::NativePath,
+                    path: root.path().display().to_string(),
+                }),
+                confinement: genet_daemon_logic_api::ConfinementMode::None,
+                capture_stdout: true,
+                capture_stderr: true,
+            },
+            steps: vec![
+                ProcessDialogueStep {
+                    stdin: b"first\n".to_vec(),
+                    wait_for_line: b"reply:first".to_vec(),
+                },
+                ProcessDialogueStep {
+                    stdin: b"second\n".to_vec(),
+                    wait_for_line: b"reply:second".to_vec(),
+                },
+            ],
+            timeout_millis: 5_000,
+            max_stdout_bytes: 1024,
+            max_stderr_bytes: 1024,
+        }),
+    )
+    .await
+    .result
+    .unwrap();
+    assert!(matches!(
+        result,
+        CapabilityValue::ProcessCompleted { stdout, stderr, .. }
+            if stdout == b"reply:first\nreply:second\n" && stderr.is_empty()
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn pty_output_and_close_are_resource_events() {
     let root = tempfile::tempdir().unwrap();
     let host = SystemHost::new(root.path().join("private"), root.path().join("logs")).unwrap();
@@ -334,6 +395,7 @@ async fn pty_output_and_close_are_resource_events() {
                 root: FileRoot::NativePath,
                 path: root.path().display().to_string(),
             },
+            confinement: genet_daemon_logic_api::ConfinementMode::None,
             cols: 80,
             rows: 24,
             env: BTreeMap::new(),

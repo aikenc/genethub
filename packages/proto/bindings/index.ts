@@ -19,13 +19,35 @@ export type AssetPreviewMetadata = { kind: AssetPreviewKind, mediaType: string, 
  */
 version: string, };
 
-export type AssetPreviewRequest = { source: WorkspaceFileSource, };
+export type AssetPreviewRequest = { source: WorkspaceFileSource, 
+/**
+ * Opaque per-operation id used only to correlate the browser and daemon's
+ * bounded diagnostic rings. It carries no account, workspace or path data.
+ */
+diagnosticId?: string, };
 
 export type Attachment = { name: string, mime: string, path?: string, 
 /**
  * Inline payload, base64. Only set for small pastes such as screenshots.
  */
 dataBase64?: string, };
+
+/**
+ * A process an agent started and did not stop.
+ *
+ * Assembled from what the operating system says rather than from what was
+ * recorded when it started, because we did not start it — the agent did, and
+ * what it started is only visible from the outside.
+ */
+export type BackgroundProcess = { 
+/**
+ * The conversation whose agent is answerable for this.
+ */
+sessionId: string, pid: number, parentPid: number, 
+/**
+ * The full command line, as the operating system reports it.
+ */
+command: string, runningForSeconds: number, };
 
 export type BlobKind = "reasoning" | "toolCall";
 
@@ -106,6 +128,24 @@ name: string, description?: string,
 argumentHint?: string, };
 
 /**
+ * What the operating system is holding a process to, told to whoever asked
+ * for the process.
+ *
+ * Without this a confined caller has to infer the rule from the symptoms, and
+ * the symptoms differ by backend: a namespace makes the rest of the filesystem
+ * *absent* (`ENOENT`), Landlock leaves it there and *refuses* it (`EACCES`).
+ * An agent reading "no such file" concludes the directory does not exist and
+ * sets about creating it. Saying the rule up front is cheaper than every
+ * caller guessing it wrong differently.
+ */
+export type Confinement = { backend: IsolationBackend, 
+/**
+ * Absolute paths the process can reach and write. Everything outside them
+ * is absent or refused; which of the two depends on `backend`.
+ */
+roots: Array<string>, };
+
+/**
  * A client proving it is on the authorized list, without sending its secret.
  */
 export type DeviceAuth = { deviceId: string, 
@@ -137,7 +177,12 @@ export type DeviceInfo = { id: string, name: string, pairedAt: string, lastSeenA
 /**
  * True while this device has a live connection to the machine.
  */
-connected: boolean, };
+connected: boolean, 
+/**
+ * What this device may ask for. Absent from machines that predate grants,
+ * where every authorized device could do everything.
+ */
+grants?: Array<string>, };
 
 /**
  * A one-time chance to become an authorized device.
@@ -155,7 +200,12 @@ export type DeviceInvite = { code: string,
  * a relay first for that reason; privileged LAN transport is deliberately
  * unsupported.
  */
-rendezvousUrl?: string, expiresAt: string, };
+rendezvousUrl?: string, expiresAt: string, 
+/**
+ * What redeeming this invitation will be worth. Shown before anyone
+ * accepts it, because a grant nobody was told about is not a choice.
+ */
+grants?: Array<string>, };
 
 export type DirectoryEntry = { name: string, path: string, };
 
@@ -163,9 +213,13 @@ export type DirectoryListing = { path: string, parent: string | null, directorie
 /**
  * Openable VS Code workspace definitions in this directory.
  */
-workspaceFiles: Array<DirectoryEntry>, };
+workspaceFiles: Array<DirectoryEntry>, 
+/**
+ * Machine roots view (Windows drives). Not a selectable project folder.
+ */
+roots: boolean, };
 
-export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "protocolVersion";
+export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "protocolVersion" | "isolationUnavailable";
 
 /**
  * The first encrypted record on a client-opened logical stream.
@@ -184,6 +238,42 @@ path: string, isDir: boolean, size?: number,
  */
 children?: Array<FileNode>, };
 
+/**
+ * What a bounded reconstructed fork carried into its target Agent.
+ */
+export type ForkContextStats = { sourceItemCount: number, includedItemCount: number, omittedItemCount: number, estimatedTokens: number, tokenBudget: number, digest: string, };
+
+/**
+ * How a child session obtained the context that precedes its first new turn.
+ *
+ * Native checkpoints preserve the Agent's own thread. Reconstructed context
+ * is deliberately named differently: it is a bounded, provider-agnostic view
+ * of GeneHub's visible history, not a claim that hidden Agent state moved.
+ */
+export type ForkMethod = "nativeCheckpoint" | "reconstructedContext";
+
+/**
+ * The explicit destination chosen in the Fork UI.
+ *
+ * Omitting this object on the RPC keeps the native Fork semantics of the
+ * source machine, workspace and Agent. A client sends it when the user
+ * explicitly switches any destination dimension, which is the opt-in boundary
+ * for reconstructed context.
+ */
+export type ForkTarget = { agentId: string, 
+/**
+ * Required destination workspace for a directed fork. Older clients omit
+ * it and keep the source workspace on the current machine.
+ */
+workspaceId?: string, modelId?: string, modeId?: string, effortId?: string, };
+
+/**
+ * Portable, untrusted material exported by the source daemon for a fork on a
+ * different machine. The destination daemon applies its own Agent catalog,
+ * context budget and workspace validation; clients cannot supply a seed.
+ */
+export type ForkTransfer = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, sourceRoundId?: string, title?: string, items: Array<TimelineItem>, coverage: HistoryCoverage, };
+
 export type GitChange = { path: string, kind: GitChangeKind, staged: boolean, };
 
 export type GitChangeKind = "added" | "modified" | "deleted" | "renamed" | "untracked";
@@ -199,7 +289,22 @@ fingerprint: string, transport: TransportKind, machineName: string,
  * Advertised inside the encrypted data plane. The viewer's local RTC
  * preference still decides whether negotiation is attempted.
  */
-rtcSupported: boolean, };
+rtcSupported: boolean, 
+/**
+ * Additive product capabilities. Older daemons omit this field; clients
+ * must treat that exactly like an empty list rather than guessing support.
+ */
+features?: Array<string>, 
+/**
+ * What this machine can actually enforce on a process it starts on a
+ * caller's behalf. Absent from older daemons, which is why it is optional.
+ */
+isolation?: IsolationInfo, };
+
+/**
+ * Honest coverage for a full, clipped or imported history view.
+ */
+export type HistoryCoverage = { sourceItemCount?: number, retainedItemCount: number, omittedItemCount: number, retrieval: RetrievalCapability, reason?: string, };
 
 /**
  * The ways back into an identity that has no password.
@@ -287,6 +392,12 @@ fabricRouteTicket: string, fabricRouteExpiresAt: string,
  */
 fingerprint: string, };
 
+/**
+ * Whether an imported conversation can keep talking through its original
+ * Agent thread, or is a durable GeneHub transcript only.
+ */
+export type ImportContinuation = "native" | "readOnly";
+
 export type InteractionAnswer = { questionId: string, selectedOptionIds: Array<string>, freeformText?: string, };
 
 export type InteractionOption = { id: string, label: string, };
@@ -297,6 +408,37 @@ export type InteractionQuestion = { id: string, prompt: string, allowMultiple: b
  * Proof of the PSK carried in the fragment half of a pairing link.
  */
 export type InviteAuth = { inviteId: string, nonce: string, proof: string, };
+
+/**
+ * How much of a machine an invitation is worth.
+ *
+ * Its own type rather than a bare list of strings so that the request carrying
+ * it can grow other limits — an expiry, a workspace — without changing shape
+ * again.
+ */
+export type InviteScope = { grants: Array<string>, };
+
+export type IsolationBackend = "landlock" | "namespaces" | "seatbelt" | "appContainer" | "none";
+
+/**
+ * The operating system confinement this machine can put a spawned process in.
+ *
+ * Reported rather than promised. A caller decides whether to run something it
+ * does not fully trust by reading this, so it has to describe what is actually
+ * in force on this kernel right now — not what the build supports and not what
+ * a configuration file asked for.
+ */
+export type IsolationInfo = { backend: IsolationBackend, 
+/**
+ * Whether a confined process would really be confined. False means every
+ * request that needs confinement is refused, never quietly downgraded.
+ */
+enforced: boolean, 
+/**
+ * Why, in a sentence a person can act on. Present whether or not it worked,
+ * because "landlock, abi 4" is as worth saying as "kernel 5.4 has none".
+ */
+detail: string, };
 
 /**
  * Streaming increment for an item already on the timeline.
@@ -444,14 +586,27 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "log", "data": LogTail } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "logicModule", "data": LogicModuleStatus } | { "type": "session", "data": SessionSummary } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "logicModule", "data": LogicModuleStatus } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
  * Prefetches the last round's trunk index and final trunk details in
  * the subscription response.
  */
-expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, 
+/**
+ * Where the agent starts, inside the workspace. Absent means the
+ * workspace root, which is what every client sent before this field
+ * existed. Relative paths resolve against the root; an absolute path
+ * must still fall inside it, and the daemon refuses the rest rather
+ * than clamping — a task silently run in the wrong directory is worse
+ * than one that refused to start.
+ */
+cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+/**
+ * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
+ */
+itemId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.rounds", "payload": { sessionId: string, throughRoundId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.context", "payload": { sessionId: string, throughRoundId: string | null, tokenBudget: number, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
 /**
  * Deprecated wire field. Current clients always send `null`; Preview
  * locators are rebound in the workbench from relative/absolute paths.
@@ -467,7 +622,13 @@ artifactPreviewBaseUrl: string | null,
  * round that already ended, this is treated as a new round — a
  * wrong stitch is a worse failure than an extra round.
  */
-continuesRound: string | null, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+continuesRound: string | null, } } | { "type": "session.artifact.begin", "payload": { sessionId: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } } | { "type": "session.artifact.chunk", "payload": { sessionId: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } } | { "type": "session.artifact.finish", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.artifact.abort", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, 
+/**
+ * Absent is the legacy native-only request. New clients send an
+ * explicit target to opt into provider-agnostic reconstruction when
+ * any destination dimension changes or a native checkpoint cannot be used.
+ */
+target?: ForkTarget, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -484,16 +645,31 @@ dialect: string | null,
 /**
  * Models by hand, for an endpoint that cannot list its own.
  */
-models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payload": { providerId: string, } } | { "type": "log.tail", "payload": { 
+models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payload": { providerId: string, } } | { "type": "speech.capabilities" } | { "type": "speech.settings.setQwen3", "payload": { 
+/**
+ * Selects the deterministic no-model protocol Stub. Optional so an
+ * older client changing prompt terms does not change runtime mode.
+ */
+stubEnabled?: boolean, contextEnabled: boolean, pinnedTerms: Array<string>, languageHints: Array<string>, collectCorrections: boolean, 
+/**
+ * Required when changing project-local correction consent. Optional
+ * for wire compatibility with clients that only change prompt terms.
+ */
+workspaceId?: string, } } | { "type": "speech.runtime.probe" } | { "type": "speech.runtime.configure", "payload": { command: string | null, args: Array<string>, } } | { "type": "speech.context.preview", "payload": { workspaceId: string, sessionId: string | null, draft: string | null, } } | { "type": "speech.feedback.record", "payload": { workspaceId: string, requestId: string, contextSnapshotId: string, candidates: Array<SpeechCandidate>, selectedCandidateId: string, rejectedCandidateId?: string, scope?: SpeechFeedbackScope, scoreKind: SpeechScoreKind, } } | { "type": "log.tail", "payload": { 
 /**
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "daemon.logic.status" } | { "type": "daemon.logic.install", "payload": { path: string, } } | { "type": "daemon.logic.rollback" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite" } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "daemon.logic.status" } | { "type": "daemon.logic.install", "payload": { path: string, } } | { "type": "daemon.logic.rollback" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */
-paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } };
+paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } } | { "type": "process.list" } | { "type": "process.kill", "payload": { sessionId: string, pid: number, } } | { "type": "process.killAll", "payload": { sessionId: string, } };
+
+/**
+ * Whether text outside the retained GeneHub window can be read again.
+ */
+export type RetrievalCapability = "genehub" | "external" | "nativeOnly" | "unavailable";
 
 export type RoundBatch = { summary: RoundBatchSummary, 
 /**
@@ -549,7 +725,43 @@ export type SequencedEvent = { seq: number, sessionId: string, event: SessionEve
 /**
  * Anything the daemon sends to a client.
  */
-export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "desync", sessionId: string, missed: number, };
+export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "processes", processes: Array<BackgroundProcess>, } | { "type": "desync", sessionId: string, missed: number, };
+
+/**
+ * A complete daemon-owned artifact bundle. Chat needs only these locators and
+ * counts; the payload remains on the machine that owns the session.
+ */
+export type SessionArtifactBundle = { relativePath: string, workspacePath: string, manifestPath: string, createdAtMs: number, totalBytes: number, files: Array<SessionArtifactStoredFile>, };
+
+/**
+ * One file the browser intends to place in a session artifact bundle.
+ */
+export type SessionArtifactFile = { name: string, mime: string, bytes: number, };
+
+/**
+ * Daemon-computed identity of one finalized file.
+ */
+export type SessionArtifactStoredFile = { name: string, mime: string, bytes: number, sha256: string, };
+
+/**
+ * Upload lease returned by `session.artifact.begin`.
+ */
+export type SessionArtifactUpload = { uploadId: string, 
+/**
+ * Relative to the physical session directory, e.g.
+ * `artifacts/260813-221500-a3f1`.
+ */
+relativePath: string, 
+/**
+ * Relative to the workspace, so a local Agent can open it directly.
+ */
+workspacePath: string, maxChunkBytes: number, };
+
+/**
+ * Deterministic, model-free context projection used directly by Agents and
+ * as the fallback for reconstructed forks and built-in compaction.
+ */
+export type SessionContext = { source: SessionReadSource, coverage: HistoryCoverage, text: string, references: Array<SessionSourceRef>, retrievalCommands: Array<string>, estimatedTokens: number, tokenBudget: number, digest: string, };
 
 export type SessionEvent = { "type": "turnStarted", turnId: string, 
 /**
@@ -557,6 +769,65 @@ export type SessionEvent = { "type": "turnStarted", turnId: string,
  * with its own wall clock before the event reaches a client.
  */
 startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
+
+/**
+ * One lightweight external conversation returned by the discovery pass.
+ *
+ * `candidate_id` is an expiring daemon-owned token. Provider handles, source
+ * paths and storage details never cross the RPC boundary.
+ */
+export type SessionImportCandidate = { candidateId: string, agentId: string, title: string, preview: string, updatedAtMs: number, continuation: ImportContinuation, };
+
+/**
+ * Result of the lightweight discovery pass. Selecting one candidate performs
+ * the separate full-history import, so opening this dialog stays bounded even
+ * when an Agent owns years of sessions.
+ */
+export type SessionImportListing = { sources: Array<SessionImportSource>, expiresAtMs: number, filteredDuplicates: number, };
+
+/**
+ * Durable, public import origin. The provider-specific source key remains in
+ * daemon metadata and is used only for duplicate detection.
+ */
+export type SessionImportOrigin = { agentId: string, continuation: ImportContinuation, warnings: Array<string>, 
+/**
+ * What GeneHub retained from the provider transcript and whether omitted
+ * history can be recovered. Older imports have no structured answer and
+ * keep this absent rather than pretending their warning prose was parsed.
+ */
+coverage?: HistoryCoverage, };
+
+/**
+ * Discovery is isolated by Agent: one unavailable or incompatible CLI does
+ * not hide importable conversations reported by the others.
+ */
+export type SessionImportSource = { agentId: string, label: string, supported: boolean, candidates: Array<SessionImportCandidate>, error?: string, };
+
+/**
+ * A small structural entry point. It deliberately contains no free-form
+ * transcript text; callers choose a bounded narrative page explicitly.
+ */
+export type SessionInspection = { summary: SessionSummary, source: SessionReadSource, narrativeItemCount: number, roundCount: number, latestRoundId?: string, coverage: HistoryCoverage, layers: Array<string>, };
+
+/**
+ * Durable ancestry for a forked conversation.
+ */
+export type SessionLineage = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, method: ForkMethod, context?: ForkContextStats, };
+
+/**
+ * A recent-first page of narrative items, returned in chronological order.
+ */
+export type SessionNarrativePage = { source: SessionReadSource, items: Array<TimelineItem>, nextCursor?: string, };
+
+/**
+ * Stable identity and waterline shared by every read-only session page.
+ */
+export type SessionReadSource = { sessionId: string, throughRoundId?: string, digest: string, untrusted: boolean, };
+
+/**
+ * A recent-first page of round summaries, returned in chronological order.
+ */
+export type SessionRoundPage = { source: SessionReadSource, rounds: Array<RoundSummary>, nextCursor?: string, };
 
 /**
  * Everything a client needs to render a session from scratch.
@@ -579,6 +850,11 @@ rounds?: Array<RoundSummary>,
  */
 expandedRound?: RoundLayer, };
 
+/**
+ * A durable address carried by compacted context instead of copied detail.
+ */
+export type SessionSourceRef = { id: string, sessionId: string, itemId?: string, roundId?: string, digest?: string, };
+
 export type SessionStatus = "idle" | "running" | "waiting" | "readOnly" | "failed" | "closed";
 
 export type SessionSummary = { id: string, workspaceId: string, agentId: string, 
@@ -593,7 +869,16 @@ title?: string, status: SessionStatus, modelId?: string, modeId?: string, effort
  * conversation is in the user's own project folder, and an unexplained
  * absence is worse than a row that says why it is out of reach.
  */
-unsupported?: UnsupportedFormat, };
+unsupported?: UnsupportedFormat, 
+/**
+ * Present only for a fork. Ordinary and imported sessions can add their
+ * own origin variants later without overloading the Agent binding.
+ */
+lineage?: SessionLineage, 
+/**
+ * Present only for a conversation imported from an Agent's native store.
+ */
+imported?: SessionImportOrigin, };
 
 /**
  * The machine-level settings a client may see and change.
@@ -602,7 +887,242 @@ export type Settings = { providers: Array<ProviderInfo>,
 /**
  * Whether the daemon accepts connections from the local network.
  */
-lanEnabled: boolean, };
+lanEnabled: boolean, 
+/**
+ * Qwen3 speech is independent of LLM providers. GeneHub exposes prompt,
+ * N-best and correction contracts while the model runtime stays local.
+ */
+speech?: SpeechSettings, };
+
+/**
+ * One message from a running command.
+ *
+ * The two output streams stay apart the whole way. A terminal merges them
+ * because a person is reading both at once; a caller that has to tell a
+ * diagnostic from a result cannot un-merge them afterwards.
+ */
+export type ShellFrame = { "type": "stdout", data: string, } | { "type": "stderr", data: string, } | { "type": "exit", 
+/**
+ * Absent when a signal ended the process, which is the one case where
+ * there is no exit status to report.
+ */
+code?: number, signal?: number, 
+/**
+ * Whether the command was ended because it ran out of time rather
+ * than because it finished.
+ *
+ * Not inferable from the rest: a command ended this way reports
+ * exactly what one killed for any other reason reports, and "killed
+ * by SIGKILL" would leave the caller to guess between "it hung" and
+ * "somebody stopped it". The difference decides whether retrying with
+ * a longer limit is sensible.
+ */
+timed_out: boolean, };
+
+/**
+ * What to run on a machine, and where.
+ *
+ * `argv` is a list, never a command line: the machine does not parse it, so
+ * nothing in it can turn into a second command. A caller that wants a shell's
+ * help says so out loud with `["bash", "-lc", "..."]`, and that is then
+ * visibly a shell rather than something that became one by quoting.
+ * The request body, if there is one, is the command's standard input. It is
+ * sent whole rather than as it is typed, because a single exchange cannot
+ * carry a conversation: a command that reads, prints a question and reads
+ * again needs the answer to depend on the question, and that is a terminal
+ * (`pty.open`), not this. What this covers is the input that was already
+ * decided before the command started — a patch, a here-document, the output
+ * of something else in a pipeline.
+ */
+export type ShellRunRequest = { workspaceId: string, argv: Array<string>, 
+/**
+ * Somewhere inside the workspace. Absent means its root.
+ */
+cwd?: string, 
+/**
+ * Added to the environment the daemon runs with, overriding it name by
+ * name.
+ *
+ * Additions only: there is no way to ask for a cleared environment. A
+ * command that loses `PATH` and `HOME` fails in ways that look like the
+ * machine is broken, and this grants no authority that choosing the argv
+ * did not already grant — the caller could have run `env FOO=bar ...`
+ * itself.
+ */
+env: { [key in string]?: string }, 
+/**
+ * How long the command may run before it is ended, in milliseconds.
+ *
+ * Absent means no limit, which is not what a one-shot tool call would
+ * choose but is right here: this streams, so the caller sees the output
+ * as it arrives and can stop the command by going away. A caller that
+ * cannot wait — an agent, which has no way to press Ctrl-C — says so.
+ */
+timeoutMs?: bigint, };
+
+export type SpeechAudioFormat = { encoding: SpeechEncoding, sampleRateHz: number, channels: number, };
+
+export type SpeechCancelReason = "user" | "pageHidden" | "targetChanged" | "clientBackpressure";
+
+export type SpeechCandidate = { candidateId: string, rank: number, text: string, score: number, matchedTerms: Array<string>, };
+
+export type SpeechCapabilities = { protocolVersion: number, runtimeStatus: SpeechRuntimeStatus, runtime: SpeechRuntimeDescriptor, audio: Array<SpeechAudioFormat>, languages: Array<string>, maxLanguageHints: number, maxDurationMs: number, context: SpeechContextLimits, nBest: SpeechNBestCapabilities, segmentation: SpeechSegmentationCapabilities, };
+
+export type SpeechCompleted = { requestId: string, text: string, durationMs: number, contextSnapshotId: string, candidates: Array<SpeechCandidate>, defaultCandidateId: string, scoreKind: SpeechScoreKind, scoresCalibrated: boolean, 
+/**
+ * Optional for wire compatibility with clients and runtimes that only
+ * understand whole-utterance N-best.
+ */
+segments?: Array<SpeechSegment>, };
+
+export type SpeechContextLimits = { maxBytes: number, maxPromptChars: number, maxPinnedTerms: number, maxAutomaticTerms: number, };
+
+export type SpeechContextOmissions = { pinnedTerms: number, automaticTerms: number, messages: number, projectIndexUnavailable: boolean, projectContextTruncated: boolean, };
+
+/**
+ * The exact bounded Qwen3 prompt snapshot used for one transcription.
+ */
+export type SpeechContextPack = { snapshotId: string, prompt: string, terms: Array<SpeechContextTerm>, languageHints: Array<string>, compilerVersion: string, omitted: SpeechContextOmissions, };
+
+export type SpeechContextSource = "pinned" | "correction" | "projectConfig" | "workspace" | "projectFile";
+
+export type SpeechContextTerm = { text: string, source: SpeechContextSource, score: number, };
+
+export type SpeechContextUpdate = { revision: number, context: SpeechContextPack, };
+
+export type SpeechEncoding = "pcmS16Le";
+
+export type SpeechFailure = { code: SpeechFailureCode, message: string, retryable: boolean, retryAfterMs?: number, correlationId?: string, };
+
+export type SpeechFailureCode = "runtimeUnavailable" | "unsupportedLanguage" | "contextRejected" | "timeout" | "protocolMismatch" | "canceled" | "internal";
+
+export type SpeechFeedbackLevel = "utterance" | "segment" | "span";
+
+export type SpeechFeedbackReceipt = { stored: boolean, learnedTerms: Array<string>, 
+/**
+ * Stable id of the authoritative preference pair. It is safe to include
+ * in diagnostics and lets support correlate a UI report without copying
+ * transcript or candidate text.
+ */
+feedbackId?: string, relativePath?: string, };
+
+/**
+ * Conditioning retained with a preference pair. A segment/span correction
+ * stays fine-grained while `utterance_text` and its neighbours preserve the
+ * context needed by a later reranker or preference-tuning pipeline.
+ */
+export type SpeechFeedbackScope = { level: SpeechFeedbackLevel, utteranceText: string, segmentId?: string, segmentStartMs?: number, segmentEndMs?: number, precedingText?: string, followingText?: string, uncertainSpanId?: string, spanStartChar?: number, spanEndChar?: number, };
+
+export type SpeechNBestCapabilities = { maxCandidates: number, scoreKind: SpeechScoreKind, calibrated: boolean, };
+
+/**
+ * A complete replacement for the current Best-1 preview. Revisions increase
+ * monotonically within one request; `stable_prefix_chars` uses Unicode scalar
+ * offsets and tells the UI which prefix the runtime does not expect to revise.
+ */
+export type SpeechPartial = { requestId: string, revision: number, text: string, audioEndMs: number, stablePrefixChars: number, };
+
+export type SpeechReady = { requestId: string, runtimeId: string, modelId: string, contextRevision: number, };
+
+/**
+ * The bounded document printed by a community runtime for
+ * `--genehub-probe`. GeneHub validates every field before advertising it to a
+ * client; installing the model and implementing this adapter remain outside
+ * the GeneHub distribution.
+ */
+export type SpeechRuntimeCapabilities = { schema: string, speechProtocolVersion: number, runtime: SpeechRuntimeDescriptor, audio: Array<SpeechAudioFormat>, languages: Array<string>, maxLanguageHints: number, maxDurationMs: number, nBest: SpeechNBestCapabilities, segmentation: SpeechSegmentationCapabilities, };
+
+export type SpeechRuntimeDescriptor = { id: string, model: string, label: string, 
+/**
+ * `stub` identifies GeneHub's no-model protocol test runtime; a community
+ * adapter reports its own stable implementation identifier.
+ */
+implementation: string, };
+
+export type SpeechRuntimeStatus = { "state": "ready" } | { "state": "unavailable", message: string, };
+
+export type SpeechScoreKind = "unavailable" | "mockRelative" | "lengthNormalizedLogProbability";
+
+/**
+ * A final acoustic/linguistic segment. Text character offsets locate the
+ * segment inside `SpeechCompleted.text`; time offsets locate it in the one
+ * recording. Segment alternatives are full segment strings, while
+ * `uncertain_spans` makes the local disagreement directly reviewable.
+ */
+export type SpeechSegment = { segmentId: string, startMs: number, endMs: number, textStartChar: number, textEndChar: number, text: string, candidates: Array<SpeechCandidate>, defaultCandidateId: string, uncertainSpans: Array<SpeechUncertainSpan>, boundary: SpeechSegmentBoundary, };
+
+export type SpeechSegmentBoundary = { kind: SpeechSegmentBoundaryKind, confidence: number, };
+
+export type SpeechSegmentBoundaryKind = "voiceActivity" | "decoderEndpoint" | "maxDuration" | "final";
+
+export type SpeechSegmentationCapabilities = { maxSegments: number, 
+/**
+ * Whether the runtime can return revisioned Best-1 replacements while
+ * audio is arriving. Segments and candidate review remain final-only.
+ */
+partialResults: boolean, localNBest: boolean, uncertainSpans: boolean, };
+
+/**
+ * Machine-local Qwen3 prompt and preference settings.
+ */
+export type SpeechSettings = { runtime: SpeechRuntimeDescriptor, 
+/**
+ * The deterministic no-model protocol Stub is selected instead of the
+ * registered community runtime. Stub output is never training evidence.
+ */
+stubEnabled: boolean, contextEnabled: boolean, pinnedTerms: Array<string>, languageHints: Array<string>, 
+/**
+ * Legacy machine-wide flag retained on the wire for clients that predate
+ * project-scoped consent. New daemons always return false and use
+ * `correction_workspaces` instead.
+ */
+collectCorrections: boolean, 
+/**
+ * Stable workspace ids for which the user explicitly enabled local
+ * preference collection. Consent for one project must never silently
+ * enable collection in another project on the same machine.
+ */
+correctionWorkspaces: Array<string>, };
+
+/**
+ * One alternative for a locally ambiguous character span. `candidate_id`
+ * references a candidate in the containing segment, so choosing a span never
+ * needs to replace unrelated segments in the utterance.
+ */
+export type SpeechSpanAlternative = { alternativeId: string, candidateId: string, text: string, score: number, };
+
+export type SpeechStart = { requestId: string, workspaceId: string, sessionId?: string, audio: SpeechAudioFormat, languageHints: Array<string>, context: SpeechContextPack, contextRevision: number, 
+/**
+ * Older v2 clients omit this and receive only the final result. New
+ * clients opt in so adding Partial does not break an already shipped
+ * decoder.
+ */
+acceptPartial: boolean, };
+
+/**
+ * Character offsets are Unicode scalar-value offsets inside the segment's
+ * default text, not UTF-8 bytes or JavaScript UTF-16 code units.
+ */
+export type SpeechUncertainSpan = { spanId: string, startChar: number, endChar: number, alternatives: Array<SpeechSpanAlternative>, defaultAlternativeId: string, };
+
+/**
+ * One daemon-owned diagnostic fact. Values are intentionally categorical.
+ */
+export type SupportDiagnosticEvent = { at: string, component: string, operation: string, outcome: string, code?: string, 
+/**
+ * Consecutive identical events are coalesced so a reconnect loop cannot
+ * evict every earlier clue from the bounded record.
+ */
+count: number, };
+
+/**
+ * A bounded support record that is safe to attach to explicit user feedback.
+ *
+ * Every string in this shape comes from a daemon-owned allowlist. User input,
+ * local paths, URLs, identifiers, prompts, terminal output and Agent output do
+ * not have a field in the schema.
+ */
+export type SupportDiagnostics = { version: number, capturedAt: string, daemonVersion: string, os: string, arch: string, uptimeSeconds: number, hubState: string, remoteState: string, events: Array<SupportDiagnosticEvent>, droppedEvents: number, };
 
 /**
  * One entry in a session's timeline.

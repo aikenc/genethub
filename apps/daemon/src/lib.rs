@@ -3,19 +3,24 @@
 //! Exposed as a library as well as a binary so integration tests can start a
 //! real daemon in-process instead of asserting against a mock of one.
 
+pub mod authz;
 pub mod channel;
 pub mod channel_auth;
 pub mod config;
 pub mod dataplane;
+pub mod diagnostics;
 pub mod files;
 pub mod hub;
+pub use genet_daemon_system::isolation;
 pub mod lifecycle;
 pub mod link;
 pub mod logic;
 pub mod logs;
+pub mod process;
 pub mod remote;
 pub mod router;
 pub mod run;
+pub mod speech;
 pub mod state;
 pub mod transport;
 

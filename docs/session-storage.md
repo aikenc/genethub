@@ -58,6 +58,8 @@
   rounds/r-001/…
   blobs/b-9f.jsonl                 blob 正文，按内容 id 前两位合批
   state/                           adapter 私有 scratch
+  artifacts/YYMMDD-hhmmss-<hash4>/ 浏览器运行产物；manifest + 图片/视频/文本
+<workspace>/.genethub/tombstones/<session-id>.json  持锁写入的逻辑删除标记
 ```
 
 会话目录**自包含**：没有任何一个文件名、也没有 `meta.json` 里的任何一个字段依赖外部上下文——它属于哪个工作区由它躺在哪里决定（§3.4）。整个目录可以整体移动、整体删除、整体备份，换一个 channel 打开也还是同一批对话。
@@ -110,7 +112,7 @@
  "blob":{"id":"9f3ac1…","bytes":20480,"at":"9f:81920:20480"}}
 ```
 
-一个 trunk 最多 100 个 blob（`TRUNK_MAX_BLOBS`），每个可见 batch 最多 16 个（`BATCH_MAX_BLOBS`），所以单个 trunk 文件稳定在几十 KB。`trunk.get` = 打开一个小文件读完，**不需要 offset 运算，也不存在偏移漂移**。
+一个 trunk 在工具调用超过 100 次后，会在下一个 batch 边界切换（`TRUNK_TOOL_CALL_THRESHOLD`）；100 是软阈值，不会为了凑数拆开 batch。每个可见 batch 最多 16 个 blob（`BATCH_MAX_BLOBS`）。`trunk.get` 仍然直接读取单个 trunk 文件，**不需要 offset 运算，也不存在偏移漂移**。
 
 trunk 索引与 trunk 明细分开，是因为 `trunk.list` 只要标题和计数；把明细混在同一个文件里会让翻索引付明细的钱。
 
@@ -141,6 +143,14 @@ pub struct BlobRef {
 **内容寻址在这里买的是不可变与稳定命名，不是去重。** 每个 payload 都嵌着它所属 item 的唯一 id，所以两个不同 item 永远不会哈希相同，没有可折叠的东西。曾经加过一张进程内 id→引用表想「顺手去重」，实测命中率为零，却让每个会话常驻一张随 blob 数无上限增长的 map——正是这次重排要消除的那类内存。已经删掉。真要跨重启去重，代价是打开会话时加载全量 id 索引，等于把刚砍掉的 O(N) 请回来。
 
 **桶文件可以很大，这不是问题。** 一条 100MB 的构建日志就是桶里的一行。读取按 offset 定长取，不受文件总长影响；写入是追加，也不受影响。真正会被文件大小拖垮的是顺序扫描，而这里已经没有顺序扫描了。
+
+### 3.3.1 artifacts/
+
+Preview 采集的日志、DOM、真实渲染截图和体验视频直接存到 daemon 所在电脑的当前会话目录，不经过 Chat 搬运大字节。目录名由 daemon 生成，格式为 `YYMMDD-hhmmss-<hash4>`；浏览器只能声明一组平面文件名、MIME 和大小，不能选择磁盘路径。
+
+传输采用 `session.artifact.begin / chunk / finish / abort`：原始 chunk 最大 512 KiB，单 bundle 最大 512 MiB。上传时数据位于 `artifacts/.upload-*` 隐藏 staging 目录；daemon 校验 session 归属、文件名、offset、声明大小和总量，并在完成时计算每个文件的 SHA-256。只有所有文件完整且 `manifest.json` 已写入后，才通过同目录 rename 一次性发布正式目录。断线导致 chunk 或 finish 重试时按 upload id 幂等；失败或取消只清理尚未发布的 staging，已完成 bundle 不会被 abort 删除。
+
+Chat 只发送 `manifest.json` 的工作区相对路径、文件数和总字节等小摘要，不附带图片、视频、DOM 或日志正文。Agent 与第三方 Agent 都在 daemon 电脑上从该路径按需读取；采集内容一律视为不可信输入。删除 session 会连同其 artifacts 一起删除。
 
 ### 3.4 跨 channel 共用一个工作目录
 
@@ -173,7 +183,7 @@ pub struct BlobRef {
 
 ## 4. 复杂度对照
 
-N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = 一个 trunk 内的 blob 数（≤100）。
+N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = 一个 trunk 内的 blob 数（由工具调用软阈值与 batch 边界决定）。
 
 | 操作 | 旧 | 新 |
 |------|-----|-----|
@@ -212,10 +222,10 @@ N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = �
 ## 7. 验收
 
 - **打开成本与历史无关：** 一个含 5000 次工具调用、正文合计 500MB 的会话，layered 打开读取的字节数与一个只有 3 轮对话的会话在同一量级；抓包不含任何 blob 正文。
-- **展开成本有界：** `trunk.get` 读取的字节只与该 trunk 的 ≤100 条 overview 有关，不随 round 总长增长，也不触发同 round 内其他 trunk 的读取。
+- **展开成本与当前 trunk 有关：** `trunk.get` 只读取该 trunk，不随 round 总长增长，也不触发同 round 内其他 trunk 的读取。工具密集流会在超过软阈值后的下一个 batch 边界落盘。
 - **blob 定位不扫描：** 写入 5000 条 blob 的总读字节数与已写入总量无关（旧实现是平方级）；`blob.get` 的读取字节数等于该 blob 自身长度。
-- **边界：** batch 第 16 条关闭、trunk 第 100 条关闭；无独白时 batch 文本回退到首个 thinking 前 100 字，再回退到「调用了 N 次工具」。
+- **边界：** batch 第 16 个 blob 关闭；trunk 在工具调用超过 100 次后的下一个 batch 起点切换。无独白时 batch 文本回退到首个 thinking 前 100 字，再回退到「调用了 N 次工具」。
 - **跨 channel 复用：** 另一个 channel 注册同一个目录后，既有会话照常列出、照常打开、照常续聊，不依赖它自己那份 workspace id。
 - **版本单向：** `format` 高于本机的会话仍出现在列表里并说明原因，但打不开；本机只读它不会改动 `meta.json`。
 - **写入互斥：** 同一 session 的第二个 daemon 写入被拒绝并指出占用者，读取不受影响；不同 session 可跨 channel 并行写；占用者退出后无需重启即可恢复写入；从稳定 turn Fork 的新 session 不受源 session 锁影响。
-- **删除彻底：** `session.delete` 删掉整个会话目录，包括 blobs 与 scratch。
+- **删除原子且可回收：** `session.delete` 持有该 session 的 writer lock 写入 durable tombstone；从此所有 channel 都隐藏并拒绝写入该 id。随后释放锁并删除整个会话目录，包括 blobs 与 scratch；Windows 若因开放 handle 暂时不能删除，启动/列表扫描会继续回收，墓碑保证残留目录永不复活。

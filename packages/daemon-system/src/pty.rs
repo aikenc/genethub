@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use genet_daemon_logic_api::{
-    CapabilityEvent, CapabilityFailure, CapabilityFailureKind, CapabilityValue, PtyRequest,
-    MAX_CAPABILITY_CHUNK_BYTES,
+    CapabilityEvent, CapabilityFailure, CapabilityFailureKind, CapabilityValue, ConfinementMode,
+    PtyRequest, MAX_CAPABILITY_CHUNK_BYTES,
 };
 use portable_pty::{ChildKiller, CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
@@ -56,12 +56,23 @@ impl Ptys {
         match request {
             PtyRequest::Open {
                 cwd,
+                confinement,
                 cols,
                 rows,
                 env,
             } => {
                 let cwd = crate::filesystem::resolve_locator(roots, &cwd).await?;
-                self.open(&cwd, cols, rows, env).await
+                let confinement = match confinement {
+                    ConfinementMode::None => None,
+                    ConfinementMode::Workspace { roots: locators } => {
+                        let mut paths = Vec::with_capacity(locators.len());
+                        for locator in locators {
+                            paths.push(crate::filesystem::resolve_locator(roots, &locator).await?);
+                        }
+                        Some(crate::isolation::Policy::for_workspace(&paths))
+                    }
+                };
+                self.open(&cwd, cols, rows, env, confinement).await
             }
             PtyRequest::Write { resource_id, bytes } => {
                 if bytes.len() > MAX_CAPABILITY_CHUNK_BYTES {
@@ -113,6 +124,7 @@ impl Ptys {
         cols: u16,
         rows: u16,
         env: std::collections::BTreeMap<String, String>,
+        confinement: Option<crate::isolation::Policy>,
     ) -> Result<CapabilityValue, CapabilityFailure> {
         validate_dimensions(cols, rows)?;
         let cwd = cwd.canonicalize().map_err(pty_failure)?;
@@ -146,7 +158,23 @@ impl Ptys {
                 pixel_height: 0,
             })
             .map_err(|error| failure(CapabilityFailureKind::Unavailable, error.to_string()))?;
-        let mut command = CommandBuilder::new(default_shell());
+        let shell = default_shell();
+        let argv = match confinement {
+            Some(policy) => policy
+                .wrap(std::path::Path::new(&shell))
+                .map_err(|error| failure(CapabilityFailureKind::Unavailable, error.to_string()))?,
+            None => vec![std::path::PathBuf::from(shell)],
+        };
+        let (program, args) = argv.split_first().ok_or_else(|| {
+            failure(
+                CapabilityFailureKind::Internal,
+                "PTY confinement produced an empty command",
+            )
+        })?;
+        let mut command = CommandBuilder::new(program);
+        for arg in args {
+            command.arg(arg);
+        }
         command.cwd(cwd);
         command.env("TERM", "xterm-256color");
         for (key, value) in env {

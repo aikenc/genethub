@@ -173,7 +173,7 @@ flowchart LR
 
 `mermaid` fence 按需加载独立 bundle，普通 Markdown 不加载它。输入最多 128 KiB，`securityLevel=strict` 且禁用 HTML label；输出再次移除 script、foreignObject、image、link 与事件属性，最后作为 Blob SVG `<img>` 显示，而不是把活动 SVG 注入工作台 DOM。Markdown 作者声明图片不会自动联网；普通链接只在用户点击后以独立 tab 和 `noopener/noreferrer` 打开。
 
-工作台浮窗与深链 Preview 页根容器都占满各自视口，只有正文 pane 使用 `overflow-y:auto`，因此长文档在手机和桌面都可滚动。反馈只在工作台入口收集，浮窗内预览 iframe 的错误经 postMessage 汇入同一诊断包；「新窗口打开」的深链页不参与反馈。
+工作台浮窗与深链 Preview 页根容器都占满各自视口，只有正文 pane 使用 `overflow-y:auto`，因此长文档在手机和桌面都可滚动。两种页面都能主动提交反馈。浮窗及深链 Preview 的 iframe 错误经父页面桥接进入同一套浏览器有界事件环；父页面只接受自己渲染的 `iframe.contentWindow` 发来的消息，不能靠伪造 `source` 字段注入诊断。提交时，当前已授权 Client 再通过 E2EE `diagnostics.snapshot` 拉取 daemon 的白名单快照；不会自动上传 `daemon.log`、agent stderr、请求体、凭据或文件正文附件。
 
 ### 活动单文件 HTML
 

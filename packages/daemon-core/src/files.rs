@@ -82,6 +82,155 @@ pub fn write(
     }
 }
 
+pub fn mkdir(
+    workspace: &WorkspaceEntry,
+    path: &str,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<(), ProtocolError> {
+    let (folder, relative) = resolve_non_root(workspace, path)?;
+    let mut client = Client::new(executor, next);
+    if exists(&locator(folder, relative), &mut client)? {
+        return Err(conflict(format!("{path} already exists")));
+    }
+    unit(
+        client.call(CapabilityRequest::File(FileRequest::CreateDirAll {
+            locator: locator(folder, relative),
+        }))?,
+        "directory creation",
+    )
+}
+
+pub fn copy(
+    workspace: &WorkspaceEntry,
+    from: &str,
+    to: &str,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<(), ProtocolError> {
+    let (source_folder, source) = resolve_non_root(workspace, from)?;
+    let (target_folder, target) = resolve_non_root(workspace, to)?;
+    validate_transfer(source_folder, source, target_folder, target)?;
+    let mut client = Client::new(executor, next);
+    unit(
+        client.call(CapabilityRequest::File(FileRequest::Copy {
+            from: locator(source_folder, source),
+            to: locator(target_folder, target),
+        }))?,
+        "file copy",
+    )
+}
+
+pub fn move_path(
+    workspace: &WorkspaceEntry,
+    from: &str,
+    to: &str,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<(), ProtocolError> {
+    let (source_folder, source) = resolve_non_root(workspace, from)?;
+    let (target_folder, target) = resolve_non_root(workspace, to)?;
+    validate_transfer(source_folder, source, target_folder, target)?;
+    let mut client = Client::new(executor, next);
+    unit(
+        client.call(CapabilityRequest::File(FileRequest::Rename {
+            from: locator(source_folder, source),
+            to: locator(target_folder, target),
+        }))?,
+        "file move",
+    )
+}
+
+pub fn delete(
+    workspace: &WorkspaceEntry,
+    paths: &[String],
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<(), ProtocolError> {
+    if paths.is_empty() || paths.len() > 256 {
+        return Err(bad_request("delete requires 1 through 256 paths"));
+    }
+    let mut client = Client::new(executor, next);
+    for path in paths {
+        let (folder, relative) = resolve_non_root(workspace, path)?;
+        let target = locator(folder, relative);
+        let metadata = match client.call(CapabilityRequest::File(FileRequest::Metadata {
+            locator: target.clone(),
+        }))? {
+            CapabilityValue::FileMetadata(metadata) => metadata,
+            _ => return Err(internal("file delete metadata returned the wrong value")),
+        };
+        let request = if metadata.kind == FileKind::Directory {
+            FileRequest::RemoveDirAll { locator: target }
+        } else {
+            FileRequest::RemoveFile { locator: target }
+        };
+        unit(
+            client.call(CapabilityRequest::File(request))?,
+            "file delete",
+        )?;
+    }
+    Ok(())
+}
+
+fn resolve_non_root<'a>(
+    workspace: &'a WorkspaceEntry,
+    path: &'a str,
+) -> Result<(&'a WorkspaceFolderEntry, &'a str), ProtocolError> {
+    let (folder, relative) = resolve(workspace, path)?;
+    if relative.is_empty() {
+        return Err(forbidden("operation cannot target a workspace root"));
+    }
+    Ok((folder, relative))
+}
+
+fn validate_transfer(
+    source_folder: &WorkspaceFolderEntry,
+    source: &str,
+    target_folder: &WorkspaceFolderEntry,
+    target: &str,
+) -> Result<(), ProtocolError> {
+    if source_folder.root_handle != target_folder.root_handle {
+        return Err(bad_request(
+            "transfer must stay inside the same workspace root",
+        ));
+    }
+    if target == source
+        || target
+            .strip_prefix(source)
+            .is_some_and(|tail| tail.starts_with('/'))
+    {
+        return Err(bad_request("cannot place a path inside itself"));
+    }
+    Ok(())
+}
+
+fn exists<E: CapabilityExecutor>(
+    locator: &FileLocator,
+    client: &mut Client<'_, E>,
+) -> Result<bool, ProtocolError> {
+    match client.call_raw(CapabilityRequest::File(FileRequest::Metadata {
+        locator: locator.clone(),
+    }))? {
+        Ok(CapabilityValue::FileMetadata(_)) => Ok(true),
+        Ok(_) => Err(internal("file metadata returned the wrong value")),
+        Err(error) if error.kind == genet_daemon_logic_api::CapabilityFailureKind::NotFound => {
+            Ok(false)
+        }
+        Err(error) => Err(ProtocolError {
+            code: ErrorCode::Internal,
+            message: error.message,
+        }),
+    }
+}
+
+fn unit(value: CapabilityValue, operation: &str) -> Result<(), ProtocolError> {
+    match value {
+        CapabilityValue::Unit => Ok(()),
+        _ => Err(internal(format!("{operation} returned the wrong value"))),
+    }
+}
+
 fn tree_in<E: CapabilityExecutor>(
     folder: &WorkspaceFolderEntry,
     relative: &str,
@@ -237,6 +386,13 @@ fn forbidden(message: impl Into<String>) -> ProtocolError {
 fn internal(message: impl Into<String>) -> ProtocolError {
     ProtocolError {
         code: ErrorCode::Internal,
+        message: message.into(),
+    }
+}
+
+fn conflict(message: impl Into<String>) -> ProtocolError {
+    ProtocolError {
+        code: ErrorCode::Conflict,
         message: message.into(),
     }
 }

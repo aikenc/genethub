@@ -22,6 +22,7 @@ chrono.workspace = true
 tempfile.workspace = true
 genet-daemon-system = { path = "../daemon-system" }
 tokio.workspace = true
+fs2.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

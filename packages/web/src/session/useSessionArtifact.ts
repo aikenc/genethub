@@ -10,6 +10,7 @@ const NO_FOLDERS: MarkdownArtifactProps["folders"] = [];
 export function useSessionArtifact(): MarkdownArtifactProps | null {
   const client = useWorkbench((state) => state.client);
   const deviceHandle = client?.identity?.machineId ?? null;
+  const sessionId = useWorkbench((state) => state.activeSessionId);
   const workspaceHandle = useWorkbench((state) => {
     const session = state.sessions.find((entry) => entry.id === state.activeSessionId);
     return (
@@ -43,7 +44,8 @@ export function useSessionArtifact(): MarkdownArtifactProps | null {
         root: folder.root,
         rootHandle: folder.rootHandle,
       })),
+      ...(sessionId ? { sessionId } : {}),
       loadPreview,
     };
-  }, [deviceHandle, folders, loadPreview, workspaceHandle]);
+  }, [deviceHandle, folders, loadPreview, sessionId, workspaceHandle]);
 }

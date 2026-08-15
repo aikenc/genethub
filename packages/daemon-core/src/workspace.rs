@@ -235,6 +235,30 @@ pub fn directory(
     executor: &mut impl CapabilityExecutor,
     next: &mut u64,
 ) -> Result<DirectoryListing, ProtocolError> {
+    if requested.as_deref() == Some("") {
+        let mut client = Client::new(executor, next);
+        let entries = match client.call(CapabilityRequest::File(FileRequest::MachineRoots))? {
+            CapabilityValue::FileEntries(entries) => entries,
+            _ => return Err(internal("machine root listing returned the wrong value")),
+        };
+        let mut directories = entries
+            .into_iter()
+            .filter_map(|entry| {
+                entry.native_path.map(|path| DirectoryEntry {
+                    name: entry.name,
+                    path,
+                })
+            })
+            .collect::<Vec<_>>();
+        directories.sort_by_key(|entry| entry.name.to_lowercase());
+        return Ok(DirectoryListing {
+            path: String::new(),
+            parent: None,
+            directories,
+            workspace_files: Vec::new(),
+            roots: true,
+        });
+    }
     let requested = requested
         .or_else(|| home.map(str::to_string))
         .ok_or_else(|| bad_request("no home directory"))?;
@@ -278,7 +302,82 @@ pub fn directory(
         parent: metadata.parent_path,
         directories,
         workspace_files,
+        roots: false,
     })
+}
+
+pub fn mkdir_directory(
+    parent: String,
+    name: String,
+    home: Option<&str>,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<DirectoryListing, ProtocolError> {
+    let name = validate_new_entry_name(&name)?;
+    if parent.is_empty() {
+        return Err(bad_request("cannot create a folder at the machine roots"));
+    }
+    let mut client = Client::new(executor, next);
+    let parent = canonicalize(&parent, &mut client)?;
+    let target = match client.call_raw(CapabilityRequest::File(FileRequest::ResolveHostPath {
+        base: parent.clone(),
+        path: name.to_string(),
+    }))? {
+        Ok(CapabilityValue::Text(_)) => {
+            return Err(ProtocolError {
+                code: ErrorCode::Conflict,
+                message: format!("{name} already exists"),
+            })
+        }
+        Ok(_) => return Err(internal("host path resolution returned the wrong value")),
+        Err(error) if error.kind == CapabilityFailureKind::NotFound => {
+            // ResolveHostPath canonicalizes and therefore cannot name a new
+            // leaf. Join only the guest-validated single path component.
+            native_join(&parent, name)
+        }
+        Err(error) => return Err(map_failure(error)),
+    };
+    match client.call(CapabilityRequest::File(FileRequest::CreateDirAll {
+        locator: FileLocator {
+            root: FileRoot::NativePath,
+            path: target,
+        },
+    }))? {
+        CapabilityValue::Unit => {}
+        _ => return Err(internal("directory creation returned the wrong value")),
+    }
+    directory(Some(parent), home, executor, next)
+}
+
+fn validate_new_entry_name(name: &str) -> Result<&str, ProtocolError> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.len() > 255
+        || matches!(name, "." | "..")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return Err(bad_request("folder name is invalid"));
+    }
+    // Windows-invalid names must be rejected by the Linux-built guest too,
+    // because the same artifact runs on every host.
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = name.split('.').next().unwrap_or(name);
+    if RESERVED.iter().any(|item| stem.eq_ignore_ascii_case(item))
+        || name.chars().any(|character| "<>:\"|?*".contains(character))
+    {
+        return Err(bad_request("folder name is invalid on Windows"));
+    }
+    Ok(name)
+}
+
+fn native_join(parent: &str, name: &str) -> String {
+    let separator = if parent.contains('\\') { '\\' } else { '/' };
+    format!("{}{separator}{name}", parent.trim_end_matches(['/', '\\']))
 }
 
 pub fn workspace(config: &Config, id: &str) -> Result<WorkspaceEntry, ProtocolError> {

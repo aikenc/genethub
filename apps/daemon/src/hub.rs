@@ -253,7 +253,15 @@ impl Client {
             if base.scheme() != "http" {
                 return Err(anyhow!("{label} must stay on the configured Hub origin"));
             }
-            validate_control_url(&target)?;
+            // Browser continuation links legitimately carry one-time state in
+            // their query or fragment (for example `/activate?code=...`). The
+            // Control API URL validator rejects both, so validate a copy that
+            // keeps the target's scheme, authority, path and credentials while
+            // excluding only that browser-owned continuation state.
+            let mut target_without_state = target.clone();
+            target_without_state.set_query(None);
+            target_without_state.set_fragment(None);
+            validate_control_url(&target_without_state)?;
         }
         Ok(())
     }
@@ -722,12 +730,18 @@ mod tests {
         // public https origin instead — the split is intentional
         // (`dev-workspace-design.md`), not a spoofed reply, so it must still
         // be accepted as long as the link itself is a safe https URL.
-        assert!(local
-            .validate_browser_link(
-                "https://myteam.devcloud.woa.com/relay-dev-chat/link/once",
-                "trial claim URL"
-            )
-            .is_ok());
+        for target in [
+            "https://myteam.devcloud.woa.com/relay-dev-chat/link/once",
+            "https://myteam.devcloud.woa.com/relay-dev-chat/activate?code=AAAA-BBBB",
+            "https://myteam.devcloud.woa.com/relay-dev-chat/link/once#continue",
+        ] {
+            assert!(
+                local
+                    .validate_browser_link(target, "trial claim URL")
+                    .is_ok(),
+                "{target}"
+            );
+        }
         // The relaxation is specific to a `base` that is itself a literal
         // loopback address; it must not let a loopback-looking `target`
         // smuggle past a scheme this check still has to reject.

@@ -55,6 +55,7 @@ export function MobileToolsDrawer({
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-3">
           <Entry label="文件" onClick={() => go("files")} />
           <Entry label="终端" onClick={() => go("terminal")} />
+          <Entry label="后台进程" onClick={() => go("processes")} />
           <Entry label="设备" onClick={() => go("devices")} />
           {extraTabs.map((tab) => (
             <Entry

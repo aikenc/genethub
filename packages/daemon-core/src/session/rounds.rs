@@ -11,8 +11,16 @@ use serde::{Deserialize, Serialize};
 use super::overview;
 
 pub const SCHEMA_VERSION: u32 = 4;
-pub const BATCH_MAX_BLOBS: u32 = 16;
-pub const TRUNK_MAX_BLOBS: u32 = 100;
+/// Once a batch has accumulated this many tool calls, the next reasoning block
+/// starts a fresh semantic batch. This keeps the mainline grouping behavior;
+/// reasoning is not merely another fixed-size blob boundary.
+pub const BATCH_REASONING_TOOL_THRESHOLD: u32 = 16;
+/// Tool-only work still needs a bounded batch when an Agent emits no
+/// narration or reasoning boundary.
+pub const BATCH_MAX_TOOL_CALLS: u32 = 64;
+/// Safety bound for reasoning and tool blobs combined.
+pub const BATCH_MAX_BLOBS: u32 = 128;
+pub const TRUNK_TOOL_CALL_THRESHOLD: u32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,7 +81,7 @@ enum TrunkItem {
     ToolCall,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct BatchBuilder {
     item_ids: Vec<String>,
     blob_count: u32,
@@ -82,6 +90,7 @@ struct BatchBuilder {
     tool_count: u32,
 }
 
+#[derive(Debug, Clone)]
 struct ClosedBatch {
     first_item_id: String,
     blob_count: u32,
@@ -90,6 +99,7 @@ struct ClosedBatch {
     tool_count: u32,
 }
 
+#[derive(Debug, Clone)]
 struct ClosedTrunk {
     first_item_id: String,
     blob_count: u32,
@@ -98,7 +108,7 @@ struct ClosedTrunk {
 }
 
 impl ClosedTrunk {
-    fn summary(self, index: u32, texts: &HashMap<String, String>) -> RoundTrunkSummary {
+    fn into_summary(self, index: u32, texts: &HashMap<String, String>) -> RoundTrunkSummary {
         let batches = self
             .batches
             .into_iter()
@@ -145,11 +155,12 @@ impl ClosedTrunk {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct TrunkBuilder {
     current_batch: BatchBuilder,
     closed_batches: Vec<ClosedBatch>,
     blob_count: u32,
+    tool_count: u32,
     first_item_id: Option<String>,
     first_monologue_item_id: Option<String>,
 }
@@ -157,14 +168,16 @@ struct TrunkBuilder {
 impl TrunkBuilder {
     fn push(&mut self, item_id: &str, item: TrunkItem) -> Option<ClosedTrunk> {
         let mut closed = None;
-        if matches!(item, TrunkItem::Monologue)
-            && self.current_batch.monologue_item_id.is_some()
-            && self.current_batch.blob_count > 0
-        {
+        let starts_semantic_batch = match item {
+            TrunkItem::Monologue => !self.current_batch.item_ids.is_empty(),
+            TrunkItem::Reasoning => self.current_batch.tool_count >= BATCH_REASONING_TOOL_THRESHOLD,
+            TrunkItem::ToolCall => false,
+        };
+        if starts_semantic_batch {
             self.close_batch();
-            if self.blob_count >= TRUNK_MAX_BLOBS {
-                closed = self.close_finished();
-            }
+        }
+        if self.current_batch.item_ids.is_empty() && self.tool_count > TRUNK_TOOL_CALL_THRESHOLD {
+            closed = self.close_finished();
         }
         if self.first_item_id.is_none() {
             self.first_item_id = Some(item_id.to_string());
@@ -191,14 +204,13 @@ impl TrunkBuilder {
                 self.current_batch.blob_count += 1;
                 self.current_batch.tool_count += 1;
                 self.blob_count += 1;
+                self.tool_count += 1;
             }
         }
-        if self.current_batch.blob_count >= BATCH_MAX_BLOBS {
+        if self.current_batch.tool_count >= BATCH_MAX_TOOL_CALLS
+            || self.current_batch.blob_count >= BATCH_MAX_BLOBS
+        {
             self.close_batch();
-        }
-        if self.blob_count >= TRUNK_MAX_BLOBS {
-            self.close_batch();
-            return self.close_finished().or(closed);
         }
         closed
     }
@@ -226,6 +238,7 @@ impl TrunkBuilder {
         if self.closed_batches.is_empty() {
             return None;
         }
+        self.tool_count = 0;
         Some(ClosedTrunk {
             first_item_id: self.first_item_id.take().unwrap_or_default(),
             blob_count: std::mem::take(&mut self.blob_count),
@@ -264,7 +277,7 @@ pub fn trunks_from_items(items: &[TimelineItem], first_index: u32) -> Vec<RoundT
     let summaries = closed
         .into_iter()
         .enumerate()
-        .map(|(index, trunk)| trunk.summary(first_index + index as u32, &texts))
+        .map(|(index, trunk)| trunk.into_summary(first_index + index as u32, &texts))
         .collect::<Vec<_>>();
     let position = |id: &str| items.iter().position(|item| item.id() == id);
     let mut trunks = Vec::new();
@@ -326,13 +339,21 @@ fn blob_overview(item: &TimelineItem) -> Option<BlobOverview> {
 
 fn first_sentence(text: &str) -> String {
     let text = text.trim();
-    let end = text
-        .char_indices()
-        .find_map(|(index, character)| {
-            matches!(character, '。' | '！' | '？' | '.' | '!' | '?' | '\n')
-                .then_some(index + character.len_utf8())
-        })
-        .unwrap_or(text.len());
+    let mut end = text.len();
+    for (index, character) in text.char_indices() {
+        if matches!(character, '。' | '！' | '？' | '.' | '!' | '?' | '\n') {
+            let candidate = index + character.len_utf8();
+            if text[..candidate]
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .count()
+                > 15
+            {
+                end = candidate;
+                break;
+            }
+        }
+    }
     clip(text[..end].trim(), 100)
 }
 
@@ -354,21 +375,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trunks_and_batches_remain_bounded() {
-        let items = (0..205)
-            .map(|index| TimelineItem::Reasoning {
-                id: format!("r{index}"),
-                text: format!("reason {index}"),
+    fn tool_only_items_follow_the_mainline_batch_and_trunk_thresholds() {
+        let items = (0..113)
+            .map(|index| TimelineItem::ToolCall {
+                id: format!("t{index}"),
+                name: "grep".to_string(),
+                status: genehub_proto::ToolStatus::Ok,
+                detail: ToolCallDetail::Unknown {
+                    raw: serde_json::Value::Null,
+                },
             })
             .collect::<Vec<_>>();
-        let trunks = trunks_from_items(&items, 7);
-        assert_eq!(trunks.len(), 3);
-        assert_eq!(trunks[0].summary.index, 7);
-        assert!(trunks.iter().all(|trunk| trunk.summary.blob_count <= 100));
-        assert!(trunks
-            .iter()
-            .flat_map(|trunk| &trunk.batches)
-            .all(|batch| batch.summary.blob_count <= 16));
+        let trunks = trunks_from_items(&items, 0);
+        assert_eq!(trunks.len(), 1);
+        assert_eq!(trunks[0].summary.blob_count, 113);
+        assert_eq!(trunks[0].batches.len(), 2);
+        assert_eq!(trunks[0].batches[0].summary.blob_count, 64);
+        assert_eq!(trunks[0].batches[1].summary.blob_count, 49);
+    }
+
+    #[test]
+    fn short_acknowledgement_is_not_the_whole_title() {
+        assert_eq!(
+            first_sentence("收到。我现在继续检查流式更新期间的页面稳定性。后续内容"),
+            "收到。我现在继续检查流式更新期间的页面稳定性。"
+        );
+        assert_eq!(first_sentence("收到。"), "收到。");
     }
 
     #[test]
@@ -388,5 +420,198 @@ mod tests {
         };
         assert_eq!(record.summary(true).outcome, RoundLayerOutcome::Running);
         assert_eq!(record.summary(false).outcome, RoundLayerOutcome::Failed);
+    }
+}
+
+#[cfg(test)]
+mod mainline_contract_tests {
+    use super::*;
+
+    fn texts(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(id, text)| ((*id).to_string(), (*text).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn monologues_split_batches_but_not_trunks() {
+        let mut builder = TrunkBuilder::default();
+        builder.push("a1", TrunkItem::Monologue);
+        builder.push("t1", TrunkItem::ToolCall);
+        builder.push("t2", TrunkItem::ToolCall);
+        assert!(
+            builder.push("a2", TrunkItem::Monologue).is_none(),
+            "a monologue starts a batch, not a new trunk"
+        );
+        builder.push("r1", TrunkItem::Reasoning);
+        let summary = builder.close().unwrap().into_summary(
+            0,
+            &texts(&[("a1", "先读取配置。再检查环境"), ("a2", "开始修改")]),
+        );
+        assert_eq!(summary.blob_count, 3);
+        assert_eq!(summary.title, "先读取配置。再检查环境");
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches[0].blob_count, 2);
+        assert_eq!(summary.batches[0].text, "先读取配置。再检查环境");
+        assert_eq!(summary.batches[1].text, "开始修改");
+    }
+
+    #[test]
+    fn every_monologue_starts_a_fresh_semantic_batch() {
+        let mut builder = TrunkBuilder::default();
+        builder.push("r1", TrunkItem::Reasoning);
+        builder.push("a1", TrunkItem::Monologue);
+        builder.push("t1", TrunkItem::ToolCall);
+        builder.push("t2", TrunkItem::ToolCall);
+        builder.push("a2", TrunkItem::Monologue);
+        let summary = builder.close().unwrap().into_summary(
+            0,
+            &texts(&[
+                ("r1", "先判断入口"),
+                ("a1", "开始核对网络边界"),
+                ("a2", "已经完成核对"),
+            ]),
+        );
+
+        assert_eq!(summary.batches.len(), 3);
+        assert_eq!(summary.batches[0].first_item_id, "r1");
+        assert_eq!(summary.batches[0].blob_count, 1);
+        assert_eq!(summary.batches[0].text, "先判断入口");
+        assert_eq!(summary.batches[1].first_item_id, "a1");
+        assert_eq!(summary.batches[1].blob_count, 2);
+        assert_eq!(summary.batches[1].text, "开始核对网络边界");
+        assert_eq!(summary.batches[2].first_item_id, "a2");
+        assert_eq!(summary.batches[2].blob_count, 0);
+    }
+
+    #[test]
+    fn a_tool_only_batch_closes_at_sixty_four_calls() {
+        let mut builder = TrunkBuilder::default();
+        for index in 0..BATCH_MAX_TOOL_CALLS + 1 {
+            builder.push(&format!("t{index}"), TrunkItem::ToolCall);
+        }
+        let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches[0].blob_count, 64);
+        assert_eq!(summary.batches[0].text, "调用了 64 次工具");
+        assert_eq!(summary.batches[1].blob_count, 1);
+    }
+
+    #[test]
+    fn reasoning_after_sixteen_tools_titles_a_fresh_batch() {
+        let mut builder = TrunkBuilder::default();
+        for index in 0..BATCH_REASONING_TOOL_THRESHOLD {
+            builder.push(&format!("t{index}"), TrunkItem::ToolCall);
+        }
+        builder.push("r1", TrunkItem::Reasoning);
+        builder.push("t16", TrunkItem::ToolCall);
+        let summary = builder
+            .close()
+            .unwrap()
+            .into_summary(0, &texts(&[("r1", "开始修改并验证结果")]));
+
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches[0].blob_count, 16);
+        assert_eq!(summary.batches[0].text, "调用了 16 次工具");
+        assert_eq!(summary.batches[1].first_item_id, "r1");
+        assert_eq!(summary.batches[1].blob_count, 2);
+        assert_eq!(summary.batches[1].text, "开始修改并验证结果");
+    }
+
+    #[test]
+    fn reasoning_before_sixteen_tools_stays_with_the_current_batch() {
+        let mut builder = TrunkBuilder::default();
+        for index in 0..BATCH_REASONING_TOOL_THRESHOLD - 1 {
+            builder.push(&format!("t{index}"), TrunkItem::ToolCall);
+        }
+        builder.push("r1", TrunkItem::Reasoning);
+        let summary = builder
+            .close()
+            .unwrap()
+            .into_summary(0, &texts(&[("r1", "继续确认剩余入口")]));
+
+        assert_eq!(summary.batches.len(), 1);
+        assert_eq!(summary.batches[0].blob_count, 16);
+        assert_eq!(summary.batches[0].text, "继续确认剩余入口");
+    }
+
+    #[test]
+    fn the_blob_safety_limit_still_bounds_reasoning_only_batches() {
+        let mut builder = TrunkBuilder::default();
+        for index in 0..BATCH_MAX_BLOBS + 1 {
+            builder.push(&format!("r{index}"), TrunkItem::Reasoning);
+        }
+        let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches[0].blob_count, BATCH_MAX_BLOBS);
+        assert_eq!(summary.batches[1].blob_count, 1);
+    }
+
+    #[test]
+    fn a_trunk_closes_on_the_batch_after_its_tool_call_threshold() {
+        let mut builder = TrunkBuilder::default();
+        let mut closed = None;
+        for index in 0..129 {
+            closed = builder.push(&format!("t{index}"), TrunkItem::ToolCall);
+        }
+        let summary = closed
+            .expect("the first item after the threshold-crossing batch closes the trunk")
+            .into_summary(0, &HashMap::new());
+        assert_eq!(summary.blob_count, 128);
+        assert_eq!(
+            summary
+                .batches
+                .iter()
+                .map(|batch| batch.blob_count)
+                .sum::<u32>(),
+            summary.blob_count,
+            "every counted blob must belong to a listed batch, or the rows for \
+             the trailing partial batch are written nowhere"
+        );
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches.last().unwrap().blob_count, 64);
+        assert_eq!(summary.title, "调用了 64 次工具");
+    }
+
+    #[test]
+    fn a_short_acknowledgement_is_not_the_whole_title_of_a_longer_monologue() {
+        assert_eq!(
+            first_sentence("收到。我现在继续检查流式更新期间的页面稳定性。后续内容"),
+            "收到。我现在继续检查流式更新期间的页面稳定性。"
+        );
+        assert_eq!(first_sentence("收到。"), "收到。");
+    }
+
+    #[test]
+    fn no_monologue_uses_the_first_thinking_text_for_batch_and_trunk() {
+        let mut builder = TrunkBuilder::default();
+        builder.push("r1", TrunkItem::Reasoning);
+        builder.push("t1", TrunkItem::ToolCall);
+        let summary = builder
+            .close()
+            .unwrap()
+            .into_summary(0, &texts(&[("r1", "先确认数据结构，再开始修改")]));
+        assert_eq!(summary.batches[0].text, "先确认数据结构，再开始修改");
+        assert_eq!(summary.title, "先确认数据结构，再开始修改");
+    }
+
+    #[test]
+    fn consecutive_monologues_each_start_a_batch() {
+        let mut builder = TrunkBuilder::default();
+        builder.push("a1", TrunkItem::Monologue);
+        builder.push("a2", TrunkItem::Monologue);
+        let summary = builder
+            .close()
+            .unwrap()
+            .into_summary(0, &texts(&[("a1", "第一句"), ("a2", "第二句")]));
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches[0].text, "第一句");
+        assert_eq!(summary.batches[1].text, "第二句");
+    }
+
+    #[test]
+    fn closing_an_empty_builder_produces_nothing() {
+        assert!(TrunkBuilder::default().close().is_none());
     }
 }

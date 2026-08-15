@@ -5,6 +5,7 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useWorkbench } from "./store";
+import type { Client } from "../protocol/client";
 import {
   COMPOSER_TEXTAREA_COLLAPSED_HEIGHT,
   COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT,
@@ -64,6 +65,7 @@ afterEach(() => {
     sessions: [],
     activeSessionId: null,
     agents: [],
+    workspaces: [],
     retryPending,
     editPending,
   });
@@ -235,9 +237,9 @@ describe("what the user sees in a session", () => {
     expect(screen.getByTestId("round-progress")).not.toHaveTextContent("阶段");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("🧭");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("先检查配置。");
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("再逐项核对。");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("2 项");
-    expect(screen.getByTestId("batch-monologue")).toHaveTextContent("再逐项核对。");
-    expect(screen.getByTestId("batch-monologue")).not.toHaveTextContent("先检查配置。");
+    expect(screen.queryByTestId("batch-monologue")).not.toBeInTheDocument();
     expect(screen.getByText("确认结构")).toBeInTheDocument();
     expect(screen.getByText("读取配置")).toBeInTheDocument();
 
@@ -419,6 +421,65 @@ describe("what the user sees in a session", () => {
     expect(within(trunks[1]!).getByRole("button")).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("keeps streaming progress headers on one line as their text grows", () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    const batch = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 1,
+      text: "正在核对信息面板",
+    };
+    const progress = (title: string, monologue: string) => {
+      const summary = {
+        index: 0,
+        firstItemId: "a1",
+        blobCount: 1,
+        title,
+        batches: [batch],
+      };
+      return showRounds(
+        apply(emptyTimeline(), {
+          type: "item",
+          turnId: "t1",
+          item: { type: "userMessage", id: "u1", text: "继续", attachments: [] },
+        }),
+        {
+          rounds: [round],
+          roundLayers: { r1: { round, trunks: [summary] } },
+          roundTrunks: {
+            "r1:0": {
+              summary,
+              batches: [{ summary: batch, monologue, blobs: [] }],
+            },
+          },
+        },
+      );
+    };
+
+    const view = render(<TimelineView state={progress("正在核对", "正在核对")} />);
+    view.rerender(
+      <TimelineView
+        state={progress(
+          "正在核对对话中持续刷新的信息面板与布局边界。",
+          "正在核对对话中持续刷新的信息面板与布局边界。",
+        )}
+      />,
+    );
+
+    const header = within(screen.getByTestId("round-trunk")).getByRole("button");
+    expect(header.querySelector(".whitespace-pre-wrap")).toHaveAttribute(
+      "title",
+      "正在核对对话中持续刷新的信息面板与布局边界。",
+    );
+  });
+
   it("moves the open tail along with the round and lets a reader hold one open", async () => {
     const round = {
       roundId: "r1",
@@ -504,7 +565,7 @@ describe("what the user sees in a session", () => {
             batches: [
               {
                 summary: first,
-                monologue: "核对入口与权限。随后检查角色边界。",
+                monologue: "核对入口与权限。随后检查角色边界。最后记录结论。",
                 blobs: [],
               },
               { summary: second, monologue: "核对部署边界。", blobs: [] },
@@ -522,11 +583,15 @@ describe("what the user sees in a session", () => {
     expect(batches[0]!).toHaveTextContent("💭");
     expect(batches[0]!).toHaveTextContent("核对入口与权限");
     expect(batches[0]!).toHaveTextContent("2 项");
+    expect(within(batches[0]!).getByRole("button").querySelector(".truncate")).toHaveAttribute(
+      "title",
+      "核对入口与权限。随后检查角色边界。",
+    );
 
     const batchHeader = within(batches[0]!).getByRole("button");
     await userEvent.click(batchHeader);
     expect(batchHeader).toHaveTextContent("核对入口与权限");
-    expect(batches[0]!).toHaveTextContent("随后检查角色边界。");
+    expect(batches[0]!).toHaveTextContent("最后记录结论。");
     expect(screen.getByTestId("batch-monologue")).not.toHaveTextContent("核对入口与权限。");
   });
 
@@ -844,6 +909,54 @@ function composerProps(overrides: Partial<ComponentProps<typeof Composer>> = {})
 }
 
 describe("the controls offered to the user", () => {
+  it("routes an unavailable Qwen3 runtime to settings", async () => {
+    const onOpenSettings = vi.fn();
+    const onSend = vi.fn();
+    const client = {
+      call: vi.fn(async () => ({
+        type: "speechCapabilities",
+        data: {
+          protocolVersion: 2,
+          runtimeStatus: { state: "unavailable", message: "Qwen3 runtime 尚未就绪" },
+          runtime: {
+            id: "qwen3-asr",
+            model: "Qwen3-ASR-1.7B",
+            label: "Qwen3-ASR 1.7B",
+            implementation: "mock",
+          },
+          audio: [{ encoding: "pcmS16Le", sampleRateHz: 16_000, channels: 1 }],
+          languages: ["zh"],
+          maxLanguageHints: 4,
+          maxDurationMs: 300_000,
+          context: {
+            maxBytes: 16_384,
+            maxPromptChars: 4_000,
+            maxPinnedTerms: 50,
+            maxAutomaticTerms: 150,
+          },
+          nBest: { maxCandidates: 5, scoreKind: "mockRelative", calibrated: false },
+          segmentation: {
+            maxSegments: 32,
+            partialResults: false,
+            localNBest: true,
+            uncertainSpans: true,
+          },
+        },
+      })),
+    } as unknown as Client;
+    render(
+      <Composer
+        {...composerProps({ onSend })}
+        speech={{ client, workspaceId: "w1", onOpenSettings }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "语音输入" }));
+    await waitFor(() => expect(onOpenSettings).toHaveBeenCalledOnce());
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByText("Qwen3 runtime 尚未就绪")).toBeInTheDocument();
+  });
+
   it("does not offer a model section for an agent that cannot switch models", async () => {
     const fixed = agent({
       id: "fixed",
@@ -1075,6 +1188,53 @@ describe("the controls offered to the user", () => {
       "刚才没发出去的话",
       expect.arrayContaining([expect.objectContaining({ name: "shot.png" })]),
     );
+  });
+
+  it("appends each runtime bundle on its own line without sending or erasing feedback", async () => {
+    const onSend = vi.fn();
+    const onInsertDraft = vi.fn();
+    const view = render(<Composer {...composerProps({ onSend, onInsertDraft })} />);
+    const box = screen.getByLabelText("任务描述");
+    await userEvent.type(box, "点击提交后页面空白");
+
+    view.rerender(
+      <Composer
+        {...composerProps({
+          onSend,
+          onInsertDraft,
+          insertDraft: {
+            id: "bundle-1",
+            sessionId: "s1",
+            text: "运行产物Bundle：`.genethub/sessions/s1/artifacts/first`",
+          },
+        })}
+      />,
+    );
+    await waitFor(() => expect(onInsertDraft).toHaveBeenCalledWith("bundle-1"));
+
+    view.rerender(
+      <Composer
+        {...composerProps({
+          onSend,
+          onInsertDraft,
+          insertDraft: {
+            id: "bundle-2",
+            sessionId: "s1",
+            text: "运行产物Bundle：`.genethub/sessions/s1/artifacts/second`",
+          },
+        })}
+      />,
+    );
+    await waitFor(() => expect(onInsertDraft).toHaveBeenCalledWith("bundle-2"));
+
+    expect(box).toHaveValue(
+      [
+        "点击提交后页面空白",
+        "运行产物Bundle：`.genethub/sessions/s1/artifacts/first`",
+        "运行产物Bundle：`.genethub/sessions/s1/artifacts/second`",
+      ].join("\n"),
+    );
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it("expands from one idle line when focused and collapses again on blur", async () => {
@@ -1407,6 +1567,77 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.getByText("Tools 1")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled();
     expect(state.status).toBe("idle");
+  });
+
+  it("opens Agent selection for a completed turn without a native checkpoint", async () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          id: "s1",
+          workspaceId: "w1",
+          agentId: "codex",
+          title: undefined,
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          archived: false,
+          status: "idle",
+        },
+      ],
+      activeSessionId: "s1",
+      workspaces: [{
+        id: "w1",
+        name: "GeneHub",
+        root: "/work/genehub",
+        isGitRepo: true,
+        folders: [],
+      }],
+      agents: [
+        agent({
+          id: "codex",
+          label: "Codex",
+          capabilities: { ...agent().capabilities, fork: true },
+        }),
+        agent({ id: "claude", label: "Claude Code" }),
+      ],
+    });
+    let state = apply(emptyTimeline(), {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "继续实现", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "turnSummary",
+        id: "summary-t1",
+        stats: {
+          turnId: "t1",
+          outcome: "completed",
+          startedAtMs: 1,
+          finishedAtMs: 2,
+          durationMs: 1,
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            costUsd: undefined,
+          },
+          toolCalls: 0,
+          forkCheckpoint: undefined,
+        },
+      },
+    });
+
+    render(<TimelineView state={state} />);
+    await userEvent.click(screen.getByRole("button", { name: "Fork" }));
+
+    expect(screen.getByRole("dialog", { name: "Fork 会话" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Codex" })).toBeChecked();
+    expect(screen.getByText("当前回合不可原生 Fork")).toBeInTheDocument();
+    expect(screen.queryByText("重建会话")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeDisabled();
   });
 });
 

@@ -243,6 +243,8 @@ export function languageForPath(path: string): string | undefined {
 export type MarkdownVariant = "chat" | "document";
 
 export type MarkdownArtifactProps = ArtifactResolveContext & {
+  /** Session that owns links rendered in this Markdown. */
+  sessionId?: string;
   /** Authenticated workspace read used to inline local images. */
   loadPreview?: (
     path: string,
@@ -286,7 +288,11 @@ export const Markdown = memo(function Markdown({
           a: ({ href, children }) => {
             const resolved = resolveArtifactRef(href, artifact);
             if (resolved.kind === "blocked") {
-              return <span className="gh-blocked-link">{children}</span>;
+              return (
+                <span className="gh-blocked-link" title="此链接不在当前工作区内">
+                  {children}
+                </span>
+              );
             }
             if (
               resolved.kind === "preview" &&
@@ -302,6 +308,7 @@ export const Markdown = memo(function Markdown({
                       deviceHandle: artifact.deviceHandle,
                       workspaceHandle: artifact.workspaceHandle,
                       path: resolved.path,
+                      sessionId: artifact.sessionId ?? null,
                     });
                   }}
                 >

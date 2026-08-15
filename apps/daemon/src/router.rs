@@ -39,13 +39,18 @@ fn failed(error: anyhow::Error) -> Handled {
 }
 
 /// Routes every decoded RPC through the currently active signed application.
-pub async fn handle(state: &Shared, transport: TransportKind, request: Request) -> Handled {
+pub async fn handle(
+    state: &Shared,
+    transport: TransportKind,
+    caller: genet_daemon_logic_api::CallerContext,
+    request: Request,
+) -> Handled {
     let Some(logic) = state.logic.as_ref() else {
         return failed(anyhow::anyhow!(
             "no verified daemon logic artifact is active"
         ));
     };
-    match logic.route(transport, request).await {
+    match logic.route(transport, caller, request).await {
         Ok(routed) => Handled {
             reply: match routed.outcome {
                 genet_daemon_logic_api::LogicOutcome::Reply(reply) => Ok(*reply),

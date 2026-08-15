@@ -59,6 +59,7 @@ beforeEach(() => {
     activeTabId: null,
     notice: null,
     restoreDraft: null,
+    composerDraftInserts: [],
     // Fresh, not carried over: a test that leaves a message pending must not
     // hand it to the next one.
     timeline: emptyTimeline(),
@@ -69,6 +70,21 @@ beforeEach(() => {
 });
 
 describe("warm chat tabs", () => {
+  it("queues composer lines for their session until the composer consumes them", () => {
+    const store = useWorkbench.getState();
+    store.appendComposerDraftLine("s1", "运行产物Bundle：`first`");
+    store.appendComposerDraftLine("s2", "运行产物Bundle：`second`");
+
+    const queued = useWorkbench.getState().composerDraftInserts;
+    expect(queued.map(({ sessionId, text }) => ({ sessionId, text }))).toEqual([
+      { sessionId: "s1", text: "运行产物Bundle：`first`" },
+      { sessionId: "s2", text: "运行产物Bundle：`second`" },
+    ]);
+
+    useWorkbench.getState().consumedComposerDraftInsert(queued[0]!.id);
+    expect(useWorkbench.getState().composerDraftInserts).toEqual([queued[1]]);
+  });
+
   it("keeps an opened session subscribed and reactivates it without another snapshot", async () => {
     const other = { ...SESSION, id: "s2" };
     let subscriptions = 0;
@@ -480,10 +496,40 @@ describe("opening a session that belongs to another project", () => {
 });
 
 describe("forking a completed turn", () => {
+  it("omits the target when the current Agent should use its native Fork", async () => {
+    const calls: unknown[] = [];
+    const client = {
+      call: async (request: unknown) => {
+        calls.push(request);
+        return { type: "session", data: { ...SESSION, id: "s-native" } };
+      },
+      subscribe: async () => ({
+        snapshot: {
+          seq: 0,
+          items: [],
+          pendingPermissions: [],
+          summary: { ...SESSION, id: "s-native" },
+        },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({ client, activeSessionId: SESSION.id });
+
+    await useWorkbench.getState().forkSession("turn-native");
+
+    expect(calls[0]).toEqual({
+      type: "session.fork",
+      payload: { sessionId: SESSION.id, turnId: "turn-native" },
+    });
+  });
+
   it("asks for the exact turn and opens the independent session returned by the daemon", async () => {
     const forked: SessionSummary = {
       ...SESSION,
       id: "s-fork",
+      workspaceId: "w2",
       title: "Fix the redirect · 分支",
       updatedAtMs: 10,
     };
@@ -507,14 +553,22 @@ describe("forking a completed turn", () => {
     } as unknown as Client;
     useWorkbench.setState({ client, activeSessionId: SESSION.id });
 
-    await useWorkbench.getState().forkSession("turn-7");
+    await useWorkbench.getState().forkSession("turn-7", {
+      agentId: "claude",
+      workspaceId: "w2",
+    });
 
     expect(calls).toContainEqual({
       type: "session.fork",
-      payload: { sessionId: SESSION.id, turnId: "turn-7" },
+      payload: {
+        sessionId: SESSION.id,
+        turnId: "turn-7",
+        target: { agentId: "claude", workspaceId: "w2" },
+      },
     });
     expect(useWorkbench.getState().sessions[0]).toEqual(forked);
     expect(useWorkbench.getState().activeSessionId).toBe(forked.id);
+    expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
   });
 });
 
@@ -780,6 +834,9 @@ describe("opening a new conversation", () => {
         modelId: "opus",
         modeId: null,
         title: null,
+        // The workbench opens a session at the workspace root; naming a
+        // directory inside it is something only the CLI does today.
+        cwd: null,
       },
     });
   });
@@ -879,6 +936,50 @@ describe("renaming and deleting a conversation", () => {
  * only that the outcome was unknown.
  */
 describe("asking the machine about rounds", () => {
+  it("keeps older trunks in place when the live page refreshes", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 4,
+    };
+    const trunk = (index: number) => ({
+      index,
+      firstItemId: `t${index}`,
+      blobCount: 1,
+      title: `trunk ${index}`,
+      batches: [],
+    });
+    const timeline = {
+      ...emptyTimeline(),
+      rounds: [round],
+      roundLayers: {
+        r1: { round, trunks: [trunk(0), trunk(1), trunk(2)], nextCursor: undefined },
+      },
+    };
+    const client = {
+      call: async () => ({
+        type: "roundLayer",
+        data: { round, trunks: [trunk(2), trunk(3)], nextCursor: "before:2" },
+      }),
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      activeSessionId: "s1",
+      timeline,
+      sessionTimelines: { s1: timeline },
+    });
+
+    await useWorkbench.getState().loadRound("latest");
+
+    expect(useWorkbench.getState().timeline.roundLayers.r1?.trunks.map(({ index }) => index)).toEqual(
+      [0, 1, 2, 3],
+    );
+    expect(useWorkbench.getState().timeline.roundLayers.r1?.nextCursor).toBeUndefined();
+  });
+
   function counting() {
     let inFlight = 0;
     let peak = 0;
@@ -1001,6 +1102,7 @@ describe("returning after a disconnection", () => {
       },
       onNotice: () => {},
       onUpdateDownload: () => {},
+      onBackgroundProcesses: () => {},
       call: async () => undefined,
       lastCloseReason: close,
       failure: undefined,

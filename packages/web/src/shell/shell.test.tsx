@@ -115,17 +115,34 @@ describe("the left edge", () => {
     expect(within(empty).getByText("还没有会话")).toBeInTheDocument();
   });
 
-  it("opens a roomy recent-session list with each conversation's workspace", async () => {
+  it("shows every recent session in the shared grouping control", async () => {
     sidebar();
 
-    await userEvent.click(screen.getByRole("button", { name: /最近会话/ }));
+    await userEvent.click(screen.getByRole("button", { name: "最近" }));
 
-    const dialog = screen.getByRole("dialog", { name: "最近会话" });
-    expect(within(dialog).getByText("修复移动端横向拖动")).toBeInTheDocument();
-    expect(within(dialog).getByText(/paseo ·/)).toBeInTheDocument();
-    expect(within(dialog).getByRole("img", { name: "运行中" })).toBeInTheDocument();
-    await userEvent.click(within(dialog).getByRole("button", { name: /relay 重连/ }));
+    const recent = screen.getByRole("list", { name: "最近会话" });
+    expect(within(recent).getByText("修复移动端横向拖动")).toBeInTheDocument();
+    expect(within(recent).getAllByText("paseo").length).toBeGreaterThan(0);
+    expect(within(recent).getByRole("img", { name: "运行中" })).toBeInTheDocument();
+    await userEvent.click(within(recent).getByText("relay 重连").closest("button")!);
     expect(useWorkbench.getState().selectSession).toHaveBeenCalledWith("s3");
+  });
+
+  it("shows five recent sessions per project and remembers expansion", async () => {
+    useWorkbench.setState({
+      sessions: Array.from({ length: 7 }, (_, index) => ({
+        ...session(`s${index}`, "w1", `会话 ${index}`),
+        updatedAtMs: index,
+      })),
+    });
+    const projects = projectRows(sidebar());
+
+    expect(within(projects[0]!).queryByText("会话 0")).not.toBeInTheDocument();
+    expect(within(projects[0]!).getByText("会话 6")).toBeInTheDocument();
+    await userEvent.click(within(projects[0]!).getByRole("button", { name: "展开其余 2 个" }));
+
+    expect(within(projects[0]!).getByText("会话 0")).toBeInTheDocument();
+    expect(localStorage.getItem("genehub.sidebar.expanded-projects")).toBe('["w1"]');
   });
 
   it("shows a session a newer build wrote, and refuses to pretend it can open it", async () => {
@@ -249,6 +266,7 @@ describe("the left edge", () => {
     for (const label of ["已完成未阅读", "已完成已阅读", "运行中", "等待交互", "运行异常"]) {
       expect(screen.getByRole("img", { name: label })).toBeInTheDocument();
     }
+    expect(screen.getByRole("img", { name: "运行中" }).querySelector(".animate-spin")).not.toBeNull();
   });
 
   it("writes nothing to the machine when a new conversation is opened", async () => {

@@ -5,10 +5,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use genet_daemon_logic_api::{
-    CapabilityEvent, CapabilityFailure, CapabilityFailureKind, CapabilityValue, ProcessRequest,
-    ProcessSignal, ProcessSpec, ProcessStream, MAX_CAPABILITY_CHUNK_BYTES,
+    CapabilityEvent, CapabilityFailure, CapabilityFailureKind, CapabilityValue, ConfinementMode,
+    ProcessCensusRow, ProcessDialogueStep, ProcessRequest, ProcessSignal, ProcessSpec,
+    ProcessStream, MAX_CAPABILITY_CHUNK_BYTES,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -74,6 +75,23 @@ impl Processes {
                 )
                 .await
             }
+            ProcessRequest::Dialogue {
+                spec,
+                steps,
+                timeout_millis,
+                max_stdout_bytes,
+                max_stderr_bytes,
+            } => {
+                self.dialogue(
+                    roots,
+                    spec,
+                    steps,
+                    timeout_millis,
+                    max_stdout_bytes,
+                    max_stderr_bytes,
+                )
+                .await
+            }
             ProcessRequest::Spawn(spec) => self.spawn(roots, spec).await,
             ProcessRequest::Write { resource_id, bytes } => {
                 checked_bytes(&bytes)?;
@@ -112,6 +130,19 @@ impl Processes {
                     None => Ok(CapabilityValue::Unit),
                 }
             }
+            ProcessRequest::Census => census()
+                .await
+                .map(CapabilityValue::ProcessCensus)
+                .ok_or_else(|| {
+                    failure(
+                        CapabilityFailureKind::Unavailable,
+                        "the operating system did not return a process census",
+                    )
+                }),
+            ProcessRequest::EndTree { pid } => {
+                end_pid_tree(pid).await?;
+                Ok(CapabilityValue::Unit)
+            }
         }
     }
 
@@ -134,8 +165,16 @@ impl Processes {
                 "process timeout must be between 1 ms and 5 minutes",
             ));
         }
-        let mut command = Command::new(&spec.program);
+        let argv = launch_argv(roots, &spec).await?;
+        let (program, wrapper_args) = argv.split_first().ok_or_else(|| {
+            failure(
+                CapabilityFailureKind::Internal,
+                "process confinement produced an empty command",
+            )
+        })?;
+        let mut command = Command::new(program);
         command
+            .args(wrapper_args)
             .args(&spec.args)
             .envs(&spec.env)
             .stdin(if stdin.is_empty() {
@@ -167,7 +206,7 @@ impl Processes {
             }
             command.current_dir(cwd);
         }
-        without_window(&mut command);
+        prepare_child(&mut command);
         let mut child = command.spawn().map_err(process_io_failure)?;
         let mut child_stdin = child.stdin.take();
         let stdout = child.stdout.take();
@@ -200,7 +239,7 @@ impl Processes {
             }),
             Ok(Err(error)) => Err(error),
             Err(_) => {
-                let _ = child.start_kill();
+                let _ = kill_tree(&mut child).await;
                 Err(failure(
                     CapabilityFailureKind::Unavailable,
                     format!("process timed out after {timeout_millis} ms"),
@@ -215,8 +254,16 @@ impl Processes {
         spec: ProcessSpec,
     ) -> Result<CapabilityValue, CapabilityFailure> {
         validate_spec(&spec)?;
-        let mut command = Command::new(&spec.program);
+        let argv = launch_argv(roots, &spec).await?;
+        let (program, wrapper_args) = argv.split_first().ok_or_else(|| {
+            failure(
+                CapabilityFailureKind::Internal,
+                "process confinement produced an empty command",
+            )
+        })?;
+        let mut command = Command::new(program);
         command
+            .args(wrapper_args)
             .args(&spec.args)
             .envs(&spec.env)
             .stdin(Stdio::piped())
@@ -242,7 +289,7 @@ impl Processes {
             }
             command.current_dir(cwd);
         }
-        without_window(&mut command);
+        prepare_child(&mut command);
         let mut child = command.spawn().map_err(process_io_failure)?;
         let pid = child.id();
         let stdin = child.stdin.take();
@@ -282,6 +329,160 @@ impl Processes {
         Ok(CapabilityValue::ProcessStarted { resource_id, pid })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn dialogue(
+        &self,
+        roots: &Arc<RwLock<SystemRoots>>,
+        spec: ProcessSpec,
+        steps: Vec<ProcessDialogueStep>,
+        timeout_millis: u32,
+        max_stdout_bytes: u32,
+        max_stderr_bytes: u32,
+    ) -> Result<CapabilityValue, CapabilityFailure> {
+        validate_spec(&spec)?;
+        if steps.is_empty() || steps.len() > 32 {
+            return Err(failure(
+                CapabilityFailureKind::Invalid,
+                "process dialogue requires 1 through 32 steps",
+            ));
+        }
+        let mut input_bytes = 0usize;
+        for step in &steps {
+            checked_bytes(&step.stdin)?;
+            if step.wait_for_line.is_empty() || step.wait_for_line.len() > 4096 {
+                return Err(failure(
+                    CapabilityFailureKind::Invalid,
+                    "process dialogue markers must contain 1 through 4096 bytes",
+                ));
+            }
+            input_bytes = input_bytes.saturating_add(step.stdin.len());
+        }
+        if input_bytes > MAX_CAPABILITY_CHUNK_BYTES {
+            return Err(failure(
+                CapabilityFailureKind::TooLarge,
+                "process dialogue input exceeds the capability chunk limit",
+            ));
+        }
+        let stdout_limit = checked_output_limit(max_stdout_bytes)?;
+        let stderr_limit = checked_output_limit(max_stderr_bytes)?;
+        if timeout_millis == 0 || timeout_millis > 300_000 {
+            return Err(failure(
+                CapabilityFailureKind::Invalid,
+                "process timeout must be between 1 ms and 5 minutes",
+            ));
+        }
+
+        let argv = launch_argv(roots, &spec).await?;
+        let (program, wrapper_args) = argv.split_first().ok_or_else(|| {
+            failure(
+                CapabilityFailureKind::Internal,
+                "process confinement produced an empty command",
+            )
+        })?;
+        let mut command = Command::new(program);
+        command
+            .args(wrapper_args)
+            .args(&spec.args)
+            .envs(&spec.env)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(cwd) = &spec.cwd {
+            let cwd = crate::filesystem::resolve_locator(roots, cwd).await?;
+            if !std::fs::metadata(&cwd)
+                .map_err(process_io_failure)?
+                .is_dir()
+            {
+                return Err(failure(
+                    CapabilityFailureKind::Invalid,
+                    format!("process cwd is not a directory: {}", cwd.display()),
+                ));
+            }
+            command.current_dir(cwd);
+        }
+        prepare_child(&mut command);
+        let mut child = command.spawn().map_err(process_io_failure)?;
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            failure(
+                CapabilityFailureKind::Internal,
+                "process stdin was not captured",
+            )
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            failure(
+                CapabilityFailureKind::Internal,
+                "process stdout was not captured",
+            )
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            failure(
+                CapabilityFailureKind::Internal,
+                "process stderr was not captured",
+            )
+        })?;
+        let stderr_task = tokio::spawn(read_optional_bounded(Some(stderr), stderr_limit));
+        let operation = async {
+            let mut reader = BufReader::new(stdout);
+            let mut output = Vec::new();
+            let mut line = Vec::new();
+            for step in steps {
+                stdin
+                    .write_all(&step.stdin)
+                    .await
+                    .map_err(process_io_failure)?;
+                stdin.flush().await.map_err(process_io_failure)?;
+                loop {
+                    line.clear();
+                    let count = reader
+                        .read_until(b'\n', &mut line)
+                        .await
+                        .map_err(process_io_failure)?;
+                    if count == 0 {
+                        return Err(failure(
+                            CapabilityFailureKind::Unavailable,
+                            "process dialogue ended before its completion marker",
+                        ));
+                    }
+                    if output.len().saturating_add(count) > stdout_limit {
+                        return Err(failure(
+                            CapabilityFailureKind::TooLarge,
+                            format!("process output exceeds {stdout_limit} bytes"),
+                        ));
+                    }
+                    let complete = line
+                        .windows(step.wait_for_line.len())
+                        .any(|window| window == step.wait_for_line);
+                    output.extend_from_slice(&line);
+                    if complete {
+                        break;
+                    }
+                }
+            }
+            Ok::<_, CapabilityFailure>(output)
+        };
+        let result =
+            tokio::time::timeout(Duration::from_millis(timeout_millis as u64), operation).await;
+        drop(stdin);
+        let _ = kill_tree(&mut child).await;
+        let code = child.wait().await.ok().and_then(|status| status.code());
+        let stderr = stderr_task
+            .await
+            .map_err(|error| failure(CapabilityFailureKind::Internal, error.to_string()))??;
+        match result {
+            Ok(Ok(stdout)) => Ok(CapabilityValue::ProcessCompleted {
+                code,
+                stdout,
+                stderr,
+            }),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(failure(
+                CapabilityFailureKind::Unavailable,
+                format!("process dialogue timed out after {timeout_millis} ms"),
+            )),
+        }
+    }
+
     async fn resource(&self, resource_id: u64) -> Result<Arc<Resource>, CapabilityFailure> {
         self.inner
             .resources
@@ -311,6 +512,202 @@ impl Processes {
         }
         self.inner.resources.write().await.clear();
     }
+}
+
+async fn launch_argv(
+    roots: &Arc<RwLock<SystemRoots>>,
+    spec: &ProcessSpec,
+) -> Result<Vec<std::path::PathBuf>, CapabilityFailure> {
+    match &spec.confinement {
+        ConfinementMode::None => Ok(vec![std::path::PathBuf::from(&spec.program)]),
+        ConfinementMode::Workspace { roots: locators } => {
+            if locators.is_empty() || locators.len() > 64 {
+                return Err(failure(
+                    CapabilityFailureKind::Invalid,
+                    "workspace confinement requires 1 through 64 roots",
+                ));
+            }
+            let mut paths = Vec::with_capacity(locators.len());
+            for locator in locators {
+                paths.push(crate::filesystem::resolve_locator(roots, locator).await?);
+            }
+            crate::isolation::Policy::for_workspace(&paths)
+                .wrap(std::path::Path::new(&spec.program))
+                .map_err(|error| failure(CapabilityFailureKind::Unavailable, error.to_string()))
+        }
+    }
+}
+
+const CENSUS_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(unix)]
+async fn census() -> Option<Vec<ProcessCensusRow>> {
+    let mut command = Command::new("ps");
+    command
+        .args(["-eo", "pid=,ppid=,pgid=,etime=,args="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(CENSUS_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| parse_census(&String::from_utf8_lossy(&output.stdout)))
+}
+
+#[cfg(not(unix))]
+async fn census() -> Option<Vec<ProcessCensusRow>> {
+    // Windows has no process groups equivalent to the Unix ownership rule.
+    // Returning an honest empty census is safer than guessing from pids.
+    Some(Vec::new())
+}
+
+fn parse_census(text: &str) -> Vec<ProcessCensusRow> {
+    text.lines().filter_map(parse_census_row).collect()
+}
+
+fn take_field<'a>(rest: &mut &'a str) -> Option<&'a str> {
+    let end = rest.find(char::is_whitespace)?;
+    let field = &rest[..end];
+    *rest = rest[end..].trim_start();
+    Some(field)
+}
+
+fn parse_census_row(line: &str) -> Option<ProcessCensusRow> {
+    let mut rest = line.trim_start();
+    let pid = take_field(&mut rest)?.parse().ok()?;
+    let parent_pid = take_field(&mut rest)?.parse().ok()?;
+    let group_id = take_field(&mut rest)?.parse().ok()?;
+    let running_for_seconds = parse_elapsed(take_field(&mut rest)?)?;
+    let command = rest.trim().to_string();
+    (!command.is_empty()).then_some(ProcessCensusRow {
+        pid,
+        parent_pid,
+        group_id,
+        running_for_seconds,
+        command,
+    })
+}
+
+fn parse_elapsed(field: &str) -> Option<u64> {
+    let (days, clock) = match field.split_once('-') {
+        Some((days, rest)) => (days.parse::<u64>().ok()?, rest),
+        None => (0, field),
+    };
+    let parts = clock.split(':').collect::<Vec<_>>();
+    let (hours, minutes, seconds): (u64, u64, u64) = match parts.as_slice() {
+        [minutes, seconds] => (0, minutes.parse().ok()?, seconds.parse().ok()?),
+        [hours, minutes, seconds] => (
+            hours.parse().ok()?,
+            minutes.parse().ok()?,
+            seconds.parse().ok()?,
+        ),
+        _ => return None,
+    };
+    Some(
+        days.saturating_mul(86_400)
+            .saturating_add(hours.saturating_mul(3_600))
+            .saturating_add(minutes.saturating_mul(60))
+            .saturating_add(seconds),
+    )
+}
+
+#[cfg(unix)]
+async fn end_pid_tree(pid: u32) -> Result<(), CapabilityFailure> {
+    if pid == 0 || pid == std::process::id() {
+        return Err(failure(
+            CapabilityFailureKind::Invalid,
+            "invalid process tree root",
+        ));
+    }
+    let initial_census = census().await.ok_or_else(|| {
+        failure(
+            CapabilityFailureKind::Unavailable,
+            "cannot enumerate the process tree before ending it",
+        )
+    })?;
+    let mut selected = std::collections::HashSet::from([pid]);
+    loop {
+        let before = selected.len();
+        for row in &initial_census {
+            if selected.contains(&row.parent_pid) {
+                selected.insert(row.pid);
+            }
+        }
+        if selected.len() == before {
+            break;
+        }
+    }
+    let mut targets = initial_census
+        .iter()
+        .filter(|row| selected.contains(&row.pid))
+        .map(|row| row.pid)
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Ok(());
+    }
+    // Descendants first keeps the root alive long enough to retain ownership
+    // while its children receive the graceful signal.
+    targets.sort_unstable_by(|left, right| right.cmp(left));
+    signal_pids("-TERM", &targets).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        let alive = census()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .any(|row| selected.contains(&row.pid));
+        if !alive {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    signal_pids("-KILL", &targets).await;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn signal_pids(signal: &str, pids: &[u32]) {
+    if pids.is_empty() {
+        return;
+    }
+    let mut command = Command::new("kill");
+    command.arg(signal).arg("--");
+    for pid in pids {
+        command.arg(pid.to_string());
+    }
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    let _ = command.status().await;
+}
+
+#[cfg(windows)]
+async fn end_pid_tree(pid: u32) -> Result<(), CapabilityFailure> {
+    let status = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map_err(process_io_failure)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(failure(
+            CapabilityFailureKind::Unavailable,
+            format!("could not end process tree {pid}"),
+        ))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn end_pid_tree(_pid: u32) -> Result<(), CapabilityFailure> {
+    Err(failure(
+        CapabilityFailureKind::Unavailable,
+        "process tree termination is unavailable on this platform",
+    ))
 }
 
 fn resolve_program(program: &str) -> Option<std::path::PathBuf> {
@@ -457,6 +854,20 @@ async fn interrupt(child: &mut Child) -> Result<(), CapabilityFailure> {
 }
 
 async fn kill_tree(child: &mut Child) -> Result<(), CapabilityFailure> {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let group = format!("-{pid}");
+        let status = Command::new("kill")
+            .args(["-KILL", "--", &group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map_err(process_io_failure)?;
+        if status.success() {
+            return Ok(());
+        }
+    }
     #[cfg(windows)]
     if let Some(pid) = child.id() {
         let _ = Command::new("taskkill")
@@ -568,14 +979,21 @@ fn process_io_failure(error: std::io::Error) -> CapabilityFailure {
 }
 
 #[cfg(windows)]
-fn without_window(command: &mut Command) {
+fn prepare_child(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(CREATE_NO_WINDOW);
 }
 
-#[cfg(not(windows))]
-fn without_window(_command: &mut Command) {}
+#[cfg(unix)]
+fn prepare_child(command: &mut Command) {
+    // Every raw process resource owns one process group. That makes a later
+    // KillTree reach descendants even if the direct child has forked them.
+    command.process_group(0);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn prepare_child(_command: &mut Command) {}
 
 pub fn monotonic_millis() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
@@ -585,4 +1003,30 @@ pub fn monotonic_millis() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn census_parser_preserves_commands_with_spaces_and_all_elapsed_shapes() {
+        let rows = parse_census(
+            "  100     1   100    01:02 bash -lc 'npm run dev -- --port 3000'\n\
+             101     1   101 3-02:01:30 cargo watch\n",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].command, "bash -lc 'npm run dev -- --port 3000'");
+        assert_eq!(rows[0].running_for_seconds, 62);
+        assert_eq!(rows[1].running_for_seconds, 266_490);
+        assert_eq!(parse_elapsed("05"), None);
+        assert_eq!(parse_elapsed("02:01:30"), Some(7_290));
+    }
+
+    #[test]
+    fn malformed_census_rows_are_dropped_instead_of_guessed() {
+        let rows = parse_census("nonsense\n\n  100 1 100 01:00 sh\n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 100);
+    }
 }

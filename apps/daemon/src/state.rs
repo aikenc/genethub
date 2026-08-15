@@ -30,6 +30,12 @@ pub struct AppState {
     /// `None` exists only in unit-test process scaffolding. A real Daemon start
     /// fails closed unless a verified signed application is active.
     pub logic: Option<Arc<crate::logic::LogicHost>>,
+    /// Native transport/runtime diagnostics contain categorical platform
+    /// facts only; product routing decides whether they are returned.
+    pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
+    /// Resident audio/runtime resources. Speech settings and context policy
+    /// are supplied by the portable application.
+    pub speech: Arc<crate::speech::SpeechBroker>,
     pub fanout: std::sync::OnceLock<broadcast::Sender<ServerFrame>>,
     pub shutdown: Arc<tokio::sync::Notify>,
 }
@@ -53,6 +59,8 @@ impl AppState {
             link: std::sync::OnceLock::new(),
             remote: std::sync::OnceLock::new(),
             logic,
+            diagnostics: Arc::new(crate::diagnostics::Diagnostics::new()),
+            speech: Arc::new(crate::speech::SpeechBroker::new()),
             fanout: std::sync::OnceLock::new(),
             shutdown: Arc::new(tokio::sync::Notify::new()),
         });

@@ -503,6 +503,7 @@ async fn connection(
         accepted.key,
         accepted.access,
         carrier,
+        endpoint::CarrierKind::WebSocket,
     ));
     let reader = async move {
         while let Some(Ok(message)) = stream.next().await {

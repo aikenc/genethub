@@ -18,6 +18,17 @@ export type { Endpoint, Host, Notification, Target } from "./host";
 export { Client } from "./protocol/client";
 export { AssetPreviewPage } from "./preview/AssetPreviewPage";
 export { PreviewFloat } from "./preview/PreviewFloat";
+export { PreviewPopoutPage } from "./preview/PreviewPopoutPage";
+export { parsePreviewPopout } from "./preview/popout";
+export type { PreviewPopoutContext } from "./preview/popout";
 export { assetPreviewUrl, parseAssetPreviewPath } from "./preview/url";
 export { useWorkbench } from "./session/store";
+export type { SpeechInputProblem } from "./speech/useSpeechInput";
+export {
+  activeDiagnosticClient,
+  CLIENT_DIAGNOSTIC_EVENT,
+  registerDiagnosticClient,
+} from "./diagnostics";
+export type { ClientDiagnosticEvent, ClientDiagnosticKind } from "./protocol/client";
+export type { SupportDiagnostics } from "@genehub/proto";
 export type { ExtraTab } from "./shell/tabs";

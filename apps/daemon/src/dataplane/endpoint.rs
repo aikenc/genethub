@@ -1,15 +1,17 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     ErrorCode, ExchangeRequestHead, ExchangeResponseHead, ProtocolError, Reply, Request,
     ServerFrame, TransportKind,
 };
-use genet_daemon_logic_api::PlatformReply;
+use genet_daemon_logic_api::{PlatformReply, StreamAuthorization, StreamMethod};
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
+use crate::authz;
 use crate::channel_auth::{self, Direction, SessionKey};
 use crate::dataplane::frame::{Frame, Kind, MAX_PAYLOAD_BYTES};
 use crate::router::{self, SideEffect};
@@ -31,6 +33,23 @@ pub const RESET_REFUSED: u32 = 3;
 pub const RESET_TOO_LARGE: u32 = 4;
 pub const RESET_TIMEOUT: u32 = 5;
 pub const RESET_ENDPOINT_CLOSED: u32 = 6;
+
+#[derive(Clone, Copy)]
+pub enum CarrierKind {
+    WebSocket,
+    Fabric,
+    Rtc,
+}
+
+impl CarrierKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WebSocket => "websocket",
+            Self::Fabric => "fabric",
+            Self::Rtc => "rtc",
+        }
+    }
+}
 
 /// Message-preserving records supplied by local WebSocket, Relay Fabric, or
 /// WebRTC.  No business handler receives these channels directly.
@@ -180,9 +199,9 @@ enum EndpointCommand {
     Retire(u32),
 }
 
-pub(super) struct ServerStream {
+pub(crate) struct ServerStream {
     id: u32,
-    pub(super) head: ExchangeRequestHead,
+    pub(crate) head: ExchangeRequestHead,
     inbound: mpsc::Receiver<Incoming>,
     writer: Writer,
     commands: mpsc::Sender<EndpointCommand>,
@@ -190,37 +209,60 @@ pub(super) struct ServerStream {
     local_sequence: u32,
     local_bytes: u64,
     expected_local_bytes: Option<u64>,
+    response_status: Option<u16>,
+    diagnostic_operation: Option<String>,
     local_head_sent: bool,
     local_finished: bool,
 }
 
+pub(crate) enum StreamInput {
+    Chunk(Vec<u8>),
+    Fin,
+    Reset(u32),
+}
+
 impl ServerStream {
-    pub(super) async fn read_body(&mut self, maximum: usize) -> Result<Vec<u8>> {
+    /// Reads one request-side chunk and returns its stream credit immediately
+    /// after ownership has moved into the business handler. Duplex handlers
+    /// use this instead of waiting for a finite request body.
+    pub(crate) async fn next_input(&mut self) -> Result<StreamInput> {
+        match self.inbound.recv().await {
+            Some(Incoming::Chunk(chunk)) => {
+                let IncomingChunk { bytes, _permit } = chunk;
+                let credit = bytes.len() as u32;
+                drop(_permit);
+                self.writer
+                    .send(Frame {
+                        kind: Kind::WindowUpdate,
+                        stream_id: self.id,
+                        value: credit,
+                        payload: Vec::new(),
+                    })
+                    .await?;
+                Ok(StreamInput::Chunk(bytes))
+            }
+            Some(Incoming::Fin) => Ok(StreamInput::Fin),
+            Some(Incoming::Reset(code)) => Ok(StreamInput::Reset(code)),
+            None => anyhow::bail!("peer stream ended before request FIN"),
+        }
+    }
+
+    pub(crate) async fn read_body(&mut self, maximum: usize) -> Result<Vec<u8>> {
         let mut body = Vec::new();
-        while let Some(incoming) = self.inbound.recv().await {
-            match incoming {
-                Incoming::Chunk(chunk) => {
+        loop {
+            match self.next_input().await? {
+                StreamInput::Chunk(bytes) => {
                     let next = body
                         .len()
-                        .checked_add(chunk.bytes.len())
+                        .checked_add(bytes.len())
                         .ok_or_else(|| anyhow!("request body length overflow"))?;
                     if next > maximum {
                         self.reset(RESET_TOO_LARGE).await;
                         anyhow::bail!("request body is too large");
                     }
-                    body.extend_from_slice(&chunk.bytes);
-                    let credit = chunk.bytes.len() as u32;
-                    drop(chunk);
-                    self.writer
-                        .send(Frame {
-                            kind: Kind::WindowUpdate,
-                            stream_id: self.id,
-                            value: credit,
-                            payload: Vec::new(),
-                        })
-                        .await?;
+                    body.extend_from_slice(&bytes);
                 }
-                Incoming::Fin => {
+                StreamInput::Fin => {
                     if self
                         .head
                         .body_length
@@ -231,13 +273,12 @@ impl ServerStream {
                     }
                     return Ok(body);
                 }
-                Incoming::Reset(code) => anyhow::bail!("peer reset stream ({code})"),
+                StreamInput::Reset(code) => anyhow::bail!("peer reset stream ({code})"),
             }
         }
-        anyhow::bail!("peer stream ended before request FIN")
     }
 
-    pub(super) async fn respond(&mut self, head: &ExchangeResponseHead) -> Result<()> {
+    pub(crate) async fn respond(&mut self, head: &ExchangeResponseHead) -> Result<()> {
         if self.local_head_sent || self.local_finished {
             anyhow::bail!("response head was already sent");
         }
@@ -261,11 +302,12 @@ impl ServerStream {
             })
             .await?;
         self.expected_local_bytes = head.body_length;
+        self.response_status = Some(head.status);
         self.local_head_sent = true;
         Ok(())
     }
 
-    pub(super) async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+    pub(crate) async fn write(&mut self, bytes: &[u8]) -> Result<()> {
         if !self.local_head_sent || self.local_finished {
             anyhow::bail!("response body cannot be written in this stream state");
         }
@@ -300,7 +342,7 @@ impl ServerStream {
         Ok(())
     }
 
-    async fn write_message<T: serde::Serialize>(&mut self, message: &T) -> Result<()> {
+    pub(super) async fn write_message<T: serde::Serialize>(&mut self, message: &T) -> Result<()> {
         let body = serde_json::to_vec(message)?;
         let length = u32::try_from(body.len()).context("event message is too large")?;
         let mut wire = Vec::with_capacity(4 + body.len());
@@ -309,7 +351,7 @@ impl ServerStream {
         self.write(&wire).await
     }
 
-    pub(super) async fn finish(&mut self) -> Result<()> {
+    pub(crate) async fn finish(&mut self) -> Result<()> {
         if self.local_finished {
             return Ok(());
         }
@@ -353,12 +395,13 @@ impl ServerStream {
     }
 }
 
-pub(super) struct PeerServices {
-    pub(super) state: Shared,
-    pub(super) access: PeerAccess,
+pub(crate) struct PeerServices {
+    pub(crate) state: Shared,
+    pub(crate) access: PeerAccess,
     event_sender: mpsc::Sender<ServerFrame>,
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
     subscriptions: tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    carrier_kind: CarrierKind,
 }
 
 /// Serves one already mutually-authenticated peer until its carrier closes.
@@ -367,6 +410,7 @@ pub async fn serve(
     key: SessionKey,
     access: PeerAccess,
     mut carrier: Carrier,
+    carrier_kind: CarrierKind,
 ) -> Result<()> {
     let (writer_tx, writer_rx) = mpsc::channel(WRITER_COMMAND_QUEUE);
     let writer = Writer {
@@ -387,8 +431,28 @@ pub async fn serve(
         event_sender,
         event_receiver: tokio::sync::Mutex::new(Some(event_receiver)),
         subscriptions: tokio::sync::Mutex::new(HashMap::new()),
+        carrier_kind,
     });
 
+    // A terminal is shared across a user's own devices on purpose, but this
+    // fanout reaches every authenticated peer, and a device that was never
+    // granted `pty` must not be sent the terminal anyway. Gating only
+    // `pty.open` would leave the output arriving unasked, which is the half
+    // that matters: a shell shows keystrokes, paths, and whatever the user
+    // pastes into it.
+    //
+    // Decided once, at connection: grants are fixed when a device is paired,
+    // and revoking one drops its connections rather than editing them.
+    let logic = state
+        .logic
+        .as_ref()
+        .context("portable daemon logic is unavailable")?;
+    let watcher = logic
+        .authorize_stream(authz::principal(&access), StreamMethod::Events)
+        .await?;
+    state
+        .diagnostics
+        .record("stream", "data.endpoint", "online", None);
     let fanout_task = state.fanout.get().map(|fanout| {
         let mut receiver = fanout.subscribe();
         let events = services.event_sender.clone();
@@ -396,6 +460,9 @@ pub async fn serve(
             loop {
                 match receiver.recv().await {
                     Ok(frame) => {
+                        if !frame_allowed(&frame, &watcher) {
+                            continue;
+                        }
                         if events.send(frame).await.is_err() {
                             return;
                         }
@@ -407,10 +474,6 @@ pub async fn serve(
         })
     });
 
-    let logic = state
-        .logic
-        .as_ref()
-        .context("portable daemon logic is unavailable")?;
     let mut revocations = logic.subscribe_device_revocations();
     if let Some(device_id) = &access.device_id {
         logic.device_connection(device_id.clone(), true).await?;
@@ -476,6 +539,16 @@ pub async fn serve(
             tracing::warn!(%error, %device_id, "portable device presence did not settle");
         }
     }
+    state.diagnostics.record(
+        "stream",
+        "data.endpoint",
+        if outcome.is_ok() { "offline" } else { "error" },
+        if outcome.is_ok() {
+            None
+        } else {
+            Some("carrier")
+        },
+    );
     outcome
 }
 
@@ -566,6 +639,8 @@ fn dispatch(
             local_sequence: 0,
             local_bytes: 0,
             expected_local_bytes: None,
+            response_status: None,
+            diagnostic_operation: None,
             local_head_sent: false,
             local_finished: false,
         };
@@ -660,30 +735,138 @@ fn dispatch(
 }
 
 async fn handle_stream(mut stream: ServerStream, services: Arc<PeerServices>) -> Result<()> {
-    let result = match stream.head.method.as_str() {
-        "rpc" => handle_rpc(&mut stream, &services).await,
-        "events" => handle_events(&mut stream, &services).await,
-        "asset.preview" => crate::dataplane::preview::handle(&mut stream, &services).await,
-        "rtc.negotiate" => crate::dataplane::rtc::handle(&mut stream, &services).await,
-        _ => {
-            send_error(
-                &mut stream,
-                404,
-                ErrorCode::NotFound,
-                "unknown exchange method",
-            )
-            .await
-        }
-    };
+    let started = Instant::now();
+    let request_id = diagnostic_id(&stream.head.metadata);
+    let exchange_method = stream.head.method.clone();
+    let request_bytes = stream.head.body_length;
+    let result = serve_stream(&mut stream, &services).await;
     if result.is_err() {
         stream.reset(RESET_PROTOCOL).await;
     }
+    if exchange_method != "events" {
+        let operation = stream
+            .diagnostic_operation
+            .clone()
+            .unwrap_or_else(|| exchange_method.clone());
+        let status = stream.response_status;
+        let outcome = if result.is_ok() && status.is_some_and(|value| value < 400) {
+            "ok"
+        } else {
+            "error"
+        };
+        let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        if let Some(operation) = support_stream_operation(&exchange_method) {
+            services.state.diagnostics.record(
+                "stream",
+                operation,
+                outcome,
+                support_status_code(status, result.is_err()),
+            );
+        }
+        if outcome == "error" {
+            tracing::warn!(
+                target: "diagnostic",
+                operation,
+                request_id,
+                transport = services.carrier_kind.as_str(),
+                status,
+                duration_ms,
+                request_bytes,
+                response_bytes = stream.local_bytes,
+                "data operation failed"
+            );
+        } else if exchange_method == "asset.preview" || exchange_method == "rtc.negotiate" {
+            tracing::info!(
+                target: "diagnostic",
+                operation,
+                request_id,
+                transport = services.carrier_kind.as_str(),
+                status,
+                duration_ms,
+                request_bytes,
+                response_bytes = stream.local_bytes,
+                "data operation completed"
+            );
+        }
+    }
     result
+}
+
+async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
+    if stream.head.method == "rpc" {
+        // Per-request rather than per-stream: one RPC stream carries one
+        // operation, and they do not all cost the same.
+        return handle_rpc(stream, services).await;
+    }
+    let Some(method) = authz::stream_method(&stream.head.method) else {
+        return send_error(stream, 404, ErrorCode::NotFound, "unknown exchange method").await;
+    };
+    let authorization = services
+        .state
+        .logic
+        .as_ref()
+        .context("portable daemon logic is unavailable")?
+        .authorize_stream(authz::principal(&services.access), method)
+        .await?;
+    if !authorization.allowed {
+        let missing = authorization.missing_grant.as_deref().unwrap_or("unknown");
+        services.state.diagnostics.record(
+            "stream",
+            "authorization",
+            "error",
+            Some(authz::diagnostic_grant_code(missing)),
+        );
+        return refuse(stream, missing).await;
+    }
+    match method {
+        StreamMethod::Events => handle_events(stream, services).await,
+        StreamMethod::AssetPreview => crate::dataplane::preview::handle(stream, services).await,
+        StreamMethod::ShellRun => {
+            crate::dataplane::exec::handle(stream, services, &authorization).await
+        }
+        StreamMethod::RtcNegotiate => crate::dataplane::rtc::handle(stream, services).await,
+        StreamMethod::SpeechTranscribe => crate::speech::handle(stream, services).await,
+    }
+}
+
+/// What a peer must have been granted to be told this.
+///
+/// Matched by name with no wildcard so that a new frame has to be classified
+/// here before it can be broadcast. Anything unsaid would be broadcast to
+/// every authenticated peer, which is the wrong default for a push: the peer
+/// never asked, so it never had a request for the usual check to refuse.
+fn frame_allowed(frame: &ServerFrame, authorization: &StreamAuthorization) -> bool {
+    match frame {
+        ServerFrame::PtyOutput { .. } | ServerFrame::PtyClosed { .. } => authorization.receive_pty,
+        // Command lines of what an agent ran. The same material as the tool
+        // calls in a timeline, and gated the same way.
+        ServerFrame::BackgroundProcesses { .. } => authorization.receive_background_processes,
+        ServerFrame::Event { .. }
+        | ServerFrame::Desync { .. }
+        | ServerFrame::Notice { .. }
+        | ServerFrame::UpdateDownloadChanged { .. } => true,
+    }
+}
+
+/// The one wording for "you are authenticated, and this is still not yours".
+///
+/// It names the missing capability rather than the request, so that a caller
+/// that was narrowed on purpose can tell that apart from a request it got
+/// wrong, and ask for the right invitation instead of retrying.
+async fn refuse(stream: &mut ServerStream, needed: &str) -> Result<()> {
+    send_error(
+        stream,
+        403,
+        ErrorCode::Forbidden,
+        format!("this device was not granted `{}` on this machine", needed),
+    )
+    .await
 }
 
 async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     let body = stream.read_body(MAX_RPC_BODY_BYTES).await?;
     let request: Request = serde_json::from_slice(&body).context("invalid RPC operation body")?;
+    stream.diagnostic_operation = diagnostic_operation(&stream.head.metadata);
     if let Some(scope) = &services.access.workspace_id {
         if let Some(requested) = request_workspace(&request) {
             if requested != scope {
@@ -748,7 +931,11 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         .await;
     }
 
-    let handled = router::handle(&services.state, services.access.transport, request).await;
+    // Resolved once and carried into the router: a request that decides what
+    // to enforce on a spawned process must be looking at the same caller the
+    // gate just admitted, not at a second lookup that could disagree with it.
+    let caller = authz::principal(&services.access);
+    let handled = router::handle(&services.state, services.access.transport, caller, request).await;
     match handled.reply {
         Ok(reply) => {
             send_reply(stream, reply).await?;
@@ -756,6 +943,55 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
             Ok(())
         }
         Err(error) => send_protocol_error(stream, error).await,
+    }
+}
+
+fn diagnostic_id(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("diagnosticId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 96
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+        .map(str::to_string)
+}
+
+fn diagnostic_operation(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+        .map(str::to_string)
+}
+
+fn support_stream_operation(method: &str) -> Option<&'static str> {
+    match method {
+        "asset.preview" => Some("asset.preview"),
+        "rtc.negotiate" => Some("rtc.negotiate"),
+        "shell.run" => Some("shell.run"),
+        _ => None,
+    }
+}
+
+fn support_status_code(status: Option<u16>, transport_error: bool) -> Option<&'static str> {
+    if transport_error {
+        Some("transport")
+    } else {
+        match status {
+            Some(400..=499) => Some("clientError"),
+            Some(500..=599) => Some("serverError"),
+            _ => None,
+        }
     }
 }
 
@@ -783,6 +1019,10 @@ async fn send_protocol_error(stream: &mut ServerStream, error: ProtocolError) ->
         ErrorCode::Unsupported => 422,
         ErrorCode::ProtocolVersion => 426,
         ErrorCode::Internal => 500,
+        // Not 403: the caller is allowed, the machine is unable. Retrying with
+        // a wider grant would not help, and neither would retrying at all
+        // until this machine gains a backend.
+        ErrorCode::IsolationUnavailable => 501,
     };
     stream
         .respond(&ExchangeResponseHead {
@@ -795,7 +1035,7 @@ async fn send_protocol_error(stream: &mut ServerStream, error: ProtocolError) ->
     stream.finish().await
 }
 
-pub(super) async fn send_error(
+pub(crate) async fn send_error(
     stream: &mut ServerStream,
     status: u16,
     code: ErrorCode,
@@ -887,13 +1127,26 @@ async fn handle_events(stream: &mut ServerStream, services: &PeerServices) -> Re
 
 fn request_workspace(request: &Request) -> Option<&str> {
     match request {
+        Request::SessionFork {
+            target: Some(target),
+            ..
+        }
+        | Request::SessionForkImport { target, .. } => target.workspace_id.as_deref(),
         Request::SessionCreate { workspace_id, .. }
+        | Request::SessionImportList { workspace_id, .. }
+        | Request::SessionImport { workspace_id, .. }
         | Request::FileTree { workspace_id, .. }
         | Request::FileWrite { workspace_id, .. }
+        | Request::FileMkdir { workspace_id, .. }
+        | Request::FileCopy { workspace_id, .. }
+        | Request::FileMove { workspace_id, .. }
+        | Request::FileDelete { workspace_id, .. }
         | Request::GitStatus { workspace_id }
         | Request::GitDiff { workspace_id, .. }
         | Request::GitCommit { workspace_id, .. }
         | Request::PtyOpen { workspace_id, .. }
+        | Request::SpeechContextPreview { workspace_id, .. }
+        | Request::SpeechFeedbackRecord { workspace_id, .. }
         | Request::WorkspaceRename { workspace_id, .. }
         | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
         _ => None,
@@ -1011,5 +1264,57 @@ mod tests {
         enqueue_writer(command(3), &mut queues, &mut runnable);
         enqueue_writer(command(1), &mut queues, &mut runnable);
         assert_eq!(runnable, VecDeque::from([1, 3]));
+    }
+
+    #[test]
+    fn diagnostic_metadata_accepts_only_bounded_opaque_labels() {
+        assert_eq!(
+            diagnostic_operation(&serde_json::json!({ "operation": "file.tree" })).as_deref(),
+            Some("file.tree")
+        );
+        assert_eq!(
+            diagnostic_operation(&serde_json::json!({ "operation": "settings/get?token=x" })),
+            None
+        );
+    }
+
+    #[test]
+    fn directed_forks_are_scoped_to_the_destination_workspace() {
+        let target = genehub_proto::ForkTarget {
+            agent_id: "codex".into(),
+            workspace_id: Some("target-workspace".into()),
+            model_id: None,
+            mode_id: None,
+            effort_id: None,
+        };
+        assert_eq!(
+            request_workspace(&Request::SessionFork {
+                session_id: "source".into(),
+                turn_id: "turn".into(),
+                target: Some(target.clone()),
+            }),
+            Some("target-workspace")
+        );
+        assert_eq!(
+            request_workspace(&Request::SessionForkImport {
+                transfer: genehub_proto::ForkTransfer {
+                    source_session_id: "source".into(),
+                    source_turn_id: "turn".into(),
+                    source_agent_id: "codex".into(),
+                    source_round_id: None,
+                    title: None,
+                    items: Vec::new(),
+                    coverage: genehub_proto::HistoryCoverage {
+                        source_item_count: Some(0),
+                        retained_item_count: 0,
+                        omitted_item_count: 0,
+                        retrieval: genehub_proto::RetrievalCapability::Genehub,
+                        reason: None,
+                    },
+                },
+                target,
+            }),
+            Some("target-workspace")
+        );
     }
 }

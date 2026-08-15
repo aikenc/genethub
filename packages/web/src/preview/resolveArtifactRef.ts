@@ -12,7 +12,8 @@ export type ArtifactResolveContext = {
   /**
    * Root-qualified path of the current Markdown/HTML document
    * (`r_handle/dir/file.md`). Relative refs resolve against its directory.
-   * When omitted (chat), relative refs resolve against the first folder root.
+   * When omitted (chat), relative refs resolve against the first folder as
+   * Agent cwd; `../` may land in a sibling registered root.
    */
   documentPath?: string;
 };
@@ -139,9 +140,47 @@ export function resolveWorkspacePath(
   if (context.documentPath) {
     return joinAgainstDocument(context.documentPath, relative);
   }
+  // Chat: Agent cwd is the first folder. Join on its filesystem root so `../`
+  // can reach a sibling workspace folder, then remap onto the longest match.
+  const remapped = resolveRelativeToFirstRoot(relative, context);
+  if (remapped) return remapped;
   const rootHandle = context.folders[0]?.rootHandle;
   if (!rootHandle) return null;
   return joinSegments(rootHandle, [], relative);
+}
+
+/** Join a cwd-relative path onto the first folder, then match any registered root. */
+function resolveRelativeToFirstRoot(
+  relative: string,
+  context: ArtifactResolveContext,
+): string | null {
+  const first = context.folders[0];
+  if (!first) return null;
+  const absolute = joinFilesystem(first.root, relative);
+  if (!absolute) return null;
+  return matchAbsolutePath(absolute, context.folders);
+}
+
+/** POSIX/Windows filesystem join that refuses to walk above the volume root. */
+function joinFilesystem(root: string, relative: string): string | null {
+  const base = normalizeRoot(root);
+  if (!base) return null;
+  const windows = /^[A-Za-z]:\//.test(base);
+  if (!windows && !base.startsWith("/")) return null;
+
+  const parts = windows ? base.split("/") : base.split("/").filter(Boolean);
+  const minLength = windows ? 1 : 0;
+  for (const segment of relative.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (parts.length <= minLength) return null;
+      parts.pop();
+      continue;
+    }
+    parts.push(segment);
+  }
+  if (windows) return parts.length > 1 ? parts.join("/") : null;
+  return parts.length > 0 ? `/${parts.join("/")}` : null;
 }
 
 function stripFileUrl(value: string): string {

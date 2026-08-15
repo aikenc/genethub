@@ -373,9 +373,27 @@ fn detail_from_call(name: &str, arguments: &Value) -> ToolCallDetail {
             path: arg(arguments, "path"),
             diff: String::new(),
         },
+        "grep" | "find" | "ls" => ToolCallDetail::Search {
+            query: search_query(name, arguments),
+            matches: Vec::new(),
+        },
         _ => ToolCallDetail::Unknown {
             raw: json!({ "arguments": arguments }),
         },
+    }
+}
+
+fn search_query(name: &str, arguments: &Value) -> String {
+    match name {
+        "grep" | "find" => arg(arguments, "pattern"),
+        _ => {
+            let path = arg(arguments, "path");
+            if path.is_empty() {
+                ".".to_string()
+            } else {
+                path
+            }
+        }
     }
 }
 
@@ -396,16 +414,22 @@ fn detail_from_result(
                 .join("")
         })
         .unwrap_or_default();
+    let details = result.get("details").cloned().unwrap_or(Value::Null);
+    let truncated = details
+        .get("truncation")
+        .and_then(|value| value.get("truncated"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     match name {
         "bash" => ToolCallDetail::Shell {
             command: arg(arguments, "command"),
-            output: text,
-            exit_code: (!is_error).then_some(0),
+            output: text.clone(),
+            exit_code: exit_code_from(&text, is_error),
         },
         "read" => ToolCallDetail::Read {
             path: arg(arguments, "path"),
             content: text,
-            truncated: false,
+            truncated,
         },
         "write" => ToolCallDetail::Write {
             path: arg(arguments, "path"),
@@ -413,15 +437,239 @@ fn detail_from_result(
         },
         "edit" => ToolCallDetail::Edit {
             path: arg(arguments, "path"),
-            diff: text,
+            diff: details
+                .get("diff")
+                .and_then(Value::as_str)
+                .unwrap_or(&text)
+                .to_string(),
+        },
+        "grep" | "find" | "ls" => ToolCallDetail::Search {
+            query: search_query(name, arguments),
+            matches: parse_matches(&text),
         },
         _ => {
             let mut raw = Map::new();
             raw.insert("arguments".to_string(), arguments.clone());
             raw.insert("output".to_string(), Value::String(text));
+            if !details.is_null() {
+                raw.insert("details".to_string(), details);
+            }
             ToolCallDetail::Unknown {
                 raw: Value::Object(raw),
             }
+        }
+    }
+}
+
+fn exit_code_from(text: &str, is_error: bool) -> Option<i32> {
+    if !is_error {
+        return Some(0);
+    }
+    text.rsplit("Command exited with code ")
+        .next()
+        .and_then(|tail| tail.trim().parse::<i32>().ok())
+}
+
+fn parse_matches(text: &str) -> Vec<genehub_proto::SearchMatch> {
+    text.lines()
+        .filter(|line| !line.is_empty() && *line != "(empty directory)")
+        .take(500)
+        .map(|line| {
+            let mut parts = line.splitn(3, ':');
+            let path = parts.next().unwrap_or(line).to_string();
+            match (parts.next(), parts.next()) {
+                (Some(number), Some(preview)) if number.parse::<u32>().is_ok() => {
+                    genehub_proto::SearchMatch {
+                        path,
+                        line: number.parse().ok(),
+                        preview: preview.to_string(),
+                    }
+                }
+                _ => genehub_proto::SearchMatch {
+                    path: line.to_string(),
+                    line: None,
+                    preview: String::new(),
+                },
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn update(event: Value) -> String {
+        json!({
+            "type": "message_update",
+            "message": { "role": "assistant" },
+            "assistantMessageEvent": event,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn stream_tool_error_usage_and_out_of_turn_contracts_survive_porting() {
+        let mut driver = Driver::default();
+        assert!(driver
+            .line(&update(json!({ "type": "text_start" })))
+            .is_empty());
+        driver.prompt("t1", "hello".to_string());
+
+        let opened = driver.line(&update(json!({ "type": "text_start" })));
+        let item_id = match &opened[0] {
+            SessionEvent::Item {
+                item: TimelineItem::AssistantMessage { id, text },
+                ..
+            } => {
+                assert!(text.is_empty());
+                id.clone()
+            }
+            other => panic!("expected opening text item, saw {other:?}"),
+        };
+        assert!(matches!(
+            &driver.line(&update(json!({ "type": "text_delta", "delta": "hi" })))[0],
+            SessionEvent::ItemDelta { item_id: id, .. } if id == &item_id
+        ));
+        assert!(matches!(
+            &driver.line(&update(json!({ "type": "text_end", "content": "hi" })))[0],
+            SessionEvent::Item { item: TimelineItem::AssistantMessage { id, text }, .. }
+                if id == &item_id && text == "hi"
+        ));
+
+        driver.line(&update(json!({
+            "type": "toolcall_end",
+            "toolCall": {
+                "id": "search-1", "name": "grep", "arguments": { "pattern": "needle" }
+            }
+        })));
+        let settled = driver.line(
+            &json!({
+                "type": "tool_execution_end", "toolCallId": "search-1",
+                "result": { "content": [{ "type": "text", "text": "src/a.rs:12:needle\nsub/file" }] }
+            })
+            .to_string(),
+        );
+        match &settled[0] {
+            SessionEvent::Item {
+                item:
+                    TimelineItem::ToolCall {
+                        status: ToolStatus::Ok,
+                        detail: ToolCallDetail::Search { query, matches },
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(query, "needle");
+                assert_eq!(matches[0].line, Some(12));
+                assert_eq!(matches[0].preview, "needle");
+                assert_eq!(matches[1].path, "sub/file");
+            }
+            other => panic!("expected settled search, saw {other:?}"),
+        }
+
+        driver.line(&update(json!({
+            "type": "toolcall_end",
+            "toolCall": { "id": "shell-1", "name": "bash", "arguments": { "command": "false" } }
+        })));
+        let failed = driver.line(
+            &json!({
+                "type": "tool_execution_end", "toolCallId": "shell-1", "isError": true,
+                "result": { "content": [{ "type": "text", "text": "out\n\nCommand exited with code 3" }] }
+            })
+            .to_string(),
+        );
+        assert!(matches!(
+            &failed[0],
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall {
+                    status: ToolStatus::Error,
+                    detail: ToolCallDetail::Shell {
+                        exit_code: Some(3),
+                        ..
+                    },
+                    ..
+                },
+                ..
+            }
+        ));
+
+        for _ in 0..2 {
+            driver.line(
+                &json!({
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant", "stopReason": "stop",
+                        "usage": { "input": 10, "output": 5, "cost": { "total": 0.25 } }
+                    }
+                })
+                .to_string(),
+            );
+        }
+        let done = driver.line(r#"{"type":"agent_end"}"#);
+        assert!(matches!(
+            &done[0],
+            SessionEvent::TurnCompleted { usage, .. }
+                if usage.input_tokens == 20
+                    && usage.output_tokens == 10
+                    && usage.cost_usd == Some(0.5)
+        ));
+    }
+
+    #[test]
+    fn failures_cancellation_truncation_and_unknown_details_remain_actionable() {
+        let mut driver = Driver::default();
+        driver.prompt("failure", String::new());
+        driver.line(
+            r#"{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"no API key configured"}}"#,
+        );
+        assert!(matches!(
+            &driver.line(r#"{"type":"agent_end"}"#)[0],
+            SessionEvent::TurnFailed { error, .. }
+                if error.code == TurnErrorCode::MissingCredentials
+        ));
+
+        driver.prompt("cancel", String::new());
+        driver.line(
+            r#"{"type":"message_end","message":{"role":"assistant","stopReason":"aborted"}}"#,
+        );
+        assert!(matches!(
+            &driver.line(r#"{"type":"agent_end"}"#)[0],
+            SessionEvent::TurnCanceled { .. }
+        ));
+
+        let read = detail_from_result(
+            "read",
+            &json!({ "path": "huge.txt" }),
+            &json!({
+                "content": [{ "type": "text", "text": "prefix" }],
+                "details": { "truncation": { "truncated": true } }
+            }),
+            false,
+        );
+        assert!(matches!(
+            read,
+            ToolCallDetail::Read {
+                truncated: true,
+                ..
+            }
+        ));
+        let unknown = detail_from_result(
+            "teleport",
+            &json!({ "destination": "mars" }),
+            &json!({
+                "content": [{ "type": "text", "text": "arrived" }],
+                "details": { "latency": 7 }
+            }),
+            false,
+        );
+        match unknown {
+            ToolCallDetail::Unknown { raw } => {
+                assert_eq!(raw["arguments"]["destination"], "mars");
+                assert_eq!(raw["output"], "arrived");
+                assert_eq!(raw["details"]["latency"], 7);
+            }
+            other => panic!("expected unknown tool detail, saw {other:?}"),
         }
     }
 }

@@ -16,6 +16,7 @@ genet-daemon-platform = { path = "../../packages/daemon-platform" }
 genet-daemon-system = { path = "../../packages/daemon-system" }
 
 anyhow.workspace = true
+async-trait = "0.1"
 aes-gcm.workspace = true
 base64.workspace = true
 ed25519-dalek.workspace = true
@@ -52,4 +53,3 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 tempfile = "3"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

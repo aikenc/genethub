@@ -1,4 +1,9 @@
-import type { ProviderInfo, UpdateStatus } from "@genehub/proto";
+import type {
+  ProviderInfo,
+  SpeechRuntimeStatus,
+  SpeechSettings,
+  UpdateStatus,
+} from "@genehub/proto";
 import { useEffect, useState } from "react";
 
 import { BUILD } from "../build";
@@ -23,6 +28,9 @@ const OFFERED = [
 ];
 
 const OFFICIAL_RELEASES = "https://github.com/aikenc/genethub/releases";
+const QWEN3_ASR_DOCS = "https://github.com/QwenLM/Qwen3-ASR";
+const SPEECH_ADAPTER_DOCS =
+  "https://github.com/aikenc/genethub/blob/main/docs/speech-runtime-adapter.md";
 
 /**
  * Keys, agents and remote access.
@@ -37,6 +45,8 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
     loadSettings,
     setProvider,
     forgetProvider,
+    setSpeechQwen3,
+    probeSpeechRuntime,
     agents,
     hub,
     claim,
@@ -45,6 +55,7 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
     claimLink,
     unpair,
     client,
+    activeWorkspaceId,
   } = useWorkbench();
 
   useEffect(() => {
@@ -58,6 +69,16 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
       <Appearance />
 
       <RtcConnection />
+
+      {client?.identity?.features?.includes("speech.transcribe.v2") ? (
+        <SpeechSettingsCard
+          host={host}
+          speech={settings?.speech}
+          workspaceId={activeWorkspaceId ?? undefined}
+          onSave={setSpeechQwen3}
+          onProbe={probeSpeechRuntime}
+        />
+      ) : null}
 
       <section>
         <h2 className="mb-2 text-sm font-medium">模型密钥</h2>
@@ -119,6 +140,231 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
       <Version host={host} endpoint={endpoint} daemonVersion={client?.identity?.daemonVersion} />
     </div>
   );
+}
+
+function SpeechSettingsCard({
+  host,
+  speech,
+  workspaceId,
+  onSave,
+  onProbe,
+}: {
+  host: Host;
+  speech?: SpeechSettings;
+  workspaceId?: string;
+  onSave(input: {
+    stubEnabled: boolean;
+    contextEnabled: boolean;
+    pinnedTerms: string[];
+    languageHints: string[];
+    collectCorrections: boolean;
+    workspaceId?: string;
+  }): Promise<void>;
+  onProbe(): Promise<SpeechRuntimeStatus | null>;
+}) {
+  const [stubEnabled, setStubEnabled] = useState(speech?.stubEnabled ?? false);
+  const [contextEnabled, setContextEnabled] = useState(speech?.contextEnabled ?? true);
+  const [terms, setTerms] = useState((speech?.pinnedTerms ?? []).join("\n"));
+  const [languages, setLanguages] = useState((speech?.languageHints ?? []).join(", "));
+  const [collectCorrections, setCollectCorrections] = useState(
+    Boolean(workspaceId && speech?.correctionWorkspaces.includes(workspaceId)),
+  );
+  const [busy, setBusy] = useState<"save" | "probe" | null>(null);
+  const [probe, setProbe] = useState<SpeechRuntimeStatus | null>(null);
+
+  useEffect(() => {
+    setProbe(null);
+    setStubEnabled(speech?.stubEnabled ?? false);
+    setContextEnabled(speech?.contextEnabled ?? true);
+    setTerms((speech?.pinnedTerms ?? []).join("\n"));
+    setLanguages((speech?.languageHints ?? []).join(", "));
+    setCollectCorrections(
+      Boolean(workspaceId && speech?.correctionWorkspaces.includes(workspaceId)),
+    );
+  }, [speech, workspaceId]);
+
+  const parsedTerms = lines(terms);
+  const parsedLanguages = languages
+    .split(/[\s,，]+/)
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const canSave = parsedTerms.length <= 50 && parsedLanguages.length <= 4;
+
+  return (
+    <section>
+      <div className="mb-2 flex items-center gap-2">
+        <h2 className="text-sm font-medium">语音转文字</h2>
+        <span className="rounded bg-raised px-1.5 py-0.5 text-[10px] text-muted">Qwen3-ASR 推荐</span>
+      </div>
+      <div className="flex flex-col gap-3 rounded bg-surface px-3 py-3 text-xs">
+        <div>
+          <p className="font-medium text-fg">
+            {speech?.runtime.implementation === "stub"
+              ? speech.runtime.label
+              : speech?.runtime.model || speech?.runtime.label || "尚未安装本地语音模型"}
+          </p>
+          <p className="mt-0.5 text-faint">
+            GeneHub 会把真实麦克风音频流式送到当前选择的本机 runtime，并把 revisioned Best-1 原位写入输入框。runtime 只有真实提供 N-best、分段和不确定词时，界面才会显示相应候选；不会伪造置信度。
+          </p>
+          {speech?.runtime.implementation === "mock" ? (
+            <p className="mt-1 text-muted">开发 Mock 已启用：音频只在浏览器内用于波形，不执行模型推理。</p>
+          ) : null}
+          {speech?.runtime.implementation === "stub" ? (
+            <p className="mt-1 text-muted">协议 Stub 正在使用正式音频链路，但只会返回固定测试文字。</p>
+          ) : null}
+        </div>
+
+        <label className="flex items-start gap-2 rounded border border-line px-2 py-2">
+          <input
+            type="checkbox"
+            role="switch"
+            aria-label="语音协议 Stub"
+            checked={stubEnabled}
+            onChange={(event) => setStubEnabled(event.currentTarget.checked)}
+          />
+          <span>
+            <span className="block text-fg">启用语音协议 Stub（测试模式）</span>
+            <span className="mt-0.5 block text-faint">
+              保存语音设置后生效。不安装或运行模型；真实麦克风 PCM 仍按正式链路分块送到 daemon，Stub 返回固定的 Partial、分段 N-best 和低置信候选，用于验证 UI 与 Adapter 契约。音频不保存，候选选择不会写入训练数据；关闭并保存后恢复已登记的真实 Runtime。
+            </span>
+          </span>
+        </label>
+
+        <label className="flex items-start gap-2 rounded border border-line px-2 py-2">
+          <input
+            type="checkbox"
+            checked={contextEnabled}
+            onChange={(event) => setContextEnabled(event.currentTarget.checked)}
+          />
+          <span>
+            <span className="block text-fg">使用当前会话和项目术语增强识别</span>
+            <span className="mt-0.5 block text-faint">
+              活动工作区 ID 自动维护。读取最近对话、当前草稿、工作区/文件名，以及项目显式提供的 .genethub/speech/context.md、terms.txt 和 learned-terms.txt；不会遍历读取普通文件正文。
+            </span>
+          </span>
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-muted">固定专业术语（每行一个，最多 50 个）</span>
+          <textarea
+            aria-label="固定专业术语"
+            rows={4}
+            className="resize-y rounded border border-line bg-bg px-2 py-1.5 font-mono outline-none focus:border-accent"
+            placeholder={"GeneHub\nPipeSpace\nQwen3-ASR"}
+            value={terms}
+            onChange={(event) => setTerms(event.currentTarget.value)}
+          />
+        </label>
+
+        <label className="flex items-start gap-2 rounded border border-line px-2 py-2">
+          <input
+            type="checkbox"
+            checked={collectCorrections}
+            disabled={!workspaceId}
+            onChange={(event) => setCollectCorrections(event.currentTarget.checked)}
+          />
+          <span>
+            <span className="block text-fg">为当前项目沉淀我主动选择的候选</span>
+            <span className="mt-0.5 block text-faint">
+              {workspaceId
+                ? "只为当前项目写入 .genethub/speech/preferences.jsonl 和 learned-terms.txt；切换项目不会沿用授权。只记录主动纠正，不保存音频、不自动上传，并默认写入该目录的 .gitignore。关闭收集不会删除已有文件，可直接检查、导出或删除。"
+                : "请先选择一个工作区；纠正收集不会按整台机器全局开启。"}
+            </span>
+          </span>
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-muted">语言提示（逗号分隔，最多 4 个）</span>
+          <input
+            aria-label="语音语言提示"
+            className="rounded border border-line bg-bg px-2 py-1.5 outline-none focus:border-accent"
+            placeholder="zh, en"
+            value={languages}
+            onChange={(event) => setLanguages(event.currentTarget.value)}
+          />
+        </label>
+
+        {parsedTerms.length > 50 || parsedLanguages.length > 4 ? (
+          <p role="alert" className="text-danger">专业术语最多 50 个，语言提示最多 4 个。</p>
+        ) : null}
+
+        <p className="text-faint">
+          GeneHub 只提供 UI、连接协议、上下文和反馈接口，不下载模型或创建 Python 环境。可在内置 Agent 中说“安装本地语音模型”，它会使用 genehub-speech-runtime Skill 先检查硬件、说明方案并征得确认，再按社区文档安装、探测和登记。
+          <button
+            type="button"
+            className="ml-1 underline decoration-dotted hover:text-accent"
+            onClick={() => host.openExternal(QWEN3_ASR_DOCS)}
+          >
+            查看 Qwen3-ASR 社区运行说明
+          </button>
+          <button
+            type="button"
+            className="ml-1 underline decoration-dotted hover:text-accent"
+            onClick={() => host.openExternal(SPEECH_ADAPTER_DOCS)}
+          >
+            查看 Adapter 接入契约
+          </button>
+        </p>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            data-testid="save-speech-qwen3"
+            className="rounded bg-accent px-3 py-1.5 text-white disabled:opacity-40"
+            disabled={busy !== null || !canSave}
+            onClick={async () => {
+              setBusy("save");
+              setProbe(null);
+              try {
+                await onSave({
+                  stubEnabled,
+                  contextEnabled,
+                  pinnedTerms: parsedTerms,
+                  languageHints: parsedLanguages,
+                  collectCorrections,
+                  workspaceId,
+                });
+              } finally {
+                setBusy(null);
+              }
+            }}
+          >
+            {busy === "save" ? "保存中…" : "保存语音设置"}
+          </button>
+          <button
+            type="button"
+            data-testid="probe-speech-qwen3"
+            className="rounded border border-line px-3 py-1.5 hover:border-accent disabled:opacity-40"
+            disabled={busy !== null}
+            onClick={async () => {
+              setBusy("probe");
+              try {
+                setProbe(await onProbe());
+              } finally {
+                setBusy(null);
+              }
+            }}
+          >
+            {busy === "probe" ? "检查中…" : "检查语音 runtime"}
+          </button>
+          <SpeechRuntimeProbeStatus status={probe} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SpeechRuntimeProbeStatus({ status }: { status: SpeechRuntimeStatus | null }) {
+  if (!status) return <span className="text-muted">尚未检查 runtime</span>;
+  if (status.state === "ready") return <span role="status" className="text-accent-bright">语音 runtime 就绪</span>;
+  return <span role="alert" className="text-danger">{status.message}</span>;
+}
+
+function lines(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 function RtcConnection() {

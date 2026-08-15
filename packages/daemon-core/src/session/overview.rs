@@ -328,3 +328,225 @@ mod tests {
         assert!(output.lines().count() <= 5);
     }
 }
+
+#[cfg(test)]
+mod mainline_contract_tests {
+    use super::*;
+    use genehub_proto::ToolStatus;
+
+    fn overview(detail: ToolCallDetail) -> (String, String, String) {
+        match condense_detail(&detail, Some("fallback")) {
+            ToolCallDetail::Overview {
+                overview,
+                input,
+                output,
+                ..
+            } => (overview, input, output),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reasoning_is_one_line_of_at_most_24_characters() {
+        assert_eq!(shorten("short", 24), "short");
+        assert_eq!(shorten("\n\n  first line\nsecond", 24), "first line");
+        assert_eq!(
+            shorten("a command that runs far past the limit", 24),
+            "a command that runs far…"
+        );
+        // Exactly at the limit is not cut; one past it is.
+        let exact: String = "字".repeat(24);
+        assert_eq!(shorten(&exact, 24), exact);
+        let over: String = "字".repeat(25);
+        let shortened = shorten(&over, 24);
+        assert_eq!(shortened, format!("{}…", "字".repeat(23)));
+        assert_eq!(shortened.chars().count(), 24);
+    }
+
+    #[test]
+    fn thinking_is_cut_to_its_first_sentence() {
+        let item = TimelineItem::Reasoning {
+            id: "r".into(),
+            text: "Let me think about this problem carefully and consider every option".into(),
+        };
+        match condense_item(&item) {
+            TimelineItem::Reasoning { text, .. } => {
+                assert_eq!(text, "Let me think about this…");
+                assert!(text.chars().count() <= REASONING_CHARS);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_shell_call_keeps_one_input_line_and_four_output_lines() {
+        let item = TimelineItem::ToolCall {
+            id: "c".into(),
+            name: "Shell".into(),
+            status: ToolStatus::Ok,
+            detail: ToolCallDetail::Shell {
+                command: "ls".into(),
+                output: "thousands of lines\n".repeat(100),
+                exit_code: Some(3),
+            },
+        };
+        match condense_item(&item) {
+            TimelineItem::ToolCall { detail, .. } => {
+                let ToolCallDetail::Overview {
+                    overview,
+                    input,
+                    output,
+                    tool_kind,
+                } = detail
+                else {
+                    panic!("unexpected detail")
+                };
+                assert_eq!(overview, "ls");
+                assert_eq!(input, "ls");
+                assert_eq!(tool_kind, ToolKind::Shell);
+                assert_eq!(output.lines().count(), 5);
+                assert!(output
+                    .lines()
+                    .all(|line| line.chars().count() <= TOOL_LINE_CHARS));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_tool_shape_becomes_an_overview_with_bounded_fields() {
+        for detail in [
+            ToolCallDetail::Edit {
+                path: "src/main.rs".into(),
+                diff: "@@ huge @@".into(),
+            },
+            ToolCallDetail::Read {
+                path: "src/main.rs".into(),
+                content: "the whole file".into(),
+                truncated: true,
+            },
+            ToolCallDetail::Write {
+                path: "src/main.rs".into(),
+                content: "the whole file".into(),
+            },
+        ] {
+            let (overview, input, output) = overview(detail);
+            assert!(overview.chars().count() <= SUMMARY_CHARS, "{overview:?}");
+            assert!(input.chars().count() <= TOOL_LINE_CHARS, "{input:?}");
+            assert!(output
+                .lines()
+                .all(|line| line.chars().count() <= TOOL_LINE_CHARS));
+        }
+    }
+
+    #[test]
+    fn plans_have_no_unbounded_exception() {
+        let detail = ToolCallDetail::Plan {
+            markdown: "## 步骤\n\na plan someone must read before approving".repeat(10),
+        };
+        let (overview, input, output) = overview(detail);
+        assert!(overview.chars().count() <= SUMMARY_CHARS);
+        assert!(input.chars().count() <= TOOL_LINE_CHARS);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn an_agent_provided_overview_wins_for_unknown_tools() {
+        let detail = ToolCallDetail::Unknown {
+            raw: serde_json::json!({
+                "overview": "agent supplied overview that is much too long",
+                "input": "input value",
+                "output": "output value"
+            }),
+        };
+        let (overview, input, output) = overview(detail);
+        assert!(overview.starts_with("agent supplied overview"));
+        assert!(overview.chars().count() <= SUMMARY_CHARS);
+        assert!(overview.ends_with("input value"));
+        assert_eq!(input, "input value");
+        assert_eq!(output, "output value");
+    }
+
+    #[test]
+    fn an_explicit_overview_uses_48_characters_then_fills_the_64_character_header() {
+        let provided = "概".repeat(60);
+        let input = "入".repeat(60);
+        let title = header(&provided, &input, "", "fallback");
+        assert_eq!(title.chars().count(), SUMMARY_CHARS);
+        assert!(title.starts_with(&format!("{}… · ", "概".repeat(OVERVIEW_CHARS - 1))));
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn missing_overview_uses_the_input_directly() {
+        let title = header("", &"入".repeat(80), "", "fallback");
+        assert_eq!(title.chars().count(), SUMMARY_CHARS);
+        assert!(!title.contains(" · "));
+    }
+
+    #[test]
+    fn a_sub_agent_keeps_only_its_overview_input_and_last_output() {
+        let detail = ToolCallDetail::SubAgent {
+            agent: "Explore".into(),
+            prompt: "find the thing".into(),
+            items: vec![TimelineItem::AssistantMessage {
+                id: "s".into(),
+                text: "nested work".into(),
+            }],
+        };
+        assert_eq!(
+            overview(detail),
+            (
+                "Explore · find the thing".into(),
+                "find the thing".into(),
+                "nested work".into()
+            )
+        );
+    }
+
+    #[test]
+    fn tool_status_deltas_are_condensed_and_small_events_pass_through() {
+        let delta = SessionEvent::ItemDelta {
+            turn_id: "t".into(),
+            item_id: "c".into(),
+            delta: ItemDelta::ToolStatus {
+                status: ToolStatus::Ok,
+                detail: Some(ToolCallDetail::Shell {
+                    command: "make".into(),
+                    output: "a wall of compiler output".into(),
+                    exit_code: Some(0),
+                }),
+            },
+        };
+        match condense_event(&delta) {
+            SessionEvent::ItemDelta {
+                delta: ItemDelta::ToolStatus { detail, .. },
+                ..
+            } => match detail.expect("the detail is kept, condensed") {
+                ToolCallDetail::Overview {
+                    overview,
+                    input,
+                    output,
+                    tool_kind,
+                } => {
+                    assert_eq!(overview, "make");
+                    assert_eq!(input, "make");
+                    assert_eq!(output, "a wall of compiler output");
+                    assert_eq!(tool_kind, ToolKind::Shell);
+                }
+                other => panic!("unexpected {other:?}"),
+            },
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // A reply's own text is content, not detail: untouched.
+        let text = SessionEvent::ItemDelta {
+            turn_id: "t".into(),
+            item_id: "m".into(),
+            delta: ItemDelta::Text {
+                delta: "a long piece of the actual answer, which stays whole".into(),
+            },
+        };
+        assert_eq!(condense_event(&text), text);
+    }
+}

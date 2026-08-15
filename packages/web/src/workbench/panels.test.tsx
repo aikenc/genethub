@@ -31,6 +31,7 @@ function stubDaemon(answers: Partial<Record<Request["type"], (payload: never) =>
     onPty: () => () => {},
     onNotice: () => () => {},
     onUpdateDownload: () => () => {},
+    onBackgroundProcesses: () => () => {},
     onStateChange: () => () => {},
     identity: {
       daemonVersion: "test",
@@ -171,9 +172,75 @@ describe("the files panel", () => {
       deviceHandle: "m_device",
       workspaceHandle: "w1",
       path: "r_demo/notes.md",
+      sessionId: null,
     });
     expect(calls.some((call) => call.type === "file.tree")).toBe(true);
     expect(calls.some((call) => call.type === "file.write")).toBe(false);
+  });
+
+  it("creates copies and deletes paths through the light file manager", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { client, calls } = stubDaemon({
+      "file.tree": () => ({
+        type: "fileTree",
+        data: {
+          name: "demo",
+          path: "r_demo",
+          isDir: true,
+          children: [
+            { name: "docs", path: "r_demo/docs", isDir: true, children: [] },
+            { name: "notes.md", path: "r_demo/notes.md", isDir: false },
+          ],
+        },
+      }),
+      "file.mkdir": () => ({ type: "ack" }),
+      "file.copy": () => ({ type: "ack" }),
+      "file.delete": () => ({ type: "ack" }),
+    });
+    install(client);
+
+    render(<FilesPanel />);
+    await screen.findByText("notes.md");
+
+    await userEvent.click(screen.getByRole("button", { name: "新建文件夹" }));
+    const input = await screen.findByLabelText("新文件夹名称");
+    await userEvent.clear(input);
+    await userEvent.type(input, "assets");
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "file.mkdir")?.payload).toEqual({
+        workspaceId: "w1",
+        path: "r_demo/assets",
+      });
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "复制" }));
+    expect(screen.getByRole("button", { name: "确认复制" })).toBeDisabled();
+    await userEvent.click(screen.getByText("notes.md"));
+    // Selecting for copy must not open Preview.
+    expect(useWorkbench.getState().previewFloat).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "确认复制" }));
+    await userEvent.click(screen.getByText("docs"));
+    await userEvent.click(screen.getByRole("button", { name: "粘贴" }));
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "file.copy")?.payload).toEqual({
+        workspaceId: "w1",
+        from: "r_demo/notes.md",
+        to: "r_demo/docs/notes.md",
+      });
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "删除" }));
+    await userEvent.click(screen.getByText("notes.md"));
+    await userEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => {
+      expect(calls.find((call) => call.type === "file.delete")?.payload).toEqual({
+        workspaceId: "w1",
+        paths: ["r_demo/notes.md"],
+      });
+    });
+    expect(confirm).toHaveBeenCalled();
+    confirm.mockRestore();
   });
 
   it("does not load file bytes into the workbench store", async () => {
@@ -238,7 +305,7 @@ describe("the files panel", () => {
       type: "file.tree",
       payload: { workspaceId: "w1", path: "r_demo/docs", depth: 1 },
     });
-    expect(screen.getByText(/单个文件上限 4 MiB/)).toBeInTheDocument();
+    expect(screen.getByText(/单个预览上限 4 MiB/)).toBeInTheDocument();
   });
 
   it("refreshes the root without requiring a page reload", async () => {
@@ -572,6 +639,70 @@ describe("the settings panel", () => {
     await waitFor(() => {
       expect(calls.some((call) => call.type === "agent.refresh")).toBe(true);
     });
+  });
+});
+
+describe("speech settings", () => {
+  it("configures project context, labels an explicit mock, and probes the runtime", async () => {
+    let correctionWorkspaces: string[] = [];
+    const speech = () => ({
+      runtime: {
+        id: "qwen3-asr",
+        model: "Qwen3-ASR-1.7B",
+        label: "Qwen3-ASR 1.7B",
+        implementation: "mock",
+      },
+      stubEnabled: false,
+      contextEnabled: true,
+      pinnedTerms: [] as string[],
+      languageHints: ["zh"],
+      collectCorrections: false,
+      correctionWorkspaces,
+    });
+    const { client, calls } = stubDaemon({
+      "settings.get": () => ({
+        type: "settings",
+        data: { lanEnabled: false, providers: [], speech: speech() },
+      }),
+      "speech.settings.setQwen3": () => {
+        correctionWorkspaces = ["w1"];
+        return {
+          type: "settings",
+          data: { lanEnabled: false, providers: [], speech: speech() },
+        };
+      },
+      "speech.runtime.probe": () => ({ type: "speechRuntimeStatus", data: { state: "ready" } }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    (client.identity as { features?: string[] }).features = ["speech.transcribe.v2"];
+    install(client);
+
+    render(<SettingsPanel host={browserHost()} />);
+    expect(await screen.findByText("Qwen3-ASR-1.7B")).toBeInTheDocument();
+    expect(screen.getByText(/开发 Mock 已启用/)).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "语音协议 Stub" })).not.toBeChecked();
+    expect(screen.queryByRole("combobox", { name: /模型/ })).not.toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText("固定专业术语"), "GeneHub\nPipeSpace");
+    await userEvent.clear(screen.getByLabelText("语音语言提示"));
+    await userEvent.type(screen.getByLabelText("语音语言提示"), "zh, en");
+    await userEvent.click(screen.getByRole("switch", { name: "语音协议 Stub" }));
+    await userEvent.click(screen.getByText("为当前项目沉淀我主动选择的候选"));
+    await userEvent.click(screen.getByTestId("save-speech-qwen3"));
+
+    await waitFor(() => {
+      const sent = calls.find((call) => call.type === "speech.settings.setQwen3");
+      expect(sent?.payload).toMatchObject({
+        stubEnabled: true,
+        pinnedTerms: ["GeneHub", "PipeSpace"],
+        languageHints: ["zh", "en"],
+        collectCorrections: true,
+        workspaceId: "w1",
+      });
+    });
+
+    await userEvent.click(screen.getByTestId("probe-speech-qwen3"));
+    expect(await screen.findByText("语音 runtime 就绪")).toBeInTheDocument();
   });
 });
 

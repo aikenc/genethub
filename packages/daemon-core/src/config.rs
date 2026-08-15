@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 
-use genehub_proto::{ErrorCode, ProtocolError, ProviderInfo, Settings};
+use genehub_proto::{
+    ErrorCode, ProtocolError, ProviderInfo, Settings, SpeechRuntimeDescriptor, SpeechSettings,
+};
 use genet_daemon_logic_api::{
     CapabilityFailure, CapabilityFailureKind, CapabilityRequest, CapabilityValue, HttpRequest,
-    RedirectPolicy,
+    RedirectPolicy, SpeechConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +22,7 @@ pub struct Config {
     pub port: u16,
     pub lan_enabled: bool,
     pub agents: AgentsConfig,
+    pub speech: SpeechConfig,
     pub workspace_roots: Vec<WorkspaceRootEntry>,
     pub workspaces: Vec<WorkspaceEntry>,
     pub workspace_catalog_generation: String,
@@ -34,6 +37,7 @@ impl Default for Config {
             port: 0,
             lan_enabled: false,
             agents: AgentsConfig::default(),
+            speech: SpeechConfig::default(),
             workspace_roots: Vec::new(),
             workspaces: Vec::new(),
             workspace_catalog_generation: String::new(),
@@ -319,6 +323,40 @@ pub fn settings(
     Settings {
         providers,
         lan_enabled: config.lan_enabled,
+        speech: Some(speech_settings(&config.speech)),
+    }
+}
+
+pub fn speech_settings(config: &SpeechConfig) -> SpeechSettings {
+    SpeechSettings {
+        runtime: if config.stub_enabled {
+            SpeechRuntimeDescriptor {
+                id: "genehub-speech-stub".to_string(),
+                model: "no-model".to_string(),
+                label: "GeneHub 语音协议 Stub".to_string(),
+                implementation: "stub".to_string(),
+            }
+        } else if config.runtime.is_some() {
+            SpeechRuntimeDescriptor {
+                id: "community-speech-runtime".to_string(),
+                model: String::new(),
+                label: "已注册的社区语音 Runtime".to_string(),
+                implementation: "external-stdio".to_string(),
+            }
+        } else {
+            SpeechRuntimeDescriptor {
+                id: "unconfigured".to_string(),
+                model: String::new(),
+                label: "尚未安装本地语音模型".to_string(),
+                implementation: "unconfigured".to_string(),
+            }
+        },
+        stub_enabled: config.stub_enabled,
+        context_enabled: config.context_enabled,
+        pinned_terms: config.pinned_terms.clone(),
+        language_hints: config.language_hints.clone(),
+        collect_corrections: false,
+        correction_workspaces: config.correction_workspaces.clone(),
     }
 }
 

@@ -7,6 +7,7 @@
 
 mod filesystem;
 mod http;
+pub mod isolation;
 mod process;
 mod pty;
 mod rtc;
@@ -110,6 +111,7 @@ impl SystemHost {
 
     async fn execute_call(&self, call: CapabilityCall) -> CapabilityResult {
         let result = match call.request {
+            CapabilityRequest::Environment { key, max_bytes } => environment(&key, max_bytes),
             CapabilityRequest::SecureRead { key, max_bytes } => {
                 filesystem::secure_read(&self.roots, &key, max_bytes).await
             }
@@ -140,6 +142,14 @@ impl SystemHost {
                 CapabilityFailureKind::Unavailable,
                 "connectivity control is handled by the daemon transport owner",
             )),
+            CapabilityRequest::Diagnostics => Err(failure(
+                CapabilityFailureKind::Unavailable,
+                "diagnostics are handled by the daemon transport owner",
+            )),
+            CapabilityRequest::SpeechRuntime(_) => Err(failure(
+                CapabilityFailureKind::Unavailable,
+                "speech runtime is handled by the daemon transport owner",
+            )),
             CapabilityRequest::LogicArtifact(request) => {
                 let operation = match request {
                     LogicArtifactRequest::Status => "status",
@@ -165,6 +175,34 @@ impl SystemHost {
         self.sockets.close_all().await;
         self.rtc.close_all().await;
     }
+}
+
+fn environment(key: &str, max_bytes: u32) -> Result<CapabilityValue, CapabilityFailure> {
+    if key.is_empty()
+        || key.len() > 256
+        || key.chars().any(|character| matches!(character, '\0' | '='))
+        || max_bytes == 0
+        || max_bytes as usize > genet_daemon_logic_api::MAX_CAPABILITY_CHUNK_BYTES
+    {
+        return Err(failure(
+            CapabilityFailureKind::Invalid,
+            "invalid environment capability request",
+        ));
+    }
+    let value = std::env::var_os(key).ok_or_else(|| {
+        failure(
+            CapabilityFailureKind::NotFound,
+            format!("environment variable is not set: {key}"),
+        )
+    })?;
+    let value = value.to_string_lossy().into_owned();
+    if value.len() > max_bytes as usize {
+        return Err(failure(
+            CapabilityFailureKind::TooLarge,
+            format!("environment value exceeds {max_bytes} bytes"),
+        ));
+    }
+    Ok(CapabilityValue::Text(value))
 }
 
 fn random(bytes: u32) -> Result<CapabilityValue, CapabilityFailure> {

@@ -9,12 +9,14 @@ pub mod data;
 pub mod domain;
 pub mod event;
 pub mod rpc;
+pub mod speech;
 pub mod timeline;
 
 pub use data::*;
 pub use domain::*;
 pub use event::*;
 pub use rpc::*;
+pub use speech::*;
 pub use timeline::*;
 
 #[cfg(test)]
@@ -69,6 +71,13 @@ mod tests {
             json!({"type": "pty.resize", "payload": {"ptyId": "p", "cols": 80, "rows": 24}}),
             json!({"type": "workspace.rename", "payload": {"workspaceId": "w", "name": "demo"}}),
             json!({"type": "session.fork", "payload": {"sessionId": "s", "turnId": "t"}}),
+            json!({"type": "session.artifact.begin", "payload": {
+                "sessionId": "s",
+                "files": [{"name": "events.jsonl", "mime": "application/x-ndjson", "bytes": 0}],
+                "metadata": {"schema": "genehub.preview-runtime.v2"}
+            }}),
+            json!({"type": "session.forkExport", "payload": {"sessionId": "s", "turnId": "t"}}),
+            json!({"type": "diagnostics.snapshot"}),
         ];
         for case in cases {
             let raw = case.to_string();
@@ -92,6 +101,63 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+
+        let fork: Request = serde_json::from_value(
+            json!({"type": "session.fork", "payload": {"sessionId": "s", "turnId": "t"}}),
+        )
+        .expect("parse legacy fork");
+        assert!(matches!(fork, Request::SessionFork { target: None, .. }));
+    }
+
+    #[test]
+    fn diagnostics_omit_an_absent_categorical_code() {
+        let event = SupportDiagnosticEvent {
+            at: "2026-08-12T00:00:00.000Z".into(),
+            component: "daemon".into(),
+            operation: "lifecycle".into(),
+            outcome: "started".into(),
+            code: None,
+            count: 1,
+        };
+        let encoded = serde_json::to_value(event).expect("serialize diagnostic event");
+        assert_eq!(encoded.get("code"), None, "None must be absent, not null");
+    }
+
+    #[test]
+    fn fork_target_survives_the_wire() {
+        round_trip(Request::SessionFork {
+            session_id: "source".into(),
+            turn_id: "turn-7".into(),
+            target: Some(ForkTarget {
+                agent_id: "claude".into(),
+                workspace_id: Some("target-workspace".into()),
+                model_id: Some("sonnet".into()),
+                mode_id: None,
+                effort_id: None,
+            }),
+        });
+    }
+
+    #[test]
+    fn portable_fork_transfer_survives_the_wire() {
+        round_trip(ForkTransfer {
+            source_session_id: "source".into(),
+            source_turn_id: "turn-7".into(),
+            source_agent_id: "codex".into(),
+            source_round_id: Some("round-3".into()),
+            title: Some("Investigate".into()),
+            items: vec![TimelineItem::AssistantMessage {
+                id: "a1".into(),
+                text: "done".into(),
+            }],
+            coverage: HistoryCoverage {
+                source_item_count: Some(1),
+                retained_item_count: 1,
+                omitted_item_count: 0,
+                retrieval: RetrievalCapability::Genehub,
+                reason: None,
+            },
+        });
     }
 
     #[test]
@@ -143,5 +209,31 @@ mod tests {
             !todo.append_text("b"),
             "a text delta for a todo item is a protocol error, not a no-op"
         );
+    }
+
+    #[test]
+    fn an_invite_sent_the_way_it_was_sent_before_grants_still_means_no_limits() {
+        // Pairing is the exchange that has to keep working on the machine
+        // nobody can walk over to and fix, so an older client that never heard
+        // of grants must still be understood, and understood as asking for
+        // what it always got.
+        let old: Request = serde_json::from_value(json!({"type": "device.invite"})).unwrap();
+        assert_eq!(old, Request::DeviceInvite(None));
+
+        let narrowed: Request = serde_json::from_value(
+            json!({"type": "device.invite", "payload": {"grants": ["read", "session"]}}),
+        )
+        .unwrap();
+        assert_eq!(
+            narrowed,
+            Request::DeviceInvite(Some(InviteScope {
+                grants: vec!["read".into(), "session".into()]
+            }))
+        );
+
+        round_trip(Request::DeviceInvite(None));
+        round_trip(Request::DeviceInvite(Some(InviteScope {
+            grants: vec!["pty".into()],
+        })));
     }
 }

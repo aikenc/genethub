@@ -6,6 +6,7 @@ use genehub_proto::{Reply, Request, TransportKind};
 use genet_daemon::config::Paths;
 use genet_daemon::router;
 use genet_daemon::Daemon;
+use genet_daemon_logic_api::CallerContext;
 use genet_daemon_platform::{ArtifactEnvelope, SignedArtifact, LOGIC_ABI_VERSION};
 
 const MODULE_ID: &str = "genehub:daemon/logic";
@@ -43,6 +44,7 @@ async fn running_daemon_hot_updates_rejects_tampering_and_rolls_back_without_res
     let installed = router::handle(
         &daemon.state,
         TransportKind::Loopback,
+        CallerContext::LocalUser,
         Request::DaemonLogicInstall {
             path: next_path.display().to_string(),
         },
@@ -61,6 +63,7 @@ async fn running_daemon_hot_updates_rejects_tampering_and_rolls_back_without_res
     let identity = router::handle(
         &daemon.state,
         TransportKind::Loopback,
+        CallerContext::LocalUser,
         Request::ConnectionIdentity,
     )
     .await;
@@ -74,6 +77,7 @@ async fn running_daemon_hot_updates_rejects_tampering_and_rolls_back_without_res
     let rejected = router::handle(
         &daemon.state,
         TransportKind::Loopback,
+        CallerContext::LocalUser,
         Request::DaemonLogicInstall {
             path: tampered_path.display().to_string(),
         },
@@ -86,6 +90,7 @@ async fn running_daemon_hot_updates_rejects_tampering_and_rolls_back_without_res
     let remote = router::handle(
         &daemon.state,
         TransportKind::Forwarded,
+        CallerContext::LocalUser,
         Request::DaemonLogicRollback,
     )
     .await;
@@ -95,6 +100,7 @@ async fn running_daemon_hot_updates_rejects_tampering_and_rolls_back_without_res
     let rolled_back = router::handle(
         &daemon.state,
         TransportKind::Loopback,
+        CallerContext::LocalUser,
         Request::DaemonLogicRollback,
     )
     .await;
@@ -122,7 +128,14 @@ async fn real_guest_owns_workspace_files_pty_settings_devices_and_catalog_end_to
         .await
         .unwrap();
 
-    let call = |request| router::handle(&daemon.state, TransportKind::Loopback, request);
+    let call = |request| {
+        router::handle(
+            &daemon.state,
+            TransportKind::Loopback,
+            CallerContext::LocalUser,
+            request,
+        )
+    };
     let opened = call(Request::WorkspaceOpen {
         root: workspace.display().to_string(),
     })
@@ -188,7 +201,7 @@ async fn real_guest_owns_workspace_files_pty_settings_devices_and_catalog_end_to
         Ok(Reply::Settings(_))
     ));
     assert!(matches!(
-        call(Request::DeviceInvite).await.reply,
+        call(Request::DeviceInvite(None)).await.reply,
         Ok(Reply::Invite(_))
     ));
 

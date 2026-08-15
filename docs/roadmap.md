@@ -41,11 +41,11 @@
 ### 明确不做
 
 - 手机原生 App（M2；MVP 用手机浏览器，界面已按小屏适配）
-- Codex 的 skills 菜单、子 agent 内部步骤：原生 `app-server` 适配器已经落地（`adapter::codex`），`thread/resume` 和贴图也已接上；这两项是它明确还没接的部分，理由见 [third-party-agents.md](./third-party-agents.md) §4 末尾；对应能力位不申报，界面上因此没有对应控件，而不是点了不生效
+- Codex 的 skills 菜单、子 agent 内部步骤：原生 `app-server` driver 已落地（`packages/daemon-core/src/session/codex.rs`），`thread/resume` 和贴图也已接上；这两项是它明确还没接的部分，理由见 [third-party-agents.md](./third-party-agents.md) §4 末尾；对应能力位不申报，界面上因此没有对应控件，而不是点了不生效
 - Codex 接 DeepSeek：不是我们的待办，是 Codex（只认 Responses API）与 DeepSeek（只有 Chat Completions）两个上游之间的协议缺口，见 [third-party-agents.md](./third-party-agents.md) §4；换成原生 `app-server` 传输不会让这个缺口消失
 - 应用内自动更新（手动重装）
 - 平台级零知识与前向保密（M4；当前转发业务帧已对 Relay 加密，但托管 Control 生成对称会话 secret，见 [security-model.md](./security-model.md) §1.1）
-- 前端长尾能力：语音、定时任务、分屏、fork / rewind 等，清单见 [web-workbench.md](./web-workbench.md) §4
+- 前端长尾能力：实时语音对话 / TTS、定时任务、分屏、fork / rewind 等，清单见 [web-workbench.md](./web-workbench.md) §4；离线 Qwen3 语音转文本 UI、N-best、项目上下文和无 GPU Mock 已实现，真实模型由社区 runtime 接入，见[语音输入提案](./speech-input-proposal.md)
 - Agent 的 subagents / MCP / 真压缩（见 [builtin-agent.md](./builtin-agent.md) §8）；`genet` 自身的图片输入也在此列——贴图现在能发给 claude / acp / opencode（它们各自把图片转给自己的模型），但 `genet` 的 provider 层（Anthropic / OpenAI / DeepSeek 请求构造）还不接受图片内容块
 - 会话中途动态切换 agent：`claude`、`opencode` 各自维护一份进程私有的会话状态（CLI 自己的 `--resume` id、HTTP session），把 `TimelineItem` 转存到另一个 agent 不等于真的迁移了上下文，效果只会更糟；有对话内容后前端直接锁定 agent 选择器（`ComposerControls.tsx`），而不是假装能无缝换
 - OpenCode 的真实模型目录（当前 `catalog.models` 恒为空，选择器因此不出现）、各 adapter 的速度 / 质量档位、权限的历史面板
@@ -72,8 +72,8 @@
 - [x] daemon 内核代码中不存在按 agent 名字分支的逻辑
 - [x] 未知工具类型走 `Unknown` 兜底渲染，不白屏、不丢事件
 - [x] 同一段前端代码分别驱动内置 agent 与一个真实外部 agent，渲染结果形状一致
-- [x] Claude Code（原生 `stream-json`，`adapter::claude`）接 DeepSeek 官方 Anthropic 兼容端点，真实模型端到端跑通并固化为四条回归测试（`testing/tests/claude.rs`）：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具确实没有落盘
-- [x] Codex（原生 `app-server`，`adapter::codex`）默认注册、探测（含未登录时报出那一行命令而不是让首个 prompt 挂住）与三个选择器展示正常；接 DeepSeek 的已知限制记录在案，不在本项目范围内解决
+- [x] Claude Code（原生 `stream-json` portable driver）接 DeepSeek 官方 Anthropic 兼容端点，真实模型端到端跑通并固化为四条回归测试（`testing/tests/claude.rs`）：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具确实没有落盘
+- [x] Codex（原生 `app-server` portable driver）默认注册、探测（含未登录时报出那一行命令而不是让首个 prompt 挂住）与三个选择器展示正常；接 DeepSeek 的已知限制记录在案，不在本项目范围内解决
 
 **接入与安全**
 

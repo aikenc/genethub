@@ -6,10 +6,13 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+use genehub_proto::PermissionOutcome;
 use genehub_proto::{
-    InteractionOption, InteractionQuestion, ItemDelta, PermissionOption, PermissionOptionKind,
-    PermissionOutcome, PermissionRequest, PermissionRequestKind, SessionEvent, TimelineItem,
-    TodoEntry, TodoStatus, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    Catalog, InteractionOption, InteractionQuestion, ItemDelta, ModeInfo, ModelInfo,
+    PermissionOption, PermissionOptionKind, PermissionRequest, PermissionRequestKind, SessionEvent,
+    TimelineItem, TodoEntry, TodoStatus, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode,
+    Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -30,6 +33,10 @@ pub struct Driver {
     mode_config_id: Option<String>,
     model: Option<String>,
     mode: Option<String>,
+    /// ACP has no standard system/developer field. Keep fixed product context
+    /// separate in a leading, tagged block instead of rewriting user text.
+    #[serde(default)]
+    system_guidance: Option<String>,
     applied_model: bool,
     applied_mode: bool,
     pending: BTreeMap<i64, Pending>,
@@ -112,6 +119,7 @@ impl Driver {
         resume: Option<&Value>,
         model: Option<&str>,
         mode: Option<&str>,
+        system_guidance: Option<&str>,
     ) -> Self {
         Self {
             agent_id: agent_id.to_string(),
@@ -128,6 +136,7 @@ impl Driver {
             mode_config_id: None,
             model: model.map(str::to_string),
             mode: mode.map(str::to_string),
+            system_guidance: system_guidance.map(str::to_string),
             applied_model: false,
             applied_mode: false,
             pending: BTreeMap::new(),
@@ -221,6 +230,7 @@ impl Driver {
         }
     }
 
+    #[cfg(test)]
     pub fn respond(
         &mut self,
         request_id: &str,
@@ -452,7 +462,11 @@ impl Driver {
             .session_id
             .clone()
             .ok_or_else(|| "the ACP session is not ready".to_string())?;
-        let blocks = prompt_blocks(&prompt.text, &prompt.attachments);
+        let blocks = prompt_blocks(
+            &prompt.text,
+            &prompt.attachments,
+            self.system_guidance.as_deref(),
+        );
         self.call(
             "session/prompt",
             json!({ "sessionId": session_id, "prompt": blocks }),
@@ -764,8 +778,15 @@ fn encode(value: Value) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn prompt_blocks(text: &str, attachments: &[genehub_proto::Attachment]) -> Vec<Value> {
+fn prompt_blocks(
+    text: &str,
+    attachments: &[genehub_proto::Attachment],
+    system_guidance: Option<&str>,
+) -> Vec<Value> {
     let mut blocks = Vec::new();
+    if let Some(guidance) = system_guidance.filter(|value| !value.trim().is_empty()) {
+        blocks.push(json!({ "type": "text", "text": guidance }));
+    }
     if !text.is_empty() {
         blocks.push(json!({ "type": "text", "text": text }));
     }
@@ -783,6 +804,199 @@ fn prompt_blocks(text: &str, attachments: &[genehub_proto::Attachment]) -> Vec<V
         }
     }
     blocks
+}
+
+/// Parses the standard ACP `session/new` discovery surface. Newer Agents use
+/// `models`/`modes`; older ones expose equivalent select config options.
+pub(crate) fn catalog(result: Option<&Value>) -> Catalog {
+    let Some(result) = result else {
+        return Catalog::default();
+    };
+    let (models, default_model) = models_in(result);
+    let (modes, default_mode) = modes_in(result);
+    Catalog {
+        models,
+        modes,
+        commands: Vec::new(),
+        default_model,
+        default_mode,
+        default_effort: None,
+    }
+}
+
+fn config_options_in(result: &Value) -> Option<&Vec<Value>> {
+    result.get("configOptions").and_then(Value::as_array)
+}
+
+fn find_select_config_option<'a>(
+    config_options: Option<&'a Vec<Value>>,
+    category: &str,
+) -> Option<&'a Value> {
+    config_options?.iter().find(|entry| {
+        entry.get("type").and_then(Value::as_str) == Some("select")
+            && entry.get("category").and_then(Value::as_str) == Some(category)
+    })
+}
+
+fn flatten_select_options(options: &[Value]) -> Vec<(String, String, Option<String>)> {
+    let mut flat = Vec::new();
+    for option in options {
+        if let Some(value) = option.get("value").and_then(Value::as_str) {
+            flat.push((
+                value.to_string(),
+                option
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(value)
+                    .to_string(),
+                option
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            ));
+            continue;
+        }
+        let group = option.get("group").and_then(Value::as_str);
+        for choice in option
+            .get("options")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(value) = choice.get("value").and_then(Value::as_str) else {
+                continue;
+            };
+            flat.push((
+                value.to_string(),
+                choice
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(value)
+                    .to_string(),
+                choice
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| group.map(str::to_string)),
+            ));
+        }
+    }
+    flat
+}
+
+fn models_in(result: &Value) -> (Vec<ModelInfo>, Option<String>) {
+    if let Some(models) = result.get("models") {
+        let current = models
+            .get("currentModelId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(available) = models
+            .get("availableModels")
+            .and_then(Value::as_array)
+            .filter(|available| !available.is_empty())
+        {
+            return (
+                available
+                    .iter()
+                    .filter_map(|model| {
+                        let id = model.get("modelId")?.as_str()?;
+                        Some(ModelInfo {
+                            id: id.to_string(),
+                            label: model
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or(id)
+                                .to_string(),
+                            context_window: None,
+                            reasoning: false,
+                            efforts: Vec::new(),
+                        })
+                    })
+                    .collect(),
+                current,
+            );
+        }
+    }
+    let option = find_select_config_option(config_options_in(result), "model");
+    let current = option
+        .and_then(|option| option.get("currentValue"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let choices = option
+        .and_then(|option| option.get("options"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    (
+        flatten_select_options(choices)
+            .into_iter()
+            .map(|(id, label, _)| ModelInfo {
+                id,
+                label,
+                context_window: None,
+                reasoning: false,
+                efforts: Vec::new(),
+            })
+            .collect(),
+        current,
+    )
+}
+
+fn modes_in(result: &Value) -> (Vec<ModeInfo>, Option<String>) {
+    if let Some(modes) = result.get("modes") {
+        let current = modes
+            .get("currentModeId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(available) = modes
+            .get("availableModes")
+            .and_then(Value::as_array)
+            .filter(|available| !available.is_empty())
+        {
+            return (
+                available
+                    .iter()
+                    .filter_map(|mode| {
+                        let id = mode.get("id")?.as_str()?;
+                        Some(ModeInfo {
+                            id: id.to_string(),
+                            label: mode
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or(id)
+                                .to_string(),
+                            description: mode
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect(),
+                current,
+            );
+        }
+    }
+    let option = find_select_config_option(config_options_in(result), "mode");
+    let current = option
+        .and_then(|option| option.get("currentValue"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let choices = option
+        .and_then(|option| option.get("options"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    (
+        flatten_select_options(choices)
+            .into_iter()
+            .map(|(id, label, description)| ModeInfo {
+                id,
+                label,
+                description,
+            })
+            .collect(),
+        current,
+    )
 }
 
 fn resume_method_in(value: &Value) -> Option<ResumeMethod> {
@@ -805,14 +1019,7 @@ fn resume_method_in(value: &Value) -> Option<ResumeMethod> {
 }
 
 fn config_id_for_category(value: &Value, category: &str) -> Option<String> {
-    value
-        .get("configOptions")
-        .and_then(Value::as_array)?
-        .iter()
-        .find(|entry| {
-            entry.get("type").and_then(Value::as_str) == Some("select")
-                && entry.get("category").and_then(Value::as_str) == Some(category)
-        })?
+    find_select_config_option(config_options_in(value), category)?
         .get("id")?
         .as_str()
         .map(str::to_string)
@@ -883,6 +1090,7 @@ fn permission_detail(tool: &Value) -> Option<String> {
     (!paths.is_empty()).then(|| paths.join("\n"))
 }
 
+#[cfg(test)]
 fn permission_outcome(outcome: &PermissionOutcome) -> Value {
     match outcome {
         PermissionOutcome::Selected { option_id } => {
@@ -892,6 +1100,7 @@ fn permission_outcome(outcome: &PermissionOutcome) -> Value {
     }
 }
 
+#[cfg(test)]
 fn cursor_question_outcome(outcome: &PermissionOutcome) -> Value {
     match outcome {
         PermissionOutcome::Answered { answers } => json!({ "outcome": {
@@ -906,6 +1115,7 @@ fn cursor_question_outcome(outcome: &PermissionOutcome) -> Value {
     }
 }
 
+#[cfg(test)]
 fn cursor_plan_outcome(outcome: &PermissionOutcome) -> Value {
     match outcome {
         PermissionOutcome::Selected { option_id } if option_id == "accept" => {
@@ -1024,6 +1234,27 @@ mod tests {
     }
 
     #[test]
+    fn product_guidance_is_a_separate_leading_block() {
+        let blocks = prompt_blocks(
+            "the user's exact request",
+            &[],
+            Some("<genehub_system_guidance>fixed</genehub_system_guidance>"),
+        );
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            blocks[0],
+            json!({
+                "type": "text",
+                "text": "<genehub_system_guidance>fixed</genehub_system_guidance>"
+            })
+        );
+        assert_eq!(
+            blocks[1],
+            json!({ "type": "text", "text": "the user's exact request" })
+        );
+    }
+
+    #[test]
     fn handshake_resume_configuration_and_prompt_are_serialized() {
         let mut driver = Driver::new(
             "cursor",
@@ -1031,6 +1262,7 @@ mod tests {
             Some(&json!({ "sessionId": "remote-1" })),
             Some("composer"),
             Some("agent"),
+            None,
         );
         let writes = driver.prompt("turn-1", "hello".to_string(), &[]).unwrap();
         assert!(String::from_utf8_lossy(&writes[0]).contains("initialize"));
@@ -1060,7 +1292,7 @@ mod tests {
 
     #[test]
     fn permission_and_cursor_question_responses_preserve_wire_ids() {
-        let mut driver = Driver::new("cursor", "/work".into(), None, None, None);
+        let mut driver = Driver::new("cursor", "/work".into(), None, None, None, None);
         driver.turn.id = Some("turn-1".into());
         let permission = driver.line(
             &json!({
@@ -1090,7 +1322,7 @@ mod tests {
 
     #[test]
     fn streamed_text_tools_and_completion_form_one_turn() {
-        let mut driver = Driver::new("cursor", "/work".into(), None, None, None);
+        let mut driver = Driver::new("cursor", "/work".into(), None, None, None, None);
         driver.turn.id = Some("turn-1".into());
         driver.pending.insert(
             9,
@@ -1113,5 +1345,190 @@ mod tests {
             done.events.first(),
             Some(SessionEvent::TurnCompleted { turn_id, .. }) if turn_id == "turn-1"
         ));
+    }
+
+    #[test]
+    fn catalog_reads_native_acp_models_modes_and_defaults() {
+        let result = json!({
+            "models": {
+                "currentModelId": "sonnet",
+                "availableModels": [
+                    {"modelId":"sonnet","name":"Sonnet"},
+                    {"modelId":"opus","name":"Opus"}
+                ]
+            },
+            "modes": {
+                "currentModeId": "agent",
+                "availableModes": [
+                    {"id":"agent","name":"Agent","description":"Act autonomously"},
+                    {"id":"ask","name":"Ask"}
+                ]
+            }
+        });
+        let catalog = catalog(Some(&result));
+        assert_eq!(catalog.default_model.as_deref(), Some("sonnet"));
+        assert_eq!(catalog.default_mode.as_deref(), Some("agent"));
+        assert_eq!(catalog.models.len(), 2);
+        assert_eq!(
+            catalog.modes[0].description.as_deref(),
+            Some("Act autonomously")
+        );
+    }
+
+    #[test]
+    fn catalog_falls_back_to_grouped_select_config_options() {
+        let result = json!({"configOptions":[
+            {
+                "id":"model-choice","type":"select","category":"model",
+                "currentValue":"composer","options":[
+                    {"group":"Cursor","options":[
+                        {"value":"composer","name":"Composer"},
+                        {"value":"fast","name":"Fast","description":"Quick replies"}
+                    ]}
+                ]
+            },
+            {
+                "id":"mode-choice","type":"select","category":"mode",
+                "currentValue":"agent","options":[
+                    {"value":"agent","name":"Agent","description":"Write code"}
+                ]
+            }
+        ]});
+        let catalog = catalog(Some(&result));
+        assert_eq!(catalog.default_model.as_deref(), Some("composer"));
+        assert_eq!(catalog.models[0].label, "Composer");
+        assert_eq!(catalog.models[0].id, "composer");
+        assert_eq!(catalog.modes[0].description.as_deref(), Some("Write code"));
+    }
+
+    #[test]
+    fn resume_attachment_and_unknown_request_contracts_survive_porting() {
+        assert_eq!(
+            resume_method_in(&json!({
+                "agentCapabilities": {
+                    "sessionCapabilities": { "resume": {} },
+                    "loadSession": true
+                }
+            })),
+            Some(ResumeMethod::Resume)
+        );
+        assert_eq!(
+            resume_method_in(&json!({
+                "agentCapabilities": { "loadSession": true }
+            })),
+            Some(ResumeMethod::Load)
+        );
+
+        let blocks = prompt_blocks(
+            "look",
+            &[
+                genehub_proto::Attachment {
+                    name: "shot.png".into(),
+                    mime: "image/png".into(),
+                    path: None,
+                    data_base64: Some("Zm9v".into()),
+                },
+                genehub_proto::Attachment {
+                    name: "path-only.png".into(),
+                    mime: "image/png".into(),
+                    path: Some("/tmp/path-only.png".into()),
+                    data_base64: None,
+                },
+            ],
+            None,
+        );
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["mimeType"], "image/png");
+        assert_eq!(blocks[1]["data"], "Zm9v");
+
+        let mut driver = Driver::new("cursor", "/work".into(), None, None, None, None);
+        let unknown =
+            driver.line(r#"{"jsonrpc":"2.0","id":"opaque","method":"future/method","params":{}}"#);
+        let reply: Value = serde_json::from_slice(&unknown.writes[0]).unwrap();
+        assert_eq!(reply["id"], "opaque");
+        assert_eq!(reply["error"]["code"], -32601);
+
+        let malformed = driver.line(
+            r#"{"jsonrpc":"2.0","id":9,"method":"cursor/ask_question","params":{"questions":[{"id":"q","options":[]}]}}"#,
+        );
+        assert!(malformed.events.is_empty());
+        let reply: Value = serde_json::from_slice(&malformed.writes[0]).unwrap();
+        assert_eq!(reply["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn permission_details_plans_todos_and_turn_scope_remain_structured() {
+        assert_eq!(
+            permission_detail(&json!({ "rawInput": { "command": "rm -rf build" } })),
+            Some("{\n  \"command\": \"rm -rf build\"\n}".into())
+        );
+        assert_eq!(
+            permission_detail(&json!({
+                "content": [{ "content": { "text": "first" } }, { "text": "second" }]
+            })),
+            Some("first\nsecond".into())
+        );
+        assert_eq!(
+            permission_detail(&json!({
+                "locations": [{ "path": "src/a.rs" }, { "path": "src/b.rs" }]
+            })),
+            Some("src/a.rs\nsrc/b.rs".into())
+        );
+
+        let mut driver = Driver::new("cursor", "/work".into(), None, None, None, None);
+        let outside = driver.line(
+            r#"{"method":"cursor/update_todos","params":{"todos":[{"content":"x","status":"in_progress"}]}}"#,
+        );
+        assert!(outside.events.is_empty());
+        driver.turn.id = Some("turn-1".into());
+        let todos = driver.line(
+            r#"{"method":"cursor/update_todos","params":{"todos":[{"content":"x","status":"in_progress"}]}}"#,
+        );
+        assert!(matches!(
+            &todos.events[0],
+            SessionEvent::Item {
+                item: TimelineItem::Todo { items, .. },
+                ..
+            } if items[0].status == TodoStatus::InProgress
+        ));
+
+        let plan = driver.line(
+            r#"{"jsonrpc":"2.0","id":"plan-1","method":"cursor/create_plan","params":{"name":"Implement","overview":"why","plan":"how"}}"#,
+        );
+        assert!(matches!(
+            &plan.events[0],
+            SessionEvent::PermissionRequested { request }
+                if request.kind == PermissionRequestKind::PlanApproval
+                    && request.detail.as_deref() == Some("why\n\nhow")
+        ));
+        let accepted = driver
+            .respond(
+                "plan-1",
+                &PermissionOutcome::Selected {
+                    option_id: "accept".into(),
+                },
+            )
+            .unwrap();
+        let accepted: Value = serde_json::from_slice(&accepted).unwrap();
+        assert_eq!(accepted["id"], "plan-1");
+        assert_eq!(accepted["result"]["outcome"]["outcome"], "accepted");
+    }
+
+    #[test]
+    fn old_snapshot_without_product_guidance_still_restores() {
+        let driver = Driver::new(
+            "cursor",
+            "/work".into(),
+            Some(&json!({ "sessionId": "remote-1" })),
+            Some("composer"),
+            Some("agent"),
+            Some("fixed guidance"),
+        );
+        let mut snapshot = serde_json::to_value(driver).unwrap();
+        snapshot.as_object_mut().unwrap().remove("systemGuidance");
+        let restored: Driver = serde_json::from_value(snapshot).unwrap();
+        assert_eq!(restored.resume_session.as_deref(), Some("remote-1"));
+        assert!(restored.system_guidance.is_none());
     }
 }

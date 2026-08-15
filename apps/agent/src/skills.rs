@@ -8,6 +8,35 @@ use ignore::WalkBuilder;
 
 const MAX_NAME_LENGTH: usize = 64;
 const MAX_DESCRIPTION_LENGTH: usize = 1024;
+struct BuiltinFile {
+    relative_path: &'static str,
+    contents: &'static str,
+}
+
+const BUILTIN_FILES: &[BuiltinFile] = &[
+    BuiltinFile {
+        relative_path: "genehub-session-history/SKILL.md",
+        contents: include_str!("../builtin-skills/genehub-session-history/SKILL.md"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/SKILL.md",
+        contents: include_str!("../builtin-skills/genehub-speech-runtime/SKILL.md"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/agents/openai.yaml",
+        contents: include_str!("../builtin-skills/genehub-speech-runtime/agents/openai.yaml"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/references/models.md",
+        contents: include_str!("../builtin-skills/genehub-speech-runtime/references/models.md"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/references/runtime-contract.md",
+        contents: include_str!(
+            "../builtin-skills/genehub-speech-runtime/references/runtime-contract.md"
+        ),
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
@@ -20,6 +49,7 @@ pub struct Skill {
 
 /// Global then project locations; on a name collision the first one wins.
 pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
+    let builtin_dir = materialize_builtins(agent_dir);
     let mut skills: Vec<Skill> = Vec::new();
     let mut push = |found: Vec<Skill>| {
         for skill in found {
@@ -35,9 +65,59 @@ pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
     }
     push(load_dir(&cwd.join(".genehub").join("skills"), true));
     push(load_dir(&cwd.join(".agents").join("skills"), false));
+    if let Some(dir) = builtin_dir {
+        // Built-ins are guaranteed fallbacks. A user or project skill with the
+        // same name intentionally wins, which keeps the extension point real.
+        push(load_dir(&dir, false));
+    }
 
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
+}
+
+fn materialize_builtins(agent_dir: &Path) -> Option<PathBuf> {
+    let root = agent_dir.join("builtin-skills");
+    for file in BUILTIN_FILES {
+        let target = root.join(file.relative_path);
+        if std::fs::read_to_string(&target).ok().as_deref() == Some(file.contents) {
+            continue;
+        }
+        let parent = target.parent()?;
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            eprintln!(
+                "genet-agent: could not create built-in skill directory for {}: {error}",
+                file.relative_path
+            );
+            return None;
+        }
+        let file_name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("builtin");
+        let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+        let installed = std::fs::write(&temporary, file.contents).and_then(|_| {
+            std::fs::rename(&temporary, &target).or_else(|first_error| {
+                // Windows does not replace an existing destination with rename.
+                // This fallback loses atomic replacement but keeps upgrades from
+                // silently dropping a built-in Skill on that platform.
+                if target.exists() {
+                    std::fs::remove_file(&target)?;
+                    std::fs::rename(&temporary, &target)
+                } else {
+                    Err(first_error)
+                }
+            })
+        });
+        if let Err(error) = installed {
+            let _ = std::fs::remove_file(&temporary);
+            eprintln!(
+                "genet-agent: could not install built-in file {}: {error}",
+                file.relative_path
+            );
+            return None;
+        }
+    }
+    Some(root)
 }
 
 /// Only our own skill directories treat loose `.md` files as skills; shared
@@ -336,5 +416,60 @@ mod tests {
             disable_model_invocation: true,
         }];
         assert!(format_for_prompt(&skills).is_empty());
+    }
+
+    #[test]
+    fn built_in_session_history_skill_is_materialized_and_discovered() {
+        let cwd = temp_dir("builtin-cwd");
+        let agent_dir = temp_dir("builtin-agent");
+        let skills = load(&cwd, &agent_dir);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "genehub-session-history")
+            .expect("built-in skill");
+        assert!(skill
+            .file_path
+            .starts_with(agent_dir.join("builtin-skills")));
+        assert!(std::fs::read_to_string(&skill.file_path)
+            .unwrap()
+            .contains("GENEHUB_SESSION_ID"));
+    }
+
+    #[test]
+    fn built_in_speech_runtime_skill_and_references_are_materialized() {
+        let cwd = temp_dir("speech-builtin-cwd");
+        let agent_dir = temp_dir("speech-builtin-agent");
+        let skills = load(&cwd, &agent_dir);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "genehub-speech-runtime")
+            .expect("built-in speech runtime skill");
+        assert!(std::fs::read_to_string(&skill.file_path)
+            .unwrap()
+            .contains("speech runtime register"));
+        assert!(skill.base_dir.join("references/models.md").is_file());
+        assert!(skill
+            .base_dir
+            .join("references/runtime-contract.md")
+            .is_file());
+        assert!(skill.base_dir.join("agents/openai.yaml").is_file());
+    }
+
+    #[test]
+    fn project_skill_can_override_the_built_in_fallback() {
+        let cwd = temp_dir("override-cwd");
+        let agent_dir = temp_dir("override-agent");
+        let override_path = write_skill(
+            &cwd.join(".agents").join("skills"),
+            "genehub-session-history",
+            "---\nname: genehub-session-history\ndescription: Project override\n---\n",
+        );
+        let skills = load(&cwd, &agent_dir);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "genehub-session-history")
+            .unwrap();
+        assert_eq!(skill.file_path, override_path);
+        assert_eq!(skill.description, "Project override");
     }
 }

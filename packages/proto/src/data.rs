@@ -5,10 +5,13 @@
 //! frame codec itself lives beside each transport implementation and is pinned
 //! by cross-language golden vectors.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
+use crate::domain::IsolationBackend;
 use crate::rpc::ProtocolError;
 
 /// A clean break from the former connection-wide JSON request protocol.
@@ -153,6 +156,114 @@ pub enum WorkspaceFileSourceKind {
 #[ts(export, export_to = "index.ts")]
 pub struct AssetPreviewRequest {
     pub source: WorkspaceFileSource,
+    /// Opaque per-operation id used only to correlate the browser and daemon's
+    /// bounded diagnostic rings. It carries no account, workspace or path data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diagnostic_id: Option<String>,
+}
+
+/// What to run on a machine, and where.
+///
+/// `argv` is a list, never a command line: the machine does not parse it, so
+/// nothing in it can turn into a second command. A caller that wants a shell's
+/// help says so out loud with `["bash", "-lc", "..."]`, and that is then
+/// visibly a shell rather than something that became one by quoting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+/// The request body, if there is one, is the command's standard input. It is
+/// sent whole rather than as it is typed, because a single exchange cannot
+/// carry a conversation: a command that reads, prints a question and reads
+/// again needs the answer to depend on the question, and that is a terminal
+/// (`pty.open`), not this. What this covers is the input that was already
+/// decided before the command started — a patch, a here-document, the output
+/// of something else in a pipeline.
+pub struct ShellRunRequest {
+    pub workspace_id: String,
+    pub argv: Vec<String>,
+    /// Somewhere inside the workspace. Absent means its root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cwd: Option<String>,
+    /// Added to the environment the daemon runs with, overriding it name by
+    /// name.
+    ///
+    /// Additions only: there is no way to ask for a cleared environment. A
+    /// command that loses `PATH` and `HOME` fails in ways that look like the
+    /// machine is broken, and this grants no authority that choosing the argv
+    /// did not already grant — the caller could have run `env FOO=bar ...`
+    /// itself.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// How long the command may run before it is ended, in milliseconds.
+    ///
+    /// Absent means no limit, which is not what a one-shot tool call would
+    /// choose but is right here: this streams, so the caller sees the output
+    /// as it arrives and can stop the command by going away. A caller that
+    /// cannot wait — an agent, which has no way to press Ctrl-C — says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// What the operating system is holding a process to, told to whoever asked
+/// for the process.
+///
+/// Without this a confined caller has to infer the rule from the symptoms, and
+/// the symptoms differ by backend: a namespace makes the rest of the filesystem
+/// *absent* (`ENOENT`), Landlock leaves it there and *refuses* it (`EACCES`).
+/// An agent reading "no such file" concludes the directory does not exist and
+/// sets about creating it. Saying the rule up front is cheaper than every
+/// caller guessing it wrong differently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct Confinement {
+    pub backend: IsolationBackend,
+    /// Absolute paths the process can reach and write. Everything outside them
+    /// is absent or refused; which of the two depends on `backend`.
+    pub roots: Vec<String>,
+}
+
+/// One message from a running command.
+///
+/// The two output streams stay apart the whole way. A terminal merges them
+/// because a person is reading both at once; a caller that has to tell a
+/// diagnostic from a result cannot un-merge them afterwards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum ShellFrame {
+    Stdout {
+        data: String,
+    },
+    Stderr {
+        data: String,
+    },
+    /// Always the last frame, and sent even when the command was killed —
+    /// a stream that simply stopped would be indistinguishable from a
+    /// connection that broke.
+    Exit {
+        /// Absent when a signal ended the process, which is the one case where
+        /// there is no exit status to report.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        code: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        signal: Option<i32>,
+        /// Whether the command was ended because it ran out of time rather
+        /// than because it finished.
+        ///
+        /// Not inferable from the rest: a command ended this way reports
+        /// exactly what one killed for any other reason reports, and "killed
+        /// by SIGKILL" would leave the caller to guess between "it hung" and
+        /// "somebody stopped it". The difference decides whether retrying with
+        /// a longer limit is sensible.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        timed_out: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -202,6 +313,7 @@ mod tests {
                 workspace_handle: "w_one".into(),
                 path: "docs/readme.md".into(),
             },
+            diagnostic_id: None,
         })
         .unwrap();
         assert_eq!(value["source"]["kind"], "workspaceFile");

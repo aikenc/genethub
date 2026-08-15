@@ -1,9 +1,11 @@
 import type {
   AgentInfo,
   Attachment,
+  BackgroundProcess,
   DeviceInfo,
   DeviceInvite,
   FileNode,
+  ForkTarget,
   GitStatus,
   HubClaim,
   HubStatus,
@@ -13,8 +15,10 @@ import type {
   BlobRef,
   SequencedEvent,
   SessionSnapshot,
+  SessionImportListing,
   SessionSummary,
   Settings,
+  SpeechRuntimeStatus,
   UpdateDownload,
   UpdateStatus,
   WorkspaceInfo,
@@ -46,6 +50,7 @@ export type TabKind =
   | "settings"
   | "devices"
   | "logs"
+  | "processes"
   | `extra:${string}`;
 
 export interface WorkbenchTab {
@@ -64,6 +69,12 @@ export type PreviewFloatTarget = {
   deviceHandle: string;
   workspaceHandle: string;
   path: string;
+  /** Session that owned the link when Preview was opened; stable across tab changes. */
+  sessionId: string | null;
+};
+
+export type PreviewFloatRequest = Omit<PreviewFloatTarget, "sessionId"> & {
+  sessionId?: string | null;
 };
 
 /**
@@ -110,6 +121,14 @@ export function defaultAgent(agents: AgentInfo[]): AgentInfo | undefined {
 /** The tab an unstarted conversation lives in. There is only ever one. */
 const DRAFT_TAB = "chat:draft";
 
+export type ComposerDraftInsert = {
+  id: string;
+  sessionId: string;
+  text: string;
+};
+
+let composerDraftInsertSequence = 0;
+
 interface WorkbenchState {
   client: Client | null;
   connection: ConnectionState;
@@ -145,6 +164,8 @@ interface WorkbenchState {
    * clears it with `restoredDraft`.
    */
   restoreDraft: { text: string; attachments: Attachment[] } | null;
+  /** Lines waiting to be appended to a session's composer without sending it. */
+  composerDraftInserts: ComposerDraftInsert[];
   hub: HubStatus | null;
   /**
    * The last way into this machine's identity the Hub handed out.
@@ -156,6 +177,15 @@ interface WorkbenchState {
   claim: HubClaim | null;
   /** Who this machine lets in from outside. Owned by the daemon, not by us. */
   devices: DeviceInfo[];
+  /**
+   * What each session's agent left running.
+   *
+   * Pushed by the daemon at the end of every turn, so this is a count that can
+   * sit on screen without anyone asking for it. Refetched when the panel opens
+   * and after anything is ended, because those are the moments a stale answer
+   * would be visible as a wrong one.
+   */
+  backgroundProcesses: BackgroundProcess[];
   remote: RemoteAccess | null;
   tree: FileNode | null;
   git: GitStatus | null;
@@ -229,6 +259,15 @@ interface WorkbenchState {
     /** Written by hand, for an endpoint that cannot list its own models. */
     models?: string[];
   }): Promise<void>;
+  setSpeechQwen3(input: {
+    stubEnabled: boolean;
+    contextEnabled: boolean;
+    pinnedTerms: string[];
+    languageHints: string[];
+    collectCorrections: boolean;
+    workspaceId?: string;
+  }): Promise<void>;
+  probeSpeechRuntime(): Promise<SpeechRuntimeStatus | null>;
   /** Removes a provider the user added. */
   forgetProvider(providerId: string): Promise<void>;
   /**
@@ -252,7 +291,7 @@ interface WorkbenchState {
   closeTab(tabId: string): void;
   setTabLimit(limit: number): void;
   setRightPanel(panel: RightPanel): void;
-  openPreviewFloat(target: PreviewFloatTarget): void;
+  openPreviewFloat(target: PreviewFloatRequest): void;
   closePreviewFloat(): void;
   send(text: string, attachments?: Attachment[]): Promise<void>;
   /** Sends a failed message again, unchanged. */
@@ -261,8 +300,16 @@ interface WorkbenchState {
   editPending(): void;
   /** Acknowledges that the composer has taken `restoreDraft` back. */
   restoredDraft(): void;
+  /** Adds one intact line to a session's current composer draft. */
+  appendComposerDraftLine(sessionId: string, text: string): void;
+  /** Acknowledges that one queued composer insertion has been applied. */
+  consumedComposerDraftInsert(id: string): void;
   /** Creates an independent Agent context through one completed turn. */
-  forkSession(turnId: string): Promise<void>;
+  forkSession(turnId: string, target?: ForkTarget): Promise<boolean>;
+  /** Lightweight provider discovery; full history is read only after selection. */
+  listImportableSessions(workspaceId: string): Promise<SessionImportListing | null>;
+  /** Imports one expiring candidate and opens the resulting GeneHub session. */
+  importSessionCandidate(workspaceId: string, candidateId: string): Promise<boolean>;
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
   setMode(modeId: string): Promise<void>;
@@ -276,6 +323,9 @@ interface WorkbenchState {
   claimLink(): Promise<HubClaim | null>;
   unpair(): Promise<void>;
   refreshDevices(): Promise<void>;
+  refreshBackgroundProcesses(): Promise<void>;
+  killBackgroundProcess(sessionId: string, pid: number): Promise<void>;
+  killBackgroundProcesses(sessionId: string): Promise<void>;
   invite(): Promise<DeviceInvite | null>;
   revokeDevice(deviceId: string): Promise<void>;
   attachRelay(relayUrl: string, joinToken: string): Promise<void>;
@@ -409,13 +459,23 @@ let roundRefreshInFlight: Promise<void> | null = null;
 let roundRefreshAgain = false;
 
 async function refreshRound(get: () => WorkbenchState): Promise<void> {
+  const sessionId = get().activeSessionId;
+  if (!sessionId) return;
   await get().loadRound("latest");
+  if (get().activeSessionId !== sessionId) return;
   const round = Object.values(get().timeline.roundLayers)
     .reverse()
     .find((layer) => layer.round.outcome === "running")?.round;
   if (!round) return;
   const last = get().timeline.roundLayers[round.roundId]?.trunks.at(-1);
-  if (last) await get().loadTrunk(round.roundId, last.index);
+  if (!last) return;
+  const loaded = get().timeline.roundTrunks[`${round.roundId}:${last.index}`];
+  // A layer refresh often reports the exact same live tail. Keep the detail
+  // object already on screen in that case, so an expanded card neither flashes
+  // through loading nor churns its measured height on every stream event.
+  if (!loaded || JSON.stringify(loaded.summary) !== JSON.stringify(last)) {
+    await get().loadTrunk(round.roundId, last.index);
+  }
 }
 
 /**
@@ -453,6 +513,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   client: null,
   connection: "connecting",
   agents: [],
+  backgroundProcesses: [],
   workspaces: [],
   activeWorkspaceId: null,
   sessions: [],
@@ -468,6 +529,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   tabLimit: 16,
   notice: null,
   restoreDraft: null,
+  composerDraftInserts: [],
   hub: null,
   claim: null,
   devices: [],
@@ -524,6 +586,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     });
     client.onNotice((_level, message) => set({ notice: message }));
     client.onUpdateDownload((download) => set({ download }));
+    client.onBackgroundProcesses((backgroundProcesses) => set({ backgroundProcesses }));
     try {
       // Hub status and the download prompt do not read anything the catalog
       // loads, so they fly alongside it instead of queueing behind two relay
@@ -818,13 +881,33 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       });
       if (reply?.type !== "roundLayer") return;
       const layer = reply.data;
-      patchTimeline(sessionId, set, (timeline) => ({
-        rounds: [
-          ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),
-          layer.round,
-        ],
-        roundLayers: { ...timeline.roundLayers, [layer.round.roundId]: layer },
-      }));
+      patchTimeline(sessionId, set, (timeline) => {
+        const existing = timeline.roundLayers[layer.round.roundId];
+        const trunks = existing
+          ? [
+              ...new Map(
+                [...existing.trunks, ...layer.trunks].map((trunk) => [trunk.index, trunk]),
+              ).values(),
+            ].sort((left, right) => left.index - right.index)
+          : layer.trunks;
+        const existingFirst = existing?.trunks[0]?.index;
+        const keptOlder =
+          existingFirst !== undefined && existingFirst < (layer.trunks[0]?.index ?? 0);
+        return {
+          rounds: [
+            ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),
+            layer.round,
+          ],
+          roundLayers: {
+            ...timeline.roundLayers,
+            [layer.round.roundId]: {
+              ...layer,
+              trunks,
+              nextCursor: keptOlder ? existing?.nextCursor : layer.nextCursor,
+            },
+          },
+        };
+      });
     });
   },
 
@@ -895,6 +978,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       settings: "设置",
       devices: "设备",
       logs: "日志",
+      processes: "后台进程",
     };
     set((state) => {
       if (state.tabs.some((tab) => tab.id === id)) {
@@ -988,6 +1072,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         deviceHandle: target.deviceHandle,
         workspaceHandle: target.workspaceHandle,
         path: target.path,
+        sessionId:
+          target.sessionId === undefined ? get().activeSessionId : target.sessionId,
       },
     });
   },
@@ -1095,18 +1181,58 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set({ restoreDraft: null });
   },
 
-  async forkSession(turnId) {
+  appendComposerDraftLine(sessionId, text) {
+    if (!sessionId || !text || text.includes("\n")) return;
+    const insert = {
+      id: `composer-insert-${Date.now().toString(36)}-${++composerDraftInsertSequence}`,
+      sessionId,
+      text,
+    } satisfies ComposerDraftInsert;
+    set((state) => ({ composerDraftInserts: [...state.composerDraftInserts, insert] }));
+  },
+
+  consumedComposerDraftInsert(id) {
+    set((state) => ({
+      composerDraftInserts: state.composerDraftInserts.filter((insert) => insert.id !== id),
+    }));
+  },
+
+  async forkSession(turnId, target) {
     const sessionId = get().activeSessionId;
-    if (!sessionId) return;
+    if (!sessionId) return false;
     const reply = await asked(set, () =>
       require_(get().client).call({
         type: "session.fork",
-        payload: { sessionId, turnId },
+        payload: { sessionId, turnId, ...(target ? { target } : {}) },
       }),
     );
-    if (reply?.type !== "session") return;
+    if (reply?.type !== "session") return false;
     set((state) => ({ sessions: [reply.data, ...state.sessions] }));
     await get().selectSession(reply.data.id);
+    return true;
+  },
+
+  async listImportableSessions(workspaceId) {
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "session.importList",
+        payload: { workspaceId, limit: 30 },
+      }),
+    );
+    return reply?.type === "sessionImports" ? reply.data : null;
+  },
+
+  async importSessionCandidate(workspaceId, candidateId) {
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "session.import",
+        payload: { workspaceId, candidateId },
+      }),
+    );
+    if (reply?.type !== "session") return false;
+    set((state) => ({ sessions: [reply.data, ...state.sessions] }));
+    await get().selectSession(reply.data.id);
+    return true;
   },
 
   async interrupt() {
@@ -1313,6 +1439,39 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (agents?.type === "agents") set({ agents: agents.data });
   },
 
+  async setSpeechQwen3({
+    stubEnabled,
+    contextEnabled,
+    pinnedTerms,
+    languageHints,
+    collectCorrections,
+    workspaceId,
+  }) {
+    set({ notice: null });
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "speech.settings.setQwen3",
+        payload: {
+          stubEnabled,
+          contextEnabled,
+          pinnedTerms,
+          languageHints,
+          collectCorrections,
+          ...(workspaceId ? { workspaceId } : {}),
+        },
+      }),
+    );
+    if (reply?.type === "settings") set({ settings: reply.data });
+  },
+
+  async probeSpeechRuntime() {
+    set({ notice: null });
+    const reply = await asked(set, () =>
+      require_(get().client).call({ type: "speech.runtime.probe" }),
+    );
+    return reply?.type === "speechRuntimeStatus" ? reply.data : null;
+  },
+
   async forgetProvider(providerId) {
     set({ notice: null });
     const reply = await asked(set, () =>
@@ -1367,8 +1526,32 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async invite() {
-    const reply = await require_(get().client).call({ type: "device.invite" });
+    // Null, not a grant list: the workbench pairs a device the owner will use
+    // as themselves. Narrowing belongs to whoever is deliberately handing out
+    // less, and inventing a default here would decide that for them.
+    const reply = await require_(get().client).call({
+      type: "device.invite",
+      payload: null,
+    });
     return reply?.type === "invite" ? reply.data : null;
+  },
+
+  async refreshBackgroundProcesses() {
+    const client = require_(get().client);
+    const reply = await client
+      .call({ type: "process.list" })
+      .catch(unattended(client, get, set));
+    if (reply?.type === "processes") set({ backgroundProcesses: reply.data });
+  },
+
+  async killBackgroundProcess(sessionId, pid) {
+    await require_(get().client).call({ type: "process.kill", payload: { sessionId, pid } });
+    await get().refreshBackgroundProcesses();
+  },
+
+  async killBackgroundProcesses(sessionId) {
+    await require_(get().client).call({ type: "process.killAll", payload: { sessionId } });
+    await get().refreshBackgroundProcesses();
   },
 
   async revokeDevice(deviceId) {
@@ -1497,6 +1680,7 @@ async function start(
         modelId: draft.modelId,
         modeId: draft.modeId,
         title: null,
+        cwd: null,
       },
     }),
   );

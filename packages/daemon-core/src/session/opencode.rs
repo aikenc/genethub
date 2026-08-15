@@ -17,6 +17,12 @@ pub struct Driver {
     turn_id: String,
     session_id: Option<String>,
     completed: bool,
+    /// A few OpenCode releases could exit cleanly before flushing their final
+    /// `step_finish`. A recognized frame proves a real run started; a clean
+    /// exit with no frame is not success (older releases used that shape for
+    /// `Session not found`).
+    #[serde(default)]
+    saw_event: bool,
 }
 
 impl Driver {
@@ -25,11 +31,16 @@ impl Driver {
             turn_id,
             session_id,
             completed: false,
+            saw_event: false,
         }
     }
 
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    pub fn can_complete_on_clean_exit(&self) -> bool {
+        self.saw_event && !self.completed
     }
 
     pub fn line(&mut self, line: &str) -> Vec<SessionEvent> {
@@ -47,6 +58,12 @@ impl Driver {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        if matches!(
+            kind,
+            "text" | "reasoning" | "tool_use" | "step_start" | "step_finish" | "error"
+        ) {
+            self.saw_event = true;
+        }
         let part = frame.get("part").unwrap_or(&Value::Null);
         let item_id = || {
             part.get("id")
@@ -248,5 +265,65 @@ mod tests {
         );
         assert_eq!(driver.session_id(), Some("ses_1"));
         assert!(driver.completed);
+    }
+
+    #[test]
+    fn tools_errors_and_clean_exit_fallback_keep_the_headless_contract() {
+        let mut driver = Driver::new("turn_1".into(), None);
+        assert!(!driver.can_complete_on_clean_exit());
+        assert!(driver
+            .line(r#"{"type":"step_start","sessionID":"ses_1","part":{}}"#)
+            .is_empty());
+        assert!(driver.can_complete_on_clean_exit());
+
+        let shell = driver.line(
+            r#"{"type":"tool_use","part":{"id":"tool_1","tool":"bash","state":{"status":"completed","input":{"command":"pwd"},"output":"/work"}}}"#,
+        );
+        assert!(matches!(
+            &shell[0],
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall {
+                    status: ToolStatus::Ok,
+                    detail: ToolCallDetail::Shell { command, output, .. },
+                    ..
+                },
+                ..
+            } if command == "pwd" && output == "/work"
+        ));
+
+        let unknown = driver.line(
+            r#"{"type":"tool_use","part":{"id":"tool_2","tool":"mystery","state":{"status":"error","input":{"a":1},"output":"bad"}}}"#,
+        );
+        assert!(matches!(
+            &unknown[0],
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall {
+                    status: ToolStatus::Error,
+                    detail: ToolCallDetail::Unknown { raw },
+                    ..
+                },
+                ..
+            } if raw["input"]["a"] == 1 && raw["output"] == "bad"
+        ));
+
+        let failed = driver.line(
+            r#"{"type":"error","error":{"data":{"message":"provider returned 429 rate limit"}}}"#,
+        );
+        assert!(matches!(
+            &failed[0],
+            SessionEvent::TurnFailed { error, .. }
+                if error.code == TurnErrorCode::RateLimited
+        ));
+        assert!(!driver.can_complete_on_clean_exit());
+    }
+
+    #[test]
+    fn old_snapshot_without_clean_exit_marker_still_restores() {
+        let driver = Driver::new("turn_1".into(), Some("ses_1".into()));
+        let mut snapshot = serde_json::to_value(driver).unwrap();
+        snapshot.as_object_mut().unwrap().remove("sawEvent");
+        let restored: Driver = serde_json::from_value(snapshot).unwrap();
+        assert_eq!(restored.session_id(), Some("ses_1"));
+        assert!(!restored.can_complete_on_clean_exit());
     }
 }

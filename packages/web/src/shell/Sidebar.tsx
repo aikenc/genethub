@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { Endpoint, Host, Target } from "../host";
 import { useWorkbench } from "../session/store";
+import { ImportSessionsDialog } from "../session/ImportSessionsDialog";
 import { OpenProject } from "../workspace/OpenProject";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import { SessionStatusIcon } from "./SessionStatusIcon";
@@ -61,8 +62,11 @@ export function Sidebar({
 
   const [grouping, setGrouping] = useState<Grouping>(() => recall(GROUPING_KEY, "project"));
   const [collapsed, setCollapsed] = useState<string[]>(() => recall(COLLAPSED_KEY, []));
+  const [expandedProjects, setExpandedProjects] = useState<string[]>(() =>
+    recall(EXPANDED_PROJECTS_KEY, []),
+  );
   const [query, setQuery] = useState("");
-  const [recentOpen, setRecentOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [readAt, setReadAt] = useState<Record<string, number>>(() => recall(READ_KEY, {}));
   const readStateInitialized = useRef(recall(READ_INITIALIZED_KEY, false));
 
@@ -139,6 +143,15 @@ export function Sidebar({
       return next;
     });
 
+  const toggleProjectSessions = (workspaceId: string) =>
+    setExpandedProjects((current) => {
+      const next = current.includes(workspaceId)
+        ? current.filter((id) => id !== workspaceId)
+        : [...current, workspaceId];
+      remember(EXPANDED_PROJECTS_KEY, next);
+      return next;
+    });
+
   return (
     <>
       {/* Tapping beside the drawer shuts it, which is what every phone app
@@ -189,16 +202,15 @@ export function Sidebar({
             <span aria-hidden>+</span>
             新建会话
           </button>
-          {sessions.length > 0 ? (
-            <button
-              type="button"
-              className="flex min-h-11 w-full items-center justify-between rounded-xl px-3 text-sm text-muted hover:bg-sidebar-hover hover:text-fg md:min-h-0 md:rounded-md md:py-1.5 md:text-xs"
-              onClick={() => setRecentOpen(true)}
-            >
-              <span>最近会话</span>
-              <span className="text-xs text-faint">最近 30 条 ›</span>
-            </button>
-          ) : null}
+          <button
+            type="button"
+            className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-line px-3 text-sm text-muted hover:border-accent/50 hover:bg-sidebar-hover hover:text-fg disabled:opacity-40 md:min-h-0 md:rounded-md md:py-1.5 md:text-xs"
+            disabled={!workspace || connection !== "ready"}
+            onClick={() => setImportOpen(true)}
+          >
+            <span aria-hidden>⇩</span>
+            导入历史
+          </button>
           {sessions.length > 0 ? (
             <input
               type="search"
@@ -218,21 +230,25 @@ export function Sidebar({
             workspaces.length > 0 ? "flex" : "hidden"
           } items-center justify-between px-3 pt-2 text-[10px] uppercase tracking-wide text-faint`}
         >
-          <span>{grouping === "project" ? "工作区" : "状态"}</span>
-          <button
-            type="button"
-            // Kept, because the two questions are different: "what is running
-            // right now" cuts across projects, and answering it used to be the
-            // only thing this list did.
-            className="rounded px-2 py-1.5 normal-case tracking-normal hover:bg-sidebar-hover hover:text-fg md:px-1.5 md:py-0.5"
-            onClick={() => {
-              const next = grouping === "project" ? "status" : "project";
-              remember(GROUPING_KEY, next);
-              setGrouping(next);
-            }}
-          >
-            {grouping === "project" ? "按状态" : "按项目"}
-          </button>
+          <span>会话</span>
+          <div className="flex rounded-md bg-surface p-0.5 normal-case tracking-normal">
+            {(["recent", "status", "project"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={grouping === mode}
+                className={`rounded px-1.5 py-0.5 ${
+                  grouping === mode ? "bg-raised text-fg" : "hover:text-fg"
+                }`}
+                onClick={() => {
+                  remember(GROUPING_KEY, mode);
+                  setGrouping(mode);
+                }}
+              >
+                {mode === "recent" ? "最近" : mode === "status" ? "按状态" : "按项目"}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-2 py-2">
@@ -244,10 +260,12 @@ export function Sidebar({
               // that was found — and a search that silently finds nothing is
               // indistinguishable from one that found nothing.
               collapsed={needle ? [] : collapsed}
+              expanded={needle ? workspaces.map(({ id }) => id) : expandedProjects}
               activeSessionId={activeSessionId}
               activeWorkspaceId={workspace?.id ?? null}
               deviceName={endpoint?.label ?? "当前设备"}
               onToggle={toggle}
+              onToggleSessions={toggleProjectSessions}
               onPickWorkspace={(id) => {
                 void selectWorkspace(id);
                 onNavigate();
@@ -257,8 +275,16 @@ export function Sidebar({
               onPickSession={go}
               {...actions}
             />
-          ) : (
+          ) : grouping === "status" ? (
             <Statuses
+              sessions={matching}
+              workspaces={workspaces}
+              activeSessionId={activeSessionId}
+              onPickSession={go}
+              {...actions}
+            />
+          ) : (
+            <RecentSessions
               sessions={matching}
               workspaces={workspaces}
               activeSessionId={activeSessionId}
@@ -287,114 +313,18 @@ export function Sidebar({
           <StatusDot connection={connection} />
         </div>
       </aside>
-
-      {recentOpen ? (
-        <RecentSessionsDialog
-          sessions={sessions}
-          workspaces={workspaces}
-          activeSessionId={activeSessionId}
-          onClose={() => setRecentOpen(false)}
-          onPick={(sessionId) => {
-            setRecentOpen(false);
-            go(sessionId);
+      {importOpen && workspace ? (
+        <ImportSessionsDialog
+          workspaceId={workspace.id}
+          onClose={() => {
+            setImportOpen(false);
+            onNavigate();
           }}
         />
       ) : null}
+
     </>
   );
-}
-
-/** A roomy cross-workspace view, separate from the navigation tree on the left. */
-function RecentSessionsDialog({
-  sessions,
-  workspaces,
-  activeSessionId,
-  onClose,
-  onPick,
-}: {
-  sessions: SessionSummary[];
-  workspaces: WorkspaceInfo[];
-  activeSessionId: string | null;
-  onClose(): void;
-  onPick(sessionId: string): void;
-}) {
-  const recent = [...sessions]
-    .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
-    .slice(0, 30);
-  const workspaceOf = (workspaceId: string) =>
-    workspaces.find((workspace) => workspace.id === workspaceId);
-
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" role="presentation">
-      <button
-        type="button"
-        aria-label="关闭最近会话"
-        className="absolute inset-0 cursor-default"
-        onClick={onClose}
-      />
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="recent-sessions-title"
-        className="relative flex max-h-[min(42rem,calc(100vh-2rem))] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-line-strong bg-surface shadow-[0_24px_80px_rgb(0_0_0_/0.45)]"
-      >
-        <header className="flex items-center justify-between border-b border-line px-5 py-4">
-          <div>
-            <h2 id="recent-sessions-title" className="text-base font-medium text-fg">
-              最近会话
-            </h2>
-            <p className="mt-0.5 text-xs text-faint">按最后更新时间显示最近 30 条，包含所属工作区。</p>
-          </div>
-          <button
-            type="button"
-            aria-label="关闭最近会话"
-            className="flex h-10 w-10 items-center justify-center rounded-lg text-lg text-faint hover:bg-raised hover:text-fg"
-            onClick={onClose}
-          >
-            ×
-          </button>
-        </header>
-        <ul className="min-h-0 divide-y divide-line overflow-y-auto px-2 py-2">
-          {recent.map((session) => {
-            const workspace = workspaceOf(session.workspaceId);
-            return <li key={session.id}>
-              <button
-                type="button"
-                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left hover:bg-raised ${
-                  session.id === activeSessionId ? "bg-raised" : ""
-                }`}
-                onClick={() => onPick(session.id)}
-              >
-                <SessionStatusIcon status={session.status} />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm text-fg">{title(session)}</span>
-                  <span className="mt-1 flex items-center gap-1 truncate text-xs text-faint">
-                    {workspace ? <WorkspaceIcon workspace={workspace} className="h-3 w-3" /> : null}
-                    <span className="truncate">
-                      {workspace?.name ?? "未知工作区"} · {recentTime(session.updatedAtMs)}
-                    </span>
-                  </span>
-                </span>
-                <span className="shrink-0 text-xs text-muted">{sessionStatus(session.status)}</span>
-              </button>
-            </li>;
-          })}
-        </ul>
-      </section>
-    </div>
-  );
-}
-
-function recentTime(updatedAtMs: number): string {
-  const elapsed = Math.max(0, Date.now() - updatedAtMs);
-  if (elapsed < 60_000) return "刚刚";
-  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} 分钟前`;
-  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} 小时前`;
-  return `${Math.floor(elapsed / 86_400_000)} 天前`;
-}
-
-function sessionStatus(status: SessionSummary["status"]): string {
-  return status === "running" ? "运行中" : status === "waiting" ? "等待中" : status === "failed" ? "失败" : "已完成";
 }
 
 /** What every list of conversations needs to be able to do to one. */
@@ -411,10 +341,12 @@ function Projects({
   workspaces,
   sessions,
   collapsed,
+  expanded,
   activeSessionId,
   activeWorkspaceId,
   deviceName,
   onToggle,
+  onToggleSessions,
   onPickWorkspace,
   onRenameWorkspace,
   onRemoveWorkspace,
@@ -423,10 +355,12 @@ function Projects({
   workspaces: WorkspaceInfo[];
   sessions: ListedSession[];
   collapsed: string[];
+  expanded: string[];
   activeSessionId: string | null;
   activeWorkspaceId: string | null;
   deviceName: string;
   onToggle(workspaceId: string): void;
+  onToggleSessions(workspaceId: string): void;
   onPickWorkspace(workspaceId: string): void;
   onRenameWorkspace(workspaceId: string, name: string): void;
   onRemoveWorkspace(workspaceId: string): Promise<void>;
@@ -434,11 +368,15 @@ function Projects({
   return (
     <ul aria-label="工作区">
       {workspaces.map((workspace) => {
-        const mine = sessions.filter((session) => session.workspaceId === workspace.id);
+        const mine = sessions
+          .filter((session) => session.workspaceId === workspace.id)
+          .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
         const running = mine.filter((session) =>
           ["running", "waiting"].includes(session.status),
         ).length;
         const shut = collapsed.includes(workspace.id);
+        const showAll = expanded.includes(workspace.id);
+        const visible = showAll ? mine : mine.slice(0, PROJECT_SESSION_PREVIEW_LIMIT);
         const rename = (name: string) => {
           if (name !== workspace.name) onRenameWorkspace(workspace.id, name);
         };
@@ -457,7 +395,7 @@ function Projects({
           >
             {shut ? null : mine.length > 0 ? (
               <ul className="ml-3 border-l border-line pl-1">
-                {mine.map((session) => (
+                {visible.map((session) => (
                   <SessionRow
                     key={session.id}
                     session={session}
@@ -465,6 +403,20 @@ function Projects({
                     {...actions}
                   />
                 ))}
+                {mine.length > PROJECT_SESSION_PREVIEW_LIMIT ? (
+                  <li>
+                    <button
+                      type="button"
+                      className="w-full rounded-md px-2 py-1 text-left text-[11px] text-accent hover:bg-sidebar-hover"
+                      aria-expanded={showAll}
+                      onClick={() => onToggleSessions(workspace.id)}
+                    >
+                      {showAll
+                        ? "收起到最近 5 个"
+                        : `展开其余 ${mine.length - PROJECT_SESSION_PREVIEW_LIMIT} 个`}
+                    </button>
+                  </li>
+                ) : null}
               </ul>
             ) : (
               <p className="ml-4 py-1 pl-2 text-[11px] text-faint">还没有会话</p>
@@ -745,6 +697,33 @@ function Statuses({
   );
 }
 
+function RecentSessions({
+  sessions,
+  workspaces,
+  activeSessionId,
+  ...actions
+}: {
+  sessions: ListedSession[];
+  workspaces: WorkspaceInfo[];
+  activeSessionId: string | null;
+} & RowActions) {
+  return (
+    <ul className="space-y-0.5" aria-label="最近会话">
+      {[...sessions]
+        .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
+        .map((session) => (
+          <SessionRow
+            key={session.id}
+            session={session}
+            active={session.id === activeSessionId}
+            project={workspaces.find(({ id }) => id === session.workspaceId)}
+            {...actions}
+          />
+        ))}
+    </ul>
+  );
+}
+
 function SessionRow({
   session,
   active,
@@ -994,10 +973,12 @@ const title = (session: SessionSummary) => session.title || "新会话";
 const whyUnsupported = (format: NonNullable<SessionSummary["unsupported"]>) =>
   `这个会话由更新版本的 GeneHub 写入（数据格式 ${format.written}，当前版本读到 ${format.supported}），升级后才能打开。`;
 
-type Grouping = "project" | "status";
+type Grouping = "recent" | "project" | "status";
 
 const GROUPING_KEY = "genehub.sidebar.grouping";
 const COLLAPSED_KEY = "genehub.sidebar.collapsed";
+const EXPANDED_PROJECTS_KEY = "genehub.sidebar.expanded-projects";
+const PROJECT_SESSION_PREVIEW_LIMIT = 5;
 const READ_KEY = "genehub.sidebar.read-at";
 const READ_INITIALIZED_KEY = "genehub.sidebar.read-at.initialized";
 

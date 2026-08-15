@@ -1,7 +1,6 @@
 //! Shared session state and the read-only payloads the daemon polls for.
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -12,6 +11,37 @@ use crate::rpc::Emitter;
 use crate::session::Session;
 use crate::skills::Skill;
 
+/// A level-triggered cancellation signal. Unlike polling an atomic flag, a
+/// waiter subscribed through `cancelled` wakes even when its underlying I/O is
+/// otherwise completely idle.
+pub struct Abort {
+    changed: tokio::sync::watch::Sender<bool>,
+}
+
+impl Abort {
+    pub fn new() -> Self {
+        let (changed, _) = tokio::sync::watch::channel(false);
+        Self { changed }
+    }
+
+    pub fn reset(&self) {
+        self.changed.send_replace(false);
+    }
+
+    pub fn request(&self) -> bool {
+        self.changed.send_replace(true)
+    }
+
+    pub fn requested(&self) -> bool {
+        *self.changed.borrow()
+    }
+
+    pub async fn cancelled(&self) {
+        let mut changed = self.changed.subscribe();
+        let _ = changed.wait_for(|requested| *requested).await;
+    }
+}
+
 pub struct State {
     pub emitter: Emitter,
     pub session: Session,
@@ -19,12 +49,15 @@ pub struct State {
     pub current_model: Option<ModelConfig>,
     pub thinking_level: String,
     pub auto_compaction: bool,
+    pub genehub_session_id: Option<String>,
     pub skills: Vec<Skill>,
     pub additional_system_prompts: Vec<String>,
     pub cwd: PathBuf,
     pub stats: Usage,
     pub streaming: bool,
-    pub abort: Arc<AtomicBool>,
+    pub compacting: bool,
+    pub tools_enabled: bool,
+    pub abort: Arc<Abort>,
     /// The prompt currently being served, so shutdown can wait for it.
     pub running: Option<tokio::task::JoinHandle<()>>,
 }
@@ -43,7 +76,7 @@ impl State {
             "model": self.model_value(),
             "thinkingLevel": self.thinking_level,
             "isStreaming": self.streaming,
-            "isCompacting": false,
+            "isCompacting": self.compacting,
             "autoCompactionEnabled": self.auto_compaction,
             "sessionId": self.session.id,
             "messageCount": self.session.messages.len(),
@@ -179,12 +212,15 @@ mod tests {
             }),
             thinking_level: "medium".into(),
             auto_compaction: true,
+            genehub_session_id: None,
             additional_system_prompts: Vec::new(),
             skills: Vec::new(),
             cwd,
             stats: Usage::default(),
             streaming: false,
-            abort: Arc::new(AtomicBool::new(false)),
+            compacting: false,
+            tools_enabled: true,
+            abort: Arc::new(Abort::new()),
             running: None,
         }
     }
@@ -235,6 +271,24 @@ mod tests {
         assert_eq!(value["toolResults"], 1);
         assert_eq!(value["totalMessages"], 3);
         assert_eq!(value["cost"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn abort_wakes_a_waiter_and_reset_clears_the_level() {
+        let abort = Arc::new(Abort::new());
+        let waiting = {
+            let abort = abort.clone();
+            tokio::spawn(async move { abort.cancelled().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!abort.request());
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("the cancellation wakes an idle waiter")
+            .unwrap();
+        assert!(abort.requested());
+        abort.reset();
+        assert!(!abort.requested());
     }
 
     #[tokio::test]

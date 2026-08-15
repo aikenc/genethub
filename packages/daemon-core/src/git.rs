@@ -116,6 +116,7 @@ fn git<E: CapabilityExecutor>(
                 },
                 path: String::new(),
             }),
+            confinement: genet_daemon_logic_api::ConfinementMode::None,
             capture_stdout: true,
             capture_stderr: true,
         },

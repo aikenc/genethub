@@ -20,6 +20,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::authz::GrantSet;
 use crate::capability::Client;
 use crate::CapabilityExecutor;
 
@@ -32,6 +33,7 @@ const MAX_DEVICES: usize = 128;
 const MAX_DEVICE_NAME_CHARS: usize = 64;
 const HANDSHAKE_DOMAIN: &[u8] = b"genehub-channel-handshake-v1";
 const KEY_DOMAIN: &[u8] = b"genehub-channel-key-v1";
+const GRANTS_VERSION: u8 = 1;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +57,10 @@ struct Device {
     paired_at_ms: i64,
     #[serde(rename = "lastSeenAt", default, with = "legacy_optional_time")]
     last_seen_at_ms: Option<i64>,
+    #[serde(default)]
+    grants: GrantSet,
+    #[serde(default)]
+    grants_version: u8,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -63,6 +69,8 @@ struct Invite {
     id: String,
     secret: String,
     expires_at_ms: i64,
+    #[serde(default)]
+    grants: GrantSet,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -87,12 +95,14 @@ impl Devices {
                 paired_at: timestamp(device.paired_at_ms),
                 last_seen_at: device.last_seen_at_ms.map(timestamp),
                 connected: self.connected.contains_key(&device.id),
+                grants: Some(device.grants.names()),
             })
             .collect())
     }
 
     pub fn invite(
         &mut self,
+        grants: GrantSet,
         remote: &RemoteAccess,
         executor: &mut impl CapabilityExecutor,
         next: &mut u64,
@@ -110,12 +120,21 @@ impl Devices {
             id: id.clone(),
             secret: secret.clone(),
             expires_at_ms,
+            grants: grants.clone(),
         });
         Ok(DeviceInvite {
             code: format!("{id}.{secret}"),
             rendezvous_url: remote.rendezvous_url.clone(),
             expires_at: timestamp(expires_at_ms),
+            grants: Some(grants.names()),
         })
+    }
+
+    pub fn grants(&self, device_id: &str) -> Option<GrantSet> {
+        self.devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .map(|device| device.grants.clone())
     }
 
     pub fn revoke(
@@ -221,13 +240,15 @@ impl Devices {
                 "this machine has reached its authorized-device limit",
             ));
         }
-        self.invites.remove(position);
+        let invite = self.invites.remove(position);
         let device = Device {
             id: format!("d_{}", random_hex(32, executor, next)?),
             name,
             secret: random_hex(32, executor, next)?,
             paired_at_ms: now,
             last_seen_at_ms: None,
+            grants: invite.grants,
+            grants_version: GRANTS_VERSION,
         };
         let credential = DeviceCredential {
             device_id: device.id.clone(),
@@ -283,6 +304,12 @@ impl Devices {
                 let persisted: Persisted = serde_json::from_slice(&bytes)
                     .map_err(|error| internal(format!("reading authorized devices: {error}")))?;
                 self.devices = persisted.devices.into_iter().take(MAX_DEVICES).collect();
+                for device in &mut self.devices {
+                    if device.grants_version == 0 {
+                        device.grants.add_speech_to_legacy_full();
+                        device.grants_version = GRANTS_VERSION;
+                    }
+                }
             }
             Err(error) if error.kind == CapabilityFailureKind::NotFound => {}
             Err(error) => return Err(capability_error(error)),
@@ -656,6 +683,8 @@ mod tests {
             fingerprint: "fingerprint".into(),
             machine_name: "workstation".into(),
             rtc_supported: true,
+            features: Vec::new(),
+            isolation: None,
             log_directory: ".".into(),
             log_display_directory: ".".into(),
             default_workspace: None,
@@ -715,6 +744,7 @@ mod tests {
         let mut devices = Devices::default();
         let invite = devices
             .invite(
+                GrantSet::full(),
                 &RemoteAccess {
                     relay_url: Some("https://relay.example".into()),
                     rendezvous_url: Some("wss://relay.example/route".into()),

@@ -71,6 +71,12 @@ impl Paths {
         self.root.join("devices.json")
     }
 
+    /// Credentials for machines this installation calls outward to. Unlike
+    /// device grants, these are transport identity and remain native.
+    pub fn machines_file(&self) -> PathBuf {
+        self.root.join("machines.json")
+    }
+
     /// One directory for everything anyone would ask for when something is
     /// wrong: the daemon's log, and whatever the desktop shell writes.
     ///
@@ -134,6 +140,7 @@ impl Paths {
             self.lock_file(),
             self.endpoint_file(),
             self.devices_file(),
+            self.machines_file(),
             self.log_file(),
         ] {
             match fs::symlink_metadata(&path) {
@@ -292,7 +299,7 @@ impl MachineState {
 }
 
 /** Writes secrets without a world-readable creation window and survives crashes. */
-pub(crate) fn save_private(path: &Path, body: &[u8]) -> Result<()> {
+pub fn save_private(path: &Path, body: &[u8]) -> Result<()> {
     #[cfg(test)]
     if take_injected_save_failure(path) {
         anyhow::bail!("injected private-save failure for {}", path.display());

@@ -57,7 +57,7 @@ async fn claude_code_reaches_the_same_timeline_as_the_built_in_agent() {
 }
 
 /// Going native over the ACP wrapper exists specifically to get per-tool
-/// permission control back (see `adapter::claude`'s doc comment). This is the
+/// permission control back (see the portable Claude driver's doc comment). This is the
 /// one journey that actually exercises that control protocol end to end,
 /// through `session.setMode` rather than answering each prompt by hand: real
 /// tool execution, real permission grant, real file on disk.

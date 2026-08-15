@@ -126,6 +126,8 @@ fn boot_bytes() -> Vec<u8> {
             fingerprint: "fingerprint".to_string(),
             machine_name: "workstation".to_string(),
             rtc_supported: true,
+            features: Vec::new(),
+            isolation: None,
             log_directory: "/genehub-logs".to_string(),
             log_display_directory: "/host/logs".to_string(),
             default_workspace: None,
@@ -143,6 +145,7 @@ fn request(request: Request) -> Vec<u8> {
         &LogicInput::Request(LogicRequest {
             call_id: 7,
             transport: TransportKind::Loopback,
+            caller: genet_daemon_logic_api::CallerContext::LocalUser,
             request,
         }),
     )

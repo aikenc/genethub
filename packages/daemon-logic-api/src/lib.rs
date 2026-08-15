@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 
 use genehub_proto::{
     DeviceAuth, DeviceCredential, HubClaim, HubMachine, HubStatus, HubTicket, InviteAuth,
-    ProtocolError, RemoteAccess, Reply, Request, SequencedEvent, ServerFrame, TransportKind,
+    IsolationInfo, ProtocolError, RemoteAccess, Reply, Request, SequencedEvent, ServerFrame,
+    SpeechCandidate, SpeechCapabilities, SpeechRuntimeDescriptor, SpeechRuntimeStatus,
+    SpeechScoreKind, SpeechSegment, SpeechStart, SupportDiagnostics, TransportKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,10 +34,53 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
 }
 
 /// Core-Wasm export contract implemented by `genet-daemon-logic`.
-pub const ABI_VERSION: u32 = 13;
+pub const ABI_VERSION: u32 = 18;
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 pub const MAX_CAPABILITY_BATCH: usize = 64;
 pub const MAX_CAPABILITY_CHUNK_BYTES: usize = 3 * 1024 * 1024;
+
+/// Portable product settings for the resident speech driver. The signed guest
+/// owns and persists this value; native code receives a copy only when it must
+/// start or probe an OS process.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SpeechConfig {
+    pub runtime: Option<SpeechRuntimeConfig>,
+    pub stub_enabled: bool,
+    pub context_enabled: bool,
+    pub pinned_terms: Vec<String>,
+    pub language_hints: Vec<String>,
+    /// Legacy machine-wide consent. It is read for migration only and never
+    /// projected back as active consent.
+    pub collect_corrections: bool,
+    pub correction_workspaces: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SpeechRuntimeConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Authoritative result retained by the signed application for a later
+/// correction choice. The native audio driver supplies this once after it has
+/// validated a runtime completion; client-provided transcript fields are never
+/// accepted as training evidence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SpeechCompletionEvidence {
+    pub recorded_at_millis: i64,
+    pub workspace_id: String,
+    pub request_id: String,
+    pub runtime: SpeechRuntimeDescriptor,
+    pub context_snapshot_id: String,
+    pub candidates: Vec<SpeechCandidate>,
+    pub segments: Vec<SpeechSegment>,
+    pub score_kind: SpeechScoreKind,
+    pub scores_calibrated: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -46,6 +91,13 @@ pub struct LogicBoot {
     pub fingerprint: String,
     pub machine_name: String,
     pub rtc_supported: bool,
+    /// Platform facts advertised by the portable router. The native shell
+    /// discovers them; the guest decides how they appear in the product
+    /// protocol.
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub isolation: Option<IsolationInfo>,
     /// Capability-relative directory visible inside the WASI sandbox.
     pub log_directory: String,
     /// Native path shown to a local user; never used for guest file access.
@@ -74,7 +126,23 @@ pub struct LogicRequest {
     /// one guest instance suspend multiple requests on batched capabilities.
     pub call_id: u64,
     pub transport: TransportKind,
+    /// Authenticated identity only. Grants and request classification remain
+    /// in the guest, so native transport cannot silently grow a second policy
+    /// router.
+    pub caller: CallerContext,
     pub request: Request,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum CallerContext {
+    LocalUser,
+    Device {
+        device_id: String,
+    },
+    #[default]
+    Channel,
+    Pairing,
 }
 
 /// Every invocation of `genehub_handle` carries exactly one bounded event.
@@ -119,6 +187,12 @@ pub enum PlatformRequest {
         device_id: String,
         connected: bool,
     },
+    /// Authorizes a non-RPC data-plane stream and returns the event classes
+    /// this connection may observe. The platform only enforces the answer.
+    AuthorizeStream {
+        caller: CallerContext,
+        stream: StreamMethod,
+    },
     /// Path-free projection consumed by the native Hub carrier.
     WorkspaceCatalog,
     /// Resolves a client-visible workspace path to one already-registered
@@ -128,6 +202,66 @@ pub enum PlatformRequest {
         workspace_id: String,
         path: String,
     },
+    /// Resolves the complete workspace confinement set plus a requested cwd.
+    /// Native command streaming receives only opaque locators, never the
+    /// guest's workspace catalogue or path-selection policy.
+    ResolveWorkspaceExecution {
+        workspace_id: String,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    /// Validates a speech stream against guest-owned workspace/session state
+    /// and returns the current portable runtime selection. The native stream
+    /// driver never reads product configuration directly.
+    PrepareSpeech {
+        #[serde(default)]
+        route_workspace_id: Option<String>,
+        start: SpeechStart,
+    },
+    /// Transfers one already-validated completion from the resident audio
+    /// driver into guest-owned feedback policy. This is a single bounded
+    /// message, not a field-by-field string ABI.
+    RememberSpeechCompletion {
+        evidence: SpeechCompletionEvidence,
+    },
+    /// Gives the portable application a final bounded opportunity to stop
+    /// session-owned descendants before native resource tables disappear.
+    /// Hot replacement does not send this: resources deliberately survive a
+    /// guest update and are rebound through the transferred snapshot.
+    Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StreamMethod {
+    Events,
+    AssetPreview,
+    ShellRun,
+    RtcNegotiate,
+    SpeechTranscribe,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StreamAuthorization {
+    pub allowed: bool,
+    #[serde(default)]
+    pub missing_grant: Option<String>,
+    /// A remote shell/command must be confined unless the guest explicitly
+    /// says this caller holds `pty:unconfined`.
+    #[serde(default)]
+    pub confinement_required: bool,
+    #[serde(default)]
+    pub receive_pty: bool,
+    #[serde(default)]
+    pub receive_background_processes: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceExecution {
+    pub cwd: FileLocator,
+    pub roots: Vec<FileLocator>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +292,9 @@ pub enum PlatformReply {
     Claimed(DeviceCredential),
     WorkspaceCatalog(WorkspaceCatalog),
     WorkspaceFile(FileLocator),
+    WorkspaceExecution(WorkspaceExecution),
+    StreamAuthorization(StreamAuthorization),
+    SpeechPrepared(SpeechConfig),
     Ack,
 }
 
@@ -296,6 +433,13 @@ pub enum CapabilityFailureKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum CapabilityRequest {
+    /// Reads one explicitly named host environment value. This is a raw OS
+    /// fact used for tool-owned configuration directories; interpretation and
+    /// allowlisting remain in the signed guest.
+    Environment {
+        key: String,
+        max_bytes: u32,
+    },
     SecureRead {
         key: String,
         max_bytes: u32,
@@ -317,6 +461,10 @@ pub enum CapabilityRequest {
     /// it owns Tokio tasks and live carriers. The guest still owns RPC routing
     /// and invokes each operation as one bounded capability call.
     Connectivity(ConnectivityRequest),
+    SpeechRuntime(SpeechRuntimeRequest),
+    /// A bounded, privacy-safe snapshot of native carrier/runtime facts. The
+    /// guest decides whether and when this is exposed as a product reply.
+    Diagnostics,
     Random {
         bytes: u32,
     },
@@ -336,6 +484,7 @@ pub enum CapabilityValue {
     },
     FileEntries(Vec<FileEntry>),
     FileMetadata(FileMetadata),
+    FileLocator(FileLocator),
     FileLocked {
         resource_id: u64,
     },
@@ -354,6 +503,7 @@ pub enum CapabilityValue {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
     },
+    ProcessCensus(Vec<ProcessCensusRow>),
     Http(HttpResponse),
     RtcDescription {
         kind: RtcDescriptionKind,
@@ -367,7 +517,19 @@ pub enum CapabilityValue {
     HubMachines(Vec<HubMachine>),
     HubTicket(HubTicket),
     RemoteAccess(RemoteAccess),
+    Diagnostics(SupportDiagnostics),
+    SpeechCapabilities(SpeechCapabilities),
+    SpeechRuntimeStatus(SpeechRuntimeStatus),
+    SpeechRuntimeConfig(SpeechRuntimeConfig),
     LogicArtifact(LogicArtifactState),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum SpeechRuntimeRequest {
+    Capabilities { config: SpeechConfig },
+    Probe { config: SpeechConfig },
+    ValidateRegistration { command: String, args: Vec<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -440,6 +602,9 @@ pub enum CapabilityEvent {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum FileRequest {
+    /// Enumerates OS volume roots for the native file picker. This cannot be
+    /// compiled into the Linux-built guest because the answer is host-specific.
+    MachineRoots,
     RegisterWorkspaceRoot {
         handle: String,
         native_path: String,
@@ -496,6 +661,10 @@ pub enum FileRequest {
         from: FileLocator,
         to: FileLocator,
     },
+    Copy {
+        from: FileLocator,
+        to: FileLocator,
+    },
     CanonicalizeHostPath {
         path: String,
     },
@@ -503,6 +672,21 @@ pub enum FileRequest {
         base: String,
         path: String,
     },
+    /// Resolves an optional native/relative cwd against a guest-supplied set
+    /// of registered workspace roots and returns an opaque rooted locator.
+    ResolveWorkspacePath {
+        roots: Vec<WorkspaceRootPath>,
+        default_handle: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceRootPath {
+    pub handle: String,
+    pub native_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -571,6 +755,16 @@ pub enum ProcessRequest {
         max_stdout_bytes: u32,
         max_stderr_bytes: u32,
     },
+    /// Runs a bounded byte-stream dialogue. The guest owns every protocol
+    /// frame and completion marker; native code only writes bytes and waits
+    /// for a matching stdout line before advancing to the next step.
+    Dialogue {
+        spec: ProcessSpec,
+        steps: Vec<ProcessDialogueStep>,
+        timeout_millis: u32,
+        max_stdout_bytes: u32,
+        max_stderr_bytes: u32,
+    },
     Spawn(ProcessSpec),
     Write {
         resource_id: u64,
@@ -586,6 +780,32 @@ pub enum ProcessRequest {
     Poll {
         resource_id: u64,
     },
+    /// Raw host process table. Ownership attribution remains in the guest.
+    Census,
+    /// Raw tree termination after the guest has matched the pid against a
+    /// fresh census and a session-owned agent process.
+    EndTree {
+        pid: u32,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessDialogueStep {
+    pub stdin: Vec<u8>,
+    /// A byte sequence that must occur in one complete stdout line before the
+    /// following step is written. Empty markers are rejected.
+    pub wait_for_line: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessCensusRow {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub group_id: u32,
+    pub running_for_seconds: u64,
+    pub command: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -595,8 +815,20 @@ pub struct ProcessSpec {
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: Option<FileLocator>,
+    #[serde(default)]
+    pub confinement: ConfinementMode,
     pub capture_stdout: bool,
     pub capture_stderr: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum ConfinementMode {
+    #[default]
+    None,
+    Workspace {
+        roots: Vec<FileLocator>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -619,6 +851,8 @@ pub enum ProcessStream {
 pub enum PtyRequest {
     Open {
         cwd: FileLocator,
+        #[serde(default)]
+        confinement: ConfinementMode,
         cols: u16,
         rows: u16,
         env: BTreeMap<String, String>,

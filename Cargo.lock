@@ -1018,6 +1018,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "enumflags2"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
+dependencies = [
+ "enumflags2_derive",
+]
+
+[[package]]
+name = "enumflags2_derive"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1255,6 +1275,7 @@ dependencies = [
  "futures-util",
  "globset",
  "ignore",
+ "libc",
  "regex",
  "reqwest",
  "serde",
@@ -1268,10 +1289,13 @@ name = "genet-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64",
+ "chrono",
  "ed25519-dalek",
  "fs2",
  "futures-util",
  "genehub-proto",
+ "genehub-testing",
  "genet-daemon",
  "genet-daemon-platform",
  "serde",
@@ -1279,6 +1303,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "uuid",
 ]
 
 [[package]]
@@ -1287,6 +1312,7 @@ version = "0.0.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "bytes",
@@ -1340,6 +1366,7 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "chrono",
+ "fs2",
  "genehub-proto",
  "genet-daemon-common",
  "genet-daemon-logic-api",
@@ -1400,8 +1427,10 @@ dependencies = [
  "chrono",
  "fs2",
  "futures-util",
+ "genehub-proto",
  "genet-daemon-logic-api",
  "getrandom 0.4.3",
+ "landlock",
  "libc",
  "portable-pty",
  "reqwest",
@@ -1918,6 +1947,17 @@ checksum = "733a844dbd6fef128e98cb4487b887cb55454d92cd9994b1bafe004fabbe670c"
 dependencies = [
  "serde",
  "ucd-trie",
+]
+
+[[package]]
+name = "landlock"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

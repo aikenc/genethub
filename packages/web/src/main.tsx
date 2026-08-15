@@ -3,7 +3,8 @@ import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
 import { PRODUCT } from "./channel";
-import { AssetPreviewPage } from "./preview/AssetPreviewPage";
+import { parsePreviewPopout } from "./preview/popout";
+import { PreviewPopoutPage } from "./preview/PreviewPopoutPage";
 import { parseAssetPreviewPath } from "./preview/url";
 import { watchViewport } from "./shell/viewport";
 import "./theme.css";
@@ -35,9 +36,12 @@ watchSystemTheme((theme) => useTheme.getState().systemChanged(theme));
 watchViewport();
 
 const preview = parseAssetPreviewPath(window.location.pathname);
+const previewPopout = preview
+  ? parsePreviewPopout(window.location.search, window.location.hash)
+  : null;
 
 createRoot(root).render(
   <StrictMode>
-    {preview ? <AssetPreviewPage source={preview} /> : <App />}
+    {preview ? <PreviewPopoutPage source={preview} context={previewPopout} /> : <App />}
   </StrictMode>,
 );

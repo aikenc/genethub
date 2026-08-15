@@ -14,11 +14,12 @@ use base64::Engine as _;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use genehub_proto::{Request, SequencedEvent, ServerFrame, TransportKind};
 use genet_daemon_logic_api::{
-    decode_message, encode_message, CapabilityBatch, CapabilityCall, CapabilityFailure,
-    CapabilityFailureKind, CapabilityRequest, CapabilityResult, CapabilityResults, CapabilityValue,
-    ConnectionDirective, ConnectivityRequest, LogicArtifactRequest, LogicArtifactState, LogicBoot,
-    LogicInput, LogicOutcome, LogicOutput, LogicRequest, PlatformCall, PlatformReply,
-    PlatformRequest, Publication,
+    decode_message, encode_message, CallerContext, CapabilityBatch, CapabilityCall,
+    CapabilityFailure, CapabilityFailureKind, CapabilityRequest, CapabilityResult,
+    CapabilityResults, CapabilityValue, ConnectionDirective, ConnectivityRequest,
+    LogicArtifactRequest, LogicArtifactState, LogicBoot, LogicInput, LogicOutcome, LogicOutput,
+    LogicRequest, PlatformCall, PlatformReply, PlatformRequest, Publication, StreamAuthorization,
+    StreamMethod,
 };
 use genet_daemon_platform::{
     ActiveLogic, ArtifactVerifier, PlatformRuntime, SignedArtifact, VmPolicy, LOGIC_ABI_VERSION,
@@ -127,6 +128,13 @@ impl LogicHost {
                 fingerprint: machine.fingerprint(),
                 machine_name: crate::link::default_display_name(),
                 rtc_supported: true,
+                features: vec![
+                    genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
+                    genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
+                    genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
+                    genehub_proto::SPEECH_FEATURE_FEEDBACK.to_string(),
+                ],
+                isolation: Some(crate::isolation::report()),
                 log_directory: "/genehub-logs".to_string(),
                 log_display_directory: paths.logs_dir().display().to_string(),
                 default_workspace: paths
@@ -181,6 +189,7 @@ impl LogicHost {
     pub async fn route(
         self: &Arc<Self>,
         transport: TransportKind,
+        caller: CallerContext,
         request: Request,
     ) -> Result<LogicRoute> {
         let _execution = self.execution.lock().await;
@@ -188,6 +197,7 @@ impl LogicHost {
         let input = LogicInput::Request(LogicRequest {
             call_id,
             transport,
+            caller,
             request,
         });
         let mut inputs = VecDeque::from([input]);
@@ -425,6 +435,70 @@ impl LogicHost {
         self.system.system.workspace_path(&locator).await
     }
 
+    pub async fn authorize_stream(
+        &self,
+        caller: CallerContext,
+        stream: StreamMethod,
+    ) -> Result<StreamAuthorization> {
+        match self
+            .platform_request(PlatformRequest::AuthorizeStream { caller, stream })
+            .await?
+        {
+            PlatformReply::StreamAuthorization(authorization) => Ok(authorization),
+            _ => anyhow::bail!("portable stream authorization returned the wrong value"),
+        }
+    }
+
+    pub async fn resolve_workspace_execution(
+        &self,
+        workspace_id: String,
+        cwd: Option<String>,
+    ) -> Result<(PathBuf, Vec<PathBuf>)> {
+        let execution = match self
+            .platform_request(PlatformRequest::ResolveWorkspaceExecution { workspace_id, cwd })
+            .await?
+        {
+            PlatformReply::WorkspaceExecution(execution) => execution,
+            _ => anyhow::bail!("portable workspace execution resolver returned the wrong value"),
+        };
+        let cwd = self.system.system.workspace_path(&execution.cwd).await?;
+        let mut roots = Vec::with_capacity(execution.roots.len());
+        for locator in execution.roots {
+            roots.push(self.system.system.workspace_path(&locator).await?);
+        }
+        Ok((cwd, roots))
+    }
+
+    pub async fn prepare_speech(
+        &self,
+        route_workspace_id: Option<String>,
+        start: genehub_proto::SpeechStart,
+    ) -> Result<genet_daemon_logic_api::SpeechConfig> {
+        match self
+            .platform_request(PlatformRequest::PrepareSpeech {
+                route_workspace_id,
+                start,
+            })
+            .await?
+        {
+            PlatformReply::SpeechPrepared(config) => Ok(config),
+            _ => anyhow::bail!("portable speech preparation returned the wrong value"),
+        }
+    }
+
+    pub async fn remember_speech_completion(
+        &self,
+        evidence: genet_daemon_logic_api::SpeechCompletionEvidence,
+    ) -> Result<()> {
+        match self
+            .platform_request(PlatformRequest::RememberSpeechCompletion { evidence })
+            .await?
+        {
+            PlatformReply::Ack => Ok(()),
+            _ => anyhow::bail!("portable speech evidence handler returned the wrong value"),
+        }
+    }
+
     pub fn subscribe_device_revocations(&self) -> broadcast::Receiver<String> {
         self.device_revocations.subscribe()
     }
@@ -551,6 +625,9 @@ impl LogicHost {
     }
 
     pub async fn shutdown(&self) {
+        if let Err(error) = self.platform_request(PlatformRequest::Shutdown).await {
+            tracing::warn!(%error, "portable application could not finish graceful shutdown");
+        }
         if let Some(task) = self.event_task.lock().await.take() {
             task.abort();
         }
@@ -691,17 +768,25 @@ async fn execute_capability_batch(
     services: &std::sync::OnceLock<std::sync::Weak<crate::state::AppState>>,
     batch: CapabilityBatch,
 ) -> CapabilityResults {
-    let mut results = Vec::with_capacity(batch.calls.len());
-    for call in batch.calls {
+    let batch_id = batch.batch_id;
+    // Calls inside one batch are independent by contract. Preserve their
+    // declared result order while allowing cold CLI probes and unrelated file
+    // reads to overlap; otherwise one AgentList would add every optional
+    // executable's timeout together.
+    let results = futures_util::future::join_all(batch.calls.into_iter().map(|call| async move {
         let call_id = call.call_id;
         let result = match call.request {
             CapabilityRequest::Connectivity(request) => {
                 execute_connectivity(services, request).await
             }
+            CapabilityRequest::Diagnostics => execute_diagnostics(services).await,
+            CapabilityRequest::SpeechRuntime(request) => {
+                execute_speech_runtime(services, request).await
+            }
             request => {
                 let mut result = system
                     .execute(CapabilityBatch {
-                        batch_id: batch.batch_id,
+                        batch_id,
                         calls: vec![CapabilityCall { call_id, request }],
                     })
                     .await
@@ -714,12 +799,74 @@ async fn execute_capability_batch(
                 })
             }
         };
-        results.push(CapabilityResult { call_id, result });
+        CapabilityResult { call_id, result }
+    }))
+    .await;
+    CapabilityResults { batch_id, results }
+}
+
+async fn execute_speech_runtime(
+    services: &std::sync::OnceLock<std::sync::Weak<crate::state::AppState>>,
+    request: genet_daemon_logic_api::SpeechRuntimeRequest,
+) -> std::result::Result<CapabilityValue, CapabilityFailure> {
+    let state = services
+        .get()
+        .and_then(std::sync::Weak::upgrade)
+        .ok_or_else(|| {
+            capability_failure(
+                CapabilityFailureKind::Unavailable,
+                "speech runtime is not attached",
+            )
+        })?;
+    match request {
+        genet_daemon_logic_api::SpeechRuntimeRequest::Capabilities { config } => Ok(
+            CapabilityValue::SpeechCapabilities(state.speech.capabilities(&config).await),
+        ),
+        genet_daemon_logic_api::SpeechRuntimeRequest::Probe { config } => Ok(
+            CapabilityValue::SpeechRuntimeStatus(state.speech.probe(&config).await),
+        ),
+        genet_daemon_logic_api::SpeechRuntimeRequest::ValidateRegistration { command, args } => {
+            state
+                .speech
+                .validate_registration(command, args)
+                .await
+                .map(CapabilityValue::SpeechRuntimeConfig)
+                .map_err(|error| {
+                    capability_failure(CapabilityFailureKind::Invalid, format!("{error:#}"))
+                })
+        }
     }
-    CapabilityResults {
-        batch_id: batch.batch_id,
-        results,
-    }
+}
+
+async fn execute_diagnostics(
+    services: &std::sync::OnceLock<std::sync::Weak<crate::state::AppState>>,
+) -> std::result::Result<CapabilityValue, CapabilityFailure> {
+    let state = services
+        .get()
+        .and_then(std::sync::Weak::upgrade)
+        .ok_or_else(|| {
+            capability_failure(
+                CapabilityFailureKind::Unavailable,
+                "daemon diagnostics are not attached",
+            )
+        })?;
+    let hub = match state.link.get() {
+        Some(link) => link.status().await,
+        None => genehub_proto::HubStatus::Unpaired,
+    };
+    let remote = match state.remote.get() {
+        Some(remote) => remote.status().await,
+        None => genehub_proto::RemoteAccess {
+            relay_url: None,
+            rendezvous_url: None,
+            online: false,
+        },
+    };
+    Ok(CapabilityValue::Diagnostics(state.diagnostics.snapshot(
+        &state.version,
+        &hub,
+        &remote,
+    )))
 }
 
 async fn execute_connectivity(

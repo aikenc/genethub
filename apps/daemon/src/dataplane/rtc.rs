@@ -300,6 +300,7 @@ async fn serve_channel(
         accepted.key,
         accepted.access,
         carrier,
+        endpoint::CarrierKind::Rtc,
     ));
 
     tokio::select! {

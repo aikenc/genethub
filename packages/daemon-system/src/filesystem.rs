@@ -196,6 +196,7 @@ pub async fn execute(
     request: FileRequest,
 ) -> Result<CapabilityValue, CapabilityFailure> {
     match request {
+        FileRequest::MachineRoots => Ok(CapabilityValue::FileEntries(machine_roots())),
         FileRequest::RegisterWorkspaceRoot {
             handle,
             native_path,
@@ -330,6 +331,17 @@ pub async fn execute(
                 fs::create_dir_all(parent).map_err(io_failure)?;
                 reject_symlink_chain(parent)?;
             }
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                    return Err(failure(
+                        CapabilityFailureKind::Denied,
+                        format!("append target is not a plain file: {}", path.display()),
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_failure(error)),
+            }
             let mut options = fs::OpenOptions::new();
             options.create(true).append(true);
             let mut file = options.open(&path).map_err(io_failure)?;
@@ -409,7 +421,7 @@ pub async fn execute(
             }
         }
         FileRequest::Rename { from, to } => {
-            if std::mem::discriminant(&from.root) != std::mem::discriminant(&to.root) {
+            if from.root != to.root {
                 return Err(failure(
                     CapabilityFailureKind::Denied,
                     "rename cannot cross capability roots",
@@ -421,6 +433,30 @@ pub async fn execute(
                 fs::create_dir_all(parent).map_err(io_failure)?;
             }
             fs::rename(from, to).map_err(io_failure)?;
+            Ok(CapabilityValue::Unit)
+        }
+        FileRequest::Copy { from, to } => {
+            if from.root != to.root {
+                return Err(failure(
+                    CapabilityFailureKind::Denied,
+                    "copy cannot cross capability roots",
+                ));
+            }
+            let from = resolve(roots, &from, false).await?;
+            let to = resolve(roots, &to, true).await?;
+            if to.exists() {
+                return Err(failure(
+                    CapabilityFailureKind::Conflict,
+                    format!("{} already exists", to.display()),
+                ));
+            }
+            if to == from || to.starts_with(&from) {
+                return Err(failure(
+                    CapabilityFailureKind::Invalid,
+                    "cannot place a path inside itself",
+                ));
+            }
+            copy_recursive(&from, &to, 0)?;
             Ok(CapabilityValue::Unit)
         }
         FileRequest::CanonicalizeHostPath { path } => {
@@ -443,6 +479,159 @@ pub async fn execute(
             let canonical = requested.canonicalize().map_err(io_failure)?;
             Ok(CapabilityValue::Text(canonical.display().to_string()))
         }
+        FileRequest::ResolveWorkspacePath {
+            roots: requested_roots,
+            default_handle,
+            path,
+        } => {
+            if requested_roots.is_empty() || requested_roots.len() > 64 {
+                return Err(failure(
+                    CapabilityFailureKind::Invalid,
+                    "workspace path resolution requires 1 through 64 roots",
+                ));
+            }
+            let mut canonical_roots = Vec::with_capacity(requested_roots.len());
+            for root in requested_roots {
+                validate_handle(&root.handle)?;
+                let canonical = canonical_directory(Path::new(&root.native_path))?;
+                let registered = roots
+                    .read()
+                    .await
+                    .workspaces
+                    .get(&root.handle)
+                    .cloned()
+                    .ok_or_else(|| {
+                        failure(
+                            CapabilityFailureKind::Denied,
+                            format!("workspace root {} is not registered", root.handle),
+                        )
+                    })?;
+                if registered != canonical {
+                    return Err(failure(
+                        CapabilityFailureKind::Denied,
+                        format!("workspace root {} changed after registration", root.handle),
+                    ));
+                }
+                canonical_roots.push((root.handle, canonical));
+            }
+            let default = canonical_roots
+                .iter()
+                .find(|(handle, _)| handle == &default_handle)
+                .ok_or_else(|| {
+                    failure(
+                        CapabilityFailureKind::Invalid,
+                        "default workspace root is not in the root set",
+                    )
+                })?;
+            let requested = match path {
+                None => default.1.clone(),
+                Some(path) => {
+                    if path.contains('\0') {
+                        return Err(failure(
+                            CapabilityFailureKind::Invalid,
+                            "workspace cwd contains NUL",
+                        ));
+                    }
+                    let path = PathBuf::from(path);
+                    let candidate = if path.is_absolute() {
+                        path
+                    } else {
+                        default.1.join(path)
+                    };
+                    candidate.canonicalize().map_err(io_failure)?
+                }
+            };
+            let (handle, root) = canonical_roots
+                .iter()
+                .find(|(_, root)| requested.starts_with(root))
+                .ok_or_else(|| {
+                    failure(
+                        CapabilityFailureKind::Denied,
+                        "requested cwd escapes the workspace",
+                    )
+                })?;
+            if !requested.is_dir() {
+                return Err(failure(
+                    CapabilityFailureKind::Invalid,
+                    "requested cwd is not a directory",
+                ));
+            }
+            let relative = requested
+                .strip_prefix(root)
+                .map_err(|_| failure(CapabilityFailureKind::Denied, "cwd escaped its root"))?
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            Ok(CapabilityValue::FileLocator(FileLocator {
+                root: FileRoot::Workspace {
+                    handle: handle.clone(),
+                },
+                path: relative,
+            }))
+        }
+    }
+}
+
+fn copy_recursive(from: &Path, to: &Path, depth: usize) -> Result<(), CapabilityFailure> {
+    if depth > 128 {
+        return Err(failure(
+            CapabilityFailureKind::TooLarge,
+            "copy tree exceeds 128 directory levels",
+        ));
+    }
+    let metadata = fs::symlink_metadata(from).map_err(io_failure)?;
+    if metadata.file_type().is_symlink() {
+        return Err(failure(
+            CapabilityFailureKind::Denied,
+            format!("refusing to copy a symbolic link: {}", from.display()),
+        ));
+    }
+    if metadata.is_file() {
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).map_err(io_failure)?;
+            reject_symlink_chain(parent)?;
+        }
+        fs::copy(from, to).map_err(io_failure)?;
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        fs::create_dir(to).map_err(io_failure)?;
+        for entry in fs::read_dir(from).map_err(io_failure)? {
+            let entry = entry.map_err(io_failure)?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()), depth + 1)?;
+        }
+        return Ok(());
+    }
+    Err(failure(
+        CapabilityFailureKind::Invalid,
+        format!("unsupported file type: {}", from.display()),
+    ))
+}
+
+fn machine_roots() -> Vec<FileEntry> {
+    #[cfg(windows)]
+    {
+        (b'A'..=b'Z')
+            .filter_map(|letter| {
+                let drive = format!("{}:\\", letter as char);
+                Path::new(&drive).is_dir().then(|| FileEntry {
+                    name: format!("{}:", letter as char),
+                    kind: FileKind::Directory,
+                    bytes: 0,
+                    modified_at_millis: None,
+                    native_path: Some(drive),
+                })
+            })
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        vec![FileEntry {
+            name: "/".to_string(),
+            kind: FileKind::Directory,
+            bytes: 0,
+            modified_at_millis: None,
+            native_path: Some("/".to_string()),
+        }]
     }
 }
 
@@ -482,7 +671,16 @@ async fn resolve(
         })?,
         FileRoot::NativePath => unreachable!(),
     };
-    let path = root.join(relative);
+    // `PathBuf::join("")` preserves a trailing separator on Unix. Besides
+    // making an otherwise identical capability root compare unequal, that
+    // leaked a different path spelling into confinement announcements after
+    // the Wasm split. Keep the registered canonical root verbatim when the
+    // locator names the root itself.
+    let path = if relative.as_os_str().is_empty() {
+        root.clone()
+    } else {
+        root.join(relative)
+    };
     if allow_missing_leaf {
         let parent = path.parent().unwrap_or(root);
         ensure_beneath(root, parent)?;

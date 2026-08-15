@@ -265,6 +265,7 @@ impl Journey {
         // builds `genet-agent-dev` and listens for `GENET_AGENT_DEV_COMMAND`.
         let (env_name, binary) = agent_command_override()?;
         std::env::set_var(env_name, binary);
+        point_confinement_at_the_real_binary();
 
         let paths = Paths::new(&data_dir);
         let daemon = Daemon::start(paths).await.context("starting the daemon")?;
@@ -344,6 +345,7 @@ impl Journey {
                 model_id: Some(model_id.to_string()),
                 mode_id: None,
                 title: None,
+                cwd: None,
             })
             .await?;
         match reply {
@@ -459,7 +461,43 @@ impl Journey {
 /// binary to point it at. Both names come from `scripts/channel.env` — the
 /// stamp decides what a binary is called, and this harness follows the stamp
 /// rather than pinning a channel's names here.
-fn agent_command_override() -> Result<(String, PathBuf)> {
+/// Tells the daemon which binary to re-run when it needs to confine a process.
+///
+/// In production the daemon is `genet` and re-runs itself. Under `cargo test`
+/// it is a libtest harness that would treat `__confine` as a filter, run no
+/// tests, exit 0 — and hand back a terminal that closed immediately with
+/// nothing having been confined. Every isolation assertion downstream depends
+/// on this pointing somewhere real (`apps/daemon/src/isolation.rs`).
+fn point_confinement_at_the_real_binary() {
+    use genet_daemon::isolation::CONFINE_COMMAND_ENV;
+
+    if std::env::var_os(CONFINE_COMMAND_ENV).is_some() {
+        return;
+    }
+    // The test executable sits in `target/<profile>/deps`; the CLI is built two
+    // levels up, under whichever name this channel stamps.
+    //
+    // Cargo does not rebuild that binary for `--test command`, so a confinement
+    // test run straight after editing this library exercises whatever was built
+    // last. It will happily agree with a change that is not in it. Build the CLI
+    // too before believing a result here — including a failure you were trying
+    // to provoke.
+    let Ok(here) = std::env::current_exe() else {
+        return;
+    };
+    let Some(target) = here.parent().and_then(|deps| deps.parent()) else {
+        return;
+    };
+    for name in ["genet-dev", "genet"] {
+        let candidate = target.join(name);
+        if candidate.is_file() {
+            std::env::set_var(CONFINE_COMMAND_ENV, candidate);
+            return;
+        }
+    }
+}
+
+pub fn agent_command_override() -> Result<(String, PathBuf)> {
     let channel = channel_env()?;
     let env_name = channel
         .get("ENV_AGENT_COMMAND")
