@@ -70,7 +70,11 @@ panic = "abort"
 # size-oriented full LTO on every logic release.
 [profile.daemon-logic-dev]
 inherits = "dev"
-opt-level = 0
+# A fully unoptimized Rust guest makes ordinary serde/workspace requests spend
+# hundreds of millions of Wasm instructions. Level 1 is the lowest profile
+# that remains interactive; `cargo check` is the sub-second inner loop, while
+# this profile is the runnable hot-reload artifact.
+opt-level = 1
 debug = false
 strip = "symbols"
 incremental = true

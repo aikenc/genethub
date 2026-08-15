@@ -4,7 +4,7 @@ use std::time::Duration;
 use genet_daemon_logic_api::{
     CapabilityBatch, CapabilityCall, CapabilityEvent, CapabilityFailureKind, CapabilityRequest,
     CapabilityValue, FileLocator, FileRequest, FileRoot, HttpRequest, ProcessRequest, ProcessSpec,
-    PtyRequest, RedirectPolicy, SocketRequest, MAX_CAPABILITY_BATCH,
+    PtyRequest, RedirectPolicy, RtcRequest, SocketRequest, MAX_CAPABILITY_BATCH,
 };
 use genet_daemon_system::SystemHost;
 
@@ -525,6 +525,76 @@ async fn http_and_websocket_drivers_move_bounded_raw_messages() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn rtc_peers_are_bounded_opaque_resources_with_explicit_lifecycle() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SystemHost::new(root.path().join("private"), root.path().join("logs")).unwrap();
+
+    assert!(matches!(
+        one(
+            &host,
+            CapabilityRequest::Rtc(RtcRequest::Create {
+                ice_servers: vec![],
+                data_channel_label: String::new(),
+                max_message_bytes: 1024,
+            }),
+        )
+        .await
+        .result,
+        Err(error) if error.kind == CapabilityFailureKind::Invalid
+    ));
+
+    let resource_id = match one(
+        &host,
+        CapabilityRequest::Rtc(RtcRequest::Create {
+            ice_servers: vec![],
+            data_channel_label: "genehub".to_string(),
+            max_message_bytes: 1024,
+        }),
+    )
+    .await
+    .result
+    .unwrap()
+    {
+        CapabilityValue::Resource { resource_id } => resource_id,
+        other => panic!("unexpected {other:?}"),
+    };
+
+    assert!(matches!(
+        one(
+            &host,
+            CapabilityRequest::Rtc(RtcRequest::Send {
+                resource_id,
+                bytes: b"not-open".to_vec(),
+            }),
+        )
+        .await
+        .result,
+        Err(error) if error.kind == CapabilityFailureKind::Conflict
+    ));
+    assert!(matches!(
+        one(
+            &host,
+            CapabilityRequest::Rtc(RtcRequest::Close { resource_id }),
+        )
+        .await
+        .result,
+        Ok(CapabilityValue::Unit)
+    ));
+    assert!(matches!(
+        one(
+            &host,
+            CapabilityRequest::Rtc(RtcRequest::Send {
+                resource_id,
+                bytes: b"closed".to_vec(),
+            }),
+        )
+        .await
+        .result,
+        Err(error) if error.kind == CapabilityFailureKind::NotFound
+    ));
 }
 
 #[test]

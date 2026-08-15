@@ -429,10 +429,11 @@ fn resolve(id: &str, config: &ProviderConfig) -> Resolved {
 fn validate_credential_url(value: &str) -> Result<(), ProtocolError> {
     let parsed = url::Url::parse(value)
         .map_err(|error| bad_request(format!("读取模型接口地址：{error}")))?;
-    let loopback = parsed
-        .host_str()
-        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
-        .is_some_and(|address| address.is_loopback());
+    let loopback = match parsed.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(_)) | None => false,
+    };
     if !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.query().is_some()
@@ -492,5 +493,89 @@ fn bad_request(message: impl Into<String>) -> ProtocolError {
     ProtocolError {
         code: ErrorCode::BadRequest,
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_credentials_require_tls_except_on_exact_ip_loopback() {
+        for allowed in [
+            "https://api.example.com/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://127.42.0.9:8080/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            validate_credential_url(allowed).unwrap();
+        }
+        for refused in [
+            "http://api.example.com/v1",
+            "http://10.0.0.2:8080/v1",
+            "http://172.16.0.2:8080/v1",
+            "http://192.168.1.20:8080/v1",
+            "http://localhost:8080/v1",
+            "http://loopback.attacker.test:8080/v1",
+            "ftp://api.example.com/v1",
+            "https://user:password@api.example.com/v1",
+            "https://api.example.com/v1?key=secret",
+            "https://api.example.com/v1#credential",
+        ] {
+            assert!(
+                validate_credential_url(refused).is_err(),
+                "{refused} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_provider_update_does_not_mutate_portable_config() {
+        let mut config = Config::default();
+        let error = set_provider(
+            &mut config,
+            "insecure".to_string(),
+            Some("secret".to_string()),
+            Some("http://192.168.1.20/v1".to_string()),
+            None,
+            Some("openai".to_string()),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert!(!config.agents.providers.contains_key("insecure"));
+    }
+
+    #[test]
+    fn shipped_and_custom_provider_resolution_stays_in_portable_logic() {
+        let shipped = resolve("deepseek", &ProviderConfig::default());
+        assert_eq!(
+            shipped.base_url.as_deref(),
+            Some("https://api.deepseek.com/v1")
+        );
+        assert!(!shipped.custom);
+
+        let custom = resolve(
+            "internal",
+            &ProviderConfig {
+                base_url: Some("https://models.example".to_string()),
+                dialect: Some("anthropic".to_string()),
+                label: Some("Internal".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        assert_eq!(custom.label, "Internal");
+        assert_eq!(custom.base_url.as_deref(), Some("https://models.example"));
+        assert_eq!(custom.dialect, Dialect::Anthropic);
+        assert!(custom.custom);
+    }
+
+    #[test]
+    fn non_chat_models_are_filtered_before_the_guest_publishes_settings() {
+        assert!(usable_for_chat("gpt-4o"));
+        assert!(usable_for_chat("deepseek-chat"));
+        assert!(!usable_for_chat("text-embedding-3-small"));
+        assert!(!usable_for_chat("whisper-1"));
+        assert!(!usable_for_chat("dall-e-3"));
     }
 }

@@ -11,9 +11,15 @@ use genet_daemon_platform::{ArtifactEnvelope, SignedArtifact, LOGIC_ABI_VERSION}
 const MODULE_ID: &str = "genehub:daemon/logic";
 const KEY_ID: &str = "dev-local";
 
+fn serial() -> &'static tokio::sync::Mutex<()> {
+    static SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 #[tokio::test]
 #[ignore = "requires GENET_DAEMON_LOGIC_WASM naming the signed real Rust guest"]
 async fn running_daemon_hot_updates_rejects_tampering_and_rolls_back_without_restart() {
+    let _serial = serial().lock().await;
     let source = artifact_path();
     let initial_file = fs::read(&source).unwrap();
     let initial = SignedArtifact::from_single_file(&initial_file).unwrap();
@@ -101,6 +107,134 @@ async fn running_daemon_hot_updates_rejects_tampering_and_rolls_back_without_res
     );
     assert_eq!(daemon.port, port);
     assert_eq!(std::process::id(), pid);
+
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires GENET_DAEMON_LOGIC_WASM naming the signed real Rust guest"]
+async fn real_guest_owns_workspace_files_pty_settings_devices_and_catalog_end_to_end() {
+    let _serial = serial().lock().await;
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let daemon = Daemon::start(Paths::new(directory.path().join("data")))
+        .await
+        .unwrap();
+
+    let call = |request| router::handle(&daemon.state, TransportKind::Loopback, request);
+    let opened = call(Request::WorkspaceOpen {
+        root: workspace.display().to_string(),
+    })
+    .await
+    .reply
+    .unwrap();
+    let Reply::Workspace(opened) = opened else {
+        panic!("workspace.open returned the wrong reply")
+    };
+    let folder = opened.folders.first().unwrap();
+    let file = format!("{}/notes/readme.txt", folder.root_handle);
+
+    assert!(matches!(
+        call(Request::FileWrite {
+            workspace_id: opened.id.clone(),
+            path: file.clone(),
+            content: "portable application".into(),
+        })
+        .await
+        .reply,
+        Ok(Reply::Ack)
+    ));
+    assert_eq!(
+        fs::read_to_string(workspace.join("notes/readme.txt")).unwrap(),
+        "portable application"
+    );
+    assert!(matches!(
+        call(Request::FileTree {
+            workspace_id: opened.id.clone(),
+            path: Some(folder.root_handle.clone()),
+            depth: Some(3),
+        })
+        .await
+        .reply,
+        Ok(Reply::FileTree(_))
+    ));
+
+    let logic = daemon.state.logic.as_ref().unwrap();
+    let catalog = logic.workspace_catalog().await.unwrap();
+    assert!(catalog
+        .workspaces
+        .iter()
+        .any(|workspace| workspace.local_workspace_id == opened.id));
+    assert_eq!(
+        logic
+            .resolve_workspace_file(opened.id.clone(), file)
+            .await
+            .unwrap(),
+        workspace.join("notes/readme.txt")
+    );
+
+    assert!(matches!(
+        call(Request::SettingsSetProvider {
+            provider_id: "test-provider".into(),
+            api_key: Some("secret".into()),
+            base_url: Some("https://provider.example/v1".into()),
+            label: Some("Test".into()),
+            dialect: Some("openai".into()),
+            models: Some(vec!["test-model".into()]),
+        })
+        .await
+        .reply,
+        Ok(Reply::Settings(_))
+    ));
+    assert!(matches!(
+        call(Request::DeviceInvite).await.reply,
+        Ok(Reply::Invite(_))
+    ));
+
+    let pty = call(Request::PtyOpen {
+        workspace_id: opened.id.clone(),
+        cols: Some(80),
+        rows: Some(24),
+    })
+    .await
+    .reply
+    .unwrap();
+    let Reply::Pty { pty_id } = pty else {
+        panic!("pty.open returned the wrong reply")
+    };
+    assert!(matches!(
+        call(Request::PtyClose { pty_id }).await.reply,
+        Ok(Reply::Ack)
+    ));
+
+    // Every operation above survives a full guest instance replacement; no
+    // native business object is available to reconstruct it as a fallback.
+    let initial = SignedArtifact::from_single_file(&fs::read(artifact_path()).unwrap()).unwrap();
+    let next_path = directory.path().join("next.wasm");
+    fs::write(
+        &next_path,
+        sign("stateful-update", initial.component)
+            .to_single_file()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        call(Request::DaemonLogicInstall {
+            path: next_path.display().to_string(),
+        })
+        .await
+        .reply,
+        Ok(Reply::LogicModule(_))
+    ));
+    assert!(matches!(
+        call(Request::WorkspaceList).await.reply,
+        Ok(Reply::Workspaces(ref workspaces)) if workspaces.iter().any(|item| item.id == opened.id)
+    ));
+    assert!(matches!(
+        call(Request::SettingsGet).await.reply,
+        Ok(Reply::Settings(ref settings)) if settings.providers.iter().any(|item| item.id == "test-provider")
+    ));
 
     daemon.shutdown().await;
 }

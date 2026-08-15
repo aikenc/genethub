@@ -90,9 +90,9 @@ pub enum LogicConnection {
 }
 
 impl LogicHost {
-    /// Loads the one shipped signed artifact. A source-tree dev build remains
-    /// usable before the developer builds the guest; every released channel
-    /// fails closed when its mandatory artifact or pinned key is missing.
+    /// Loads the one shipped signed artifact. Unit-test scaffolding may build
+    /// state without it, but every real daemon start fails closed when its
+    /// mandatory artifact or pinned key is missing.
     pub fn discover(
         paths: &Paths,
         machine: &MachineState,
@@ -101,7 +101,7 @@ impl LogicHost {
         let Some(artifact_path) = artifact_path()? else {
             if crate::channel::CHANNEL == "dev" {
                 tracing::warn!(
-                    "no {ARTIFACT_FILE_NAME}; daemon logic remains native until the dev guest is built"
+                    "no {ARTIFACT_FILE_NAME}; build the signed dev guest before starting the daemon"
                 );
                 return Ok(None);
             }
