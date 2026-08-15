@@ -96,10 +96,10 @@ pub type BatchSummary = RoundBatchSummary;
 
 /// A semantic batch never exposes more than sixteen blobs at once.
 pub const BATCH_MAX_BLOBS: u32 = 16;
-/// A visible trunk holds at most a hundred blobs — six full batches and part
-/// of a seventh. The cap is what keeps one trunk request bounded no matter how
-/// long its round ran.
-pub const TRUNK_MAX_BLOBS: u32 = 100;
+/// Once a trunk has passed this many tool calls, its next semantic batch starts
+/// a new trunk. This is deliberately a soft threshold: a batch is never cut in
+/// half merely to make the number exact.
+pub const TRUNK_TOOL_CALL_THRESHOLD: u32 = 100;
 
 pub enum TrunkItem<'a> {
     Monologue,
@@ -186,6 +186,7 @@ pub struct TrunkBuilder {
     current_batch: BatchBuilder,
     closed_batches: Vec<ClosedBatch>,
     blob_count: u32,
+    tool_count: u32,
     first_item_id: Option<String>,
     first_monologue_item_id: Option<String>,
 }
@@ -198,9 +199,12 @@ impl TrunkBuilder {
             && self.current_batch.blob_count > 0
         {
             self.close_batch();
-            if self.blob_count >= TRUNK_MAX_BLOBS {
-                closed_trunk = self.close_finished();
-            }
+        }
+        // Batch boundaries are the only safe trunk boundaries. Crossing the
+        // threshold marks the trunk ready to close; the item that begins the
+        // next batch belongs wholly to the new trunk.
+        if self.current_batch.item_ids.is_empty() && self.tool_count > TRUNK_TOOL_CALL_THRESHOLD {
+            closed_trunk = self.close_finished();
         }
 
         if self.first_item_id.is_none() {
@@ -222,6 +226,7 @@ impl TrunkBuilder {
                 self.current_batch.blob_count += 1;
                 self.current_batch.tool_count += 1;
                 self.blob_count += 1;
+                self.tool_count += 1;
             }
             TrunkItem::Reasoning => {
                 self.current_batch.blob_count += 1;
@@ -234,13 +239,6 @@ impl TrunkBuilder {
 
         if self.current_batch.blob_count >= BATCH_MAX_BLOBS {
             self.close_batch();
-        }
-        if self.blob_count >= TRUNK_MAX_BLOBS {
-            // The cap is not a multiple of the batch size, so the trunk
-            // usually fills mid-batch. Closing that batch here is what keeps
-            // its blobs inside the trunk rather than counted-but-unlisted.
-            self.close_batch();
-            return self.close_finished().or(closed_trunk);
         }
         closed_trunk
     }
@@ -268,6 +266,7 @@ impl TrunkBuilder {
         if self.closed_batches.is_empty() {
             return None;
         }
+        self.tool_count = 0;
         Some(ClosedTrunk {
             first_item_id: self.first_item_id.take().unwrap_or_default(),
             blob_count: std::mem::take(&mut self.blob_count),
@@ -279,13 +278,21 @@ impl TrunkBuilder {
 
 fn first_sentence(text: &str) -> String {
     let text = text.trim();
-    let end = text
-        .char_indices()
-        .find_map(|(index, character)| {
-            matches!(character, '。' | '！' | '？' | '.' | '!' | '?' | '\n')
-                .then_some(index + character.len_utf8())
-        })
-        .unwrap_or(text.len());
+    let mut end = text.len();
+    for (index, character) in text.char_indices() {
+        if matches!(character, '。' | '！' | '？' | '.' | '!' | '?' | '\n') {
+            let candidate = index + character.len_utf8();
+            if text[..candidate]
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .count()
+                > 15
+            {
+                end = candidate;
+                break;
+            }
+        }
+    }
     overview::clip(text[..end].trim(), 100)
 }
 
@@ -417,7 +424,7 @@ mod tests {
             &texts(&[("a1", "先读取配置。再检查环境"), ("a2", "开始修改")]),
         );
         assert_eq!(summary.blob_count, 3);
-        assert_eq!(summary.title, "先读取配置。");
+        assert_eq!(summary.title, "先读取配置。再检查环境");
         assert_eq!(summary.batches.len(), 2);
         assert_eq!(summary.batches[0].blob_count, 2);
         assert_eq!(summary.batches[0].text, "先读取配置。再检查环境");
@@ -463,16 +470,16 @@ mod tests {
     }
 
     #[test]
-    fn a_trunk_closes_at_its_blob_cap_without_stranding_the_open_batch() {
+    fn a_trunk_closes_on_the_batch_after_its_tool_call_threshold() {
         let mut builder = TrunkBuilder::default();
         let mut closed = None;
-        for index in 0..TRUNK_MAX_BLOBS {
+        for index in 0..113 {
             closed = builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
         }
         let summary = closed
-            .expect("the hundredth blob closes the trunk")
+            .expect("the first item after the threshold-crossing batch closes the trunk")
             .into_summary(0, &HashMap::new());
-        assert_eq!(summary.blob_count, 100);
+        assert_eq!(summary.blob_count, 112);
         assert_eq!(
             summary
                 .batches
@@ -484,8 +491,17 @@ mod tests {
              the trailing partial batch are written nowhere"
         );
         assert_eq!(summary.batches.len(), 7);
-        assert_eq!(summary.batches.last().unwrap().blob_count, 4);
+        assert_eq!(summary.batches.last().unwrap().blob_count, 16);
         assert_eq!(summary.title, "调用了 16 次工具");
+    }
+
+    #[test]
+    fn a_short_acknowledgement_is_not_the_whole_title_of_a_longer_monologue() {
+        assert_eq!(
+            first_sentence("收到。我现在继续检查流式更新期间的页面稳定性。后续内容"),
+            "收到。我现在继续检查流式更新期间的页面稳定性。"
+        );
+        assert_eq!(first_sentence("收到。"), "收到。");
     }
 
     #[test]

@@ -550,7 +550,9 @@ function TrunkCard({
           🧭
         </span>
         <span
-          className="min-w-0 flex-1 truncate text-sm font-medium"
+          className={`min-w-0 flex-1 text-sm font-medium ${
+            open ? "whitespace-pre-wrap break-words" : "truncate"
+          }`}
           title={trunkTitle}
         >
           {trunkTitle}
@@ -602,7 +604,9 @@ function BatchCard({ batch, active }: { batch: RoundBatch; active: boolean }) {
           💭
         </span>
         <span
-          className="min-w-0 flex-1 truncate text-xs"
+          className={`min-w-0 flex-1 text-xs ${
+            open ? "whitespace-pre-wrap break-words" : "truncate"
+          }`}
           title={monologue.first || batch.summary.text}
         >
           {monologue.first || batch.summary.text}
@@ -640,8 +644,16 @@ function splitMonologue(monologue: string): { first: string; rest: string } {
   const lines = monologue.replace(/\r\n/gu, "\n").split("\n");
   while (lines[0]?.trim() === "") lines.shift();
   const firstLine = lines.shift()?.trim() ?? "";
-  const sentenceEnd = firstLine.search(/[。！？!?]|[.](?=\s|$)/u);
-  const end = sentenceEnd < 0 ? firstLine.length : sentenceEnd + 1;
+  const ends = [...firstLine.matchAll(/[。！？!?]|[.](?=\s|$)/gu)];
+  const longEnough = ends.find(
+    (match) =>
+      [...firstLine.slice(0, (match.index ?? 0) + match[0].length)].filter(
+        (character) => !/\s/u.test(character),
+      ).length > 15,
+  );
+  const end = longEnough
+    ? (longEnough.index ?? 0) + longEnough[0].length
+    : firstLine.length;
   const first = firstLine.slice(0, end).trim().replace(/(?:\.{3}|…)+$/u, "");
   const sameLineRest = firstLine.slice(end).trim();
   const rest = [sameLineRest, ...lines].filter(Boolean).join("\n").trim();

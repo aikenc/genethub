@@ -24,14 +24,11 @@ pub fn build(cwd: &Path, skills: &[Skill], additional_system_prompts: &[String])
         .collect::<Vec<_>>()
         .join("\n");
 
-    let guidelines = [
-        "Be concise in your responses",
-        "Show file paths clearly when working with files",
-    ]
-    .iter()
-    .map(|guideline| format!("- {guideline}"))
-    .collect::<Vec<_>>()
-    .join("\n");
+    let guidelines = ["Show file paths clearly when working with files"]
+        .iter()
+        .map(|guideline| format!("- {guideline}"))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let mut prompt = format!(
         "You are an expert coding assistant operating inside {}, a coding agent harness. \

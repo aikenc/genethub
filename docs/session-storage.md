@@ -112,7 +112,7 @@
  "blob":{"id":"9f3ac1…","bytes":20480,"at":"9f:81920:20480"}}
 ```
 
-一个 trunk 最多 100 个 blob（`TRUNK_MAX_BLOBS`），每个可见 batch 最多 16 个（`BATCH_MAX_BLOBS`），所以单个 trunk 文件稳定在几十 KB。`trunk.get` = 打开一个小文件读完，**不需要 offset 运算，也不存在偏移漂移**。
+一个 trunk 在工具调用超过 100 次后，会在下一个 batch 边界切换（`TRUNK_TOOL_CALL_THRESHOLD`）；100 是软阈值，不会为了凑数拆开 batch。每个可见 batch 最多 16 个 blob（`BATCH_MAX_BLOBS`）。`trunk.get` 仍然直接读取单个 trunk 文件，**不需要 offset 运算，也不存在偏移漂移**。
 
 trunk 索引与 trunk 明细分开，是因为 `trunk.list` 只要标题和计数；把明细混在同一个文件里会让翻索引付明细的钱。
 
@@ -183,7 +183,7 @@ Chat 只发送 `manifest.json` 的工作区相对路径、文件数和总字节�
 
 ## 4. 复杂度对照
 
-N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = 一个 trunk 内的 blob 数（≤100）。
+N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = 一个 trunk 内的 blob 数（由工具调用软阈值与 batch 边界决定）。
 
 | 操作 | 旧 | 新 |
 |------|-----|-----|
@@ -222,9 +222,9 @@ N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = �
 ## 7. 验收
 
 - **打开成本与历史无关：** 一个含 5000 次工具调用、正文合计 500MB 的会话，layered 打开读取的字节数与一个只有 3 轮对话的会话在同一量级；抓包不含任何 blob 正文。
-- **展开成本有界：** `trunk.get` 读取的字节只与该 trunk 的 ≤100 条 overview 有关，不随 round 总长增长，也不触发同 round 内其他 trunk 的读取。
+- **展开成本与当前 trunk 有关：** `trunk.get` 只读取该 trunk，不随 round 总长增长，也不触发同 round 内其他 trunk 的读取。工具密集流会在超过软阈值后的下一个 batch 边界落盘。
 - **blob 定位不扫描：** 写入 5000 条 blob 的总读字节数与已写入总量无关（旧实现是平方级）；`blob.get` 的读取字节数等于该 blob 自身长度。
-- **边界：** batch 第 16 条关闭、trunk 第 100 条关闭；无独白时 batch 文本回退到首个 thinking 前 100 字，再回退到「调用了 N 次工具」。
+- **边界：** batch 第 16 个 blob 关闭；trunk 在工具调用超过 100 次后的下一个 batch 起点切换。无独白时 batch 文本回退到首个 thinking 前 100 字，再回退到「调用了 N 次工具」。
 - **跨 channel 复用：** 另一个 channel 注册同一个目录后，既有会话照常列出、照常打开、照常续聊，不依赖它自己那份 workspace id。
 - **版本单向：** `format` 高于本机的会话仍出现在列表里并说明原因，但打不开；本机只读它不会改动 `meta.json`。
 - **写入互斥：** 同一 session 的第二个 daemon 写入被拒绝并指出占用者，读取不受影响；不同 session 可跨 channel 并行写；占用者退出后无需重启即可恢复写入；从稳定 turn Fork 的新 session 不受源 session 锁影响。

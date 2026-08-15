@@ -66,7 +66,8 @@ struct Live {
     status: Mutex<SessionStatus>,
     /// The session narrative, plus the work items of the trunk currently being
     /// built. Bounded on both counts: narrative grows with what was said, and
-    /// a trunk never exceeds `TRUNK_MAX_BLOBS`. Work items are dropped as soon
+    /// a trunk rolls over at a semantic batch boundary after its tool-call
+    /// threshold. Work items are dropped as soon
     /// as their trunk is written, which is what keeps a round that runs for a
     /// day from keeping a day of tool output resident
     /// (`docs/session-storage.md` §4).
@@ -91,7 +92,8 @@ struct Live {
     /// Item ids settled during the current turn, flushed to disk when it ends.
     turn_items: Mutex<Vec<String>>,
     /// Work item ids belonging to the trunk currently open, in order. Cleared
-    /// when that trunk is written out, so this never grows past a trunk's cap
+    /// when that trunk is written out, so this stays bounded by a soft batch
+    /// boundary during tool-heavy work
     /// however many adapter turns the round spans.
     open_trunk_items: Mutex<Vec<String>>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -2402,11 +2404,10 @@ impl Live {
     /// keeps trunk boundaries from double-counting a re-sent item.
     async fn record_round_item(&self, item: &TimelineItem) {
         {
-            let mut open = self.open_trunk_items.lock().await;
+            let open = self.open_trunk_items.lock().await;
             if open.iter().any(|id| id == item.id()) {
                 return;
             }
-            open.push(item.id().to_string());
         }
         let closed = {
             let mut active = self.active_round.lock().await;
@@ -2416,8 +2417,15 @@ impl Live {
             }
         };
         if closed.is_some() {
+            // `push` closes the previous trunk before placing this item in the
+            // new one. Keep the trigger out of the old trunk's persisted id
+            // set, then retain it after that set has been drained.
             self.finish_trunk().await;
         }
+        self.open_trunk_items
+            .lock()
+            .await
+            .push(item.id().to_string());
     }
 
     /// The trunk being built right now, assembled from the items still in
@@ -6066,7 +6074,7 @@ mod tests {
     /// proposal notes is prompted to "be concise") produces long runs of
     /// tool calls with no monologue in between.
     #[tokio::test]
-    async fn a_round_with_no_monologue_at_all_still_paginates_at_the_cap() {
+    async fn a_round_with_no_monologue_at_all_paginates_after_the_soft_threshold() {
         let dir = tempfile::tempdir().unwrap();
         let (sessions, events, _) = wired(dir.path()).await;
         let providers = ProviderMap::new();
@@ -6126,11 +6134,11 @@ mod tests {
         assert_eq!(
             trunks.len(),
             2,
-            "116 tool calls split into a full 100-blob trunk and a 16-blob tail: {trunks:?}"
+            "116 tool calls split after the threshold-crossing batch: {trunks:?}"
         );
-        assert_eq!(trunks[0].blob_count, 100);
+        assert_eq!(trunks[0].blob_count, 112);
         assert_eq!(trunks[0].batches.len(), 7);
-        assert_eq!(trunks[1].blob_count, 16);
+        assert_eq!(trunks[1].blob_count, 4);
         assert_eq!(trunks[1].batches.len(), 1);
     }
 

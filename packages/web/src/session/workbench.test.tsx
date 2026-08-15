@@ -237,9 +237,9 @@ describe("what the user sees in a session", () => {
     expect(screen.getByTestId("round-progress")).not.toHaveTextContent("阶段");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("🧭");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("先检查配置。");
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("再逐项核对。");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("2 项");
-    expect(screen.getByTestId("batch-monologue")).toHaveTextContent("再逐项核对。");
-    expect(screen.getByTestId("batch-monologue")).not.toHaveTextContent("先检查配置。");
+    expect(screen.queryByTestId("batch-monologue")).not.toBeInTheDocument();
     expect(screen.getByText("确认结构")).toBeInTheDocument();
     expect(screen.getByText("读取配置")).toBeInTheDocument();
 
@@ -474,7 +474,7 @@ describe("what the user sees in a session", () => {
     );
 
     const header = within(screen.getByTestId("round-trunk")).getByRole("button");
-    expect(header.querySelector(".truncate")).toHaveAttribute(
+    expect(header.querySelector(".whitespace-pre-wrap")).toHaveAttribute(
       "title",
       "正在核对对话中持续刷新的信息面板与布局边界。",
     );
@@ -565,7 +565,7 @@ describe("what the user sees in a session", () => {
             batches: [
               {
                 summary: first,
-                monologue: "核对入口与权限。随后检查角色边界。",
+                monologue: "核对入口与权限。随后检查角色边界。最后记录结论。",
                 blobs: [],
               },
               { summary: second, monologue: "核对部署边界。", blobs: [] },
@@ -585,13 +585,13 @@ describe("what the user sees in a session", () => {
     expect(batches[0]!).toHaveTextContent("2 项");
     expect(within(batches[0]!).getByRole("button").querySelector(".truncate")).toHaveAttribute(
       "title",
-      "核对入口与权限。",
+      "核对入口与权限。随后检查角色边界。",
     );
 
     const batchHeader = within(batches[0]!).getByRole("button");
     await userEvent.click(batchHeader);
     expect(batchHeader).toHaveTextContent("核对入口与权限");
-    expect(batches[0]!).toHaveTextContent("随后检查角色边界。");
+    expect(batches[0]!).toHaveTextContent("最后记录结论。");
     expect(screen.getByTestId("batch-monologue")).not.toHaveTextContent("核对入口与权限。");
   });
 

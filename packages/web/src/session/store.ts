@@ -459,13 +459,23 @@ let roundRefreshInFlight: Promise<void> | null = null;
 let roundRefreshAgain = false;
 
 async function refreshRound(get: () => WorkbenchState): Promise<void> {
+  const sessionId = get().activeSessionId;
+  if (!sessionId) return;
   await get().loadRound("latest");
+  if (get().activeSessionId !== sessionId) return;
   const round = Object.values(get().timeline.roundLayers)
     .reverse()
     .find((layer) => layer.round.outcome === "running")?.round;
   if (!round) return;
   const last = get().timeline.roundLayers[round.roundId]?.trunks.at(-1);
-  if (last) await get().loadTrunk(round.roundId, last.index);
+  if (!last) return;
+  const loaded = get().timeline.roundTrunks[`${round.roundId}:${last.index}`];
+  // A layer refresh often reports the exact same live tail. Keep the detail
+  // object already on screen in that case, so an expanded card neither flashes
+  // through loading nor churns its measured height on every stream event.
+  if (!loaded || JSON.stringify(loaded.summary) !== JSON.stringify(last)) {
+    await get().loadTrunk(round.roundId, last.index);
+  }
 }
 
 /**
@@ -871,13 +881,33 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       });
       if (reply?.type !== "roundLayer") return;
       const layer = reply.data;
-      patchTimeline(sessionId, set, (timeline) => ({
-        rounds: [
-          ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),
-          layer.round,
-        ],
-        roundLayers: { ...timeline.roundLayers, [layer.round.roundId]: layer },
-      }));
+      patchTimeline(sessionId, set, (timeline) => {
+        const existing = timeline.roundLayers[layer.round.roundId];
+        const trunks = existing
+          ? [
+              ...new Map(
+                [...existing.trunks, ...layer.trunks].map((trunk) => [trunk.index, trunk]),
+              ).values(),
+            ].sort((left, right) => left.index - right.index)
+          : layer.trunks;
+        const existingFirst = existing?.trunks[0]?.index;
+        const keptOlder =
+          existingFirst !== undefined && existingFirst < (layer.trunks[0]?.index ?? 0);
+        return {
+          rounds: [
+            ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),
+            layer.round,
+          ],
+          roundLayers: {
+            ...timeline.roundLayers,
+            [layer.round.roundId]: {
+              ...layer,
+              trunks,
+              nextCursor: keptOlder ? existing?.nextCursor : layer.nextCursor,
+            },
+          },
+        };
+      });
     });
   },
 
