@@ -81,7 +81,17 @@ export default defineConfig({
   base: "./",
   // So the page can say which build it is; see `build-stamp.js`.
   define: buildDefines(),
-  build: { outDir: "dist", sourcemap: true },
+  build: {
+    outDir: "dist",
+    sourcemap: true,
+    // The PCM capture worklet must stay a real file. Under the default 4 kB
+    // inline limit Vite turns it into a data: URL, and every CSP-bearing
+    // consumer — the cloud console (script-src 'self') and the Tauri desktop
+    // shell (default-src 'self') — then blocks audioWorklet.addModule, so
+    // voice input fails before recording starts (beta.2 report, 2026-08-14).
+    assetsInlineLimit: (filePath) =>
+      filePath.endsWith("pcm-worklet.js") ? false : undefined,
+  },
   server: {
     proxy: { ...daemonProxy(), ...relayProxy() },
   },
