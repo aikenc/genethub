@@ -13,7 +13,9 @@ mod vm;
 pub use artifact::{ArtifactEnvelope, ArtifactVerifier, SignedArtifact, VerifiedArtifact};
 pub use error::{PlatformError, Result};
 pub use runtime::{ActiveLogic, ActiveOrigin, PlatformRuntime};
-pub use vm::{LogicInstance, LogicVm, VmLimits, VmPolicy, WasiPolicy, WasiPreopen};
+pub use vm::{
+    CapabilityHandler, LogicInstance, LogicVm, VmLimits, VmPolicy, WasiPolicy, WasiPreopen,
+};
 
 /// First version of the platform/logic lifecycle contract.
-pub const LOGIC_ABI_VERSION: u32 = 3;
+pub const LOGIC_ABI_VERSION: u32 = 6;

@@ -22,12 +22,17 @@ fn malformed_missing_importing_and_incompatible_modules_are_rejected() {
         vm.instantiate(b"not wasm"),
         Err(PlatformError::Vm(_))
     ));
+    let incompatible = match vm.instantiate(&component(ComponentSpec {
+        abi: LOGIC_ABI_VERSION as i32 + 1,
+        ..ComponentSpec::default()
+    })) {
+        Ok(_) => panic!("incompatible ABI unexpectedly loaded"),
+        Err(error) => error,
+    };
     assert!(matches!(
-        vm.instantiate(&component(ComponentSpec {
-            abi: LOGIC_ABI_VERSION as i32 + 1,
-            ..ComponentSpec::default()
-        })),
-        Err(PlatformError::Vm(message)) if message.contains("reports ABI 3")
+        incompatible,
+        PlatformError::Vm(message)
+            if message.contains(&format!("reports ABI {}", LOGIC_ABI_VERSION + 1))
     ));
     assert!(matches!(
         vm.instantiate(&component(ComponentSpec {

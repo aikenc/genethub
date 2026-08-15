@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use wasmtime::{
-    Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, Strategy,
-    TypedFunc,
+    Caller, Config, Engine, Extern, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
+    Strategy, TypedFunc,
 };
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
@@ -21,6 +21,26 @@ const INITIALIZE_EXPORT: &str = "genehub_initialize";
 const HANDLE_EXPORT: &str = "genehub_handle";
 const SNAPSHOT_EXPORT: &str = "genehub_snapshot";
 const RESTORE_EXPORT: &str = "genehub_restore";
+const CAPABILITY_MODULE: &str = "genehub_platform";
+const CAPABILITY_IMPORT: &str = "genehub_capability";
+
+/// One policy-free byte-batch bridge supplied by the embedding application.
+///
+/// The VM crate deliberately does not depend on GeneHub schemas. The handler
+/// receives and returns opaque bounded bytes; the signed guest and the system
+/// driver own the typed capability contract.
+pub trait CapabilityHandler: Send + Sync {
+    fn handle(&self, request: &[u8]) -> std::result::Result<Vec<u8>, String>;
+}
+
+impl<F> CapabilityHandler for F
+where
+    F: Fn(&[u8]) -> std::result::Result<Vec<u8>, String> + Send + Sync,
+{
+    fn handle(&self, request: &[u8]) -> std::result::Result<Vec<u8>, String> {
+        self(request)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct VmLimits {
@@ -49,12 +69,26 @@ impl Default for VmLimits {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct VmPolicy {
     pub abi_version: u32,
     pub limits: VmLimits,
     pub require_application_abi: bool,
     pub wasi: Option<WasiPolicy>,
+    capability: Option<Arc<dyn CapabilityHandler>>,
+}
+
+impl std::fmt::Debug for VmPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VmPolicy")
+            .field("abi_version", &self.abi_version)
+            .field("limits", &self.limits)
+            .field("require_application_abi", &self.require_application_abi)
+            .field("wasi", &self.wasi)
+            .field("capability", &self.capability.as_ref().map(|_| "installed"))
+            .finish()
+    }
 }
 
 /// The standardized system surface granted to a portable daemon instance.
@@ -82,6 +116,7 @@ impl VmPolicy {
             limits: VmLimits::default(),
             require_application_abi: false,
             wasi: None,
+            capability: None,
         }
     }
 
@@ -91,6 +126,7 @@ impl VmPolicy {
             limits: VmLimits::default(),
             require_application_abi: true,
             wasi: None,
+            capability: None,
         }
     }
 
@@ -113,6 +149,11 @@ impl VmPolicy {
     /// files, environment, stdio or network access.
     pub fn with_wasi(mut self) -> Self {
         self.wasi.get_or_insert_with(WasiPolicy::default);
+        self
+    }
+
+    pub fn with_capability_handler(mut self, handler: impl CapabilityHandler + 'static) -> Self {
+        self.capability = Some(Arc::new(handler));
         self
     }
 }
@@ -173,7 +214,12 @@ impl LogicVm {
         let unexpected_imports = module
             .imports()
             .filter(|import| {
-                import.module() != "wasi_snapshot_preview1" || self.policy.wasi.is_none()
+                let wasi =
+                    import.module() == "wasi_snapshot_preview1" && self.policy.wasi.is_some();
+                let capability = import.module() == CAPABILITY_MODULE
+                    && import.name() == CAPABILITY_IMPORT
+                    && self.policy.capability.is_some();
+                !wasi && !capability
             })
             .map(|import| format!("{}::{}", import.module(), import.name()))
             .collect::<Vec<_>>();
@@ -191,6 +237,8 @@ impl LogicVm {
             StoreState {
                 limits: build_store_limits(&self.policy.limits),
                 wasi,
+                capability: self.policy.capability.clone(),
+                max_message_bytes: self.policy.limits.max_message_bytes,
             },
         );
         store.limiter(|state| &mut state.limits);
@@ -204,6 +252,30 @@ impl LogicVm {
                     .expect("WASI linker is installed only with a WASI context")
             })
             .map_err(|error| PlatformError::Vm(format!("linking WASI preview 1: {error:#}")))?;
+        }
+        if self.policy.capability.is_some() {
+            linker
+                .func_wrap(
+                    CAPABILITY_MODULE,
+                    CAPABILITY_IMPORT,
+                    |mut caller: Caller<'_, StoreState>,
+                     input_pointer: i32,
+                     input_length: i32,
+                     output_pointer: i32,
+                     output_capacity: i32|
+                     -> i32 {
+                        invoke_capability(
+                            &mut caller,
+                            input_pointer,
+                            input_length,
+                            output_pointer,
+                            output_capacity,
+                        )
+                    },
+                )
+                .map_err(|error| {
+                    PlatformError::Vm(format!("linking capability bridge: {error:#}"))
+                })?;
         }
         let instance = linker
             .instantiate(&mut store, &module)
@@ -505,6 +577,63 @@ impl LogicInstance {
 struct StoreState {
     limits: StoreLimits,
     wasi: Option<WasiP1Ctx>,
+    capability: Option<Arc<dyn CapabilityHandler>>,
+    max_message_bytes: usize,
+}
+
+fn invoke_capability(
+    caller: &mut Caller<'_, StoreState>,
+    input_pointer: i32,
+    input_length: i32,
+    output_pointer: i32,
+    output_capacity: i32,
+) -> i32 {
+    let Ok(input_pointer) = usize::try_from(input_pointer) else {
+        return -1;
+    };
+    let Ok(input_length) = usize::try_from(input_length) else {
+        return -1;
+    };
+    let Ok(output_pointer) = usize::try_from(output_pointer) else {
+        return -1;
+    };
+    let Ok(output_capacity) = usize::try_from(output_capacity) else {
+        return -1;
+    };
+    let max_message_bytes = caller.data().max_message_bytes;
+    if input_pointer == 0
+        || output_pointer == 0
+        || input_length == 0
+        || input_length > max_message_bytes
+        || output_capacity == 0
+        || output_capacity > max_message_bytes
+    {
+        return -1;
+    }
+    let Some(Extern::Memory(memory)) = caller.get_export(MEMORY_EXPORT) else {
+        return -2;
+    };
+    let mut input = vec![0_u8; input_length];
+    if memory
+        .read(&mut *caller, input_pointer, &mut input)
+        .is_err()
+    {
+        return -3;
+    }
+    let Some(handler) = caller.data().capability.clone() else {
+        return -4;
+    };
+    let output = match handler.handle(&input) {
+        Ok(output) => output,
+        Err(_) => return -5,
+    };
+    if output.is_empty() || output.len() > output_capacity || output.len() > max_message_bytes {
+        return -6;
+    }
+    if memory.write(&mut *caller, output_pointer, &output).is_err() {
+        return -7;
+    }
+    i32::try_from(output.len()).unwrap_or(-6)
 }
 
 struct InstanceState {

@@ -89,14 +89,21 @@ fn failed(error: anyhow::Error) -> Handled {
 pub async fn handle(state: &Shared, transport: TransportKind, request: Request) -> Handled {
     if let Some(logic) = state.logic.as_ref() {
         match logic.route(transport, request.clone()).await {
-            Ok(genet_daemon_logic_api::LogicOutcome::ContinueNative) => {}
-            Ok(genet_daemon_logic_api::LogicOutcome::Reply(reply)) => return Handled::ok(*reply),
-            Ok(genet_daemon_logic_api::LogicOutcome::Error(error)) => {
-                return Handled {
-                    reply: Err(error),
-                    effect: SideEffect::None,
+            Ok(routed) => match routed.outcome {
+                genet_daemon_logic_api::LogicOutcome::ContinueNative => {}
+                genet_daemon_logic_api::LogicOutcome::Reply(reply) => {
+                    return Handled {
+                        reply: Ok(*reply),
+                        effect: portable_connection(routed.connection),
+                    }
                 }
-            }
+                genet_daemon_logic_api::LogicOutcome::Error(error) => {
+                    return Handled {
+                        reply: Err(error),
+                        effect: portable_connection(routed.connection),
+                    }
+                }
+            },
             Err(error) => return failed(error),
         }
     }
@@ -778,6 +785,22 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
             Ok(()) => Handled::ok(Reply::Ack),
             Err(error) => failed(error),
         },
+    }
+}
+
+fn portable_connection(connection: crate::logic::LogicConnection) -> SideEffect {
+    match connection {
+        crate::logic::LogicConnection::None => SideEffect::None,
+        crate::logic::LogicConnection::Subscribe {
+            session_id,
+            receiver,
+        } => SideEffect::Subscribe {
+            session_id,
+            receiver,
+        },
+        crate::logic::LogicConnection::Unsubscribe { session_id } => {
+            SideEffect::Unsubscribe { session_id }
+        }
     }
 }
 

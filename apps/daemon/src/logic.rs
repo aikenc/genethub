@@ -12,16 +12,18 @@ use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use genehub_proto::{Request, TransportKind};
+use genehub_proto::{Request, SequencedEvent, ServerFrame, TransportKind};
 use genet_daemon_logic_api::{
-    CapabilityBatch, CapabilityCall, CapabilityFailure, CapabilityFailureKind, CapabilityRequest,
-    CapabilityResult, CapabilityResults, CapabilityValue, LogicArtifactRequest, LogicArtifactState,
-    LogicBoot, LogicInput, LogicOutcome, LogicOutput, LogicRequest,
+    decode_message, encode_message, CapabilityBatch, CapabilityCall, CapabilityFailure,
+    CapabilityFailureKind, CapabilityRequest, CapabilityResult, CapabilityResults, CapabilityValue,
+    ConnectionDirective, LogicArtifactRequest, LogicArtifactState, LogicBoot, LogicInput,
+    LogicOutcome, LogicOutput, LogicRequest, Publication,
 };
 use genet_daemon_platform::{
     ActiveLogic, ArtifactVerifier, PlatformRuntime, SignedArtifact, VmPolicy, LOGIC_ABI_VERSION,
 };
 use genet_daemon_system::SystemHost;
+use tokio::sync::{broadcast, Mutex};
 
 use crate::config::{MachineState, Paths};
 
@@ -34,8 +36,53 @@ pub const ARTIFACT_PATH_ENV: &str = "GENET_DAEMON_LOGIC_WASM";
 
 pub struct LogicHost {
     runtime: PlatformRuntime,
-    system: Arc<SystemHost>,
+    system: CapabilityBroker,
     next_call_id: AtomicU64,
+    execution: Mutex<()>,
+    events: std::sync::Mutex<
+        Option<tokio::sync::mpsc::Receiver<genet_daemon_logic_api::CapabilityEvent>>,
+    >,
+    event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    subscriptions:
+        std::sync::Mutex<std::collections::HashMap<String, broadcast::Sender<SequencedEvent>>>,
+    fanout: std::sync::OnceLock<broadcast::Sender<ServerFrame>>,
+}
+
+#[derive(Clone)]
+struct CapabilityBroker {
+    commands: tokio::sync::mpsc::Sender<BrokerCommand>,
+    thread: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
+}
+
+enum BrokerCommand {
+    Execute {
+        batch: CapabilityBatch,
+        reply: BrokerReply,
+    },
+    Shutdown {
+        reply: std::sync::mpsc::SyncSender<()>,
+    },
+}
+
+enum BrokerReply {
+    Blocking(std::sync::mpsc::SyncSender<CapabilityResults>),
+    Async(tokio::sync::oneshot::Sender<CapabilityResults>),
+}
+
+pub struct LogicRoute {
+    pub outcome: LogicOutcome,
+    pub connection: LogicConnection,
+}
+
+pub enum LogicConnection {
+    None,
+    Subscribe {
+        session_id: String,
+        receiver: broadcast::Receiver<SequencedEvent>,
+    },
+    Unsubscribe {
+        session_id: String,
+    },
 }
 
 impl LogicHost {
@@ -67,34 +114,41 @@ impl LogicHost {
         // Verify before constructing boot data or compiling. A runtime path
         // override may select bytes, never a trust root.
         verifier.verify(&artifact)?;
-        let boot = serde_json::to_vec(&LogicBoot {
-            daemon_version: version.to_string(),
-            protocol_version: genehub_proto::PROTOCOL_VERSION,
-            machine_id: machine.machine_id.clone(),
-            fingerprint: machine.fingerprint(),
-            machine_name: crate::link::default_display_name(),
-            rtc_supported: true,
-            log_directory: "/genehub-logs".to_string(),
-            log_display_directory: paths.logs_dir().display().to_string(),
-        })?;
+        let boot = encode_message(
+            "logic boot",
+            &LogicBoot {
+                daemon_version: version.to_string(),
+                protocol_version: genehub_proto::PROTOCOL_VERSION,
+                machine_id: machine.machine_id.clone(),
+                fingerprint: machine.fingerprint(),
+                machine_name: crate::link::default_display_name(),
+                rtc_supported: true,
+                log_directory: "/genehub-logs".to_string(),
+                log_display_directory: paths.logs_dir().display().to_string(),
+                default_workspace: paths
+                    .default_workspace
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                home_directory: dirs::home_dir().map(|path| path.display().to_string()),
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+        let system = Arc::new(SystemHost::new(paths.root.clone(), paths.logs_dir())?);
+        let events = system.take_events()?;
+        let broker = CapabilityBroker::start(system);
+        let capability = broker.clone();
         let runtime = PlatformRuntime::open_application(
             paths.logic_dir(),
             verifier,
             // WASIp1 gives the guest one cross-platform clock/random ABI. It
             // inherits no ambient files, env, stdio or sockets; workspace
             // directories are added later as explicit root capabilities.
-            VmPolicy::application(LOGIC_ABI_VERSION).with_wasi_preopen(
-                paths.logs_dir(),
-                "/genehub-logs",
-                false,
-            ),
+            VmPolicy::application(LOGIC_ABI_VERSION)
+                .with_wasi_preopen(paths.logs_dir(), "/genehub-logs", false)
+                .with_capability_handler(move |request: &[u8]| capability.handle_bytes(request)),
             artifact,
             boot,
         )?;
-        let system = Arc::new(SystemHost::new(
-            paths.root.join("portable"),
-            paths.logs_dir(),
-        )?);
         tracing::info!(
             path = %artifact_path.display(),
             version = %runtime.active()?.version,
@@ -102,12 +156,18 @@ impl LogicHost {
         );
         Ok(Some(Arc::new(Self {
             runtime,
-            system,
+            system: broker,
             next_call_id: AtomicU64::new(1),
+            execution: Mutex::new(()),
+            events: std::sync::Mutex::new(Some(events)),
+            event_task: Mutex::new(None),
+            subscriptions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            fanout: std::sync::OnceLock::new(),
         })))
     }
 
-    pub async fn route(&self, transport: TransportKind, request: Request) -> Result<LogicOutcome> {
+    pub async fn route(&self, transport: TransportKind, request: Request) -> Result<LogicRoute> {
+        let _execution = self.execution.lock().await;
         let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
         let input = LogicInput::Request(LogicRequest {
             call_id,
@@ -116,6 +176,7 @@ impl LogicHost {
         });
         let mut inputs = VecDeque::from([input]);
         let mut completion = None;
+        let mut connection = LogicConnection::None;
         let mut turns = 0_usize;
         while let Some(input) = inputs.pop_front() {
             turns += 1;
@@ -123,9 +184,7 @@ impl LogicHost {
                 anyhow::bail!("portable logic exceeded the capability continuation limit");
             }
             let mut output = self.dispatch(&input)?;
-            if !output.publications.is_empty() {
-                anyhow::bail!("portable logic published before the event bridge was ready");
-            }
+            self.publish(output.publications.drain(..), None)?;
             for finished in output.completions.drain(..) {
                 if finished.call_id != call_id {
                     anyhow::bail!(
@@ -133,14 +192,7 @@ impl LogicHost {
                         finished.call_id
                     );
                 }
-                if !matches!(
-                    finished.connection,
-                    genet_daemon_logic_api::ConnectionDirective::None
-                ) {
-                    anyhow::bail!(
-                        "portable logic emitted a connection directive before routing support was ready"
-                    );
-                }
+                connection = self.connection(finished.connection)?;
                 if completion.replace(finished.outcome).is_some() {
                     anyhow::bail!("portable logic completed call {call_id} more than once");
                 }
@@ -150,14 +202,126 @@ impl LogicHost {
                 inputs.push_back(LogicInput::CapabilityResults(results));
             }
         }
-        completion.context("portable logic did not complete the routed request")
+        Ok(LogicRoute {
+            outcome: completion.context("portable logic did not complete the routed request")?,
+            connection,
+        })
+    }
+
+    /// Starts the sole native-resource event pump. Resource bytes re-enter the
+    /// same guest instance as request events; native code never interprets an
+    /// agent protocol or session event.
+    pub async fn start_event_pump(
+        self: &Arc<Self>,
+        fanout: broadcast::Sender<ServerFrame>,
+    ) -> Result<()> {
+        let mut task = self.event_task.lock().await;
+        if task.is_some() {
+            return Ok(());
+        }
+        self.fanout
+            .set(fanout.clone())
+            .map_err(|_| anyhow::anyhow!("portable logic fanout was already installed"))?;
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capability event receiver lock poisoned"))?
+            .take()
+            .context("capability event pump was already started")?;
+        let host = Arc::clone(self);
+        *task = Some(tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if let Err(error) = host.drive_event(event, &fanout).await {
+                    tracing::error!(%error, "portable logic rejected a native resource event");
+                }
+            }
+        }));
+        Ok(())
+    }
+
+    async fn drive_event(
+        &self,
+        event: genet_daemon_logic_api::CapabilityEvent,
+        fanout: &broadcast::Sender<ServerFrame>,
+    ) -> Result<()> {
+        let _execution = self.execution.lock().await;
+        let mut inputs = VecDeque::from([LogicInput::CapabilityEvent(event)]);
+        let mut turns = 0_usize;
+        while let Some(input) = inputs.pop_front() {
+            turns += 1;
+            if turns > 128 {
+                anyhow::bail!("portable event handling exceeded the capability continuation limit");
+            }
+            let mut output = self.dispatch(&input)?;
+            if !output.completions.is_empty() {
+                anyhow::bail!("a resource event unexpectedly completed a client request");
+            }
+            self.publish(output.publications.drain(..), Some(fanout))?;
+            for batch in output.capability_batches {
+                inputs.push_back(LogicInput::CapabilityResults(
+                    self.execute_batch(batch).await,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn publish(
+        &self,
+        publications: impl IntoIterator<Item = Publication>,
+        fanout: Option<&broadcast::Sender<ServerFrame>>,
+    ) -> Result<()> {
+        for publication in publications {
+            match publication {
+                Publication::Session(event) => {
+                    let sender = self.session_sender(&event.session_id)?;
+                    let _ = sender.send(event);
+                }
+                Publication::Fanout(frame) => {
+                    let fanout = fanout.or_else(|| self.fanout.get()).context(
+                        "portable logic emitted a fanout frame before the event pump started",
+                    )?;
+                    let _ = fanout.send(frame);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn connection(&self, directive: ConnectionDirective) -> Result<LogicConnection> {
+        Ok(match directive {
+            ConnectionDirective::None => LogicConnection::None,
+            ConnectionDirective::Subscribe { session_id } => LogicConnection::Subscribe {
+                receiver: self.session_sender(&session_id)?.subscribe(),
+                session_id,
+            },
+            ConnectionDirective::Unsubscribe { session_id } => {
+                LogicConnection::Unsubscribe { session_id }
+            }
+        })
+    }
+
+    fn session_sender(&self, session_id: &str) -> Result<broadcast::Sender<SequencedEvent>> {
+        let mut subscriptions = self
+            .subscriptions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("logic subscription lock poisoned"))?;
+        Ok(subscriptions
+            .entry(session_id.to_string())
+            .or_insert_with(|| broadcast::channel(1024).0)
+            .clone())
     }
 
     fn dispatch(&self, input: &LogicInput) -> Result<LogicOutput> {
-        let input = serde_json::to_vec(input)?;
+        let input = encode_message("logic input", input).map_err(anyhow::Error::msg)?;
         let output = self.runtime.handle(&input)?;
-        serde_json::from_slice::<std::result::Result<LogicOutput, String>>(&output)?
-            .map_err(anyhow::Error::msg)
+        decode_message::<std::result::Result<LogicOutput, String>>(
+            "logic output",
+            &output,
+            4 * 1024 * 1024,
+        )
+        .map_err(anyhow::Error::msg)?
+        .map_err(anyhow::Error::msg)
     }
 
     async fn execute_batch(&self, batch: CapabilityBatch) -> CapabilityResults {
@@ -239,7 +403,135 @@ impl LogicHost {
     }
 
     pub async fn shutdown(&self) {
+        if let Some(task) = self.event_task.lock().await.take() {
+            task.abort();
+        }
         self.system.shutdown().await;
+    }
+}
+
+impl CapabilityBroker {
+    fn start(system: Arc<SystemHost>) -> Self {
+        let (commands, mut receiver) = tokio::sync::mpsc::channel::<BrokerCommand>(16);
+        let thread = std::thread::Builder::new()
+            .name("genehub-system-capabilities".to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("building capability runtime");
+                runtime.block_on(async move {
+                    while let Some(command) = receiver.recv().await {
+                        match command {
+                            BrokerCommand::Execute { batch, reply } => {
+                                let results = system.execute(batch).await;
+                                match reply {
+                                    BrokerReply::Blocking(reply) => {
+                                        let _ = reply.send(results);
+                                    }
+                                    BrokerReply::Async(reply) => {
+                                        let _ = reply.send(results);
+                                    }
+                                }
+                            }
+                            BrokerCommand::Shutdown { reply } => {
+                                system.shutdown().await;
+                                let _ = reply.send(());
+                                break;
+                            }
+                        }
+                    }
+                });
+            })
+            .expect("starting capability runtime");
+        Self {
+            commands,
+            thread: Arc::new(std::sync::Mutex::new(Some(thread))),
+        }
+    }
+
+    fn handle_bytes(&self, request: &[u8]) -> std::result::Result<Vec<u8>, String> {
+        let batch: CapabilityBatch = decode_message("capability batch", request, 4 * 1024 * 1024)?;
+        if batch
+            .calls
+            .iter()
+            .any(|call| matches!(call.request, CapabilityRequest::LogicArtifact(_)))
+        {
+            return Err(
+                "logic artifact replacement cannot re-enter the active VM call".to_string(),
+            );
+        }
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .try_send(BrokerCommand::Execute {
+                batch,
+                reply: BrokerReply::Blocking(reply),
+            })
+            .map_err(|error| format!("queuing capability batch: {error}"))?;
+        let results = answer
+            .recv()
+            .map_err(|_| "capability runtime stopped before replying".to_string())?;
+        encode_message("capability results", &results)
+    }
+
+    async fn execute(&self, batch: CapabilityBatch) -> CapabilityResults {
+        let batch_id = batch.batch_id;
+        let calls = batch.calls.clone();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        if self
+            .commands
+            .send(BrokerCommand::Execute {
+                batch,
+                reply: BrokerReply::Async(reply),
+            })
+            .await
+            .is_err()
+        {
+            return unavailable_results(batch_id, calls, "capability runtime is stopped");
+        }
+        answer.await.unwrap_or_else(|_| {
+            unavailable_results(
+                batch_id,
+                calls,
+                "capability runtime stopped before replying",
+            )
+        })
+    }
+
+    async fn shutdown(&self) {
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        if self
+            .commands
+            .send(BrokerCommand::Shutdown { reply })
+            .await
+            .is_ok()
+        {
+            let _ = tokio::task::spawn_blocking(move || answer.recv()).await;
+        }
+        let thread = self.thread.lock().ok().and_then(|mut thread| thread.take());
+        if let Some(thread) = thread {
+            let _ = tokio::task::spawn_blocking(move || thread.join()).await;
+        }
+    }
+}
+
+fn unavailable_results(
+    batch_id: u64,
+    calls: Vec<CapabilityCall>,
+    message: &str,
+) -> CapabilityResults {
+    CapabilityResults {
+        batch_id,
+        results: calls
+            .into_iter()
+            .map(|call| CapabilityResult {
+                call_id: call.call_id,
+                result: Err(capability_failure(
+                    CapabilityFailureKind::Unavailable,
+                    message,
+                )),
+            })
+            .collect(),
     }
 }
 

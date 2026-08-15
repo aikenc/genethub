@@ -4,7 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use genehub_proto::{Reply, Request, TransportKind, PROTOCOL_VERSION};
-use genet_daemon_logic_api::{LogicBoot, LogicInput, LogicOutcome, LogicOutput, LogicRequest};
+use genet_daemon_logic_api::{
+    decode_message, encode_message, LogicBoot, LogicInput, LogicOutcome, LogicOutput, LogicRequest,
+};
 use genet_daemon_platform::{
     LogicVm, PlatformRuntime, SignedArtifact, VmPolicy, LOGIC_ABI_VERSION,
 };
@@ -15,12 +17,7 @@ use support::{signed_component, signing_key, verifier};
 fn real_rust_application_runs_statefully_and_restores_across_instances() {
     let component = application_component();
     let logs = tempfile::tempdir().unwrap();
-    let vm = LogicVm::new(VmPolicy::application(LOGIC_ABI_VERSION).with_wasi_preopen(
-        logs.path(),
-        "/genehub-logs",
-        false,
-    ))
-    .unwrap();
+    let vm = LogicVm::new(application_policy(logs.path())).unwrap();
     let first = vm.instantiate(&component).unwrap();
     first.initialize(&boot_bytes()).unwrap();
 
@@ -66,7 +63,7 @@ fn real_application_single_file_hot_updates_without_restarting_runtime() {
     let runtime = PlatformRuntime::open_application(
         directory.path(),
         verifier(&key, 16 * 1024 * 1024),
-        VmPolicy::application(LOGIC_ABI_VERSION).with_wasi_preopen(&logs, "/genehub-logs", false),
+        application_policy(&logs),
         fallback,
         boot_bytes(),
     )
@@ -101,6 +98,14 @@ fn application_path() -> PathBuf {
         .expect("GENET_DAEMON_LOGIC_WASM must name the real Rust guest")
 }
 
+fn application_policy(logs: &std::path::Path) -> VmPolicy {
+    VmPolicy::application(LOGIC_ABI_VERSION)
+        .with_wasi_preopen(logs, "/genehub-logs", false)
+        .with_capability_handler(|_: &[u8]| {
+            Err("this lifecycle test does not exercise system capabilities".to_string())
+        })
+}
+
 /// CI hands every OS the signed single-file distribution artifact. Local
 /// development may point at the raw compiler output, so accept both without
 /// changing the VM contract (the VM always receives core Wasm bytes).
@@ -112,31 +117,39 @@ fn application_component() -> Vec<u8> {
 }
 
 fn boot_bytes() -> Vec<u8> {
-    serde_json::to_vec(&LogicBoot {
-        daemon_version: "1.2.3".to_string(),
-        protocol_version: PROTOCOL_VERSION,
-        machine_id: "machine".to_string(),
-        fingerprint: "fingerprint".to_string(),
-        machine_name: "workstation".to_string(),
-        rtc_supported: true,
-        log_directory: "/genehub-logs".to_string(),
-        log_display_directory: "/host/logs".to_string(),
-    })
+    encode_message(
+        "logic boot",
+        &LogicBoot {
+            daemon_version: "1.2.3".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            machine_id: "machine".to_string(),
+            fingerprint: "fingerprint".to_string(),
+            machine_name: "workstation".to_string(),
+            rtc_supported: true,
+            log_directory: "/genehub-logs".to_string(),
+            log_display_directory: "/host/logs".to_string(),
+            default_workspace: None,
+            home_directory: None,
+        },
+    )
     .unwrap()
 }
 
 fn request(request: Request) -> Vec<u8> {
-    serde_json::to_vec(&LogicInput::Request(LogicRequest {
-        call_id: 7,
-        transport: TransportKind::Loopback,
-        request,
-    }))
+    encode_message(
+        "logic input",
+        &LogicInput::Request(LogicRequest {
+            call_id: 7,
+            transport: TransportKind::Loopback,
+            request,
+        }),
+    )
     .unwrap()
 }
 
 fn call(instance: &genet_daemon_platform::LogicInstance, request_value: Request) -> LogicOutcome {
     let output = instance.handle(&request(request_value)).unwrap();
-    serde_json::from_slice::<Result<LogicOutput, String>>(&output)
+    decode_message::<Result<LogicOutput, String>>("logic output", &output, 4 * 1024 * 1024)
         .unwrap()
         .unwrap()
         .completions
@@ -147,7 +160,7 @@ fn call(instance: &genet_daemon_platform::LogicInstance, request_value: Request)
 
 fn runtime_call(runtime: &PlatformRuntime, request_value: Request) -> LogicOutcome {
     let output = runtime.handle(&request(request_value)).unwrap();
-    serde_json::from_slice::<Result<LogicOutput, String>>(&output)
+    decode_message::<Result<LogicOutput, String>>("logic output", &output, 4 * 1024 * 1024)
         .unwrap()
         .unwrap()
         .completions

@@ -49,6 +49,23 @@ impl Processes {
         request: ProcessRequest,
     ) -> Result<CapabilityValue, CapabilityFailure> {
         match request {
+            ProcessRequest::Run {
+                spec,
+                stdin,
+                timeout_millis,
+                max_stdout_bytes,
+                max_stderr_bytes,
+            } => {
+                self.run(
+                    roots,
+                    spec,
+                    stdin,
+                    timeout_millis,
+                    max_stdout_bytes,
+                    max_stderr_bytes,
+                )
+                .await
+            }
             ProcessRequest::Spawn(spec) => self.spawn(roots, spec).await,
             ProcessRequest::Write { resource_id, bytes } => {
                 checked_bytes(&bytes)?;
@@ -86,6 +103,100 @@ impl Processes {
                     }),
                     None => Ok(CapabilityValue::Unit),
                 }
+            }
+        }
+    }
+
+    async fn run(
+        &self,
+        roots: &Arc<RwLock<SystemRoots>>,
+        spec: ProcessSpec,
+        stdin: Vec<u8>,
+        timeout_millis: u32,
+        max_stdout_bytes: u32,
+        max_stderr_bytes: u32,
+    ) -> Result<CapabilityValue, CapabilityFailure> {
+        validate_spec(&spec)?;
+        checked_bytes(&stdin)?;
+        let stdout_limit = checked_output_limit(max_stdout_bytes)?;
+        let stderr_limit = checked_output_limit(max_stderr_bytes)?;
+        if timeout_millis == 0 || timeout_millis > 300_000 {
+            return Err(failure(
+                CapabilityFailureKind::Invalid,
+                "process timeout must be between 1 ms and 5 minutes",
+            ));
+        }
+        let mut command = Command::new(&spec.program);
+        command
+            .args(&spec.args)
+            .envs(&spec.env)
+            .stdin(if stdin.is_empty() {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            })
+            .stdout(if spec.capture_stdout {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stderr(if spec.capture_stderr {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .kill_on_drop(true);
+        if let Some(cwd) = &spec.cwd {
+            let cwd = crate::filesystem::resolve_locator(roots, cwd).await?;
+            if !std::fs::metadata(&cwd)
+                .map_err(process_io_failure)?
+                .is_dir()
+            {
+                return Err(failure(
+                    CapabilityFailureKind::Invalid,
+                    format!("process cwd is not a directory: {}", cwd.display()),
+                ));
+            }
+            command.current_dir(cwd);
+        }
+        without_window(&mut command);
+        let mut child = command.spawn().map_err(process_io_failure)?;
+        let mut child_stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let operation = async {
+            let write = async move {
+                if let Some(mut writer) = child_stdin.take() {
+                    writer.write_all(&stdin).await.map_err(process_io_failure)?;
+                    writer.shutdown().await.map_err(process_io_failure)?;
+                }
+                Ok::<(), CapabilityFailure>(())
+            };
+            let stdout = read_optional_bounded(stdout, stdout_limit);
+            let stderr = read_optional_bounded(stderr, stderr_limit);
+            let wait = async {
+                child
+                    .wait()
+                    .await
+                    .map_err(process_io_failure)
+                    .map(|status| status.code())
+            };
+            let (_, stdout, stderr, code) = tokio::try_join!(write, stdout, stderr, wait)?;
+            Ok::<_, CapabilityFailure>((stdout, stderr, code))
+        };
+        match tokio::time::timeout(Duration::from_millis(timeout_millis as u64), operation).await {
+            Ok(Ok((stdout, stderr, code))) => Ok(CapabilityValue::ProcessCompleted {
+                code,
+                stdout,
+                stderr,
+            }),
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                let _ = child.start_kill();
+                Err(failure(
+                    CapabilityFailureKind::Unavailable,
+                    format!("process timed out after {timeout_millis} ms"),
+                ))
             }
         }
     }
@@ -364,6 +475,41 @@ fn checked_bytes(bytes: &[u8]) -> Result<(), CapabilityFailure> {
         ));
     }
     Ok(())
+}
+
+fn checked_output_limit(limit: u32) -> Result<usize, CapabilityFailure> {
+    let limit = limit as usize;
+    if limit == 0 || limit > MAX_CAPABILITY_CHUNK_BYTES {
+        return Err(failure(
+            CapabilityFailureKind::TooLarge,
+            "process output limit is empty or exceeds the capability chunk limit",
+        ));
+    }
+    Ok(limit)
+}
+
+async fn read_optional_bounded(
+    input: Option<impl AsyncRead + Unpin>,
+    limit: usize,
+) -> Result<Vec<u8>, CapabilityFailure> {
+    let Some(mut input) = input else {
+        return Ok(Vec::new());
+    };
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = input.read(&mut buffer).await.map_err(process_io_failure)?;
+        if count == 0 {
+            return Ok(output);
+        }
+        if output.len().saturating_add(count) > limit {
+            return Err(failure(
+                CapabilityFailureKind::TooLarge,
+                format!("process output exceeds {limit} bytes"),
+            ));
+        }
+        output.extend_from_slice(&buffer[..count]);
+    }
 }
 
 fn process_io_failure(error: std::io::Error) -> CapabilityFailure {

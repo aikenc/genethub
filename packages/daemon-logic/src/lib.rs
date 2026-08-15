@@ -10,9 +10,12 @@
 mod wasm_abi {
     use std::sync::{Mutex, OnceLock};
 
-    use genet_daemon_common::{decode_json, encode_json};
-    use genet_daemon_core::LogicApp;
-    use genet_daemon_logic_api::{LogicBoot, LogicInput, LogicOutput};
+    use genet_daemon_common::encode_json;
+    use genet_daemon_core::{CapabilityExecutor, LogicApp};
+    use genet_daemon_logic_api::{
+        decode_message, encode_message, CapabilityBatch, CapabilityResults, LogicBoot, LogicInput,
+        LogicOutput,
+    };
 
     const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -20,6 +23,54 @@ mod wasm_abi {
     struct Runtime {
         app: Option<LogicApp>,
         output: Vec<u8>,
+        capability_output: Vec<u8>,
+    }
+
+    struct ImportedCapabilities<'a> {
+        output: &'a mut Vec<u8>,
+    }
+
+    impl CapabilityExecutor for ImportedCapabilities<'_> {
+        fn execute(&mut self, batch: CapabilityBatch) -> Result<CapabilityResults, String> {
+            let input = encode_message("capability batch", &batch)?;
+            if input.is_empty() || input.len() > MAX_INPUT_BYTES {
+                return Err("capability batch exceeds the ABI message limit".to_string());
+            }
+            self.output.clear();
+            self.output.resize(MAX_INPUT_BYTES, 0);
+            // SAFETY: both slices remain allocated and exclusively borrowed for
+            // the duration of the host call. The host may write at most the
+            // advertised output capacity and returns the initialized length.
+            let length = unsafe {
+                genehub_capability(
+                    input.as_ptr() as i32,
+                    input.len() as i32,
+                    self.output.as_mut_ptr() as i32,
+                    self.output.len() as i32,
+                )
+            };
+            if length <= 0 {
+                return Err(format!(
+                    "platform capability bridge failed with code {length}"
+                ));
+            }
+            let length = length as usize;
+            if length > self.output.len() {
+                return Err("platform capability bridge returned an oversized result".to_string());
+            }
+            self.output.truncate(length);
+            decode_message("capability results", self.output, MAX_INPUT_BYTES)
+        }
+    }
+
+    #[link(wasm_import_module = "genehub_platform")]
+    unsafe extern "C" {
+        fn genehub_capability(
+            input_pointer: i32,
+            input_length: i32,
+            output_pointer: i32,
+            output_capacity: i32,
+        ) -> i32;
     }
 
     static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
@@ -60,7 +111,7 @@ mod wasm_abi {
     #[no_mangle]
     pub unsafe extern "C" fn genehub_initialize(pointer: i32, length: i32) -> i64 {
         consume_input(pointer, length, |input, runtime| {
-            let boot: LogicBoot = decode_json("logic boot", input, MAX_INPUT_BYTES)?;
+            let boot: LogicBoot = decode_message("logic boot", input, MAX_INPUT_BYTES)?;
             runtime.app = Some(LogicApp::new(boot)?);
             encode_json("initialize result", &Result::<(), String>::Ok(()))
         })
@@ -69,14 +120,21 @@ mod wasm_abi {
     #[no_mangle]
     pub unsafe extern "C" fn genehub_handle(pointer: i32, length: i32) -> i64 {
         consume_input(pointer, length, |input, runtime| {
-            let event: LogicInput = decode_json("logic input", input, MAX_INPUT_BYTES)?;
-            let app = runtime
-                .app
+            let event: LogicInput = decode_message("logic input", input, MAX_INPUT_BYTES)?;
+            let Runtime {
+                app,
+                capability_output,
+                ..
+            } = runtime;
+            let app = app
                 .as_mut()
                 .ok_or_else(|| "logic is not initialized".to_string())?;
-            encode_json(
+            let mut capabilities = ImportedCapabilities {
+                output: capability_output,
+            };
+            encode_message(
                 "logic output",
-                &Result::<LogicOutput, String>::Ok(app.handle(event)),
+                &Result::<LogicOutput, String>::Ok(app.handle_with(event, &mut capabilities)),
             )
         })
     }

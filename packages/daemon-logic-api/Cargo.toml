@@ -8,6 +8,7 @@ description = "Portable byte-batch contract shared by the GeneHub daemon platfor
 [dependencies]
 genehub-proto = { path = "../proto" }
 serde.workspace = true
+rmp-serde = "1"
 
 [lints.rust]
 unsafe_code = "forbid"

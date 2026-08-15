@@ -143,6 +143,26 @@ pub async fn execute(
             }
             Ok(CapabilityValue::Bytes(bytes))
         }
+        FileRequest::ReadTail { locator, max_bytes } => {
+            let limit = checked_limit(max_bytes)?;
+            let path = resolve(roots, &locator, false).await?;
+            let metadata = fs::symlink_metadata(&path).map_err(io_failure)?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(failure(
+                    CapabilityFailureKind::Invalid,
+                    format!("not a regular file: {}", path.display()),
+                ));
+            }
+            let mut file = fs::File::open(&path).map_err(io_failure)?;
+            let offset = metadata.len().saturating_sub(limit as u64);
+            use std::io::{Seek, SeekFrom};
+            file.seek(SeekFrom::Start(offset)).map_err(io_failure)?;
+            let mut bytes = Vec::with_capacity((metadata.len() - offset) as usize);
+            file.take(limit as u64)
+                .read_to_end(&mut bytes)
+                .map_err(io_failure)?;
+            Ok(CapabilityValue::Bytes(bytes))
+        }
         FileRequest::WriteAtomic { locator, bytes } => {
             checked_bytes(&bytes)?;
             let path = resolve(roots, &locator, true).await?;
@@ -180,6 +200,7 @@ pub async fn execute(
             Ok(CapabilityValue::Unit)
         }
         FileRequest::List { locator } => {
+            let include_native_path = matches!(&locator.root, FileRoot::NativePath);
             let path = resolve(roots, &locator, false).await?;
             let mut entries = Vec::new();
             for entry in fs::read_dir(&path).map_err(io_failure)? {
@@ -190,6 +211,7 @@ pub async fn execute(
                     kind: file_kind(&metadata),
                     bytes: metadata.len(),
                     modified_at_millis: modified_at(&metadata),
+                    native_path: include_native_path.then(|| entry.path().display().to_string()),
                 });
                 if entries.len() > 100_000 {
                     return Err(failure(
@@ -212,6 +234,13 @@ pub async fn execute(
                     .canonicalize()
                     .ok()
                     .map(|path| path.display().to_string()),
+                parent_path: path.parent().map(|path| path.display().to_string()),
+                file_name: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string()),
+                extension: path
+                    .extension()
+                    .map(|extension| extension.to_string_lossy().to_string()),
             }))
         }
         FileRequest::CreateDirAll { locator } => {
@@ -258,6 +287,22 @@ pub async fn execute(
         FileRequest::CanonicalizeHostPath { path } => {
             let path = PathBuf::from(path).canonicalize().map_err(io_failure)?;
             Ok(CapabilityValue::Text(path.display().to_string()))
+        }
+        FileRequest::ResolveHostPath { base, path } => {
+            if path.contains('\0') {
+                return Err(failure(
+                    CapabilityFailureKind::Invalid,
+                    "host path contains NUL",
+                ));
+            }
+            let requested = PathBuf::from(&path);
+            let requested = if requested.is_absolute() {
+                requested
+            } else {
+                PathBuf::from(base).join(requested)
+            };
+            let canonical = requested.canonicalize().map_err(io_failure)?;
+            Ok(CapabilityValue::Text(canonical.display().to_string()))
         }
     }
 }

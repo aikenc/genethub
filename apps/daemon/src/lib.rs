@@ -46,6 +46,9 @@ impl Daemon {
         // so anything the machine wants to volunteer — download progress, for
         // one — reaches them without a second bus to subscribe to.
         let _ = state.fanout.set(pty.clone());
+        if let Some(logic) = state.logic.as_ref() {
+            logic.start_event_pump(pty.clone()).await?;
+        }
         let listener = transport::local::serve(state.clone(), pty.clone()).await?;
         state.publish_endpoint(listener.port)?;
 

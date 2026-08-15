@@ -10,11 +10,29 @@ use std::collections::BTreeMap;
 use genehub_proto::{ProtocolError, Reply, Request, SequencedEvent, ServerFrame, TransportKind};
 use serde::{Deserialize, Serialize};
 
+pub fn encode_message<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, String> {
+    rmp_serde::to_vec_named(value).map_err(|error| format!("encoding {label}: {error}"))
+}
+
+pub fn decode_message<T: for<'de> Deserialize<'de>>(
+    label: &str,
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<T, String> {
+    if bytes.is_empty() || bytes.len() > max_bytes {
+        return Err(format!(
+            "{label} is {} bytes, expected 1 through {max_bytes}",
+            bytes.len()
+        ));
+    }
+    rmp_serde::from_slice(bytes).map_err(|error| format!("decoding {label}: {error}"))
+}
+
 /// Core-Wasm export contract implemented by `genet-daemon-logic`.
-pub const ABI_VERSION: u32 = 3;
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 6;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 3;
 pub const MAX_CAPABILITY_BATCH: usize = 64;
-pub const MAX_CAPABILITY_CHUNK_BYTES: usize = 1024 * 1024;
+pub const MAX_CAPABILITY_CHUNK_BYTES: usize = 3 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -29,6 +47,12 @@ pub struct LogicBoot {
     pub log_directory: String,
     /// Native path shown to a local user; never used for guest file access.
     pub log_display_directory: String,
+    /// Platform-discovered first-run workspace. The guest decides whether to
+    /// create/register it; the native side only supplies the OS-specific path.
+    #[serde(default)]
+    pub default_workspace: Option<String>,
+    #[serde(default)]
+    pub home_directory: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -215,6 +239,11 @@ pub enum CapabilityValue {
     ProcessExit {
         code: Option<i32>,
     },
+    ProcessCompleted {
+        code: Option<i32>,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
     Http(HttpResponse),
     RtcDescription {
         kind: RtcDescriptionKind,
@@ -241,6 +270,7 @@ pub enum CapabilityEvent {
     },
     PtyClosed {
         resource_id: u64,
+        code: Option<i32>,
     },
     SocketMessage {
         resource_id: u64,
@@ -277,6 +307,10 @@ pub enum FileRequest {
         locator: FileLocator,
         max_bytes: u32,
     },
+    ReadTail {
+        locator: FileLocator,
+        max_bytes: u32,
+    },
     WriteAtomic {
         locator: FileLocator,
         bytes: Vec<u8>,
@@ -307,6 +341,10 @@ pub enum FileRequest {
     CanonicalizeHostPath {
         path: String,
     },
+    ResolveHostPath {
+        base: String,
+        path: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -332,6 +370,8 @@ pub struct FileEntry {
     pub kind: FileKind,
     pub bytes: u64,
     pub modified_at_millis: Option<i64>,
+    #[serde(default)]
+    pub native_path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -341,6 +381,12 @@ pub struct FileMetadata {
     pub bytes: u64,
     pub modified_at_millis: Option<i64>,
     pub canonical_path: Option<String>,
+    #[serde(default)]
+    pub parent_path: Option<String>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub extension: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +401,13 @@ pub enum FileKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum ProcessRequest {
+    Run {
+        spec: ProcessSpec,
+        stdin: Vec<u8>,
+        timeout_millis: u32,
+        max_stdout_bytes: u32,
+        max_stderr_bytes: u32,
+    },
     Spawn(ProcessSpec),
     Write {
         resource_id: u64,

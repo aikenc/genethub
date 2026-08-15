@@ -209,9 +209,9 @@ impl Ptys {
 
         let events = self.inner.events.clone();
         std::thread::spawn(move || {
-            let _ = child.wait();
+            let code = child.wait().ok().map(|status| status.exit_code() as i32);
             closed.store(true, Ordering::Release);
-            let _ = events.blocking_send(CapabilityEvent::PtyClosed { resource_id });
+            let _ = events.blocking_send(CapabilityEvent::PtyClosed { resource_id, code });
         });
         Ok(CapabilityValue::Resource { resource_id })
     }

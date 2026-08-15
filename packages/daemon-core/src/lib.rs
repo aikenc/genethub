@@ -3,15 +3,24 @@
 //! Platform crates must not depend on this crate. The Wasm entry crate links it
 //! normally, preserving Rust ownership, visibility and memory safety.
 
+mod capability;
+mod config;
+mod files;
+mod git;
+mod terminal;
+mod workspace;
+
+use std::collections::{BTreeMap, HashMap};
+
 use genehub_proto::{
-    ErrorCode, HelloResult, LogEntry, LogTail, LogicModuleStatus, ProtocolError, Reply, Request,
-    TransportKind, PROTOCOL_VERSION,
+    ErrorCode, HelloResult, LogicModuleStatus, ProtocolError, Reply, Request, TransportKind,
+    PROTOCOL_VERSION,
 };
 use genet_daemon_common::{decode_json, encode_json};
 use genet_daemon_logic_api::{
     CapabilityBatch, CapabilityCall, CapabilityFailureKind, CapabilityRequest, CapabilityResults,
-    CapabilityValue, LogicArtifactRequest, LogicBoot, LogicInput, LogicOutcome, LogicOutput,
-    LogicRequest, SNAPSHOT_FORMAT_VERSION,
+    CapabilityValue, FileLocator, FileRequest, FileRoot, LogicArtifactRequest, LogicBoot,
+    LogicInput, LogicOutcome, LogicOutput, LogicRequest, SNAPSHOT_FORMAT_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +32,12 @@ const AUTOMATIC_UPDATE_REFUSAL: &str =
 pub struct LogicApp {
     boot: LogicBoot,
     handled_requests: u64,
+    next_capability_id: u64,
     pending: std::collections::BTreeMap<u64, Pending>,
+    config: Option<config::Config>,
+    discoveries: BTreeMap<String, config::Discovery>,
+    terminals: HashMap<String, u64>,
+    workspace_roots_ready: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -32,7 +46,11 @@ struct Snapshot {
     format_version: u32,
     boot: LogicBoot,
     handled_requests: u64,
-    pending: std::collections::BTreeMap<u64, Pending>,
+    next_capability_id: u64,
+    pending: BTreeMap<u64, Pending>,
+    config: Option<config::Config>,
+    discoveries: BTreeMap<String, config::Discovery>,
+    terminals: HashMap<String, u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,31 +59,62 @@ struct Pending {
     call_id: u64,
 }
 
+/// Typed guest-side access to the one opaque byte-batch platform import.
+/// Native tests provide a deterministic fake; the Wasm entry provides the
+/// actual import. Product code never calls a string-shaped host function.
+pub trait CapabilityExecutor {
+    fn execute(&mut self, batch: CapabilityBatch) -> Result<CapabilityResults, String>;
+}
+
+struct NoCapabilities;
+
+impl CapabilityExecutor for NoCapabilities {
+    fn execute(&mut self, _batch: CapabilityBatch) -> Result<CapabilityResults, String> {
+        Err("synchronous system capabilities are unavailable".to_string())
+    }
+}
+
 impl LogicApp {
     pub fn new(boot: LogicBoot) -> Result<Self, String> {
         validate_boot(&boot)?;
         Ok(Self {
             boot,
             handled_requests: 0,
-            pending: std::collections::BTreeMap::new(),
+            next_capability_id: 1,
+            pending: BTreeMap::new(),
+            config: None,
+            discoveries: BTreeMap::new(),
+            terminals: HashMap::new(),
+            workspace_roots_ready: false,
         })
     }
 
     pub fn handle(&mut self, input: LogicInput) -> LogicOutput {
+        self.handle_with(input, &mut NoCapabilities)
+    }
+
+    pub fn handle_with(
+        &mut self,
+        input: LogicInput,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutput {
         match input {
             LogicInput::Request(request) => {
                 self.handled_requests = self.handled_requests.saturating_add(1);
-                self.handle_request(request)
+                self.handle_request(request, capabilities)
             }
-            // Capability routing lands before the first migrated asynchronous
-            // domain. Unknown resource events are intentionally harmless so a
-            // late OS close from a replaced instance cannot trap its successor.
             LogicInput::CapabilityResults(results) => self.handle_capability_results(results),
-            LogicInput::CapabilityEvent(_) => LogicOutput::default(),
+            // Unknown or stale resource events are intentionally harmless so a
+            // late OS close from a replaced instance cannot trap its successor.
+            LogicInput::CapabilityEvent(event) => terminal::event(&mut self.terminals, event),
         }
     }
 
-    fn handle_request(&mut self, input: LogicRequest) -> LogicOutput {
+    fn handle_request(
+        &mut self,
+        input: LogicRequest,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutput {
         let call_id = input.call_id;
         let transport = input.transport;
         let outcome = match input.request {
@@ -120,7 +169,99 @@ impl LogicApp {
                     message: "there is nothing to send".to_string(),
                 })
             }
-            Request::LogTail { name } => self.read_log(name),
+            Request::LogTail { name } => self.read_log(name, capabilities),
+            Request::SettingsGet => self.settings(capabilities),
+            Request::SettingsSetProvider {
+                provider_id,
+                api_key,
+                base_url,
+                label,
+                dialect,
+                models,
+            } => self.set_provider(
+                provider_id,
+                api_key,
+                base_url,
+                label,
+                dialect,
+                models,
+                capabilities,
+            ),
+            Request::SettingsForgetProvider { provider_id } => {
+                self.forget_provider(provider_id, capabilities)
+            }
+            Request::WorkspaceList => self.workspace_list(capabilities),
+            Request::WorkspaceOpen { root } => self.workspace_open(root, None, false, capabilities),
+            Request::WorkspaceCreate { root, name } => {
+                self.workspace_open(root, Some(name), true, capabilities)
+            }
+            Request::WorkspaceRename { workspace_id, name } => {
+                self.workspace_rename(workspace_id, name, capabilities)
+            }
+            Request::WorkspaceRemove { workspace_id } => {
+                self.workspace_remove(workspace_id, capabilities)
+            }
+            Request::DirectoryList { path } => {
+                match workspace::directory(
+                    path,
+                    self.boot.home_directory.as_deref(),
+                    capabilities,
+                    &mut self.next_capability_id,
+                ) {
+                    Ok(directory) => LogicOutcome::Reply(Box::new(Reply::Directory(directory))),
+                    Err(error) => LogicOutcome::Error(error),
+                }
+            }
+            Request::FileTree {
+                workspace_id,
+                path,
+                depth,
+            } => self.file_tree(workspace_id, path, depth, capabilities),
+            Request::FileWrite {
+                workspace_id,
+                path,
+                content,
+            } => self.file_write(workspace_id, path, content, capabilities),
+            Request::GitStatus { workspace_id } => self.git_status(workspace_id, capabilities),
+            Request::GitDiff { workspace_id, path } => {
+                self.git_diff(workspace_id, path, capabilities)
+            }
+            Request::GitCommit {
+                workspace_id,
+                message,
+                paths,
+            } => self.git_commit(workspace_id, message, paths, capabilities),
+            Request::PtyOpen {
+                workspace_id,
+                cols,
+                rows,
+            } => self.pty_open(
+                workspace_id,
+                cols.unwrap_or(80),
+                rows.unwrap_or(24),
+                capabilities,
+            ),
+            Request::PtyWrite { pty_id, data } => terminal::reply(terminal::write(
+                &self.terminals,
+                &pty_id,
+                data,
+                capabilities,
+                &mut self.next_capability_id,
+            )),
+            Request::PtyResize { pty_id, cols, rows } => terminal::reply(terminal::resize(
+                &self.terminals,
+                &pty_id,
+                cols,
+                rows,
+                capabilities,
+                &mut self.next_capability_id,
+            )),
+            Request::PtyClose { pty_id } => terminal::reply(terminal::close(
+                &self.terminals,
+                &pty_id,
+                capabilities,
+                &mut self.next_capability_id,
+            )),
             _ => LogicOutcome::ContinueNative,
         };
         LogicOutput::completed(call_id, outcome)
@@ -180,35 +321,405 @@ impl LogicApp {
         LogicOutput::completed(pending.call_id, outcome)
     }
 
-    fn read_log(&self, name: Option<String>) -> LogicOutcome {
+    fn read_log(
+        &mut self,
+        name: Option<String>,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
         let name = name.unwrap_or_else(|| "daemon.log".to_string());
-        let directory = std::path::Path::new(&self.boot.log_directory);
-        match portable_logs::tail(directory, &name, portable_logs::DEFAULT_TAIL_BYTES) {
-            Ok(text) => LogicOutcome::Reply(Box::new(Reply::Log(LogTail {
-                path: std::path::Path::new(&self.boot.log_display_directory)
-                    .join(&name)
-                    .display()
-                    .to_string(),
-                name,
-                text,
-                files: portable_logs::list(directory)
-                    .into_iter()
-                    .map(|(name, bytes)| LogEntry { name, bytes })
-                    .collect(),
-            }))),
-            Err(message) => LogicOutcome::Error(ProtocolError {
-                code: if message.contains("不是一个日志文件名") {
-                    ErrorCode::BadRequest
-                } else if message.contains("does not exist")
-                    || message.contains("No such file")
-                    || message.contains("找不到")
-                {
-                    ErrorCode::NotFound
-                } else {
-                    ErrorCode::Internal
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || matches!(name.as_str(), "." | "..")
+        {
+            return LogicOutcome::Error(ProtocolError {
+                code: ErrorCode::BadRequest,
+                message: format!("{name} 不是一个日志文件名"),
+            });
+        }
+        let list_id = self.take_capability_id();
+        let metadata_id = self.take_capability_id();
+        let tail_id = self.take_capability_id();
+        let batch_id = self.take_capability_id();
+        let locator = FileLocator {
+            root: FileRoot::Logs,
+            path: name.clone(),
+        };
+        let results = match capabilities.execute(CapabilityBatch {
+            batch_id,
+            calls: vec![
+                CapabilityCall {
+                    call_id: list_id,
+                    request: CapabilityRequest::File(FileRequest::List {
+                        locator: FileLocator {
+                            root: FileRoot::Logs,
+                            path: String::new(),
+                        },
+                    }),
                 },
-                message,
-            }),
+                CapabilityCall {
+                    call_id: metadata_id,
+                    request: CapabilityRequest::File(FileRequest::Metadata {
+                        locator: locator.clone(),
+                    }),
+                },
+                CapabilityCall {
+                    call_id: tail_id,
+                    request: CapabilityRequest::File(FileRequest::ReadTail {
+                        locator,
+                        max_bytes: portable_logs::DEFAULT_TAIL_BYTES as u32,
+                    }),
+                },
+            ],
+        }) {
+            Ok(results) => results,
+            Err(message) => {
+                return LogicOutcome::Error(ProtocolError {
+                    code: ErrorCode::Internal,
+                    message,
+                })
+            }
+        };
+        match portable_logs::from_capabilities(
+            &name,
+            &self.boot.log_display_directory,
+            results,
+            list_id,
+            metadata_id,
+            tail_id,
+        ) {
+            Ok(log) => LogicOutcome::Reply(Box::new(Reply::Log(log))),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
+    fn take_capability_id(&mut self) -> u64 {
+        let id = self.next_capability_id;
+        self.next_capability_id = self.next_capability_id.saturating_add(1);
+        id
+    }
+
+    fn ensure_config(
+        &mut self,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> Result<(), ProtocolError> {
+        if self.config.is_none() {
+            self.config = Some(config::load(capabilities, &mut self.next_capability_id)?);
+        }
+        Ok(())
+    }
+
+    fn settings(&mut self, capabilities: &mut impl CapabilityExecutor) -> LogicOutcome {
+        if let Err(error) = self.ensure_config(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        LogicOutcome::Reply(Box::new(Reply::Settings(config::settings(
+            self.config.as_ref().expect("config loaded"),
+            &mut self.discoveries,
+            capabilities,
+            &mut self.next_capability_id,
+        ))))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn set_provider(
+        &mut self,
+        provider_id: String,
+        api_key: Option<String>,
+        base_url: Option<String>,
+        label: Option<String>,
+        dialect: Option<String>,
+        models: Option<Vec<String>>,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_config(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        let mut next = self.config.as_ref().expect("config loaded").clone();
+        if let Err(error) = config::set_provider(
+            &mut next,
+            provider_id.clone(),
+            api_key,
+            base_url,
+            label,
+            dialect,
+            models,
+        )
+        .and_then(|()| config::save(&next, capabilities, &mut self.next_capability_id))
+        {
+            return LogicOutcome::Error(error);
+        }
+        self.config = Some(next);
+        self.discoveries.remove(&provider_id);
+        self.settings(capabilities)
+    }
+
+    fn forget_provider(
+        &mut self,
+        provider_id: String,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_config(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        let mut next = self.config.as_ref().expect("config loaded").clone();
+        if let Err(error) = config::forget_provider(&mut next, &provider_id)
+            .and_then(|()| config::save(&next, capabilities, &mut self.next_capability_id))
+        {
+            return LogicOutcome::Error(error);
+        }
+        self.config = Some(next);
+        self.discoveries.remove(&provider_id);
+        self.settings(capabilities)
+    }
+
+    fn ensure_workspaces(
+        &mut self,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> Result<(), ProtocolError> {
+        self.ensure_config(capabilities)?;
+        if self.workspace_roots_ready {
+            return Ok(());
+        }
+        let mut next = self.config.as_ref().expect("config loaded").clone();
+        let changed = workspace::prepare(
+            &mut next,
+            self.boot.default_workspace.as_deref(),
+            capabilities,
+            &mut self.next_capability_id,
+        )?;
+        if changed {
+            config::save(&next, capabilities, &mut self.next_capability_id)?;
+        }
+        self.config = Some(next);
+        self.workspace_roots_ready = true;
+        Ok(())
+    }
+
+    fn workspace_list(&mut self, capabilities: &mut impl CapabilityExecutor) -> LogicOutcome {
+        if let Err(error) = self.ensure_workspaces(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        LogicOutcome::Reply(Box::new(Reply::Workspaces(workspace::list(
+            self.config.as_ref().expect("config loaded"),
+        ))))
+    }
+
+    fn workspace_open(
+        &mut self,
+        root: String,
+        name: Option<String>,
+        create: bool,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_workspaces(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        let mut next = self.config.as_ref().expect("config loaded").clone();
+        let workspace = match workspace::open(
+            &mut next,
+            root,
+            name,
+            create,
+            capabilities,
+            &mut self.next_capability_id,
+        ) {
+            Ok(workspace) => workspace,
+            Err(error) => return LogicOutcome::Error(error),
+        };
+        if let Err(error) = config::save(&next, capabilities, &mut self.next_capability_id) {
+            return LogicOutcome::Error(error);
+        }
+        self.config = Some(next);
+        LogicOutcome::Reply(Box::new(Reply::Workspace(workspace)))
+    }
+
+    fn workspace_rename(
+        &mut self,
+        workspace_id: String,
+        name: String,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_workspaces(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        let mut next = self.config.as_ref().expect("config loaded").clone();
+        let workspace = match workspace::rename(&mut next, &workspace_id, &name) {
+            Ok(workspace) => workspace,
+            Err(error) => return LogicOutcome::Error(error),
+        };
+        if let Err(error) = config::save(&next, capabilities, &mut self.next_capability_id) {
+            return LogicOutcome::Error(error);
+        }
+        self.config = Some(next);
+        LogicOutcome::Reply(Box::new(Reply::Workspace(workspace)))
+    }
+
+    fn workspace_remove(
+        &mut self,
+        workspace_id: String,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_workspaces(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        let mut next = self.config.as_ref().expect("config loaded").clone();
+        let workspaces = match workspace::remove(&mut next, &workspace_id) {
+            Ok(workspaces) => workspaces,
+            Err(error) => return LogicOutcome::Error(error),
+        };
+        if let Err(error) = config::save(&next, capabilities, &mut self.next_capability_id) {
+            return LogicOutcome::Error(error);
+        }
+        self.config = Some(next);
+        LogicOutcome::Reply(Box::new(Reply::Workspaces(workspaces)))
+    }
+
+    fn file_tree(
+        &mut self,
+        workspace_id: String,
+        path: Option<String>,
+        depth: Option<u32>,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_workspaces(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        let workspace =
+            match workspace::workspace(self.config.as_ref().expect("config loaded"), &workspace_id)
+            {
+                Ok(workspace) => workspace,
+                Err(error) => return LogicOutcome::Error(error),
+            };
+        match files::tree(
+            &workspace,
+            path.as_deref(),
+            depth.unwrap_or(2).min(8),
+            capabilities,
+            &mut self.next_capability_id,
+        ) {
+            Ok(tree) => LogicOutcome::Reply(Box::new(Reply::FileTree(tree))),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
+    fn file_write(
+        &mut self,
+        workspace_id: String,
+        path: String,
+        content: String,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        if let Err(error) = self.ensure_workspaces(capabilities) {
+            return LogicOutcome::Error(error);
+        }
+        let workspace =
+            match workspace::workspace(self.config.as_ref().expect("config loaded"), &workspace_id)
+            {
+                Ok(workspace) => workspace,
+                Err(error) => return LogicOutcome::Error(error),
+            };
+        match files::write(
+            &workspace,
+            &path,
+            content,
+            capabilities,
+            &mut self.next_capability_id,
+        ) {
+            Ok(()) => LogicOutcome::Reply(Box::new(Reply::Ack)),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
+    fn workspace_for_operation(
+        &mut self,
+        workspace_id: &str,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> Result<config::WorkspaceEntry, ProtocolError> {
+        self.ensure_workspaces(capabilities)?;
+        workspace::workspace(self.config.as_ref().expect("config loaded"), workspace_id)
+    }
+
+    fn git_status(
+        &mut self,
+        workspace_id: String,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        let workspace = match self.workspace_for_operation(&workspace_id, capabilities) {
+            Ok(workspace) => workspace,
+            Err(error) => return LogicOutcome::Error(error),
+        };
+        match git::status(&workspace, capabilities, &mut self.next_capability_id) {
+            Ok(status) => LogicOutcome::Reply(Box::new(Reply::GitStatus(status))),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
+    fn git_diff(
+        &mut self,
+        workspace_id: String,
+        path: Option<String>,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        let workspace = match self.workspace_for_operation(&workspace_id, capabilities) {
+            Ok(workspace) => workspace,
+            Err(error) => return LogicOutcome::Error(error),
+        };
+        match git::diff(
+            &workspace,
+            path.as_deref(),
+            capabilities,
+            &mut self.next_capability_id,
+        ) {
+            Ok(diff) => LogicOutcome::Reply(Box::new(Reply::GitDiff { diff })),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
+    fn git_commit(
+        &mut self,
+        workspace_id: String,
+        message: String,
+        paths: Vec<String>,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        let workspace = match self.workspace_for_operation(&workspace_id, capabilities) {
+            Ok(workspace) => workspace,
+            Err(error) => return LogicOutcome::Error(error),
+        };
+        match git::commit(
+            &workspace,
+            &message,
+            &paths,
+            capabilities,
+            &mut self.next_capability_id,
+        ) {
+            Ok(commit) => LogicOutcome::Reply(Box::new(Reply::GitCommit { commit })),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
+    fn pty_open(
+        &mut self,
+        workspace_id: String,
+        cols: u16,
+        rows: u16,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        let workspace = match self.workspace_for_operation(&workspace_id, capabilities) {
+            Ok(workspace) => workspace,
+            Err(error) => return LogicOutcome::Error(error),
+        };
+        match terminal::open(
+            &mut self.terminals,
+            &workspace,
+            cols,
+            rows,
+            capabilities,
+            &mut self.next_capability_id,
+        ) {
+            Ok(pty_id) => LogicOutcome::Reply(Box::new(Reply::Pty { pty_id })),
+            Err(error) => LogicOutcome::Error(error),
         }
     }
 
@@ -219,7 +730,11 @@ impl LogicApp {
                 format_version: SNAPSHOT_FORMAT_VERSION,
                 boot: self.boot.clone(),
                 handled_requests: self.handled_requests,
+                next_capability_id: self.next_capability_id,
                 pending: self.pending.clone(),
+                config: self.config.clone(),
+                discoveries: self.discoveries.clone(),
+                terminals: self.terminals.clone(),
             },
         )
     }
@@ -236,7 +751,12 @@ impl LogicApp {
         Ok(Self {
             boot: snapshot.boot,
             handled_requests: snapshot.handled_requests,
+            next_capability_id: snapshot.next_capability_id,
             pending: snapshot.pending,
+            config: snapshot.config,
+            discoveries: snapshot.discoveries,
+            terminals: snapshot.terminals,
+            workspace_roots_ready: false,
         })
     }
 
@@ -268,71 +788,179 @@ fn validate_boot(boot: &LogicBoot) -> Result<(), String> {
 }
 
 mod portable_logs {
-    use std::io::{Read, Seek, SeekFrom};
-    use std::path::Path;
+    use genehub_proto::{ErrorCode, LogEntry, LogTail, ProtocolError};
+    use genet_daemon_logic_api::{
+        CapabilityFailure, CapabilityFailureKind, CapabilityResults, CapabilityValue, FileKind,
+    };
 
     pub const DEFAULT_TAIL_BYTES: usize = 64 * 1024;
 
-    pub fn list(directory: &Path) -> Vec<(String, u64)> {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            return Vec::new();
+    pub fn from_capabilities(
+        name: &str,
+        display_directory: &str,
+        results: CapabilityResults,
+        list_id: u64,
+        metadata_id: u64,
+        tail_id: u64,
+    ) -> Result<LogTail, ProtocolError> {
+        let find = |id| {
+            results
+                .results
+                .iter()
+                .find(|result| result.call_id == id)
+                .ok_or_else(|| ProtocolError {
+                    code: ErrorCode::Internal,
+                    message: format!("log capability omitted call {id}"),
+                })
         };
-        let mut found = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let metadata = entry.path().symlink_metadata().ok()?;
-                if !metadata.is_file() || metadata.file_type().is_symlink() {
-                    return None;
-                }
-                Some((
-                    entry.file_name().to_string_lossy().to_string(),
-                    metadata.len(),
-                    metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
-                ))
+        let entries = match &find(list_id)?.result {
+            Ok(CapabilityValue::FileEntries(entries)) => entries,
+            Ok(_) => return Err(wrong_type("listing log files")),
+            Err(error) => return Err(map_failure(error)),
+        };
+        let metadata = match &find(metadata_id)?.result {
+            Ok(CapabilityValue::FileMetadata(metadata)) if metadata.kind == FileKind::File => {
+                metadata
+            }
+            Ok(CapabilityValue::FileMetadata(_)) => {
+                return Err(ProtocolError {
+                    code: ErrorCode::BadRequest,
+                    message: format!("打不开 {name}：not a regular log file"),
+                })
+            }
+            Ok(_) => return Err(wrong_type("reading log metadata")),
+            Err(error) => return Err(map_failure(error)),
+        };
+        let raw = match &find(tail_id)?.result {
+            Ok(CapabilityValue::Bytes(bytes)) => bytes,
+            Ok(_) => return Err(wrong_type("reading log bytes")),
+            Err(error) => return Err(map_failure(error)),
+        };
+        let mut text = String::from_utf8_lossy(raw).to_string();
+        if metadata.bytes > DEFAULT_TAIL_BYTES as u64 {
+            text = match text.find('\n') {
+                Some(at) => text[at + 1..].to_string(),
+                None => String::new(),
+            };
+        }
+        let mut files = entries
+            .iter()
+            .filter(|entry| entry.kind == FileKind::File)
+            .map(|entry| {
+                (
+                    entry.modified_at_millis.unwrap_or(i64::MIN),
+                    LogEntry {
+                        name: entry.name.clone(),
+                        bytes: entry.bytes,
+                    },
+                )
             })
             .collect::<Vec<_>>();
-        found.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
-        found
-            .into_iter()
-            .map(|(name, bytes, _)| (name, bytes))
-            .collect()
+        files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+        Ok(LogTail {
+            path: format!(
+                "{}/{}",
+                display_directory.trim_end_matches(['/', '\\']),
+                name
+            ),
+            name: name.to_string(),
+            text,
+            files: files.into_iter().map(|(_, entry)| entry).collect(),
+        })
     }
 
-    pub fn tail(directory: &Path, name: &str, bytes: usize) -> Result<String, String> {
-        if name.is_empty() || Path::new(name).components().count() != 1 {
-            return Err(format!("{name} 不是一个日志文件名"));
+    fn wrong_type(operation: &str) -> ProtocolError {
+        ProtocolError {
+            code: ErrorCode::Internal,
+            message: format!("system capability returned the wrong value while {operation}"),
         }
-        let path = directory.join(name);
-        let metadata = path
-            .symlink_metadata()
-            .map_err(|error| format!("打不开 {name}：{error}"))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(format!("打不开 {name}：not a regular log file"));
+    }
+
+    fn map_failure(error: &CapabilityFailure) -> ProtocolError {
+        ProtocolError {
+            code: match error.kind {
+                CapabilityFailureKind::Invalid => ErrorCode::BadRequest,
+                CapabilityFailureKind::Denied => ErrorCode::Forbidden,
+                CapabilityFailureKind::NotFound => ErrorCode::NotFound,
+                CapabilityFailureKind::Conflict => ErrorCode::Conflict,
+                CapabilityFailureKind::Unavailable
+                | CapabilityFailureKind::TooLarge
+                | CapabilityFailureKind::Internal => ErrorCode::Internal,
+            },
+            message: error.message.clone(),
         }
-        let mut file =
-            std::fs::File::open(&path).map_err(|error| format!("打不开 {name}：{error}"))?;
-        let from = metadata.len().saturating_sub(bytes as u64);
-        file.seek(SeekFrom::Start(from))
-            .map_err(|error| format!("读取 {name}：{error}"))?;
-        let mut raw = Vec::new();
-        file.take(bytes as u64)
-            .read_to_end(&mut raw)
-            .map_err(|error| format!("读取 {name}：{error}"))?;
-        let text = String::from_utf8_lossy(&raw).to_string();
-        if from == 0 {
-            return Ok(text);
-        }
-        Ok(match text.find('\n') {
-            Some(at) => text[at + 1..].to_string(),
-            None => text,
-        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genehub_proto::TransportKind;
+    use genehub_proto::{LogTail, TransportKind};
+    use genet_daemon_logic_api::FileKind;
+
+    struct TestLogs(std::path::PathBuf);
+
+    impl CapabilityExecutor for TestLogs {
+        fn execute(&mut self, batch: CapabilityBatch) -> Result<CapabilityResults, String> {
+            let results = batch
+                .calls
+                .into_iter()
+                .map(|call| {
+                    let result = match call.request {
+                        CapabilityRequest::File(FileRequest::List { .. }) => {
+                            let entries = std::fs::read_dir(&self.0)
+                                .unwrap()
+                                .map(|entry| {
+                                    let entry = entry.unwrap();
+                                    let metadata = entry.metadata().unwrap();
+                                    genet_daemon_logic_api::FileEntry {
+                                        name: entry.file_name().to_string_lossy().to_string(),
+                                        kind: if metadata.is_file() {
+                                            FileKind::File
+                                        } else {
+                                            FileKind::Directory
+                                        },
+                                        bytes: metadata.len(),
+                                        modified_at_millis: None,
+                                        native_path: None,
+                                    }
+                                })
+                                .collect();
+                            Ok(CapabilityValue::FileEntries(entries))
+                        }
+                        CapabilityRequest::File(FileRequest::Metadata { locator }) => {
+                            let metadata = std::fs::metadata(self.0.join(&locator.path)).unwrap();
+                            Ok(CapabilityValue::FileMetadata(
+                                genet_daemon_logic_api::FileMetadata {
+                                    kind: FileKind::File,
+                                    bytes: metadata.len(),
+                                    modified_at_millis: None,
+                                    canonical_path: None,
+                                    parent_path: None,
+                                    file_name: Some(locator.path),
+                                    extension: None,
+                                },
+                            ))
+                        }
+                        CapabilityRequest::File(FileRequest::ReadTail { locator, max_bytes }) => {
+                            let bytes = std::fs::read(self.0.join(locator.path)).unwrap();
+                            let from = bytes.len().saturating_sub(max_bytes as usize);
+                            Ok(CapabilityValue::Bytes(bytes[from..].to_vec()))
+                        }
+                        other => panic!("unexpected capability {other:?}"),
+                    };
+                    genet_daemon_logic_api::CapabilityResult {
+                        call_id: call.call_id,
+                        result,
+                    }
+                })
+                .collect();
+            Ok(CapabilityResults {
+                batch_id: batch.batch_id,
+                results,
+            })
+        }
+    }
 
     fn boot() -> LogicBoot {
         LogicBoot {
@@ -344,6 +972,8 @@ mod tests {
             rtc_supported: true,
             log_directory: ".".to_string(),
             log_display_directory: "/host/logs".to_string(),
+            default_workspace: None,
+            home_directory: None,
         }
     }
 
@@ -447,11 +1077,14 @@ mod tests {
         config.log_directory = directory.path().display().to_string();
         let mut app = LogicApp::new(config).unwrap();
 
-        let output = app.handle(LogicInput::Request(LogicRequest {
-            call_id: 1,
-            transport: TransportKind::Loopback,
-            request: Request::LogTail { name: None },
-        }));
+        let output = app.handle_with(
+            LogicInput::Request(LogicRequest {
+                call_id: 1,
+                transport: TransportKind::Loopback,
+                request: Request::LogTail { name: None },
+            }),
+            &mut TestLogs(directory.path().to_path_buf()),
+        );
         assert!(matches!(
             output.completions.as_slice(),
             [genet_daemon_logic_api::LogicCompletion {

@@ -316,9 +316,9 @@ async fn pty_output_and_close_are_resource_events() {
                     break;
                 }
             }
-            Ok(Some(CapabilityEvent::PtyClosed { resource_id: id }))
-                if id == resource_id =>
-            {
+            Ok(Some(CapabilityEvent::PtyClosed {
+                resource_id: id, ..
+            })) if id == resource_id => {
                 panic!("PTY closed before its startup prompt")
             }
             Ok(Some(_)) | Err(_) => {}
@@ -344,9 +344,9 @@ async fn pty_output_and_close_are_resource_events() {
                 resource_id: id,
                 bytes,
             })) if id == resource_id => output.extend(bytes),
-            Ok(Some(CapabilityEvent::PtyClosed { resource_id: id }))
-                if id == resource_id =>
-            {
+            Ok(Some(CapabilityEvent::PtyClosed {
+                resource_id: id, ..
+            })) if id == resource_id => {
                 panic!("PTY closed before accepting input")
             }
             Ok(Some(_)) | Err(_) => {}
@@ -371,7 +371,9 @@ async fn pty_output_and_close_are_resource_events() {
             .unwrap()
             .unwrap()
         {
-            CapabilityEvent::PtyClosed { resource_id: id } if id == resource_id => break,
+            CapabilityEvent::PtyClosed {
+                resource_id: id, ..
+            } if id == resource_id => break,
             _ => {}
         }
     }
