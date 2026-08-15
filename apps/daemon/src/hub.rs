@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::Enrollment;
-use crate::workspace::WorkspaceCatalog;
+use genet_daemon_logic_api::WorkspaceCatalog;
 
 const HUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -849,7 +849,7 @@ mod tests {
         let catalog = WorkspaceCatalog {
             generation: "wcg_public".into(),
             revision: 7,
-            workspaces: vec![crate::workspace::CatalogWorkspace {
+            workspaces: vec![genet_daemon_logic_api::CatalogWorkspace {
                 local_workspace_id: "w_opaque".into(),
                 reported_name: "Project".into(),
                 is_git_repo: true,

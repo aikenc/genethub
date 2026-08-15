@@ -24,7 +24,7 @@ use genet_daemon_logic_api::{
     CapabilityBatch, CapabilityCall, CapabilityFailureKind, CapabilityRequest, CapabilityResults,
     CapabilityValue, ConnectivityRequest, FileLocator, FileRequest, FileRoot, LogicArtifactRequest,
     LogicBoot, LogicInput, LogicOutcome, LogicOutput, LogicRequest, PlatformCall,
-    PlatformCompletion, PlatformRequest, SNAPSHOT_FORMAT_VERSION,
+    PlatformCompletion, PlatformReply, PlatformRequest, SNAPSHOT_FORMAT_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -495,6 +495,10 @@ impl LogicApp {
                 capabilities,
                 &mut self.next_capability_id,
             ),
+            PlatformRequest::WorkspaceCatalog => self.platform_workspace_catalog(capabilities),
+            PlatformRequest::ResolveWorkspaceFile { workspace_id, path } => {
+                self.platform_workspace_file(&workspace_id, &path, capabilities)
+            }
         };
         LogicOutput {
             platform_completions: vec![PlatformCompletion {
@@ -503,6 +507,50 @@ impl LogicApp {
             }],
             ..LogicOutput::default()
         }
+    }
+
+    fn platform_workspace_catalog(
+        &mut self,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> Result<PlatformReply, ProtocolError> {
+        self.ensure_workspaces(capabilities)?;
+        let config = self.config.as_ref().expect("config loaded");
+        let mut workspaces = config
+            .workspaces
+            .iter()
+            .filter(|workspace| !workspace.removed)
+            .map(|workspace| genet_daemon_logic_api::CatalogWorkspace {
+                local_workspace_id: workspace.id.clone(),
+                reported_name: workspace.name.clone(),
+                is_git_repo: workspace.is_git_repo,
+            })
+            .collect::<Vec<_>>();
+        workspaces.sort_by(|left, right| {
+            left.reported_name
+                .cmp(&right.reported_name)
+                .then(left.local_workspace_id.cmp(&right.local_workspace_id))
+        });
+        Ok(PlatformReply::WorkspaceCatalog(
+            genet_daemon_logic_api::WorkspaceCatalog {
+                generation: config.workspace_catalog_generation.clone(),
+                revision: config.workspace_catalog_revision,
+                workspaces,
+            },
+        ))
+    }
+
+    fn platform_workspace_file(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> Result<PlatformReply, ProtocolError> {
+        self.ensure_workspaces(capabilities)?;
+        let workspace =
+            workspace::workspace(self.config.as_ref().expect("config loaded"), workspace_id)?;
+        Ok(PlatformReply::WorkspaceFile(files::resolve_locator(
+            &workspace, path,
+        )?))
     }
 
     fn connectivity(

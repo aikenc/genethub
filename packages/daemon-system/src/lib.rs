@@ -63,6 +63,24 @@ impl SystemHost {
             .ok_or_else(|| anyhow::anyhow!("capability event receiver was already taken"))
     }
 
+    /// Resolves only a guest-authorized workspace locator for native streaming
+    /// code such as Asset Preview. Native callers cannot use this to name an
+    /// arbitrary path or inspect the guest's workspace registry.
+    pub async fn workspace_path(
+        &self,
+        locator: &genet_daemon_logic_api::FileLocator,
+    ) -> anyhow::Result<PathBuf> {
+        if !matches!(
+            locator.root,
+            genet_daemon_logic_api::FileRoot::Workspace { .. }
+        ) {
+            anyhow::bail!("portable application returned a non-workspace locator");
+        }
+        filesystem::resolve_locator(&self.roots, locator)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
     pub async fn execute(&self, batch: CapabilityBatch) -> CapabilityResults {
         if batch.calls.len() > MAX_CAPABILITY_BATCH {
             return CapabilityResults {

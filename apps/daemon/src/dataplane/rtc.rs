@@ -74,8 +74,8 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
         .try_acquire_owned()
         .map_err(|_| anyhow!("RTC peer limit reached"))?;
 
-    let capability_id = format!("rtc_{}", crate::devices::random_token());
-    let secret = crate::devices::random_token();
+    let capability_id = format!("rtc_{}", crate::channel_auth::random_token());
+    let secret = crate::channel_auth::random_token();
     let admission = Admission::Rtc {
         capability_id: capability_id.clone(),
         secret: secret.clone(),

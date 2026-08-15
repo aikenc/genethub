@@ -212,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn loopback_is_a_full_mutual_psk_handshake() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, _) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+        let state = crate::AppState::build(crate::config::Paths::new(dir.path()))
             .await
             .unwrap();
         let secret = "one-use-server-proof";

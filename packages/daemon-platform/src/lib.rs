@@ -18,4 +18,4 @@ pub use vm::{
 };
 
 /// First version of the platform/logic lifecycle contract.
-pub const LOGIC_ABI_VERSION: u32 = 11;
+pub const LOGIC_ABI_VERSION: u32 = 12;

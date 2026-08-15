@@ -32,7 +32,7 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
 }
 
 /// Core-Wasm export contract implemented by `genet-daemon-logic`.
-pub const ABI_VERSION: u32 = 11;
+pub const ABI_VERSION: u32 = 12;
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 pub const MAX_CAPABILITY_BATCH: usize = 64;
 pub const MAX_CAPABILITY_CHUNK_BYTES: usize = 3 * 1024 * 1024;
@@ -114,6 +114,31 @@ pub enum PlatformRequest {
         device_id: String,
         connected: bool,
     },
+    /// Path-free projection consumed by the native Hub carrier.
+    WorkspaceCatalog,
+    /// Resolves a client-visible workspace path to one already-registered
+    /// opaque root capability. Native code never receives the workspace
+    /// registry or decides which root a request belongs to.
+    ResolveWorkspaceFile {
+        workspace_id: String,
+        path: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceCatalog {
+    pub generation: String,
+    pub revision: u64,
+    pub workspaces: Vec<CatalogWorkspace>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogWorkspace {
+    pub local_workspace_id: String,
+    pub reported_name: String,
+    pub is_git_repo: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -126,6 +151,8 @@ pub enum PlatformReply {
         context: String,
     },
     Claimed(DeviceCredential),
+    WorkspaceCatalog(WorkspaceCatalog),
+    WorkspaceFile(FileLocator),
     Ack,
 }
 

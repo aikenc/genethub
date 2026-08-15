@@ -55,6 +55,7 @@ struct CapabilityBroker {
     commands: tokio::sync::mpsc::Sender<BrokerCommand>,
     thread: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
     services: Arc<std::sync::OnceLock<std::sync::Weak<crate::state::AppState>>>,
+    system: Arc<SystemHost>,
 }
 
 enum BrokerCommand {
@@ -394,6 +395,31 @@ impl LogicHost {
         }
     }
 
+    pub async fn workspace_catalog(&self) -> Result<genet_daemon_logic_api::WorkspaceCatalog> {
+        match self
+            .platform_request(PlatformRequest::WorkspaceCatalog)
+            .await?
+        {
+            PlatformReply::WorkspaceCatalog(catalog) => Ok(catalog),
+            _ => anyhow::bail!("portable workspace catalog returned the wrong value"),
+        }
+    }
+
+    pub async fn resolve_workspace_file(
+        &self,
+        workspace_id: String,
+        path: String,
+    ) -> Result<PathBuf> {
+        let locator = match self
+            .platform_request(PlatformRequest::ResolveWorkspaceFile { workspace_id, path })
+            .await?
+        {
+            PlatformReply::WorkspaceFile(locator) => locator,
+            _ => anyhow::bail!("portable workspace resolver returned the wrong value"),
+        };
+        self.system.system.workspace_path(&locator).await
+    }
+
     pub fn subscribe_device_revocations(&self) -> broadcast::Receiver<String> {
         self.device_revocations.subscribe()
     }
@@ -538,6 +564,7 @@ impl CapabilityBroker {
         let (commands, mut receiver) = tokio::sync::mpsc::channel::<BrokerCommand>(16);
         let services = Arc::new(std::sync::OnceLock::new());
         let thread_services = services.clone();
+        let thread_system = Arc::clone(&system);
         let thread = std::thread::Builder::new()
             .name("genehub-system-capabilities".to_string())
             .spawn(move || {
@@ -549,9 +576,12 @@ impl CapabilityBroker {
                     while let Some(command) = receiver.recv().await {
                         match command {
                             BrokerCommand::Execute { batch, reply } => {
-                                let results =
-                                    execute_capability_batch(&system, &thread_services, batch)
-                                        .await;
+                                let results = execute_capability_batch(
+                                    &thread_system,
+                                    &thread_services,
+                                    batch,
+                                )
+                                .await;
                                 match reply {
                                     BrokerReply::Blocking(reply) => {
                                         let _ = reply.send(results);
@@ -562,7 +592,7 @@ impl CapabilityBroker {
                                 }
                             }
                             BrokerCommand::Shutdown { reply } => {
-                                system.shutdown().await;
+                                thread_system.shutdown().await;
                                 let _ = reply.send(());
                                 break;
                             }
@@ -575,6 +605,7 @@ impl CapabilityBroker {
             commands,
             thread: Arc::new(std::sync::Mutex::new(Some(thread))),
             services,
+            system,
         }
     }
 

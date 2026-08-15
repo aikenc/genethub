@@ -11,6 +11,14 @@ use anyhow::{anyhow, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+pub fn random_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
 const HANDSHAKE_DOMAIN: &[u8] = b"genehub-channel-handshake-v1";
 const KEY_DOMAIN: &[u8] = b"genehub-channel-key-v1";
 const DATA_RECORD_DOMAIN: &[u8] = b"genehub-data-record-v1";

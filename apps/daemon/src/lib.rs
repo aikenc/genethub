@@ -3,29 +3,21 @@
 //! Exposed as a library as well as a binary so integration tests can start a
 //! real daemon in-process instead of asserting against a mock of one.
 
-pub mod adapter;
 pub mod channel;
 pub mod channel_auth;
 pub mod config;
 pub mod dataplane;
-pub mod devices;
 pub mod files;
-pub mod git;
 pub mod hub;
 pub mod lifecycle;
 pub mod link;
 pub mod logic;
 pub mod logs;
-pub mod provider;
-pub mod pty;
 pub mod remote;
 pub mod router;
 pub mod run;
-pub mod session;
 pub mod state;
 pub mod transport;
-pub mod updates;
-pub mod workspace;
 
 use anyhow::Result;
 
@@ -40,8 +32,12 @@ pub struct Daemon {
 
 impl Daemon {
     pub async fn start(paths: config::Paths) -> Result<Self> {
-        let (state, pty_rx) = AppState::build(paths).await?;
-        let pty = transport::local::pty_fanout(pty_rx);
+        let state = AppState::build(paths).await?;
+        if state.logic.is_none() {
+            #[cfg(not(test))]
+            anyhow::bail!("no verified daemon logic artifact is active");
+        }
+        let pty = transport::local::pty_fanout();
         // The same channel every client already listens on, handed to the state
         // so anything the machine wants to volunteer — download progress, for
         // one — reaches them without a second bus to subscribe to.
@@ -86,8 +82,6 @@ impl Daemon {
     /// Ordering matters: sessions first, so agents get their shutdown before
     /// the runtime goes away and leaves them orphaned.
     pub async fn shutdown(self) {
-        self.state.sessions.shutdown().await;
-        self.state.terminals.close_all().await;
         if let Some(link) = self.state.link.get() {
             link.stop().await;
         }

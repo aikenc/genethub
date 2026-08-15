@@ -188,349 +188,35 @@ fn default_workspace() -> Result<PathBuf> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
-    /// 0 asks the OS for a free port, which is the normal case: the chosen port
-    /// is published through `endpoint.json` rather than being agreed in advance.
+    /// 0 asks the OS for an ephemeral loopback port.
     pub port: u16,
-    /// Off by default. Listening beyond loopback is a decision the user makes,
-    /// not something that happens because they installed the app.
+    /// Retained solely so native startup can reject insecure legacy LAN mode.
     pub lan_enabled: bool,
-    pub agents: AgentsConfig,
-    /// Device-local, project-independent filesystem roots.
-    ///
-    /// Projects only reference these opaque handles. Keeping the mapping here
-    /// makes one physical directory keep the same locator when it is opened as
-    /// a folder or appears in any number of `.code-workspace` files.
-    #[serde(default)]
-    pub workspace_roots: Vec<WorkspaceRootEntry>,
-    pub workspaces: Vec<WorkspaceEntry>,
-    /// Identifies one lifetime of the local workspace catalogue.
-    ///
-    /// This is deliberately unrelated to the machine identity and to any Hub
-    /// row id. If the local configuration is recreated, the new generation
-    /// cannot be mistaken for a delayed snapshot from the old one.
-    pub workspace_catalog_generation: String,
-    /// Monotonically increases whenever the safe, path-free catalogue changes.
-    /// The Hub uses it to reject a delayed snapshot after a newer one.
-    pub workspace_catalog_revision: u64,
-    /// How many events per session stay replayable after a disconnect.
-    pub replay_window: usize,
-    /// Where to look when someone asks whether there is a newer build.
-    ///
-    /// Empty turns the check off, which is the setting for a deployment that
-    /// wants no outbound call at all — and the reason this is an address rather
-    /// than a flag is that a self-hosted copy can point it at its own file
-    /// instead of at somebody else's releases.
-    pub update_manifest_url: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
+        Self {
             port: 0,
             lan_enabled: false,
-            agents: AgentsConfig::default(),
-            workspace_roots: Vec::new(),
-            workspaces: Vec::new(),
-            workspace_catalog_generation: String::new(),
-            workspace_catalog_revision: 0,
-            replay_window: 2048,
-            update_manifest_url: crate::channel::DEFAULT_MANIFEST_URL.to_string(),
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct AgentsConfig {
-    /// Credentials for the built-in agent's providers, keyed by provider id.
-    pub providers: std::collections::BTreeMap<String, ProviderConfig>,
-    /// Extra agents declared by the user. `extends` names a built-in adapter
-    /// shape, so adding a new ACP-speaking CLI needs no code change.
-    pub custom: std::collections::BTreeMap<String, CustomAgent>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct ProviderConfig {
-    pub api_key: Option<String>,
-    /// Empty for a provider we ship an address for; see `crate::provider`.
-    pub base_url: Option<String>,
-    /// What to call it on screen. Only a provider the user added needs this.
-    pub label: Option<String>,
-    /// `openai` | `anthropic`. Which wire protocol the address speaks, which is
-    /// not decided by whose name is on it: most services copy Chat Completions.
-    pub dialect: Option<String>,
-    /// Why this provider produced no models, in its own words.
-    ///
-    /// Never stored: it describes one attempt to reach a service, not a setting.
-    #[serde(skip)]
-    pub problem: Option<String>,
-    /// Models the user listed by hand.
-    ///
-    /// For an endpoint that does not implement a list call — a local llama.cpp,
-    /// a gateway that only proxies — this is the only way to have anything in
-    /// the picker. Non-empty means we do not ask.
-    pub models: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomAgent {
-    pub extends: String,
-    pub command: Vec<String>,
-    #[serde(default)]
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceRootEntry {
-    pub handle: String,
-    pub root: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceFolderEntry {
-    pub name: String,
-    pub root: PathBuf,
-    /// Stable device-local identity of `root`. It is independent of every
-    /// project and display label that references the directory.
-    #[serde(default)]
-    pub root_handle: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceEntry {
-    pub id: String,
-    pub name: String,
-    /// The first folder is deliberately duplicated here as a first-class fact:
-    /// it remains the Agent/session/terminal/git working directory.
-    pub root: PathBuf,
-    /// Every filesystem root visible in Explorer and Asset Preview, in order.
-    /// Empty only while loading a pre-multi-root config; startup migrates it.
-    #[serde(default)]
-    pub folders: Vec<WorkspaceFolderEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_file: Option<PathBuf>,
-    /// Hidden from the active registry, but retained so reopening the same
-    /// project restores its id and therefore its on-disk conversation history.
-    #[serde(default)]
-    pub removed: bool,
-    /// A revisioned catalogue fact, sampled when the daemon starts or the
-    /// workspace is first opened. Keeping it in config prevents a filesystem
-    /// change from producing a different Hub snapshot at the same revision.
-    #[serde(default)]
-    pub is_git_repo: bool,
 }
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
-            Ok(raw) => {
-                serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+            Ok(raw) => serde_json::from_str(&raw)
+                .with_context(|| format!("parsing config at {}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => {
+                Err(error).with_context(|| format!("reading config at {}", path.display()))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-        }
-    }
-
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let body = serde_json::to_string_pretty(self)?;
-        save_private(path, body.as_bytes())
-    }
-
-    /// Returns the device-wide locator for one already-canonical directory,
-    /// creating it in this pending configuration snapshot when first seen.
-    pub(crate) fn ensure_workspace_root(&mut self, root: &Path) -> String {
-        if let Some(mapping) = self
-            .workspace_roots
-            .iter()
-            .find(|mapping| mapping.root == root)
-        {
-            return mapping.handle.clone();
-        }
-        let handle = new_workspace_root_handle(
-            self.workspace_roots
-                .iter()
-                .map(|mapping| mapping.handle.as_str()),
-        );
-        self.workspace_roots.push(WorkspaceRootEntry {
-            handle: handle.clone(),
-            root: root.to_path_buf(),
-        });
-        handle
-    }
-
-    /// Rewrites the old one-root representation once, instead of carrying a
-    /// permanent runtime fallback through every filesystem operation.
-    pub fn migrate_workspace_folders(&mut self, path: &Path) -> Result<()> {
-        let mut changed = false;
-        for workspace in &mut self.workspaces {
-            if workspace.folders.is_empty() {
-                workspace.folders.push(WorkspaceFolderEntry {
-                    name: workspace
-                        .root
-                        .file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_else(|| workspace.name.clone()),
-                    root: workspace.root.clone(),
-                    root_handle: String::new(),
-                });
-                changed = true;
-            }
-            if workspace.folders.first().map(|folder| &folder.root) != Some(&workspace.root) {
-                anyhow::bail!(
-                    "workspace {} primary root does not match its first folder",
-                    workspace.id
-                );
-            }
-        }
-        if changed {
-            self.save(path)?;
-        }
-        Ok(())
-    }
-
-    /// Gives every concrete folder one durable, device-local locator.
-    ///
-    /// This is a one-time rewrite for configurations written before roots were
-    /// first-class. Runtime resolution has no alias/path-name fallback after
-    /// startup: every project folder must carry the canonical global handle.
-    pub fn migrate_workspace_roots(&mut self, path: &Path) -> Result<()> {
-        let mut changed = false;
-        let mut handles = std::collections::HashMap::<String, PathBuf>::new();
-        let mut roots = std::collections::HashMap::<PathBuf, String>::new();
-        let mut normalized = Vec::with_capacity(self.workspace_roots.len());
-
-        for mut mapping in std::mem::take(&mut self.workspace_roots) {
-            if !valid_workspace_root_handle(&mapping.handle)
-                || handles
-                    .get(&mapping.handle)
-                    .is_some_and(|root| root != &mapping.root)
-            {
-                mapping.handle = new_workspace_root_handle(handles.keys().map(String::as_str));
-                changed = true;
-            }
-            if let Some(existing) = roots.get(&mapping.root) {
-                if existing != &mapping.handle {
-                    changed = true;
-                }
-                continue;
-            }
-            handles.insert(mapping.handle.clone(), mapping.root.clone());
-            roots.insert(mapping.root.clone(), mapping.handle.clone());
-            normalized.push(mapping);
-        }
-        self.workspace_roots = normalized;
-
-        for workspace in &mut self.workspaces {
-            for folder in &mut workspace.folders {
-                let handle = match roots.get(&folder.root) {
-                    Some(handle) => handle.clone(),
-                    None => {
-                        let handle = new_workspace_root_handle(handles.keys().map(String::as_str));
-                        roots.insert(folder.root.clone(), handle.clone());
-                        handles.insert(handle.clone(), folder.root.clone());
-                        self.workspace_roots.push(WorkspaceRootEntry {
-                            handle: handle.clone(),
-                            root: folder.root.clone(),
-                        });
-                        changed = true;
-                        handle
-                    }
-                };
-                if folder.root_handle != handle {
-                    folder.root_handle = handle;
-                    changed = true;
-                }
-            }
-        }
-
-        if changed {
-            self.save(path)?;
-        }
-        Ok(())
-    }
-
-    /// Repairs malformed local ids without merging distinct project sources.
-    /// A directly opened folder and every `.code-workspace` file are separate
-    /// projects even when their Agent root is the same physical directory.
-    pub fn migrate_workspace_identities(&mut self, path: &Path) -> Result<()> {
-        let mut changed = false;
-        let mut ids = std::collections::HashSet::new();
-        for workspace in &mut self.workspaces {
-            if workspace.id.trim().is_empty() || !ids.insert(workspace.id.clone()) {
-                workspace.id = format!("w_{}", uuid::Uuid::new_v4().simple());
-                ids.insert(workspace.id.clone());
-                changed = true;
-            }
-        }
-
-        if changed {
-            self.workspace_catalog_revision = self.workspace_catalog_revision.saturating_add(1);
-            self.save(path)?;
-        }
-        Ok(())
-    }
-
-    /// Makes the catalogue generation durable before it is ever uploaded.
-    ///
-    /// Older configuration files predate this field. Generating an id only in
-    /// memory would give them a different generation after every restart and
-    /// make the Hub correctly reject what looked like a catalogue replacement.
-    pub fn ensure_workspace_catalog_generation(&mut self, path: &Path) -> Result<()> {
-        if self.workspace_catalog_generation.is_empty() {
-            self.workspace_catalog_generation = format!("wcg_{}", uuid::Uuid::new_v4().simple());
-            self.save(path)?;
-        }
-        Ok(())
-    }
-
-    /// Refreshes filesystem-derived catalogue facts under a new revision.
-    ///
-    /// The Hub rejects two different complete snapshots that claim the same
-    /// revision. Sampling `.git` directly while serializing would therefore
-    /// make a repository initialized between daemon restarts permanently
-    /// conflict with its previous snapshot.
-    pub fn refresh_workspace_catalog_facts(&mut self, path: &Path) -> Result<()> {
-        let mut changed = false;
-        for workspace in &mut self.workspaces {
-            let is_git_repo = workspace.root.join(".git").exists();
-            if workspace.is_git_repo != is_git_repo {
-                workspace.is_git_repo = is_git_repo;
-                changed = true;
-            }
-        }
-        if changed {
-            self.workspace_catalog_revision = self.workspace_catalog_revision.saturating_add(1);
-            self.save(path)?;
-        }
-        Ok(())
-    }
-}
-
-fn valid_workspace_root_handle(handle: &str) -> bool {
-    handle.len() >= 3
-        && handle.len() <= 128
-        && handle.starts_with("r_")
-        && handle
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-}
-
-fn new_workspace_root_handle<'a>(existing: impl Iterator<Item = &'a str>) -> String {
-    let existing = existing.collect::<std::collections::HashSet<_>>();
-    loop {
-        let candidate = format!("r_{}", uuid::Uuid::new_v4().simple());
-        if !existing.contains(candidate.as_str()) {
-            return candidate;
         }
     }
 }
 
-/// Identity that must survive restarts.
+/// Native identity and transport enrollment that must survive restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineState {
@@ -1154,395 +840,80 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_missing_config_reads_as_defaults_rather_than_failing() {
+    fn missing_and_legacy_configs_expose_only_platform_bootstrap_fields() {
         let dir = tempfile::tempdir().unwrap();
-        let config = Config::load(&dir.path().join("nope.json")).unwrap();
-        assert_eq!(config.port, 0);
-        assert!(!config.lan_enabled);
-    }
+        let missing = Config::load(&dir.path().join("missing.json")).unwrap();
+        assert_eq!(missing.port, 0);
+        assert!(!missing.lan_enabled);
 
-    #[test]
-    fn config_survives_a_save_and_load_cycle() {
-        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let mut config = Config {
-            port: 1234,
-            ..Default::default()
-        };
-        config.workspaces.push(WorkspaceEntry {
-            id: "w1".into(),
-            name: "demo".into(),
-            root: PathBuf::from("/tmp/demo"),
-            folders: vec![WorkspaceFolderEntry {
-                name: "demo".into(),
-                root: PathBuf::from("/tmp/demo"),
-                root_handle: "r_demo".into(),
-            }],
-            workspace_file: None,
-            removed: false,
-            is_git_repo: false,
-        });
-        config.save(&path).unwrap();
-
+        fs::write(
+            &path,
+            r#"{
+                "port": 4242,
+                "lanEnabled": false,
+                "agents": {"providers": {"secret": {"apiKey": "sk-private"}}},
+                "workspaces": [{"id": "business-state"}]
+            }"#,
+        )
+        .unwrap();
         let loaded = Config::load(&path).unwrap();
-        assert_eq!(loaded.port, 1234);
-        assert_eq!(loaded.workspaces.len(), 1);
-        assert_eq!(loaded.workspaces[0].name, "demo");
+        assert_eq!(loaded.port, 4242);
+        assert!(!loaded.lan_enabled);
     }
 
     #[test]
-    fn legacy_workspace_roots_are_migrated_once_to_folder_records() {
+    fn paths_seed_legacy_business_config_once_into_guest_private_storage() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let root = dir.path().join("project");
-        let mut config = Config::default();
-        config.workspaces.push(WorkspaceEntry {
-            id: "w1".into(),
-            name: "Project".into(),
-            root: root.clone(),
-            folders: Vec::new(),
-            workspace_file: None,
-            removed: false,
-            is_git_repo: false,
-        });
-        config.save(&path).unwrap();
-
-        let mut loaded = Config::load(&path).unwrap();
-        loaded.migrate_workspace_folders(&path).unwrap();
-        loaded.migrate_workspace_roots(&path).unwrap();
-        assert_eq!(loaded.workspaces[0].folders.len(), 1);
-        assert_eq!(loaded.workspaces[0].folders[0].root, root);
-        assert!(loaded.workspaces[0].folders[0]
-            .root_handle
-            .starts_with("r_"));
-
-        let saved = Config::load(&path).unwrap();
-        assert_eq!(saved.workspaces[0].folders.len(), 1);
-        assert_eq!(saved.workspace_roots.len(), 1);
-        assert_eq!(
-            saved.workspaces[0].folders[0].root_handle,
-            saved.workspace_roots[0].handle
-        );
-    }
-
-    #[test]
-    fn folder_and_workspace_projects_keep_distinct_ids_but_share_global_roots() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let root = dir.path().join("product");
-        let docs = dir.path().join("docs");
-        let definition = dir.path().join("suite.code-workspace");
-        let folder = WorkspaceFolderEntry {
-            name: "product".into(),
-            root: root.clone(),
-            root_handle: String::new(),
-        };
-        let mut config = Config {
-            workspaces: vec![
-                WorkspaceEntry {
-                    id: "w_folder".into(),
-                    name: "product".into(),
-                    root: root.clone(),
-                    folders: vec![folder.clone()],
-                    workspace_file: None,
-                    removed: false,
-                    is_git_repo: false,
-                },
-                WorkspaceEntry {
-                    id: "w_suite".into(),
-                    name: "suite".into(),
-                    root: root.clone(),
-                    folders: vec![
-                        WorkspaceFolderEntry {
-                            name: "Product".into(),
-                            root: root.clone(),
-                            root_handle: String::new(),
-                        },
-                        WorkspaceFolderEntry {
-                            name: "Docs".into(),
-                            root: docs,
-                            root_handle: String::new(),
-                        },
-                    ],
-                    workspace_file: Some(definition.clone()),
-                    removed: true,
-                    is_git_repo: false,
-                },
-            ],
-            ..Config::default()
-        };
-
-        config.migrate_workspace_roots(&path).unwrap();
-        config.migrate_workspace_identities(&path).unwrap();
-
-        assert_eq!(config.workspaces.len(), 2);
-        assert_eq!(config.workspaces[0].id, "w_folder");
-        assert_eq!(config.workspaces[1].id, "w_suite");
-        assert_eq!(
-            config.workspaces[0].folders[0].root_handle,
-            config.workspaces[1].folders[0].root_handle
-        );
-        assert_ne!(
-            config.workspaces[0].folders[0].root_handle,
-            config.workspaces[1].folders[1].root_handle
-        );
-        assert_eq!(config.workspace_roots.len(), 2);
-        assert_eq!(config.workspace_catalog_revision, 0);
-        assert_eq!(Config::load(&path).unwrap().workspaces.len(), 2);
-    }
-
-    #[test]
-    fn malformed_root_handles_are_repaired_before_runtime_resolution() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let root = dir.path().join("project");
-        let mut config = Config {
-            workspace_roots: vec![WorkspaceRootEntry {
-                handle: "../project".into(),
-                root: root.clone(),
-            }],
-            workspaces: vec![WorkspaceEntry {
-                id: "w_project".into(),
-                name: "project".into(),
-                root: root.clone(),
-                folders: vec![WorkspaceFolderEntry {
-                    name: "project".into(),
-                    root,
-                    root_handle: "../project".into(),
-                }],
-                workspace_file: None,
-                removed: false,
-                is_git_repo: false,
-            }],
-            ..Config::default()
-        };
-
-        config.migrate_workspace_roots(&path).unwrap();
-
-        let handle = &config.workspace_roots[0].handle;
-        assert!(valid_workspace_root_handle(handle));
-        assert_eq!(config.workspaces[0].folders[0].root_handle, *handle);
-        assert!(!handle.contains('/'));
-    }
-
-    #[test]
-    fn private_save_atomically_replaces_the_same_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        save_private(&path, br#"{"version":1}"#).unwrap();
-        save_private(&path, br#"{"version":2}"#).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), br#"{"version":2}"#);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn planted_sensitive_symlinks_never_touch_their_external_targets() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
-
-        let outer = tempfile::tempdir().unwrap();
-        let victim_dir = outer.path().join("victim-dir");
-        fs::create_dir(&victim_dir).unwrap();
-        fs::set_permissions(&victim_dir, fs::Permissions::from_mode(0o755)).unwrap();
-        let linked_root = outer.path().join("linked-data");
-        symlink(&victim_dir, &linked_root).unwrap();
-        assert!(Paths::new(&linked_root).ensure().is_err());
-        assert_eq!(
-            victim_dir.metadata().unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-
-        let root_with_linked_logs = outer.path().join("data-with-linked-logs");
-        fs::create_dir(&root_with_linked_logs).unwrap();
-        symlink(&victim_dir, root_with_linked_logs.join("logs")).unwrap();
-        assert!(Paths::new(&root_with_linked_logs).ensure().is_err());
-        assert_eq!(
-            victim_dir.metadata().unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-
-        let root = outer.path().join("real-data");
-        fs::create_dir(&root).unwrap();
-        let victim_file = outer.path().join("victim.json");
-        fs::write(&victim_file, b"outside secret").unwrap();
-        fs::set_permissions(&victim_file, fs::Permissions::from_mode(0o644)).unwrap();
-        symlink(&victim_file, root.join("config.json")).unwrap();
-        assert!(Paths::new(&root).ensure().is_err());
-        assert_eq!(fs::read(&victim_file).unwrap(), b"outside secret");
-        assert_eq!(
-            victim_file.metadata().unwrap().permissions().mode() & 0o777,
-            0o644
-        );
-
-        let path = outer.path().join("published.json");
-        let stale_fixed_temp = path.with_extension("json.tmp");
-        symlink(&victim_file, &stale_fixed_temp).unwrap();
-        save_private(&path, b"new private data").unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"new private data");
-        assert_eq!(fs::read(&victim_file).unwrap(), b"outside secret");
-        assert_eq!(
-            victim_file.metadata().unwrap().permissions().mode() & 0o777,
-            0o644
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn provider_secrets_are_saved_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut config = Config::default();
-        config.agents.providers.insert(
-            "private".into(),
-            ProviderConfig {
-                api_key: Some("secret".into()),
-                ..Default::default()
-            },
-        );
-        config.save(&path).unwrap();
-        assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_data_root_and_secret_files_have_protected_owner_only_dacls() {
-        let parent = tempfile::tempdir().unwrap();
-        let paths = Paths::new(parent.path().join("data"));
-        let nested = paths.logs_dir().join("archive");
-        let old_rotation = nested.join("daemon.log.1");
-        let old_log = paths.logs_dir().join("old.log");
-        fs::create_dir_all(&nested).unwrap();
-        fs::write(&old_rotation, b"legacy log").unwrap();
-        fs::write(&old_log, b"legacy log").unwrap();
-        windows_acl::make_unprotected_for_test(&nested).unwrap();
-        windows_acl::make_unprotected_for_test(&old_rotation).unwrap();
-        windows_acl::make_unprotected_for_test(&old_log).unwrap();
+        let paths = Paths::new(dir.path());
+        fs::create_dir_all(&paths.root).unwrap();
+        fs::write(
+            paths.config_file(),
+            br#"{"port":7,"workspaces":[{"id":"w"}]}"#,
+        )
+        .unwrap();
         paths.ensure().unwrap();
-        windows_acl::verify_owner_only(&paths.root, true).unwrap();
-        windows_acl::verify_owner_only(&paths.logs_dir(), true).unwrap();
-        windows_acl::verify_owner_only(&nested, true).unwrap();
-        windows_acl::verify_owner_only(&old_rotation, false).unwrap();
-        windows_acl::verify_owner_only(&old_log, false).unwrap();
-
-        let mut config = Config::default();
-        config.agents.providers.insert(
-            "private".into(),
-            ProviderConfig {
-                api_key: Some("secret".into()),
-                ..Default::default()
-            },
+        let portable = paths.portable_dir().join("config.json");
+        assert_eq!(
+            fs::read(&portable).unwrap(),
+            br#"{"port":7,"workspaces":[{"id":"w"}]}"#
         );
-        config.save(&paths.config_file()).unwrap();
-        config.port = 4242;
-        config.save(&paths.config_file()).unwrap();
-        assert_eq!(Config::load(&paths.config_file()).unwrap().port, 4242);
-        windows_acl::verify_owner_only(&paths.config_file(), false).unwrap();
-    }
-
-    #[test]
-    fn an_old_config_gets_one_durable_workspace_catalog_generation() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"port":1234}"#).unwrap();
-
-        let mut first = Config::load(&path).unwrap();
-        assert!(first.workspace_catalog_generation.is_empty());
-        first.ensure_workspace_catalog_generation(&path).unwrap();
-        let generation = first.workspace_catalog_generation.clone();
-        assert!(generation.starts_with("wcg_"));
-
-        let mut restarted = Config::load(&path).unwrap();
-        restarted
-            .ensure_workspace_catalog_generation(&path)
-            .unwrap();
-        assert_eq!(restarted.workspace_catalog_generation, generation);
-    }
-
-    #[test]
-    fn filesystem_catalog_facts_advance_the_revision_before_upload() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        std::fs::create_dir(&project).unwrap();
-        let path = dir.path().join("config.json");
-        let mut config = Config::default();
-        config.workspaces.push(WorkspaceEntry {
-            id: "w1".into(),
-            name: "project".into(),
-            root: project.clone(),
-            folders: vec![WorkspaceFolderEntry {
-                name: "project".into(),
-                root: project.clone(),
-                root_handle: "r_project".into(),
-            }],
-            workspace_file: None,
-            removed: false,
-            is_git_repo: false,
-        });
-
-        config.refresh_workspace_catalog_facts(&path).unwrap();
-        assert_eq!(config.workspace_catalog_revision, 0);
-        std::fs::create_dir(project.join(".git")).unwrap();
-        config.refresh_workspace_catalog_facts(&path).unwrap();
-        assert!(config.workspaces[0].is_git_repo);
-        assert_eq!(config.workspace_catalog_revision, 1);
-        config.refresh_workspace_catalog_facts(&path).unwrap();
-        assert_eq!(config.workspace_catalog_revision, 1);
-    }
-
-    /// The two roots must never be the same tree: uninstall deletes the data
-    /// root, and the user's files are not ours to delete.
-    #[test]
-    fn the_working_folder_is_not_inside_the_data_folder() {
-        let paths = Paths {
-            root: PathBuf::from("/data/GeneHub"),
-            default_workspace: Some(PathBuf::from("/home/me/GeneHub")),
-        };
-        let workspace = paths.default_workspace.unwrap();
-        assert!(!workspace.starts_with(&paths.root));
-    }
-
-    #[test]
-    fn a_test_gets_an_empty_machine_unless_it_asks_otherwise() {
-        assert!(Paths::new("/tmp/whatever").default_workspace.is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn daemon_data_and_sensitive_subdirectories_are_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let outer = tempfile::tempdir().unwrap();
-        let root = outer.path().join("daemon-data");
-        // Simulate an older build (or permissive umask) which left the data
-        // directory traversable by other local accounts.
-        std::fs::create_dir(&root).unwrap();
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let paths = Paths::new(&root);
+        fs::write(paths.config_file(), br#"{"port":8}"#).unwrap();
         paths.ensure().unwrap();
-
-        for path in [&root, &paths.logs_dir()] {
-            assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o700);
-        }
+        assert_eq!(
+            fs::read(&portable).unwrap(),
+            br#"{"port":7,"workspaces":[{"id":"w"}]}"#
+        );
     }
 
     #[test]
-    fn machine_identity_is_stable_across_loads() {
+    fn machine_identity_is_private_durable_and_fingerprinted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         let first = MachineState::load_or_create(&path).unwrap();
         let second = MachineState::load_or_create(&path).unwrap();
         assert_eq!(first.machine_id, second.machine_id);
+        assert_eq!(first.secret, second.secret);
         assert_eq!(first.fingerprint(), second.fingerprint());
-        assert!(first.fingerprint().contains('-'));
+        assert_eq!(first.fingerprint().split('-').count(), 4);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sensitive_roots_reject_symbolic_links() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        symlink(victim.path(), &root).unwrap();
+        assert!(Paths::new(root).ensure().is_err());
     }
 }

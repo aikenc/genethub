@@ -202,6 +202,17 @@ fn locator(folder: &WorkspaceFolderEntry, path: &str) -> FileLocator {
     }
 }
 
+pub fn resolve_locator(
+    workspace: &WorkspaceEntry,
+    path: &str,
+) -> Result<FileLocator, ProtocolError> {
+    let (folder, relative) = resolve(workspace, path)?;
+    if relative.is_empty() {
+        return Err(forbidden("preview path names a workspace root"));
+    }
+    Ok(locator(folder, relative))
+}
+
 fn is_noise(name: &str) -> bool {
     matches!(
         name,
