@@ -1438,6 +1438,14 @@ impl LogicApp {
         if let Err(error) = self.ensure_workspaces(capabilities) {
             return LogicOutcome::Error(error);
         }
+        if let Err(error) = self.sessions.ensure_workspace_removable(
+            &workspace_id,
+            self.config.as_ref().expect("config loaded"),
+            capabilities,
+            &mut self.next_capability_id,
+        ) {
+            return LogicOutcome::Error(error);
+        }
         let mut next = self.config.as_ref().expect("config loaded").clone();
         let workspaces = match workspace::remove(&mut next, &workspace_id) {
             Ok(workspaces) => workspaces,
@@ -3104,7 +3112,7 @@ done
             &mut capabilities,
             10,
             Request::SessionList {
-                workspace_id: Some(workspace_id),
+                workspace_id: Some(workspace_id.clone()),
                 include_archived: false,
             },
         )
@@ -3171,11 +3179,60 @@ done
             ErrorCode::BadRequest
         );
 
+        let removed = match call(
+            &mut app,
+            &mut capabilities,
+            14,
+            Request::WorkspaceRemove {
+                workspace_id: workspace_id.clone(),
+            },
+        )
+        .unwrap()
+        {
+            Reply::Workspaces(workspaces) => workspaces,
+            other => panic!("wrong workspace remove reply: {other:?}"),
+        };
+        assert!(removed.iter().all(|workspace| workspace.id != workspace_id));
+        let hidden = match call(
+            &mut app,
+            &mut capabilities,
+            15,
+            Request::SessionList {
+                workspace_id: Some(workspace_id.clone()),
+                include_archived: true,
+            },
+        )
+        .unwrap()
+        {
+            Reply::Sessions(sessions) => sessions,
+            other => panic!("wrong removed-workspace session reply: {other:?}"),
+        };
+        assert!(hidden.is_empty(), "removed workspace sessions stay hidden");
+        let reopened = open_workspace(&mut app, &mut capabilities, 16, &workspace_file);
+        assert_eq!(reopened.id, workspace_id);
+        let restored = match call(
+            &mut app,
+            &mut capabilities,
+            17,
+            Request::SessionList {
+                workspace_id: Some(workspace_id.clone()),
+                include_archived: true,
+            },
+        )
+        .unwrap()
+        {
+            Reply::Sessions(sessions) => sessions,
+            other => panic!("wrong reopened-workspace session reply: {other:?}"),
+        };
+        assert!(restored
+            .iter()
+            .any(|session| session.id == second_session_id));
+
         for (call_id, session_id) in [
-            (14, second_session_id.clone()),
-            (15, second_session_id.clone()),
-            (16, future_session_id.clone()),
-            (17, future_session_id.clone()),
+            (20, second_session_id.clone()),
+            (21, second_session_id.clone()),
+            (22, future_session_id.clone()),
+            (23, future_session_id.clone()),
         ] {
             assert!(matches!(
                 call(
@@ -3191,7 +3248,7 @@ done
         let listed = match call(
             &mut app,
             &mut capabilities,
-            18,
+            24,
             Request::SessionList {
                 workspace_id: None,
                 include_archived: true,

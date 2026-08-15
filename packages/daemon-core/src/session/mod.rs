@@ -665,7 +665,9 @@ impl Sessions {
                     .loaded
                     .values()
                     .filter(|live| {
-                        workspace_id
+                        config.workspaces.iter().any(|workspace| {
+                            workspace.id == live.meta.workspace_id && !workspace.removed
+                        }) && workspace_id
                             .as_deref()
                             .is_none_or(|workspace| live.meta.workspace_id == workspace)
                             && (include_archived || !live.meta.archived)
@@ -1459,6 +1461,28 @@ impl Sessions {
             live.active_turn = None;
             live.closed = true;
         }
+    }
+
+    pub(super) fn ensure_workspace_removable(
+        &mut self,
+        workspace_id: &str,
+        config: &Config,
+        executor: &mut impl CapabilityExecutor,
+        next: &mut u64,
+    ) -> Result<(), ProtocolError> {
+        self.load_catalog(config, executor, next)?;
+        if self.loaded.values().any(|live| {
+            live.meta.workspace_id == workspace_id
+                && matches!(
+                    status(live),
+                    SessionStatus::Running | SessionStatus::Waiting
+                )
+        }) {
+            return Err(conflict(
+                "stop the workspace's running or waiting sessions before removing it",
+            ));
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
