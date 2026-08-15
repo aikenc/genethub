@@ -16,4 +16,4 @@ pub use runtime::{ActiveLogic, ActiveOrigin, PlatformRuntime};
 pub use vm::{LogicInstance, LogicVm, VmLimits, VmPolicy, WasiPolicy, WasiPreopen};
 
 /// First version of the platform/logic lifecycle contract.
-pub const LOGIC_ABI_VERSION: u32 = 2;
+pub const LOGIC_ABI_VERSION: u32 = 3;

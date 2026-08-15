@@ -4,10 +4,15 @@
 //! normally, preserving Rust ownership, visibility and memory safety.
 
 use genehub_proto::{
-    ErrorCode, HelloResult, LogEntry, LogTail, ProtocolError, Reply, Request, PROTOCOL_VERSION,
+    ErrorCode, HelloResult, LogEntry, LogTail, LogicModuleStatus, ProtocolError, Reply, Request,
+    TransportKind, PROTOCOL_VERSION,
 };
 use genet_daemon_common::{decode_json, encode_json};
-use genet_daemon_logic_api::{LogicBoot, LogicOutcome, LogicRequest, SNAPSHOT_FORMAT_VERSION};
+use genet_daemon_logic_api::{
+    CapabilityBatch, CapabilityCall, CapabilityFailureKind, CapabilityRequest, CapabilityResults,
+    CapabilityValue, LogicArtifactRequest, LogicBoot, LogicInput, LogicOutcome, LogicOutput,
+    LogicRequest, SNAPSHOT_FORMAT_VERSION,
+};
 use serde::{Deserialize, Serialize};
 
 const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
@@ -18,6 +23,7 @@ const AUTOMATIC_UPDATE_REFUSAL: &str =
 pub struct LogicApp {
     boot: LogicBoot,
     handled_requests: u64,
+    pending: std::collections::BTreeMap<u64, Pending>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -26,6 +32,13 @@ struct Snapshot {
     format_version: u32,
     boot: LogicBoot,
     handled_requests: u64,
+    pending: std::collections::BTreeMap<u64, Pending>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Pending {
+    call_id: u64,
 }
 
 impl LogicApp {
@@ -34,19 +47,61 @@ impl LogicApp {
         Ok(Self {
             boot,
             handled_requests: 0,
+            pending: std::collections::BTreeMap::new(),
         })
     }
 
-    pub fn handle(&mut self, input: LogicRequest) -> LogicOutcome {
-        self.handled_requests = self.handled_requests.saturating_add(1);
-        match input.request {
+    pub fn handle(&mut self, input: LogicInput) -> LogicOutput {
+        match input {
+            LogicInput::Request(request) => {
+                self.handled_requests = self.handled_requests.saturating_add(1);
+                self.handle_request(request)
+            }
+            // Capability routing lands before the first migrated asynchronous
+            // domain. Unknown resource events are intentionally harmless so a
+            // late OS close from a replaced instance cannot trap its successor.
+            LogicInput::CapabilityResults(results) => self.handle_capability_results(results),
+            LogicInput::CapabilityEvent(_) => LogicOutput::default(),
+        }
+    }
+
+    fn handle_request(&mut self, input: LogicRequest) -> LogicOutput {
+        let call_id = input.call_id;
+        let transport = input.transport;
+        let outcome = match input.request {
+            Request::DaemonLogicStatus => {
+                return self.request_artifact(call_id, LogicArtifactRequest::Status)
+            }
+            Request::DaemonLogicInstall { path } => {
+                if transport != TransportKind::Loopback {
+                    LogicOutcome::Error(ProtocolError {
+                        code: ErrorCode::Forbidden,
+                        message: "daemon logic may only be installed over loopback".to_string(),
+                    })
+                } else {
+                    return self.request_artifact(
+                        call_id,
+                        LogicArtifactRequest::Install { native_path: path },
+                    );
+                }
+            }
+            Request::DaemonLogicRollback => {
+                if transport != TransportKind::Loopback {
+                    LogicOutcome::Error(ProtocolError {
+                        code: ErrorCode::Forbidden,
+                        message: "daemon logic may only be rolled back over loopback".to_string(),
+                    })
+                } else {
+                    return self.request_artifact(call_id, LogicArtifactRequest::Rollback);
+                }
+            }
             Request::ConnectionIdentity => {
                 LogicOutcome::Reply(Box::new(Reply::Hello(HelloResult {
                     daemon_version: self.boot.daemon_version.clone(),
                     protocol_version: self.boot.protocol_version,
                     machine_id: self.boot.machine_id.clone(),
                     fingerprint: self.boot.fingerprint.clone(),
-                    transport: input.transport,
+                    transport,
                     machine_name: self.boot.machine_name.clone(),
                     rtc_supported: self.boot.rtc_supported,
                 })))
@@ -67,7 +122,62 @@ impl LogicApp {
             }
             Request::LogTail { name } => self.read_log(name),
             _ => LogicOutcome::ContinueNative,
+        };
+        LogicOutput::completed(call_id, outcome)
+    }
+
+    fn request_artifact(&mut self, call_id: u64, request: LogicArtifactRequest) -> LogicOutput {
+        self.pending.insert(call_id, Pending { call_id });
+        LogicOutput {
+            capability_batches: vec![CapabilityBatch {
+                batch_id: call_id,
+                calls: vec![CapabilityCall {
+                    call_id,
+                    request: CapabilityRequest::LogicArtifact(request),
+                }],
+            }],
+            ..LogicOutput::default()
         }
+    }
+
+    fn handle_capability_results(&mut self, results: CapabilityResults) -> LogicOutput {
+        let Some(pending) = self.pending.remove(&results.batch_id) else {
+            return LogicOutput::default();
+        };
+        let outcome = match results.results.as_slice() {
+            [result] if result.call_id == pending.call_id => match &result.result {
+                Ok(CapabilityValue::LogicArtifact(state)) => {
+                    LogicOutcome::Reply(Box::new(Reply::LogicModule(LogicModuleStatus {
+                        loaded: true,
+                        version: Some(state.version.clone()),
+                        digest: Some(state.digest.clone()),
+                        origin: Some(state.origin.clone()),
+                        generation: state.generation,
+                    })))
+                }
+                Ok(_) => LogicOutcome::Error(ProtocolError {
+                    code: ErrorCode::Internal,
+                    message: "logic artifact capability returned the wrong value".to_string(),
+                }),
+                Err(error) => LogicOutcome::Error(ProtocolError {
+                    code: match error.kind {
+                        CapabilityFailureKind::Invalid => ErrorCode::BadRequest,
+                        CapabilityFailureKind::Denied => ErrorCode::Forbidden,
+                        CapabilityFailureKind::NotFound => ErrorCode::NotFound,
+                        CapabilityFailureKind::Conflict => ErrorCode::Conflict,
+                        CapabilityFailureKind::Unavailable
+                        | CapabilityFailureKind::TooLarge
+                        | CapabilityFailureKind::Internal => ErrorCode::Internal,
+                    },
+                    message: error.message.clone(),
+                }),
+            },
+            _ => LogicOutcome::Error(ProtocolError {
+                code: ErrorCode::Internal,
+                message: "logic artifact capability returned a malformed batch".to_string(),
+            }),
+        };
+        LogicOutput::completed(pending.call_id, outcome)
     }
 
     fn read_log(&self, name: Option<String>) -> LogicOutcome {
@@ -109,6 +219,7 @@ impl LogicApp {
                 format_version: SNAPSHOT_FORMAT_VERSION,
                 boot: self.boot.clone(),
                 handled_requests: self.handled_requests,
+                pending: self.pending.clone(),
             },
         )
     }
@@ -125,6 +236,7 @@ impl LogicApp {
         Ok(Self {
             boot: snapshot.boot,
             handled_requests: snapshot.handled_requests,
+            pending: snapshot.pending,
         })
     }
 
@@ -239,21 +351,31 @@ mod tests {
     fn portable_router_owns_identity_update_policy_and_pure_validation() {
         let mut app = LogicApp::new(boot()).unwrap();
         assert!(matches!(
-            app.handle(LogicRequest {
+            app.handle(LogicInput::Request(LogicRequest {
+                call_id: 1,
                 transport: TransportKind::Loopback,
                 request: Request::ConnectionIdentity,
-            }),
-            LogicOutcome::Reply(reply) if matches!(*reply, Reply::Hello(_))
+            })),
+            LogicOutput { completions, .. }
+                if matches!(completions.as_slice(), [genet_daemon_logic_api::LogicCompletion {
+                    outcome: LogicOutcome::Reply(reply),
+                    ..
+                }] if matches!(**reply, Reply::Hello(_)))
         ));
         assert!(matches!(
-            app.handle(LogicRequest {
+            app.handle(LogicInput::Request(LogicRequest {
+                call_id: 2,
                 transport: TransportKind::Forwarded,
                 request: Request::UpdateDownload,
-            }),
-            LogicOutcome::Error(ProtocolError {
-                code: ErrorCode::Unsupported,
-                ..
-            })
+            })),
+            LogicOutput { completions, .. }
+                if matches!(completions.as_slice(), [genet_daemon_logic_api::LogicCompletion {
+                    outcome: LogicOutcome::Error(ProtocolError {
+                        code: ErrorCode::Unsupported,
+                        ..
+                    }),
+                    ..
+                }])
         ));
         assert_eq!(app.handled_requests(), 2);
     }
@@ -261,12 +383,56 @@ mod tests {
     #[test]
     fn snapshot_restores_state_without_platform_interpreting_it() {
         let mut app = LogicApp::new(boot()).unwrap();
-        let _ = app.handle(LogicRequest {
+        let _ = app.handle(LogicInput::Request(LogicRequest {
+            call_id: 1,
             transport: TransportKind::Loopback,
             request: Request::AgentList,
-        });
+        }));
         let restored = LogicApp::restore(&app.snapshot().unwrap()).unwrap();
         assert_eq!(restored.handled_requests(), 1);
+    }
+
+    #[test]
+    fn artifact_control_survives_hot_state_transfer_mid_capability() {
+        let mut app = LogicApp::new(boot()).unwrap();
+        let output = app.handle(LogicInput::Request(LogicRequest {
+            call_id: 41,
+            transport: TransportKind::Loopback,
+            request: Request::DaemonLogicStatus,
+        }));
+        assert!(output.completions.is_empty());
+        assert!(matches!(
+            output.capability_batches.as_slice(),
+            [CapabilityBatch { batch_id: 41, calls }]
+                if matches!(calls.as_slice(), [CapabilityCall {
+                    request: CapabilityRequest::LogicArtifact(LogicArtifactRequest::Status),
+                    ..
+                }])
+        ));
+
+        let mut restored = LogicApp::restore(&app.snapshot().unwrap()).unwrap();
+        let output = restored.handle(LogicInput::CapabilityResults(CapabilityResults {
+            batch_id: 41,
+            results: vec![genet_daemon_logic_api::CapabilityResult {
+                call_id: 41,
+                result: Ok(CapabilityValue::LogicArtifact(
+                    genet_daemon_logic_api::LogicArtifactState {
+                        version: "next".into(),
+                        digest: "abc".into(),
+                        origin: "installed".into(),
+                        generation: 7,
+                    },
+                )),
+            }],
+        }));
+        assert!(matches!(
+            output.completions.as_slice(),
+            [genet_daemon_logic_api::LogicCompletion {
+                call_id: 41,
+                outcome: LogicOutcome::Reply(reply),
+                ..
+            }] if matches!(**reply, Reply::LogicModule(LogicModuleStatus { generation: 7, .. }))
+        ));
     }
 
     #[test]
@@ -281,27 +447,35 @@ mod tests {
         config.log_directory = directory.path().display().to_string();
         let mut app = LogicApp::new(config).unwrap();
 
-        let outcome = app.handle(LogicRequest {
+        let output = app.handle(LogicInput::Request(LogicRequest {
+            call_id: 1,
             transport: TransportKind::Loopback,
             request: Request::LogTail { name: None },
-        });
+        }));
         assert!(matches!(
-            outcome,
-            LogicOutcome::Reply(reply)
-                if matches!(*reply, Reply::Log(LogTail { ref text, .. }) if text.ends_with("third\n"))
+            output.completions.as_slice(),
+            [genet_daemon_logic_api::LogicCompletion {
+                outcome: LogicOutcome::Reply(reply),
+                ..
+            }] if matches!(**reply, Reply::Log(LogTail { ref text, .. }) if text.ends_with("third\n"))
         ));
 
         assert!(matches!(
-            app.handle(LogicRequest {
+            app.handle(LogicInput::Request(LogicRequest {
+                call_id: 2,
                 transport: TransportKind::Forwarded,
                 request: Request::LogTail {
                     name: Some("../config.json".to_string()),
                 },
-            }),
-            LogicOutcome::Error(ProtocolError {
-                code: ErrorCode::BadRequest,
-                ..
-            })
+            })),
+            LogicOutput { completions, .. }
+                if matches!(completions.as_slice(), [genet_daemon_logic_api::LogicCompletion {
+                    outcome: LogicOutcome::Error(ProtocolError {
+                        code: ErrorCode::BadRequest,
+                        ..
+                    }),
+                    ..
+                }])
         ));
     }
 }

@@ -5,6 +5,7 @@ members = [
   "apps/cli",
   "apps/daemon",
   "packages/daemon-platform",
+  "packages/daemon-system",
   "packages/daemon-logic-api",
   "packages/daemon-common",
   "packages/daemon-core",

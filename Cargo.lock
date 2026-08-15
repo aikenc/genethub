@@ -1300,6 +1300,7 @@ dependencies = [
  "genehub-proto",
  "genet-daemon-logic-api",
  "genet-daemon-platform",
+ "genet-daemon-system",
  "hmac",
  "ignore",
  "json5",
@@ -1383,6 +1384,26 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "wat",
+]
+
+[[package]]
+name = "genet-daemon-system"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "genet-daemon-logic-api",
+ "getrandom 0.4.3",
+ "libc",
+ "portable-pty",
+ "reqwest",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "uuid",
+ "webrtc",
 ]
 
 [[package]]

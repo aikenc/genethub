@@ -88,7 +88,7 @@ fn failed(error: anyhow::Error) -> Handled {
 
 pub async fn handle(state: &Shared, transport: TransportKind, request: Request) -> Handled {
     if let Some(logic) = state.logic.as_ref() {
-        match logic.route(transport, request.clone()) {
+        match logic.route(transport, request.clone()).await {
             Ok(genet_daemon_logic_api::LogicOutcome::ContinueNative) => {}
             Ok(genet_daemon_logic_api::LogicOutcome::Reply(reply)) => return Handled::ok(*reply),
             Ok(genet_daemon_logic_api::LogicOutcome::Error(error)) => {

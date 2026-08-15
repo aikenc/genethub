@@ -3,7 +3,9 @@
 //! The native side knows artifact trust, VM lifecycle and one byte-batch call.
 //! It does not inspect request fields or split strings into host functions.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -11,10 +13,15 @@ use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use genehub_proto::{Request, TransportKind};
-use genet_daemon_logic_api::{LogicBoot, LogicOutcome, LogicRequest};
+use genet_daemon_logic_api::{
+    CapabilityBatch, CapabilityCall, CapabilityFailure, CapabilityFailureKind, CapabilityRequest,
+    CapabilityResult, CapabilityResults, CapabilityValue, LogicArtifactRequest, LogicArtifactState,
+    LogicBoot, LogicInput, LogicOutcome, LogicOutput, LogicRequest,
+};
 use genet_daemon_platform::{
     ActiveLogic, ArtifactVerifier, PlatformRuntime, SignedArtifact, VmPolicy, LOGIC_ABI_VERSION,
 };
+use genet_daemon_system::SystemHost;
 
 use crate::config::{MachineState, Paths};
 
@@ -27,6 +34,8 @@ pub const ARTIFACT_PATH_ENV: &str = "GENET_DAEMON_LOGIC_WASM";
 
 pub struct LogicHost {
     runtime: PlatformRuntime,
+    system: Arc<SystemHost>,
+    next_call_id: AtomicU64,
 }
 
 impl LogicHost {
@@ -82,19 +91,128 @@ impl LogicHost {
             artifact,
             boot,
         )?;
+        let system = Arc::new(SystemHost::new(
+            paths.root.join("portable"),
+            paths.logs_dir(),
+        )?);
         tracing::info!(
             path = %artifact_path.display(),
             version = %runtime.active()?.version,
             "daemon Wasm logic active"
         );
-        Ok(Some(Arc::new(Self { runtime })))
+        Ok(Some(Arc::new(Self {
+            runtime,
+            system,
+            next_call_id: AtomicU64::new(1),
+        })))
     }
 
-    pub fn route(&self, transport: TransportKind, request: Request) -> Result<LogicOutcome> {
-        let input = serde_json::to_vec(&LogicRequest { transport, request })?;
+    pub async fn route(&self, transport: TransportKind, request: Request) -> Result<LogicOutcome> {
+        let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
+        let input = LogicInput::Request(LogicRequest {
+            call_id,
+            transport,
+            request,
+        });
+        let mut inputs = VecDeque::from([input]);
+        let mut completion = None;
+        let mut turns = 0_usize;
+        while let Some(input) = inputs.pop_front() {
+            turns += 1;
+            if turns > 128 {
+                anyhow::bail!("portable logic exceeded the capability continuation limit");
+            }
+            let mut output = self.dispatch(&input)?;
+            if !output.publications.is_empty() {
+                anyhow::bail!("portable logic published before the event bridge was ready");
+            }
+            for finished in output.completions.drain(..) {
+                if finished.call_id != call_id {
+                    anyhow::bail!(
+                        "portable logic completed call {} while driving {call_id}",
+                        finished.call_id
+                    );
+                }
+                if !matches!(
+                    finished.connection,
+                    genet_daemon_logic_api::ConnectionDirective::None
+                ) {
+                    anyhow::bail!(
+                        "portable logic emitted a connection directive before routing support was ready"
+                    );
+                }
+                if completion.replace(finished.outcome).is_some() {
+                    anyhow::bail!("portable logic completed call {call_id} more than once");
+                }
+            }
+            for batch in output.capability_batches {
+                let results = self.execute_batch(batch).await;
+                inputs.push_back(LogicInput::CapabilityResults(results));
+            }
+        }
+        completion.context("portable logic did not complete the routed request")
+    }
+
+    fn dispatch(&self, input: &LogicInput) -> Result<LogicOutput> {
+        let input = serde_json::to_vec(input)?;
         let output = self.runtime.handle(&input)?;
-        serde_json::from_slice::<std::result::Result<LogicOutcome, String>>(&output)?
+        serde_json::from_slice::<std::result::Result<LogicOutput, String>>(&output)?
             .map_err(anyhow::Error::msg)
+    }
+
+    async fn execute_batch(&self, batch: CapabilityBatch) -> CapabilityResults {
+        let mut results = Vec::with_capacity(batch.calls.len());
+        for call in batch.calls {
+            results.push(match call.request {
+                CapabilityRequest::LogicArtifact(request) => {
+                    self.execute_artifact(call.call_id, request)
+                }
+                request => {
+                    let mut result = self
+                        .system
+                        .execute(CapabilityBatch {
+                            batch_id: batch.batch_id,
+                            calls: vec![CapabilityCall {
+                                call_id: call.call_id,
+                                request,
+                            }],
+                        })
+                        .await
+                        .results;
+                    result.pop().unwrap_or_else(|| CapabilityResult {
+                        call_id: call.call_id,
+                        result: Err(capability_failure(
+                            CapabilityFailureKind::Internal,
+                            "system capability returned no result",
+                        )),
+                    })
+                }
+            });
+        }
+        CapabilityResults {
+            batch_id: batch.batch_id,
+            results,
+        }
+    }
+
+    fn execute_artifact(&self, call_id: u64, request: LogicArtifactRequest) -> CapabilityResult {
+        let result = match request {
+            LogicArtifactRequest::Status => self.runtime.active(),
+            LogicArtifactRequest::Install { native_path } => read_artifact(Path::new(&native_path))
+                .map_err(|error| genet_daemon_platform::PlatformError::State(format!("{error:#}")))
+                .and_then(|artifact| self.runtime.install(artifact)),
+            LogicArtifactRequest::Rollback => self.runtime.rollback(),
+        }
+        .map(|active| {
+            CapabilityValue::LogicArtifact(LogicArtifactState {
+                version: active.version,
+                digest: active.digest,
+                origin: format!("{:?}", active.origin).to_ascii_lowercase(),
+                generation: active.generation,
+            })
+        })
+        .map_err(|error| capability_failure(CapabilityFailureKind::Unavailable, error.to_string()));
+        CapabilityResult { call_id, result }
     }
 
     pub fn active(&self) -> Result<ActiveLogic> {
@@ -118,6 +236,20 @@ impl LogicHost {
 
     pub fn rollback(&self) -> Result<ActiveLogic> {
         Ok(self.runtime.rollback()?)
+    }
+
+    pub async fn shutdown(&self) {
+        self.system.shutdown().await;
+    }
+}
+
+fn capability_failure(
+    kind: CapabilityFailureKind,
+    message: impl Into<String>,
+) -> CapabilityFailure {
+    CapabilityFailure {
+        kind,
+        message: message.into(),
     }
 }
 

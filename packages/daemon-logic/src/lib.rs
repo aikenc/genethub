@@ -12,7 +12,7 @@ mod wasm_abi {
 
     use genet_daemon_common::{decode_json, encode_json};
     use genet_daemon_core::LogicApp;
-    use genet_daemon_logic_api::{LogicBoot, LogicOutcome, LogicRequest};
+    use genet_daemon_logic_api::{LogicBoot, LogicInput, LogicOutput};
 
     const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -69,14 +69,14 @@ mod wasm_abi {
     #[no_mangle]
     pub unsafe extern "C" fn genehub_handle(pointer: i32, length: i32) -> i64 {
         consume_input(pointer, length, |input, runtime| {
-            let request: LogicRequest = decode_json("logic request", input, MAX_INPUT_BYTES)?;
+            let event: LogicInput = decode_json("logic input", input, MAX_INPUT_BYTES)?;
             let app = runtime
                 .app
                 .as_mut()
                 .ok_or_else(|| "logic is not initialized".to_string())?;
             encode_json(
-                "logic outcome",
-                &Result::<LogicOutcome, String>::Ok(app.handle(request)),
+                "logic output",
+                &Result::<LogicOutput, String>::Ok(app.handle(event)),
             )
         })
     }

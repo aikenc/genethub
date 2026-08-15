@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use genehub_proto::{Reply, Request, TransportKind, PROTOCOL_VERSION};
-use genet_daemon_logic_api::{LogicBoot, LogicOutcome, LogicRequest};
+use genet_daemon_logic_api::{LogicBoot, LogicInput, LogicOutcome, LogicOutput, LogicRequest};
 use genet_daemon_platform::{
     LogicVm, PlatformRuntime, SignedArtifact, VmPolicy, LOGIC_ABI_VERSION,
 };
@@ -126,23 +126,32 @@ fn boot_bytes() -> Vec<u8> {
 }
 
 fn request(request: Request) -> Vec<u8> {
-    serde_json::to_vec(&LogicRequest {
+    serde_json::to_vec(&LogicInput::Request(LogicRequest {
+        call_id: 7,
         transport: TransportKind::Loopback,
         request,
-    })
+    }))
     .unwrap()
 }
 
 fn call(instance: &genet_daemon_platform::LogicInstance, request_value: Request) -> LogicOutcome {
     let output = instance.handle(&request(request_value)).unwrap();
-    serde_json::from_slice::<Result<LogicOutcome, String>>(&output)
+    serde_json::from_slice::<Result<LogicOutput, String>>(&output)
         .unwrap()
         .unwrap()
+        .completions
+        .pop()
+        .unwrap()
+        .outcome
 }
 
 fn runtime_call(runtime: &PlatformRuntime, request_value: Request) -> LogicOutcome {
     let output = runtime.handle(&request(request_value)).unwrap();
-    serde_json::from_slice::<Result<LogicOutcome, String>>(&output)
+    serde_json::from_slice::<Result<LogicOutput, String>>(&output)
         .unwrap()
         .unwrap()
+        .completions
+        .pop()
+        .unwrap()
+        .outcome
 }

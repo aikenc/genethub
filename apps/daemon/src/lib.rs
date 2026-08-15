@@ -91,6 +91,9 @@ impl Daemon {
         if let Some(remote) = self.state.remote.get() {
             remote.stop().await;
         }
+        if let Some(logic) = self.state.logic.as_ref() {
+            logic.shutdown().await;
+        }
         self.listener.abort();
         let _ = std::fs::remove_file(self.state.paths.endpoint_file());
     }
