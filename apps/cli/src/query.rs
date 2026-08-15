@@ -396,6 +396,7 @@ fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Log(_) => "log",
         Reply::Update(_) => "update",
         Reply::UpdateDownload(_) => "update download",
+        Reply::LogicModule(_) => "daemon logic module",
         Reply::Session(_) => "session",
         Reply::Sessions(_) => "sessions",
         Reply::Snapshot(_) => "session snapshot",

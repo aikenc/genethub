@@ -4,25 +4,28 @@ use std::fs;
 use std::path::PathBuf;
 
 use genet_daemon_platform::{
-    ArtifactEnvelope, PlatformRuntime, SignedArtifact, VmPolicy, LOGIC_ABI_VERSION,
+    ArtifactVerifier, PlatformRuntime, SignedArtifact, VmPolicy, LOGIC_ABI_VERSION,
 };
-use support::{healthy_component, signed_component, signing_key, verifier, KEY_ID, MODULE_ID};
+use support::{healthy_component, signed_component_with_key_id, signing_key, MODULE_ID};
 
 const COMPONENT_FILE: &str = "daemon-logic.wasm";
-const ENVELOPE_FILE: &str = "daemon-logic.envelope.json";
 const PORTABLE_VERSION: &str = "portable-linux-ci";
+const KEY_ID: &str = "dev-local";
 
-/// CI invokes this only on Linux after rustc has emitted the guest. The output
-/// directory is uploaded as one immutable handoff to every native OS runner.
+/// A producer-side assertion for the exact application artifact that Linux
+/// built and signed. Packaging itself is done by `genet-daemon-artifact`; the
+/// test never rewrites the handoff bytes.
 #[test]
 #[ignore = "CI fixture producer; requires GENET_PORTABLE_FIXTURE_DIR"]
 fn write_linux_portable_fixture() {
     let directory = fixture_directory();
     let component_path = directory.join(COMPONENT_FILE);
-    let component = fs::read(&component_path).expect("Linux rustc must create the guest first");
-    let artifact = signed_component(&signing_key(7), PORTABLE_VERSION, component);
-    let envelope = serde_json::to_vec_pretty(&artifact.envelope).unwrap();
-    fs::write(directory.join(ENVELOPE_FILE), envelope).unwrap();
+    let bytes = fs::read(&component_path).expect("Linux must create the signed guest first");
+    let artifact = SignedArtifact::from_single_file(&bytes).unwrap();
+    assert_eq!(artifact.envelope.module_id(), MODULE_ID);
+    assert_eq!(artifact.envelope.key_id(), KEY_ID);
+    assert_eq!(artifact.envelope.version(), PORTABLE_VERSION);
+    assert_eq!(artifact.to_single_file().unwrap(), bytes);
 }
 
 /// This test runs on Linux, Windows and macOS against the exact files uploaded
@@ -32,20 +35,26 @@ fn write_linux_portable_fixture() {
 #[ignore = "cross-OS CI consumer; requires GENET_PORTABLE_FIXTURE_DIR"]
 fn consume_linux_built_fixture_through_update_and_restart() {
     let directory = fixture_directory();
-    let component = fs::read(directory.join(COMPONENT_FILE)).unwrap();
-    let envelope: ArtifactEnvelope =
-        serde_json::from_slice(&fs::read(directory.join(ENVELOPE_FILE)).unwrap()).unwrap();
-    assert_eq!(envelope.module_id(), MODULE_ID);
-    assert_eq!(envelope.key_id(), KEY_ID);
-    assert_eq!(envelope.version(), PORTABLE_VERSION);
-    let candidate = SignedArtifact::new(envelope, component);
+    let candidate =
+        SignedArtifact::from_single_file(&fs::read(directory.join(COMPONENT_FILE)).unwrap())
+            .unwrap();
+    assert_eq!(candidate.envelope.module_id(), MODULE_ID);
+    assert_eq!(candidate.envelope.key_id(), KEY_ID);
+    assert_eq!(candidate.envelope.version(), PORTABLE_VERSION);
 
     let state = tempfile::tempdir().unwrap();
     let key = signing_key(7);
-    let fallback = signed_component(&key, "embedded", healthy_component(1));
+    let verifier = ArtifactVerifier::new(
+        MODULE_ID,
+        LOGIC_ABI_VERSION,
+        16 * 1024 * 1024,
+        [(KEY_ID.to_string(), key.verifying_key())],
+    )
+    .unwrap();
+    let fallback = signed_component_with_key_id(&key, KEY_ID, "embedded", healthy_component(1));
     let runtime = PlatformRuntime::open(
         state.path(),
-        verifier(&key, 4 * 1024 * 1024),
+        verifier.clone(),
         VmPolicy::new(LOGIC_ABI_VERSION),
         fallback.clone(),
     )
@@ -58,7 +67,7 @@ fn consume_linux_built_fixture_through_update_and_restart() {
 
     let reopened = PlatformRuntime::open(
         state.path(),
-        verifier(&key, 4 * 1024 * 1024),
+        verifier,
         VmPolicy::new(LOGIC_ABI_VERSION),
         fallback,
     )

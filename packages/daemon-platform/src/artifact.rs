@@ -16,6 +16,8 @@ const MAX_MODULE_ID_BYTES: usize = 128;
 const MAX_VERSION_BYTES: usize = 128;
 const MAX_KEY_ID_BYTES: usize = 64;
 const ED25519_SIGNATURE_BASE64_BYTES: usize = 86;
+const ARTIFACT_CUSTOM_SECTION: &str = "genehub.daemon.artifact.v1";
+const MAX_ENVELOPE_BYTES: usize = 16 * 1024;
 
 /// Signed, immutable metadata stored beside one Wasm component.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -138,6 +140,90 @@ impl SignedArtifact {
             envelope,
             component: component.into(),
         }
+    }
+
+    /// Encodes the signed envelope into a standard Wasm custom section.
+    ///
+    /// The returned bytes remain a valid Wasm module, so one immutable file can
+    /// be built and signed on Linux and passed directly through every native
+    /// platform's verifier. The signature covers the exact module prefix; the
+    /// custom section itself is deliberately excluded to avoid a circular
+    /// signature.
+    pub fn to_single_file(&self) -> Result<Vec<u8>> {
+        if self.envelope.size != self.component.len() as u64
+            || self.envelope.sha256 != sha256_hex(&self.component)
+        {
+            return Err(PlatformError::Verification(
+                "artifact envelope does not describe its component".to_string(),
+            ));
+        }
+        reject_existing_artifact_section(&self.component)?;
+        let envelope = serde_json::to_vec(&self.envelope)?;
+        if envelope.len() > MAX_ENVELOPE_BYTES {
+            return Err(PlatformError::Verification(
+                "artifact envelope exceeds the single-file limit".to_string(),
+            ));
+        }
+
+        let mut section = Vec::with_capacity(ARTIFACT_CUSTOM_SECTION.len() + envelope.len() + 10);
+        append_leb_u32(&mut section, ARTIFACT_CUSTOM_SECTION.len())?;
+        section.extend_from_slice(ARTIFACT_CUSTOM_SECTION.as_bytes());
+        section.extend_from_slice(&envelope);
+
+        let mut file = Vec::with_capacity(self.component.len() + section.len() + 6);
+        file.extend_from_slice(&self.component);
+        file.push(0); // WebAssembly custom section id.
+        append_leb_u32(&mut file, section.len())?;
+        file.extend_from_slice(&section);
+        Ok(file)
+    }
+
+    /// Decodes one self-contained signed Wasm file.
+    ///
+    /// Canonical re-encoding is required byte-for-byte. This rejects duplicate,
+    /// reordered or trailing metadata and makes the signed module prefix
+    /// unambiguous before trust verification runs.
+    pub fn from_single_file(file: &[u8]) -> Result<Self> {
+        let mut encoded_envelope = None;
+        for payload in wasmparser::Parser::new(0).parse_all(file) {
+            let payload = payload.map_err(|error| {
+                PlatformError::Verification(format!("invalid Wasm artifact: {error}"))
+            })?;
+            if let wasmparser::Payload::CustomSection(section) = payload {
+                if section.name() == ARTIFACT_CUSTOM_SECTION
+                    && encoded_envelope.replace(section.data()).is_some()
+                {
+                    return Err(PlatformError::Verification(
+                        "artifact contains duplicate signed metadata".to_string(),
+                    ));
+                }
+            }
+        }
+        let encoded_envelope = encoded_envelope.ok_or_else(|| {
+            PlatformError::Verification("artifact has no signed metadata section".to_string())
+        })?;
+        if encoded_envelope.len() > MAX_ENVELOPE_BYTES {
+            return Err(PlatformError::Verification(
+                "artifact envelope exceeds the single-file limit".to_string(),
+            ));
+        }
+        let envelope: ArtifactEnvelope = serde_json::from_slice(encoded_envelope)?;
+        let component_size = usize::try_from(envelope.size).map_err(|_| {
+            PlatformError::Verification("component length does not fit this host".to_string())
+        })?;
+        let component = file.get(..component_size).ok_or_else(|| {
+            PlatformError::Verification(
+                "signed component length exceeds the artifact file".to_string(),
+            )
+        })?;
+        let artifact = Self::new(envelope, component.to_vec());
+        let canonical = artifact.to_single_file()?;
+        if canonical != file {
+            return Err(PlatformError::Verification(
+                "artifact metadata is not the final canonical section".to_string(),
+            ));
+        }
+        Ok(artifact)
     }
 }
 
@@ -291,6 +377,40 @@ fn append_field(output: &mut Vec<u8>, value: &[u8]) -> Result<()> {
     })?;
     output.extend_from_slice(&length.to_be_bytes());
     output.extend_from_slice(value);
+    Ok(())
+}
+
+fn append_leb_u32(output: &mut Vec<u8>, value: usize) -> Result<()> {
+    let mut value = u32::try_from(value)
+        .map_err(|_| PlatformError::Verification("Wasm custom section is too large".to_string()))?;
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        output.push(byte);
+        if value == 0 {
+            return Ok(());
+        }
+    }
+}
+
+fn reject_existing_artifact_section(component: &[u8]) -> Result<()> {
+    for payload in wasmparser::Parser::new(0).parse_all(component) {
+        let payload = payload.map_err(|error| {
+            PlatformError::Verification(format!("invalid Wasm component: {error}"))
+        })?;
+        if matches!(
+            payload,
+            wasmparser::Payload::CustomSection(section)
+                if section.name() == ARTIFACT_CUSTOM_SECTION
+        ) {
+            return Err(PlatformError::Verification(
+                "component already contains signed artifact metadata".to_string(),
+            ));
+        }
+    }
     Ok(())
 }
 

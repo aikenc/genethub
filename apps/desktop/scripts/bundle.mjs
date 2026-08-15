@@ -24,6 +24,7 @@ let CHANNEL = "dev";
 let PRODUCT = "GeneHub Dev";
 let CLI_BINARY = "genet-dev";
 let AGENT_BINARY = "genet-agent-dev";
+const LOGIC_ARTIFACT = "daemon-logic.wasm";
 
 const envFile = join(repo, "scripts/channel.env");
 if (existsSync(envFile)) {
@@ -76,6 +77,14 @@ const exe = process.platform === "win32" ? ".exe" : "";
 for (const binary of [CLI_BINARY, AGENT_BINARY]) {
   cpSync(join(repo, "target/release", binary + exe), join(binDir, binary + exe));
 }
+// The Wasm application is compiled and signed exactly once by the Linux
+// producer job. Native installer builders only consume those bytes. A local
+// bundle may use `node scripts/daemon-logic.mjs` to create the same dev file.
+const logicSource = process.env.GENET_DAEMON_LOGIC_WASM || join(repo, "target", LOGIC_ARTIFACT);
+if (!existsSync(logicSource)) {
+  fail(`signed daemon logic is missing at ${logicSource}; run 'node scripts/daemon-logic.mjs' or set GENET_DAEMON_LOGIC_WASM`);
+}
+cpSync(logicSource, join(binDir, LOGIC_ARTIFACT));
 
 console.log(`==> building the installer (${bundles})`);
 run("npm", ["--prefix", join(here, ".."), "run", "build", "--", "--bundles", bundles], { shell: process.platform === "win32" });

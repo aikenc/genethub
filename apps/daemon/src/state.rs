@@ -43,6 +43,9 @@ pub struct AppState {
     pub remote: std::sync::OnceLock<SharedRemote>,
     /// How far the installer fetch has got, when one was asked for.
     pub updates: crate::updates::Downloader,
+    /// Hot-updatable portable application logic. `None` is allowed only for a
+    /// source-tree dev build before its guest artifact has been built.
+    pub logic: Option<Arc<crate::logic::LogicHost>>,
     /// The channel every connected client is listening on.
     ///
     /// The same one terminal output uses, which is why it is set from outside:
@@ -132,6 +135,8 @@ impl AppState {
 
         let (terminals, pty_rx) = Terminals::new();
         let updates_dir = paths.updates_dir();
+        let version = env!("CARGO_PKG_VERSION").to_string();
+        let logic = crate::logic::LogicHost::discover(&paths, &machine, &version)?;
 
         let state = Arc::new(AppState {
             paths,
@@ -142,12 +147,13 @@ impl AppState {
             sessions,
             workspaces,
             terminals,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version,
             token: uuid::Uuid::new_v4().simple().to_string(),
             devices,
             link: std::sync::OnceLock::new(),
             remote: std::sync::OnceLock::new(),
             updates: crate::updates::Downloader::new(updates_dir),
+            logic,
             fanout: std::sync::OnceLock::new(),
             models: RwLock::new(std::collections::HashMap::new()),
             shutdown: Arc::new(tokio::sync::Notify::new()),

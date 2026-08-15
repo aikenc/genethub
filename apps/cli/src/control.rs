@@ -78,7 +78,46 @@ pub async fn daemon(args: &[String]) -> i32 {
         "start" => no_extra(rest, start),
         "stop" => no_extra(rest, stop),
         "restart" => no_extra(rest, restart),
+        "logic" => logic(rest).await,
         _ => crate::usage(),
+    }
+}
+
+async fn logic(args: &[String]) -> i32 {
+    let request = match args {
+        [verb] if verb == "status" => genehub_proto::Request::DaemonLogicStatus,
+        [verb, path] if verb == "install" => {
+            let path = match std::fs::canonicalize(path) {
+                Ok(path) if path.is_file() => path,
+                Ok(path) => fail(
+                    "invalid_args",
+                    &format!("logic artifact is not a file: {}", path.display()),
+                    crate::EXIT_INVALID_ARGS,
+                ),
+                Err(error) => fail(
+                    "invalid_args",
+                    &format!("could not resolve logic artifact {path}: {error}"),
+                    crate::EXIT_INVALID_ARGS,
+                ),
+            };
+            genehub_proto::Request::DaemonLogicInstall {
+                path: path.display().to_string(),
+            }
+        }
+        [verb] if verb == "rollback" => genehub_proto::Request::DaemonLogicRollback,
+        _ => return crate::usage(),
+    };
+    let rpc = crate::rpc::Rpc::connect_or_exit().await;
+    match rpc.call(request).await {
+        Ok(genehub_proto::Reply::LogicModule(status)) => {
+            ok(serde_json::to_value(status).expect("logic status is serializable"))
+        }
+        Ok(other) => fail(
+            "protocol",
+            &format!("daemon returned an unexpected reply: {other:?}"),
+            EXIT_FAILED,
+        ),
+        Err(error) => fail("logic_update", &error.to_string(), EXIT_FAILED),
     }
 }
 

@@ -1,66 +1,83 @@
-# daemon-platform foundation
+# daemon-platform
 
-`genet-daemon-platform` is the native trust and lifecycle kernel for an
-updatable Rust/Wasm daemon application. It is intentionally not a second copy
-of daemon business logic.
+`genet-daemon-platform` is the native trust, Wasmtime and activation kernel for
+GeneHub's signed Rust/Wasm daemon application. It deliberately has no dependency
+on `genehub-proto`, sessions, adapters, devices, PTY or networking policy.
 
-This first migration increment is isolated from the existing daemon startup so
-the current product remains usable while the boundary is proven. It owns only:
+It owns only:
 
-- trusted release keys and signed artifact verification;
-- Wasmtime core-Wasm configuration, resource limits, compilation and instances;
-- side-by-side candidate health checks and atomic route replacement;
-- durable active/previous slots, rollback and embedded fallback recovery.
+- Ed25519 trust roots and verification before compilation;
+- the bounded Wasmtime engine, module cache, stores and instances;
+- one opaque byte-batch application ABI;
+- side-by-side candidate initialization, snapshot/restore and health checks;
+- durable active/previous artifact slots, atomic route replacement and recovery.
 
-Session, adapter, protocol, scheduling, networking, PTY and process policy stay
-out of this crate. Future native system ports must be narrow capabilities, and
-each port needs contract tests before application logic is moved behind it.
+The distributed artifact is one valid Wasm file. Its final custom section,
+`genehub.daemon.artifact.v1`, contains the signed canonical envelope; there is
+no sidecar manifest to lose or mismatch. The signature binds module id, version,
+ABI, byte length, SHA-256 and key id to the exact core-Wasm prefix.
 
-## Artifact and activation model
+## Source modules versus deployment files
 
-A signed envelope covers the module ID, semantic version, ABI version, byte
-length, component SHA-256 and signing key ID. Two identities are retained:
+The guest is a normal safe-Rust dependency graph:
 
-- the component digest deduplicates identical Wasm bytes;
-- the signed artifact ID distinguishes releases and signing-key rotations even
-  when their component bytes are identical.
+```text
+genehub-proto + daemon-logic-api
+              │
+daemon-common ├──> daemon-core ──> daemon-logic (cdylib entry)
+```
 
-Artifacts and envelopes are content addressed. Slot state is append-only and
-generation numbered. An installation follows this order:
+Those crates call one another as ordinary Rust. They statically link into one
+`daemon-logic.wasm`; they are not Wasm microservices and create no host calls.
+Additional business crates should join this graph without increasing the
+artifact count. A second deployable artifact requires a real independent state,
+rollback and release domain.
 
-1. verify signature, module, ABI, length and digest;
-2. compile, instantiate and run the guest self-check beside the live instance;
-3. durably persist the component and signed envelope;
-4. durably append the new active/previous slot generation;
-5. replace the in-memory route under a short write lock.
+## Local development
 
-A failure before step 5 leaves the old route serving. A runtime trap poisons
-that instance and attempts to route to the immediate previous artifact, then
-the embedded artifact. Corrupted content-addressed files are repaired from
-verified bytes; torn state generations are ignored during recovery.
+Build and development-sign the guest:
 
-## Integration-test contract
+```sh
+node scripts/daemon-logic.mjs
+```
 
-The integration suite executes real Wasmtime modules and covers:
+The result is `target/daemon-logic.wasm`. Run a source build against it with:
 
-- typed load/call, malformed modules, imports, missing or wrong exports;
-- ABI and self-check rejection, initialization and call fuel exhaustion;
-- memory limits, traps and permanent instance poisoning;
-- trusted signatures, tampering, metadata, key, module, ABI and size policy;
-- same-byte releases and signing-key rotation without component duplication;
-- first boot, installation, restart, explicit and automatic rollback;
-- rejected candidates, torn state, corrupt artifacts and embedded repair;
-- concurrent calls during replacement and concurrent installer linearization.
+```sh
+GENET_DAEMON_LOGIC_WASM="$PWD/target/daemon-logic.wasm" \
+  cargo run -p genet-cli -- daemon run
+```
 
-Run locally with:
+Inspect or replace the live module without restarting the native daemon:
+
+```sh
+genet-dev daemon logic status
+genet-dev daemon logic install /absolute/path/to/signed.wasm
+genet-dev daemon logic rollback
+```
+
+Release signing never uses the development key. The public Linux release job
+reads `GENET_DAEMON_LOGIC_SIGNING_KEY`, builds the guest once, appends the signed
+section once, and hands those exact bytes to every native packager.
+
+## Tests
 
 ```sh
 cargo test -p genet-daemon-platform --all-targets
+
+GENET_DAEMON_LOGIC_WASM="$PWD/target/daemon-logic.wasm" \
+  cargo test -p genet-daemon-platform --test application_integration -- --ignored
+
+GENET_DAEMON_LOGIC_WASM="$PWD/target/daemon-logic.wasm" \
+  cargo test -p genet-daemon --test logic_update_integration -- --ignored
+
+GENET_DAEMON_LOGIC_WASM="$PWD/target/daemon-logic.wasm" \
+  cargo test -p genet-cli --test logic_update_contract -- --ignored
 ```
 
-CI runs this suite natively on Linux, Windows and macOS so filesystem durability
-and atomic replacement paths are exercised on every supported desktop family.
-The release portability gate compiles one real Rust `wasm32-unknown-unknown`
-guest on Linux, signs it once, then hands those exact bytes to Linux x64/ARM64,
-Windows x64, and macOS x64/ARM64 runners for verification, installation, calls
-and restart recovery. Consumer jobs never rebuild the guest.
+CI additionally downloads one Linux-built signed file on Linux x64/ARM64,
+Windows x64 and macOS x64/ARM64 and runs the real VM, product-daemon and CLI
+update tests. Consumer jobs never rebuild guest bytes.
+
+The complete decision, current limits and migration gates are in
+[`docs/daemon-wasm.md`](../../docs/daemon-wasm.md).

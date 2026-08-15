@@ -1,11 +1,11 @@
 mod support;
 
-use genet_daemon_platform::{LogicVm, PlatformError, VmLimits, VmPolicy};
+use genet_daemon_platform::{LogicVm, PlatformError, VmLimits, VmPolicy, LOGIC_ABI_VERSION};
 use support::{component, healthy_component, ComponentSpec};
 
 #[test]
 fn real_core_wasm_module_loads_and_calls_through_typed_contract() {
-    let vm = LogicVm::new(VmPolicy::new(1)).unwrap();
+    let vm = LogicVm::new(VmPolicy::new(LOGIC_ABI_VERSION)).unwrap();
     let first = vm.instantiate(&healthy_component(1)).unwrap();
     let second = vm.instantiate(&healthy_component(10)).unwrap();
 
@@ -16,7 +16,7 @@ fn real_core_wasm_module_loads_and_calls_through_typed_contract() {
 
 #[test]
 fn malformed_missing_importing_and_incompatible_modules_are_rejected() {
-    let vm = LogicVm::new(VmPolicy::new(1)).unwrap();
+    let vm = LogicVm::new(VmPolicy::new(LOGIC_ABI_VERSION)).unwrap();
 
     assert!(matches!(
         vm.instantiate(b"not wasm"),
@@ -24,10 +24,10 @@ fn malformed_missing_importing_and_incompatible_modules_are_rejected() {
     ));
     assert!(matches!(
         vm.instantiate(&component(ComponentSpec {
-            abi: 2,
+            abi: LOGIC_ABI_VERSION as i32 + 1,
             ..ComponentSpec::default()
         })),
-        Err(PlatformError::Vm(message)) if message.contains("reports ABI 2")
+        Err(PlatformError::Vm(message)) if message.contains("reports ABI 3")
     ));
     assert!(matches!(
         vm.instantiate(&component(ComponentSpec {
@@ -55,7 +55,7 @@ fn malformed_missing_importing_and_incompatible_modules_are_rejected() {
 
 #[test]
 fn self_check_traps_and_bad_health_are_rejected_before_activation() {
-    let mut policy = VmPolicy::new(1);
+    let mut policy = VmPolicy::new(LOGIC_ABI_VERSION);
     policy.limits.fuel_per_call = 10_000;
     let vm = LogicVm::new(policy).unwrap();
 
@@ -85,7 +85,7 @@ fn self_check_traps_and_bad_health_are_rejected_before_activation() {
 
 #[test]
 fn fuel_and_memory_limits_trap_and_poison_the_instance() {
-    let mut policy = VmPolicy::new(1);
+    let mut policy = VmPolicy::new(LOGIC_ABI_VERSION);
     policy.limits = VmLimits {
         max_memory_bytes: 64 * 1024,
         fuel_per_call: 10_000,
@@ -130,7 +130,7 @@ fn fuel_and_memory_limits_trap_and_poison_the_instance() {
 
 #[test]
 fn initialization_is_fuel_limited_before_guest_code_can_become_active() {
-    let mut policy = VmPolicy::new(1);
+    let mut policy = VmPolicy::new(LOGIC_ABI_VERSION);
     policy.limits.fuel_per_call = 10_000;
     let vm = LogicVm::new(policy).unwrap();
     let result = vm.instantiate(&component(ComponentSpec {
@@ -146,8 +146,8 @@ fn initialization_is_fuel_limited_before_guest_code_can_become_active() {
 
 #[test]
 fn zero_resource_limits_are_rejected_at_engine_construction() {
-    for clear_limit in 0..7 {
-        let mut policy = VmPolicy::new(1);
+    for clear_limit in 0..8 {
+        let mut policy = VmPolicy::new(LOGIC_ABI_VERSION);
         match clear_limit {
             0 => policy.limits.max_memory_bytes = 0,
             1 => policy.limits.max_table_elements = 0,
@@ -156,6 +156,7 @@ fn zero_resource_limits_are_rejected_at_engine_construction() {
             4 => policy.limits.max_tables = 0,
             5 => policy.limits.max_wasm_stack_bytes = 0,
             6 => policy.limits.fuel_per_call = 0,
+            7 => policy.limits.max_message_bytes = 0,
             _ => unreachable!(),
         }
         assert!(matches!(LogicVm::new(policy), Err(PlatformError::Vm(_))));

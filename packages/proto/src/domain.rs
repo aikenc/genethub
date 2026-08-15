@@ -3,6 +3,22 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// The signed portable application currently routed by the native daemon.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct LogicModuleStatus {
+    pub loaded: bool,
+    #[ts(optional)]
+    pub version: Option<String>,
+    #[ts(optional)]
+    pub digest: Option<String>,
+    #[ts(optional)]
+    pub origin: Option<String>,
+    #[ts(type = "number")]
+    pub generation: u64,
+}
+
 /// What an agent can do, declared up front.
 ///
 /// The frontend renders controls from this rather than probing with calls that

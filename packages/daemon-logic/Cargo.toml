@@ -1,0 +1,17 @@
+[package]
+name = "genet-daemon-logic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Portable, hot-updatable GeneHub daemon application logic"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+genet-daemon-common = { path = "../daemon-common" }
+genet-daemon-core = { path = "../daemon-core" }
+genet-daemon-logic-api = { path = "../daemon-logic-api" }
+
+[lints.rust]
+unsafe_code = "allow"

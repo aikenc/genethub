@@ -1,0 +1,138 @@
+mod support;
+
+use std::fs;
+use std::path::PathBuf;
+
+use genehub_proto::{Reply, Request, TransportKind, PROTOCOL_VERSION};
+use genet_daemon_logic_api::{LogicBoot, LogicOutcome, LogicRequest};
+use genet_daemon_platform::{
+    LogicVm, PlatformRuntime, SignedArtifact, VmPolicy, LOGIC_ABI_VERSION,
+};
+use support::{signed_component, signing_key, verifier};
+
+#[test]
+#[ignore = "requires GENET_DAEMON_LOGIC_WASM built for wasm32-unknown-unknown"]
+fn real_rust_application_runs_statefully_and_restores_across_instances() {
+    let component = application_component();
+    let vm = LogicVm::new(VmPolicy::application(LOGIC_ABI_VERSION)).unwrap();
+    let first = vm.instantiate(&component).unwrap();
+    first.initialize(&boot_bytes()).unwrap();
+
+    let outcome = call(&first, Request::ConnectionIdentity);
+    assert!(matches!(
+        outcome,
+        LogicOutcome::Reply(reply) if matches!(*reply, Reply::Hello(_))
+    ));
+    let _ = call(&first, Request::AgentList);
+    let snapshot = first.snapshot().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&snapshot).unwrap()["handledRequests"],
+        2
+    );
+
+    let second = vm.instantiate(&component).unwrap();
+    second.initialize(&boot_bytes()).unwrap();
+    second.restore(&snapshot).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&second.snapshot().unwrap()).unwrap()
+            ["handledRequests"],
+        2
+    );
+    assert!(matches!(
+        call(&second, Request::UpdateDownload),
+        LogicOutcome::Error(_)
+    ));
+}
+
+#[test]
+#[ignore = "requires GENET_DAEMON_LOGIC_WASM built for wasm32-unknown-unknown"]
+fn real_application_single_file_hot_updates_without_restarting_runtime() {
+    let component = application_component();
+    let key = signing_key(7);
+    let fallback = signed_component(&key, "embedded", component.clone());
+    let packaged = fallback.to_single_file().unwrap();
+    let decoded = SignedArtifact::from_single_file(&packaged).unwrap();
+    assert_eq!(decoded.component, component);
+
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = PlatformRuntime::open_application(
+        directory.path(),
+        verifier(&key, 16 * 1024 * 1024),
+        VmPolicy::application(LOGIC_ABI_VERSION),
+        fallback,
+        boot_bytes(),
+    )
+    .unwrap();
+    assert!(matches!(
+        runtime_call(&runtime, Request::ConnectionIdentity),
+        LogicOutcome::Reply(reply) if matches!(*reply, Reply::Hello(_))
+    ));
+    let before = runtime.active().unwrap();
+
+    let installed = runtime
+        .install(signed_component(&key, "next", component))
+        .unwrap();
+    assert_eq!(installed.generation, before.generation + 1);
+    assert_eq!(installed.version, "next");
+    assert!(matches!(
+        runtime_call(&runtime, Request::AgentList),
+        LogicOutcome::ContinueNative
+    ));
+
+    let rolled_back = runtime.rollback().unwrap();
+    assert_eq!(rolled_back.version, "embedded");
+    assert!(matches!(
+        runtime_call(&runtime, Request::UpdateCheck),
+        LogicOutcome::Error(_)
+    ));
+}
+
+fn application_path() -> PathBuf {
+    std::env::var_os("GENET_DAEMON_LOGIC_WASM")
+        .map(PathBuf::from)
+        .expect("GENET_DAEMON_LOGIC_WASM must name the real Rust guest")
+}
+
+/// CI hands every OS the signed single-file distribution artifact. Local
+/// development may point at the raw compiler output, so accept both without
+/// changing the VM contract (the VM always receives core Wasm bytes).
+fn application_component() -> Vec<u8> {
+    let bytes = fs::read(application_path()).unwrap();
+    SignedArtifact::from_single_file(&bytes)
+        .map(|artifact| artifact.component)
+        .unwrap_or(bytes)
+}
+
+fn boot_bytes() -> Vec<u8> {
+    serde_json::to_vec(&LogicBoot {
+        daemon_version: "1.2.3".to_string(),
+        protocol_version: PROTOCOL_VERSION,
+        machine_id: "machine".to_string(),
+        fingerprint: "fingerprint".to_string(),
+        machine_name: "workstation".to_string(),
+        rtc_supported: true,
+    })
+    .unwrap()
+}
+
+fn request(request: Request) -> Vec<u8> {
+    serde_json::to_vec(&LogicRequest {
+        transport: TransportKind::Loopback,
+        request,
+    })
+    .unwrap()
+}
+
+fn call(instance: &genet_daemon_platform::LogicInstance, request_value: Request) -> LogicOutcome {
+    let output = instance.handle(&request(request_value)).unwrap();
+    serde_json::from_slice::<Result<LogicOutcome, String>>(&output)
+        .unwrap()
+        .unwrap()
+}
+
+fn runtime_call(runtime: &PlatformRuntime, request_value: Request) -> LogicOutcome {
+    let output = runtime.handle(&request(request_value)).unwrap();
+    serde_json::from_slice::<Result<LogicOutcome, String>>(&output)
+        .unwrap()
+        .unwrap()
+}

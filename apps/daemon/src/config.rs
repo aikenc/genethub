@@ -94,6 +94,12 @@ impl Paths {
         self.root.join("updates")
     }
 
+    /// Native VM state and signed logic slots. Business data remains in the
+    /// daemon's ordinary configuration and session stores.
+    pub fn logic_dir(&self) -> PathBuf {
+        self.root.join("logic")
+    }
+
     pub fn ensure(&self) -> Result<()> {
         ensure_real_directory(&self.root)
             .with_context(|| format!("creating data directory {}", self.root.display()))?;
@@ -104,6 +110,8 @@ impl Paths {
         restrict_dir_to_owner(&self.root)?;
         ensure_real_directory(&self.logs_dir())?;
         restrict_dir_to_owner(&self.logs_dir())?;
+        ensure_real_directory(&self.logic_dir())?;
+        restrict_dir_to_owner(&self.logic_dir())?;
         restrict_existing_sensitive_tree(&self.logs_dir())?;
         // Protect existing sensitive children too. Tightening a Windows parent
         // DACL does not retroactively rewrite ACLs inherited in older releases.

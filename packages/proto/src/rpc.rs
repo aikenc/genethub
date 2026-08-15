@@ -218,6 +218,19 @@ pub enum Request {
     #[serde(rename = "update.dismiss")]
     UpdateDismiss,
 
+    // -- portable daemon logic -------------------------------------------
+    /// Reports the signed Wasm application currently routed by this process.
+    #[serde(rename = "daemon.logic.status")]
+    DaemonLogicStatus,
+    /// Verifies, side-loads and atomically activates one local signed Wasm
+    /// file. The router permits this mutation only over loopback.
+    #[serde(rename = "daemon.logic.install", rename_all = "camelCase")]
+    DaemonLogicInstall { path: String },
+    /// Atomically routes back to the previous signed application, preserving
+    /// the current guest snapshot. Loopback-only like installation.
+    #[serde(rename = "daemon.logic.rollback")]
+    DaemonLogicRollback,
+
     // -- hub ---------------------------------------------------------------
     /// Whether this machine is paired, and how far a pairing in progress got.
     #[serde(rename = "hub.status")]
@@ -400,6 +413,7 @@ pub enum Reply {
     Log(LogTail),
     Update(UpdateStatus),
     UpdateDownload(UpdateDownload),
+    LogicModule(LogicModuleStatus),
     Session(SessionSummary),
     Sessions(Vec<SessionSummary>),
     Snapshot(SessionSnapshot),

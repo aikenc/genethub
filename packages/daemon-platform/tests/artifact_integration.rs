@@ -23,6 +23,52 @@ fn trusted_signature_hash_size_and_metadata_are_verified_together() {
 }
 
 #[test]
+fn signed_artifact_is_one_canonical_wasm_file() {
+    let key = signing_key(7);
+    let artifact = signed_component(&key, "1.2.3", healthy_component(1));
+    let file = artifact.to_single_file().unwrap();
+
+    // The package is still directly consumable as WebAssembly; the release
+    // metadata is a standard ignored custom section rather than a wrapper.
+    wasmparser::Validator::new().validate_all(&file).unwrap();
+    let decoded = SignedArtifact::from_single_file(&file).unwrap();
+    assert_eq!(decoded.envelope, artifact.envelope);
+    assert_eq!(decoded.component, artifact.component);
+    verifier(&key, 1024 * 1024).verify(&decoded).unwrap();
+}
+
+#[test]
+fn single_file_rejects_missing_duplicate_non_final_and_tampered_metadata() {
+    let key = signing_key(7);
+    let artifact = signed_component(&key, "1.2.3", healthy_component(1));
+    let file = artifact.to_single_file().unwrap();
+
+    assert!(matches!(
+        SignedArtifact::from_single_file(&artifact.component),
+        Err(PlatformError::Verification(message)) if message.contains("no signed metadata")
+    ));
+
+    let mut duplicate = file.clone();
+    duplicate.extend_from_slice(&file[artifact.component.len()..]);
+    assert!(matches!(
+        SignedArtifact::from_single_file(&duplicate),
+        Err(PlatformError::Verification(message)) if message.contains("duplicate")
+    ));
+
+    let mut trailing = file.clone();
+    // A valid unrelated empty custom section after the signature section.
+    trailing.extend_from_slice(&[0, 1, 0]);
+    assert!(matches!(
+        SignedArtifact::from_single_file(&trailing),
+        Err(PlatformError::Verification(message)) if message.contains("final canonical")
+    ));
+
+    let mut tampered = file;
+    *tampered.last_mut().unwrap() ^= 1;
+    assert!(SignedArtifact::from_single_file(&tampered).is_err());
+}
+
+#[test]
 fn signed_manifest_identity_changes_without_duplicating_component_identity() {
     let old_key = signing_key(7);
     let new_key = signing_key(9);

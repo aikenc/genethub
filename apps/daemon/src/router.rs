@@ -87,6 +87,19 @@ fn failed(error: anyhow::Error) -> Handled {
 }
 
 pub async fn handle(state: &Shared, transport: TransportKind, request: Request) -> Handled {
+    if let Some(logic) = state.logic.as_ref() {
+        match logic.route(transport, request.clone()) {
+            Ok(genet_daemon_logic_api::LogicOutcome::ContinueNative) => {}
+            Ok(genet_daemon_logic_api::LogicOutcome::Reply(reply)) => return Handled::ok(*reply),
+            Ok(genet_daemon_logic_api::LogicOutcome::Error(error)) => {
+                return Handled {
+                    reply: Err(error),
+                    effect: SideEffect::None,
+                }
+            }
+            Err(error) => return failed(error),
+        }
+    }
     match request {
         Request::ConnectionIdentity => Handled::ok(Reply::Hello(HelloResult {
             daemon_version: state.version.clone(),
@@ -390,6 +403,66 @@ pub async fn handle(state: &Shared, transport: TransportKind, request: Request) 
         Request::UpdateDownloadState => Handled::ok(Reply::UpdateDownload(state.updates.state())),
 
         Request::UpdateDismiss => Handled::ok(Reply::UpdateDownload(state.updates.dismiss(state))),
+
+        Request::DaemonLogicStatus => match state.logic.as_ref() {
+            Some(logic) => match logic.status() {
+                Ok(status) => Handled::ok(Reply::LogicModule(status)),
+                Err(error) => failed(error),
+            },
+            None => Handled::ok(Reply::LogicModule(genehub_proto::LogicModuleStatus {
+                loaded: false,
+                version: None,
+                digest: None,
+                origin: None,
+                generation: 0,
+            })),
+        },
+
+        Request::DaemonLogicInstall { path } => {
+            if transport != TransportKind::Loopback {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "daemon logic may only be installed over loopback",
+                );
+            }
+            let Some(logic) = state.logic.clone() else {
+                return Handled::err(
+                    ErrorCode::Unsupported,
+                    "no trusted daemon logic runtime is active",
+                );
+            };
+            match tokio::task::spawn_blocking(move || logic.install_file(Path::new(&path))).await {
+                Ok(Ok(_)) => match state.logic.as_ref().unwrap().status() {
+                    Ok(status) => Handled::ok(Reply::LogicModule(status)),
+                    Err(error) => failed(error),
+                },
+                Ok(Err(error)) => failed(error),
+                Err(error) => failed(anyhow::anyhow!("logic installer stopped: {error}")),
+            }
+        }
+
+        Request::DaemonLogicRollback => {
+            if transport != TransportKind::Loopback {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "daemon logic may only be rolled back over loopback",
+                );
+            }
+            let Some(logic) = state.logic.clone() else {
+                return Handled::err(
+                    ErrorCode::Unsupported,
+                    "no trusted daemon logic runtime is active",
+                );
+            };
+            match tokio::task::spawn_blocking(move || logic.rollback()).await {
+                Ok(Ok(_)) => match state.logic.as_ref().unwrap().status() {
+                    Ok(status) => Handled::ok(Reply::LogicModule(status)),
+                    Err(error) => failed(error),
+                },
+                Ok(Err(error)) => failed(error),
+                Err(error) => failed(anyhow::anyhow!("logic rollback stopped: {error}")),
+            }
+        }
 
         Request::SettingsForgetProvider { provider_id } => {
             match state.forget_provider(&provider_id).await {

@@ -1,0 +1,13 @@
+[package]
+name = "genet-daemon-logic-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Portable byte-batch contract shared by the GeneHub daemon platform and Wasm app"
+
+[dependencies]
+genehub-proto = { path = "../proto" }
+serde.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

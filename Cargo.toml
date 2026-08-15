@@ -5,6 +5,11 @@ members = [
   "apps/cli",
   "apps/daemon",
   "packages/daemon-platform",
+  "packages/daemon-logic-api",
+  "packages/daemon-common",
+  "packages/daemon-core",
+  "packages/daemon-logic",
+  "packages/daemon-artifact",
   "packages/proto",
   "testing",
 ]
@@ -48,11 +53,33 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "process", "sync", "time", "fs", "signal"] }
 ts-rs = "10"
 uuid = { version = "1", features = ["v4"] }
-wasmtime = { version = "47.0.3", default-features = false, features = ["anyhow", "cranelift", "runtime", "std"] }
+wasmtime = { version = "47.0.3", default-features = false, features = ["anyhow", "runtime", "std", "winch"] }
+wasmparser = "0.252"
 
 [profile.release]
 opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+panic = "abort"
+
+# The hot-updatable daemon app is not CPU-bound. These profiles deliberately
+# optimize edit-to-artifact latency instead of paying the workspace's expensive
+# size-oriented full LTO on every logic release.
+[profile.daemon-logic-dev]
+inherits = "dev"
+opt-level = 0
+debug = false
+strip = "symbols"
+incremental = true
+codegen-units = 256
+panic = "abort"
+
+[profile.daemon-logic-release]
+inherits = "release"
+opt-level = 1
+lto = false
+codegen-units = 16
+strip = "symbols"
+incremental = true
 panic = "abort"

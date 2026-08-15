@@ -14,6 +14,7 @@ pub mod git;
 pub mod hub;
 pub mod lifecycle;
 pub mod link;
+pub mod logic;
 pub mod logs;
 pub mod provider;
 pub mod pty;

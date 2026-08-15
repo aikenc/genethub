@@ -14,8 +14,11 @@ sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 wasmtime.workspace = true
+wasmparser.workspace = true
 
 [dev-dependencies]
+genehub-proto = { path = "../proto" }
+genet-daemon-logic-api = { path = "../daemon-logic-api" }
 wat = "1"
 
 [lints.rust]

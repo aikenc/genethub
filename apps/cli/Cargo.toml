@@ -24,4 +24,6 @@ tokio.workspace = true
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
+genet-daemon-platform = { path = "../../packages/daemon-platform" }
 tempfile = "3"

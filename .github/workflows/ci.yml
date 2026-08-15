@@ -96,12 +96,13 @@ jobs:
                 rust=true
                 daemon_platform=true
                 ;;
-              packages/daemon-platform/*)
+              packages/daemon-platform/*|packages/daemon-logic/*|packages/daemon-logic-api/*|packages/daemon-common/*|packages/daemon-core/*|packages/daemon-artifact/*)
                 rust=true
                 daemon_platform=true
                 ;;
-              apps/daemon/*|apps/cli/*|apps/agent/*|apps/proto/*|testing/*)
+              apps/daemon/*|apps/cli/*|apps/agent/*|packages/proto/*|testing/*)
                 rust=true
+                daemon_platform=true
                 ;;
               apps/relay/*)
                 relay=true
@@ -134,7 +135,7 @@ jobs:
           if [ "$rust" = true ]; then
             for f in "${files[@]}"; do
               case "$f" in
-                apps/daemon/*|apps/cli/*|packages/daemon-platform/*|Cargo.toml|Cargo.lock)
+                apps/daemon/*|apps/cli/*|packages/daemon-platform/*|packages/daemon-logic/*|packages/daemon-logic-api/*|packages/daemon-common/*|packages/daemon-core/*|packages/daemon-artifact/*|packages/proto/*|Cargo.toml|Cargo.lock)
                   desktop=true
                   break
                   ;;
@@ -309,17 +310,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$GENET_PORTABLE_FIXTURE_DIR"
-          rustc \
-            --edition=2021 \
-            --target=wasm32-unknown-unknown \
-            --crate-type=cdylib \
-            -C opt-level=s \
-            -C lto=fat \
-            -C codegen-units=1 \
-            -C panic=abort \
-            -C strip=symbols \
-            packages/daemon-platform/tests/fixtures/portable_guest.rs \
-            -o "$GENET_PORTABLE_FIXTURE_DIR/daemon-logic.wasm"
+          cargo build -p genet-daemon-logic \
+            --target wasm32-unknown-unknown \
+            --profile daemon-logic-release
+          cargo run --quiet -p genet-daemon-artifact -- pack-dev \
+            target/wasm32-unknown-unknown/daemon-logic-release/genet_daemon_logic.wasm \
+            "$GENET_PORTABLE_FIXTURE_DIR/daemon-logic.wasm" \
+            portable-linux-ci
           cargo test -p genet-daemon-platform \
             --test portable_artifact_handoff \
             write_linux_portable_fixture \
@@ -369,6 +366,27 @@ jobs:
           name: daemon-platform-portable-fixture
           path: ${{ runner.temp }}/daemon-platform-fixture
       - run: cargo test -p genet-daemon-platform --all-targets
+      - name: Run the real application ABI and state-transfer tests
+        env:
+          GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-platform-fixture/daemon-logic.wasm
+        run: >-
+          cargo test -p genet-daemon-platform
+          --test application_integration
+          -- --ignored
+      - name: Start the product daemon and hot-update it without restart
+        env:
+          GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-platform-fixture/daemon-logic.wasm
+        run: >-
+          cargo test -p genet-daemon
+          --test logic_update_integration
+          -- --ignored
+      - name: Drive the resident daemon through the public logic-update CLI
+        env:
+          GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-platform-fixture/daemon-logic.wasm
+        run: >-
+          cargo test -p genet-cli
+          --test logic_update_contract
+          -- --ignored
       - name: Install the exact Linux-built artifact, call it, and reopen it
         env:
           GENET_PORTABLE_FIXTURE_DIR: ${{ runner.temp }}/daemon-platform-fixture
