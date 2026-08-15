@@ -37,7 +37,7 @@ pub const ARTIFACT_FILE_NAME: &str = "daemon-logic.wasm";
 pub const ARTIFACT_PATH_ENV: &str = "GENET_DAEMON_LOGIC_WASM";
 
 pub struct LogicHost {
-    runtime: PlatformRuntime,
+    runtime: Arc<PlatformRuntime>,
     system: CapabilityBroker,
     next_call_id: AtomicU64,
     execution: Mutex<()>,
@@ -155,7 +155,7 @@ impl LogicHost {
         let events = system.take_events()?;
         let broker = CapabilityBroker::start(system);
         let capability = broker.clone();
-        let runtime = PlatformRuntime::open_application(
+        let runtime = Arc::new(PlatformRuntime::open_application(
             paths.logic_dir(),
             verifier,
             // WASIp1 gives the guest one cross-platform clock/random ABI. It
@@ -166,7 +166,7 @@ impl LogicHost {
                 .with_capability_handler(move |request: &[u8]| capability.handle_bytes(request)),
             artifact,
             boot,
-        )?;
+        )?);
         tracing::info!(
             path = %artifact_path.display(),
             version = %runtime.active()?.version,
@@ -288,7 +288,7 @@ impl LogicHost {
             if turns > 128 {
                 anyhow::bail!("portable event handling exceeded the capability continuation limit");
             }
-            let mut output = self.dispatch(&input)?;
+            let mut output = self.dispatch_blocking(input).await?;
             if !output.completions.is_empty() || !output.platform_completions.is_empty() {
                 anyhow::bail!("a resource event unexpectedly completed a client request");
             }
@@ -338,7 +338,7 @@ impl LogicHost {
             if turns > 128 {
                 anyhow::bail!("portable platform call exceeded the capability continuation limit");
             }
-            let mut output = self.dispatch(&input)?;
+            let mut output = self.dispatch_blocking(input).await?;
             if !output.completions.is_empty() {
                 anyhow::bail!("portable logic completed an RPC while handling platform security");
             }
@@ -527,9 +527,9 @@ impl LogicHost {
             .clone())
     }
 
-    fn dispatch(&self, input: &LogicInput) -> Result<LogicOutput> {
+    fn dispatch_with(runtime: &PlatformRuntime, input: &LogicInput) -> Result<LogicOutput> {
         let input = encode_message("logic input", input).map_err(anyhow::Error::msg)?;
-        let output = self.runtime.handle(&input)?;
+        let output = runtime.handle(&input)?;
         decode_message::<std::result::Result<LogicOutput, String>>(
             "logic output",
             &output,
@@ -539,9 +539,9 @@ impl LogicHost {
         .map_err(anyhow::Error::msg)
     }
 
-    async fn dispatch_blocking(self: &Arc<Self>, input: LogicInput) -> Result<LogicOutput> {
-        let host = Arc::clone(self);
-        tokio::task::spawn_blocking(move || host.dispatch(&input))
+    async fn dispatch_blocking(&self, input: LogicInput) -> Result<LogicOutput> {
+        let runtime = Arc::clone(&self.runtime);
+        tokio::task::spawn_blocking(move || Self::dispatch_with(&runtime, &input))
             .await
             .context("portable Wasm worker stopped")?
     }
@@ -651,43 +651,43 @@ fn migrate_legacy_secure_file(source: &Path, destination: &Path) -> Result<()> {
 impl CapabilityBroker {
     fn start(system: Arc<SystemHost>) -> Self {
         let (commands, mut receiver) = tokio::sync::mpsc::channel::<BrokerCommand>(16);
+        // The bridge has its own OS thread because Wasm imports are
+        // synchronous, but capability futures must stay on the daemon's
+        // runtime. A private Tokio runtime here would make every long-lived
+        // task spawned by a capability (Fabric uplinks in particular) belong
+        // to the bridge thread. If such a task re-entered the guest it would
+        // wait for the same bridge thread to service its next import.
+        let runtime = tokio::runtime::Handle::current();
         let services = Arc::new(std::sync::OnceLock::new());
         let thread_services = services.clone();
         let thread_system = Arc::clone(&system);
         let thread = std::thread::Builder::new()
             .name("genehub-system-capabilities".to_string())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("building capability runtime");
-                runtime.block_on(async move {
-                    while let Some(command) = receiver.recv().await {
-                        match command {
-                            BrokerCommand::Execute { batch, reply } => {
-                                let results = execute_capability_batch(
-                                    &thread_system,
-                                    &thread_services,
-                                    batch,
-                                )
-                                .await;
-                                match reply {
-                                    BrokerReply::Blocking(reply) => {
-                                        let _ = reply.send(results);
-                                    }
-                                    BrokerReply::Async(reply) => {
-                                        let _ = reply.send(results);
-                                    }
+                while let Some(command) = receiver.blocking_recv() {
+                    match command {
+                        BrokerCommand::Execute { batch, reply } => {
+                            let results = runtime.block_on(execute_capability_batch(
+                                &thread_system,
+                                &thread_services,
+                                batch,
+                            ));
+                            match reply {
+                                BrokerReply::Blocking(reply) => {
+                                    let _ = reply.send(results);
+                                }
+                                BrokerReply::Async(reply) => {
+                                    let _ = reply.send(results);
                                 }
                             }
-                            BrokerCommand::Shutdown { reply } => {
-                                thread_system.shutdown().await;
-                                let _ = reply.send(());
-                                break;
-                            }
+                        }
+                        BrokerCommand::Shutdown { reply } => {
+                            runtime.block_on(thread_system.shutdown());
+                            let _ = reply.send(());
+                            break;
                         }
                     }
-                });
+                }
             })
             .expect("starting capability runtime");
         Self {
