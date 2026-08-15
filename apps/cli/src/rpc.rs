@@ -109,7 +109,7 @@ impl Rpc {
         let (mut socket, _) = tokio_tungstenite::connect_async(&admission.url)
             .await
             .map_err(|_| ConnectError::Unavailable(dial_failure(endpoint_file.port)))?;
-        let nonce = genet_daemon::devices::random_token();
+        let nonce = genet_daemon::channel_auth::random_token();
         let context = "loopback";
         let hello = PeerHello {
             version: genehub_proto::DATA_PLANE_VERSION,

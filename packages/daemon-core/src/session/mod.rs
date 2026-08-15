@@ -56,6 +56,8 @@ struct LiveSession {
     lock_resource_id: u64,
     seq: u64,
     replay: VecDeque<SequencedEvent>,
+    #[serde(default = "default_replay_window")]
+    replay_window: usize,
     pending_permissions: Vec<genehub_proto::PermissionRequest>,
     process: Option<AgentProcess>,
     active_items: Vec<TimelineItem>,
@@ -333,6 +335,7 @@ impl Sessions {
                         lock_resource_id,
                         seq: 0,
                         replay: VecDeque::new(),
+                        replay_window: config.replay_window.max(1),
                         pending_permissions: Vec::new(),
                         process: None,
                         active_items: Vec::new(),
@@ -927,6 +930,7 @@ impl Sessions {
                 lock_resource_id,
                 seq: 0,
                 replay: VecDeque::new(),
+                replay_window: config.replay_window.max(1),
                 pending_permissions: Vec::new(),
                 process: None,
                 active_items: Vec::new(),
@@ -1294,6 +1298,7 @@ impl Sessions {
                             lock_resource_id,
                             seq: 0,
                             replay: VecDeque::new(),
+                            replay_window: config.replay_window.max(1),
                             process: None,
                             active_items: Vec::new(),
                             active_turn: None,
@@ -2519,9 +2524,14 @@ fn publish(live: &mut LiveSession, event: SessionEvent) -> Publication {
 }
 
 fn trim_replay(live: &mut LiveSession) {
-    while live.replay.len() > 2048 || encoded_len(&live.replay) > REPLAY_BYTES {
+    while live.replay.len() > live.replay_window.max(1) || encoded_len(&live.replay) > REPLAY_BYTES
+    {
         live.replay.pop_front();
     }
+}
+
+fn default_replay_window() -> usize {
+    2048
 }
 
 fn encoded_len<T: Serialize>(value: &T) -> usize {

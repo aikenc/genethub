@@ -1337,8 +1337,8 @@ async fn reconnecting_replays_the_gap_without_losing_or_repeating_events() {
 #[tokio::test]
 async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
     let journey = Journey::start_with(genehub_testing::Mode::Mock, |config| {
-        // Small enough that a single turn overflows it.
-        config.replay_window = 2;
+        // Small enough that the portable Agent turn's two events overflow it.
+        config.replay_window = 1;
     })
     .await
     .expect("journey starts");
@@ -1366,11 +1366,15 @@ async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
         .unwrap()
     {
         Reply::Subscribed {
-            snapshot, reset, ..
+            snapshot,
+            replayed,
+            reset,
         } => {
             assert!(
                 reset,
-                "a gap we cannot fill must be admitted, not papered over"
+                "a gap we cannot fill must be admitted, not papered over (snapshot seq {}, replayed {:?})",
+                snapshot.seq,
+                replayed.iter().map(|event| event.seq).collect::<Vec<_>>()
             );
             assert!(
                 !snapshot.items.is_empty(),

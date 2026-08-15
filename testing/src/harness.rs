@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use genehub_proto::{Reply, Request, WorkspaceInfo};
-use genet_daemon::config::{Config, Paths, ProviderConfig};
+use genet_daemon::config::Paths;
 use genet_daemon::Daemon;
+use serde::Serialize;
 
 use crate::client::Client;
 use crate::mock_llm::MockLlm;
@@ -56,6 +57,48 @@ pub struct ModelBackend {
     pub api_key: String,
     /// Provider-qualified, as the daemon reports it: `provider/model`.
     pub model_id: String,
+}
+
+/// Complete first-start fixture consumed by both sides of the split.
+///
+/// Native startup reads only `port` and `lan_enabled`; the copy-once migration
+/// places the same JSON in the portable store, where the signed application
+/// reads provider and replay policy. Keeping this as a test-only wire fixture
+/// prevents journeys from reaching into either implementation's Rust objects.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Config {
+    pub port: u16,
+    pub lan_enabled: bool,
+    pub agents: AgentsConfig,
+    pub replay_window: usize,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentsConfig {
+    pub providers: std::collections::BTreeMap<String, ProviderConfig>,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfig {
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub label: Option<String>,
+    pub dialect: Option<String>,
+    pub models: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            port: 0,
+            lan_enabled: false,
+            agents: AgentsConfig::default(),
+            replay_window: 2048,
+        }
+    }
 }
 
 impl ModelBackend {
@@ -211,7 +254,10 @@ impl Journey {
             },
         );
         adjust(&mut config);
-        config.save(&data_dir.join("config.json"))?;
+        std::fs::write(
+            data_dir.join("config.json"),
+            serde_json::to_vec_pretty(&config)?,
+        )?;
 
         // The daemon finds the agent next to its own binary in production; in a
         // test it lives in the cargo target directory instead. Both the binary

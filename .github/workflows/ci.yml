@@ -219,6 +219,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -247,6 +248,13 @@ jobs:
       # they did on every cold cache while a warm one kept the job green: a false
       # pass that survived until a release tag.
       - run: cargo build --workspace --bins
+      # The product daemon has no native business fallback. Journeys therefore
+      # run against the same signed Rust/Wasm application used by the dedicated
+      # cross-platform matrix instead of silently exercising deleted code.
+      - name: Build the signed portable daemon application for journeys
+        run: |
+          node scripts/daemon-logic.mjs
+          echo "GENET_DAEMON_LOGIC_WASM=$GITHUB_WORKSPACE/target/daemon-logic.wasm" >> "$GITHUB_ENV"
       # Journeys default to the mock model, so this stays offline and free.
       #
       # The failure list is repeated as annotations because reading a job's log
