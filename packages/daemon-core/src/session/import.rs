@@ -255,6 +255,7 @@ impl Sessions {
             project_key: workspace_project_key(workspace),
             root_handle: folder.root_handle.clone(),
             root: folder.root.clone(),
+            cwd_path: String::new(),
             agent_id: definition.id,
             title: history
                 .title

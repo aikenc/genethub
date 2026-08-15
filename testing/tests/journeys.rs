@@ -2335,7 +2335,7 @@ async fn a_log_request_cannot_reach_outside_the_log_directory() {
 /// landed — not what the session metadata claims.
 #[tokio::test]
 async fn a_session_starts_where_it_was_told_to_and_cannot_be_told_to_leave() {
-    let journey = Journey::start().await.expect("journey starts");
+    let mut journey = Journey::start().await.expect("journey starts");
     mock_only!(journey);
     std::fs::create_dir_all(journey.project().join("services/api")).expect("subdirectory exists");
 
@@ -2387,6 +2387,49 @@ async fn a_session_starts_where_it_was_told_to_and_cannot_be_told_to_leave() {
     assert!(
         !journey.file_exists("result.txt"),
         "nothing should have been written at the workspace root"
+    );
+
+    std::fs::remove_file(journey.project().join("services/api/result.txt"))
+        .expect("the first result is removed before restart");
+    journey
+        .restart_daemon()
+        .await
+        .expect("the daemon restarts with the same session store");
+    journey
+        .client
+        .call(Request::Subscribe {
+            session_id: summary.id.clone(),
+            since_seq: None,
+            expand_last_round: false,
+        })
+        .await
+        .expect("the subdirectory session reopens after restart");
+    script_the_task(&journey).await;
+    journey
+        .send(&summary.id, TASK)
+        .await
+        .expect("the reopened session accepts another prompt");
+    let events = journey
+        .client
+        .drain_turn()
+        .await
+        .expect("the restarted turn ends");
+    assert!(
+        events.completed(),
+        "the restarted turn should complete; saw {:?}",
+        events.failure()
+    );
+    assert_eq!(
+        journey
+            .read_file("services/api/result.txt")
+            .as_deref()
+            .map(str::trim),
+        Some("DONE"),
+        "the persisted session cwd survives a complete daemon restart"
+    );
+    assert!(
+        !journey.file_exists("result.txt"),
+        "restart must not reset the session cwd to the workspace root"
     );
 
     // Refusing beats clamping to the root: a task quietly run somewhere else

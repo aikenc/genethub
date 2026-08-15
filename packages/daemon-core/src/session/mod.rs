@@ -45,7 +45,7 @@ use crate::CapabilityExecutor;
 // 5 adds fork lineage and reconstructed context; 6 adds imported origin and
 // read-only continuation. Older builds must not reopen either as a blank
 // writable Agent context, so these are correctness-breaking format changes.
-pub(crate) const SESSION_FORMAT: u32 = 6;
+pub(crate) const SESSION_FORMAT: u32 = 7;
 const META_BYTES: u32 = 1024 * 1024;
 const CHAT_BYTES: u32 = 3 * 1024 * 1024;
 const FILE_CHUNK_BYTES: u32 = 1024 * 1024;
@@ -109,6 +109,13 @@ struct SessionMeta {
     root_handle: String,
     #[serde(default, rename = "cwd", alias = "root")]
     root: String,
+    /// Forward-slash relative path from `root_handle` to `root`.
+    ///
+    /// The native path remains useful when talking to third-party Agent CLIs,
+    /// while this locator-safe spelling is what lets the platform start the
+    /// process in the requested subdirectory on every host OS.
+    #[serde(default)]
+    cwd_path: String,
     agent_id: String,
     title: Option<String>,
     model_id: Option<String>,
@@ -599,7 +606,8 @@ impl Sessions {
                 let definition = agents::require(boot, config, &agent_id)?;
                 let workspace = workspace(config, &workspace_id)?;
                 let (id, now) = identity_and_time(executor, next)?;
-                let (root_handle, root) = resolve_session_cwd(workspace, cwd, executor, next)?;
+                let (root_handle, root, cwd_path) =
+                    resolve_session_cwd(workspace, cwd, executor, next)?;
                 let meta = SessionMeta {
                     format: SESSION_FORMAT,
                     id,
@@ -607,6 +615,7 @@ impl Sessions {
                     project_key: workspace_project_key(workspace),
                     root_handle,
                     root,
+                    cwd_path,
                     agent_id: definition.id,
                     title: normalize_title(title),
                     model_id,
@@ -1624,6 +1633,7 @@ impl Sessions {
 
         if let Err(error) = prompt_process(
             self.live_mut(session_id)?,
+            config,
             &turn_id,
             agent_text,
             &attachments,
@@ -1809,12 +1819,18 @@ impl Sessions {
             .folders
             .first()
             .ok_or_else(|| bad_request("destination workspace has no folders"))?;
-        let (root_handle, root) = if destination_workspace_id == source_meta.workspace_id {
-            (source_meta.root_handle.clone(), source_meta.root.clone())
+        let (root_handle, root, cwd_path) = if destination_workspace_id == source_meta.workspace_id
+        {
+            (
+                source_meta.root_handle.clone(),
+                source_meta.root.clone(),
+                session_cwd_path(config, &source_meta)?,
+            )
         } else {
             (
                 destination_folder.root_handle.clone(),
                 destination_folder.root.clone(),
+                String::new(),
             )
         };
         let (persist, method, context, context_seed) = if native {
@@ -1871,6 +1887,7 @@ impl Sessions {
             project_key: workspace_project_key(destination_workspace),
             root_handle,
             root,
+            cwd_path,
             agent_id: target.agent_id,
             title,
             model_id,
@@ -2066,6 +2083,7 @@ impl Sessions {
             project_key: workspace_project_key(workspace),
             root_handle: folder.root_handle.clone(),
             root: folder.root.clone(),
+            cwd_path: String::new(),
             agent_id: target.agent_id,
             title: transfer
                 .title
@@ -2319,6 +2337,7 @@ impl Sessions {
             self.live_mut(session_id)?.process = Some(process);
             if let Err(error) = prompt_process(
                 self.live_mut(session_id)?,
+                config,
                 &turn_id,
                 continuation.prompt,
                 &[],
@@ -3112,6 +3131,8 @@ fn start_process(
 ) -> Result<AgentProcess, ProtocolError> {
     let mut args = definition.args().to_vec();
     let mut env = std::collections::BTreeMap::new();
+    let workspace_root = workspace_root_for_meta(config, &live.meta)?;
+    let cwd_path = session_cwd_path(config, &live.meta)?;
     let product_guidance = artifact_links::guidance();
     let tagged_guidance = artifact_links::tagged_guidance();
     let choices = launch_choices(&definition.kind, &live.meta, catalog);
@@ -3198,11 +3219,11 @@ fn start_process(
                     .home_env
                     .clone()
                     .unwrap_or_else(|| "GENET_AGENT_HOME".to_string()),
-                native_child_path(&live.meta, &home),
+                native_child_path(workspace_root, &home),
             );
             args.extend([
                 "--session".to_string(),
-                native_child_path(&live.meta, &format!("{home}/session.jsonl")),
+                native_child_path(workspace_root, &format!("{home}/session.jsonl")),
             ]);
             Driver::Genet(genet::Driver::default())
         }
@@ -3252,6 +3273,7 @@ fn start_process(
                 live,
                 turn_id,
                 attachments,
+                workspace_root,
                 executor,
                 next,
             )?);
@@ -3292,7 +3314,7 @@ fn start_process(
                 root: FileRoot::Workspace {
                     handle: live.meta.root_handle.clone(),
                 },
-                path: String::new(),
+                path: cwd_path,
             }),
             confinement: genet_daemon_logic_api::ConfinementMode::None,
             capture_stdout: true,
@@ -3317,13 +3339,15 @@ fn start_process(
 
 fn prompt_process(
     live: &mut LiveSession,
+    config: &Config,
     turn_id: &str,
     text: String,
     attachments: &[genehub_proto::Attachment],
     executor: &mut impl CapabilityExecutor,
     next: &mut u64,
 ) -> Result<(), ProtocolError> {
-    let attachment_paths = codex_attachment_paths(&live.meta, turn_id, attachments);
+    let workspace_root = workspace_root_for_meta(config, &live.meta)?;
+    let attachment_paths = codex_attachment_paths(&live.meta, workspace_root, turn_id, attachments);
     let process = live
         .process
         .as_mut()
@@ -3434,6 +3458,7 @@ fn opencode_attachments(
     live: &LiveSession,
     turn_id: &str,
     attachments: &[genehub_proto::Attachment],
+    workspace_root: &str,
     executor: &mut impl CapabilityExecutor,
     next: &mut u64,
 ) -> Result<Vec<String>, ProtocolError> {
@@ -3479,7 +3504,7 @@ fn opencode_attachments(
         }))?;
         args.extend([
             "--file".to_string(),
-            native_child_path(&live.meta, &relative),
+            native_child_path(workspace_root, &relative),
         ]);
     }
     Ok(args)
@@ -3555,20 +3580,25 @@ fn codex_attachment_relatives(
 
 fn codex_attachment_paths(
     meta: &SessionMeta,
+    workspace_root: &str,
     turn_id: &str,
     attachments: &[genehub_proto::Attachment],
 ) -> Vec<String> {
     codex_attachment_relatives(meta, turn_id, attachments)
         .into_iter()
-        .map(|relative| native_child_path(meta, &relative))
+        .map(|relative| native_child_path(workspace_root, &relative))
         .collect()
 }
 
-fn native_child_path(meta: &SessionMeta, relative: &str) -> String {
-    let separator = if meta.root.contains('\\') { '\\' } else { '/' };
+fn native_child_path(workspace_root: &str, relative: &str) -> String {
+    let separator = if workspace_root.contains('\\') {
+        '\\'
+    } else {
+        '/'
+    };
     format!(
         "{}{}{}",
-        meta.root.trim_end_matches(['/', '\\']),
+        workspace_root.trim_end_matches(['/', '\\']),
         separator,
         relative.replace('/', &separator.to_string())
     )
@@ -4660,12 +4690,51 @@ fn workspace<'a>(config: &'a Config, id: &str) -> Result<&'a WorkspaceEntry, Pro
         .ok_or_else(|| not_found(format!("no such workspace: {id}")))
 }
 
+fn workspace_root_for_meta<'a>(
+    config: &'a Config,
+    meta: &SessionMeta,
+) -> Result<&'a str, ProtocolError> {
+    let workspace = workspace(config, &meta.workspace_id)?;
+    workspace
+        .folders
+        .iter()
+        .find(|folder| folder.root_handle == meta.root_handle)
+        .map(|folder| folder.root.as_str())
+        .ok_or_else(|| internal("session workspace root handle is no longer registered"))
+}
+
+fn session_cwd_path(config: &Config, meta: &SessionMeta) -> Result<String, ProtocolError> {
+    if !meta.cwd_path.is_empty() {
+        return Ok(meta.cwd_path.clone());
+    }
+    relative_native_path(workspace_root_for_meta(config, meta)?, &meta.root).ok_or_else(|| {
+        conflict("session working directory is outside its registered workspace root")
+    })
+}
+
+/// Recovers the locator-safe spelling for metadata written before format 7.
+/// New metadata stores this value directly; string recovery only exists so an
+/// already-created subdirectory session keeps its cwd after an upgrade.
+fn relative_native_path(workspace_root: &str, cwd: &str) -> Option<String> {
+    let workspace_root = workspace_root.replace('\\', "/");
+    let cwd = cwd.replace('\\', "/");
+    let workspace_root = workspace_root.trim_end_matches('/');
+    let cwd = cwd.trim_end_matches('/');
+    if cwd == workspace_root {
+        return Some(String::new());
+    }
+    cwd.strip_prefix(workspace_root)
+        .and_then(|relative| relative.strip_prefix('/'))
+        .filter(|relative| !relative.is_empty())
+        .map(str::to_string)
+}
+
 fn resolve_session_cwd(
     workspace: &WorkspaceEntry,
     cwd: Option<String>,
     executor: &mut impl CapabilityExecutor,
     next: &mut u64,
-) -> Result<(String, String), ProtocolError> {
+) -> Result<(String, String, String), ProtocolError> {
     let first = workspace
         .folders
         .first()
@@ -4687,7 +4756,8 @@ fn resolve_session_cwd(
         CapabilityValue::FileLocator(locator) => locator,
         _ => return Err(internal("workspace cwd resolver returned the wrong value")),
     };
-    let FileRoot::Workspace { handle } = locator.root else {
+    let FileLocator { root, path } = locator;
+    let FileRoot::Workspace { handle } = root else {
         return Err(internal(
             "workspace cwd resolver returned a non-workspace root",
         ));
@@ -4702,17 +4772,17 @@ fn resolve_session_cwd(
     } else {
         '/'
     };
-    let root = if locator.path.is_empty() {
+    let native_root = if path.is_empty() {
         folder.root.clone()
     } else {
         format!(
             "{}{}{}",
             folder.root.trim_end_matches(['/', '\\']),
             separator,
-            locator.path.replace('/', &separator.to_string())
+            path.replace('/', &separator.to_string())
         )
     };
-    Ok((handle, root))
+    Ok((handle, native_root, path))
 }
 
 fn workspace_project_key(workspace: &WorkspaceEntry) -> String {
@@ -4920,6 +4990,7 @@ fn load_meta(
             project_key: expected_project_key,
             root_handle: folder.root_handle.clone(),
             root: folder.root.clone(),
+            cwd_path: String::new(),
             agent_id: String::new(),
             title: header.title,
             model_id: None,
@@ -4950,6 +5021,13 @@ fn load_meta(
     meta.root_handle = folder.root_handle.clone();
     if meta.root.is_empty() {
         meta.root = folder.root.clone();
+    }
+    if meta.cwd_path.is_empty() {
+        meta.cwd_path = relative_native_path(&folder.root, &meta.root).ok_or_else(|| {
+            conflict(format!(
+                "session {id} working directory is outside its registered workspace root"
+            ))
+        })?;
     }
     Ok(meta)
 }
@@ -5275,6 +5353,7 @@ mod catalog_contract_tests {
             project_key: "project".to_string(),
             root_handle: "root".to_string(),
             root: "/workspace".to_string(),
+            cwd_path: String::new(),
             agent_id: "claude".to_string(),
             title: None,
             model_id: Some(model.to_string()),
@@ -5290,6 +5369,26 @@ mod catalog_contract_tests {
             imported: None,
             context_seed: None,
         }
+    }
+
+    #[test]
+    fn legacy_session_cwds_recover_a_locator_on_unix_and_windows() {
+        assert_eq!(
+            relative_native_path("/work/project", "/work/project/services/api"),
+            Some("services/api".to_string())
+        );
+        assert_eq!(
+            relative_native_path(r"C:\work\project", r"C:\work\project\services\api"),
+            Some("services/api".to_string())
+        );
+        assert_eq!(
+            relative_native_path("/work/project/", "/work/project/"),
+            Some(String::new())
+        );
+        assert_eq!(
+            relative_native_path("/work/project", "/work/project-other"),
+            None
+        );
     }
 
     #[test]
