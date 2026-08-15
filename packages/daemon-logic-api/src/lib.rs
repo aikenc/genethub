@@ -32,7 +32,7 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
 }
 
 /// Core-Wasm export contract implemented by `genet-daemon-logic`.
-pub const ABI_VERSION: u32 = 10;
+pub const ABI_VERSION: u32 = 11;
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 pub const MAX_CAPABILITY_BATCH: usize = 64;
 pub const MAX_CAPABILITY_CHUNK_BYTES: usize = 3 * 1024 * 1024;
@@ -136,16 +136,14 @@ pub struct PlatformCompletion {
     pub result: Result<PlatformReply, ProtocolError>,
 }
 
-/// Result of the portable policy/router stage.
+/// Final result of the portable application router.
 ///
-/// `ContinueNative` is a migration valve, not a second wire protocol: the
-/// already-decoded request stays in the caller and is never copied back across
-/// the boundary. As business slices move into the Wasm app this variant shrinks
-/// until only raw system capabilities remain native.
+/// There is deliberately no native fallback. A request is either answered by
+/// the signed Wasm application or fails; the platform cannot silently regain
+/// ownership of business policy when an artifact is missing or incomplete.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum LogicOutcome {
-    ContinueNative,
     Reply(Box<Reply>),
     Error(ProtocolError),
 }

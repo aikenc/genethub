@@ -81,7 +81,7 @@ fn real_application_single_file_hot_updates_without_restarting_runtime() {
     assert_eq!(installed.version, "next");
     assert!(matches!(
         runtime_call(&runtime, Request::AgentList),
-        LogicOutcome::ContinueNative
+        LogicOutcome::Reply(reply) if matches!(*reply, Reply::Agents(_))
     ));
 
     let rolled_back = runtime.rollback().unwrap();

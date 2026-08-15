@@ -180,31 +180,6 @@ struct ChatLog {
     rounds: Vec<rounds::RoundRecord>,
 }
 
-pub fn handles(request: &Request) -> bool {
-    matches!(
-        request,
-        Request::Subscribe { .. }
-            | Request::Unsubscribe { .. }
-            | Request::SessionCreate { .. }
-            | Request::SessionList { .. }
-            | Request::SessionGet { .. }
-            | Request::RoundTrunkList { .. }
-            | Request::RoundTrunkGet { .. }
-            | Request::BlobGet { .. }
-            | Request::SessionSend { .. }
-            | Request::SessionFork { .. }
-            | Request::SessionInterrupt { .. }
-            | Request::SessionClose { .. }
-            | Request::SessionArchive { .. }
-            | Request::SessionRename { .. }
-            | Request::SessionDelete { .. }
-            | Request::SessionSetModel { .. }
-            | Request::SessionSetMode { .. }
-            | Request::SessionSetEffort { .. }
-            | Request::SessionRespondPermission { .. }
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn request(
     sessions: &mut Sessions,

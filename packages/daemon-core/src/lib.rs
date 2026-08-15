@@ -153,21 +153,6 @@ impl LogicApp {
     ) -> LogicOutput {
         let call_id = input.call_id;
         let transport = input.transport;
-        if session::handles(&input.request) {
-            if let Err(error) = self.ensure_workspaces(capabilities) {
-                return LogicOutput::completed(call_id, LogicOutcome::Error(error));
-            }
-            let config = self.config.as_ref().expect("config loaded").clone();
-            return session::request(
-                &mut self.sessions,
-                call_id,
-                input.request,
-                &self.boot,
-                &config,
-                capabilities,
-                &mut self.next_capability_id,
-            );
-        }
         let outcome = match input.request {
             Request::DaemonLogicStatus => {
                 return self.request_artifact(call_id, LogicArtifactRequest::Status)
@@ -205,6 +190,37 @@ impl LogicApp {
                     machine_name: self.boot.machine_name.clone(),
                     rtc_supported: self.boot.rtc_supported,
                 })))
+            }
+            Request::SessionSend {
+                ref text,
+                ref attachments,
+                ..
+            } if text.trim().is_empty() && attachments.is_empty() => {
+                LogicOutcome::Error(ProtocolError {
+                    code: ErrorCode::BadRequest,
+                    message: "there is nothing to send".to_string(),
+                })
+            }
+            request @ (Request::Subscribe { .. }
+            | Request::Unsubscribe { .. }
+            | Request::SessionCreate { .. }
+            | Request::SessionList { .. }
+            | Request::SessionGet { .. }
+            | Request::RoundTrunkList { .. }
+            | Request::RoundTrunkGet { .. }
+            | Request::BlobGet { .. }
+            | Request::SessionSend { .. }
+            | Request::SessionFork { .. }
+            | Request::SessionInterrupt { .. }
+            | Request::SessionClose { .. }
+            | Request::SessionArchive { .. }
+            | Request::SessionRename { .. }
+            | Request::SessionDelete { .. }
+            | Request::SessionSetModel { .. }
+            | Request::SessionSetMode { .. }
+            | Request::SessionSetEffort { .. }
+            | Request::SessionRespondPermission { .. }) => {
+                return self.request_session(call_id, request, capabilities)
             }
             Request::AgentList => self.agent_list(false, capabilities),
             Request::AgentRefresh => self.agent_list(true, capabilities),
@@ -320,16 +336,6 @@ impl LogicApp {
                 self.hub_change(ConnectivityRequest::HubConnect { machine_id }, capabilities)
             }
             Request::HubUnpair => self.hub_change(ConnectivityRequest::HubUnpair, capabilities),
-            Request::SessionSend {
-                ref text,
-                ref attachments,
-                ..
-            } if text.trim().is_empty() && attachments.is_empty() => {
-                LogicOutcome::Error(ProtocolError {
-                    code: ErrorCode::BadRequest,
-                    message: "there is nothing to send".to_string(),
-                })
-            }
             Request::LogTail { name } => self.read_log(name, capabilities),
             Request::SettingsGet => self.settings(capabilities),
             Request::SettingsSetProvider {
@@ -423,9 +429,29 @@ impl LogicApp {
                 capabilities,
                 &mut self.next_capability_id,
             )),
-            _ => LogicOutcome::ContinueNative,
         };
         LogicOutput::completed(call_id, outcome)
+    }
+
+    fn request_session(
+        &mut self,
+        call_id: u64,
+        request: Request,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutput {
+        if let Err(error) = self.ensure_workspaces(capabilities) {
+            return LogicOutput::completed(call_id, LogicOutcome::Error(error));
+        }
+        let config = self.config.as_ref().expect("config loaded").clone();
+        session::request(
+            &mut self.sessions,
+            call_id,
+            request,
+            &self.boot,
+            &config,
+            capabilities,
+            &mut self.next_capability_id,
+        )
     }
 
     fn handle_platform(
