@@ -113,16 +113,16 @@ pub struct Discovery {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Dialect {
+pub(crate) enum Dialect {
     OpenAi,
     Anthropic,
 }
 
-struct Resolved {
-    label: String,
-    base_url: Option<String>,
-    dialect: Dialect,
-    custom: bool,
+pub(crate) struct Resolved {
+    pub(crate) label: String,
+    pub(crate) base_url: Option<String>,
+    pub(crate) dialect: Dialect,
+    pub(crate) custom: bool,
 }
 
 const KNOWN: &[(&str, &str, &str, Dialect)] = &[
@@ -260,7 +260,7 @@ pub fn settings(
             .api_key
             .as_deref()
             .filter(|key| !key.is_empty())
-            .and_then(|_| resolved.base_url.as_deref())
+            .and(resolved.base_url.as_deref())
             .and_then(|url| validate_credential_url(url).err())
             .map(|error| error.message);
         let question = format!(
@@ -320,6 +320,25 @@ pub fn settings(
         providers,
         lan_enabled: config.lan_enabled,
     }
+}
+
+/// Applies successful provider discovery to an in-memory configuration view.
+///
+/// User-authored model lists remain the durable source of truth. Discovered
+/// lists are deliberately ephemeral, but every consumer in the running guest
+/// must still see the same catalogue after discovery.
+pub fn with_discoveries(config: &Config, discoveries: &BTreeMap<String, Discovery>) -> Config {
+    let mut resolved = config.clone();
+    for (id, provider) in &mut resolved.agents.providers {
+        if !provider.models.is_empty() {
+            continue;
+        }
+        if let Some(discovery) = discoveries.get(id) {
+            provider.models.clone_from(&discovery.models);
+            provider.problem.clone_from(&discovery.problem);
+        }
+    }
+    resolved
 }
 
 fn discover(
@@ -401,7 +420,7 @@ fn discover(
     Ok(ids)
 }
 
-fn resolve(id: &str, config: &ProviderConfig) -> Resolved {
+pub(crate) fn resolve(id: &str, config: &ProviderConfig) -> Resolved {
     let known = KNOWN.iter().find(|(known, ..)| *known == id);
     Resolved {
         label: config
@@ -577,5 +596,33 @@ mod tests {
         assert!(!usable_for_chat("text-embedding-3-small"));
         assert!(!usable_for_chat("whisper-1"));
         assert!(!usable_for_chat("dall-e-3"));
+    }
+
+    #[test]
+    fn discovered_models_feed_runtime_consumers_without_rewriting_user_config() {
+        let mut config = Config::default();
+        config.agents.providers.insert(
+            "deepseek".to_string(),
+            ProviderConfig {
+                api_key: Some("secret".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        let discoveries = BTreeMap::from([(
+            "deepseek".to_string(),
+            Discovery {
+                question: "q".to_string(),
+                models: vec!["deepseek-chat".to_string()],
+                problem: None,
+            },
+        )]);
+
+        let runtime = with_discoveries(&config, &discoveries);
+
+        assert!(config.agents.providers["deepseek"].models.is_empty());
+        assert_eq!(
+            runtime.agents.providers["deepseek"].models,
+            ["deepseek-chat"]
+        );
     }
 }

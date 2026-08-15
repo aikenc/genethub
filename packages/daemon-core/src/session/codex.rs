@@ -310,7 +310,7 @@ impl Driver {
                     .get("thread")
                     .and_then(|value| value.get("id"))
                     .and_then(Value::as_str)
-                    .or_else(|| self.resume_thread.as_deref())
+                    .or(self.resume_thread.as_deref())
                     .map(str::to_string);
                 self.stage = Stage::Ready;
                 if let Some(thread) = &self.thread {

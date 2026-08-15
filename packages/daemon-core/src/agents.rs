@@ -32,6 +32,8 @@ pub struct AgentDefinition {
     pub kind: AgentKind,
     pub command: Vec<String>,
     pub builtin: bool,
+    #[serde(default)]
+    pub home_env: Option<String>,
 }
 
 impl AgentDefinition {
@@ -173,6 +175,7 @@ pub fn definitions(boot: &LogicBoot, config: &Config) -> Vec<AgentDefinition> {
                 .clone()
                 .unwrap_or_else(|| "genet-agent".to_string())],
             builtin: true,
+            home_env: boot.builtin_agent_home_env.clone(),
         },
         AgentDefinition {
             id: "opencode".to_string(),
@@ -180,6 +183,7 @@ pub fn definitions(boot: &LogicBoot, config: &Config) -> Vec<AgentDefinition> {
             kind: AgentKind::OpenCode,
             command: vec!["opencode".to_string()],
             builtin: false,
+            home_env: None,
         },
         AgentDefinition {
             id: "claude".to_string(),
@@ -187,6 +191,7 @@ pub fn definitions(boot: &LogicBoot, config: &Config) -> Vec<AgentDefinition> {
             kind: AgentKind::Claude,
             command: vec!["claude".to_string()],
             builtin: false,
+            home_env: None,
         },
         AgentDefinition {
             id: "codex".to_string(),
@@ -194,6 +199,7 @@ pub fn definitions(boot: &LogicBoot, config: &Config) -> Vec<AgentDefinition> {
             kind: AgentKind::Codex,
             command: vec!["codex".to_string()],
             builtin: false,
+            home_env: None,
         },
         AgentDefinition {
             id: "cursor".to_string(),
@@ -212,6 +218,7 @@ pub fn definitions(boot: &LogicBoot, config: &Config) -> Vec<AgentDefinition> {
             .map(str::to_string)
             .collect(),
             builtin: false,
+            home_env: None,
         },
         AgentDefinition {
             id: "acp".to_string(),
@@ -219,6 +226,7 @@ pub fn definitions(boot: &LogicBoot, config: &Config) -> Vec<AgentDefinition> {
             kind: AgentKind::Acp,
             command: vec!["acp-agent".to_string()],
             builtin: false,
+            home_env: None,
         },
     ];
     definitions.extend(config.agents.custom.iter().filter_map(|(id, custom)| {
@@ -231,6 +239,7 @@ pub fn definitions(boot: &LogicBoot, config: &Config) -> Vec<AgentDefinition> {
             kind: AgentKind::Acp,
             command: custom.command.clone(),
             builtin: false,
+            home_env: None,
         })
     }));
     definitions
@@ -314,10 +323,7 @@ fn genet_catalog(config: &Config) -> Catalog {
         {
             continue;
         }
-        let label = provider
-            .label
-            .clone()
-            .unwrap_or_else(|| provider_id.clone());
+        let label = crate::config::resolve(provider_id, provider).label;
         for model in &provider.models {
             models.push(ModelInfo {
                 id: format!("{provider_id}/{model}"),

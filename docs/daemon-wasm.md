@@ -1,193 +1,263 @@
 # GeneHub daemon Rust/Wasm architecture
 
-Status: implemented vertical platform and product integration; business migration in progress  
+Status: implemented on `release/v0.5.1`
+
 Decision date: 2026-08-15
+
+Application ABI: 13
 
 ## Decision
 
-GeneHub daemon uses native Rust plus a signed Rust/Wasm application:
-
-- one native process and one Wasmtime `Engine`;
-- initially one deployable `daemon-logic.wasm` (`K = 1`);
-- any number of normally dependent safe-Rust source crates (`N`);
-- one artifact built and signed on Linux, consumed byte-for-byte on every
-  supported native platform;
-- no native restart for logic replacement or rollback.
-
-`crate`, `artifact` and `instance` are different units. `common`, `core` and
-business crates are source boundaries and use ordinary Rust calls. They do not
-become separate Wasm files. More artifacts are allowed only when a domain has
-independent state, compatibility, update and rollback requirements and a narrow,
-low-frequency boundary. Line count alone is not a reason to split.
-
-Future game projects may use native Rust for the non-GC engine and TypeScript
-for the GC/gameplay layer. That is a separate choice and does not add V8 or a
-WebView dependency to daemon.
-
-## Landed architecture
+The daemon is one native Rust process running one signed Rust/Wasm application.
+The default deployment model is deliberately simple:
 
 ```text
-signed daemon-logic.wasm (one physical file)
-  └─ daemon-logic entry
-       ├─ daemon-core
-       ├─ daemon-common
-       ├─ daemon-logic-api
-       └─ genehub-proto
-                 │ one bounded input + one bounded output per event
-                 ▼
-native LogicHost
-  └─ daemon-platform
-       ├─ artifact signature and canonical single-file parser
-       ├─ Wasmtime/Winch engine and compiled-module cache
-       ├─ memory, table, stack, message and fuel limits
-       ├─ active/previous durable slots
-       └─ candidate, snapshot/restore, switch and recovery
+1 native daemon process
+1 Wasmtime Engine
+1 active daemon-logic.wasm instance
+N normally dependent safe-Rust source crates
 ```
 
-The application ABI uses fixed scalar Wasm exports plus linear-memory offsets.
-Complex requests, replies and strings cross once as a bounded serialized batch;
-there is no host function per string, field or business service. The current
-guest is self-contained core Wasm with zero imports, so its Linux-built bytes
-are independent of libc, Windows, macOS and CPU architecture.
+Source crates are not Wasm services. `daemon-common`, `daemon-logic-api`,
+`daemon-core`, `genehub-proto` and the small `daemon-logic` entry crate use
+ordinary checked Rust calls and statically link into one artifact. This keeps
+ownership, visibility, borrowing and type checking inside the application and
+creates only one native/Wasm boundary.
 
-The signed envelope is the final standard Wasm custom section. The result stays
-a valid `.wasm`, while canonical decoding rejects missing, duplicate, reordered,
-trailing or tampered metadata. Trust verification occurs before Wasmtime
-compiles the candidate.
+The daemon does not use Go, C#, V8 or a system WebView as its application
+runtime. The separate game-engine direction remains native Rust for the
+non-GC/high-frequency layer and TypeScript/JavaScript for the GC/browser layer;
+daemon measurements must not be used as game-loop measurements.
 
-## Update transaction
+## Implemented 1 + N graph
 
-Installation is loopback-only and follows one transaction:
+```text
+genehub-proto ───────────┐
+daemon-common ───────────┼──> daemon-core ──> daemon-logic (cdylib)
+daemon-logic-api ────────┘             │
+                                       └── one daemon-logic.wasm
+```
 
-1. read a bounded single-file artifact;
-2. verify module identity, ABI, size, digest, trusted key and Ed25519 signature;
-3. compile/instantiate the candidate beside the active instance;
-4. initialize it and run health checks;
-5. quiesce application calls briefly;
-6. export the old opaque snapshot and restore it into the candidate;
-7. health-check restored state;
+| Crate/tier | Implemented responsibility |
+| --- | --- |
+| `daemon-common` | portable bounded codecs and shared guest helpers |
+| `daemon-logic-api` | ABI 13, boot/input/output, capability batches, events and snapshot contract |
+| `daemon-core` | every RPC policy path, sessions, five Agent adapters, workspaces/files/git, providers, devices, terminals, persistence and update coordination |
+| `daemon-logic` | small `wasm32-wasip1` allocation and exported-call adapter |
+| `daemon-platform` | native artifact trust, Wasmtime, limits, active/previous slots, activation and recovery |
+| `daemon-system` | policy-free native filesystem, process, PTY, HTTP, WebSocket, WebRTC, clock/random and secure-storage drivers |
+| native daemon shell | startup, local/Fabric transports, AEAD records, Hub/relay carrier ownership, file streaming and the one VM/capability bridge |
+
+`LogicOutcome` has only `Reply` and `Error`. There is no `ContinueNative`, no
+second native business router and no native session/adapter/provider/workspace
+implementation. A real daemon without a verified artifact fails before opening
+its listener.
+
+The current guest-owned crates have 13,108 Rust source lines; the shared
+`genehub-proto` dependency adds 2,264, for 15,372 lines in the complete guest
+compile graph. Business domains remain modules inside `daemon-core` at this
+size. When real guest code reaches roughly 25–40k lines, coherent domains may
+become normal library crates to improve parallel and incremental compilation.
+They still link into the same artifact. Dependencies between those crates are
+expected and are how Rust propagates memory-safety and API changes.
+
+## What stays native, and why
+
+Thin means “no replaceable product implementation or duplicate policy”, not
+“fewest possible lines”. Three native layers remain:
+
+| Native code | Lines at this checkpoint | Why it cannot live entirely in core Wasm |
+| --- | ---: | --- |
+| `packages/daemon-platform/src` | 2,093 | trust roots, Wasmtime objects, executable-memory policy, durable slots and atomic route replacement |
+| `packages/daemon-system/src` | 2,494 | OS file handles/locks, child processes, PTYs, sockets, HTTP client, WebRTC peers and secure randomness |
+| `apps/daemon/src` | 10,203 | process bootstrap plus long-lived local/Fabric/Hub/relay carriers and platform integration |
+
+The 10.2k-line shell is not all VM code. Its largest files are transport and
+third-party carrier implementations. They own Tokio tasks, sockets, WebRTC
+objects, machine enrollment credentials and native file streaming. The guest
+owns which RPC is allowed, device/invite authentication, workspace catalogue,
+session and Agent state machines, command construction, provider credential
+policy, persistence schema, replay window and update policy. Native transport
+asks the guest for security and path decisions through the same bounded ABI.
+
+Process, PTY, sockets and WebRTC are opaque resource tables. The guest sends a
+bounded operation and receives an integer resource id; output returns as ordered
+capability events. Handles survive a guest hot replacement, while stale events
+are harmless. This keeps the high-frequency protocol loop in Wasm without
+pretending that WebAssembly can directly own an OS process or WebRTC object.
+
+Hub/relay attachment is intentionally a coarse carrier capability rather than
+dozens of HTTP/string calls. It is native because it owns resident uplinks and
+serves inbound transports back into the daemon. Product request routing and
+authorization are still guest-owned; there is no native fallback path.
+
+## Boundary and complex values
+
+The core application ABI uses scalar exports and linear-memory offsets:
+
+```text
+genehub_initialize(bytes)
+genehub_handle(bytes) -> bytes
+genehub_snapshot() -> bytes
+genehub_restore(bytes)
+genehub_platform::genehub_capability(bytes) -> bytes
+```
+
+The byte payload is bounded MessagePack. A client request, capability batch,
+capability result or resource event crosses as one complete buffer. Strings,
+vectors and business structs do not become individual host calls. Current
+limits include:
+
+- 4 MiB application input/output buffers;
+- at most 64 calls in one capability batch;
+- 3 MiB maximum capability chunk;
+- explicit per-driver response, process, socket and RTC limits;
+- Wasmtime memory, table, stack and fuel limits.
+
+The guest target is `wasm32-wasip1`. It imports the one GeneHub batch function
+plus the small WASIp1 surface needed by Rust's runtime. It inherits no host
+environment, stdio, socket namespace or ambient filesystem. Only the log
+directory is preopened, read-only; all other access goes through rooted
+capabilities. WASIp1 is implemented by Wasmtime on each host and does not make
+the artifact dependent on Linux libc or a Linux CPU.
+
+## One Linux-built cross-platform file
+
+The release artifact is one valid `.wasm` file. Its final custom section,
+`genehub.daemon.artifact.v1`, contains the canonical signed envelope: module
+id, version, ABI, raw byte length, SHA-256, signing key id and Ed25519 signature.
+There is no sidecar manifest that can drift from the module.
+
+CI builds and signs the application once on Linux. Linux x64/ARM64, Windows
+x64 and macOS x64/ARM64 consumer jobs download the exact same bytes and run:
+
+- artifact verification and durable-slot tests;
+- the real application ABI and snapshot/restore tests;
+- a real daemon hot install/rollback without restart;
+- the public CLI update contract;
+- install, call and reopen of the Linux-produced file.
+
+Windows and macOS never compile the Wasm application. Native package jobs place
+the same file beside the daemon executable. This is the portability contract;
+only a public matrix run can provide cross-OS evidence, while local tests prove
+the Linux consumer.
+
+## Signed hot update without process restart
+
+Installation is allowed only over loopback and follows one transaction:
+
+1. read a size-bounded single-file candidate;
+2. verify canonical form, module id, ABI, hash, key id and Ed25519 signature;
+3. compile and initialize a side-by-side candidate;
+4. run its self-check;
+5. briefly serialize application calls;
+6. snapshot the active guest and restore the candidate;
+7. health-check the restored candidate;
 8. durably commit active/previous slots;
-9. atomically replace the in-memory route.
+9. atomically switch the in-memory route.
 
-Any failure before step 9 leaves the old route active. A live trap discards the
-instance, loads previous/fallback signed bytes, restores the last in-memory
-checkpoint and switches without restarting the process. Explicit rollback uses
-the same state-transfer path. The CLI exposes `status`, `install` and `rollback`.
+Failures before the final switch leave the old route active. Explicit rollback
+uses the same side-by-side state-transfer path. A live trap discards the failed
+instance and recreates a signed previous/fallback instance; a trapped instance
+is never reused. PID, listener port, native resource tables and carrier tasks do
+not restart.
 
-The snapshot is currently a hot-replacement/recovery checkpoint, not the
-business database. Durable session/workspace data remains in existing stores.
-Before moving unique durable state into the guest, that state must continue to
-use its own journal/store or gain an opaque durable snapshot protocol; relying
-only on the in-memory VM checkpoint is forbidden.
+The guest snapshot transfers in-memory coordination state. Durable provider,
+device, workspace, session, round and Agent data is written through secure or
+workspace-rooted stores and therefore also survives process restart.
 
-## Release and cross-platform contract
+## Current build cost
 
-CI and Release have a single Linux producer:
+Measured on 2026-08-15 with Rust 1.95.0, Linux x64 and 96 logical CPUs. Cold
+measurements used distinct empty target directories and the final 15,372-line
+guest compile graph. Both runnable profiles deliberately use `opt-level = 1`; an
+`opt=0` full guest exhausted the 500-million-instruction request budget and is
+not a viable live-reload artifact.
 
-- compile `genet-daemon-logic` for `wasm32-wasip1`;
-- use the latency-oriented `daemon-logic-release` profile (`opt-level = 1`, no
-  LTO), not the workspace's size-oriented full-LTO profile;
-- sign once with the channel release key;
-- upload one `daemon-logic.wasm` plus public trust metadata for native builders.
-
-Windows installer and Linux tarball jobs download the exact artifact, compile
-the native binary with its pinned public key, and place the file beside the
-daemon executable. The standalone signed `.wasm` is also a release asset. The
-Linux install script installs it beside `genet`. Official signing requires the
-GitHub secret `GENET_DAEMON_LOGIC_SIGNING_KEY` and variable
-`GENET_DAEMON_LOGIC_KEY_ID`; a tag build fails closed if either is absent.
-
-The CI consumer matrix is Linux x64/ARM64, Windows x64 and macOS x64/ARM64. It
-runs the exact Linux artifact through platform ABI/state tests, a real daemon
-hot update and the public CLI contract. This repository configuration is the
-cross-platform gate; local validation can only prove the current host.
-
-## Measured current cost
-
-Measurements on 2026-08-15 used Rust 1.95, a fresh target directory and the
-actual `api → common → core → app` guest. They include `genehub-proto`, serde
-and code generation, not a hello-world fixture.
-
-| Profile | Cold | No-op | Edit in `daemon-core` | Raw Wasm |
+| Build | Wall time | Peak RSS | Raw Wasm | Signed single file |
 | --- | ---: | ---: | ---: | ---: |
-| `daemon-logic-dev` (`opt=0`) | 6.79 s | 0.07 s | 0.25 s | 1,145,569 B |
-| `daemon-logic-release` (`opt=1`, no LTO) | 8.33 s | 0.08 s | 0.23 s | 716,110 B |
+| cold `daemon-logic-dev` | 25.32 s | 717 MiB | 6,662,017 B | 6,662,350 B current dev version |
+| cold `daemon-logic-release` | 24.88 s | 749 MiB | 6,295,054 B | 6,295,397 B measurement version |
+| small real `daemon-core` edit + dev signing | 6.37 s | 537 MiB | — | 6,662,350 B |
+| no-op dev build + dev signing | 0.88 s | 87 MiB | — | 6,662,350 B |
 
-The signed files are 1,145,901 B (dev) and 716,449 B (release); the canonical
-signature section therefore adds only a few hundred bytes. Current product startup with
-the signed guest and Winch has been measured around 1.2–1.5 seconds in the
-integration tests, including daemon initialization. These are single-machine
-numbers, not universal SLOs.
+The signed-section overhead is 333 bytes for the current dev version; it varies
+by the length of the embedded version string (343 bytes in the release
+measurement above). Release intentionally uses `opt-level = 1`, no LTO and 16
+codegen units. The daemon is not CPU-bound, so high optimization and `wasm-opt`
+are not default release taxes. Larger shared-crate edits observed during the
+migration took roughly 10.5–15.4 seconds to a runnable signed dev file.
 
-The current native daemon contains 33,807 Rust lines. The landed portable guest
-crates contain 409 Rust lines plus shared protocol code; therefore the table is
-the real current guest cost, **not** a claim that all 33,807 lines already build
-as Wasm. Synthetic earlier scaling runs suggested roughly 2.5 s incremental at
-100k generated lines and 5.0 s at 200k with `opt=0`, but real proc macros,
-generics and dependency changes can be slower. The project must remeasure at
-25k, 50k, 100k and 200k of migrated real guest code.
+For a future 100–200k-line guest, the correct structure is 8–15 cohesive
+library crates plus one entry crate, still one artifact. Current evidence gives
+this capacity-planning range, not a benchmark guarantee:
 
-Development always uses native unit tests first and `opt=0` Wasm for live
-reload. Default published daemon logic uses `opt=1` without LTO because daemon
-is not CPU-bound. High optimization/`wasm-opt` is an optional measured release
-decision, never a default tax on iteration.
+- ordinary leaf-domain edit: roughly 5–20 seconds to a runnable signed dev file;
+- shared `core/common/proto` or snapshot-shape edit: roughly 20–60 seconds;
+- clean build on a high-core CI worker: roughly 30–90 seconds.
 
-## Thin-platform invariant and current gap
+Those ranges combine the measured 6.4–15.4-second real edit spread with Cargo
+crate invalidation and parallel compilation; line count alone is not predictive.
+The project must remeasure at 25k, 50k, 100k and 200k real lines. If a leaf edit
+misses 20 seconds, split source crates before considering a second artifact.
 
-`packages/daemon-platform/src` is 1,831 Rust lines and only implements trust,
-VM, slots and recovery. It does not depend on `genehub-proto` or platform
-business modules. That crate satisfies the thin-kernel rule.
+## Artifact-count rule
 
-The complete native process is **not thin yet**: `apps/daemon/src` is still
-33,807 lines and owns PTY, processes, WebRTC, networking, persistence, sessions
-and adapters. The router first asks Wasm and uses `ContinueNative` for unmigrated
-requests. Today Wasm owns identity, update refusal policy and pure empty-send
-validation; it does not yet own the whole daemon. This compatibility valve is a
-migration mechanism and cannot be presented as the final split.
+Default `K = 1`. Multiple source crates provide compile boundaries without ABI
+or distribution boundaries. Add another Wasm artifact only when a domain has
+all of the following:
 
-The final invariant is:
+- genuinely independent state and lifecycle;
+- independent compatibility, release and rollback requirements;
+- a narrow, low-frequency, batchable interface;
+- no complex shared mutable object graph;
+- measured download/update benefit larger than orchestration cost.
 
-- native: startup, trust, VM/update kernel and irreducible raw OS resource
-  drivers only;
-- Wasm: product security, protocol, scheduling, persistence policy, session,
-  adapters, networking state machines and update policy;
-- PTY/process/WebRTC native code may hold opaque OS handles and move bytes, but
-  command construction, lifecycle policy, protocol parsing and routing belong
-  to Wasm;
-- platform must not parse GeneHub business messages or expose chatty string
-  calls.
+A second artifact may run under the same host and Engine; it does not require a
+second process. It also cannot exchange Rust references with the first
+artifact, so the default response to a cross-artifact safety problem is to keep
+the code in one artifact. Ordinary patches therefore update one file.
 
-## Migration gates
+## Validation
 
-Migration proceeds by replacing direct OS calls with safe facades while keeping
-one artifact:
+The landed suites cover:
 
-1. move pure validation, routing and state machines into `daemon-core`;
-2. define bounded capability batches for filesystem, network, persistence,
-   clock/random, process/PTY and WebRTC raw drivers;
-3. move session/adapters/security/update policy behind those facades;
-4. delete each corresponding native business path and its `ContinueNative`
-   arm;
-5. reject release builds while any route unexpectedly falls back;
-6. only then declare the whole platform thin.
+- canonical artifact parsing, signatures, tamper, wrong key/hash/ABI and size;
+- malformed modules/imports, WASI policy, memory/stack/table/fuel and traps;
+- concurrent calls/installs, torn durable state, restart, rollback and key rotation;
+- rooted/atomic private and workspace files, symlink escape and kernel locks;
+- random/clock batching, process streams, PTY lifecycle, bounded HTTP/WebSocket
+  messages and WebRTC resource lifecycle;
+- native guest tests for all five Agent protocols, sessions, persistence,
+  devices, provider TLS policy, workspaces, logs and replay;
+- real signed guest workspace/file/provider/device/PTY/catalog behavior;
+- state survival across live guest replacement, tamper rejection and rollback;
+- public CLI update/rollback with unchanged PID and port;
+- real journey fixtures that can no longer start without the signed guest.
 
-Every capability needs native contract tests, guest tests and product E2E on
-the supported OS matrix. PTY/process/WebRTC are not blockers to Wasm ownership:
-the OS handle remains native, while Wasm owns the closed-loop behavior. They are
-also not already migrated merely because the VM foundation exists.
+At this checkpoint, `cargo test --workspace --no-fail-fast` passed 423 default
+tests with one test thread, including all 44 real daemon journeys. All seven
+normally ignored release gates were then run explicitly and passed: two real
+application/state-transfer tests, two resident-daemon update tests, the public
+CLI update contract, and both Linux artifact producer/consumer handoff tests.
+`cargo fmt --check` and workspace/all-target Clippy with warnings denied also
+passed. The five-OS GitHub matrix is configured to consume the exact
+Linux-produced bytes; only that public run can supply evidence from non-Linux
+kernels.
 
-## Acceptance evidence in this change
+Local development:
 
-- real Rust guest, not a WAT fixture, loads and owns product routes;
-- one signed file survives canonical parse and tamper tests;
-- rejected signature/ABI/health candidates never change the active route;
-- snapshot/restore works across instances;
-- hot install and rollback keep daemon PID and port unchanged;
-- active traps recover to a signed previous/fallback instance;
-- public CLI drives the resident process end to end;
-- Linux installer and desktop bundle stage the Wasm beside the executable;
-- CI/Release use one Linux producer and native byte-for-byte consumers.
+```sh
+node scripts/daemon-logic.mjs
 
-This is a complete runnable update foundation and migration seam. It is not yet
-the completed migration of all daemon business code; that claim is reserved for
-gate 6 above.
+GENET_DAEMON_LOGIC_WASM="$PWD/target/daemon-logic.wasm" \
+  cargo run -p genet-cli -- daemon run
+
+genet-dev daemon logic status
+genet-dev daemon logic install /absolute/path/to/signed.wasm
+genet-dev daemon logic rollback
+```
+
+The native and portable halves are one product: workspace CI now builds the
+signed dev artifact before mandatory real-process journeys, so deleted native
+business behavior cannot silently keep tests green.

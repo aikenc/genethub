@@ -1,6 +1,6 @@
 //! The same journey, driven through the Cursor CLI, spoken as ACP
 //! (`cursor-agent acp`) — the protocol that CLI publishes for exactly this
-//! kind of embedding (`apps/daemon/src/adapter/acp.rs`).
+//! kind of embedding (`packages/daemon-core/src/session/acp.rs`).
 //!
 //! There is no pointing Cursor at the mock: its CLI picks the model from the
 //! account it is logged into, and offers no backend address to override, so

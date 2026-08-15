@@ -184,7 +184,7 @@ async fn run_socket<S>(
         tokio::select! {
             command = commands.recv() => match command {
                 Some(Command::Send(bytes)) => {
-                    if let Err(error) = output.send(Message::Binary(bytes.into())).await {
+                    if let Err(error) = output.send(Message::Binary(bytes)).await {
                         break error.to_string();
                     }
                 }

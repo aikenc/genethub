@@ -32,7 +32,7 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
 }
 
 /// Core-Wasm export contract implemented by `genet-daemon-logic`.
-pub const ABI_VERSION: u32 = 12;
+pub const ABI_VERSION: u32 = 13;
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 pub const MAX_CAPABILITY_BATCH: usize = 64;
 pub const MAX_CAPABILITY_CHUNK_BYTES: usize = 3 * 1024 * 1024;
@@ -60,6 +60,11 @@ pub struct LogicBoot {
     /// launch policy; native code only resolves the OS-specific sibling name.
     #[serde(default)]
     pub builtin_agent_binary: Option<String>,
+    /// Channel-stamped environment variable understood by that executable.
+    /// The value is platform/build metadata; the guest still decides the
+    /// per-session directory assigned to it.
+    #[serde(default)]
+    pub builtin_agent_home_env: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

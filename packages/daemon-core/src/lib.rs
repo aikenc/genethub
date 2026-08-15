@@ -442,7 +442,10 @@ impl LogicApp {
         if let Err(error) = self.ensure_workspaces(capabilities) {
             return LogicOutput::completed(call_id, LogicOutcome::Error(error));
         }
-        let config = self.config.as_ref().expect("config loaded").clone();
+        let config = config::with_discoveries(
+            self.config.as_ref().expect("config loaded"),
+            &self.discoveries,
+        );
         session::request(
             &mut self.sessions,
             call_id,
@@ -785,9 +788,22 @@ impl LogicApp {
             return LogicOutcome::Error(error);
         }
         if refresh || self.agent_cache.is_none() {
+            // Provider discovery is cached in the guest, not persisted as
+            // user-authored configuration. Resolve one shared runtime view so
+            // Settings and the Agent picker cannot disagree about models.
+            let _ = config::settings(
+                self.config.as_ref().expect("config loaded"),
+                &mut self.discoveries,
+                capabilities,
+                &mut self.next_capability_id,
+            );
+            let runtime_config = config::with_discoveries(
+                self.config.as_ref().expect("config loaded"),
+                &self.discoveries,
+            );
             match agents::list(
                 &self.boot,
-                self.config.as_ref().expect("config loaded"),
+                &runtime_config,
                 capabilities,
                 &mut self.next_capability_id,
             ) {
@@ -1419,6 +1435,7 @@ mod tests {
             default_workspace: None,
             home_directory: None,
             builtin_agent_binary: None,
+            builtin_agent_home_env: None,
         }
     }
 

@@ -9,6 +9,7 @@ mod claude;
 mod codex;
 mod genet;
 mod opencode;
+mod overview;
 mod rounds;
 
 use std::collections::{HashMap, VecDeque};
@@ -29,7 +30,7 @@ use sha2::{Digest, Sha256};
 
 use crate::agents::{self, AgentDefinition, AgentKind};
 use crate::capability::Client;
-use crate::config::{Config, WorkspaceEntry};
+use crate::config::{Config, WorkspaceEntry, WorkspaceFolderEntry};
 use crate::CapabilityExecutor;
 
 const SESSION_FORMAT: u32 = 4;
@@ -260,6 +261,10 @@ impl Sessions {
                 expand_last_round: _,
             } => {
                 self.ensure_loaded(&session_id, config, executor, next)?;
+                // Close releases the live agent process; it does not make the
+                // durable conversation read-only. Subscribing is the explicit
+                // reopen operation used by every client before it can send.
+                self.live_mut(&session_id)?.closed = false;
                 let live = self.live(&session_id)?;
                 let snapshot = snapshot(live, executor, next)?;
                 let first = live
@@ -267,15 +272,21 @@ impl Sessions {
                     .front()
                     .map(|event| event.seq)
                     .unwrap_or(live.seq + 1);
-                let reset = since_seq.is_some_and(|seq| seq.saturating_add(1) < first);
-                let replayed = if reset {
-                    Vec::new()
-                } else {
-                    live.replay
-                        .iter()
-                        .filter(|event| since_seq.is_some_and(|seq| event.seq > seq))
-                        .cloned()
-                        .collect()
+                let (replayed, reset) = match since_seq {
+                    // A layered snapshot already carries the narrative and a
+                    // bounded last-round tail. Replaying all work history from
+                    // zero would duplicate it and defeat that byte budget.
+                    None | Some(0) => (Vec::new(), true),
+                    Some(seq) if seq == live.seq => (Vec::new(), false),
+                    Some(seq) if seq.saturating_add(1) < first => (Vec::new(), true),
+                    Some(seq) => (
+                        live.replay
+                            .iter()
+                            .filter(|event| event.seq > seq)
+                            .cloned()
+                            .collect(),
+                        false,
+                    ),
                 };
                 Ok(Response {
                     reply: Reply::Subscribed {
@@ -638,6 +649,7 @@ impl Sessions {
             text: text.clone(),
             attachments: attachments.clone(),
         };
+        let mut assigned_title = None;
         {
             let live = self.live_mut(session_id)?;
             let mut rows = Vec::new();
@@ -692,6 +704,7 @@ impl Sessions {
             };
             if live.meta.title.is_none() {
                 live.meta.title = title_from(&text);
+                assigned_title.clone_from(&live.meta.title);
             }
             live.meta.updated_at_ms = timestamp;
             live.settled_status = None;
@@ -702,7 +715,7 @@ impl Sessions {
                 round_id,
                 interrupted: false,
             });
-            rows.insert(0, ChatRow::Item { item: user });
+            rows.insert(0, ChatRow::Item { item: user.clone() });
             append_rows(&live.meta, &rows, executor, next)?;
             save_meta(&live.meta, executor, next)?;
         }
@@ -782,20 +795,31 @@ impl Sessions {
                 return Err(error);
             }
         }
-        let publication = {
+        let publications = {
             let live = self.live_mut(session_id)?;
-            publish(
+            let mut publications = vec![publish(
                 live,
                 SessionEvent::TurnStarted {
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     started_at_ms: timestamp,
                 },
-            )
+            )];
+            publications.push(publish(
+                live,
+                SessionEvent::Item {
+                    turn_id,
+                    item: user,
+                },
+            ));
+            if let Some(title) = assigned_title {
+                publications.push(publish(live, SessionEvent::TitleChanged { title }));
+            }
+            publications
         };
         Ok(Response {
             reply: Reply::Ack,
             connection: ConnectionDirective::None,
-            publications: vec![publication],
+            publications,
         })
     }
 
@@ -951,6 +975,16 @@ impl Sessions {
         next: &mut u64,
     ) -> Result<Response, ProtocolError> {
         let live = self.live_mut(session_id)?;
+        if live.meta.agent_id == "genet" {
+            match &control {
+                Control::Model(value) => {
+                    genet::validate_model(value)?;
+                }
+                Control::Mode(value) | Control::Effort(value) => {
+                    genet::validate_effort(value)?;
+                }
+            }
+        }
         let (event, command) = match &control {
             Control::Model(value) => {
                 live.meta.model_id = Some(value.clone());
@@ -1218,7 +1252,9 @@ impl Sessions {
                     live.meta.updated_at_ms = finished_at;
                 }
                 fold(live, &event, &mut settled);
-                publications.push(publish(live, event));
+                if let Some(event) = client_event(live, &event) {
+                    publications.push(publish(live, event));
+                }
             }
             if let Some(settled) = settled {
                 let live = self.live_mut(session_id)?;
@@ -1272,16 +1308,9 @@ impl Sessions {
                 if self.loaded.contains_key(&entry.name) {
                     continue;
                 }
-                if let Ok(meta) = load_meta(
-                    root.clone(),
-                    &entry.name,
-                    &workspace.id,
-                    &workspace_project_key(workspace),
-                    &folder.root_handle,
-                    &folder.root,
-                    executor,
-                    next,
-                ) {
+                if let Ok(meta) =
+                    load_meta(root.clone(), &entry.name, workspace, folder, executor, next)
+                {
                     let Ok(lock_resource_id) = lock_session(&meta, executor, next) else {
                         continue;
                     };
@@ -1489,7 +1518,10 @@ fn start_process(
             let home = format!(".genethub/sessions/{}/state/genet", live.meta.id);
             write_genet_models(&live.meta, &home, config, executor, next)?;
             env.insert(
-                "GENET_AGENT_HOME".to_string(),
+                definition
+                    .home_env
+                    .clone()
+                    .unwrap_or_else(|| "GENET_AGENT_HOME".to_string()),
                 native_child_path(&live.meta, &home),
             );
             args.extend([
@@ -1590,25 +1622,53 @@ fn write_genet_models(
     executor: &mut impl CapabilityExecutor,
     next: &mut u64,
 ) -> Result<(), ProtocolError> {
+    let selected = meta
+        .model_id
+        .as_deref()
+        .and_then(|model| model.split_once('/'));
     let models = config
         .agents
         .providers
         .iter()
         .flat_map(|(provider, value)| {
-            value.models.iter().map(move |model| {
+            let resolved = crate::config::resolve(provider, value);
+            let configured = value.models.iter().map(String::as_str);
+            let selected = selected
+                .filter(|(selected_provider, selected_model)| {
+                    *selected_provider == provider
+                        && value.problem.is_none()
+                        && !value.models.iter().any(|model| model == selected_model)
+                        && value.api_key.as_deref().is_some_and(|key| !key.is_empty())
+                })
+                .map(|(_, model)| model);
+            configured.chain(selected).map(move |model| {
                 serde_json::json!({
                     "id": model,
                     "name": format!("{provider}/{model}"),
                     "provider": provider,
-                    "api": value.dialect.clone().unwrap_or_else(|| "openai".to_string()),
-                    "baseUrl": value.base_url,
+                    "api": match resolved.dialect {
+                        crate::config::Dialect::OpenAi => "openai",
+                        crate::config::Dialect::Anthropic => "anthropic",
+                    },
+                    "baseUrl": resolved.base_url,
                     "apiKey": value.api_key,
                 })
             })
         })
         .collect::<Vec<_>>();
-    let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "models": models }))
-        .map_err(|error| internal(format!("encoding Agent models: {error}")))?;
+    let problem = config
+        .agents
+        .providers
+        .iter()
+        .find_map(|(provider, value)| {
+            value
+                .problem
+                .as_deref()
+                .map(|problem| format!("{provider}: {problem}"))
+        });
+    let bytes =
+        serde_json::to_vec_pretty(&serde_json::json!({ "models": models, "problem": problem }))
+            .map_err(|error| internal(format!("encoding Agent models: {error}")))?;
     let mut client = Client::new(executor, next);
     client.call(CapabilityRequest::File(FileRequest::CreateDirAll {
         locator: locator(meta, home),
@@ -1808,6 +1868,43 @@ fn complete_lines(buffer: &mut Vec<u8>) -> Vec<String> {
         buffer.clear();
     }
     lines
+}
+
+fn client_event(live: &LiveSession, event: &SessionEvent) -> Option<SessionEvent> {
+    let reasoning = match event {
+        SessionEvent::Item {
+            turn_id,
+            item: item @ TimelineItem::Reasoning { .. },
+        } => Some((turn_id, item)),
+        SessionEvent::ItemDelta {
+            turn_id,
+            item_id,
+            delta: genehub_proto::ItemDelta::Text { .. },
+        } => live
+            .active_items
+            .iter()
+            .find(|item| item.id() == item_id)
+            .filter(|item| matches!(item, TimelineItem::Reasoning { .. }))
+            .map(|item| (turn_id, item)),
+        _ => None,
+    };
+    let Some((turn_id, item)) = reasoning else {
+        return Some(overview::condense_event(event));
+    };
+    let condensed = overview::condense_item(item);
+    if matches!(&condensed, TimelineItem::Reasoning { text, .. } if text.is_empty()) {
+        return None;
+    }
+    let unchanged = live.replay.iter().rev().find_map(|sequenced| {
+        let SessionEvent::Item { item, .. } = &sequenced.event else {
+            return None;
+        };
+        (item.id() == condensed.id()).then_some(item == &condensed)
+    });
+    (!unchanged.unwrap_or(false)).then(|| SessionEvent::Item {
+        turn_id: turn_id.clone(),
+        item: condensed,
+    })
 }
 
 fn fold(live: &mut LiveSession, event: &SessionEvent, settled: &mut Option<SettledTurn>) {
@@ -2547,7 +2644,7 @@ fn snapshot(
 ) -> Result<SessionSnapshot, ProtocolError> {
     let mut items = load_log(&live.meta, executor, next)?.items;
     for item in &live.active_items {
-        upsert(&mut items, item.clone());
+        upsert(&mut items, overview::condense_item(item));
     }
     let round_summaries = live
         .rounds
@@ -2696,10 +2793,8 @@ fn save_meta(
 fn load_meta(
     root: FileRoot,
     id: &str,
-    workspace_id: &str,
-    expected_project_key: &str,
-    root_handle: &str,
-    native_root: &str,
+    workspace: &WorkspaceEntry,
+    folder: &WorkspaceFolderEntry,
     executor: &mut impl CapabilityExecutor,
     next: &mut u64,
 ) -> Result<SessionMeta, ProtocolError> {
@@ -2721,16 +2816,17 @@ fn load_meta(
             "session {id} has an unsupported format"
         )));
     }
+    let expected_project_key = workspace_project_key(workspace);
     if !meta.project_key.is_empty() && meta.project_key != expected_project_key {
         return Err(conflict(format!(
             "session {id} belongs to another workspace"
         )));
     }
-    meta.workspace_id = workspace_id.to_string();
-    meta.project_key = expected_project_key.to_string();
-    meta.root_handle = root_handle.to_string();
+    meta.workspace_id = workspace.id.clone();
+    meta.project_key = expected_project_key;
+    meta.root_handle = folder.root_handle.clone();
     if meta.root.is_empty() {
-        meta.root = native_root.to_string();
+        meta.root = folder.root.clone();
     }
     Ok(meta)
 }

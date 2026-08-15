@@ -8,6 +8,8 @@ use genehub_proto::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::overview;
+
 pub const SCHEMA_VERSION: u32 = 4;
 pub const BATCH_MAX_BLOBS: u32 = 16;
 pub const TRUNK_MAX_BLOBS: u32 = 100;
@@ -302,7 +304,8 @@ pub fn trunks_from_items(items: &[TimelineItem], first_index: u32) -> Vec<RoundT
 }
 
 fn blob_overview(item: &TimelineItem) -> Option<BlobOverview> {
-    let (kind, overview) = match item {
+    let condensed = overview::condense_item(item);
+    let (kind, overview) = match &condensed {
         TimelineItem::Reasoning { text, .. } => (BlobKind::Reasoning, shorten(text, 240)),
         TimelineItem::ToolCall { name, detail, .. } => (
             BlobKind::ToolCall,

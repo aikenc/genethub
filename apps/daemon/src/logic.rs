@@ -135,6 +135,7 @@ impl LogicHost {
                     .map(|path| path.display().to_string()),
                 home_directory: dirs::home_dir().map(|path| path.display().to_string()),
                 builtin_agent_binary: builtin_agent_binary(),
+                builtin_agent_home_env: Some(crate::channel::ENV_AGENT_HOME.to_string()),
             },
         )
         .map_err(anyhow::Error::msg)?;
@@ -177,7 +178,11 @@ impl LogicHost {
         })))
     }
 
-    pub async fn route(&self, transport: TransportKind, request: Request) -> Result<LogicRoute> {
+    pub async fn route(
+        self: &Arc<Self>,
+        transport: TransportKind,
+        request: Request,
+    ) -> Result<LogicRoute> {
         let _execution = self.execution.lock().await;
         let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
         let input = LogicInput::Request(LogicRequest {
@@ -194,7 +199,7 @@ impl LogicHost {
             if turns > 128 {
                 anyhow::bail!("portable logic exceeded the capability continuation limit");
             }
-            let mut output = self.dispatch(&input)?;
+            let mut output = self.dispatch_blocking(input).await?;
             if !output.platform_completions.is_empty() {
                 anyhow::bail!("portable logic completed a platform call while routing RPC");
             }
@@ -458,6 +463,13 @@ impl LogicHost {
         )
         .map_err(anyhow::Error::msg)?
         .map_err(anyhow::Error::msg)
+    }
+
+    async fn dispatch_blocking(self: &Arc<Self>, input: LogicInput) -> Result<LogicOutput> {
+        let host = Arc::clone(self);
+        tokio::task::spawn_blocking(move || host.dispatch(&input))
+            .await
+            .context("portable Wasm worker stopped")?
     }
 
     async fn execute_batch(&self, batch: CapabilityBatch) -> CapabilityResults {

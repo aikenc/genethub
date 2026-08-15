@@ -185,22 +185,13 @@ fn default_workspace() -> Result<PathBuf> {
     Ok(home.join(crate::channel::WORKSPACE_DIR_NAME))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
     /// 0 asks the OS for an ephemeral loopback port.
     pub port: u16,
     /// Retained solely so native startup can reject insecure legacy LAN mode.
     pub lan_enabled: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            port: 0,
-            lan_enabled: false,
-        }
-    }
 }
 
 impl Config {

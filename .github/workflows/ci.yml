@@ -231,7 +231,7 @@ jobs:
       # costs nothing since the Claude Code one only actually runs when
       # JOURNEY_LLM=real. `claude` itself, not `claude-agent-acp`: the
       # daemon speaks its native stream-json protocol directly
-      # (apps/daemon/src/adapter/claude.rs).
+      # (packages/daemon-core/src/session/claude.rs).
       # These are test fixtures, not product dependencies. Keep them in their
       # own lockfile so `npm ci` verifies exact tarball integrity without
       # coupling Rust CI to one of the shipped JavaScript packages. Codex uses

@@ -79,5 +79,6 @@ CI additionally downloads one Linux-built signed file on Linux x64/ARM64,
 Windows x64 and macOS x64/ARM64 and runs the real VM, product-daemon and CLI
 update tests. Consumer jobs never rebuild guest bytes.
 
-The complete decision, current limits and migration gates are in
+The complete decision, implemented boundary, build measurements and validation
+contract are in
 [`docs/daemon-wasm.md`](../../docs/daemon-wasm.md).

@@ -1,5 +1,5 @@
 //! The same journey, driven through Claude Code — natively, not through the
-//! `claude-agent-acp` wrapper (`apps/daemon/src/adapter/claude.rs`).
+//! `claude-agent-acp` wrapper (`packages/daemon-core/src/session/claude.rs`).
 //!
 //! Unlike OpenCode, Claude Code does not speak an OpenAI-compatible wire
 //! format, so it cannot be pointed at the mock: DeepSeek's Anthropic-compatible

@@ -55,7 +55,7 @@ fn consume_linux_built_fixture_through_update_and_restart() {
     let runtime = PlatformRuntime::open(
         state.path(),
         verifier.clone(),
-        VmPolicy::new(LOGIC_ABI_VERSION).with_wasi(),
+        portable_policy(),
         fallback.clone(),
     )
     .unwrap();
@@ -65,15 +65,18 @@ fn consume_linux_built_fixture_through_update_and_restart() {
     assert_eq!(runtime.probe(100).unwrap(), 177);
     drop(runtime);
 
-    let reopened = PlatformRuntime::open(
-        state.path(),
-        verifier,
-        VmPolicy::new(LOGIC_ABI_VERSION).with_wasi(),
-        fallback,
-    )
-    .unwrap();
+    let reopened =
+        PlatformRuntime::open(state.path(), verifier, portable_policy(), fallback).unwrap();
     assert_eq!(reopened.active().unwrap(), installed);
     assert_eq!(reopened.probe(-77).unwrap(), 0);
+}
+
+fn portable_policy() -> VmPolicy {
+    VmPolicy::new(LOGIC_ABI_VERSION)
+        .with_wasi()
+        .with_capability_handler(|_: &[u8]| {
+            Err("the portable probe does not invoke system capabilities".to_string())
+        })
 }
 
 fn fixture_directory() -> PathBuf {

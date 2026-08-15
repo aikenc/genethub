@@ -50,10 +50,7 @@ impl Driver {
     }
 
     pub fn set_model(&self, model_id: &str) -> Result<Vec<u8>, ProtocolError> {
-        let (provider, model) = model_id.split_once('/').ok_or_else(|| ProtocolError {
-            code: genehub_proto::ErrorCode::BadRequest,
-            message: format!("model id must be provider/model, got {model_id}"),
-        })?;
+        let (provider, model) = validate_model(model_id)?;
         Ok(serde_json::to_vec(&json!({
             "type": "set_model",
             "provider": provider,
@@ -63,12 +60,7 @@ impl Driver {
     }
 
     pub fn set_effort(&self, effort: &str) -> Result<Vec<u8>, ProtocolError> {
-        if !THINKING_LEVELS.contains(&effort) {
-            return Err(ProtocolError {
-                code: genehub_proto::ErrorCode::BadRequest,
-                message: format!("unknown thinking level {effort}"),
-            });
-        }
+        validate_effort(effort)?;
         Ok(serde_json::to_vec(&json!({
             "type": "set_thinking_level",
             "level": effort,
@@ -89,6 +81,30 @@ impl Driver {
         translate_frame(&frame, &mut self.turn, &mut events);
         events
     }
+}
+
+pub fn validate_model(model_id: &str) -> Result<(&str, &str), ProtocolError> {
+    let (provider, model) = model_id.split_once('/').ok_or_else(|| ProtocolError {
+        code: genehub_proto::ErrorCode::BadRequest,
+        message: format!("model id must be provider/model, got {model_id}"),
+    })?;
+    if provider.is_empty() || model.is_empty() {
+        return Err(ProtocolError {
+            code: genehub_proto::ErrorCode::BadRequest,
+            message: format!("model id must be provider/model, got {model_id}"),
+        });
+    }
+    Ok((provider, model))
+}
+
+pub fn validate_effort(effort: &str) -> Result<(), ProtocolError> {
+    if !THINKING_LEVELS.contains(&effort) {
+        return Err(ProtocolError {
+            code: genehub_proto::ErrorCode::BadRequest,
+            message: format!("unknown thinking level {effort}"),
+        });
+    }
+    Ok(())
 }
 
 fn translate_frame(frame: &Value, state: &mut TurnState, events: &mut Vec<SessionEvent>) {

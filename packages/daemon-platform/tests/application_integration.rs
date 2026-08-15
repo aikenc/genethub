@@ -131,6 +131,7 @@ fn boot_bytes() -> Vec<u8> {
             default_workspace: None,
             home_directory: None,
             builtin_agent_binary: None,
+            builtin_agent_home_env: None,
         },
     )
     .unwrap()

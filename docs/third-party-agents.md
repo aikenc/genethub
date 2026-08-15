@@ -32,7 +32,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | `cursor` | 子进程 + ACP over stdio | 探测 `cursor-agent` 二进制本身，说它自己发布的 ACP（`cursor-agent acp`），见 §5 |
 | `acp` | 子进程 + ACP over stdio | 兜底条目，探测一个叫 `acp-agent` 的二进制；真正常用的是下面的自定义声明 |
 
-`claude` 在代码里是 `adapter::claude::ClaudeAdapter`——直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。原生协议让我们保留模型、思考档位、模式、真实提问与权限请求的完整语义；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `apps/daemon/src/adapter/claude.rs` 顶部的模块文档。
+`claude` 由 portable session driver 直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。原生协议让我们保留模型、思考档位、模式、真实提问与权限请求的完整语义；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `packages/daemon-core/src/session/claude.rs` 顶部的模块文档。
 
 ### 2.1 默认放权矩阵
 
@@ -139,7 +139,7 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 
 `codex` 在代码里是 `adapter::codex::CodexAdapter`——拉起 `codex app-server`，说它自己的 JSON-RPC（stdio、双向），不经过任何 wrapper。这样能完整保留 thread 恢复、模型、思考档位、沙箱模式，以及权限请求和真实用户问题的区别。顺带还去掉了一个没人猜得到的安装步骤——之前注册的是 `codex-acp` 桥接包，于是装了 `codex` 的人被告知「Codex 未安装」。
 
-协议细节（版本漂移从此归我们跟：以下是对着 codex-cli 0.145.0 实测的）见 `apps/daemon/src/adapter/codex.rs` 顶部的模块文档。挑几条影响用户能看见什么的：
+协议细节（版本漂移从此归我们跟：以下是对着 codex-cli 0.145.0 实测的）见 `packages/daemon-core/src/session/codex.rs` 顶部的模块文档。挑几条影响用户能看见什么的：
 
 - **三个选择器都是真的，而且一个 RPC 都不用额外发。** 这个 CLI 的 `turn/start` 参数里同时带着 model、`effort`、`approvalPolicy` 和 `sandboxPolicy`，所以「切模型」「切档位」「切模式」在我们这边只是记下来，下一回合原样带过去。首个 prompt 之前进程还没起（`session::manager::ensure_started`），这也是唯一能让那时的选择不被丢掉的接法。
 - **模型表和档位问它要。** `model/list` 回的每个模型都带自己的 `supportedReasoningEfforts`（这台机器上是 `low/medium/high/xhigh/max/ultra`）和一个默认档位，原样进选择器。校验在我们这边：它不会替我们拒绝一个不存在的模型名，只会在下一回合安静地用回原来那个。

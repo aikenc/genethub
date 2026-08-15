@@ -1734,7 +1734,7 @@ async fn a_message_naming_continues_round_after_an_interrupt_still_runs_normally
 
 /// The round ledger (`docs/agent-analysis-substrate-proposal.md` §8 step 2)
 /// exercised through the real wire protocol end to end, not just the
-/// in-process unit tests in `apps/daemon/src/session/manager.rs`: a real
+/// in-process unit tests in `packages/daemon-core/src/session/mod.rs`: a real
 /// daemon, a real workspace, a real (mock) turn, then the file it wrote.
 #[tokio::test]
 async fn a_completed_round_is_recorded_in_the_round_ledger_on_disk() {

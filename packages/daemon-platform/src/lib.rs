@@ -17,5 +17,6 @@ pub use vm::{
     CapabilityHandler, LogicInstance, LogicVm, VmLimits, VmPolicy, WasiPolicy, WasiPreopen,
 };
 
-/// First version of the platform/logic lifecycle contract.
-pub const LOGIC_ABI_VERSION: u32 = 12;
+/// The platform and guest consume one Rust contract crate, so artifact signing
+/// and VM admission cannot silently drift to different ABI numbers.
+pub use genet_daemon_logic_api::ABI_VERSION as LOGIC_ABI_VERSION;
