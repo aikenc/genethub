@@ -1,4 +1,5 @@
 import type { SessionSummary } from "@genehub/proto";
+import { Loader2 } from "lucide-react";
 
 /** A compact, readable status mark shared by tabs and every session list. */
 export function SessionStatusIcon({
@@ -14,7 +15,7 @@ export function SessionStatusIcon({
       : status === "waiting"
         ? { icon: "✋", label: "等待交互", tone: "text-accent" }
         : status === "running"
-          ? { icon: "↻", label: "运行中", tone: "text-ok animate-pulse" }
+          ? { icon: null, label: "运行中", tone: "text-ok" }
           : unread
             ? { icon: "●", label: "已完成未阅读", tone: "text-accent" }
             : { icon: "✓", label: "已完成已阅读", tone: "text-faint" };
@@ -26,7 +27,7 @@ export function SessionStatusIcon({
       aria-label={state.label}
       title={state.label}
     >
-      {state.icon}
+      {status === "running" ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : state.icon}
     </span>
   );
 }
