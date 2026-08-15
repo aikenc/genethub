@@ -6069,10 +6069,9 @@ mod tests {
         assert_eq!(trunks[0].batches[1].blob_count, 0);
     }
 
-    /// A round that never narrates still gets paginated: the 32-item cap is
-    /// what protects the byte budget when an agent (like `genet`, which the
-    /// proposal notes is prompted to "be concise") produces long runs of
-    /// tool calls with no monologue in between.
+    /// A round that never narrates still gets paginated: the 64-tool batch cap
+    /// protects the byte budget during long runs with no monologue or useful
+    /// thinking boundary, while the trunk threshold remains soft.
     #[tokio::test]
     async fn a_round_with_no_monologue_at_all_paginates_after_the_soft_threshold() {
         let dir = tempfile::tempdir().unwrap();
@@ -6096,14 +6095,14 @@ mod tests {
                 started_at_ms: 1,
             })
             .unwrap();
-        for i in 0..116u32 {
+        for i in 0..132u32 {
             events
                 .send(SessionEvent::Item {
                     turn_id: turn_id.clone(),
                     item: tool_call(&format!("t{i}"), "grep"),
                 })
                 .unwrap();
-            if i % 16 == 15 {
+            if i % 64 == 63 {
                 tokio::task::yield_now().await;
             }
         }
@@ -6134,10 +6133,10 @@ mod tests {
         assert_eq!(
             trunks.len(),
             2,
-            "116 tool calls split after the threshold-crossing batch: {trunks:?}"
+            "132 tool calls split after the threshold-crossing batch: {trunks:?}"
         );
-        assert_eq!(trunks[0].blob_count, 112);
-        assert_eq!(trunks[0].batches.len(), 7);
+        assert_eq!(trunks[0].blob_count, 128);
+        assert_eq!(trunks[0].batches.len(), 2);
         assert_eq!(trunks[1].blob_count, 4);
         assert_eq!(trunks[1].batches.len(), 1);
     }

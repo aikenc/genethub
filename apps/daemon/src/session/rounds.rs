@@ -94,8 +94,16 @@ pub struct RoundRecord {
 pub type TrunkSummary = RoundTrunkSummary;
 pub type BatchSummary = RoundBatchSummary;
 
-/// A semantic batch never exposes more than sixteen blobs at once.
-pub const BATCH_MAX_BLOBS: u32 = 16;
+/// Once a batch has accumulated this many tool calls, the next reasoning block
+/// is useful enough to become the title of a fresh semantic batch.
+pub const BATCH_REASONING_TOOL_THRESHOLD: u32 = 16;
+/// A tool-only run still needs a bounded fallback when the agent provides no
+/// narration or reasoning boundary at all.
+pub const BATCH_MAX_TOOL_CALLS: u32 = 64;
+/// Reasoning is a blob too. Keep a wider storage safety bound so a malformed
+/// or unusually chatty adapter cannot grow one batch without limit, while
+/// leaving normal grouping driven by semantic tool boundaries.
+pub const BATCH_MAX_BLOBS: u32 = 128;
 /// Once a trunk has passed this many tool calls, its next semantic batch starts
 /// a new trunk. This is deliberately a soft threshold: a batch is never cut in
 /// half merely to make the number exact.
@@ -194,10 +202,12 @@ pub struct TrunkBuilder {
 impl TrunkBuilder {
     pub fn push(&mut self, item_id: &str, item: TrunkItem<'_>) -> Option<ClosedTrunk> {
         let mut closed_trunk = None;
-        if matches!(item, TrunkItem::Monologue)
-            && self.current_batch.monologue_item_id.is_some()
-            && self.current_batch.blob_count > 0
-        {
+        let starts_semantic_batch = match item {
+            TrunkItem::Monologue => !self.current_batch.item_ids.is_empty(),
+            TrunkItem::Reasoning => self.current_batch.tool_count >= BATCH_REASONING_TOOL_THRESHOLD,
+            TrunkItem::ToolCall(_) => false,
+        };
+        if starts_semantic_batch {
             self.close_batch();
         }
         // Batch boundaries are the only safe trunk boundaries. Crossing the
@@ -237,7 +247,9 @@ impl TrunkBuilder {
             }
         }
 
-        if self.current_batch.blob_count >= BATCH_MAX_BLOBS {
+        if self.current_batch.tool_count >= BATCH_MAX_TOOL_CALLS
+            || self.current_batch.blob_count >= BATCH_MAX_BLOBS
+        {
             self.close_batch();
         }
         closed_trunk
@@ -432,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn leading_reasoning_joins_the_monologue_and_work_that_follow() {
+    fn every_monologue_starts_a_fresh_semantic_batch() {
         let mut builder = TrunkBuilder::default();
         builder.push("r1", TrunkItem::Reasoning);
         builder.push("a1", TrunkItem::Monologue);
@@ -448,24 +460,77 @@ mod tests {
             ]),
         );
 
-        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches.len(), 3);
         assert_eq!(summary.batches[0].first_item_id, "r1");
-        assert_eq!(summary.batches[0].blob_count, 3);
-        assert_eq!(summary.batches[0].text, "开始核对网络边界");
-        assert_eq!(summary.batches[1].first_item_id, "a2");
-        assert_eq!(summary.batches[1].blob_count, 0);
+        assert_eq!(summary.batches[0].blob_count, 1);
+        assert_eq!(summary.batches[0].text, "先判断入口");
+        assert_eq!(summary.batches[1].first_item_id, "a1");
+        assert_eq!(summary.batches[1].blob_count, 2);
+        assert_eq!(summary.batches[1].text, "开始核对网络边界");
+        assert_eq!(summary.batches[2].first_item_id, "a2");
+        assert_eq!(summary.batches[2].blob_count, 0);
     }
 
     #[test]
-    fn a_batch_closes_at_sixteen_blobs_without_a_monologue() {
+    fn a_tool_only_batch_closes_at_sixty_four_calls() {
         let mut builder = TrunkBuilder::default();
-        for index in 0..BATCH_MAX_BLOBS + 1 {
+        for index in 0..BATCH_MAX_TOOL_CALLS + 1 {
             builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
         }
         let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
         assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches[0].blob_count, 64);
+        assert_eq!(summary.batches[0].text, "调用了 64 次工具");
+        assert_eq!(summary.batches[1].blob_count, 1);
+    }
+
+    #[test]
+    fn reasoning_after_sixteen_tools_titles_a_fresh_batch() {
+        let mut builder = TrunkBuilder::default();
+        for index in 0..BATCH_REASONING_TOOL_THRESHOLD {
+            builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
+        }
+        builder.push("r1", TrunkItem::Reasoning);
+        builder.push("t16", TrunkItem::ToolCall("write"));
+        let summary = builder
+            .close()
+            .unwrap()
+            .into_summary(0, &texts(&[("r1", "开始修改并验证结果")]));
+
+        assert_eq!(summary.batches.len(), 2);
         assert_eq!(summary.batches[0].blob_count, 16);
         assert_eq!(summary.batches[0].text, "调用了 16 次工具");
+        assert_eq!(summary.batches[1].first_item_id, "r1");
+        assert_eq!(summary.batches[1].blob_count, 2);
+        assert_eq!(summary.batches[1].text, "开始修改并验证结果");
+    }
+
+    #[test]
+    fn reasoning_before_sixteen_tools_stays_with_the_current_batch() {
+        let mut builder = TrunkBuilder::default();
+        for index in 0..BATCH_REASONING_TOOL_THRESHOLD - 1 {
+            builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
+        }
+        builder.push("r1", TrunkItem::Reasoning);
+        let summary = builder
+            .close()
+            .unwrap()
+            .into_summary(0, &texts(&[("r1", "继续确认剩余入口")]));
+
+        assert_eq!(summary.batches.len(), 1);
+        assert_eq!(summary.batches[0].blob_count, 16);
+        assert_eq!(summary.batches[0].text, "继续确认剩余入口");
+    }
+
+    #[test]
+    fn the_blob_safety_limit_still_bounds_reasoning_only_batches() {
+        let mut builder = TrunkBuilder::default();
+        for index in 0..BATCH_MAX_BLOBS + 1 {
+            builder.push(&format!("r{index}"), TrunkItem::Reasoning);
+        }
+        let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches[0].blob_count, BATCH_MAX_BLOBS);
         assert_eq!(summary.batches[1].blob_count, 1);
     }
 
@@ -473,13 +538,13 @@ mod tests {
     fn a_trunk_closes_on_the_batch_after_its_tool_call_threshold() {
         let mut builder = TrunkBuilder::default();
         let mut closed = None;
-        for index in 0..113 {
+        for index in 0..129 {
             closed = builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
         }
         let summary = closed
             .expect("the first item after the threshold-crossing batch closes the trunk")
             .into_summary(0, &HashMap::new());
-        assert_eq!(summary.blob_count, 112);
+        assert_eq!(summary.blob_count, 128);
         assert_eq!(
             summary
                 .batches
@@ -490,9 +555,9 @@ mod tests {
             "every counted blob must belong to a listed batch, or the rows for \
              the trailing partial batch are written nowhere"
         );
-        assert_eq!(summary.batches.len(), 7);
-        assert_eq!(summary.batches.last().unwrap().blob_count, 16);
-        assert_eq!(summary.title, "调用了 16 次工具");
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches.last().unwrap().blob_count, 64);
+        assert_eq!(summary.title, "调用了 64 次工具");
     }
 
     #[test]
@@ -518,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_monologues_without_work_share_one_batch() {
+    fn consecutive_monologues_each_start_a_batch() {
         let mut builder = TrunkBuilder::default();
         builder.push("a1", TrunkItem::Monologue);
         builder.push("a2", TrunkItem::Monologue);
@@ -526,8 +591,9 @@ mod tests {
             .close()
             .unwrap()
             .into_summary(0, &texts(&[("a1", "第一句"), ("a2", "第二句")]));
-        assert_eq!(summary.batches.len(), 1);
+        assert_eq!(summary.batches.len(), 2);
         assert_eq!(summary.batches[0].text, "第一句");
+        assert_eq!(summary.batches[1].text, "第二句");
     }
 
     #[test]
