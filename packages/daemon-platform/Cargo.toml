@@ -1,0 +1,22 @@
+[package]
+name = "genet-daemon-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal native trust, Wasm VM, activation and recovery kernel for GeneHub daemon"
+
+[dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+wasmtime.workspace = true
+
+[dev-dependencies]
+wat = "1"
+
+[lints.rust]
+unsafe_code = "forbid"

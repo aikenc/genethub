@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      daemon_platform: ${{ steps.filter.outputs.daemon_platform }}
       relay: ${{ steps.filter.outputs.relay }}
       web: ${{ steps.filter.outputs.web }}
       desktop: ${{ steps.filter.outputs.desktop }}
@@ -49,6 +50,7 @@ jobs:
           # something is about to ship. main and PR stay on the path filter.
           if [ "${{ inputs.force_full }}" = "true" ]; then
             echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "daemon_platform=true" >> "$GITHUB_OUTPUT"
             echo "relay=true" >> "$GITHUB_OUTPUT"
             echo "web=true" >> "$GITHUB_OUTPUT"
             echo "desktop=true" >> "$GITHUB_OUTPUT"
@@ -64,6 +66,7 @@ jobs:
             head="${{ github.sha }}"
             if [ "$base" = "0000000000000000000000000000000000000000" ] || [ -z "$base" ]; then
               echo "rust=true" >> "$GITHUB_OUTPUT"
+              echo "daemon_platform=true" >> "$GITHUB_OUTPUT"
               echo "relay=true" >> "$GITHUB_OUTPUT"
               echo "web=true" >> "$GITHUB_OUTPUT"
               echo "desktop=true" >> "$GITHUB_OUTPUT"
@@ -77,6 +80,7 @@ jobs:
           printf '  %s\n' "${files[@]}"
 
           rust=false
+          daemon_platform=false
           relay=false
           web=false
           desktop=false
@@ -88,7 +92,15 @@ jobs:
               .github/workflows/*|.github/agent-clis/*)
                 force=true
                 ;;
-              Cargo.toml|Cargo.lock|apps/daemon/*|apps/cli/*|apps/agent/*|apps/proto/*|testing/*)
+              Cargo.toml|Cargo.lock)
+                rust=true
+                daemon_platform=true
+                ;;
+              packages/daemon-platform/*)
+                rust=true
+                daemon_platform=true
+                ;;
+              apps/daemon/*|apps/cli/*|apps/agent/*|apps/proto/*|testing/*)
                 rust=true
                 ;;
               apps/relay/*)
@@ -105,6 +117,7 @@ jobs:
 
           if [ "$force" = true ]; then
             rust=true
+            daemon_platform=true
             relay=true
             web=true
             desktop=true
@@ -121,7 +134,7 @@ jobs:
           if [ "$rust" = true ]; then
             for f in "${files[@]}"; do
               case "$f" in
-                apps/daemon/*|apps/cli/*|Cargo.toml|Cargo.lock)
+                apps/daemon/*|apps/cli/*|packages/daemon-platform/*|Cargo.toml|Cargo.lock)
                   desktop=true
                   break
                   ;;
@@ -131,11 +144,12 @@ jobs:
 
           {
             echo "rust=$rust"
+            echo "daemon_platform=$daemon_platform"
             echo "relay=$relay"
             echo "web=$web"
             echo "desktop=$desktop"
           } >> "$GITHUB_OUTPUT"
-          echo "filter: rust=$rust relay=$relay web=$web desktop=$desktop"
+          echo "filter: rust=$rust daemon_platform=$daemon_platform relay=$relay web=$web desktop=$desktop"
 
   # A lock file records where each tarball came from. Written on a machine with a
   # company mirror in its npm config, it records that mirror — and then every
@@ -271,6 +285,98 @@ jobs:
             target/debug/genet-agent-dev
           if-no-files-found: error
           retention-days: 1
+
+  # Compile the real Rust guest exactly once on Linux. The matrix below consumes
+  # this signed artifact verbatim; rebuilding a fixture per OS would not prove
+  # the product requirement that one published Wasm works everywhere.
+  daemon_platform_artifact:
+    needs: changes
+    if: needs.changes.outputs.daemon_platform == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: daemon-platform-portable-artifact
+      - name: Compile the portable Rust guest on Linux
+        env:
+          GENET_PORTABLE_FIXTURE_DIR: ${{ runner.temp }}/daemon-platform-fixture
+        run: |
+          set -euo pipefail
+          mkdir -p "$GENET_PORTABLE_FIXTURE_DIR"
+          rustc \
+            --edition=2021 \
+            --target=wasm32-unknown-unknown \
+            --crate-type=cdylib \
+            -C opt-level=s \
+            -C lto=fat \
+            -C codegen-units=1 \
+            -C panic=abort \
+            -C strip=symbols \
+            packages/daemon-platform/tests/fixtures/portable_guest.rs \
+            -o "$GENET_PORTABLE_FIXTURE_DIR/daemon-logic.wasm"
+          cargo test -p genet-daemon-platform \
+            --test portable_artifact_handoff \
+            write_linux_portable_fixture \
+            -- --ignored --exact
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: daemon-platform-portable-fixture
+          path: ${{ runner.temp }}/daemon-platform-fixture/
+          if-no-files-found: error
+          retention-days: 1
+
+  # The platform kernel is deliberately exercised on all supported desktop
+  # operating systems. These tests execute real Wasmtime modules and the
+  # durable update-slot implementation, including each OS's rename/fsync path.
+  daemon-platform:
+    needs: [changes, daemon_platform_artifact]
+    if: >-
+      always()
+      && needs.changes.result == 'success'
+      && needs.changes.outputs.daemon_platform == 'true'
+      && needs.daemon_platform_artifact.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux-x64
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
+          - runner: windows-latest
+            platform: windows-x64
+          - runner: macos-latest
+            platform: macos-arm64
+          - runner: macos-15-intel
+            platform: macos-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: daemon-platform-${{ matrix.platform }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-platform-portable-fixture
+          path: ${{ runner.temp }}/daemon-platform-fixture
+      - run: cargo test -p genet-daemon-platform --all-targets
+      - name: Install the exact Linux-built artifact, call it, and reopen it
+        env:
+          GENET_PORTABLE_FIXTURE_DIR: ${{ runner.temp }}/daemon-platform-fixture
+        run: >-
+          cargo test -p genet-daemon-platform
+          --test portable_artifact_handoff
+          consume_linux_built_fixture_through_update_and_restart
+          -- --ignored --exact
 
   relay:
     needs: changes

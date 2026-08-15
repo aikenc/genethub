@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["apps/agent", "apps/cli", "apps/daemon", "packages/proto", "testing"]
+members = [
+  "apps/agent",
+  "apps/cli",
+  "apps/daemon",
+  "packages/daemon-platform",
+  "packages/proto",
+  "testing",
+]
 # The Tauri shell stays out of the workspace on purpose: it drags in a large,
 # slow-to-build native dependency tree that would otherwise be rebuilt whenever
 # the daemon changes.
@@ -25,6 +32,7 @@ aes-gcm = "0.10"
 base64 = "0.22"
 hmac = "0.12"
 chrono = { version = "0.4", features = ["clock", "serde"] }
+ed25519-dalek = "3"
 futures-util = "0.3"
 fs2 = "0.4"
 globset = "0.4"
@@ -34,10 +42,13 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "process", "sync", "time", "fs", "signal"] }
 ts-rs = "10"
 uuid = { version = "1", features = ["v4"] }
+wasmtime = { version = "47.0.3", default-features = false, features = ["anyhow", "cranelift", "runtime", "std"] }
 
 [profile.release]
 opt-level = "z"
