@@ -9,12 +9,14 @@ mod claude;
 mod codex;
 mod genet;
 mod opencode;
+mod rounds;
 
 use std::collections::{HashMap, VecDeque};
 
 use genehub_proto::{
-    ErrorCode, PermissionOutcome, ProtocolError, Reply, Request, SequencedEvent, SessionEvent,
-    SessionSnapshot, SessionStatus, SessionSummary, TimelineItem,
+    BlobKind, BlobOverview, BlobPayload, BlobRef, ErrorCode, PermissionOutcome, ProtocolError,
+    Reply, Request, RoundBatch, RoundBatchSummary, RoundLayer, RoundTrunk, RoundTrunkSummary,
+    SequencedEvent, SessionEvent, SessionSnapshot, SessionStatus, SessionSummary, TimelineItem,
 };
 use genet_daemon_logic_api::{
     CapabilityEvent, CapabilityRequest, CapabilityValue, ConnectionDirective, FileKind,
@@ -22,6 +24,8 @@ use genet_daemon_logic_api::{
     ProcessSignal, ProcessSpec, ProcessStream, Publication,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::agents::{self, AgentDefinition, AgentKind};
 use crate::capability::Client;
@@ -31,6 +35,9 @@ use crate::CapabilityExecutor;
 const SESSION_FORMAT: u32 = 4;
 const META_BYTES: u32 = 1024 * 1024;
 const CHAT_BYTES: u32 = 3 * 1024 * 1024;
+const FILE_CHUNK_BYTES: u32 = 1024 * 1024;
+const BLOB_ID_CHARS: usize = 24;
+const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 const REPLAY_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -44,12 +51,20 @@ pub struct Sessions {
 #[serde(rename_all = "camelCase")]
 struct LiveSession {
     meta: SessionMeta,
+    /// Opaque native handle for `<session>/writer.lock`. It is serialized so
+    /// guest hot replacement cannot accidentally open a second writer.
+    lock_resource_id: u64,
     seq: u64,
     replay: VecDeque<SequencedEvent>,
     pending_permissions: Vec<genehub_proto::PermissionRequest>,
     process: Option<AgentProcess>,
     active_items: Vec<TimelineItem>,
     active_turn: Option<ActiveTurn>,
+    rounds: Vec<rounds::RoundRecord>,
+    #[serde(default)]
+    closed: bool,
+    #[serde(default)]
+    settled_status: Option<SessionStatus>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,6 +74,8 @@ struct SessionMeta {
     id: String,
     #[serde(default)]
     workspace_id: String,
+    #[serde(default)]
+    project_key: String,
     #[serde(default)]
     root_handle: String,
     #[serde(default, rename = "cwd", alias = "root")]
@@ -90,6 +107,15 @@ struct ActiveTurn {
     id: String,
     started_at_ms: i64,
     user_item_id: String,
+    round_id: String,
+    interrupted: bool,
+}
+
+struct SettledTurn {
+    round_id: String,
+    turn_id: String,
+    outcome: Option<rounds::RoundOutcome>,
+    items: Vec<TimelineItem>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,6 +142,42 @@ enum Driver {
 #[serde(tag = "t", rename_all = "camelCase")]
 enum ChatRow {
     Item { item: TimelineItem },
+    Round { round: rounds::RoundRecord },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "camelCase")]
+enum TrunkRow {
+    #[serde(rename_all = "camelCase")]
+    Batch {
+        index: u32,
+        first_item_id: String,
+        blob_count: u32,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monologue: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Blob {
+        item_id: String,
+        kind: BlobKind,
+        overview: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blob: Option<BlobRef>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlobRecord {
+    id: String,
+    value: Value,
+}
+
+#[derive(Default)]
+struct ChatLog {
+    items: Vec<TimelineItem>,
+    rounds: Vec<rounds::RoundRecord>,
 }
 
 pub fn handles(request: &Request) -> bool {
@@ -271,6 +333,7 @@ impl Sessions {
                     format: SESSION_FORMAT,
                     id,
                     workspace_id,
+                    project_key: workspace_project_key(workspace),
                     root_handle: folder.root_handle.clone(),
                     root: folder.root.clone(),
                     agent_id: definition.id,
@@ -285,18 +348,23 @@ impl Sessions {
                     persist: None,
                 };
                 establish(&meta, executor, next)?;
+                let lock_resource_id = lock_session(&meta, executor, next)?;
                 save_meta(&meta, executor, next)?;
                 let summary = summary(&meta, SessionStatus::Idle);
                 self.loaded.insert(
                     meta.id.clone(),
                     LiveSession {
                         meta,
+                        lock_resource_id,
                         seq: 0,
                         replay: VecDeque::new(),
                         pending_permissions: Vec::new(),
                         process: None,
                         active_items: Vec::new(),
                         active_turn: None,
+                        rounds: Vec::new(),
+                        closed: false,
+                        settled_status: None,
                     },
                 );
                 Ok(Response::reply(Reply::Session(summary)))
@@ -332,10 +400,23 @@ impl Sessions {
                 session_id,
                 text,
                 attachments,
+                continues_round,
                 ..
-            } => self.send(&session_id, text, attachments, boot, config, executor, next),
+            } => self.send(
+                &session_id,
+                text,
+                attachments,
+                continues_round,
+                boot,
+                config,
+                executor,
+                next,
+            ),
             Request::SessionInterrupt { session_id } => {
                 let live = self.live_mut(&session_id)?;
+                if let Some(turn) = live.active_turn.as_mut() {
+                    turn.interrupted = true;
+                }
                 let process = live
                     .process
                     .as_mut()
@@ -373,10 +454,28 @@ impl Sessions {
                 Ok(Response::reply(Reply::Ack))
             }
             Request::SessionClose { session_id } => {
+                let mut publications = Vec::new();
+                if let Some(turn) = self.live_mut(&session_id)?.active_turn.as_mut() {
+                    turn.interrupted = false;
+                }
+                if let Some(turn_id) = self
+                    .live(&session_id)?
+                    .active_turn
+                    .as_ref()
+                    .map(|turn| turn.id.clone())
+                {
+                    publications.extend(self.apply_events(
+                        &session_id,
+                        vec![SessionEvent::TurnCanceled { turn_id }],
+                        executor,
+                        next,
+                    )?);
+                }
                 let process = {
                     let live = self.live_mut(&session_id)?;
                     let process = live.process.take();
                     live.active_turn = None;
+                    live.closed = true;
                     process
                 };
                 if let Some(process) = process {
@@ -392,7 +491,21 @@ impl Sessions {
                 }
                 let live = self.live(&session_id)?;
                 save_meta(&live.meta, executor, next)?;
-                Ok(Response::reply(Reply::Ack))
+                let publication = {
+                    let live = self.live_mut(&session_id)?;
+                    publish(
+                        live,
+                        SessionEvent::SessionStatusChanged {
+                            status: SessionStatus::Closed,
+                        },
+                    )
+                };
+                publications.push(publication);
+                Ok(Response {
+                    reply: Reply::Ack,
+                    connection: ConnectionDirective::None,
+                    publications,
+                })
             }
             Request::SessionArchive {
                 session_id,
@@ -434,6 +547,7 @@ impl Sessions {
                             next,
                         );
                     }
+                    unlock_session(live.lock_resource_id, executor, next)?;
                     remove_session(&live.meta, executor, next)?;
                 }
                 Ok(Response::reply(Reply::Ack))
@@ -455,12 +569,53 @@ impl Sessions {
                 request_id,
                 outcome,
             } => self.permission(&session_id, request_id, outcome, executor, next),
-            Request::RoundTrunkList { .. }
-            | Request::RoundTrunkGet { .. }
-            | Request::BlobGet { .. }
-            | Request::SessionFork { .. } => Err(unsupported(
-                "this portable session does not yet contain a requested round/blob operation",
-            )),
+            Request::RoundTrunkList {
+                session_id,
+                round_id,
+                cursor,
+                limit,
+            } => {
+                self.ensure_loaded(&session_id, config, executor, next)?;
+                let layer = round_layer(
+                    self.live(&session_id)?,
+                    &round_id,
+                    cursor.as_deref(),
+                    limit.unwrap_or(20),
+                    false,
+                    executor,
+                    next,
+                )?;
+                Ok(Response::reply(Reply::RoundLayer(layer)))
+            }
+            Request::RoundTrunkGet {
+                session_id,
+                round_id,
+                trunk_index,
+            } => {
+                self.ensure_loaded(&session_id, config, executor, next)?;
+                let live = self.live(&session_id)?;
+                let round = require_round(live, &round_id)?;
+                let summary = load_trunk_index(&live.meta, round.ord, executor, next)?
+                    .into_iter()
+                    .find(|summary| summary.index == trunk_index)
+                    .ok_or_else(|| not_found(format!("no such trunk: {trunk_index}")))?;
+                Ok(Response::reply(Reply::RoundTrunk(load_trunk(
+                    &live.meta, round.ord, &summary, executor, next,
+                )?)))
+            }
+            Request::BlobGet { session_id, blob } => {
+                self.ensure_loaded(&session_id, config, executor, next)?;
+                Ok(Response::reply(Reply::Blob(get_blob(
+                    &self.live(&session_id)?.meta,
+                    &blob,
+                    executor,
+                    next,
+                )?)))
+            }
+            Request::SessionFork {
+                session_id,
+                turn_id,
+            } => self.fork(&session_id, &turn_id, boot, config, executor, next),
             _ => Err(internal("non-session request reached session kernel")),
         }
     }
@@ -471,6 +626,7 @@ impl Sessions {
         session_id: &str,
         text: String,
         attachments: Vec<genehub_proto::Attachment>,
+        continues_round: Option<String>,
         boot: &genet_daemon_logic_api::LogicBoot,
         config: &Config,
         executor: &mut impl CapabilityExecutor,
@@ -486,6 +642,9 @@ impl Sessions {
         };
         if self.live(session_id)?.active_turn.is_some() {
             return Err(conflict("session is already running"));
+        }
+        if self.live(session_id)?.closed {
+            return Err(conflict("session is closed"));
         }
         if self.live(session_id)?.meta.pending_permission.is_some() {
             return Err(conflict(
@@ -503,16 +662,70 @@ impl Sessions {
         };
         {
             let live = self.live_mut(session_id)?;
+            let mut rows = Vec::new();
+            for round in live
+                .rounds
+                .iter_mut()
+                .filter(|round| round.outcome.is_none())
+            {
+                if continues_round.as_deref() != Some(round.round_id.as_str()) {
+                    round.outcome = Some(rounds::RoundOutcome::Superseded);
+                    round.ended_at_ms = timestamp;
+                    rows.push(ChatRow::Round {
+                        round: round.clone(),
+                    });
+                }
+            }
+            let round_id = match continues_round.as_deref().and_then(|id| {
+                live.rounds
+                    .iter_mut()
+                    .find(|round| round.round_id == id && round.outcome.is_none())
+            }) {
+                Some(round) => {
+                    if !round.adapter_turn_ids.iter().any(|id| id == &turn_id) {
+                        round.adapter_turn_ids.push(turn_id.clone());
+                    }
+                    rows.push(ChatRow::Round {
+                        round: round.clone(),
+                    });
+                    round.round_id.clone()
+                }
+                None => {
+                    let round = rounds::RoundRecord {
+                        schema_version: rounds::SCHEMA_VERSION,
+                        round_id: format!("r_{}", turn_id.trim_start_matches("turn_")),
+                        ord: live.rounds.len() as u32,
+                        user_item_id: Some(user_id.clone()),
+                        started_at_ms: timestamp,
+                        ended_at_ms: 0,
+                        outcome: None,
+                        adapter_turn_ids: vec![turn_id.clone()],
+                        blocked_ms: 0,
+                        synthesized: false,
+                        trunk_count: 0,
+                    };
+                    let id = round.round_id.clone();
+                    rows.push(ChatRow::Round {
+                        round: round.clone(),
+                    });
+                    live.rounds.push(round);
+                    id
+                }
+            };
             if live.meta.title.is_none() {
                 live.meta.title = title_from(&text);
             }
             live.meta.updated_at_ms = timestamp;
+            live.settled_status = None;
             live.active_turn = Some(ActiveTurn {
                 id: turn_id.clone(),
                 started_at_ms: timestamp,
                 user_item_id: user_id,
+                round_id,
+                interrupted: false,
             });
-            append_chat(&live.meta, &[user], executor, next)?;
+            rows.insert(0, ChatRow::Item { item: user });
+            append_rows(&live.meta, &rows, executor, next)?;
             save_meta(&live.meta, executor, next)?;
         }
 
@@ -585,6 +798,112 @@ impl Sessions {
             connection: ConnectionDirective::None,
             publications: vec![publication],
         })
+    }
+
+    fn fork(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+        boot: &genet_daemon_logic_api::LogicBoot,
+        config: &Config,
+        executor: &mut impl CapabilityExecutor,
+        next: &mut u64,
+    ) -> Result<Response, ProtocolError> {
+        self.ensure_loaded(session_id, config, executor, next)?;
+        let source = self.live(session_id)?;
+        if source.active_turn.is_some() || source.meta.pending_permission.is_some() {
+            return Err(conflict(
+                "wait for the current turn to finish before forking",
+            ));
+        }
+        let definition = agents::require(boot, config, &source.meta.agent_id)?;
+        if !definition.capabilities().fork {
+            return Err(unsupported(format!(
+                "the {} agent does not support forking",
+                source.meta.agent_id
+            )));
+        }
+        let log = load_log(&source.meta, executor, next)?;
+        let at = log
+            .items
+            .iter()
+            .position(|item| {
+                matches!(item, TimelineItem::TurnSummary { stats, .. } if stats.turn_id == turn_id)
+            })
+            .ok_or_else(|| not_found(format!("no completed turn called {turn_id}")))?;
+        let checkpoint = match &log.items[at] {
+            TimelineItem::TurnSummary { stats, .. } => stats
+                .fork_checkpoint
+                .clone()
+                .ok_or_else(|| unsupported("that turn has no Agent fork checkpoint"))?,
+            _ => unreachable!("turn summary position was selected above"),
+        };
+        let source_thread = source
+            .meta
+            .persist
+            .as_ref()
+            .filter(|persist| persist.agent_id == source.meta.agent_id)
+            .and_then(|persist| persist.value.get("threadId"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| conflict("the source Agent thread is not available"))?
+            .to_string();
+        let (id, timestamp) = identity_and_time(executor, next)?;
+        let title = source
+            .meta
+            .title
+            .as_deref()
+            .and_then(|title| normalize_title(Some(format!("{title} · 分支"))));
+        let meta = SessionMeta {
+            format: SESSION_FORMAT,
+            id,
+            workspace_id: source.meta.workspace_id.clone(),
+            project_key: source.meta.project_key.clone(),
+            root_handle: source.meta.root_handle.clone(),
+            root: source.meta.root.clone(),
+            agent_id: source.meta.agent_id.clone(),
+            title,
+            model_id: source.meta.model_id.clone(),
+            mode_id: source.meta.mode_id.clone(),
+            effort_id: source.meta.effort_id.clone(),
+            created_at_ms: timestamp,
+            updated_at_ms: timestamp,
+            archived: false,
+            pending_permission: None,
+            persist: Some(PersistHandle {
+                agent_id: source.meta.agent_id.clone(),
+                value: serde_json::json!({
+                    "threadId": source_thread,
+                    "forkCheckpoint": checkpoint,
+                }),
+            }),
+        };
+        let inherited = log.items[..=at]
+            .iter()
+            .cloned()
+            .map(|item| ChatRow::Item { item })
+            .collect::<Vec<_>>();
+        establish(&meta, executor, next)?;
+        let lock_resource_id = lock_session(&meta, executor, next)?;
+        save_meta(&meta, executor, next)?;
+        append_rows(&meta, &inherited, executor, next)?;
+        let summary = summary(&meta, SessionStatus::Idle);
+        self.loaded.insert(
+            meta.id.clone(),
+            LiveSession {
+                meta,
+                lock_resource_id,
+                seq: 0,
+                replay: VecDeque::new(),
+                pending_permissions: Vec::new(),
+                process: None,
+                active_items: Vec::new(),
+                active_turn: None,
+                rounds: Vec::new(),
+                closed: false,
+                settled_status: None,
+            },
+        );
+        Ok(Response::reply(Reply::Session(summary)))
     }
 
     fn control(
@@ -814,7 +1133,7 @@ impl Sessions {
                             .to_string()
                     })
                     .unwrap_or_default();
-                let Some(turn) = live.active_turn.take() else {
+                let Some(turn_id) = live.active_turn.as_ref().map(|turn| turn.id.clone()) else {
                     return Ok(Vec::new());
                 };
                 let suffix = if tail.is_empty() {
@@ -825,7 +1144,7 @@ impl Sessions {
                 self.apply_events(
                     &session_id,
                     vec![SessionEvent::TurnFailed {
-                        turn_id: turn.id,
+                        turn_id,
                         error: genehub_proto::TurnError {
                             code: genehub_proto::TurnErrorCode::AgentCrashed,
                             message: format!("Agent exited with code {code:?}{suffix}"),
@@ -848,16 +1167,25 @@ impl Sessions {
     ) -> Result<Vec<Publication>, ProtocolError> {
         let mut publications = Vec::new();
         for event in events {
-            let mut settled = Vec::new();
+            let terminal = matches!(
+                event,
+                SessionEvent::TurnCompleted { .. }
+                    | SessionEvent::TurnFailed { .. }
+                    | SessionEvent::TurnCanceled { .. }
+            );
+            let finished_at = terminal.then(|| now(executor, next)).transpose()?;
+            let mut settled = None;
             {
                 let live = self.live_mut(session_id)?;
+                if let Some(finished_at) = finished_at {
+                    live.meta.updated_at_ms = finished_at;
+                }
                 fold(live, &event, &mut settled);
                 publications.push(publish(live, event));
             }
-            if !settled.is_empty() {
-                let live = self.live(session_id)?;
-                append_chat(&live.meta, &settled, executor, next)?;
-                save_meta(&live.meta, executor, next)?;
+            if let Some(settled) = settled {
+                let live = self.live_mut(session_id)?;
+                persist_settled(live, settled, executor, next)?;
             }
         }
         Ok(publications)
@@ -911,11 +1239,16 @@ impl Sessions {
                     root.clone(),
                     &entry.name,
                     &workspace.id,
+                    &workspace_project_key(workspace),
                     &folder.root_handle,
                     &folder.root,
                     executor,
                     next,
                 ) {
+                    let Ok(lock_resource_id) = lock_session(&meta, executor, next) else {
+                        continue;
+                    };
+                    let log = load_log(&meta, executor, next).unwrap_or_default();
                     self.loaded.insert(
                         meta.id.clone(),
                         LiveSession {
@@ -925,11 +1258,15 @@ impl Sessions {
                                 .into_iter()
                                 .collect(),
                             meta,
+                            lock_resource_id,
                             seq: 0,
                             replay: VecDeque::new(),
                             process: None,
                             active_items: Vec::new(),
                             active_turn: None,
+                            rounds: log.rounds,
+                            closed: false,
+                            settled_status: None,
                         },
                     );
                 }
@@ -1435,7 +1772,7 @@ fn complete_lines(buffer: &mut Vec<u8>) -> Vec<String> {
     lines
 }
 
-fn fold(live: &mut LiveSession, event: &SessionEvent, settled: &mut Vec<TimelineItem>) {
+fn fold(live: &mut LiveSession, event: &SessionEvent, settled: &mut Option<SettledTurn>) {
     match event {
         SessionEvent::Item { item, .. } => upsert(&mut live.active_items, item.clone()),
         SessionEvent::ItemDelta { item_id, delta, .. } => {
@@ -1477,15 +1814,20 @@ fn fold(live: &mut LiveSession, event: &SessionEvent, settled: &mut Vec<Timeline
             turn_id,
             usage,
             fork_checkpoint,
-        } => settle(
-            live,
-            turn_id,
-            genehub_proto::TurnOutcome::Completed,
-            usage.clone(),
-            fork_checkpoint.clone(),
-            settled,
-        ),
+        } => {
+            live.settled_status = Some(SessionStatus::Idle);
+            settle(
+                live,
+                turn_id,
+                genehub_proto::TurnOutcome::Completed,
+                rounds::RoundOutcome::Completed,
+                usage.clone(),
+                fork_checkpoint.clone(),
+                settled,
+            )
+        }
         SessionEvent::TurnFailed { turn_id, error } => {
+            live.settled_status = Some(SessionStatus::Failed);
             let id = format!("{turn_id}-error");
             upsert(
                 &mut live.active_items,
@@ -1498,24 +1840,30 @@ fn fold(live: &mut LiveSession, event: &SessionEvent, settled: &mut Vec<Timeline
                 live,
                 turn_id,
                 genehub_proto::TurnOutcome::Failed,
+                rounds::RoundOutcome::Failed,
                 genehub_proto::Usage::default(),
                 None,
                 settled,
             );
         }
-        SessionEvent::TurnCanceled { turn_id } => settle(
-            live,
-            turn_id,
-            genehub_proto::TurnOutcome::Canceled,
-            genehub_proto::Usage::default(),
-            None,
-            settled,
-        ),
+        SessionEvent::TurnCanceled { turn_id } => {
+            live.settled_status = Some(SessionStatus::Idle);
+            settle(
+                live,
+                turn_id,
+                genehub_proto::TurnOutcome::Canceled,
+                rounds::RoundOutcome::Canceled,
+                genehub_proto::Usage::default(),
+                None,
+                settled,
+            )
+        }
         SessionEvent::ModelChanged { model_id } => live.meta.model_id = Some(model_id.clone()),
         SessionEvent::ModeChanged { mode_id } => live.meta.mode_id = Some(mode_id.clone()),
         SessionEvent::EffortChanged { effort_id } => live.meta.effort_id = Some(effort_id.clone()),
         SessionEvent::TitleChanged { title } => live.meta.title = Some(title.clone()),
-        SessionEvent::SessionStatusChanged { .. } | SessionEvent::TurnStarted { .. } => {}
+        SessionEvent::SessionStatusChanged { status } => live.settled_status = Some(*status),
+        SessionEvent::TurnStarted { .. } => live.settled_status = None,
     }
 }
 
@@ -1523,9 +1871,10 @@ fn settle(
     live: &mut LiveSession,
     turn_id: &str,
     outcome: genehub_proto::TurnOutcome,
+    round_outcome: rounds::RoundOutcome,
     usage: genehub_proto::Usage,
     fork_checkpoint: Option<String>,
-    settled: &mut Vec<TimelineItem>,
+    settled: &mut Option<SettledTurn>,
 ) {
     let active = live.active_turn.take();
     let started_at_ms = active
@@ -1533,8 +1882,12 @@ fn settle(
         .map(|active| active.started_at_ms)
         .unwrap_or(live.meta.updated_at_ms);
     let finished_at_ms = live.meta.updated_at_ms.max(started_at_ms);
-    settled.append(&mut live.active_items);
-    settled.push(TimelineItem::TurnSummary {
+    let mut items = std::mem::take(&mut live.active_items);
+    let tool_calls = items
+        .iter()
+        .filter(|item| matches!(item, TimelineItem::ToolCall { .. }))
+        .count() as u64;
+    items.push(TimelineItem::TurnSummary {
         id: format!("{turn_id}-summary"),
         stats: genehub_proto::TurnStats {
             turn_id: turn_id.to_string(),
@@ -1543,12 +1896,24 @@ fn settle(
             finished_at_ms,
             duration_ms: finished_at_ms.saturating_sub(started_at_ms) as u64,
             usage,
-            tool_calls: settled
-                .iter()
-                .filter(|item| matches!(item, TimelineItem::ToolCall { .. }))
-                .count() as u64,
+            tool_calls,
             fork_checkpoint,
         },
+    });
+    *settled = Some(SettledTurn {
+        round_id: active
+            .as_ref()
+            .map(|active| active.round_id.clone())
+            .unwrap_or_else(|| format!("r_{}", turn_id.trim_start_matches("turn_"))),
+        turn_id: turn_id.to_string(),
+        outcome: if matches!(outcome, genehub_proto::TurnOutcome::Canceled)
+            && active.as_ref().is_some_and(|active| active.interrupted)
+        {
+            None
+        } else {
+            Some(round_outcome)
+        },
+        items,
     });
 }
 
@@ -1557,6 +1922,515 @@ fn upsert(items: &mut Vec<TimelineItem>, item: TimelineItem) {
         Some(existing) => *existing = item,
         None => items.push(item),
     }
+}
+
+fn persist_settled(
+    live: &mut LiveSession,
+    settled: SettledTurn,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<(), ProtocolError> {
+    let Some(position) = live
+        .rounds
+        .iter()
+        .position(|round| round.round_id == settled.round_id)
+    else {
+        return Err(internal(format!(
+            "turn {} belongs to an unknown round {}",
+            settled.turn_id, settled.round_id
+        )));
+    };
+    let ord = live.rounds[position].ord;
+    let first_trunk = live.rounds[position].trunk_count;
+    let mut trunks = rounds::trunks_from_items(&settled.items, first_trunk);
+    for trunk in &mut trunks {
+        for blob in trunk
+            .batches
+            .iter_mut()
+            .flat_map(|batch| batch.blobs.iter_mut())
+        {
+            let item = settled
+                .items
+                .iter()
+                .find(|item| item.id() == blob.item_id)
+                .ok_or_else(|| internal("round blob no longer has a source item"))?;
+            blob.blob = Some(put_blob(
+                &live.meta,
+                serde_json::to_value(item)
+                    .map_err(|error| internal(format!("encoding round blob: {error}")))?,
+                executor,
+                next,
+            )?);
+        }
+        write_trunk(&live.meta, ord, trunk, executor, next)?;
+    }
+
+    let round = &mut live.rounds[position];
+    if !round
+        .adapter_turn_ids
+        .iter()
+        .any(|turn_id| turn_id == &settled.turn_id)
+    {
+        round.adapter_turn_ids.push(settled.turn_id);
+    }
+    round.trunk_count = round.trunk_count.saturating_add(trunks.len() as u32);
+    if let Some(outcome) = settled.outcome {
+        round.ended_at_ms = live.meta.updated_at_ms;
+        round.outcome = Some(outcome);
+    } else {
+        round.ended_at_ms = 0;
+        round.outcome = None;
+    }
+
+    let mut rows = settled
+        .items
+        .into_iter()
+        .filter(|item| {
+            !matches!(
+                item,
+                TimelineItem::Reasoning { .. } | TimelineItem::ToolCall { .. }
+            )
+        })
+        .map(|item| ChatRow::Item { item })
+        .collect::<Vec<_>>();
+    rows.push(ChatRow::Round {
+        round: round.clone(),
+    });
+    append_rows(&live.meta, &rows, executor, next)?;
+    save_meta(&live.meta, executor, next)
+}
+
+fn put_blob(
+    meta: &SessionMeta,
+    value: Value,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<BlobRef, ProtocolError> {
+    let encoded = serde_json::to_vec(&value)
+        .map_err(|error| internal(format!("encoding blob value: {error}")))?;
+    let id = Sha256::digest(&encoded)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        .chars()
+        .take(BLOB_ID_CHARS)
+        .collect::<String>();
+    let bucket = id[..2].to_string();
+    let path = format!(".genethub/sessions/{}/blobs/b-{bucket}.jsonl", meta.id);
+    create_dir(
+        meta,
+        &format!(".genethub/sessions/{}/blobs", meta.id),
+        executor,
+        next,
+    )?;
+    let offset = file_size(meta, &path, executor, next)?.unwrap_or(0);
+    let mut line = serde_json::to_vec(&BlobRecord {
+        id: id.clone(),
+        value,
+    })
+    .map_err(|error| internal(format!("encoding blob record: {error}")))?;
+    let length = line.len() as u64;
+    if length == 0 || length > MAX_BLOB_BYTES {
+        return Err(internal("round blob exceeds its storage limit"));
+    }
+    line.push(b'\n');
+    append_bytes(meta, &path, line, executor, next)?;
+    Ok(BlobRef {
+        id,
+        bytes: encoded.len() as u64,
+        at: format!("{bucket}:{offset}:{length}"),
+    })
+}
+
+fn get_blob(
+    meta: &SessionMeta,
+    blob: &BlobRef,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<BlobPayload, ProtocolError> {
+    let (bucket, offset, length) = parse_blob_locator(&blob.at)
+        .filter(|(_, _, length)| *length > 0 && *length <= MAX_BLOB_BYTES)
+        .ok_or_else(|| not_found(format!("no such blob: {}", blob.id)))?;
+    if blob.id.len() != BLOB_ID_CHARS || !blob.id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(not_found(format!("no such blob: {}", blob.id)));
+    }
+    let path = format!(".genethub/sessions/{}/blobs/b-{bucket}.jsonl", meta.id);
+    let bytes = read_range(meta, &path, offset, length, executor, next)?;
+    let record: BlobRecord = serde_json::from_slice(&bytes)
+        .map_err(|_| not_found(format!("no such blob: {}", blob.id)))?;
+    if record.id != blob.id {
+        return Err(not_found(format!("no such blob: {}", blob.id)));
+    }
+    Ok(BlobPayload {
+        id: record.id,
+        value: record.value,
+    })
+}
+
+fn parse_blob_locator(value: &str) -> Option<(String, u64, u64)> {
+    let mut parts = value.split(':');
+    let bucket = parts.next()?;
+    if bucket.len() != 2 || !bucket.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let offset = parts.next()?.parse().ok()?;
+    let length = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((bucket.to_string(), offset, length))
+}
+
+fn write_trunk(
+    meta: &SessionMeta,
+    ord: u32,
+    trunk: &RoundTrunk,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<(), ProtocolError> {
+    let dir = format!(".genethub/sessions/{}/rounds/r-{ord:03}", meta.id);
+    create_dir(meta, &dir, executor, next)?;
+    let mut body = Vec::new();
+    for batch in &trunk.batches {
+        push_json_line(
+            &mut body,
+            &TrunkRow::Batch {
+                index: batch.summary.index,
+                first_item_id: batch.summary.first_item_id.clone(),
+                blob_count: batch.summary.blob_count,
+                text: batch.summary.text.clone(),
+                monologue: batch.monologue.clone(),
+            },
+        )?;
+        for blob in &batch.blobs {
+            push_json_line(
+                &mut body,
+                &TrunkRow::Blob {
+                    item_id: blob.item_id.clone(),
+                    kind: blob.kind,
+                    overview: blob.overview.clone(),
+                    blob: blob.blob.clone(),
+                },
+            )?;
+        }
+    }
+    write_atomic_chunks(
+        meta,
+        &format!("{dir}/t-{:04}.jsonl", trunk.summary.index),
+        body,
+        executor,
+        next,
+    )?;
+    let mut summary = serde_json::to_vec(&trunk.summary)
+        .map_err(|error| internal(format!("encoding trunk summary: {error}")))?;
+    summary.push(b'\n');
+    append_bytes(meta, &format!("{dir}/index.jsonl"), summary, executor, next)
+}
+
+fn push_json_line<T: Serialize>(body: &mut Vec<u8>, value: &T) -> Result<(), ProtocolError> {
+    serde_json::to_writer(&mut *body, value)
+        .map_err(|error| internal(format!("encoding round trunk: {error}")))?;
+    body.push(b'\n');
+    Ok(())
+}
+
+fn write_atomic_chunks(
+    meta: &SessionMeta,
+    path: &str,
+    bytes: Vec<u8>,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<(), ProtocolError> {
+    let temporary = format!("{path}.tmp");
+    let mut chunks = bytes.chunks(FILE_CHUNK_BYTES as usize);
+    let first = chunks.next().unwrap_or_default().to_vec();
+    let mut client = Client::new(executor, next);
+    client.call(CapabilityRequest::File(FileRequest::WriteAtomic {
+        locator: locator(meta, &temporary),
+        bytes: first,
+    }))?;
+    for chunk in chunks {
+        append_bytes(meta, &temporary, chunk.to_vec(), executor, next)?;
+    }
+    let mut client = Client::new(executor, next);
+    match client.call(CapabilityRequest::File(FileRequest::Rename {
+        from: locator(meta, &temporary),
+        to: locator(meta, path),
+    }))? {
+        CapabilityValue::Unit => Ok(()),
+        _ => Err(internal("atomic round rename returned the wrong value")),
+    }
+}
+
+fn create_dir(
+    meta: &SessionMeta,
+    path: &str,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<(), ProtocolError> {
+    let mut client = Client::new(executor, next);
+    match client.call(CapabilityRequest::File(FileRequest::CreateDirAll {
+        locator: locator(meta, path),
+    }))? {
+        CapabilityValue::Unit => Ok(()),
+        _ => Err(internal("directory creation returned the wrong value")),
+    }
+}
+
+fn append_bytes(
+    meta: &SessionMeta,
+    path: &str,
+    bytes: Vec<u8>,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<(), ProtocolError> {
+    if bytes.len() > genet_daemon_logic_api::MAX_CAPABILITY_CHUNK_BYTES {
+        return Err(internal("file append exceeds the capability limit"));
+    }
+    let mut client = Client::new(executor, next);
+    match client.call(CapabilityRequest::File(FileRequest::Append {
+        locator: locator(meta, path),
+        bytes,
+    }))? {
+        CapabilityValue::Unit => Ok(()),
+        _ => Err(internal("file append returned the wrong value")),
+    }
+}
+
+fn file_size(
+    meta: &SessionMeta,
+    path: &str,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<Option<u64>, ProtocolError> {
+    let mut client = Client::new(executor, next);
+    match client.call_raw(CapabilityRequest::File(FileRequest::Metadata {
+        locator: locator(meta, path),
+    }))? {
+        Ok(CapabilityValue::FileMetadata(value)) => Ok(Some(value.bytes)),
+        Err(error) if error.kind == genet_daemon_logic_api::CapabilityFailureKind::NotFound => {
+            Ok(None)
+        }
+        Err(error) => Err(capability_error(error)),
+        Ok(_) => Err(internal("file metadata returned the wrong value")),
+    }
+}
+
+fn read_range(
+    meta: &SessionMeta,
+    path: &str,
+    offset: u64,
+    length: u64,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<Vec<u8>, ProtocolError> {
+    if length > genet_daemon_logic_api::MAX_CAPABILITY_CHUNK_BYTES as u64 {
+        return Err(unsupported(
+            "blob exceeds the current transport chunk limit",
+        ));
+    }
+    let mut client = Client::new(executor, next);
+    match client.call(CapabilityRequest::File(FileRequest::ReadRange {
+        locator: locator(meta, path),
+        offset,
+        length: length as u32,
+    }))? {
+        CapabilityValue::Bytes(bytes) if bytes.len() as u64 == length => Ok(bytes),
+        CapabilityValue::Bytes(_) => Err(not_found("the requested file range no longer exists")),
+        _ => Err(internal("file range returned the wrong value")),
+    }
+}
+
+fn require_round<'a>(
+    live: &'a LiveSession,
+    round_id: &str,
+) -> Result<&'a rounds::RoundRecord, ProtocolError> {
+    if round_id == "latest" {
+        live.rounds.last()
+    } else {
+        live.rounds.iter().find(|round| round.round_id == round_id)
+    }
+    .ok_or_else(|| not_found(format!("no such round: {round_id}")))
+}
+
+fn round_layer(
+    live: &LiveSession,
+    round_id: &str,
+    cursor: Option<&str>,
+    limit: u32,
+    expand_last: bool,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<RoundLayer, ProtocolError> {
+    let round = require_round(live, round_id)?;
+    let index = load_trunk_index(&live.meta, round.ord, executor, next)?;
+    let end = match cursor {
+        None => index.len(),
+        Some(cursor) => cursor
+            .strip_prefix("before:")
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(|value| value.min(index.len()))
+            .ok_or_else(|| bad_request("invalid trunk cursor"))?,
+    };
+    let start = end.saturating_sub(limit.clamp(1, 100) as usize);
+    let trunks = index[start..end].to_vec();
+    let expanded_trunk = if expand_last {
+        trunks
+            .last()
+            .map(|summary| load_trunk(&live.meta, round.ord, summary, executor, next))
+            .transpose()?
+    } else {
+        None
+    };
+    let running = live
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.round_id == round.round_id);
+    let mut summary = round.summary(running);
+    summary.trunk_count = index.len() as u32;
+    Ok(RoundLayer {
+        round: summary,
+        trunks,
+        next_cursor: (start > 0).then(|| format!("before:{start}")),
+        expanded_trunk,
+    })
+}
+
+fn load_trunk_index(
+    meta: &SessionMeta,
+    ord: u32,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<Vec<RoundTrunkSummary>, ProtocolError> {
+    let path = format!(
+        ".genethub/sessions/{}/rounds/r-{ord:03}/index.jsonl",
+        meta.id
+    );
+    let mut summaries: Vec<RoundTrunkSummary> = Vec::new();
+    for line in read_lines(meta, &path, executor, next)? {
+        let Ok(summary) = serde_json::from_slice::<RoundTrunkSummary>(&line) else {
+            continue;
+        };
+        match summaries
+            .iter_mut()
+            .find(|existing| existing.index == summary.index)
+        {
+            Some(existing) => *existing = summary,
+            None => summaries.push(summary),
+        }
+    }
+    summaries.sort_by_key(|summary| summary.index);
+    Ok(summaries)
+}
+
+fn load_trunk(
+    meta: &SessionMeta,
+    ord: u32,
+    summary: &RoundTrunkSummary,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<RoundTrunk, ProtocolError> {
+    let path = format!(
+        ".genethub/sessions/{}/rounds/r-{ord:03}/t-{:04}.jsonl",
+        meta.id, summary.index
+    );
+    let mut batches: Vec<RoundBatch> = Vec::new();
+    for line in read_lines(meta, &path, executor, next)? {
+        match serde_json::from_slice::<TrunkRow>(&line) {
+            Ok(TrunkRow::Batch {
+                index,
+                first_item_id,
+                blob_count,
+                text,
+                monologue,
+            }) => batches.push(RoundBatch {
+                summary: RoundBatchSummary {
+                    index,
+                    first_item_id,
+                    blob_count,
+                    text,
+                },
+                monologue,
+                blobs: Vec::new(),
+            }),
+            Ok(TrunkRow::Blob {
+                item_id,
+                kind,
+                overview,
+                blob,
+            }) => {
+                if batches.is_empty() {
+                    batches.push(RoundBatch {
+                        summary: RoundBatchSummary {
+                            index: 0,
+                            first_item_id: item_id.clone(),
+                            blob_count: 0,
+                            text: String::new(),
+                        },
+                        monologue: None,
+                        blobs: Vec::new(),
+                    });
+                }
+                batches
+                    .last_mut()
+                    .expect("batch was just established")
+                    .blobs
+                    .push(BlobOverview {
+                        item_id,
+                        kind,
+                        overview,
+                        blob,
+                    });
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(RoundTrunk {
+        summary: summary.clone(),
+        batches,
+    })
+}
+
+fn read_lines(
+    meta: &SessionMeta,
+    path: &str,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<Vec<Vec<u8>>, ProtocolError> {
+    let Some(size) = file_size(meta, path, executor, next)? else {
+        return Ok(Vec::new());
+    };
+    let mut output = Vec::new();
+    let mut pending = Vec::new();
+    let mut offset = 0_u64;
+    while offset < size {
+        let length = (size - offset).min(FILE_CHUNK_BYTES as u64);
+        let bytes = read_range(meta, path, offset, length, executor, next)?;
+        if bytes.is_empty() {
+            break;
+        }
+        offset += bytes.len() as u64;
+        pending.extend_from_slice(&bytes);
+        let split = pending
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        output.extend(
+            pending[..split]
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .map(<[u8]>::to_vec),
+        );
+        pending.drain(..split);
+        if pending.len() > CHAT_BYTES as usize {
+            return Err(internal("a round storage row exceeds the read limit"));
+        }
+    }
+    if !pending.is_empty() {
+        output.push(pending);
+    }
+    Ok(output)
 }
 
 fn publish(live: &mut LiveSession, event: SessionEvent) -> Publication {
@@ -1588,17 +2462,35 @@ fn snapshot(
     executor: &mut impl CapabilityExecutor,
     next: &mut u64,
 ) -> Result<SessionSnapshot, ProtocolError> {
-    let mut items = load_chat(&live.meta, executor, next)?;
+    let mut items = load_log(&live.meta, executor, next)?.items;
     for item in &live.active_items {
         upsert(&mut items, item.clone());
     }
+    let round_summaries = live
+        .rounds
+        .iter()
+        .map(|round| {
+            round.summary(
+                live.active_turn
+                    .as_ref()
+                    .is_some_and(|turn| turn.round_id == round.round_id),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expanded_round = if live.rounds.is_empty() {
+        None
+    } else {
+        Some(Box::new(round_layer(
+            live, "latest", None, 20, true, executor, next,
+        )?))
+    };
     Ok(SessionSnapshot {
         summary: summary(&live.meta, status(live)),
         items,
         seq: live.seq,
         pending_permissions: live.pending_permissions.clone(),
-        rounds: None,
-        expanded_round: None,
+        rounds: Some(round_summaries),
+        expanded_round,
     })
 }
 
@@ -1620,12 +2512,14 @@ fn summary(meta: &SessionMeta, status: SessionStatus) -> SessionSummary {
 }
 
 fn status(live: &LiveSession) -> SessionStatus {
-    if live.meta.pending_permission.is_some() {
+    if live.closed {
+        SessionStatus::Closed
+    } else if live.meta.pending_permission.is_some() {
         SessionStatus::Waiting
     } else if live.active_turn.is_some() {
         SessionStatus::Running
     } else {
-        SessionStatus::Idle
+        live.settled_status.unwrap_or(SessionStatus::Idle)
     }
 }
 
@@ -1635,6 +2529,25 @@ fn workspace<'a>(config: &'a Config, id: &str) -> Result<&'a WorkspaceEntry, Pro
         .iter()
         .find(|workspace| workspace.id == id && !workspace.removed)
         .ok_or_else(|| not_found(format!("no such workspace: {id}")))
+}
+
+fn workspace_project_key(workspace: &WorkspaceEntry) -> String {
+    let Some(path) = workspace.workspace_file.as_deref() else {
+        return "folder".to_string();
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"genehub-workspace-source-v1\0");
+    // Existing Windows builds hashed PathBuf's UTF-16 code units; Unix builds
+    // hashed its bytes. The guest sees a string, so select the historical
+    // representation from the path syntax to preserve old session ownership.
+    if path.contains('\\') || path.as_bytes().get(1) == Some(&b':') {
+        for unit in path.encode_utf16() {
+            digest.update(unit.to_le_bytes());
+        }
+    } else {
+        digest.update(path.as_bytes());
+    }
+    format!("workspace:{:x}", digest.finalize())
 }
 
 fn establish(
@@ -1651,6 +2564,33 @@ fn establish(
         bytes: b"*\n".to_vec(),
     }))?;
     Ok(())
+}
+
+fn lock_session(
+    meta: &SessionMeta,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<u64, ProtocolError> {
+    let mut client = Client::new(executor, next);
+    match client.call(CapabilityRequest::File(FileRequest::Lock {
+        locator: locator(meta, &format!(".genethub/sessions/{}/writer.lock", meta.id)),
+        exclusive: true,
+    }))? {
+        CapabilityValue::FileLocked { resource_id } => Ok(resource_id),
+        _ => Err(internal("session lock returned the wrong value")),
+    }
+}
+
+fn unlock_session(
+    resource_id: u64,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<(), ProtocolError> {
+    let mut client = Client::new(executor, next);
+    match client.call(CapabilityRequest::File(FileRequest::Unlock { resource_id }))? {
+        CapabilityValue::Unit => Ok(()),
+        _ => Err(internal("session unlock returned the wrong value")),
+    }
 }
 
 fn save_meta(
@@ -1674,6 +2614,7 @@ fn load_meta(
     root: FileRoot,
     id: &str,
     workspace_id: &str,
+    expected_project_key: &str,
     root_handle: &str,
     native_root: &str,
     executor: &mut impl CapabilityExecutor,
@@ -1697,7 +2638,13 @@ fn load_meta(
             "session {id} has an unsupported format"
         )));
     }
+    if !meta.project_key.is_empty() && meta.project_key != expected_project_key {
+        return Err(conflict(format!(
+            "session {id} belongs to another workspace"
+        )));
+    }
     meta.workspace_id = workspace_id.to_string();
+    meta.project_key = expected_project_key.to_string();
     meta.root_handle = root_handle.to_string();
     if meta.root.is_empty() {
         meta.root = native_root.to_string();
@@ -1705,60 +2652,110 @@ fn load_meta(
     Ok(meta)
 }
 
-fn append_chat(
+fn append_rows(
     meta: &SessionMeta,
-    items: &[TimelineItem],
+    rows: &[ChatRow],
     executor: &mut impl CapabilityExecutor,
     next: &mut u64,
 ) -> Result<(), ProtocolError> {
-    if items.is_empty() {
+    if rows.is_empty() {
         return Ok(());
     }
-    let mut bytes = Vec::new();
-    for item in items {
-        let mut row = serde_json::to_vec(&ChatRow::Item { item: item.clone() })
+    for row in rows {
+        let mut bytes = serde_json::to_vec(row)
             .map_err(|error| internal(format!("encoding session item: {error}")))?;
-        bytes.append(&mut row);
         bytes.push(b'\n');
+        if bytes.len() > genet_daemon_logic_api::MAX_CAPABILITY_CHUNK_BYTES {
+            return Err(internal(
+                "a session ledger row exceeds the capability limit",
+            ));
+        }
+        let mut client = Client::new(executor, next);
+        match client.call(CapabilityRequest::File(FileRequest::Append {
+            locator: locator(meta, &format!(".genethub/sessions/{}/chat.jsonl", meta.id)),
+            bytes,
+        }))? {
+            CapabilityValue::Unit => {}
+            _ => return Err(internal("session chat append returned the wrong value")),
+        }
     }
-    let mut client = Client::new(executor, next);
-    match client.call(CapabilityRequest::File(FileRequest::Append {
-        locator: locator(meta, &format!(".genethub/sessions/{}/chat.jsonl", meta.id)),
-        bytes,
-    }))? {
-        CapabilityValue::Unit => Ok(()),
-        _ => Err(internal("session chat append returned the wrong value")),
-    }
+    Ok(())
 }
 
-fn load_chat(
+fn load_log(
     meta: &SessionMeta,
     executor: &mut impl CapabilityExecutor,
     next: &mut u64,
-) -> Result<Vec<TimelineItem>, ProtocolError> {
-    let mut client = Client::new(executor, next);
-    let result = client.call_raw(CapabilityRequest::File(FileRequest::Read {
-        locator: locator(meta, &format!(".genethub/sessions/{}/chat.jsonl", meta.id)),
-        max_bytes: CHAT_BYTES,
-    }))?;
-    let bytes = match result {
-        Ok(CapabilityValue::Bytes(bytes)) => bytes,
-        Err(error) if error.kind == genet_daemon_logic_api::CapabilityFailureKind::NotFound => {
-            return Ok(Vec::new())
+) -> Result<ChatLog, ProtocolError> {
+    let chat = locator(meta, &format!(".genethub/sessions/{}/chat.jsonl", meta.id));
+    let size = {
+        let mut client = Client::new(executor, next);
+        match client.call_raw(CapabilityRequest::File(FileRequest::Metadata {
+            locator: chat.clone(),
+        }))? {
+            Ok(CapabilityValue::FileMetadata(metadata)) => metadata.bytes,
+            Err(error) if error.kind == genet_daemon_logic_api::CapabilityFailureKind::NotFound => {
+                return Ok(ChatLog::default())
+            }
+            Err(error) => return Err(capability_error(error)),
+            Ok(_) => return Err(internal("session chat metadata returned the wrong value")),
         }
-        Err(error) => return Err(capability_error(error)),
-        Ok(_) => return Err(internal("session chat read returned the wrong value")),
     };
-    let mut items = Vec::new();
-    for line in bytes.split(|byte| *byte == b'\n') {
-        if line.is_empty() {
-            continue;
+    let mut log = ChatLog::default();
+    let mut pending = Vec::new();
+    let mut offset = 0_u64;
+    while offset < size {
+        let length = (size - offset).min(FILE_CHUNK_BYTES as u64) as u32;
+        let mut client = Client::new(executor, next);
+        let bytes = match client.call(CapabilityRequest::File(FileRequest::ReadRange {
+            locator: chat.clone(),
+            offset,
+            length,
+        }))? {
+            CapabilityValue::Bytes(bytes) => bytes,
+            _ => return Err(internal("session chat range returned the wrong value")),
+        };
+        if bytes.is_empty() {
+            break;
         }
-        if let Ok(ChatRow::Item { item }) = serde_json::from_slice::<ChatRow>(line) {
-            upsert(&mut items, item);
+        offset = offset.saturating_add(bytes.len() as u64);
+        pending.extend_from_slice(&bytes);
+        let split = pending
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        for line in pending[..split].split(|byte| *byte == b'\n') {
+            fold_chat_row(&mut log, line);
+        }
+        pending.drain(..split);
+        if pending.len() > CHAT_BYTES as usize {
+            return Err(internal("a session ledger row exceeds the read limit"));
         }
     }
-    Ok(items)
+    if !pending.is_empty() {
+        fold_chat_row(&mut log, &pending);
+    }
+    log.rounds.sort_by_key(|round| round.ord);
+    Ok(log)
+}
+
+fn fold_chat_row(log: &mut ChatLog, line: &[u8]) {
+    if line.is_empty() {
+        return;
+    }
+    match serde_json::from_slice::<ChatRow>(line) {
+        Ok(ChatRow::Item { item }) => upsert(&mut log.items, item),
+        Ok(ChatRow::Round { round }) => match log
+            .rounds
+            .iter_mut()
+            .find(|existing| existing.round_id == round.round_id)
+        {
+            Some(existing) => *existing = round,
+            None => log.rounds.push(round),
+        },
+        Err(_) => {}
+    }
 }
 
 fn remove_session(

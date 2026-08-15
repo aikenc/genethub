@@ -29,7 +29,7 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
 }
 
 /// Core-Wasm export contract implemented by `genet-daemon-logic`.
-pub const ABI_VERSION: u32 = 7;
+pub const ABI_VERSION: u32 = 8;
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 pub const MAX_CAPABILITY_BATCH: usize = 64;
 pub const MAX_CAPABILITY_CHUNK_BYTES: usize = 3 * 1024 * 1024;
@@ -233,6 +233,9 @@ pub enum CapabilityValue {
     },
     FileEntries(Vec<FileEntry>),
     FileMetadata(FileMetadata),
+    FileLocked {
+        resource_id: u64,
+    },
     Resource {
         resource_id: u64,
     },
@@ -319,6 +322,15 @@ pub enum FileRequest {
         locator: FileLocator,
         offset: u64,
         length: u32,
+    },
+    /// Acquires a kernel-backed advisory lock and keeps its file handle in the
+    /// native resource table. The opaque id survives guest hot replacement.
+    Lock {
+        locator: FileLocator,
+        exclusive: bool,
+    },
+    Unlock {
+        resource_id: u64,
     },
     WriteAtomic {
         locator: FileLocator,

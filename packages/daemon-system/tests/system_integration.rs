@@ -150,6 +150,66 @@ async fn private_and_workspace_files_are_bounded_atomic_and_rooted() {
 }
 
 #[tokio::test]
+async fn file_locks_are_kernel_backed_exclusive_and_explicitly_releasable() {
+    let root = tempfile::tempdir().unwrap();
+    let private_dir = root.path().join("private");
+    let logs = root.path().join("logs");
+    let first = SystemHost::new(&private_dir, &logs).unwrap();
+    let second = SystemHost::new(&private_dir, &logs).unwrap();
+    let locator = private("sessions/s_test/writer.lock");
+
+    let resource_id = match one(
+        &first,
+        CapabilityRequest::File(FileRequest::Lock {
+            locator: locator.clone(),
+            exclusive: true,
+        }),
+    )
+    .await
+    .result
+    {
+        Ok(CapabilityValue::FileLocked { resource_id }) => resource_id,
+        other => panic!("first lock failed: {other:?}"),
+    };
+
+    assert!(matches!(
+        one(
+            &second,
+            CapabilityRequest::File(FileRequest::Lock {
+                locator: locator.clone(),
+                exclusive: true,
+            }),
+        )
+        .await
+        .result,
+        Err(error) if error.kind == CapabilityFailureKind::Conflict
+    ));
+
+    assert!(matches!(
+        one(
+            &first,
+            CapabilityRequest::File(FileRequest::Unlock { resource_id }),
+        )
+        .await
+        .result,
+        Ok(CapabilityValue::Unit)
+    ));
+
+    assert!(matches!(
+        one(
+            &second,
+            CapabilityRequest::File(FileRequest::Lock {
+                locator,
+                exclusive: true,
+            }),
+        )
+        .await
+        .result,
+        Ok(CapabilityValue::FileLocked { .. })
+    ));
+}
+
+#[tokio::test]
 async fn batches_randomness_and_clocks_are_bounded() {
     let root = tempfile::tempdir().unwrap();
     let host = SystemHost::new(root.path().join("private"), root.path().join("logs")).unwrap();

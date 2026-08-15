@@ -29,6 +29,7 @@ pub use filesystem::SystemRoots;
 /// same opaque ids from its snapshot.
 pub struct SystemHost {
     roots: Arc<RwLock<SystemRoots>>,
+    file_locks: filesystem::FileLocks,
     processes: process::Processes,
     terminals: pty::Ptys,
     rtc: rtc::RtcPeers,
@@ -42,6 +43,7 @@ impl SystemHost {
         let (event_tx, events) = mpsc::channel(2048);
         Ok(Self {
             roots: Arc::new(RwLock::new(roots)),
+            file_locks: filesystem::FileLocks::default(),
             processes: process::Processes::new(event_tx.clone()),
             terminals: pty::Ptys::new(event_tx.clone()),
             sockets: socket::Sockets::new(event_tx.clone()),
@@ -99,6 +101,10 @@ impl SystemHost {
             CapabilityRequest::SecureRemove { key } => {
                 filesystem::secure_remove(&self.roots, &key).await
             }
+            CapabilityRequest::File(request @ genet_daemon_logic_api::FileRequest::Lock { .. })
+            | CapabilityRequest::File(
+                request @ genet_daemon_logic_api::FileRequest::Unlock { .. },
+            ) => self.file_locks.execute(&self.roots, request).await,
             CapabilityRequest::File(request) => filesystem::execute(&self.roots, request).await,
             CapabilityRequest::Process(request) => {
                 self.processes.execute(&self.roots, request).await
@@ -131,6 +137,7 @@ impl SystemHost {
     }
 
     pub async fn shutdown(&self) {
+        self.file_locks.close_all();
         self.terminals.close_all().await;
         self.processes.close_all().await;
         self.sockets.close_all().await;

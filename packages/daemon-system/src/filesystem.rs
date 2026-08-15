@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::fs;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 use genet_daemon_logic_api::{
@@ -12,6 +15,108 @@ use genet_daemon_logic_api::{
 use tokio::sync::RwLock;
 
 use crate::failure;
+
+/// Kernel file locks owned by native code and addressed by opaque ids.
+///
+/// The guest stores only an id in its snapshot, so a hot replacement keeps
+/// the same lock alive without transferring an OS handle through Wasm.
+pub struct FileLocks {
+    next_id: AtomicU64,
+    held: Mutex<HashMap<u64, File>>,
+}
+
+impl Default for FileLocks {
+    fn default() -> Self {
+        Self {
+            next_id: AtomicU64::new(1),
+            held: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl FileLocks {
+    pub async fn execute(
+        &self,
+        roots: &Arc<RwLock<SystemRoots>>,
+        request: FileRequest,
+    ) -> Result<CapabilityValue, CapabilityFailure> {
+        match request {
+            FileRequest::Lock { locator, exclusive } => {
+                let path = resolve(roots, &locator, true).await?;
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(io_failure)?;
+                    tighten_directory(parent).map_err(io_failure)?;
+                }
+                let file = OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(&path)
+                    .map_err(io_failure)?;
+                tighten_file(&path).map_err(io_failure)?;
+                let lock = if exclusive {
+                    fs2::FileExt::try_lock_exclusive(&file)
+                } else {
+                    fs2::FileExt::try_lock_shared(&file)
+                };
+                lock.map_err(|error| {
+                    failure(
+                        if error.kind() == std::io::ErrorKind::WouldBlock {
+                            CapabilityFailureKind::Conflict
+                        } else {
+                            CapabilityFailureKind::Unavailable
+                        },
+                        format!("locking {}: {error}", path.display()),
+                    )
+                })?;
+                let resource_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                self.held
+                    .lock()
+                    .map_err(|_| {
+                        failure(
+                            CapabilityFailureKind::Unavailable,
+                            "file lock table is poisoned",
+                        )
+                    })?
+                    .insert(resource_id, file);
+                Ok(CapabilityValue::FileLocked { resource_id })
+            }
+            FileRequest::Unlock { resource_id } => {
+                let file = self
+                    .held
+                    .lock()
+                    .map_err(|_| {
+                        failure(
+                            CapabilityFailureKind::Unavailable,
+                            "file lock table is poisoned",
+                        )
+                    })?
+                    .remove(&resource_id)
+                    .ok_or_else(|| {
+                        failure(
+                            CapabilityFailureKind::NotFound,
+                            format!("unknown file lock resource {resource_id}"),
+                        )
+                    })?;
+                fs2::FileExt::unlock(&file).map_err(io_failure)?;
+                Ok(CapabilityValue::Unit)
+            }
+            _ => Err(failure(
+                CapabilityFailureKind::Invalid,
+                "non-lock request reached the file lock table",
+            )),
+        }
+    }
+
+    pub fn close_all(&self) {
+        if let Ok(mut held) = self.held.lock() {
+            for (_, file) in held.drain() {
+                let _ = fs2::FileExt::unlock(&file);
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct SystemRoots {
@@ -193,6 +298,10 @@ pub async fn execute(
                 .map_err(io_failure)?;
             Ok(CapabilityValue::Bytes(bytes))
         }
+        FileRequest::Lock { .. } | FileRequest::Unlock { .. } => Err(failure(
+            CapabilityFailureKind::Invalid,
+            "file locks are handled by the native resource table",
+        )),
         FileRequest::WriteAtomic { locator, bytes } => {
             checked_bytes(&bytes)?;
             let path = resolve(roots, &locator, true).await?;
