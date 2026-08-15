@@ -730,7 +730,7 @@ impl Sessions {
         }
 
         if self.live(session_id)?.process.is_none() {
-            let process = start_process(
+            let process = match start_process(
                 self.live(session_id)?,
                 definition,
                 config,
@@ -738,17 +738,23 @@ impl Sessions {
                 &attachments,
                 executor,
                 next,
-            )?;
+            ) {
+                Ok(process) => process,
+                Err(error) => {
+                    self.abort_send(session_id, &turn_id, &error, executor, next);
+                    return Err(error);
+                }
+            };
             self.process_to_session
                 .insert(process.resource_id, session_id.to_string());
             self.live_mut(session_id)?.process = Some(process);
         }
 
-        let (commands, close_input) = {
+        let commands = (|| {
             let live = self.live_mut(session_id)?;
             let attachment_paths = codex_attachment_paths(&live.meta, &turn_id, &attachments);
             let process = live.process.as_mut().expect("process just started");
-            match &mut process.driver {
+            Ok::<_, ProtocolError>(match &mut process.driver {
                 Driver::Claude(driver) => (
                     vec![driver
                         .prompt(&turn_id, text, &attachments)
@@ -769,6 +775,13 @@ impl Sessions {
                     false,
                 ),
                 Driver::OpenCode(_) => (vec![text.into_bytes()], true),
+            })
+        })();
+        let (commands, close_input) = match commands {
+            Ok(commands) => commands,
+            Err(error) => {
+                self.abort_send(session_id, &turn_id, &error, executor, next);
+                return Err(error);
             }
         };
         let resource_id = self
@@ -778,10 +791,18 @@ impl Sessions {
             .expect("process exists")
             .resource_id;
         for command in commands {
-            process_write(resource_id, command, executor, next)?;
+            if let Err(error) = process_write(resource_id, command, executor, next) {
+                self.abort_send(session_id, &turn_id, &error, executor, next);
+                return Err(error);
+            }
         }
         if close_input {
-            process_call(ProcessRequest::CloseInput { resource_id }, executor, next)?;
+            if let Err(error) =
+                process_call(ProcessRequest::CloseInput { resource_id }, executor, next)
+            {
+                self.abort_send(session_id, &turn_id, &error, executor, next);
+                return Err(error);
+            }
         }
         let publication = {
             let live = self.live_mut(session_id)?;
@@ -798,6 +819,43 @@ impl Sessions {
             connection: ConnectionDirective::None,
             publications: vec![publication],
         })
+    }
+
+    fn abort_send(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+        cause: &ProtocolError,
+        executor: &mut impl CapabilityExecutor,
+        next: &mut u64,
+    ) {
+        let process = self
+            .loaded
+            .get_mut(session_id)
+            .and_then(|live| live.process.take());
+        if let Some(process) = process {
+            self.process_to_session.remove(&process.resource_id);
+            let _ = process_call(
+                ProcessRequest::Signal {
+                    resource_id: process.resource_id,
+                    signal: ProcessSignal::KillTree,
+                },
+                executor,
+                next,
+            );
+        }
+        let _ = self.apply_events(
+            session_id,
+            vec![SessionEvent::TurnFailed {
+                turn_id: turn_id.to_string(),
+                error: genehub_proto::TurnError {
+                    code: genehub_proto::TurnErrorCode::Internal,
+                    message: cause.message.clone(),
+                },
+            }],
+            executor,
+            next,
+        );
     }
 
     fn fork(
@@ -2034,7 +2092,7 @@ fn put_blob(
         return Err(internal("round blob exceeds its storage limit"));
     }
     line.push(b'\n');
-    append_bytes(meta, &path, line, executor, next)?;
+    append_bytes_chunked(meta, &path, &line, executor, next)?;
     Ok(BlobRef {
         id,
         bytes: encoded.len() as u64,
@@ -2055,7 +2113,7 @@ fn get_blob(
         return Err(not_found(format!("no such blob: {}", blob.id)));
     }
     let path = format!(".genethub/sessions/{}/blobs/b-{bucket}.jsonl", meta.id);
-    let bytes = read_range(meta, &path, offset, length, executor, next)?;
+    let bytes = read_range_chunked(meta, &path, offset, length, executor, next)?;
     let record: BlobRecord = serde_json::from_slice(&bytes)
         .map_err(|_| not_found(format!("no such blob: {}", blob.id)))?;
     if record.id != blob.id {
@@ -2239,6 +2297,46 @@ fn read_range(
         CapabilityValue::Bytes(_) => Err(not_found("the requested file range no longer exists")),
         _ => Err(internal("file range returned the wrong value")),
     }
+}
+
+fn read_range_chunked(
+    meta: &SessionMeta,
+    path: &str,
+    offset: u64,
+    length: u64,
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<Vec<u8>, ProtocolError> {
+    let capacity = usize::try_from(length)
+        .map_err(|_| unsupported("the requested file range is too large for this platform"))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut read = 0_u64;
+    while read < length {
+        let chunk = (length - read).min(FILE_CHUNK_BYTES as u64);
+        bytes.extend(read_range(
+            meta,
+            path,
+            offset + read,
+            chunk,
+            executor,
+            next,
+        )?);
+        read += chunk;
+    }
+    Ok(bytes)
+}
+
+fn append_bytes_chunked(
+    meta: &SessionMeta,
+    path: &str,
+    bytes: &[u8],
+    executor: &mut impl CapabilityExecutor,
+    next: &mut u64,
+) -> Result<(), ProtocolError> {
+    for chunk in bytes.chunks(FILE_CHUNK_BYTES as usize) {
+        append_bytes(meta, path, chunk.to_vec(), executor, next)?;
+    }
+    Ok(())
 }
 
 fn require_round<'a>(

@@ -118,6 +118,10 @@ impl SystemHost {
             CapabilityRequest::Random { bytes } => random(bytes),
             CapabilityRequest::Socket(request) => self.sockets.execute(request).await,
             CapabilityRequest::Rtc(request) => self.rtc.execute(request).await,
+            CapabilityRequest::Connectivity(_) => Err(failure(
+                CapabilityFailureKind::Unavailable,
+                "connectivity control is handled by the daemon transport owner",
+            )),
             CapabilityRequest::LogicArtifact(request) => {
                 let operation = match request {
                     LogicArtifactRequest::Status => "status",

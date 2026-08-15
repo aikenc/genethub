@@ -474,7 +474,9 @@ async fn connection(
         &hello,
         None,
         None,
-    ) {
+    )
+    .await
+    {
         Ok(accepted) => accepted,
         Err(error) => {
             tracing::debug!(%error, "local data-plane handshake rejected");

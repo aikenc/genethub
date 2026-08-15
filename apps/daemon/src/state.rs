@@ -158,6 +158,9 @@ impl AppState {
             models: RwLock::new(std::collections::HashMap::new()),
             shutdown: Arc::new(tokio::sync::Notify::new()),
         });
+        if let Some(logic) = state.logic.as_ref() {
+            logic.attach_state(&state)?;
+        }
         Ok((state, pty_rx))
     }
 

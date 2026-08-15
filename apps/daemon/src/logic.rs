@@ -16,8 +16,9 @@ use genehub_proto::{Request, SequencedEvent, ServerFrame, TransportKind};
 use genet_daemon_logic_api::{
     decode_message, encode_message, CapabilityBatch, CapabilityCall, CapabilityFailure,
     CapabilityFailureKind, CapabilityRequest, CapabilityResult, CapabilityResults, CapabilityValue,
-    ConnectionDirective, LogicArtifactRequest, LogicArtifactState, LogicBoot, LogicInput,
-    LogicOutcome, LogicOutput, LogicRequest, Publication,
+    ConnectionDirective, ConnectivityRequest, LogicArtifactRequest, LogicArtifactState, LogicBoot,
+    LogicInput, LogicOutcome, LogicOutput, LogicRequest, PlatformCall, PlatformReply,
+    PlatformRequest, Publication,
 };
 use genet_daemon_platform::{
     ActiveLogic, ArtifactVerifier, PlatformRuntime, SignedArtifact, VmPolicy, LOGIC_ABI_VERSION,
@@ -45,6 +46,7 @@ pub struct LogicHost {
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     subscriptions:
         std::sync::Mutex<std::collections::HashMap<String, broadcast::Sender<SequencedEvent>>>,
+    device_revocations: broadcast::Sender<String>,
     fanout: std::sync::OnceLock<broadcast::Sender<ServerFrame>>,
 }
 
@@ -52,6 +54,7 @@ pub struct LogicHost {
 struct CapabilityBroker {
     commands: tokio::sync::mpsc::Sender<BrokerCommand>,
     thread: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
+    services: Arc<std::sync::OnceLock<std::sync::Weak<crate::state::AppState>>>,
 }
 
 enum BrokerCommand {
@@ -134,6 +137,10 @@ impl LogicHost {
             },
         )
         .map_err(anyhow::Error::msg)?;
+        migrate_legacy_secure_file(
+            &paths.devices_file(),
+            &paths.portable_dir().join("devices.json"),
+        )?;
         let system = Arc::new(SystemHost::new(paths.portable_dir(), paths.logs_dir())?);
         let events = system.take_events()?;
         let broker = CapabilityBroker::start(system);
@@ -155,6 +162,7 @@ impl LogicHost {
             version = %runtime.active()?.version,
             "daemon Wasm logic active"
         );
+        let (device_revocations, _) = broadcast::channel(64);
         Ok(Some(Arc::new(Self {
             runtime,
             system: broker,
@@ -163,6 +171,7 @@ impl LogicHost {
             events: std::sync::Mutex::new(Some(events)),
             event_task: Mutex::new(None),
             subscriptions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            device_revocations,
             fanout: std::sync::OnceLock::new(),
         })))
     }
@@ -185,6 +194,9 @@ impl LogicHost {
                 anyhow::bail!("portable logic exceeded the capability continuation limit");
             }
             let mut output = self.dispatch(&input)?;
+            if !output.platform_completions.is_empty() {
+                anyhow::bail!("portable logic completed a platform call while routing RPC");
+            }
             self.publish(output.publications.drain(..), None)?;
             for finished in output.completions.drain(..) {
                 if finished.call_id != call_id {
@@ -207,6 +219,13 @@ impl LogicHost {
             outcome: completion.context("portable logic did not complete the routed request")?,
             connection,
         })
+    }
+
+    pub fn attach_state(&self, state: &Arc<crate::state::AppState>) -> Result<()> {
+        self.system
+            .services
+            .set(Arc::downgrade(state))
+            .map_err(|_| anyhow::anyhow!("portable connectivity state was already attached"))
     }
 
     /// Starts the sole native-resource event pump. Resource bytes re-enter the
@@ -254,7 +273,7 @@ impl LogicHost {
                 anyhow::bail!("portable event handling exceeded the capability continuation limit");
             }
             let mut output = self.dispatch(&input)?;
-            if !output.completions.is_empty() {
+            if !output.completions.is_empty() || !output.platform_completions.is_empty() {
                 anyhow::bail!("a resource event unexpectedly completed a client request");
             }
             self.publish(output.publications.drain(..), Some(fanout))?;
@@ -284,9 +303,99 @@ impl LogicHost {
                     )?;
                     let _ = fanout.send(frame);
                 }
+                Publication::DeviceRevoked { device_id } => {
+                    let _ = self.device_revocations.send(device_id);
+                }
             }
         }
         Ok(())
+    }
+
+    async fn platform_request(&self, request: PlatformRequest) -> Result<PlatformReply> {
+        let _execution = self.execution.lock().await;
+        let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
+        let mut inputs = VecDeque::from([LogicInput::Platform(PlatformCall { call_id, request })]);
+        let mut completion = None;
+        let mut turns = 0_usize;
+        while let Some(input) = inputs.pop_front() {
+            turns += 1;
+            if turns > 128 {
+                anyhow::bail!("portable platform call exceeded the capability continuation limit");
+            }
+            let mut output = self.dispatch(&input)?;
+            if !output.completions.is_empty() {
+                anyhow::bail!("portable logic completed an RPC while handling platform security");
+            }
+            self.publish(output.publications.drain(..), None)?;
+            for finished in output.platform_completions.drain(..) {
+                if finished.call_id != call_id {
+                    anyhow::bail!(
+                        "portable logic completed platform call {} while driving {call_id}",
+                        finished.call_id
+                    );
+                }
+                if completion.replace(finished.result).is_some() {
+                    anyhow::bail!(
+                        "portable logic completed platform call {call_id} more than once"
+                    );
+                }
+            }
+            for batch in output.capability_batches {
+                inputs.push_back(LogicInput::CapabilityResults(
+                    self.execute_batch(batch).await,
+                ));
+            }
+        }
+        completion
+            .context("portable logic did not complete the platform call")?
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    pub async fn authenticate_device(
+        &self,
+        auth: genehub_proto::DeviceAuth,
+        server_nonce: String,
+    ) -> Result<PlatformReply> {
+        self.platform_request(PlatformRequest::AuthenticateDevice { auth, server_nonce })
+            .await
+    }
+
+    pub async fn authenticate_invite(
+        &self,
+        auth: genehub_proto::InviteAuth,
+        server_nonce: String,
+    ) -> Result<PlatformReply> {
+        self.platform_request(PlatformRequest::AuthenticateInvite { auth, server_nonce })
+            .await
+    }
+
+    pub async fn claim_authenticated_invite(
+        &self,
+        invite_id: String,
+        device_name: String,
+    ) -> Result<PlatformReply> {
+        self.platform_request(PlatformRequest::ClaimAuthenticatedInvite {
+            invite_id,
+            device_name,
+        })
+        .await
+    }
+
+    pub async fn device_connection(&self, device_id: String, connected: bool) -> Result<()> {
+        match self
+            .platform_request(PlatformRequest::DeviceConnection {
+                device_id,
+                connected,
+            })
+            .await?
+        {
+            PlatformReply::Ack => Ok(()),
+            _ => anyhow::bail!("portable device connection returned the wrong value"),
+        }
+    }
+
+    pub fn subscribe_device_revocations(&self) -> broadcast::Receiver<String> {
+        self.device_revocations.subscribe()
     }
 
     fn connection(&self, directive: ConnectionDirective) -> Result<LogicConnection> {
@@ -411,9 +520,24 @@ impl LogicHost {
     }
 }
 
+/// Copies legacy durable bytes into the guest's private capability root once.
+/// Native bootstrap resolves paths and preserves file permissions but does not
+/// deserialize or otherwise interpret the business schema.
+fn migrate_legacy_secure_file(source: &Path, destination: &Path) -> Result<()> {
+    if destination.exists() || !source.exists() {
+        return Ok(());
+    }
+    let bytes = std::fs::read(source)
+        .with_context(|| format!("reading legacy state {}", source.display()))?;
+    crate::config::save_private(destination, &bytes)
+        .with_context(|| format!("migrating legacy state to {}", destination.display()))
+}
+
 impl CapabilityBroker {
     fn start(system: Arc<SystemHost>) -> Self {
         let (commands, mut receiver) = tokio::sync::mpsc::channel::<BrokerCommand>(16);
+        let services = Arc::new(std::sync::OnceLock::new());
+        let thread_services = services.clone();
         let thread = std::thread::Builder::new()
             .name("genehub-system-capabilities".to_string())
             .spawn(move || {
@@ -425,7 +549,9 @@ impl CapabilityBroker {
                     while let Some(command) = receiver.recv().await {
                         match command {
                             BrokerCommand::Execute { batch, reply } => {
-                                let results = system.execute(batch).await;
+                                let results =
+                                    execute_capability_batch(&system, &thread_services, batch)
+                                        .await;
                                 match reply {
                                     BrokerReply::Blocking(reply) => {
                                         let _ = reply.send(results);
@@ -448,6 +574,7 @@ impl CapabilityBroker {
         Self {
             commands,
             thread: Arc::new(std::sync::Mutex::new(Some(thread))),
+            services,
         }
     }
 
@@ -513,6 +640,180 @@ impl CapabilityBroker {
         if let Some(thread) = thread {
             let _ = tokio::task::spawn_blocking(move || thread.join()).await;
         }
+    }
+}
+
+async fn execute_capability_batch(
+    system: &SystemHost,
+    services: &std::sync::OnceLock<std::sync::Weak<crate::state::AppState>>,
+    batch: CapabilityBatch,
+) -> CapabilityResults {
+    let mut results = Vec::with_capacity(batch.calls.len());
+    for call in batch.calls {
+        let call_id = call.call_id;
+        let result = match call.request {
+            CapabilityRequest::Connectivity(request) => {
+                execute_connectivity(services, request).await
+            }
+            request => {
+                let mut result = system
+                    .execute(CapabilityBatch {
+                        batch_id: batch.batch_id,
+                        calls: vec![CapabilityCall { call_id, request }],
+                    })
+                    .await
+                    .results;
+                result.pop().map(|result| result.result).unwrap_or_else(|| {
+                    Err(capability_failure(
+                        CapabilityFailureKind::Internal,
+                        "system capability returned no result",
+                    ))
+                })
+            }
+        };
+        results.push(CapabilityResult { call_id, result });
+    }
+    CapabilityResults {
+        batch_id: batch.batch_id,
+        results,
+    }
+}
+
+async fn execute_connectivity(
+    services: &std::sync::OnceLock<std::sync::Weak<crate::state::AppState>>,
+    request: ConnectivityRequest,
+) -> std::result::Result<CapabilityValue, CapabilityFailure> {
+    let state = services
+        .get()
+        .and_then(std::sync::Weak::upgrade)
+        .ok_or_else(|| {
+            capability_failure(
+                CapabilityFailureKind::Unavailable,
+                "daemon connectivity is not attached",
+            )
+        })?;
+    let failed = |error: anyhow::Error| {
+        capability_failure(CapabilityFailureKind::Unavailable, format!("{error:#}"))
+    };
+    match request {
+        ConnectivityRequest::HubStatus => {
+            let status = match state.link.get() {
+                Some(link) => link.status().await,
+                None => genehub_proto::HubStatus::Unpaired,
+            };
+            Ok(CapabilityValue::HubStatus(status))
+        }
+        ConnectivityRequest::HubPair {
+            hub_url,
+            display_name,
+        } => {
+            let link = state.link.get().ok_or_else(|| {
+                capability_failure(
+                    CapabilityFailureKind::Unavailable,
+                    "Hub connectivity is still starting",
+                )
+            })?;
+            link.pair(&hub_url, display_name)
+                .await
+                .map(CapabilityValue::HubStatus)
+                .map_err(failed)
+        }
+        ConnectivityRequest::HubTrial {
+            hub_url,
+            display_name,
+        } => {
+            let link = state.link.get().ok_or_else(|| {
+                capability_failure(
+                    CapabilityFailureKind::Unavailable,
+                    "Hub connectivity is still starting",
+                )
+            })?;
+            link.trial(&hub_url, display_name)
+                .await
+                .map(|(status, claim)| CapabilityValue::HubClaim { status, claim })
+                .map_err(failed)
+        }
+        ConnectivityRequest::HubClaimLink => {
+            let link = state.link.get().ok_or_else(|| {
+                capability_failure(
+                    CapabilityFailureKind::Unavailable,
+                    "Hub connectivity is still starting",
+                )
+            })?;
+            let claim = link.claim_link().await.map_err(failed)?;
+            Ok(CapabilityValue::HubClaim {
+                status: link.status().await,
+                claim,
+            })
+        }
+        ConnectivityRequest::HubMachines => match state.link.get() {
+            Some(link) => link
+                .machines()
+                .await
+                .map(CapabilityValue::HubMachines)
+                .map_err(failed),
+            None => Ok(CapabilityValue::HubMachines(Vec::new())),
+        },
+        ConnectivityRequest::HubConnect { machine_id } => {
+            let link = state.link.get().ok_or_else(|| {
+                capability_failure(
+                    CapabilityFailureKind::Unavailable,
+                    "Hub connectivity is still starting",
+                )
+            })?;
+            link.connect(&machine_id)
+                .await
+                .map(CapabilityValue::HubTicket)
+                .map_err(failed)
+        }
+        ConnectivityRequest::HubUnpair => match state.link.get() {
+            Some(link) => link
+                .unpair()
+                .await
+                .map(|()| CapabilityValue::HubStatus(genehub_proto::HubStatus::Unpaired))
+                .map_err(failed),
+            None => Ok(CapabilityValue::HubStatus(
+                genehub_proto::HubStatus::Unpaired,
+            )),
+        },
+        ConnectivityRequest::RemoteStatus => match state.remote.get() {
+            Some(remote) => Ok(CapabilityValue::RemoteAccess(remote.status().await)),
+            None => Ok(CapabilityValue::RemoteAccess(genehub_proto::RemoteAccess {
+                relay_url: None,
+                rendezvous_url: None,
+                online: false,
+            })),
+        },
+        ConnectivityRequest::RemoteAttach {
+            relay_url,
+            join_token,
+        } => {
+            let remote = state.remote.get().ok_or_else(|| {
+                capability_failure(
+                    CapabilityFailureKind::Unavailable,
+                    "remote connectivity is still starting",
+                )
+            })?;
+            remote
+                .set(&relay_url, join_token)
+                .await
+                .map(CapabilityValue::RemoteAccess)
+                .map_err(|error| {
+                    capability_failure(CapabilityFailureKind::Invalid, format!("{error:#}"))
+                })
+        }
+        ConnectivityRequest::RemoteDetach => match state.remote.get() {
+            Some(remote) => remote
+                .clear()
+                .await
+                .map(CapabilityValue::RemoteAccess)
+                .map_err(failed),
+            None => Ok(CapabilityValue::RemoteAccess(genehub_proto::RemoteAccess {
+                relay_url: None,
+                rendezvous_url: None,
+                online: false,
+            })),
+        },
     }
 }
 

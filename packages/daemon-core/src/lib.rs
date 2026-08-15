@@ -6,6 +6,7 @@
 mod agents;
 mod capability;
 mod config;
+mod devices;
 mod files;
 mod git;
 mod session;
@@ -15,14 +16,15 @@ mod workspace;
 use std::collections::{BTreeMap, HashMap};
 
 use genehub_proto::{
-    ErrorCode, HelloResult, LogicModuleStatus, ProtocolError, Reply, Request, TransportKind,
-    PROTOCOL_VERSION,
+    ErrorCode, HelloResult, LogicModuleStatus, ProtocolError, RemoteAccess, Reply, Request,
+    TransportKind, UpdateDownload, PROTOCOL_VERSION,
 };
 use genet_daemon_common::{decode_json, encode_json};
 use genet_daemon_logic_api::{
     CapabilityBatch, CapabilityCall, CapabilityFailureKind, CapabilityRequest, CapabilityResults,
-    CapabilityValue, FileLocator, FileRequest, FileRoot, LogicArtifactRequest, LogicBoot,
-    LogicInput, LogicOutcome, LogicOutput, LogicRequest, SNAPSHOT_FORMAT_VERSION,
+    CapabilityValue, ConnectivityRequest, FileLocator, FileRequest, FileRoot, LogicArtifactRequest,
+    LogicBoot, LogicInput, LogicOutcome, LogicOutput, LogicRequest, PlatformCall,
+    PlatformCompletion, PlatformRequest, SNAPSHOT_FORMAT_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +43,9 @@ pub struct LogicApp {
     agent_cache: Option<Vec<genehub_proto::AgentInfo>>,
     sessions: session::Sessions,
     terminals: HashMap<String, u64>,
+    devices: devices::Devices,
+    remote_access: RemoteAccess,
+    update_download: UpdateDownload,
     workspace_roots_ready: bool,
 }
 
@@ -57,6 +62,12 @@ struct Snapshot {
     agent_cache: Option<Vec<genehub_proto::AgentInfo>>,
     sessions: session::Sessions,
     terminals: HashMap<String, u64>,
+    #[serde(default)]
+    devices: devices::Devices,
+    #[serde(default = "offline_remote")]
+    remote_access: RemoteAccess,
+    #[serde(default = "idle_download")]
+    update_download: UpdateDownload,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -93,6 +104,9 @@ impl LogicApp {
             agent_cache: None,
             sessions: session::Sessions::default(),
             terminals: HashMap::new(),
+            devices: devices::Devices::default(),
+            remote_access: offline_remote(),
+            update_download: UpdateDownload::Idle,
             workspace_roots_ready: false,
         })
     }
@@ -111,6 +125,7 @@ impl LogicApp {
                 self.handled_requests = self.handled_requests.saturating_add(1);
                 self.handle_request(request, capabilities)
             }
+            LogicInput::Platform(call) => self.handle_platform(call, capabilities),
             LogicInput::CapabilityResults(results) => self.handle_capability_results(results),
             // Unknown or stale resource events are intentionally harmless so a
             // late OS close from a replaced instance cannot trap its successor.
@@ -197,6 +212,114 @@ impl LogicApp {
                 code: ErrorCode::Unsupported,
                 message: AUTOMATIC_UPDATE_REFUSAL.to_string(),
             }),
+            Request::UpdateDownloadState => LogicOutcome::Reply(Box::new(Reply::UpdateDownload(
+                self.update_download.clone(),
+            ))),
+            Request::UpdateDismiss => {
+                if !matches!(self.update_download, UpdateDownload::Fetching { .. }) {
+                    self.update_download = UpdateDownload::Idle;
+                }
+                LogicOutcome::Reply(Box::new(Reply::UpdateDownload(
+                    self.update_download.clone(),
+                )))
+            }
+            Request::DeviceList => match self.refresh_remote(capabilities).and_then(|()| {
+                self.devices
+                    .list(capabilities, &mut self.next_capability_id)
+            }) {
+                Ok(devices) => LogicOutcome::Reply(Box::new(Reply::Devices {
+                    devices,
+                    remote: self.remote_access.clone(),
+                })),
+                Err(error) => LogicOutcome::Error(error),
+            },
+            Request::DeviceInvite => match self.refresh_remote(capabilities).and_then(|()| {
+                self.devices.invite(
+                    &self.remote_access,
+                    capabilities,
+                    &mut self.next_capability_id,
+                )
+            }) {
+                Ok(invite) => LogicOutcome::Reply(Box::new(Reply::Invite(invite))),
+                Err(error) => LogicOutcome::Error(error),
+            },
+            Request::DeviceRevoke { device_id } => {
+                match self
+                    .devices
+                    .revoke(&device_id, capabilities, &mut self.next_capability_id)
+                {
+                    Ok(publications) => {
+                        let devices = match self
+                            .devices
+                            .list(capabilities, &mut self.next_capability_id)
+                        {
+                            Ok(devices) => devices,
+                            Err(error) => {
+                                return LogicOutput::completed(call_id, LogicOutcome::Error(error))
+                            }
+                        };
+                        return LogicOutput {
+                            completions: vec![genet_daemon_logic_api::LogicCompletion {
+                                call_id,
+                                outcome: LogicOutcome::Reply(Box::new(Reply::Devices {
+                                    devices,
+                                    remote: self.remote_access.clone(),
+                                })),
+                                connection: genet_daemon_logic_api::ConnectionDirective::None,
+                            }],
+                            publications,
+                            ..LogicOutput::default()
+                        };
+                    }
+                    Err(error) => LogicOutcome::Error(error),
+                }
+            }
+            Request::DeviceClaim { .. } => LogicOutcome::Error(ProtocolError {
+                code: ErrorCode::Unauthorized,
+                message: "配对邀请只能在对应的加密引导连接中兑换".to_string(),
+            }),
+            Request::DeviceRemoteAttach {
+                relay_url,
+                join_token,
+            } => self.remote_change(
+                ConnectivityRequest::RemoteAttach {
+                    relay_url,
+                    join_token,
+                },
+                capabilities,
+            ),
+            Request::DeviceRemoteDetach => {
+                self.remote_change(ConnectivityRequest::RemoteDetach, capabilities)
+            }
+            Request::HubStatus => self.hub_change(ConnectivityRequest::HubStatus, capabilities),
+            Request::HubPair {
+                hub_url,
+                display_name,
+            } => self.hub_change(
+                ConnectivityRequest::HubPair {
+                    hub_url,
+                    display_name,
+                },
+                capabilities,
+            ),
+            Request::HubTrial {
+                hub_url,
+                display_name,
+            } => self.hub_change(
+                ConnectivityRequest::HubTrial {
+                    hub_url,
+                    display_name,
+                },
+                capabilities,
+            ),
+            Request::HubClaimLink => {
+                self.hub_change(ConnectivityRequest::HubClaimLink, capabilities)
+            }
+            Request::HubMachines => self.hub_change(ConnectivityRequest::HubMachines, capabilities),
+            Request::HubConnect { machine_id } => {
+                self.hub_change(ConnectivityRequest::HubConnect { machine_id }, capabilities)
+            }
+            Request::HubUnpair => self.hub_change(ConnectivityRequest::HubUnpair, capabilities),
             Request::SessionSend {
                 ref text,
                 ref attachments,
@@ -303,6 +426,126 @@ impl LogicApp {
             _ => LogicOutcome::ContinueNative,
         };
         LogicOutput::completed(call_id, outcome)
+    }
+
+    fn handle_platform(
+        &mut self,
+        call: PlatformCall,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutput {
+        let result = match call.request {
+            PlatformRequest::AuthenticateDevice { auth, server_nonce } => {
+                self.devices.authenticate_device(
+                    &auth,
+                    &server_nonce,
+                    capabilities,
+                    &mut self.next_capability_id,
+                )
+            }
+            PlatformRequest::AuthenticateInvite { auth, server_nonce } => {
+                self.devices.authenticate_invite(
+                    &auth,
+                    &server_nonce,
+                    capabilities,
+                    &mut self.next_capability_id,
+                )
+            }
+            PlatformRequest::ClaimAuthenticatedInvite {
+                invite_id,
+                device_name,
+            } => self.devices.claim_authenticated(
+                &invite_id,
+                &device_name,
+                &self.boot,
+                capabilities,
+                &mut self.next_capability_id,
+            ),
+            PlatformRequest::DeviceConnection {
+                device_id,
+                connected,
+            } => self.devices.connection(
+                &device_id,
+                connected,
+                capabilities,
+                &mut self.next_capability_id,
+            ),
+        };
+        LogicOutput {
+            platform_completions: vec![PlatformCompletion {
+                call_id: call.call_id,
+                result,
+            }],
+            ..LogicOutput::default()
+        }
+    }
+
+    fn connectivity(
+        &mut self,
+        request: ConnectivityRequest,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> Result<CapabilityValue, ProtocolError> {
+        let mut client = capability::Client::new(capabilities, &mut self.next_capability_id);
+        client.call(CapabilityRequest::Connectivity(request))
+    }
+
+    fn refresh_remote(
+        &mut self,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> Result<(), ProtocolError> {
+        match self.connectivity(ConnectivityRequest::RemoteStatus, capabilities)? {
+            CapabilityValue::RemoteAccess(remote) => {
+                self.remote_access = remote;
+                Ok(())
+            }
+            _ => Err(ProtocolError {
+                code: ErrorCode::Internal,
+                message: "remote connectivity returned the wrong value".to_string(),
+            }),
+        }
+    }
+
+    fn remote_change(
+        &mut self,
+        request: ConnectivityRequest,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        match self.connectivity(request, capabilities) {
+            Ok(CapabilityValue::RemoteAccess(remote)) => {
+                self.remote_access = remote.clone();
+                LogicOutcome::Reply(Box::new(Reply::RemoteAccess(remote)))
+            }
+            Ok(_) => LogicOutcome::Error(ProtocolError {
+                code: ErrorCode::Internal,
+                message: "remote connectivity returned the wrong value".to_string(),
+            }),
+            Err(error) => LogicOutcome::Error(error),
+        }
+    }
+
+    fn hub_change(
+        &mut self,
+        request: ConnectivityRequest,
+        capabilities: &mut impl CapabilityExecutor,
+    ) -> LogicOutcome {
+        match self.connectivity(request, capabilities) {
+            Ok(CapabilityValue::HubStatus(status)) => {
+                LogicOutcome::Reply(Box::new(Reply::HubStatus(status)))
+            }
+            Ok(CapabilityValue::HubClaim { status, claim }) => {
+                LogicOutcome::Reply(Box::new(Reply::HubClaim { status, claim }))
+            }
+            Ok(CapabilityValue::HubMachines(machines)) => {
+                LogicOutcome::Reply(Box::new(Reply::HubMachines(machines)))
+            }
+            Ok(CapabilityValue::HubTicket(ticket)) => {
+                LogicOutcome::Reply(Box::new(Reply::HubTicket(ticket)))
+            }
+            Ok(_) => LogicOutcome::Error(ProtocolError {
+                code: ErrorCode::Internal,
+                message: "Hub connectivity returned the wrong value".to_string(),
+            }),
+            Err(error) => LogicOutcome::Error(error),
+        }
     }
 
     fn request_artifact(&mut self, call_id: u64, request: LogicArtifactRequest) -> LogicOutput {
@@ -801,6 +1044,9 @@ impl LogicApp {
                 agent_cache: self.agent_cache.clone(),
                 sessions: self.sessions.clone(),
                 terminals: self.terminals.clone(),
+                devices: self.devices.clone(),
+                remote_access: self.remote_access.clone(),
+                update_download: self.update_download.clone(),
             },
         )
     }
@@ -824,6 +1070,9 @@ impl LogicApp {
             agent_cache: snapshot.agent_cache,
             sessions: snapshot.sessions,
             terminals: snapshot.terminals,
+            devices: snapshot.devices,
+            remote_access: snapshot.remote_access,
+            update_download: snapshot.update_download,
             workspace_roots_ready: false,
         })
     }
@@ -831,6 +1080,18 @@ impl LogicApp {
     pub fn handled_requests(&self) -> u64 {
         self.handled_requests
     }
+}
+
+fn offline_remote() -> RemoteAccess {
+    RemoteAccess {
+        relay_url: None,
+        rendezvous_url: None,
+        online: false,
+    }
+}
+
+fn idle_download() -> UpdateDownload {
+    UpdateDownload::Idle
 }
 
 fn validate_boot(boot: &LogicBoot) -> Result<(), String> {

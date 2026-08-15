@@ -6,6 +6,7 @@ use genehub_proto::{
     ErrorCode, ExchangeRequestHead, ExchangeResponseHead, ProtocolError, Reply, Request,
     ServerFrame, TransportKind,
 };
+use genet_daemon_logic_api::PlatformReply;
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
@@ -406,9 +407,13 @@ pub async fn serve(
         })
     });
 
-    let mut revocations = state.devices.subscribe_revocations();
+    let logic = state
+        .logic
+        .as_ref()
+        .context("portable daemon logic is unavailable")?;
+    let mut revocations = logic.subscribe_device_revocations();
     if let Some(device_id) = &access.device_id {
-        state.devices.mark_connected(device_id);
+        logic.device_connection(device_id.clone(), true).await?;
     }
     let mut streams = HashMap::<u32, StreamState>::new();
     let mut handlers = JoinSet::new();
@@ -467,7 +472,9 @@ pub async fn serve(
     }
     writer_task.abort();
     if let Some(device_id) = &access.device_id {
-        state.devices.mark_disconnected(device_id);
+        if let Err(error) = logic.device_connection(device_id.clone(), false).await {
+            tracing::warn!(%error, %device_id, "portable device presence did not settle");
+        }
     }
     outcome
 }
@@ -709,14 +716,21 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         }
         let reply = match services
             .state
-            .devices
-            .claim_authenticated(invite_id, device_name)
+            .logic
+            .as_ref()
+            .context("portable daemon logic is unavailable")?
+            .claim_authenticated_invite(invite_id.to_string(), device_name.to_string())
+            .await
         {
-            Ok((mut credential, _)) => {
-                credential.machine_name = crate::link::default_display_name();
-                credential.machine_id = services.state.machine.machine_id.clone();
-                credential.fingerprint = services.state.machine.fingerprint();
-                Reply::Claimed(credential)
+            Ok(PlatformReply::Claimed(credential)) => Reply::Claimed(credential),
+            Ok(_) => {
+                return send_error(
+                    stream,
+                    500,
+                    ErrorCode::Internal,
+                    "portable invitation claim returned the wrong value",
+                )
+                .await
             }
             Err(error) => {
                 return send_error(stream, 401, ErrorCode::Unauthorized, format!("{error:#}")).await

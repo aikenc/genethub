@@ -23,6 +23,19 @@ pub struct SessionKey {
     context: String,
 }
 
+impl SessionKey {
+    /// Reconstitutes the portable policy result inside the native AEAD driver.
+    /// Authorization and key derivation happen in the signed guest; native code
+    /// receives only the connection-scoped key and transcript context it needs
+    /// to seal records.
+    pub fn from_portable(encryption_key: [u8; 32], context: String) -> Self {
+        Self {
+            encryption_key,
+            context,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Direction {
     ClientToDaemon,

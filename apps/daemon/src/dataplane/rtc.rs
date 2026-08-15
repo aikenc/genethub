@@ -267,7 +267,8 @@ async fn serve_channel(
         &hello,
         inherited.workspace_id.clone(),
         inherited.workspace_handle.clone(),
-    )?;
+    )
+    .await?;
     // The short-lived RTC secret is a transport upgrade, not new authority.
     // Preserve the authenticated base peer's device and workspace scope.
     accepted.access = PeerAccess {

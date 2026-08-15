@@ -1344,10 +1344,12 @@ name = "genet-daemon-core"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "chrono",
  "genehub-proto",
  "genet-daemon-common",
  "genet-daemon-logic-api",
  "genet-daemon-system",
+ "hmac",
  "json5",
  "serde",
  "serde_json",

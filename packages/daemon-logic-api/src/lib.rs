@@ -7,7 +7,10 @@
 
 use std::collections::BTreeMap;
 
-use genehub_proto::{ProtocolError, Reply, Request, SequencedEvent, ServerFrame, TransportKind};
+use genehub_proto::{
+    DeviceAuth, DeviceCredential, HubClaim, HubMachine, HubStatus, HubTicket, InviteAuth,
+    ProtocolError, RemoteAccess, Reply, Request, SequencedEvent, ServerFrame, TransportKind,
+};
 use serde::{Deserialize, Serialize};
 
 pub fn encode_message<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, String> {
@@ -29,7 +32,7 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
 }
 
 /// Core-Wasm export contract implemented by `genet-daemon-logic`.
-pub const ABI_VERSION: u32 = 8;
+pub const ABI_VERSION: u32 = 10;
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 pub const MAX_CAPABILITY_BATCH: usize = 64;
 pub const MAX_CAPABILITY_CHUNK_BYTES: usize = 3 * 1024 * 1024;
@@ -76,8 +79,61 @@ pub struct LogicRequest {
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum LogicInput {
     Request(LogicRequest),
+    Platform(PlatformCall),
     CapabilityResults(CapabilityResults),
     CapabilityEvent(CapabilityEvent),
+}
+
+/// Native transport asks the signed application to make a security decision
+/// through the same bounded byte ABI as ordinary RPC. The platform still owns
+/// sockets and AEAD records; authorization state and replay policy stay hot
+/// updateable inside the guest.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformCall {
+    pub call_id: u64,
+    pub request: PlatformRequest,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum PlatformRequest {
+    AuthenticateDevice {
+        auth: DeviceAuth,
+        server_nonce: String,
+    },
+    AuthenticateInvite {
+        auth: InviteAuth,
+        server_nonce: String,
+    },
+    ClaimAuthenticatedInvite {
+        invite_id: String,
+        device_name: String,
+    },
+    DeviceConnection {
+        device_id: String,
+        connected: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum PlatformReply {
+    Authenticated {
+        subject_id: String,
+        proof: String,
+        encryption_key: [u8; 32],
+        context: String,
+    },
+    Claimed(DeviceCredential),
+    Ack,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformCompletion {
+    pub call_id: u64,
+    pub result: Result<PlatformReply, ProtocolError>,
 }
 
 /// Result of the portable policy/router stage.
@@ -108,6 +164,8 @@ pub struct LogicCompletion {
 pub struct LogicOutput {
     #[serde(default)]
     pub completions: Vec<LogicCompletion>,
+    #[serde(default)]
+    pub platform_completions: Vec<PlatformCompletion>,
     #[serde(default)]
     pub capability_batches: Vec<CapabilityBatch>,
     #[serde(default)]
@@ -149,6 +207,7 @@ pub enum ConnectionDirective {
 pub enum Publication {
     Session(SequencedEvent),
     Fanout(ServerFrame),
+    DeviceRevoked { device_id: String },
 }
 
 /// A group of independent raw system operations. The guest emits one batch and
@@ -207,16 +266,30 @@ pub enum CapabilityFailureKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum CapabilityRequest {
-    SecureRead { key: String, max_bytes: u32 },
-    SecureWrite { key: String, bytes: Vec<u8> },
-    SecureRemove { key: String },
+    SecureRead {
+        key: String,
+        max_bytes: u32,
+    },
+    SecureWrite {
+        key: String,
+        bytes: Vec<u8>,
+    },
+    SecureRemove {
+        key: String,
+    },
     File(FileRequest),
     Process(ProcessRequest),
     Pty(PtyRequest),
     Http(HttpRequest),
     Socket(SocketRequest),
     Rtc(RtcRequest),
-    Random { bytes: u32 },
+    /// Long-lived encrypted connectivity is an unavoidable native resource:
+    /// it owns Tokio tasks and live carriers. The guest still owns RPC routing
+    /// and invokes each operation as one bounded capability call.
+    Connectivity(ConnectivityRequest),
+    Random {
+        bytes: u32,
+    },
     Clock,
     LogicArtifact(LogicArtifactRequest),
 }
@@ -256,7 +329,41 @@ pub enum CapabilityValue {
         kind: RtcDescriptionKind,
         sdp: String,
     },
+    HubStatus(HubStatus),
+    HubClaim {
+        status: HubStatus,
+        claim: HubClaim,
+    },
+    HubMachines(Vec<HubMachine>),
+    HubTicket(HubTicket),
+    RemoteAccess(RemoteAccess),
     LogicArtifact(LogicArtifactState),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum ConnectivityRequest {
+    HubStatus,
+    HubPair {
+        hub_url: String,
+        display_name: Option<String>,
+    },
+    HubTrial {
+        hub_url: String,
+        display_name: Option<String>,
+    },
+    HubClaimLink,
+    HubMachines,
+    HubConnect {
+        machine_id: String,
+    },
+    HubUnpair,
+    RemoteStatus,
+    RemoteAttach {
+        relay_url: String,
+        join_token: Option<String>,
+    },
+    RemoteDetach,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
