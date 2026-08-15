@@ -3,7 +3,9 @@
 //! Platform crates must not depend on this crate. The Wasm entry crate links it
 //! normally, preserving Rust ownership, visibility and memory safety.
 
-use genehub_proto::{ErrorCode, HelloResult, ProtocolError, Reply, Request, PROTOCOL_VERSION};
+use genehub_proto::{
+    ErrorCode, HelloResult, LogEntry, LogTail, ProtocolError, Reply, Request, PROTOCOL_VERSION,
+};
 use genet_daemon_common::{decode_json, encode_json};
 use genet_daemon_logic_api::{LogicBoot, LogicOutcome, LogicRequest, SNAPSHOT_FORMAT_VERSION};
 use serde::{Deserialize, Serialize};
@@ -63,7 +65,40 @@ impl LogicApp {
                     message: "there is nothing to send".to_string(),
                 })
             }
+            Request::LogTail { name } => self.read_log(name),
             _ => LogicOutcome::ContinueNative,
+        }
+    }
+
+    fn read_log(&self, name: Option<String>) -> LogicOutcome {
+        let name = name.unwrap_or_else(|| "daemon.log".to_string());
+        let directory = std::path::Path::new(&self.boot.log_directory);
+        match portable_logs::tail(directory, &name, portable_logs::DEFAULT_TAIL_BYTES) {
+            Ok(text) => LogicOutcome::Reply(Box::new(Reply::Log(LogTail {
+                path: std::path::Path::new(&self.boot.log_display_directory)
+                    .join(&name)
+                    .display()
+                    .to_string(),
+                name,
+                text,
+                files: portable_logs::list(directory)
+                    .into_iter()
+                    .map(|(name, bytes)| LogEntry { name, bytes })
+                    .collect(),
+            }))),
+            Err(message) => LogicOutcome::Error(ProtocolError {
+                code: if message.contains("不是一个日志文件名") {
+                    ErrorCode::BadRequest
+                } else if message.contains("does not exist")
+                    || message.contains("No such file")
+                    || message.contains("找不到")
+                {
+                    ErrorCode::NotFound
+                } else {
+                    ErrorCode::Internal
+                },
+                message,
+            }),
         }
     }
 
@@ -110,12 +145,76 @@ fn validate_boot(boot: &LogicBoot) -> Result<(), String> {
         ("machine id", boot.machine_id.as_str()),
         ("fingerprint", boot.fingerprint.as_str()),
         ("machine name", boot.machine_name.as_str()),
+        ("log directory", boot.log_directory.as_str()),
+        ("log display directory", boot.log_display_directory.as_str()),
     ] {
         if value.is_empty() {
             return Err(format!("{label} must not be empty"));
         }
     }
     Ok(())
+}
+
+mod portable_logs {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::path::Path;
+
+    pub const DEFAULT_TAIL_BYTES: usize = 64 * 1024;
+
+    pub fn list(directory: &Path) -> Vec<(String, u64)> {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return Vec::new();
+        };
+        let mut found = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let metadata = entry.path().symlink_metadata().ok()?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return None;
+                }
+                Some((
+                    entry.file_name().to_string_lossy().to_string(),
+                    metadata.len(),
+                    metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                ))
+            })
+            .collect::<Vec<_>>();
+        found.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
+        found
+            .into_iter()
+            .map(|(name, bytes, _)| (name, bytes))
+            .collect()
+    }
+
+    pub fn tail(directory: &Path, name: &str, bytes: usize) -> Result<String, String> {
+        if name.is_empty() || Path::new(name).components().count() != 1 {
+            return Err(format!("{name} 不是一个日志文件名"));
+        }
+        let path = directory.join(name);
+        let metadata = path
+            .symlink_metadata()
+            .map_err(|error| format!("打不开 {name}：{error}"))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(format!("打不开 {name}：not a regular log file"));
+        }
+        let mut file =
+            std::fs::File::open(&path).map_err(|error| format!("打不开 {name}：{error}"))?;
+        let from = metadata.len().saturating_sub(bytes as u64);
+        file.seek(SeekFrom::Start(from))
+            .map_err(|error| format!("读取 {name}：{error}"))?;
+        let mut raw = Vec::new();
+        file.take(bytes as u64)
+            .read_to_end(&mut raw)
+            .map_err(|error| format!("读取 {name}：{error}"))?;
+        let text = String::from_utf8_lossy(&raw).to_string();
+        if from == 0 {
+            return Ok(text);
+        }
+        Ok(match text.find('\n') {
+            Some(at) => text[at + 1..].to_string(),
+            None => text,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +230,8 @@ mod tests {
             fingerprint: "fingerprint".to_string(),
             machine_name: "workstation".to_string(),
             rtc_supported: true,
+            log_directory: ".".to_string(),
+            log_display_directory: "/host/logs".to_string(),
         }
     }
 
@@ -166,5 +267,41 @@ mod tests {
         });
         let restored = LogicApp::restore(&app.snapshot().unwrap()).unwrap();
         assert_eq!(restored.handled_requests(), 1);
+    }
+
+    #[test]
+    fn log_reading_is_portable_business_logic_and_rejects_path_escape() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("daemon.log"),
+            "first\nsecond\nthird\n",
+        )
+        .unwrap();
+        let mut config = boot();
+        config.log_directory = directory.path().display().to_string();
+        let mut app = LogicApp::new(config).unwrap();
+
+        let outcome = app.handle(LogicRequest {
+            transport: TransportKind::Loopback,
+            request: Request::LogTail { name: None },
+        });
+        assert!(matches!(
+            outcome,
+            LogicOutcome::Reply(reply)
+                if matches!(*reply, Reply::Log(LogTail { ref text, .. }) if text.ends_with("third\n"))
+        ));
+
+        assert!(matches!(
+            app.handle(LogicRequest {
+                transport: TransportKind::Forwarded,
+                request: Request::LogTail {
+                    name: Some("../config.json".to_string()),
+                },
+            }),
+            LogicOutcome::Error(ProtocolError {
+                code: ErrorCode::BadRequest,
+                ..
+            })
+        ));
     }
 }

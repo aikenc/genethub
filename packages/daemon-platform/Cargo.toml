@@ -14,6 +14,7 @@ sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 wasmtime.workspace = true
+wasmtime-wasi.workspace = true
 wasmparser.workspace = true
 
 [dev-dependencies]

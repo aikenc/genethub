@@ -55,7 +55,7 @@ fn consume_linux_built_fixture_through_update_and_restart() {
     let runtime = PlatformRuntime::open(
         state.path(),
         verifier.clone(),
-        VmPolicy::new(LOGIC_ABI_VERSION),
+        VmPolicy::new(LOGIC_ABI_VERSION).with_wasi(),
         fallback.clone(),
     )
     .unwrap();
@@ -68,7 +68,7 @@ fn consume_linux_built_fixture_through_update_and_restart() {
     let reopened = PlatformRuntime::open(
         state.path(),
         verifier,
-        VmPolicy::new(LOGIC_ABI_VERSION),
+        VmPolicy::new(LOGIC_ABI_VERSION).with_wasi(),
         fallback,
     )
     .unwrap();

@@ -84,7 +84,7 @@ only on the in-memory VM checkpoint is forbidden.
 
 CI and Release have a single Linux producer:
 
-- compile `genet-daemon-logic` for `wasm32-unknown-unknown`;
+- compile `genet-daemon-logic` for `wasm32-wasip1`;
 - use the latency-oriented `daemon-logic-release` profile (`opt-level = 1`, no
   LTO), not the workspace's size-oriented full-LTO profile;
 - sign once with the channel release key;

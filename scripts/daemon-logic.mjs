@@ -13,7 +13,7 @@ const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 const target = process.env.CARGO_TARGET_DIR || join(repo, "target");
 const raw = join(
   target,
-  "wasm32-unknown-unknown",
+  "wasm32-wasip1",
   "daemon-logic-dev",
   "genet_daemon_logic.wasm",
 );
@@ -27,7 +27,7 @@ run([
   "-p",
   "genet-daemon-logic",
   "--target",
-  "wasm32-unknown-unknown",
+  "wasm32-wasip1",
   "--profile",
   "daemon-logic-dev",
 ]);

@@ -11,10 +11,16 @@ use genet_daemon_platform::{
 use support::{signed_component, signing_key, verifier};
 
 #[test]
-#[ignore = "requires GENET_DAEMON_LOGIC_WASM built for wasm32-unknown-unknown"]
+#[ignore = "requires GENET_DAEMON_LOGIC_WASM built for wasm32-wasip1"]
 fn real_rust_application_runs_statefully_and_restores_across_instances() {
     let component = application_component();
-    let vm = LogicVm::new(VmPolicy::application(LOGIC_ABI_VERSION)).unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let vm = LogicVm::new(VmPolicy::application(LOGIC_ABI_VERSION).with_wasi_preopen(
+        logs.path(),
+        "/genehub-logs",
+        false,
+    ))
+    .unwrap();
     let first = vm.instantiate(&component).unwrap();
     first.initialize(&boot_bytes()).unwrap();
 
@@ -45,7 +51,7 @@ fn real_rust_application_runs_statefully_and_restores_across_instances() {
 }
 
 #[test]
-#[ignore = "requires GENET_DAEMON_LOGIC_WASM built for wasm32-unknown-unknown"]
+#[ignore = "requires GENET_DAEMON_LOGIC_WASM built for wasm32-wasip1"]
 fn real_application_single_file_hot_updates_without_restarting_runtime() {
     let component = application_component();
     let key = signing_key(7);
@@ -55,10 +61,12 @@ fn real_application_single_file_hot_updates_without_restarting_runtime() {
     assert_eq!(decoded.component, component);
 
     let directory = tempfile::tempdir().unwrap();
+    let logs = directory.path().join("logs");
+    fs::create_dir(&logs).unwrap();
     let runtime = PlatformRuntime::open_application(
         directory.path(),
         verifier(&key, 16 * 1024 * 1024),
-        VmPolicy::application(LOGIC_ABI_VERSION),
+        VmPolicy::application(LOGIC_ABI_VERSION).with_wasi_preopen(&logs, "/genehub-logs", false),
         fallback,
         boot_bytes(),
     )
@@ -111,6 +119,8 @@ fn boot_bytes() -> Vec<u8> {
         fingerprint: "fingerprint".to_string(),
         machine_name: "workstation".to_string(),
         rtc_supported: true,
+        log_directory: "/genehub-logs".to_string(),
+        log_display_directory: "/host/logs".to_string(),
     })
     .unwrap()
 }

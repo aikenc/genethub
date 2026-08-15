@@ -1,9 +1,10 @@
 //! The portable GeneHub daemon application.
 //!
 //! This crate is ordinary Rust and is tested natively, then compiled once on
-//! Linux to `wasm32-unknown-unknown`. OS access is intentionally absent. The
-//! exported ABI moves whole serialized events and command batches so strings,
-//! request trees and future capability commands cross the VM boundary once.
+//! Linux to `wasm32-wasip1`. The platform grants only explicit WASI
+//! capabilities; there is no inherited environment, stdio, network or ambient
+//! filesystem. The exported ABI moves whole serialized events and command
+//! batches so strings and request trees cross the VM boundary once.
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_abi {

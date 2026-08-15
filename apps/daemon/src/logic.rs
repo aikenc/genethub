@@ -65,11 +65,20 @@ impl LogicHost {
             fingerprint: machine.fingerprint(),
             machine_name: crate::link::default_display_name(),
             rtc_supported: true,
+            log_directory: "/genehub-logs".to_string(),
+            log_display_directory: paths.logs_dir().display().to_string(),
         })?;
         let runtime = PlatformRuntime::open_application(
             paths.logic_dir(),
             verifier,
-            VmPolicy::application(LOGIC_ABI_VERSION),
+            // WASIp1 gives the guest one cross-platform clock/random ABI. It
+            // inherits no ambient files, env, stdio or sockets; workspace
+            // directories are added later as explicit root capabilities.
+            VmPolicy::application(LOGIC_ABI_VERSION).with_wasi_preopen(
+                paths.logs_dir(),
+                "/genehub-logs",
+                false,
+            ),
             artifact,
             boot,
         )?;

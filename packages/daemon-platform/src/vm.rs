@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
@@ -6,6 +7,8 @@ use wasmtime::{
     Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, Strategy,
     TypedFunc,
 };
+use wasmtime_wasi::p1::{self, WasiP1Ctx};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 use crate::error::{PlatformError, Result};
 
@@ -51,6 +54,25 @@ pub struct VmPolicy {
     pub abi_version: u32,
     pub limits: VmLimits,
     pub require_application_abi: bool,
+    pub wasi: Option<WasiPolicy>,
+}
+
+/// The standardized system surface granted to a portable daemon instance.
+///
+/// Nothing is inherited from the native process: no stdio, environment,
+/// arguments, sockets or ambient filesystem. Every directory is an explicit
+/// capability and is mounted under a stable guest path, so one Linux-built
+/// module observes the same namespace on every host OS.
+#[derive(Clone, Debug, Default)]
+pub struct WasiPolicy {
+    pub preopens: Vec<WasiPreopen>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WasiPreopen {
+    pub host_path: PathBuf,
+    pub guest_path: String,
+    pub writable: bool,
 }
 
 impl VmPolicy {
@@ -59,6 +81,7 @@ impl VmPolicy {
             abi_version,
             limits: VmLimits::default(),
             require_application_abi: false,
+            wasi: None,
         }
     }
 
@@ -67,7 +90,30 @@ impl VmPolicy {
             abi_version,
             limits: VmLimits::default(),
             require_application_abi: true,
+            wasi: None,
         }
+    }
+
+    pub fn with_wasi_preopen(
+        mut self,
+        host_path: impl Into<PathBuf>,
+        guest_path: impl Into<String>,
+        writable: bool,
+    ) -> Self {
+        let wasi = self.wasi.get_or_insert_with(WasiPolicy::default);
+        wasi.preopens.push(WasiPreopen {
+            host_path: host_path.into(),
+            guest_path: guest_path.into(),
+            writable,
+        });
+        self
+    }
+
+    /// Enables the standardized clock/random surface without granting ambient
+    /// files, environment, stdio or network access.
+    pub fn with_wasi(mut self) -> Self {
+        self.wasi.get_or_insert_with(WasiPolicy::default);
+        self
     }
 }
 
@@ -124,26 +170,42 @@ impl LogicVm {
                 .or_insert_with(|| compiled.clone())
                 .clone()
         };
-        let imports = module
+        let unexpected_imports = module
             .imports()
+            .filter(|import| {
+                import.module() != "wasi_snapshot_preview1" || self.policy.wasi.is_none()
+            })
             .map(|import| format!("{}::{}", import.module(), import.name()))
             .collect::<Vec<_>>();
-        if !imports.is_empty() {
+        if !unexpected_imports.is_empty() {
             return Err(PlatformError::Vm(format!(
-                "foundation logic modules must be self-contained; unexpected imports: {}",
-                imports.join(", ")
+                "logic modules may import only explicitly enabled WASI capabilities; unexpected imports: {}",
+                unexpected_imports.join(", ")
             )));
         }
+
+        let wasi = build_wasi_context(self.policy.wasi.as_ref())?;
 
         let mut store = Store::new(
             &self.engine,
             StoreState {
                 limits: build_store_limits(&self.policy.limits),
+                wasi,
             },
         );
         store.limiter(|state| &mut state.limits);
         reset_fuel(&mut store, self.policy.limits.fuel_per_call)?;
-        let instance = Linker::new(&self.engine)
+        let mut linker = Linker::new(&self.engine);
+        if self.policy.wasi.is_some() {
+            p1::add_to_linker_sync(&mut linker, |state: &mut StoreState| {
+                state
+                    .wasi
+                    .as_mut()
+                    .expect("WASI linker is installed only with a WASI context")
+            })
+            .map_err(|error| PlatformError::Vm(format!("linking WASI preview 1: {error:#}")))?;
+        }
+        let instance = linker
             .instantiate(&mut store, &module)
             .map_err(|error| PlatformError::Vm(format!("instantiating module: {error:#}")))?;
 
@@ -442,6 +504,7 @@ impl LogicInstance {
 
 struct StoreState {
     limits: StoreLimits,
+    wasi: Option<WasiP1Ctx>,
 }
 
 struct InstanceState {
@@ -503,6 +566,50 @@ fn build_store_limits(limits: &VmLimits) -> StoreLimits {
         .tables(limits.max_tables)
         .trap_on_grow_failure(true)
         .build()
+}
+
+fn build_wasi_context(policy: Option<&WasiPolicy>) -> Result<Option<WasiP1Ctx>> {
+    let Some(policy) = policy else {
+        return Ok(None);
+    };
+    let mut builder = WasiCtxBuilder::new();
+    builder.allow_blocking_current_thread(true);
+    for preopen in &policy.preopens {
+        if preopen.guest_path.is_empty()
+            || !preopen.guest_path.starts_with('/')
+            || preopen.guest_path.contains("..")
+        {
+            return Err(PlatformError::Vm(format!(
+                "invalid WASI guest preopen path: {}",
+                preopen.guest_path
+            )));
+        }
+        let dir_perms = if preopen.writable {
+            DirPerms::all()
+        } else {
+            DirPerms::READ
+        };
+        let file_perms = if preopen.writable {
+            FilePerms::all()
+        } else {
+            FilePerms::READ
+        };
+        builder
+            .preopened_dir(
+                &preopen.host_path,
+                &preopen.guest_path,
+                dir_perms,
+                file_perms,
+            )
+            .map_err(|error| {
+                PlatformError::Vm(format!(
+                    "preopening {} as {}: {error:#}",
+                    preopen.host_path.display(),
+                    preopen.guest_path
+                ))
+            })?;
+    }
+    Ok(Some(builder.build_p1()))
 }
 
 fn reset_fuel(store: &mut Store<StoreState>, fuel: u64) -> Result<()> {

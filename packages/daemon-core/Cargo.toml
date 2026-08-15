@@ -11,5 +11,8 @@ genet-daemon-common = { path = "../daemon-common" }
 genet-daemon-logic-api = { path = "../daemon-logic-api" }
 serde.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints.rust]
 unsafe_code = "forbid"

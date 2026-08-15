@@ -182,7 +182,7 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: release-daemon-logic
@@ -196,10 +196,10 @@ jobs:
           node scripts/version.mjs --from-tag
           node scripts/channel.mjs --from-tag
           cargo build -p genet-daemon-logic \
-            --target wasm32-unknown-unknown \
+            --target wasm32-wasip1 \
             --profile daemon-logic-release
           mkdir -p dist
-          raw=target/wasm32-unknown-unknown/daemon-logic-release/genet_daemon_logic.wasm
+          raw=target/wasm32-wasip1/daemon-logic-release/genet_daemon_logic.wasm
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             test -n "$GENET_DAEMON_LOGIC_SIGNING_KEY" || {
               echo "::error::GENET_DAEMON_LOGIC_SIGNING_KEY is required for a release tag"

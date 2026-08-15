@@ -54,6 +54,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-
 ts-rs = "10"
 uuid = { version = "1", features = ["v4"] }
 wasmtime = { version = "47.0.3", default-features = false, features = ["anyhow", "runtime", "std", "winch"] }
+wasmtime-wasi = { version = "47.0.3", default-features = false, features = ["p1"] }
 wasmparser = "0.252"
 
 [profile.release]

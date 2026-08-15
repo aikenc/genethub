@@ -54,6 +54,35 @@ fn malformed_missing_importing_and_incompatible_modules_are_rejected() {
 }
 
 #[test]
+fn wasi_imports_require_an_explicit_preopen_policy_and_no_ambient_authority() {
+    let wasi_import =
+        "(import \"wasi_snapshot_preview1\" \"clock_time_get\" (func (param i32 i64 i32) (result i32)))";
+    let module = component(ComponentSpec {
+        module_import: wasi_import.to_string(),
+        ..ComponentSpec::default()
+    });
+
+    let closed = LogicVm::new(VmPolicy::new(LOGIC_ABI_VERSION)).unwrap();
+    assert!(matches!(
+        closed.instantiate(&module),
+        Err(PlatformError::Vm(message)) if message.contains("wasi_snapshot_preview1")
+    ));
+
+    let directory = tempfile::tempdir().unwrap();
+    let policy =
+        VmPolicy::new(LOGIC_ABI_VERSION).with_wasi_preopen(directory.path(), "/genehub-data", true);
+    let wasi = LogicVm::new(policy).unwrap();
+    assert_eq!(wasi.instantiate(&module).unwrap().probe(7).unwrap(), 7);
+
+    let invalid =
+        VmPolicy::new(LOGIC_ABI_VERSION).with_wasi_preopen(directory.path(), "../ambient", true);
+    assert!(matches!(
+        LogicVm::new(invalid).unwrap().instantiate(&healthy_component(1)),
+        Err(PlatformError::Vm(message)) if message.contains("invalid WASI guest preopen")
+    ));
+}
+
+#[test]
 fn self_check_traps_and_bad_health_are_rejected_before_activation() {
     let mut policy = VmPolicy::new(LOGIC_ABI_VERSION);
     policy.limits.fuel_per_call = 10_000;

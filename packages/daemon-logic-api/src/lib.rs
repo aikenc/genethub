@@ -21,6 +21,10 @@ pub struct LogicBoot {
     pub fingerprint: String,
     pub machine_name: String,
     pub rtc_supported: bool,
+    /// Capability-relative directory visible inside the WASI sandbox.
+    pub log_directory: String,
+    /// Native path shown to a local user; never used for guest file access.
+    pub log_display_directory: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
