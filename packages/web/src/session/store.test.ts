@@ -936,6 +936,50 @@ describe("renaming and deleting a conversation", () => {
  * only that the outcome was unknown.
  */
 describe("asking the machine about rounds", () => {
+  it("keeps older trunks in place when the live page refreshes", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 4,
+    };
+    const trunk = (index: number) => ({
+      index,
+      firstItemId: `t${index}`,
+      blobCount: 1,
+      title: `trunk ${index}`,
+      batches: [],
+    });
+    const timeline = {
+      ...emptyTimeline(),
+      rounds: [round],
+      roundLayers: {
+        r1: { round, trunks: [trunk(0), trunk(1), trunk(2)], nextCursor: undefined },
+      },
+    };
+    const client = {
+      call: async () => ({
+        type: "roundLayer",
+        data: { round, trunks: [trunk(2), trunk(3)], nextCursor: "before:2" },
+      }),
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      activeSessionId: "s1",
+      timeline,
+      sessionTimelines: { s1: timeline },
+    });
+
+    await useWorkbench.getState().loadRound("latest");
+
+    expect(useWorkbench.getState().timeline.roundLayers.r1?.trunks.map(({ index }) => index)).toEqual(
+      [0, 1, 2, 3],
+    );
+    expect(useWorkbench.getState().timeline.roundLayers.r1?.nextCursor).toBeUndefined();
+  });
+
   function counting() {
     let inFlight = 0;
     let peak = 0;
