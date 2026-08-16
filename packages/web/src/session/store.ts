@@ -228,7 +228,7 @@ interface WorkbenchState {
   refreshSessions(): Promise<void>;
   openWorkspace(root: string): Promise<void>;
   selectWorkspace(workspaceId: string): Promise<void>;
-  /** Changes a workspace's display name without moving its directory. */
+  /** Changes a workspace's display name without moving its folders. */
   renameWorkspace(workspaceId: string, name: string): Promise<void>;
   /** Hides a workspace registration without deleting files or conversations. */
   removeWorkspace(workspaceId: string): Promise<void>;

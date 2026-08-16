@@ -20,6 +20,7 @@
  */
 
 import { watchViewport } from "./shell/viewport";
+import { applyUiScale, useUiScale } from "./theme/scale";
 import { applyTheme, useTheme, watchSystemTheme } from "./theme/store";
 
 let booted = false;
@@ -34,6 +35,7 @@ export function boot(): void {
   booted = true;
 
   applyTheme(useTheme.getState().resolved);
+  applyUiScale(useUiScale.getState().scale);
   watchSystemTheme((theme) => useTheme.getState().systemChanged(theme));
   // Belongs to the window, not to any component: the keyboard can arrive while
   // any pane is open, and every one of them is inside the same fixed box.

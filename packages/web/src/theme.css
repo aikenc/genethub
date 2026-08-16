@@ -74,6 +74,56 @@
 
 html {
   height: 100%;
+  /* Extra type size on top of `zoom`. 0 on medium; ±2px per step. Kept off
+   * `<html>`'s own `font-size` so rem spacing (padding, gaps) does not move. */
+  --gh-font-nudge: 0px;
+}
+
+/*
+ * Client-only UI scale. Medium is the unzoomed page (no attribute). `zoom`
+ * is 15% per step so adjacent sizes are visible; `--gh-font-nudge` adds 2px
+ * of type on top without moving rem layout. Coarse-pointer fields still
+ * pin to 16px below, so iOS does not auto-zoom after someone picks 小.
+ */
+html[data-ui-scale="xsmall"] {
+  zoom: 0.7;
+  --gh-font-nudge: -4px;
+}
+
+html[data-ui-scale="small"] {
+  zoom: 0.85;
+  --gh-font-nudge: -2px;
+}
+
+html[data-ui-scale="large"] {
+  zoom: 1.15;
+  --gh-font-nudge: 2px;
+}
+
+html[data-ui-scale="xlarge"] {
+  zoom: 1.3;
+  --gh-font-nudge: 4px;
+}
+
+/* Chrome sizes that would otherwise stay put while only `body` grew. */
+.text-xs {
+  font-size: calc(0.75rem + var(--gh-font-nudge));
+}
+
+.text-sm {
+  font-size: calc(0.875rem + var(--gh-font-nudge));
+}
+
+.text-base {
+  font-size: calc(1rem + var(--gh-font-nudge));
+}
+
+.text-\[10px\] {
+  font-size: calc(10px + var(--gh-font-nudge));
+}
+
+.text-\[11px\] {
+  font-size: calc(11px + var(--gh-font-nudge));
 }
 
 /*
@@ -103,13 +153,15 @@ body {
   touch-action: manipulation;
   background: rgb(var(--bg));
   color: rgb(var(--fg));
-  font:
-    13px/1.5 -apple-system,
+  font-family:
+    -apple-system,
     BlinkMacSystemFont,
     "Segoe UI",
     "PingFang SC",
     "Microsoft YaHei",
     sans-serif;
+  font-size: calc(13px + var(--gh-font-nudge));
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -159,17 +211,17 @@ body {
  */
 @media (max-width: 767px) {
   body {
-    font-size: 16px;
+    font-size: calc(16px + var(--gh-font-nudge));
     line-height: 1.625;
   }
 
   .text-xs {
-    font-size: 14px;
+    font-size: calc(14px + var(--gh-font-nudge));
     line-height: 1.5rem;
   }
 
   .text-sm {
-    font-size: 16px;
+    font-size: calc(16px + var(--gh-font-nudge));
     line-height: 1.625rem;
   }
 

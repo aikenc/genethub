@@ -11,6 +11,7 @@ import type { Client } from "../protocol/client";
 import { SettingsPanel } from "../settings/SettingsPanel";
 import { CHANNEL } from "../channel";
 import { useWorkbench } from "../session/store";
+import { UI_SCALE_KEY, useUiScale } from "../theme/scale";
 import { browserHost } from "../host";
 
 /**
@@ -687,7 +688,7 @@ describe("speech settings", () => {
     await userEvent.clear(screen.getByLabelText("语音语言提示"));
     await userEvent.type(screen.getByLabelText("语音语言提示"), "zh, en");
     await userEvent.click(screen.getByRole("switch", { name: "语音协议 Stub" }));
-    await userEvent.click(screen.getByText("为当前项目沉淀我主动选择的候选"));
+    await userEvent.click(screen.getByText("为当前工作区沉淀我主动选择的候选"));
     await userEvent.click(screen.getByTestId("save-speech-qwen3"));
 
     await waitFor(() => {
@@ -944,5 +945,26 @@ describe("the version section", () => {
 
     expect(await screen.findByTestId("daemon-version")).toHaveTextContent(`daemon ${prefix} 0.1.17`);
     expect(screen.queryByTestId("app-version")).toBeNull();
+  });
+});
+
+describe("appearance on this client", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    delete document.documentElement.dataset.uiScale;
+    useUiScale.setState({ scale: "medium" });
+  });
+
+  it("offers three UI sizes and keeps medium as the current size", async () => {
+    render(<SettingsPanel host={browserHost()} />);
+
+    expect(screen.getByRole("radiogroup", { name: "界面大小" })).toBeInTheDocument();
+    expect(screen.getByTestId("ui-scale-medium")).toHaveAttribute("aria-checked", "true");
+
+    await userEvent.click(screen.getByTestId("ui-scale-large"));
+
+    expect(localStorage.getItem(UI_SCALE_KEY)).toBe("large");
+    expect(document.documentElement.dataset.uiScale).toBe("large");
+    expect(useUiScale.getState().scale).toBe("large");
   });
 });

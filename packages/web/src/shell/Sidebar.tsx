@@ -4,7 +4,8 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Endpoint, Host, Target } from "../host";
 import { useWorkbench } from "../session/store";
 import { ImportSessionsDialog } from "../session/ImportSessionsDialog";
-import { OpenProject } from "../workspace/OpenProject";
+import { OpenProject, type OpenWorkspaceHandle } from "../workspace/OpenProject";
+import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 import { TargetSwitcher } from "./TargetSwitcher";
@@ -12,19 +13,20 @@ import { TargetSwitcher } from "./TargetSwitcher";
 /**
  * The left edge of the workbench.
  *
- * Projects, and the conversations inside each. It used to be a `<select>` for
- * the project and one flat list of the current project's sessions, which meant
- * the two questions someone actually arrives with — what am I working on, and
- * where is that thing I was doing yesterday — both needed the dropdown opened
- * first. Everything is on screen now, because the daemon hands back every
- * workspace's sessions in one call.
+ * Workspaces, and the conversations inside each. It used to be a `<select>` for
+ * the workspace and one flat list of the current workspace's sessions, which
+ * meant the two questions someone actually arrives with — what am I working on,
+ * and where is that thing I was doing yesterday — both needed the dropdown
+ * opened first. Everything is on screen now, because the daemon hands back
+ * every workspace's sessions in one call.
  *
  * On a phone this is a drawer over the conversation, not a panel above it. It
  * used to be a 16rem-tall strip that pushed the chat down, which gave the list
  * four visible rows and the chat the rest of a screen it no longer fitted.
  *
- * Desktop workbench tools live in the right drawer, leaving this column for
- * project and conversation navigation.
+ * The machine switcher sits at the top of this column: everything below it
+ * belongs to one computer. The overflow next to 新建会话 only manages
+ * sessions and workspaces. Workspace surfaces and other globals live on the right.
  */
 export function Sidebar({
   host,
@@ -66,7 +68,12 @@ export function Sidebar({
     recall(EXPANDED_PROJECTS_KEY, []),
   );
   const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [globalOpen, setGlobalOpen] = useState(false);
+  const [groupingOpen, setGroupingOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const searchField = useRef<HTMLInputElement>(null);
+  const openWorkspaceRef = useRef<OpenWorkspaceHandle>(null);
   const [readAt, setReadAt] = useState<Record<string, number>>(() => recall(READ_KEY, {}));
   const readStateInitialized = useRef(recall(READ_INITIALIZED_KEY, false));
 
@@ -104,6 +111,10 @@ export function Sidebar({
   }, [sessions, activeSessionId]);
 
   const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
+
+  useEffect(() => {
+    if (searchOpen) searchField.current?.focus();
+  }, [searchOpen]);
 
   const needle = query.trim().toLowerCase();
   const listed = useMemo<ListedSession[]>(
@@ -188,67 +199,127 @@ export function Sidebar({
               onNavigate={onNavigate}
             />
           ) : null}
-          <button
-            type="button"
-            className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-accent px-3 text-sm font-medium text-white disabled:opacity-40 md:min-h-0 md:rounded-md md:py-1.5 md:text-xs"
-            disabled={!workspace}
-            // No agent named: the store keeps whichever one is in front of the
-            // user, and falls back to the built-in when there is none.
-            onClick={() => {
-              newSession(workspace?.id ?? null, null);
-              onNavigate();
-            }}
-          >
-            <span aria-hidden>+</span>
-            新建会话
-          </button>
-          <button
-            type="button"
-            className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-line px-3 text-sm text-muted hover:border-accent/50 hover:bg-sidebar-hover hover:text-fg disabled:opacity-40 md:min-h-0 md:rounded-md md:py-1.5 md:text-xs"
-            disabled={!workspace || connection !== "ready"}
-            onClick={() => setImportOpen(true)}
-          >
-            <span aria-hidden>⇩</span>
-            导入历史
-          </button>
-          {sessions.length > 0 ? (
-            <input
-              type="search"
-              aria-label="搜索会话"
-              placeholder="搜索会话"
-              className="min-h-11 w-full rounded-xl border border-line bg-surface px-3 text-base text-fg outline-none placeholder:text-faint focus:border-accent md:min-h-0 md:rounded-md md:px-2 md:py-1.5 md:text-xs"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
+          <div className="relative flex items-center gap-1">
+            <button
+              type="button"
+              className="flex min-h-11 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-xl bg-accent px-3 text-sm font-medium text-white disabled:opacity-40 md:min-h-0 md:rounded-md md:py-1.5 md:text-xs"
+              disabled={!workspace}
+              // No agent named: the store keeps whichever one is in front of the
+              // user, and falls back to the built-in when there is none.
+              onClick={() => {
+                newSession(workspace?.id ?? null, null);
+                onNavigate();
+              }}
+            >
+              <span aria-hidden>+</span>
+              新建会话
+            </button>
+            <button
+              type="button"
+              aria-label="会话与工作区"
+              aria-haspopup="menu"
+              aria-expanded={globalOpen}
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-line text-lg text-muted hover:bg-sidebar-hover hover:text-fg md:h-auto md:min-h-0 md:w-8 md:rounded-md md:py-1.5 md:text-sm"
+              onClick={() => setGlobalOpen((current) => !current)}
+            >
+              <span aria-hidden>⋯</span>
+            </button>
+            {globalOpen ? (
+              <>
+                <button
+                  type="button"
+                  aria-label="收起会话与工作区"
+                  className="fixed inset-0 z-40 cursor-default"
+                  onClick={() => setGlobalOpen(false)}
+                />
+                <div
+                  role="menu"
+                  aria-label="会话与工作区"
+                  className="absolute right-0 top-full z-50 mt-1 w-52 overflow-hidden rounded-xl border border-line-strong bg-surface py-1 shadow-[0_8px_30px_rgb(0_0_0_/0.35)]"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!endpoint}
+                    className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised disabled:opacity-40 md:min-h-0 md:py-1.5 md:text-xs"
+                    onClick={() => {
+                      setGlobalOpen(false);
+                      openWorkspaceRef.current?.open();
+                    }}
+                  >
+                    打开工作区
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!workspace || connection !== "ready"}
+                    className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised disabled:opacity-40 md:min-h-0 md:py-1.5 md:text-xs"
+                    onClick={() => {
+                      setGlobalOpen(false);
+                      setImportOpen(true);
+                    }}
+                  >
+                    导入会话
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={sessions.length === 0}
+                    className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised disabled:opacity-40 md:min-h-0 md:py-1.5 md:text-xs"
+                    onClick={() => {
+                      setGlobalOpen(false);
+                      setSearchOpen(true);
+                    }}
+                  >
+                    搜索会话
+                  </button>
+                </div>
+              </>
+            ) : null}
+          </div>
+          {searchOpen || needle ? (
+            <div className="flex items-center gap-1">
+              <input
+                ref={searchField}
+                type="search"
+                aria-label="搜索会话"
+                placeholder="搜索会话"
+                className="min-h-11 min-w-0 flex-1 rounded-xl border border-line bg-surface px-3 text-base text-fg outline-none placeholder:text-faint focus:border-accent md:min-h-0 md:rounded-md md:px-2 md:py-1.5 md:text-xs"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+              <button
+                type="button"
+                aria-label="关闭搜索"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-lg text-faint hover:bg-sidebar-hover hover:text-fg md:h-7 md:w-7 md:text-sm"
+                onClick={() => {
+                  setQuery("");
+                  setSearchOpen(false);
+                }}
+              >
+                <span aria-hidden>×</span>
+              </button>
+            </div>
           ) : null}
         </div>
 
-        {/* Nothing to group by until there is a project, and a lone "按状态"
-            above an empty list is a control for a list that does not exist. */}
-        <div
-          className={`${
-            workspaces.length > 0 ? "flex" : "hidden"
-          } items-center justify-between px-3 pt-2 text-[10px] uppercase tracking-wide text-faint`}
-        >
-          <span>会话</span>
-          <div className="flex rounded-md bg-surface p-0.5 normal-case tracking-normal">
-            {(["recent", "status", "project"] as const).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                aria-pressed={grouping === mode}
-                className={`rounded px-1.5 py-0.5 ${
-                  grouping === mode ? "bg-raised text-fg" : "hover:text-fg"
-                }`}
-                onClick={() => {
-                  remember(GROUPING_KEY, mode);
-                  setGrouping(mode);
-                }}
-              >
-                {mode === "recent" ? "最近" : mode === "status" ? "按状态" : "按项目"}
-              </button>
-            ))}
-          </div>
+        {/* This column is the session list. Grouping is a dropdown so the
+            three modes still fit after the type scale grew. */}
+        <div className="flex items-center justify-between gap-2 px-3 pt-2">
+          <span className="text-sm font-medium text-fg">会话</span>
+          {workspaces.length > 0 ? (
+            <GroupingSwitcher
+              grouping={grouping}
+              open={groupingOpen}
+              onToggle={() => setGroupingOpen((current) => !current)}
+              onPick={(mode) => {
+                remember(GROUPING_KEY, mode);
+                setGrouping(mode);
+                setGroupingOpen(false);
+              }}
+              onDismiss={() => setGroupingOpen(false)}
+            />
+          ) : null}
         </div>
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-2 py-2">
@@ -256,7 +327,7 @@ export function Sidebar({
             <Projects
               workspaces={workspaces}
               sessions={matching}
-              // While searching, a collapsed project would hide the very thing
+              // While searching, a collapsed workspace would hide the very thing
               // that was found — and a search that silently finds nothing is
               // indistinguishable from one that found nothing.
               collapsed={needle ? [] : collapsed}
@@ -300,12 +371,6 @@ export function Sidebar({
           ) : null}
         </div>
 
-        <div className="border-t border-line px-3 py-2">
-          {endpoint ? (
-            <OpenProject host={host} endpoint={endpoint} compact onOpened={onNavigate} />
-          ) : null}
-        </div>
-
         <div
           className="hidden items-center border-t border-line px-3 py-2 md:flex"
           style={{ paddingBottom: "max(0.5rem, env(safe-area-inset-bottom))" }}
@@ -313,6 +378,15 @@ export function Sidebar({
           <StatusDot connection={connection} />
         </div>
       </aside>
+      {endpoint ? (
+        <OpenProject
+          ref={openWorkspaceRef}
+          host={host}
+          endpoint={endpoint}
+          variant="none"
+          onOpened={onNavigate}
+        />
+      ) : null}
       {importOpen && workspace ? (
         <ImportSessionsDialog
           workspaceId={workspace.id}
@@ -336,7 +410,7 @@ interface RowActions {
 
 type ListedSession = SessionSummary & { unread: boolean };
 
-/** Every project, with its conversations under it. */
+/** Every workspace, with its conversations under it. */
 function Projects({
   workspaces,
   sessions,
@@ -581,7 +655,7 @@ function WorkspaceRow({
           }]).map((folder, index) => (
             <Detail
               key={folder.root}
-              label={index === 0 ? "Agent 目录" : folder.name}
+              label={index === 0 ? "Agent 工作区路径" : folder.name}
               value={folder.root}
             />
           ))}
@@ -592,7 +666,7 @@ function WorkspaceRow({
         <div className="mx-1 mb-2 rounded-lg border border-line-strong bg-surface p-3 text-xs">
           <p className="font-medium text-fg">从列表移除「{workspace.name}」？</p>
           <p className="mt-1 leading-relaxed text-muted">
-            文件和会话不会删除；以后重新打开同一目录即可继续。
+            文件和会话不会删除；以后重新打开同一工作区即可继续。
           </p>
           <div className="mt-3 flex justify-end gap-2">
             <button
@@ -777,10 +851,7 @@ function SessionRow({
         {unsupported ? (
           <span className="shrink-0 text-[10px] text-faint">需升级</span>
         ) : project ? (
-          <span className="flex shrink-0 items-center gap-1 text-[10px] text-faint">
-            <WorkspaceIcon workspace={project} className="h-3 w-3" />
-            {project.name}
-          </span>
+          <WorkspaceAffordance workspace={project} />
         ) : null}
       </button>
 
@@ -945,6 +1016,76 @@ function Rename({
   );
 }
 
+const GROUPING_MODES: { id: Grouping; label: string }[] = [
+  { id: "recent", label: "最近" },
+  { id: "status", label: "按状态" },
+  { id: "project", label: "按工作区" },
+];
+
+function groupingLabel(mode: Grouping): string {
+  return GROUPING_MODES.find((entry) => entry.id === mode)?.label ?? "按工作区";
+}
+
+function GroupingSwitcher({
+  grouping,
+  open,
+  onToggle,
+  onPick,
+  onDismiss,
+}: {
+  grouping: Grouping;
+  open: boolean;
+  onToggle(): void;
+  onPick(mode: Grouping): void;
+  onDismiss(): void;
+}) {
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="会话分组"
+        className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted hover:bg-raised hover:text-fg"
+        onClick={onToggle}
+      >
+        <span>{groupingLabel(grouping)}</span>
+        <span aria-hidden>▾</span>
+      </button>
+      {open ? (
+        <>
+          <button
+            type="button"
+            aria-label="收起会话分组"
+            className="fixed inset-0 z-40 cursor-default"
+            onClick={onDismiss}
+          />
+          <div
+            role="listbox"
+            aria-label="会话分组"
+            className="absolute right-0 top-full z-50 mt-1 min-w-[6.5rem] overflow-hidden rounded-lg border border-line-strong bg-surface py-1 shadow-[0_8px_30px_rgb(0_0_0_/0.35)]"
+          >
+            {GROUPING_MODES.map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                role="option"
+                aria-selected={grouping === mode.id}
+                className={`flex min-h-9 w-full items-center px-3 text-left text-sm md:min-h-0 md:py-1.5 md:text-xs ${
+                  grouping === mode.id ? "text-fg" : "text-muted hover:bg-raised hover:text-fg"
+                }`}
+                onClick={() => onPick(mode.id)}
+              >
+                {mode.label}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function StatusDot({ connection }: { connection: string }) {
   const ready = connection === "ready";
   return (
@@ -964,7 +1105,7 @@ function SessionStateIcon({ session }: { session: ListedSession }) {
 const title = (session: SessionSummary) => session.title || "新会话";
 
 /**
- * Why a conversation sitting in this project cannot be opened by this build.
+ * Why a conversation sitting in this workspace cannot be opened by this build.
  *
  * Sessions are stored with the code, so a beta and a release share them. The
  * beta may write a shape the release does not know how to read, and reading it
@@ -983,7 +1124,7 @@ const READ_KEY = "genehub.sidebar.read-at";
 const READ_INITIALIZED_KEY = "genehub.sidebar.read-at.initialized";
 
 /*
- * Which projects are folded shut, and which of the two lists is showing.
+ * Which workspaces are folded shut, and which of the two lists is showing.
  *
  * Local, like the paired machines next door (`devices/machines.ts`): this is
  * how one person arranged one window, and pushing it to the daemon would make
@@ -1003,6 +1144,6 @@ function remember(key: string, value: unknown): void {
     globalThis.localStorage?.setItem(key, JSON.stringify(value));
   } catch {
     // Storage blocked. The arrangement lasts as long as the tab, which is
-    // better than refusing to fold a project.
+    // better than refusing to fold a workspace.
   }
 }

@@ -1622,7 +1622,7 @@ describe("a turn that failed", () => {
 });
 
 /**
- * "新建会话的项目好像是左侧会话列表选中的。比较隐晦。" The transcript is empty
+ * "新建会话的工作区好像是左侧会话列表选中的。比较隐晦。" The transcript is empty
  * because there is nothing to transcribe yet, and that is the room the two
  * decisions a new conversation still needs belong in.
  */
@@ -1668,7 +1668,7 @@ describe("an unstarted conversation", () => {
       .map((button) => button.textContent);
   const openings = () => listed("可以先问问");
 
-  it("names every project and switches the draft to the one that is picked", async () => {
+  it("names every workspace and switches the draft to the one that is picked", async () => {
     draft();
     render(<NewSessionPanel />);
 
@@ -1713,13 +1713,13 @@ describe("an unstarted conversation", () => {
   });
 
   /**
-   * "点击项目后，选中的项目会立刻切换到第一。来回跳变很不好。" The order is
+   * "点击工作区后，选中的工作区会立刻切换到第一。来回跳变很不好。" The order is
    * decided once, when the panel opens.
    */
-  it("does not reshuffle the grid under the finger that just picked a project", async () => {
+  it("does not reshuffle the grid under the finger that just picked a workspace", async () => {
     draft();
     render(<NewSessionPanel />);
-    const names = () => listed("项目");
+    const names = () => listed("工作区");
     expect(names()).toEqual(["genethub", "console"]);
 
     await userEvent.click(screen.getByRole("button", { name: "console" }));
@@ -1733,11 +1733,11 @@ describe("an unstarted conversation", () => {
   });
 
   /**
-   * Four projects, and the one the sidebar has selected is always one of them.
-   * Being offered a list that does not include the project you are looking at
+   * Four workspaces, and the one the sidebar has selected is always one of them.
+   * Being offered a list that does not include the workspace you are looking at
    * reads as the panel having changed it.
    */
-  it("leads with the selected project, then the most recently worked in", async () => {
+  it("leads with the selected workspace, then the most recently worked in", async () => {
     const many = Array.from({ length: 6 }, (_, index) =>
       workspace(`w${index}`, `project-${index}`, `/srv/p${index}`),
     );
