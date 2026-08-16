@@ -1,9 +1,8 @@
 //! The daemon control plane (`genethub-cli.md` §4.0).
 //!
-//! These commands answer and act without a websocket: liveness comes from
-//! `daemon.lock` plus a pid probe, connection facts come from `endpoint.json`.
-//! That is what makes them usable when the daemon itself is the thing that is
-//! broken — `daemon stop` must not need the daemon's cooperation.
+//! These commands answer and act without a websocket: liveness comes from the
+//! kernel-held `daemon.lock`, while process and connection facts come from its
+//! diagnostic contents plus the authenticated `endpoint.json`.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -162,16 +161,22 @@ fn live_pid(paths: &Paths) -> Option<u32> {
 
 /// The facts every "where is the daemon" answer is built from.
 fn facts(paths: &Paths) -> serde_json::Value {
-    let pid = live_pid(paths);
+    let lock_pid = live_pid(paths);
     let endpoint = read_endpoint(paths);
     let instance_locked = lifecycle::instance_locked(paths).unwrap_or(false);
+    let endpoint_healthy = endpoint.as_ref().is_some_and(health);
+    let verified_pid = endpoint.as_ref().and_then(|endpoint| {
+        verified_endpoint_pid(lock_pid, endpoint.pid, instance_locked, endpoint_healthy)
+    });
+    // Windows' mandatory file lock can hide the pid bytes from another
+    // process. The held kernel lock plus the endpoint's keyed health proof is
+    // the stronger identity in that case; the file contents are diagnostics.
+    let pid = lock_pid.or(verified_pid);
     // Both halves, the way the shell adopts: a live pid with a dead listener
     // is no use to anyone, and a fresh endpoint with a dead pid is a leftover.
-    let running = match (pid, &endpoint) {
-        (Some(lock), Some(endpoint)) => instance_locked && lock == endpoint.pid && health(endpoint),
-        (Some(_), None) => instance_locked, // up but not listening yet
-        _ => false,
-    };
+    // A live locked pid without an endpoint is a daemon still starting.
+    let starting = lock_pid.is_some() && endpoint.is_none() && instance_locked;
+    let running = verified_pid.is_some() || starting;
     serde_json::json!({
         "running": running,
         "pid": pid,
@@ -181,6 +186,22 @@ fn facts(paths: &Paths) -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         "channel": channel::CHANNEL,
     })
+}
+
+fn verified_endpoint_pid(
+    lock_pid: Option<u32>,
+    endpoint_pid: u32,
+    instance_locked: bool,
+    endpoint_healthy: bool,
+) -> Option<u32> {
+    if !instance_locked || !endpoint_healthy {
+        return None;
+    }
+    match lock_pid {
+        Some(lock_pid) if lock_pid == endpoint_pid => Some(lock_pid),
+        Some(_) => None,
+        None => Some(endpoint_pid),
+    }
 }
 
 /// `genet daemon status` — process facts only; no WebSocket.
@@ -394,13 +415,15 @@ fn restart() -> i32 {
 /// A pid from a stale lock can have been reused. Never signal it merely because
 /// some unrelated listener now answers 200 on the stale port.
 fn stop_verified(paths: &Paths) -> Result<bool, String> {
-    let lock = live_pid(paths).ok_or_else(|| "the daemon is no longer running".to_string())?;
     let endpoint = read_endpoint(paths).ok_or_else(|| {
         "refusing to stop an unverified pid: endpoint.json is missing or unreadable".to_string()
     })?;
-    if endpoint.pid != lock || !health(&endpoint) {
+    let lock_pid = live_pid(paths);
+    let instance_locked = lifecycle::instance_locked(paths).unwrap_or(false);
+    if verified_endpoint_pid(lock_pid, endpoint.pid, instance_locked, health(&endpoint)).is_none() {
         return Err(format!(
-            "refusing to stop pid {lock}: its private endpoint identity could not be verified"
+            "refusing to stop pid {}: its private endpoint identity could not be verified",
+            endpoint.pid
         ));
     }
 
@@ -543,6 +566,22 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authenticated_endpoint_supplies_the_pid_when_lock_contents_are_hidden() {
+        assert_eq!(verified_endpoint_pid(None, 41, true, true), Some(41));
+    }
+
+    #[test]
+    fn endpoint_identity_never_overrides_a_different_readable_lock_pid() {
+        assert_eq!(verified_endpoint_pid(Some(40), 41, true, true), None);
+    }
+
+    #[test]
+    fn endpoint_pid_requires_both_the_kernel_lock_and_keyed_health_proof() {
+        assert_eq!(verified_endpoint_pid(None, 41, false, true), None);
+        assert_eq!(verified_endpoint_pid(None, 41, true, false), None);
+    }
 
     fn unrelated_health_listener() -> (u16, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
