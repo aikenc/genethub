@@ -1,11 +1,13 @@
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signer, SigningKey};
 use genet_daemon_platform::{ArtifactEnvelope, SignedArtifact, LOGIC_ABI_VERSION};
 
 const MODULE_ID: &str = "genehub:daemon/logic";
 const KEY_ID: &str = "dev-local";
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn genet() -> Command {
     Command::new(env!("CARGO_BIN_EXE_genet-dev"))
@@ -82,19 +84,57 @@ impl DaemonGuard {
     }
 
     fn command(&self, arguments: &[&str]) -> Output {
-        genet()
+        self.try_command(arguments)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn try_command(&self, arguments: &[&str]) -> Result<Output, String> {
+        let label = arguments.join(" ");
+        let mut child = genet()
             .args(arguments)
             .env("GENEHUB_DEV_DATA_DIR", &self.root)
             .env("GENEHUB_DEV_WORKSPACE_DIR", &self.workspace)
             .env("GENET_DAEMON_LOGIC_WASM", &self.artifact)
-            .output()
-            .unwrap()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("could not start `genet {label}`: {error}"))?;
+        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    return child
+                        .wait_with_output()
+                        .map_err(|error| format!("could not collect `genet {label}`: {error}"));
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let output = child.wait_with_output().map_err(|error| {
+                        format!("could not collect timed-out `genet {label}`: {error}")
+                    })?;
+                    return Err(format!(
+                        "`genet {label}` timed out after {}s\nstdout: {}\nstderr: {}",
+                        COMMAND_TIMEOUT.as_secs(),
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("could not observe `genet {label}`: {error}"));
+                }
+            }
+        }
     }
 }
 
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
-        let _ = self.command(&["daemon", "stop"]);
+        let _ = self.try_command(&["daemon", "stop"]);
     }
 }
 
