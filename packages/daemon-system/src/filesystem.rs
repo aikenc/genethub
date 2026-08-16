@@ -757,11 +757,11 @@ fn reject_symlink_chain(path: &Path) -> Result<(), CapabilityFailure> {
         // `symlink_metadata` on every filesystem. Neither can be a redirected
         // entry below the volume boundary; inspect every normal descendant,
         // where junctions and symbolic links live.
-        if !current.is_absolute() {
+        #[cfg(windows)]
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
             continue;
         }
-        #[cfg(windows)]
-        if matches!(component, Component::RootDir) {
+        if !current.is_absolute() {
             continue;
         }
         match fs::symlink_metadata(&current) {
