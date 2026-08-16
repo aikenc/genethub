@@ -1,3 +1,4 @@
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -90,37 +91,42 @@ impl DaemonGuard {
 
     fn try_command(&self, arguments: &[&str]) -> Result<Output, String> {
         let label = arguments.join(" ");
+        // A resident Windows child can keep an inherited anonymous-pipe handle
+        // open after the short-lived CLI parent exits. Capturing into ordinary
+        // files makes completion depend on the CLI process, not pipe EOF from
+        // every descendant in its process tree.
+        let mut stdout = tempfile::tempfile()
+            .map_err(|error| format!("could not create stdout for `genet {label}`: {error}"))?;
+        let mut stderr = tempfile::tempfile()
+            .map_err(|error| format!("could not create stderr for `genet {label}`: {error}"))?;
+        let child_stdout = stdout
+            .try_clone()
+            .map_err(|error| format!("could not clone stdout for `genet {label}`: {error}"))?;
+        let child_stderr = stderr
+            .try_clone()
+            .map_err(|error| format!("could not clone stderr for `genet {label}`: {error}"))?;
         let mut child = genet()
             .args(arguments)
             .env("GENEHUB_DEV_DATA_DIR", &self.root)
             .env("GENEHUB_DEV_WORKSPACE_DIR", &self.workspace)
             .env("GENET_DAEMON_LOGIC_WASM", &self.artifact)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::from(child_stdout))
+            .stderr(Stdio::from(child_stderr))
             .spawn()
             .map_err(|error| format!("could not start `genet {label}`: {error}"))?;
         let deadline = Instant::now() + COMMAND_TIMEOUT;
-        loop {
+        let (status, timed_out) = loop {
             match child.try_wait() {
-                Ok(Some(_)) => {
-                    return child
-                        .wait_with_output()
-                        .map_err(|error| format!("could not collect `genet {label}`: {error}"));
-                }
+                Ok(Some(status)) => break (status, false),
                 Ok(None) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Ok(None) => {
                     let _ = child.kill();
-                    let output = child.wait_with_output().map_err(|error| {
-                        format!("could not collect timed-out `genet {label}`: {error}")
+                    let status = child.wait().map_err(|error| {
+                        format!("could not reap timed-out `genet {label}`: {error}")
                     })?;
-                    return Err(format!(
-                        "`genet {label}` timed out after {}s\nstdout: {}\nstderr: {}",
-                        COMMAND_TIMEOUT.as_secs(),
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
+                    break (status, true);
                 }
                 Err(error) => {
                     let _ = child.kill();
@@ -128,8 +134,31 @@ impl DaemonGuard {
                     return Err(format!("could not observe `genet {label}`: {error}"));
                 }
             }
+        };
+        let output = Output {
+            status,
+            stdout: read_capture(&mut stdout, &label, "stdout")?,
+            stderr: read_capture(&mut stderr, &label, "stderr")?,
+        };
+        if timed_out {
+            return Err(format!(
+                "`genet {label}` timed out after {}s\nstdout: {}\nstderr: {}",
+                COMMAND_TIMEOUT.as_secs(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
+        Ok(output)
     }
+}
+
+fn read_capture(file: &mut std::fs::File, label: &str, stream: &str) -> Result<Vec<u8>, String> {
+    file.rewind()
+        .map_err(|error| format!("could not rewind {stream} for `genet {label}`: {error}"))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read {stream} for `genet {label}`: {error}"))?;
+    Ok(bytes)
 }
 
 impl Drop for DaemonGuard {
