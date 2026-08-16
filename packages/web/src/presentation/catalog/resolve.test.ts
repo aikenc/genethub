@@ -9,6 +9,7 @@ import {
   resolveEffortBadge,
   resolveModeBadge,
   resolveModelPresentation,
+  resolveModelTraits,
   truncateGraphemes,
 } from "./resolve";
 import badgeConfig from "./runtime-badges.json";
@@ -126,33 +127,50 @@ describe("model display names", () => {
   });
 });
 
-describe("runtime emoji badges", () => {
+describe("runtime badges", () => {
   it("does not invent a thinking level when the Agent supplied no default", () => {
-    expect(resolveEffortBadge(null)).toEqual({ emoji: "🤔", shortLabel: "默认", fullLabel: "默认" });
+    expect(resolveEffortBadge(null)).toEqual({
+      level: "auto",
+      shortLabel: "默认",
+      fullLabel: "默认",
+    });
   });
 
   it.each([
-    ["off", "关", "关闭"],
-    ["minimal", "微", "极低"],
-    ["low", "低", "低"],
-    ["medium", "中", "中"],
-    ["high", "高", "高"],
-    ["xhigh", "极", "极高"],
-    ["max", "满", "最大"],
-    ["ultra", "超", "超高"],
+    ["off", "off", "关", "关闭"],
+    ["minimal", 1, "微", "极低"],
+    ["low", 2, "低", "低"],
+    ["medium", 3, "中", "中"],
+    ["high", 4, "高", "高"],
+    ["xhigh", 5, "极", "极高"],
+    ["max", 5, "满", "最大"],
+    ["ultra", 5, "超", "超高"],
   ])(
-    "keeps the %s thinking level distinct in the compact badge",
-    (id, shortLabel, fullLabel) => {
-      expect(resolveEffortBadge(id)).toEqual({ emoji: "🤔", shortLabel, fullLabel });
+    "places the %s thinking level on the dial",
+    (id, level, shortLabel, fullLabel) => {
+      expect(resolveEffortBadge(id)).toEqual({ level, shortLabel, fullLabel });
     },
   );
 
-  it("keeps an unknown Agent-supplied thinking level instead of changing its wire value", () => {
+  it("keeps an unknown Agent-supplied thinking level instead of placing it on the dial", () => {
     expect(resolveEffortBadge("extreme")).toEqual({
-      emoji: "🤔",
+      level: "auto",
       shortLabel: "ex",
       fullLabel: "extreme",
     });
+  });
+
+  it("reads vision off well-known model families and never guesses it away", () => {
+    expect(
+      resolveModelTraits({ id: "anthropic/claude-sonnet-4", label: "Sonnet 4", reasoning: true }),
+    ).toEqual({ reasoning: true, multimodal: true });
+    expect(
+      resolveModelTraits({ id: "qwen/qwen3-vl-plus", label: "Qwen3 VL", reasoning: false }),
+    ).toEqual({ reasoning: false, multimodal: true });
+    // Unlisted is unknown, and unknown shows nothing rather than a claim.
+    expect(
+      resolveModelTraits({ id: "private/in-house-1", label: "In house", reasoning: false }),
+    ).toEqual({ reasoning: false, multimodal: false });
   });
 
   it("separates a permission policy from an ACP workflow selector", () => {

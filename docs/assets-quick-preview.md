@@ -224,7 +224,7 @@ FilesPanel 把目录和文件交互彻底分开：文件才打开 Preview，目�
 
 协议中的折叠目录以**缺失 `children`**表示，而不是 `children: null`；Web 仍归一化旧 daemon 的 null。这个边界有协议序列化和整页组件两层回归测试：旧实现点击真实目录后执行 `null.map()`，React 因未捕获 render error 卸载整个工作台，正是“全 page 都没了”的根因。
 
-打开项目入口同时接受普通目录和 `.code-workspace`。远端目录浏览器列出子目录及当前目录中的 workspace 文件；桌面原生壳提供相邻的“打开项目文件夹”和“打开工作区”动作。两种来源即使第一根相同也拥有独立项目 ID；多根 Explorer 顶层仍显示各 `folders[].name`，但节点 path 始终带全局 `rootHandle`。daemon 在每次 tree/write/preview 时重新验证项目成员关系并解析到 capability root，label、排序和重名不参与寻址。
+打开工作区入口同时接受普通文件夹和 `.code-workspace`。远端浏览器列出子文件夹及当前路径中的 workspace 文件；桌面原生壳在「打开工作区」下提供文件夹与 `.code-workspace` 两种来源。两种来源即使第一根相同也拥有独立工作区 ID；多根 Explorer 顶层仍显示各 `folders[].name`，但节点 path 始终带全局 `rootHandle`。daemon 在每次 tree/write/preview 时重新验证工作区成员关系并解析到 capability root，label、排序和重名不参与寻址。
 
 Agent 不必输出部署相关的 Preview prefix。聊天与文档 Preview 共用 Markdown 渲染器，在展示时把下列引用解析为当前 device/project/root 的 Preview URL：
 

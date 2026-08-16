@@ -8,6 +8,7 @@ import { PreviewPopoutPage } from "./preview/PreviewPopoutPage";
 import { parseAssetPreviewPath } from "./preview/url";
 import { watchViewport } from "./shell/viewport";
 import "./theme.css";
+import { applyUiScale, useUiScale } from "./theme/scale";
 import { applyTheme, useTheme, watchSystemTheme } from "./theme/store";
 
 // The tab title is the one place a browser build still names the product;
@@ -30,6 +31,7 @@ if (!root) throw new Error("index.html is missing #root");
  * opening it to inline scripts to save part of a frame is a bad trade.
  */
 applyTheme(useTheme.getState().resolved);
+applyUiScale(useUiScale.getState().scale);
 watchSystemTheme((theme) => useTheme.getState().systemChanged(theme));
 // Belongs to the window, not to any component: the keyboard can arrive while
 // any pane is open, and every one of them is inside the same fixed box.

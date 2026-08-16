@@ -12,6 +12,7 @@ import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
 import type { RtcState } from "../protocol/client";
 import { useWorkbench } from "../session/store";
+import { UI_SCALE_OPTIONS, useUiScale } from "../theme/scale";
 import { THEME_OPTIONS, useTheme } from "../theme/store";
 import { readRtcEnabled, writeRtcEnabled } from "./rtc";
 import { APP_DOWNLOAD_PAGE } from "../updates/links";
@@ -237,9 +238,9 @@ function SpeechSettingsCard({
             onChange={(event) => setContextEnabled(event.currentTarget.checked)}
           />
           <span>
-            <span className="block text-fg">使用当前会话和项目术语增强识别</span>
+            <span className="block text-fg">使用当前会话和工作区术语增强识别</span>
             <span className="mt-0.5 block text-faint">
-              活动工作区 ID 自动维护。读取最近对话、当前草稿、工作区/文件名，以及项目显式提供的 .genethub/speech/context.md、terms.txt 和 learned-terms.txt；不会遍历读取普通文件正文。
+              活动工作区 ID 自动维护。读取最近对话、当前草稿、工作区/文件名，以及工作区显式提供的 .genethub/speech/context.md、terms.txt 和 learned-terms.txt；不会遍历读取普通文件正文。
             </span>
           </span>
         </label>
@@ -264,10 +265,10 @@ function SpeechSettingsCard({
             onChange={(event) => setCollectCorrections(event.currentTarget.checked)}
           />
           <span>
-            <span className="block text-fg">为当前项目沉淀我主动选择的候选</span>
+            <span className="block text-fg">为当前工作区沉淀我主动选择的候选</span>
             <span className="mt-0.5 block text-faint">
               {workspaceId
-                ? "只为当前项目写入 .genethub/speech/preferences.jsonl 和 learned-terms.txt；切换项目不会沿用授权。只记录主动纠正，不保存音频、不自动上传，并默认写入该目录的 .gitignore。关闭收集不会删除已有文件，可直接检查、导出或删除。"
+                ? "只为当前工作区写入 .genethub/speech/preferences.jsonl 和 learned-terms.txt；切换工作区不会沿用授权。只记录主动纠正，不保存音频、不自动上传，并默认写入该工作区的 .gitignore。关闭收集不会删除已有文件，可直接检查、导出或删除。"
                 : "请先选择一个工作区；纠正收集不会按整台机器全局开启。"}
             </span>
           </span>
@@ -440,35 +441,63 @@ function rtcLabel(state: RtcState, transport?: string): string {
  */
 function Appearance() {
   const { preference, resolved, setPreference } = useTheme();
+  const { scale, setScale } = useUiScale();
   return (
     <section>
       <h2 className="mb-2 text-sm font-medium">外观</h2>
-      <div className="flex flex-col gap-2 rounded bg-surface px-3 py-2 text-xs">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex gap-1" role="radiogroup" aria-label="主题">
-            {THEME_OPTIONS.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                role="radio"
-                aria-checked={preference === option.value}
-                data-testid={`theme-${option.value}`}
-                className={`rounded border px-2.5 py-1.5 ${
-                  preference === option.value
-                    ? "border-accent bg-raised text-fg"
-                    : "border-line text-muted hover:border-line-strong hover:text-fg"
-                }`}
-                onClick={() => setPreference(option.value)}
-              >
-                {option.label}
-              </button>
-            ))}
+      <div className="flex flex-col gap-3 rounded bg-surface px-3 py-2 text-xs">
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex gap-1" role="radiogroup" aria-label="主题">
+              {THEME_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={preference === option.value}
+                  data-testid={`theme-${option.value}`}
+                  className={`rounded border px-2.5 py-1.5 ${
+                    preference === option.value
+                      ? "border-accent bg-raised text-fg"
+                      : "border-line text-muted hover:border-line-strong hover:text-fg"
+                  }`}
+                  onClick={() => setPreference(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            {preference === "system" ? (
+              <span className="text-muted">系统现在是{resolved === "dark" ? "暗色" : "亮色"}。</span>
+            ) : null}
           </div>
-          {preference === "system" ? (
-            <span className="text-muted">系统现在是{resolved === "dark" ? "暗色" : "亮色"}。</span>
-          ) : null}
+          <p className="text-faint">只对这台设备上的这个客户端生效。同一台机器从手机连过来，那边可以是另一个颜色。</p>
         </div>
-        <p className="text-faint">只对这台设备上的这个客户端生效。同一台机器从手机连过来，那边可以是另一个颜色。</p>
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-muted">界面大小</span>
+            <div className="flex gap-1" role="radiogroup" aria-label="界面大小">
+              {UI_SCALE_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={scale === option.value}
+                  data-testid={`ui-scale-${option.value}`}
+                  className={`rounded border px-2.5 py-1.5 ${
+                    scale === option.value
+                      ? "border-accent bg-raised text-fg"
+                      : "border-line text-muted hover:border-line-strong hover:text-fg"
+                  }`}
+                  onClick={() => setScale(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="text-faint">中是现在的尺寸。每档整页放大约 15%，正文字号另加减 2 像素，只影响这个客户端。</p>
+        </div>
       </div>
     </section>
   );

@@ -285,13 +285,13 @@ export function SpeechCandidatePopover({
                 <span className="min-w-0">
                   <strong className="block truncate text-sm font-medium text-fg">{alternative.text}</strong>
                   <span className="mt-0.5 block truncate text-xs text-faint">
-                    {pressed ? "当前 Best-1" : contextual ? "项目上下文候选" : "局部识别候选"}
+                    {pressed ? "当前 Best-1" : contextual ? "工作区上下文候选" : "局部识别候选"}
                   </span>
                 </span>
                 {pressed ? (
                   <Check className="h-4 w-4 text-accent-bright" aria-hidden />
                 ) : contextual ? (
-                  <span className="rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent-bright">项目优先</span>
+                  <span className="rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent-bright">工作区优先</span>
                 ) : null}
               </button>
             );

@@ -33,6 +33,60 @@ import { useSessionArtifact } from "./useSessionArtifact";
  */
 const SLOW_START_MS = 800;
 
+/** Someone sitting at the end of a long transcript, dragging the content back
+ * down to find what scrolled past. Only that direction counts: chasing new
+ * messages towards the bottom is when the composer is most wanted, so tucking
+ * it away there would be exactly wrong. */
+const TRAVEL_PX_PER_MS = 1;
+const TRAVEL_HOLD_MS = 280;
+/** Longer than this between samples and the run has ended, whatever the last
+ * pair of them said — a jump from `scrollIntoView` arrives as one lone sample
+ * and so can never accumulate a hold. */
+const TRAVEL_GAP_MS = 220;
+
+export interface TimelineScrollRun {
+  time: number;
+  top: number;
+  /** When the current unbroken run backwards began, or null between them. */
+  fastSince: number | null;
+  /** The hold has already fired for this run. Stays set until it ends, so a
+   * ten-second scroll tucks the composer once rather than nineteen times. */
+  spent: boolean;
+  /** True on the one sample that crosses the hold, so the caller fires once. */
+  triggered: boolean;
+}
+
+export const idleTimelineScroll = (): TimelineScrollRun => ({
+  time: 0,
+  top: 0,
+  fastSince: null,
+  spent: false,
+  triggered: false,
+});
+
+export function trackTimelineScroll(
+  previous: TimelineScrollRun,
+  top: number,
+  time: number,
+): TimelineScrollRun {
+  const deltaMs = time - previous.time;
+  // Positive when the transcript is being pulled back towards older turns.
+  const backwards = previous.top - top;
+  const continuous = deltaMs > 0 && deltaMs <= TRAVEL_GAP_MS;
+  if (!continuous || backwards / deltaMs < TRAVEL_PX_PER_MS) {
+    return { time, top, fastSince: null, spent: false, triggered: false };
+  }
+  const fastSince = previous.fastSince ?? previous.time;
+  const triggered = !previous.spent && time - fastSince >= TRAVEL_HOLD_MS;
+  return { time, top, fastSince, spent: previous.spent || triggered, triggered };
+}
+
+/** Far enough from the end to want a way back, with the two edges apart so the
+ * button does not blink in and out while the reader hovers around the line. */
+export function showsReturnToBottom(distance: number, shown: boolean): boolean {
+  return shown ? distance > 120 : distance > 320;
+}
+
 // Named for the file rather than for the thing it draws, because `timeline.ts`
 // next to it holds the state: two modules whose names differ only in casing are
 // the same module on Windows and on a stock macOS disk, and the import that
@@ -75,13 +129,22 @@ const CURRENT_MACHINE: ForkMachineOption = {
 export function TimelineView({
   state,
   forkController,
+  onScrollBack,
+  onReturnToBottom,
 }: {
   state: TimelineState;
   forkController?: ForkController;
+  /** Fired once a sustained drag back through history says the reader has left
+   * the end of the transcript, so the composer can get out of the way. */
+  onScrollBack?(): void;
+  /** Fired when the end comes back into view, however they got there. */
+  onReturnToBottom?(): void;
 }) {
-  const bottom = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
+  const bottom = useRef<HTMLDivElement>(null);
+  const scrollRun = useRef(idleTimelineScroll());
   const [pinned, setPinned] = useState(true);
+  const [adrift, setAdrift] = useState(false);
   const [forkRequest, setForkRequest] = useState<{
     turnId: string;
     hasNativeCheckpoint: boolean;
@@ -109,6 +172,17 @@ export function TimelineView({
     if (pinned) bottom.current?.scrollIntoView({ block: "end" });
   }, [state.items, state.pending, rounds, pinned]);
 
+  const returnToBottom = () => {
+    const element = scroller.current;
+    // A run that ends in a jump home is over, and the smooth scroll it starts
+    // runs the other way anyway, so nothing left in it should be believed.
+    scrollRun.current = idleTimelineScroll();
+    setPinned(true);
+    setAdrift(false);
+    onReturnToBottom?.();
+    element?.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+  };
+
   return (
     <>
       <div
@@ -118,7 +192,17 @@ export function TimelineView({
         onScroll={(event) => {
           const element = event.currentTarget;
           const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
-          setPinned(distance < 40);
+          const home = distance < 40;
+          setPinned(home);
+          setAdrift(showsReturnToBottom(distance, adrift));
+          if (home && !pinned) onReturnToBottom?.();
+          const run = trackTimelineScroll(
+            scrollRun.current,
+            element.scrollTop,
+            performance.now(),
+          );
+          scrollRun.current = run;
+          if (run.triggered) onScrollBack?.();
         }}
       >
         {contextualTurns.map(
@@ -192,8 +276,30 @@ export function TimelineView({
             <LogLink />
           </div>
         ) : null}
-
         <div ref={bottom} />
+      </div>
+      <div className="pointer-events-none absolute inset-x-0 bottom-3 px-4">
+        <div className="mx-auto flex max-w-chat justify-end">
+          <button
+            type="button"
+            aria-label="回到最新消息"
+            onClick={returnToBottom}
+            tabIndex={adrift ? 0 : -1}
+            className={`flex h-10 w-10 items-center justify-center rounded-full border border-line-strong bg-surface/95 text-muted shadow-[0_4px_16px_rgb(0_0_0_/0.35)] backdrop-blur transition-opacity hover:text-fg ${
+              adrift ? "pointer-events-auto opacity-100" : "opacity-0"
+            }`}
+          >
+            <svg viewBox="0 0 20 20" className="h-5 w-5" fill="none" aria-hidden>
+              <path
+                d="M10 4v11m0 0 4.5-4.5M10 15l-4.5-4.5"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+        </div>
       </div>
       {forkRequest && activeSession ? (
         <ForkDialog

@@ -3,8 +3,9 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Host } from "../host";
+import type { Endpoint, Host } from "../host";
 import { useWorkbench } from "../session/store";
+import { countTabSet, MobileTitleSwitcher } from "./MobileTitleSwitcher";
 import { Sidebar } from "./Sidebar";
 import { TabBar } from "./TabBar";
 
@@ -12,7 +13,7 @@ import { TabBar } from "./TabBar";
  * The two pieces of chrome around the workbench.
  *
  * Both exist because of the same complaint: the window did not look or read
- * like one application. The left edge hid every project but one behind a
+ * like one application. The left edge hid every workspace but one behind a
  * dropdown, and the strip along the top was drawn by the OS in the OS's own
  * colours.
  */
@@ -44,6 +45,12 @@ const host = (overrides: Partial<Host> = {}): Host => ({
   ...overrides,
 });
 
+const localEndpoint: Endpoint = {
+  url: "ws://127.0.0.1:1/ws",
+  via: "loopback",
+  label: "本机",
+};
+
 beforeEach(() => {
   localStorage.clear();
   useWorkbench.setState({
@@ -63,6 +70,7 @@ beforeEach(() => {
     selectSession: vi.fn(async () => {}),
     selectWorkspace: vi.fn(async () => {}),
     newSession: vi.fn(),
+    openTab: vi.fn(),
     renameSession: vi.fn(async () => {}),
     renameWorkspace: vi.fn(async () => {}),
     removeWorkspace: vi.fn(async () => {}),
@@ -75,11 +83,11 @@ function sidebar() {
   return screen.getByRole("list", { name: "工作区" });
 }
 
-/** The project rows, which are the tree's own children — sessions nest inside. */
+/** The workspace rows, which are the tree's own children — sessions nest inside. */
 const projectRows = (tree: HTMLElement) => Array.from(tree.children) as HTMLElement[];
 
 describe("the left edge", () => {
-  it("puts each session under the project it belongs to", () => {
+  it("puts each session under the workspace it belongs to", () => {
     const projects = projectRows(sidebar());
 
     expect(within(projects[0]!).getByText("genethub")).toBeInTheDocument();
@@ -90,7 +98,7 @@ describe("the left edge", () => {
     expect(within(projects[1]!).getByText("relay 重连")).toBeInTheDocument();
   });
 
-  it("says so rather than showing an empty gap for a project with nothing in it", () => {
+  it("says so rather than showing an empty gap for a workspace with nothing in it", () => {
     const empty = projectRows(sidebar())[2]!;
 
     expect(within(empty).getByText("demo")).toBeInTheDocument();
@@ -100,7 +108,8 @@ describe("the left edge", () => {
   it("shows every recent session in the shared grouping control", async () => {
     sidebar();
 
-    await userEvent.click(screen.getByRole("button", { name: "最近" }));
+    await userEvent.click(screen.getByRole("button", { name: "会话分组" }));
+    await userEvent.click(screen.getByRole("option", { name: "最近" }));
 
     const recent = screen.getByRole("list", { name: "最近会话" });
     expect(within(recent).getByText("修复移动端横向拖动")).toBeInTheDocument();
@@ -128,7 +137,7 @@ describe("the left edge", () => {
   });
 
   it("shows a session a newer build wrote, and refuses to pretend it can open it", async () => {
-    // Sessions live in the project folder, so a beta and a release share them.
+    // Sessions live in the workspace, so a beta and a release share them.
     // A conversation the release cannot read must not simply disappear from
     // the list — the user would have nowhere to ask where it went.
     useWorkbench.setState({
@@ -152,7 +161,7 @@ describe("the left edge", () => {
     expect(within(projects[1]!).queryByText("1")).not.toBeInTheDocument();
   });
 
-  it("folds a project away and remembers it", async () => {
+  it("folds a workspace away and remembers it", async () => {
     sidebar();
     await userEvent.click(screen.getByLabelText("折叠 genethub"));
 
@@ -185,7 +194,7 @@ describe("the left edge", () => {
 
     const details = screen.getByText("工作区详情").parentElement?.parentElement;
     expect(details).toHaveTextContent("名称genethub");
-    expect(details).toHaveTextContent("Agent 目录/home/me/genethub");
+    expect(details).toHaveTextContent("Agent 工作区路径/home/me/genethub");
     expect(details).toHaveTextContent("所属设备开发工作站");
   });
 
@@ -198,8 +207,8 @@ describe("the left edge", () => {
       workspaces: [state.workspaces[0]!, saved, state.workspaces[2]!],
     }));
     const tree = sidebar();
-    expect(tree.querySelectorAll('[data-project-icon="folder"]')).toHaveLength(2);
-    expect(tree.querySelectorAll('[data-project-icon="workspace"]')).toHaveLength(1);
+    expect(tree.querySelectorAll('[data-workspace-icon="folder"]')).toHaveLength(2);
+    expect(tree.querySelectorAll('[data-workspace-icon="workspace"]')).toHaveLength(1);
 
     await userEvent.click(screen.getByRole("button", { name: "demo 的工作区操作" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "从列表移除" }));
@@ -213,19 +222,22 @@ describe("the left edge", () => {
   it("reaches into folded projects when searching, or the search finds nothing", async () => {
     sidebar();
     await userEvent.click(screen.getByLabelText("折叠 genethub"));
+    await userEvent.click(screen.getByRole("button", { name: "会话与工作区" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "搜索会话" }));
     await userEvent.type(screen.getByLabelText("搜索会话"), "更新");
 
     expect(screen.getByText("更新流程")).toBeInTheDocument();
     expect(screen.queryByText("relay 重连")).not.toBeInTheDocument();
   });
 
-  it("still answers the other question: what is running, across every project", async () => {
+  it("still answers the other question: what is running, across every workspace", async () => {
     sidebar();
-    await userEvent.click(screen.getByRole("button", { name: "按状态" }));
+    await userEvent.click(screen.getByRole("button", { name: "会话分组" }));
+    await userEvent.click(screen.getByRole("option", { name: "按状态" }));
 
     expect(screen.getByText("运行中")).toBeInTheDocument();
     // A title on its own does not say where the work is happening, so the
-    // project comes with it once the tree is not there to say.
+    // workspace comes with it once the tree is not there to say.
     expect(screen.getAllByText("paseo").length).toBeGreaterThan(0);
   });
 
@@ -257,6 +269,37 @@ describe("the left edge", () => {
 
     expect(useWorkbench.getState().newSession).toHaveBeenCalledWith("w1", null);
   });
+
+  it("opens search and import from the overflow next to 新建会话", async () => {
+    sidebar();
+    expect(screen.queryByLabelText("搜索会话")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "会话与工作区" }));
+    expect(screen.getByRole("menuitem", { name: "打开工作区" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "导入会话" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "设置" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "设备" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("menuitem", { name: "搜索会话" }));
+
+    expect(screen.getByLabelText("搜索会话")).toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "会话与工作区" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the list titled 会话 and groups from a dropdown", async () => {
+    render(<Sidebar host={host()} open endpoint={localEndpoint} onNavigate={() => {}} />);
+
+    expect(screen.getByText("会话", { selector: "span" })).toHaveClass("text-sm");
+    expect(screen.queryByRole("button", { name: "打开工作区" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "会话分组" })).toHaveTextContent("按工作区");
+
+    await userEvent.click(screen.getByRole("button", { name: "会话与工作区" }));
+    const menu = screen.getByRole("menu", { name: "会话与工作区" });
+    expect(within(menu).getByRole("menuitem", { name: "打开工作区" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "导入会话" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "搜索会话" })).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "文件" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "设置" })).not.toBeInTheDocument();
+  });
 });
 
 describe("chat tab state", () => {
@@ -277,6 +320,42 @@ describe("chat tab state", () => {
 
     expect(screen.getByRole("img", { name: "运行中" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "运行异常" })).toBeInTheDocument();
+  });
+
+  it("prefixes built-in surfaces so they do not read as another chat", () => {
+    useWorkbench.setState({
+      tabs: [
+        { id: "chat:s1", kind: "chat", title: "修登录", sessionId: "s1" },
+        { id: "files", kind: "files", title: "文件" },
+        { id: "settings", kind: "settings", title: "设置" },
+      ],
+      activeTabId: "files",
+      sessions: [{ ...session("s1", "w1", "修登录"), status: "idle" }],
+    });
+
+    render(<TabBar />);
+
+    expect(screen.getByTestId("tab-icon-files")).toBeInTheDocument();
+    expect(screen.getByTestId("tab-icon-settings")).toBeInTheDocument();
+    expect(screen.queryByTestId("tab-icon-chat")).not.toBeInTheDocument();
+  });
+
+  it("puts the workspace name and icon on the right of session and surface titles", () => {
+    useWorkbench.setState({
+      tabs: [
+        { id: "chat:s1", kind: "chat", title: "改进UI体验", sessionId: "s1" },
+        { id: "files", kind: "files", title: "工作区文件" },
+      ],
+      activeTabId: "chat:s1",
+      sessions: [{ ...session("s1", "w1", "改进UI体验"), status: "idle" }],
+    });
+
+    render(<TabBar />);
+
+    expect(screen.getByRole("button", { name: "改进UI体验" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "文件" })).toBeInTheDocument();
+    expect(screen.getAllByTitle("genethub")).toHaveLength(2);
+    expect(screen.queryByTitle("paseo")).not.toBeInTheDocument();
   });
 });
 
@@ -334,7 +413,7 @@ describe("the tab strip when the tabs outrun the room", () => {
     // say the strip continues, which is the part two full-width tabs never did.
     expect(tab).toHaveClass("w-[28.5%]", "shrink-0", "grow");
     // A desktop keeps its title-shaped tabs.
-    expect(tab).toHaveClass("md:w-auto", "md:max-w-[14rem]", "md:shrink", "md:grow-0");
+    expect(tab).toHaveClass("md:w-auto", "md:max-w-[16rem]", "md:shrink", "md:grow-0");
   });
 
   it("never grows a vertical scrollbar beside the strip", () => {
@@ -453,5 +532,124 @@ describe("what can be done to one conversation", () => {
 
     expect(useWorkbench.getState().deleteSession).not.toHaveBeenCalled();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+});
+/**
+ * "移动端比例下的 tab 栏体验很差，空间太小了".
+ *
+ * The phone no longer keeps a strip. The header title is the switcher: one
+ * line while closed, a list when opened, and the running/done counts stay
+ * visible so the open set is still readable without the strip.
+ */
+describe("switching tabs from the phone title", () => {
+  const openTabs = (
+    extras: Partial<Parameters<typeof useWorkbench.setState>[0]> = {},
+  ) => {
+    useWorkbench.setState({
+      tabs: [
+        { id: "chat:s1", kind: "chat", title: "修复移动端横向拖动", sessionId: "s1" },
+        { id: "chat:s2", kind: "chat", title: "更新流程", sessionId: "s2" },
+        { id: "files", kind: "files", title: "文件" },
+      ],
+      activeTabId: "chat:s1",
+      sessions: [
+        { ...session("s1", "w1", "修复移动端横向拖动"), status: "running" },
+        { ...session("s2", "w1", "更新流程"), status: "idle" },
+      ],
+      ...extras,
+    });
+  };
+
+  it("stays a single line of text when there is nothing to switch", () => {
+    render(<MobileTitleSwitcher fallbackTitle="工作台" />);
+
+    expect(screen.getByText("工作台")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /切换已打开的标签/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /关闭当前标签/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps a built-in prefix on the phone title, including when it is the only tab", () => {
+    useWorkbench.setState({
+      tabs: [{ id: "settings", kind: "settings", title: "设置" }],
+      activeTabId: "settings",
+      sessions: [],
+    });
+    render(<MobileTitleSwitcher fallbackTitle="工作台" />);
+
+    expect(screen.getByTestId("tab-icon-settings")).toBeInTheDocument();
+    expect(screen.getByText("设置")).toBeInTheDocument();
+  });
+
+  it("keeps the current title, a chevron and the open-set counts on one row", () => {
+    openTabs();
+    render(<MobileTitleSwitcher fallbackTitle="工作台" />);
+
+    const switcher = screen.getByRole("button", {
+      name: "切换已打开的标签，当前 修复移动端横向拖动，1 个进行中，1 个已完成，共 3 个",
+    });
+    expect(switcher).toHaveClass("h-11", "flex-1");
+    expect(switcher.querySelector(".truncate")).toHaveTextContent("修复移动端横向拖动");
+    expect(switcher).toHaveTextContent("1");
+    expect(switcher).toHaveTextContent("✓1");
+  });
+
+  it("opens the set from the title and moves to the tab that was tapped", async () => {
+    openTabs();
+    const activateTab = vi.fn();
+    useWorkbench.setState({ activateTab });
+    render(<MobileTitleSwitcher fallbackTitle="工作台" />);
+
+    await userEvent.click(screen.getByRole("button", { name: /切换已打开的标签/ }));
+
+    expect(screen.getByRole("listbox", { name: "已打开的标签" })).toHaveTextContent(
+      "点一项打开 · 右侧关闭",
+    );
+    await userEvent.click(screen.getByRole("option", { name: /更新流程/ }));
+
+    expect(activateTab).toHaveBeenCalledWith("chat:s2");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("closes the current tab from the title row without opening the list", async () => {
+    openTabs();
+    const closeTab = vi.fn();
+    useWorkbench.setState({ closeTab });
+    render(<MobileTitleSwitcher fallbackTitle="工作台" />);
+
+    await userEvent.click(screen.getByRole("button", { name: "关闭当前标签 修复移动端横向拖动" }));
+
+    expect(closeTab).toHaveBeenCalledWith("chat:s1");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("closes a tab from the list without leaving the phone guessing how", async () => {
+    openTabs();
+    const closeTab = vi.fn();
+    useWorkbench.setState({ closeTab });
+    render(<MobileTitleSwitcher fallbackTitle="工作台" />);
+
+    await userEvent.click(screen.getByRole("button", { name: /切换已打开的标签/ }));
+    await userEvent.click(screen.getByRole("button", { name: "关闭 文件" }));
+
+    expect(closeTab).toHaveBeenCalledWith("files");
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+  });
+
+  it("counts only chat tabs, and treats waiting as still in flight", () => {
+    expect(
+      countTabSet(
+        [
+          { id: "chat:s1", kind: "chat", title: "a", sessionId: "s1" },
+          { id: "chat:s2", kind: "chat", title: "b", sessionId: "s2" },
+          { id: "chat:s3", kind: "chat", title: "c", sessionId: "s3" },
+          { id: "files", kind: "files", title: "文件" },
+        ],
+        [
+          { ...session("s1", "w1", "a"), status: "waiting" },
+          { ...session("s2", "w1", "b"), status: "failed" },
+          { ...session("s3", "w1", "c"), status: "idle" },
+        ],
+      ),
+    ).toEqual({ running: 1, completed: 2 });
   });
 });

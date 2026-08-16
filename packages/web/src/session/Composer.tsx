@@ -35,6 +35,11 @@ export type ComposerPhase = "idle" | "sending" | "running";
 /**
  * Floating input at the bottom of the chat pane.
  *
+ * The card has one size. It used to shrink to a single 28px line whenever focus
+ * left it and grow back on click, which meant every control under it — the
+ * runtime summary, the send button — moved twice per message and was a
+ * different size depending on whether the caret happened to be in the field.
+ *
  * Enter sends, shift+enter breaks the line. The send control carries the phase:
  * an arrow to send, a spinner nobody can press while the message is on its way,
  * and stop once a turn is really running — one affordance, because the user's
@@ -71,6 +76,8 @@ export function Composer({
   onHeightChange,
   onRestoreDraft,
   onInsertDraft,
+  minimized,
+  onExpand,
 }: {
   phase: ComposerPhase;
   disabled?: boolean;
@@ -109,6 +116,9 @@ export function Composer({
   onRestoreDraft?(): void;
   /** Acknowledges that `insertDraft` has been appended to the field. */
   onInsertDraft?(id: string): void;
+  /** Fast-scroll compact bar. The full card comes back on `onExpand`. */
+  minimized?: boolean;
+  onExpand?(): void;
 }) {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -199,8 +209,6 @@ export function Composer({
       })
       .slice(0, 8);
   }, [commands, typing, dismissed]);
-  const active =
-    focused || settingsOpen || speechInput.busy || speechInput.phase === "review";
   const open = focused && matches.length > 0 && !settingsOpen;
   const chosen = matches[Math.min(highlighted, matches.length - 1)];
 
@@ -267,12 +275,15 @@ export function Composer({
   useLayoutEffect(() => {
     const element = textarea.current;
     if (!element) return;
-    resizeComposerTextarea(element, active);
+    resizeComposerTextarea(element);
     if (speechPresentation) {
       element.scrollTop = element.scrollHeight;
       setComposerScrollTop(element.scrollTop);
     }
-  }, [active, speechPresentation, visibleDraft]);
+    // `minimized` is in here because the field is unmounted while tucked away:
+    // it comes back at its one-line default, and the draft it comes back with
+    // has not changed, so nothing else would ask it to grow again.
+  }, [speechPresentation, visibleDraft, minimized]);
 
   useLayoutEffect(() => {
     const element = card.current;
@@ -283,18 +294,24 @@ export function Composer({
     const observer = new ResizeObserver(update);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [onHeightChange]);
+  }, [onHeightChange, minimized]);
+
+  useEffect(() => {
+    if (!minimized) return;
+    if (focused || speechInput.phase === "recording") onExpand?.();
+  }, [minimized, focused, speechInput.phase, onExpand]);
 
   useLayoutEffect(() => {
     const update = () => {
-      if (textarea.current) resizeComposerTextarea(textarea.current, active);
+      if (textarea.current) resizeComposerTextarea(textarea.current);
     };
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
-  }, [active]);
+  }, []);
 
   return (
     <div
+      data-composer-shell=""
       className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-8 md:px-4"
       style={{
         // Above the on-screen keyboard, and clear of the home indicator when
@@ -305,7 +322,24 @@ export function Composer({
           "calc(var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)))",
       }}
     >
-      {open ? (
+      {minimized ? (
+        <button
+          type="button"
+          aria-expanded={false}
+          aria-label="展开输入框"
+          data-composer-minimized=""
+          className="pointer-events-auto mx-auto flex w-full max-w-chat items-center gap-2 rounded-2xl border border-line-strong bg-surface/95 px-4 py-2.5 text-left shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur"
+          onClick={() => onExpand?.()}
+        >
+          <span className="min-w-0 flex-1 truncate text-sm text-muted">
+            {draft.trim() || "描述任务…"}
+          </span>
+          <span className="shrink-0 text-faint" aria-hidden>
+            ▴
+          </span>
+        </button>
+      ) : null}
+      {!minimized && open ? (
         <div className="pointer-events-auto mx-auto mb-2 max-w-chat overflow-hidden rounded-xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur">
           <ul id={commandMenuId} role="listbox" aria-label="命令">
             {matches.map((command, index) => (
@@ -337,14 +371,15 @@ export function Composer({
           </ul>
         </div>
       ) : null}
-      {disabledReason ? (
+      {!minimized && disabledReason ? (
         <p className="pointer-events-auto mx-auto mb-2 max-w-chat rounded-lg border border-line bg-surface/95 px-3 py-2 text-xs text-muted shadow backdrop-blur">
           {disabledReason}
         </p>
       ) : null}
+      {!minimized ? (
       <div
         ref={card}
-        data-composer-state={active ? "active" : "idle"}
+        data-composer-card=""
         className={`pointer-events-auto mx-auto max-w-chat rounded-2xl border bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur transition-colors ${
           focused ? "border-muted/50" : "border-line-strong"
         }`}
@@ -386,19 +421,14 @@ export function Composer({
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-x-1 px-1.5 py-1 md:py-0.5">
           <div
             data-composer-slot="input"
-            className={`relative min-w-0 ${
-              active
-                ? "col-span-2 col-start-1 row-start-1"
-                : "col-start-1 row-start-1"
-            }`}
+            className="relative col-span-2 col-start-1 row-start-1 min-w-0"
           >
             <div className="relative">
               <textarea
                 ref={textarea}
-                data-expanded={active}
-                className={`relative z-[1] block w-full resize-none overflow-y-hidden bg-transparent px-3 text-base leading-9 outline-none placeholder:text-faint focus-visible:outline-transparent md:text-sm md:leading-6 ${
+                className={`relative z-[1] block w-full resize-none overflow-y-hidden bg-transparent px-3 py-1.5 text-base leading-9 outline-none placeholder:text-faint focus-visible:outline-transparent md:py-1 md:text-sm md:leading-6 ${
                   speechPresentation ? "text-transparent caret-accent-bright" : "text-fg"
-                } ${active ? "py-1.5 md:py-1" : "py-[3px] md:py-0.5"}`}
+                }`}
                 placeholder="描述任务…"
                 aria-label="任务描述"
                 aria-autocomplete="list"
@@ -550,10 +580,7 @@ export function Composer({
           </div>
           <div
             data-composer-slot="runtime"
-            data-row-units={active ? "1" : "0.5"}
-            className={`col-start-1 row-start-2 flex min-w-0 items-center ${
-              active ? "h-9 md:h-6" : "h-[18px] md:h-3"
-            }`}
+            className="col-start-1 row-start-2 flex h-9 min-w-0 items-center md:h-6"
           >
             <ComposerControls
               agents={agents}
@@ -561,7 +588,6 @@ export function Composer({
               modelId={modelId}
               modeId={modeId}
               effortId={effortId ?? null}
-              compact={!active}
               disabled={disabled || phase !== "idle"}
               agentLocked={agentLocked}
               onOpenChange={setSettingsOpen}
@@ -573,10 +599,7 @@ export function Composer({
           </div>
           <div
             data-composer-slot="actions"
-            data-row-units={active ? "1" : "1.25"}
-            className={`col-start-2 flex flex-nowrap items-center gap-1 self-center ${
-              active ? "row-start-2 h-9 md:h-6" : "row-span-2 row-start-1 h-[45px] md:h-8"
-            }`}
+            className="col-start-2 row-start-2 flex h-9 flex-nowrap items-center gap-1 self-center md:h-6"
           >
             <input
               ref={picker}
@@ -599,9 +622,7 @@ export function Composer({
                   title="停止并转成文字"
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => void speechInput.stop()}
-                  className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-danger text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 ${
-                    active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
-                  }`}
+                  className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-danger text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:w-6"
                 >
                   <Square className="h-5 w-5 fill-current md:h-3 md:w-3" aria-hidden />
                 </button>
@@ -612,9 +633,7 @@ export function Composer({
                   aria-busy="true"
                   aria-disabled="true"
                   onMouseDown={(event) => event.preventDefault()}
-                  className={`flex !min-h-0 !min-w-0 shrink-0 cursor-default items-center justify-center rounded-full bg-accent/40 text-white ${
-                    active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
-                  }`}
+                  className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 cursor-default items-center justify-center rounded-full bg-accent/40 text-white md:h-6 md:w-6"
                 >
                   <Loader2 className="h-5 w-5 animate-spin md:h-3 md:w-3" aria-hidden />
                 </button>
@@ -629,9 +648,7 @@ export function Composer({
                     setDismissed(true);
                     void speechInput.start();
                   }}
-                  className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 ${
-                    active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
-                  }`}
+                  className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
                 >
                   <Mic className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
                 </button>
@@ -644,9 +661,7 @@ export function Composer({
                 title="取消并保留原草稿"
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => void speechInput.cancel()}
-                className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 ${
-                  active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
-                }`}
+                className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:w-6"
               >
                 <X className="h-5 w-5 md:h-3.5 md:w-3.5" aria-hidden />
               </button>
@@ -665,9 +680,7 @@ export function Composer({
                 setDismissed(true);
                 picker.current?.click();
               }}
-              className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 ${
-                active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
-              }`}
+              className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
             >
               <Paperclip className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
             </button>
@@ -683,9 +696,7 @@ export function Composer({
                 aria-disabled="true"
                 aria-busy="true"
                 onMouseDown={(event) => event.preventDefault()}
-                className={`flex !min-h-0 !min-w-0 shrink-0 cursor-default items-center justify-center rounded-full bg-accent/40 text-white ${
-                  active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
-                }`}
+                className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 cursor-default items-center justify-center rounded-full bg-accent/40 text-white md:h-6 md:w-6"
               >
                 <Loader2 className="h-6 w-6 animate-spin md:h-4 md:w-4" aria-hidden />
               </button>
@@ -695,9 +706,7 @@ export function Composer({
                 aria-label="停止"
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={onInterrupt}
-                className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 ${
-                  active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
-                }`}
+                className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:w-6"
               >
                 <span className="h-[18px] w-[18px] rounded-[3px] bg-current md:h-3 md:w-3 md:rounded-[2px]" />
               </button>
@@ -706,14 +715,9 @@ export function Composer({
                 type="button"
                 aria-label="发送"
                 onMouseDown={(event) => event.preventDefault()}
-                onClick={() => {
-                  send();
-                  textarea.current?.blur();
-                }}
+                onClick={() => send()}
                 disabled={disabled || speechInput.busy || (draft.trim().length === 0 && attachments.length === 0)}
-                className={`flex !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 ${
-                  active ? "h-9 w-9 md:h-6 md:w-6" : "h-[45px] w-[45px] md:h-[30px] md:w-[30px]"
-                }`}
+                className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
               >
                 <svg
                   viewBox="0 0 16 16"
@@ -728,6 +732,8 @@ export function Composer({
           </div>
         </div>
       </div>
+      ) : null}
+      {!minimized ? (
       <SpeechCandidatePopover
         active={activeSpeechSpan}
         selectedCandidateId={
@@ -739,15 +745,18 @@ export function Composer({
         controller={speechInput}
         onClose={() => setActiveSpeechSpan(null)}
       />
+      ) : null}
     </div>
   );
 }
 
-export const COMPOSER_TEXTAREA_COLLAPSED_HEIGHT = 28;
-export const COMPOSER_TEXTAREA_PHONE_COLLAPSED_HEIGHT = 42;
-export const COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT = 120;
+/** One line of text plus half of the next, so the field reads as "more room is
+ * here" without reserving three empty lines of the transcript before anyone has
+ * typed anything. Phone lines are 36px and desktop lines 24px; the padding
+ * (`py-1.5` / `md:py-1`) is inside these numbers because `scrollHeight` is. */
+export const COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT = 66;
 export const COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT = 192;
-export const COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT = 104;
+export const COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT = 44;
 export const COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT = 176;
 export const COMPOSER_DESKTOP_BREAKPOINT = 768;
 
@@ -756,23 +765,13 @@ export function appendDraftLine(current: string, line: string): string {
   return `${current}${current.endsWith("\n") ? "" : "\n"}${line}`;
 }
 
-/** Idle is one line: 36px on a phone and 24px on a wider screen. Focus expands
- * to roughly three-to-five phone lines or four-to-seven desktop lines, then
- * scrolls internally. */
+/** Grows with the draft from one and a half lines up to roughly five phone
+ * lines or seven desktop lines, then scrolls internally. There is no smaller
+ * size to fall back to: the card does not collapse. */
 export function resizeComposerTextarea(
   element: HTMLTextAreaElement,
-  active: boolean,
   desktop = isDesktopComposerViewport(),
 ): number {
-  if (!active) {
-    const height = desktop
-      ? COMPOSER_TEXTAREA_COLLAPSED_HEIGHT
-      : COMPOSER_TEXTAREA_PHONE_COLLAPSED_HEIGHT;
-    element.style.height = `${height}px`;
-    element.style.overflowY = "hidden";
-    return height;
-  }
-
   const minHeight = desktop
     ? COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT
     : COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT;

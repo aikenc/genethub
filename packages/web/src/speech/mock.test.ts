@@ -6,7 +6,7 @@ import { MOCK_STREAM_PROFILE, mockPartialTranscript, mockSpeechCompletion } from
 
 const context: SpeechContextPack = {
   snapshotId: "sc_1",
-  prompt: "项目术语：PipeSpace",
+  prompt: "工作区术语：PipeSpace",
   terms: [{ text: "PipeSpace", source: "projectConfig", score: 1 }],
   languageHints: ["zh", "en"],
   compilerVersion: "qwen3-context-v1",

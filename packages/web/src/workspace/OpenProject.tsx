@@ -1,31 +1,39 @@
 import type { DirectoryListing } from "@genehub/proto";
-import { useState } from "react";
+import { useImperativeHandle, useRef, useState, forwardRef } from "react";
 import { createPortal } from "react-dom";
 
 import type { Endpoint } from "../host";
 import { warnOp } from "../session/op-log";
 import { useWorkbench } from "../session/store";
-import { ProjectIcon } from "./WorkspaceIcon";
+import { WorkspaceKindIcon } from "./WorkspaceIcon";
 
 /**
  * How a folder or saved VS Code workspace gets onto the workbench.
  *
+ * A workspace is either one folder or a `.code-workspace` that names several.
  * The daemon exposes its directory tree through the connection, so choosing a
- * folder stays a browse operation instead of becoming a memory test for an
+ * workspace stays a browse operation instead of becoming a memory test for an
  * absolute path on another machine.
  *
  * On Windows the remote picker climbs past a drive root into a machine-roots
  * listing so the person can switch disks without typing a path.
  */
-export function OpenProject({
-  endpoint,
-  onOpened,
-  compact = false,
-}: {
-  endpoint: Endpoint;
-  onOpened?: () => void;
-  compact?: boolean;
-}) {
+export type OpenWorkspaceHandle = { open(): void };
+
+export const OpenProject = forwardRef<
+  OpenWorkspaceHandle,
+  {
+    endpoint: Endpoint;
+    onOpened?: () => void;
+    compact?: boolean;
+    /** How the trigger is drawn. `none` keeps the picker mounted with no button. */
+    variant?: "button" | "menuitem" | "inline" | "none";
+    onPickStart?: () => void;
+  }
+>(function OpenProject(
+  { endpoint, onOpened, compact = false, variant = "button", onPickStart },
+  ref,
+) {
   const openWorkspace = useWorkbench((state) => state.openWorkspace);
   const client = useWorkbench((state) => state.client);
   const workspaces = useWorkbench((state) => state.workspaces);
@@ -95,7 +103,7 @@ export function OpenProject({
     }
     // Let the daemon choose its home only after the two user-owned hints.
     starts.push(undefined);
-    let failure: unknown = new Error("无法读取目录");
+    let failure: unknown = new Error("无法读取工作区位置");
     for (const start of starts) {
       try {
         const listing = await readDirectory(start);
@@ -103,13 +111,22 @@ export function OpenProject({
         if (!listing.roots) rememberPickerDirectory(endpoint, listing.path);
         setPickerBusy(false);
         return;
-      } catch (error) {
-        failure = error;
+      } catch (caught) {
+        failure = caught;
       }
     }
     setError(warnOp("directory.list", failure));
     setPickerBusy(false);
   };
+
+  const startOpen = () => {
+    onPickStart?.();
+    void beginBrowse();
+  };
+
+  const startOpenRef = useRef(startOpen);
+  startOpenRef.current = startOpen;
+  useImperativeHandle(ref, () => ({ open: () => startOpenRef.current() }), []);
 
   const createFolder = async () => {
     if (!client || !picker || picker.roots) return;
@@ -137,16 +154,43 @@ export function OpenProject({
     }
   };
 
-  return (
-    <div className={compact ? "" : "flex flex-col items-center gap-2"}>
+  const triggerLabel = pickerBusy ? "读取中…" : busy ? "打开中…" : "打开工作区";
+  const triggerDisabled = busy || pickerBusy || !client;
+
+  const trigger =
+    variant === "none" ? null : variant === "menuitem" ? (
+      <button
+        type="button"
+        role="menuitem"
+        disabled={triggerDisabled}
+        className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised disabled:opacity-40 md:min-h-0 md:py-1.5 md:text-xs"
+        onClick={startOpen}
+      >
+        {triggerLabel}
+      </button>
+    ) : variant === "inline" ? (
+      <button
+        type="button"
+        disabled={triggerDisabled}
+        className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-accent hover:bg-raised disabled:opacity-40"
+        onClick={startOpen}
+      >
+        {triggerLabel}
+      </button>
+    ) : (
       <button
         type="button"
         className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-40"
-        disabled={busy || pickerBusy || !client}
-        onClick={() => void beginBrowse()}
+        disabled={triggerDisabled}
+        onClick={startOpen}
       >
-        {pickerBusy ? "读取中…" : "选择文件夹或 .code-workspace…"}
+        {triggerLabel}
       </button>
+    );
+
+  return (
+    <div className={compact || variant !== "button" ? "" : "flex flex-col items-center gap-2"}>
+      {trigger}
       {error && !picker ? <p className="text-xs text-danger">{error}</p> : null}
       {picker
         ? createPortal(
@@ -156,11 +200,8 @@ export function OpenProject({
               aria-label={
                 picker.roots
                   ? "选择" + endpoint.label + "上的磁盘"
-                  : "选择" + endpoint.label + "上的文件夹或工作区"
+                  : "打开" + endpoint.label + "上的工作区"
               }
-              // Portaled to body so a transformed sidebar cannot shrink the
-              // fixed overlay; mobile sizes against the viewport (~75%), PC keeps
-              // the existing centered card proportions.
               className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-3 md:p-4"
               onKeyDown={(event) => {
                 if (event.key === "Escape") {
@@ -173,7 +214,7 @@ export function OpenProject({
                 <header className="flex items-center gap-3 border-b border-line px-4 py-3">
                   <div className="min-w-0 flex-1">
                     <h2 className="text-sm font-medium text-fg">
-                      {picker.roots ? "选择磁盘" : "选择文件夹或 .code-workspace"}
+                      {picker.roots ? "选择磁盘" : "打开工作区"}
                     </h2>
                     <p className="truncate text-xs text-faint" title={picker.path || undefined}>
                       {picker.roots ? "此设备上的可用位置" : picker.path}
@@ -181,7 +222,7 @@ export function OpenProject({
                   </div>
                   <button
                     type="button"
-                    aria-label="关闭目录选择器"
+                    aria-label="关闭工作区选择器"
                     className="rounded px-2 py-1 text-muted hover:bg-raised"
                     onClick={() => setPicker(null)}
                   >
@@ -206,7 +247,7 @@ export function OpenProject({
                       className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg hover:bg-raised"
                       onClick={() => void browse(directory.path)}
                     >
-                      <ProjectIcon kind="folder" />
+                      <WorkspaceKindIcon kind="folder" />
                       <span className="truncate">{directory.name}</span>
                     </button>
                   ))}
@@ -217,7 +258,7 @@ export function OpenProject({
                       className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg hover:bg-raised"
                       onClick={() => void open(workspace.path)}
                     >
-                      <ProjectIcon kind="workspace" />
+                      <WorkspaceKindIcon kind="workspace" />
                       <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
                       <span className="shrink-0 text-[10px] text-faint">Workspace</span>
                     </button>
@@ -293,7 +334,7 @@ export function OpenProject({
                       disabled={busy || pickerBusy || picker.roots || !picker.path}
                       onClick={() => void open(picker.path)}
                     >
-                      {busy ? "打开中…" : "选择当前文件夹"}
+                      {busy ? "打开中…" : "打开此工作区"}
                     </button>
                   </div>
                 </footer>
@@ -304,7 +345,7 @@ export function OpenProject({
         : null}
     </div>
   );
-}
+});
 
 function uniqueFolderName(listing: DirectoryListing): string {
   const taken = new Set(listing.directories.map((entry) => entry.name.toLowerCase()));
@@ -319,12 +360,22 @@ function uniqueFolderName(listing: DirectoryListing): string {
 function pickerStorageKey(endpoint: Endpoint): string {
   const machine =
     endpoint.fingerprint ?? endpoint.credential?.deviceId ?? `${endpoint.via}:${endpoint.label}`;
+  return `genehub:workspace-picker:${machine}`;
+}
+
+function legacyPickerStorageKey(endpoint: Endpoint): string {
+  const machine =
+    endpoint.fingerprint ?? endpoint.credential?.deviceId ?? `${endpoint.via}:${endpoint.label}`;
   return `genehub:project-picker:${machine}`;
 }
 
 function recallPickerDirectory(endpoint: Endpoint): string | undefined {
   try {
-    return globalThis.localStorage?.getItem(pickerStorageKey(endpoint)) || undefined;
+    return (
+      globalThis.localStorage?.getItem(pickerStorageKey(endpoint)) ||
+      globalThis.localStorage?.getItem(legacyPickerStorageKey(endpoint)) ||
+      undefined
+    );
   } catch {
     return undefined;
   }

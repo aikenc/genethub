@@ -74,6 +74,56 @@
 
 html {
   height: 100%;
+  /* Extra type size on top of `zoom`. 0 on medium; ±2px per step. Kept off
+   * `<html>`'s own `font-size` so rem spacing (padding, gaps) does not move. */
+  --gh-font-nudge: 0px;
+}
+
+/*
+ * Client-only UI scale. Medium is the unzoomed page (no attribute). `zoom`
+ * is 15% per step so adjacent sizes are visible; `--gh-font-nudge` adds 2px
+ * of type on top without moving rem layout. Coarse-pointer fields still
+ * pin to 16px below, so iOS does not auto-zoom after someone picks 小.
+ */
+html[data-ui-scale="xsmall"] {
+  zoom: 0.7;
+  --gh-font-nudge: -4px;
+}
+
+html[data-ui-scale="small"] {
+  zoom: 0.85;
+  --gh-font-nudge: -2px;
+}
+
+html[data-ui-scale="large"] {
+  zoom: 1.15;
+  --gh-font-nudge: 2px;
+}
+
+html[data-ui-scale="xlarge"] {
+  zoom: 1.3;
+  --gh-font-nudge: 4px;
+}
+
+/* Chrome sizes that would otherwise stay put while only `body` grew. */
+.text-xs {
+  font-size: calc(0.75rem + var(--gh-font-nudge));
+}
+
+.text-sm {
+  font-size: calc(0.875rem + var(--gh-font-nudge));
+}
+
+.text-base {
+  font-size: calc(1rem + var(--gh-font-nudge));
+}
+
+.text-\[10px\] {
+  font-size: calc(10px + var(--gh-font-nudge));
+}
+
+.text-\[11px\] {
+  font-size: calc(11px + var(--gh-font-nudge));
 }
 
 /*
@@ -103,13 +153,15 @@ body {
   touch-action: manipulation;
   background: rgb(var(--bg));
   color: rgb(var(--fg));
-  font:
-    13px/1.5 -apple-system,
+  font-family:
+    -apple-system,
     BlinkMacSystemFont,
     "Segoe UI",
     "PingFang SC",
     "Microsoft YaHei",
     sans-serif;
+  font-size: calc(13px + var(--gh-font-nudge));
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -159,17 +211,17 @@ body {
  */
 @media (max-width: 767px) {
   body {
-    font-size: 16px;
+    font-size: calc(16px + var(--gh-font-nudge));
     line-height: 1.625;
   }
 
   .text-xs {
-    font-size: 14px;
+    font-size: calc(14px + var(--gh-font-nudge));
     line-height: 1.5rem;
   }
 
   .text-sm {
-    font-size: 16px;
+    font-size: calc(16px + var(--gh-font-nudge));
     line-height: 1.625rem;
   }
 
@@ -460,10 +512,34 @@ input:focus-visible {
 .light .hljs-selector-id { color: #17649b; }
 .light .hljs-deletion { color: #a8322b; }
 
-.gh-table-wrap { max-width: 100%; overflow-x: auto; }
+/*
+ * A table is the one block that has to be draggable sideways on a phone, and
+ * the reason it was not is not the gesture — it is that there was nothing to
+ * drag. `width: 100%` with Chinese text, which breaks after any character,
+ * lets every column collapse to about one glyph, so six columns still "fit"
+ * 390px and the pane has no overflow to scroll. A floor on the column width
+ * is what creates the overflow, and with it the drag; narrow tables are
+ * untouched because they never reach it.
+ *
+ * `pan-y` alongside `pan-x`: the wrap is not a picture to be inspected, it is
+ * part of the reply. A finger that starts on it must still scroll the
+ * conversation.
+ */
+.gh-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
+}
 .gh-markdown table { width: 100%; border-collapse: collapse; font-size: 0.92em; }
 .gh-markdown th,
-.gh-markdown td { border: 1px solid rgb(var(--line)); padding: 0.45em 0.65em; text-align: left; }
+.gh-markdown td {
+  min-width: 7.5em;
+  border: 1px solid rgb(var(--line));
+  padding: 0.45em 0.65em;
+  text-align: left;
+}
 .gh-markdown th { background: rgb(var(--raised)); font-weight: 650; }
 .gh-markdown tbody tr:nth-child(even) { background: rgb(var(--surface) / 0.55); }
 
@@ -478,6 +554,9 @@ input:focus-visible {
 
 .gh-mermaid {
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
   border: 1px solid rgb(var(--line));
   border-radius: 0.55rem;
   background: #fff;
@@ -496,4 +575,11 @@ input:focus-visible {
   .gh-markdown h1 { font-size: 1.55em; }
   .gh-markdown h2 { font-size: 1.3em; }
   .gh-code-block code { font-size: 13px; }
+  /*
+   * A diagram squeezed into a phone's width is a grey smudge with lettering
+   * nobody can read. Below the tablet breakpoint it keeps its own size and the
+   * frame is dragged sideways instead — the same bargain the tables and the
+   * code blocks make on this screen.
+   */
+  .gh-mermaid img { max-width: none; }
 }

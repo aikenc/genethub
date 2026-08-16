@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -60,7 +61,7 @@ afterEach(() => {
 
 describe("the app as the browser loads it", () => {
   it("renders, instead of looping until React gives up", async () => {
-    render(<App mobileTools={<button type="button">反馈问题</button>} />);
+    render(<App sidebarMenu={<button type="button">反馈问题</button>} />);
 
     // Anything at all from the workbench shell proves the tree survived; the
     // failure mode is an empty root, not a wrong pixel.
@@ -70,24 +71,39 @@ describe("the app as the browser loads it", () => {
     expect(
       screen.getAllByRole("button", { name: "新建会话" }),
     ).not.toHaveLength(0);
-    expect(screen.getByRole("button", { name: "打开右侧工作区工具" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开右侧工具" })).toBeInTheDocument();
 
-    screen.getByRole("button", { name: "工作区工具" }).click();
-    const tools = screen.getByRole("complementary", { name: "工作区工具" });
-    expect(
-      within(tools).getByRole("button", { name: "文件" }),
-    ).toBeInTheDocument();
-    expect(
-      within(tools).getByRole("button", { name: "反馈问题" }),
-    ).toBeInTheDocument();
+    screen.getByRole("button", { name: "工具" }).click();
+    const tools = screen.getByRole("complementary", { name: "工具" });
+    expect(within(tools).getByRole("button", { name: "文件" })).toBeInTheDocument();
+    expect(within(tools).getByRole("button", { name: "设置" })).toBeInTheDocument();
+    expect(within(tools).getByRole("button", { name: "设备" })).toBeInTheDocument();
+    expect(within(tools).getByRole("button", { name: "反馈问题" })).toBeInTheDocument();
+    expect(within(tools).getByText("工作区")).toBeInTheDocument();
+    expect(within(tools).getByText("全局")).toBeInTheDocument();
+    const scale = within(tools).getByRole("group", { name: "界面大小" });
+    expect(within(scale).getByText("界面大小")).toBeInTheDocument();
+    expect(within(tools).getByRole("button", { name: "缩小界面" })).toBeInTheDocument();
+    expect(within(tools).getByRole("button", { name: "放大界面" })).toBeInTheDocument();
+    expect(within(tools).getByText("中")).toBeInTheDocument();
 
-    screen.getByRole("button", { name: "打开右侧工作区工具" }).click();
-    const desktopTools = screen.getByRole("complementary", { name: "右侧工作区工具" });
-    expect(within(desktopTools).getByRole("button", { name: "Changes" })).toBeInTheDocument();
+    screen.getByRole("button", { name: "打开右侧工具" }).click();
+    const desktopTools = screen.getByRole("complementary", { name: "右侧工具" });
+    expect(within(desktopTools).getByRole("button", { name: "变更" })).toBeInTheDocument();
     expect(within(desktopTools).getByRole("button", { name: "文件" })).toBeInTheDocument();
     expect(within(desktopTools).getByRole("button", { name: "设置" })).toBeInTheDocument();
-    within(desktopTools).getByRole("button", { name: "Changes" }).click();
+    expect(within(desktopTools).getByRole("button", { name: "反馈问题" })).toBeInTheDocument();
+    within(desktopTools).getByRole("button", { name: "变更" }).click();
     expect(useWorkbench.getState().rightPanel).toBe("changes");
+
+    await userEvent.click(screen.getAllByRole("button", { name: "会话与工作区" })[0]!);
+    const menu = screen.getByRole("menu", { name: "会话与工作区" });
+    expect(within(menu).getByRole("menuitem", { name: "打开工作区" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "导入会话" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "搜索会话" })).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "设置" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "文件" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("button", { name: "反馈问题" })).not.toBeInTheDocument();
   });
 
   it("hands the empty case to whoever embedded it, when they have something to offer", async () => {
