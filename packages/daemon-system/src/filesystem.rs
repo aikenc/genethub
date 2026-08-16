@@ -18,8 +18,8 @@ use crate::failure;
 
 /// Kernel file locks owned by native code and addressed by opaque ids.
 ///
-/// The guest stores only an id in its snapshot, so a hot replacement keeps
-/// the same lock alive without transferring an OS handle through Wasm.
+/// The guest sees only an opaque id. A cold logic replacement drains these
+/// native-owned handles; no OS handle or guest state crosses the update.
 pub struct FileLocks {
     next_id: AtomicU64,
     held: Mutex<HashMap<u64, File>>,
@@ -118,6 +118,13 @@ impl FileLocks {
                 let _ = fs2::FileExt::unlock(&file);
             }
         }
+    }
+
+    pub fn count(&self) -> usize {
+        self.held
+            .lock()
+            .map(|held| held.len())
+            .unwrap_or(usize::MAX)
     }
 }
 

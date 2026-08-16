@@ -99,6 +99,55 @@ describe("the v3 peer connection", () => {
     client.close();
   });
 
+  it("checks patches on the stable Platform stream without accepting a client URL", async () => {
+    const { client, socket } = await connected();
+    const pending = client.patch({ type: "check" });
+    await waitFor(() => socket.sent.some((message) => message.type === "platform.patch"));
+    const exchange = socket.lastOf("platform.patch");
+    expect(exchange.payload).toEqual({ type: "check" });
+    socket.respondExchange(
+      exchange.id,
+      200,
+      null,
+      new TextEncoder().encode(JSON.stringify({
+        type: "status",
+        active: {
+          channel: "dev",
+          logicRevision: 1,
+          platformAbi: 19,
+          protocolVersion: 3,
+          digest: "0".repeat(64),
+          origin: "bundled",
+        },
+        highestAcceptedRevision: 1,
+        availability: { type: "current" },
+      })),
+    );
+    await expect(pending).resolves.toMatchObject({ type: "status" });
+    client.close();
+  });
+
+  it("fail-closes when the active Wasm is outside the website's adapter window", async () => {
+    const proof = localProof();
+    const queue = socketQueue({
+      secret: proof.proof,
+      identity: { ...localIdentity, protocolVersion: 4 },
+    });
+    const client = new Client({
+      url: "ws://127.0.0.1:42123/ws",
+      localServerProof: proof,
+      socketFactory: queue.factory,
+      rtcEnabled: false,
+    });
+    client.connect();
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.length === 1);
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "closed");
+
+    expect(client.failure?.message).toContain("请刷新网页");
+  });
+
   it("fail-closes a peer that cannot prove the expected secret", async () => {
     const proof = localProof();
     const queue = socketQueue({ identity: localIdentity });

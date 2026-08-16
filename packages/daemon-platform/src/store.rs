@@ -2,259 +2,216 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 use crate::artifact::{ArtifactVerifier, SignedArtifact, VerifiedArtifact};
 use crate::error::{PlatformError, Result};
 
-const STATE_FORMAT_VERSION: u32 = 1;
+const ACTIVE_FILE: &str = "active.wasm";
+const CANDIDATE_FILE: &str = "candidate.wasm";
+const HIGH_WATER_FILE: &str = "highest-revision";
+const MAX_HIGH_WATER_BYTES: usize = 32;
 const MAX_ENVELOPE_BYTES: usize = 16 * 1024;
-const MAX_STATE_BYTES: usize = 16 * 1024;
 
+/// The complete durable update state: one active artifact, one staged
+/// candidate and one monotonic anti-replay scalar.
+///
+/// There is deliberately no slot history or previous artifact. The App ships
+/// the recovery baseline; an activated defect is fixed by a higher revision.
 pub(crate) struct ArtifactStore {
     root: PathBuf,
-    artifacts: PathBuf,
-    envelopes: PathBuf,
-    states: PathBuf,
+    active: PathBuf,
+    candidate: PathBuf,
+    high_water: PathBuf,
     verifier: ArtifactVerifier,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SlotState {
-    pub format_version: u32,
-    pub generation: u64,
-    pub active_artifact_id: String,
-    pub previous_artifact_id: Option<String>,
 }
 
 impl ArtifactStore {
     pub fn open(root: impl Into<PathBuf>, verifier: ArtifactVerifier) -> Result<Self> {
         let root = root.into();
-        let artifacts = root.join("artifacts");
-        let envelopes = root.join("envelopes");
-        let states = root.join("states");
-        fs::create_dir_all(&artifacts)?;
-        fs::create_dir_all(&envelopes)?;
-        fs::create_dir_all(&states)?;
+        fs::create_dir_all(&root)?;
+        reject_non_file_if_present(&root.join(ACTIVE_FILE))?;
+        reject_non_file_if_present(&root.join(CANDIDATE_FILE))?;
+        reject_non_file_if_present(&root.join(HIGH_WATER_FILE))?;
         sync_directory(&root)?;
         Ok(Self {
+            active: root.join(ACTIVE_FILE),
+            candidate: root.join(CANDIDATE_FILE),
+            high_water: root.join(HIGH_WATER_FILE),
             root,
-            artifacts,
-            envelopes,
-            states,
             verifier,
         })
     }
 
-    pub fn persist(&self, artifact: &VerifiedArtifact) -> Result<()> {
-        let digest = artifact.digest();
-        ensure_digest(digest)?;
-        persist_content_addressed(&self.artifact_path(digest), &artifact.component)?;
-        let envelope = serde_json::to_vec(&artifact.envelope)?;
-        if envelope.len() > MAX_ENVELOPE_BYTES {
-            return Err(PlatformError::State(
-                "artifact envelope exceeds its storage limit".to_string(),
-            ));
-        }
-        persist_content_addressed(&self.envelope_path(artifact.artifact_id()), &envelope)?;
-        sync_directory(&self.artifacts)?;
-        sync_directory(&self.envelopes)?;
-        sync_directory(&self.root)?;
-        Ok(())
-    }
-
-    pub fn load(&self, artifact_id: &str) -> Result<VerifiedArtifact> {
-        ensure_digest(artifact_id)?;
-        let envelope_bytes = read_limited(&self.envelope_path(artifact_id), MAX_ENVELOPE_BYTES)?;
-        let envelope: crate::artifact::ArtifactEnvelope = serde_json::from_slice(&envelope_bytes)?;
-        let component = read_limited(
-            &self.artifact_path(envelope.sha256()),
-            self.verifier.max_artifact_bytes(),
-        )?;
-        let verified = self
-            .verifier
-            .verify(&SignedArtifact::new(envelope, component))?;
-        if verified.artifact_id() != artifact_id {
-            return Err(PlatformError::State(
-                "envelope filename does not match its verified artifact identity".to_string(),
-            ));
-        }
-        Ok(verified)
-    }
-
-    pub fn latest_state(&self) -> Result<Option<SlotState>> {
-        let mut candidates = self.state_files()?;
-        candidates.sort_unstable_by_key(|candidate| std::cmp::Reverse(candidate.0));
-        for (generation, path) in candidates {
-            let bytes = match read_limited(&path, MAX_STATE_BYTES) {
-                Ok(bytes) => bytes,
-                Err(_) => continue,
-            };
-            let state: SlotState = match serde_json::from_slice(&bytes) {
-                Ok(state) => state,
-                Err(_) => continue,
-            };
-            if state.format_version != STATE_FORMAT_VERSION || state.generation != generation {
-                continue;
+    pub fn highest_revision(&self) -> Result<u64> {
+        let bytes = match read_limited(&self.high_water, MAX_HIGH_WATER_BYTES) {
+            Ok(bytes) => bytes,
+            Err(PlatformError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(0)
             }
-            if ensure_digest(&state.active_artifact_id).is_err()
-                || state
-                    .previous_artifact_id
-                    .as_deref()
-                    .is_some_and(|artifact_id| ensure_digest(artifact_id).is_err())
-            {
-                continue;
-            }
-            return Ok(Some(state));
-        }
-        Ok(None)
-    }
-
-    pub fn commit(
-        &self,
-        active_artifact_id: &str,
-        previous_artifact_id: Option<&str>,
-    ) -> Result<SlotState> {
-        ensure_digest(active_artifact_id)?;
-        if let Some(previous) = previous_artifact_id {
-            ensure_digest(previous)?;
-        }
-        let generation = self
-            .highest_generation()?
-            .checked_add(1)
-            .ok_or_else(|| PlatformError::State("slot generation overflow".to_string()))?;
-        let state = SlotState {
-            format_version: STATE_FORMAT_VERSION,
-            generation,
-            active_artifact_id: active_artifact_id.to_string(),
-            previous_artifact_id: previous_artifact_id.map(ToOwned::to_owned),
+            Err(error) => return Err(error),
         };
-        let bytes = serde_json::to_vec(&state)?;
-        let path = self.state_path(generation);
-        persist_immutable(&path, &bytes)?;
-        sync_directory(&self.states)?;
-        sync_directory(&self.root)?;
-        Ok(state)
-    }
-
-    fn highest_generation(&self) -> Result<u64> {
-        Ok(self
-            .state_files()?
-            .into_iter()
-            .map(|(generation, _)| generation)
-            .max()
-            .unwrap_or(0))
-    }
-
-    fn state_files(&self) -> Result<Vec<(u64, PathBuf)>> {
-        let mut states = Vec::new();
-        for entry in fs::read_dir(&self.states)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let Some(number) = name
-                .strip_prefix("state-")
-                .and_then(|name| name.strip_suffix(".json"))
-            else {
-                continue;
-            };
-            if number.len() != 20 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
-                continue;
-            }
-            if let Ok(generation) = number.parse() {
-                states.push((generation, entry.path()));
-            }
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| PlatformError::State("highest revision is not UTF-8".to_string()))?;
+        let number = text.strip_suffix('\n').unwrap_or(text);
+        if number.is_empty()
+            || !number.bytes().all(|byte| byte.is_ascii_digit())
+            || (number.len() > 1 && number.starts_with('0'))
+            || text != format!("{number}\n")
+        {
+            return Err(PlatformError::State(
+                "highest revision is not a canonical decimal line".to_string(),
+            ));
         }
-        Ok(states)
+        number
+            .parse::<u64>()
+            .map_err(|_| PlatformError::State("highest revision does not fit in u64".to_string()))
     }
 
-    fn artifact_path(&self, digest: &str) -> PathBuf {
-        self.artifacts.join(format!("{digest}.wasm"))
-    }
-
-    fn envelope_path(&self, artifact_id: &str) -> PathBuf {
-        self.envelopes.join(format!("{artifact_id}.json"))
-    }
-
-    fn state_path(&self, generation: u64) -> PathBuf {
-        self.states.join(format!("state-{generation:020}.json"))
-    }
-}
-
-fn persist_immutable(path: &Path, bytes: &[u8]) -> Result<()> {
-    if path.exists() {
-        let existing = read_limited(path, bytes.len().saturating_add(1))?;
-        if existing == bytes {
+    /// Advances the anti-replay fence before a staged candidate can become
+    /// active. Repeating the same revision is allowed to repair a missing or
+    /// corrupted active file; lowering the fence is never allowed.
+    pub fn advance_high_water(&self, revision: u64) -> Result<()> {
+        if revision == 0 {
+            return Err(PlatformError::State(
+                "logic revision must be positive".to_string(),
+            ));
+        }
+        let current = self.highest_revision()?;
+        if revision < current {
+            return Err(PlatformError::RevisionReplay {
+                candidate: revision,
+                highest: current,
+            });
+        }
+        if revision == current {
             return Ok(());
         }
-        return Err(PlatformError::State(format!(
-            "immutable file {} already exists with different contents",
-            path.display()
-        )));
+        replace_bytes(&self.high_water, format!("{revision}\n").as_bytes())?;
+        sync_directory(&self.root)
     }
 
-    let parent = path
-        .parent()
-        .ok_or_else(|| PlatformError::State("immutable path has no parent".to_string()))?;
-    let mut temporary = NamedTempFile::new_in(parent)?;
-    temporary.as_file_mut().write_all(bytes)?;
-    temporary.as_file_mut().sync_all()?;
-    match temporary.persist_noclobber(path) {
-        Ok(file) => {
-            file.sync_all()?;
-            sync_directory(parent)?;
-            Ok(())
+    pub fn load_active(&self) -> Result<Option<VerifiedArtifact>> {
+        self.load_optional(&self.active)
+    }
+
+    pub fn load_candidate(&self) -> Result<Option<VerifiedArtifact>> {
+        self.load_optional(&self.candidate)
+    }
+
+    pub fn stage(&self, artifact: &VerifiedArtifact) -> Result<()> {
+        let file = SignedArtifact::new(artifact.envelope.clone(), artifact.component.to_vec())
+            .to_single_file()?;
+        replace_bytes(&self.candidate, &file)?;
+        sync_directory(&self.root)
+    }
+
+    /// Publishes the already-fenced candidate as the sole downloaded active.
+    pub fn commit_candidate(&self, revision: u64) -> Result<()> {
+        let highest = self.highest_revision()?;
+        if revision != highest {
+            return Err(PlatformError::State(format!(
+                "candidate revision {revision} does not match highest revision {highest}"
+            )));
         }
-        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = read_limited(path, bytes.len().saturating_add(1))?;
-            if existing == bytes {
-                Ok(())
-            } else {
-                Err(PlatformError::State(format!(
-                    "immutable file {} raced with different contents",
-                    path.display()
-                )))
+        let candidate = self
+            .load_candidate()?
+            .ok_or_else(|| PlatformError::State("staged candidate is missing".to_string()))?;
+        if candidate.envelope().logic_revision() != revision {
+            return Err(PlatformError::State(format!(
+                "staged candidate revision {} does not match highest revision {revision}",
+                candidate.envelope().logic_revision()
+            )));
+        }
+        atomic_replace(&self.candidate, &self.active)?;
+        sync_directory(&self.root)
+    }
+
+    /// Completes the only recoverable crash point: the high-water mark was
+    /// durable but candidate -> active had not yet become visible.
+    pub fn recover_candidate(&self) -> Result<bool> {
+        let Some(candidate) = self.load_candidate()? else {
+            return Ok(false);
+        };
+        if candidate.envelope().logic_revision() != self.highest_revision()? {
+            self.discard_candidate()?;
+            return Ok(false);
+        }
+        self.commit_candidate(candidate.envelope().logic_revision())?;
+        Ok(true)
+    }
+
+    pub fn discard_active(&self) -> Result<()> {
+        remove_if_present(&self.active)?;
+        sync_directory(&self.root)
+    }
+
+    pub fn discard_candidate(&self) -> Result<()> {
+        remove_if_present(&self.candidate)?;
+        sync_directory(&self.root)
+    }
+
+    fn load_optional(&self, path: &Path) -> Result<Option<VerifiedArtifact>> {
+        let limit = self
+            .verifier
+            .max_artifact_bytes()
+            .checked_add(MAX_ENVELOPE_BYTES)
+            .ok_or_else(|| PlatformError::State("artifact storage limit overflow".to_string()))?;
+        let bytes = match read_limited(path, limit) {
+            Ok(bytes) => bytes,
+            Err(PlatformError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None)
             }
-        }
-        Err(error) => Err(PlatformError::Io(error.error)),
+            Err(error) => return Err(error),
+        };
+        let artifact = SignedArtifact::from_single_file(&bytes)?;
+        self.verifier.verify(&artifact).map(Some)
     }
 }
 
-/// Writes bytes whose expected identity is already encoded by `path`.
-///
-/// A mismatch cannot be a competing valid value: callers only use this for a
-/// verified component digest or signed artifact identity. Replacing it repairs
-/// local corruption while preserving atomic visibility for concurrent readers.
-fn persist_content_addressed(path: &Path, bytes: &[u8]) -> Result<()> {
-    if path.exists()
-        && read_limited(path, bytes.len().saturating_add(1)).is_ok_and(|existing| existing == bytes)
-    {
-        return Ok(());
+fn reject_non_file_if_present(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => Err(PlatformError::State(format!(
+            "update state {} is not a regular file",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
+}
 
+fn replace_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
-        .ok_or_else(|| PlatformError::State("content path has no parent".to_string()))?;
+        .ok_or_else(|| PlatformError::State("update path has no parent".to_string()))?;
     let mut temporary = NamedTempFile::new_in(parent)?;
     temporary.as_file_mut().write_all(bytes)?;
     temporary.as_file_mut().sync_all()?;
-    let file = temporary
-        .persist(path)
-        .map_err(|error| PlatformError::Io(error.error))?;
-    file.sync_all()?;
-    sync_directory(parent)?;
+    let temporary = temporary.into_temp_path();
+    atomic_replace(&temporary, path)?;
+    // The rename consumed the temporary path. `keep` would try to persist it
+    // again, so prevent TempPath's Drop from unlinking the now-missing name.
+    let _ = temporary.keep();
     Ok(())
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(PlatformError::State(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
     if metadata.len() > limit as u64 {
         return Err(PlatformError::State(format!(
             "{} exceeds its {} byte storage limit",
@@ -274,17 +231,41 @@ fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn ensure_digest(digest: &str) -> Result<()> {
-    if digest.len() != 64
-        || !digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(PlatformError::State(
-            "slot digest is not canonical lowercase SHA-256".to_string(),
-        ));
+#[cfg(unix)]
+fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
+    fs::rename(source, destination)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) } == 0 {
+        return Err(PlatformError::Io(std::io::Error::last_os_error()));
     }
     Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn atomic_replace(_source: &Path, _destination: &Path) -> Result<()> {
+    Err(PlatformError::State(
+        "atomic update-file replacement is unsupported on this platform".to_string(),
+    ))
 }
 
 #[cfg(unix)]
@@ -293,17 +274,7 @@ fn sync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(windows)]
-fn sync_directory(_path: &Path) -> Result<()> {
-    // Win32 exposes directory handles through FILE_FLAG_BACKUP_SEMANTICS, but
-    // FlushFileBuffers (which File::sync_all uses) requires a writable file
-    // handle and does not provide a supported directory-fsync equivalent.
-    // Every artifact and state file is synced before its rename becomes visible;
-    // there is no additional directory flush operation to perform on Windows.
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
+#[cfg(any(windows, not(any(unix, windows))))]
 fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }

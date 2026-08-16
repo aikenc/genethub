@@ -11,7 +11,10 @@ use crate::timeline::Attachment;
 
 /// Bumped when a change would break an older client. Clients that see a version
 /// they do not know must refuse to connect rather than guess.
-pub const PROTOCOL_VERSION: u32 = crate::data::DATA_PLANE_VERSION;
+/// Business JSON version spoken by Web/CLI and the signed Wasm application.
+/// It deliberately does not inherit the binary carrier version: either side
+/// may evolve without turning a protocol adapter into a Platform upgrade.
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Maximum typed RPC body accepted before it is divided into bounded v3 data
 /// frames.
 pub const MAX_RPC_BODY_BYTES: usize = 2_900_000;
@@ -380,40 +383,6 @@ pub enum Request {
     #[serde(rename = "diagnostics.snapshot")]
     DiagnosticsSnapshot,
 
-    // -- updates -----------------------------------------------------------
-    /// Whether a newer build has been published. Sent when a person asks, and
-    /// never on a timer — see `UpdateStatus`.
-    #[serde(rename = "update.check")]
-    UpdateCheck,
-    /// Fetches the installer for this platform into the machine's own data
-    /// directory. Answers with the state at that moment; the rest arrives as
-    /// `ServerFrame::UpdateDownload` pushes.
-    #[serde(rename = "update.download")]
-    UpdateDownload,
-    /// How far a fetch got, for a client that arrived after it started.
-    #[serde(rename = "update.downloadState")]
-    UpdateDownloadState,
-    /// Forgets a finished or failed fetch, so the prompt stops asking.
-    ///
-    /// The file stays on disk: "稍后" means later, not never, and re-downloading
-    /// a hundred megabytes because someone closed a toast is a punishment for
-    /// reading it.
-    #[serde(rename = "update.dismiss")]
-    UpdateDismiss,
-
-    // -- portable daemon logic -------------------------------------------
-    /// Reports the signed Wasm application currently routed by this process.
-    #[serde(rename = "daemon.logic.status")]
-    DaemonLogicStatus,
-    /// Verifies, side-loads and atomically activates one local signed Wasm
-    /// file. The router permits this mutation only over loopback.
-    #[serde(rename = "daemon.logic.install", rename_all = "camelCase")]
-    DaemonLogicInstall { path: String },
-    /// Atomically routes back to the previous signed application, preserving
-    /// the current guest snapshot. Loopback-only like installation.
-    #[serde(rename = "daemon.logic.rollback")]
-    DaemonLogicRollback,
-
     // -- hub ---------------------------------------------------------------
     /// Whether this machine is paired, and how far a pairing in progress got.
     #[serde(rename = "hub.status")]
@@ -654,9 +623,6 @@ pub enum Reply {
     SpeechFeedbackReceipt(SpeechFeedbackReceipt),
     Log(LogTail),
     Diagnostics(SupportDiagnostics),
-    Update(UpdateStatus),
-    UpdateDownload(UpdateDownload),
-    LogicModule(LogicModuleStatus),
     Session(SessionSummary),
     ForkTransfer(ForkTransfer),
     Sessions(Vec<SessionSummary>),
@@ -841,14 +807,6 @@ pub enum ServerFrame {
     /// Unsolicited notice, e.g. the machine was revoked by the Hub.
     #[serde(rename = "notice", rename_all = "camelCase")]
     Notice { level: NoticeLevel, message: String },
-    /// How far the installer fetch has got.
-    ///
-    /// Pushed to every client rather than answered to the one that asked: a
-    /// download started from the settings page has to keep reporting itself
-    /// after that page is closed, and a second window must not show a stale
-    /// "下载中" forever.
-    #[serde(rename = "updateDownload", rename_all = "camelCase")]
-    UpdateDownloadChanged { download: UpdateDownload },
     /// What is still running now that a turn has ended.
     ///
     /// Sampled at the end of a turn because that is the moment the question

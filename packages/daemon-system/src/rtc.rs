@@ -269,6 +269,10 @@ impl RtcPeers {
             let _ = resource.connection.close().await;
         }
     }
+
+    pub async fn count(&self) -> usize {
+        self.inner.resources.read().await.len()
+    }
 }
 
 async fn attach_channel(

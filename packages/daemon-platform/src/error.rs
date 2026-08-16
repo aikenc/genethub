@@ -16,8 +16,8 @@ pub enum PlatformError {
     #[error("artifact slot state is invalid: {0}")]
     State(String),
 
-    #[error("there is no previous logic artifact to roll back to")]
-    NoPreviousArtifact,
+    #[error("logic revision {candidate} is older than highest accepted revision {highest}")]
+    RevisionReplay { candidate: u64, highest: u64 },
 
     #[error("platform state lock was poisoned")]
     LockPoisoned,

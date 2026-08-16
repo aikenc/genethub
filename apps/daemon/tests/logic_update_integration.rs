@@ -10,6 +10,7 @@ use genehub_proto::{
     ProbeState, Reply, Request, SessionSnapshot, SessionStatus, TimelineItem, TransportKind,
 };
 use genet_daemon::config::Paths;
+use genet_daemon::logic::ApplyArtifact;
 use genet_daemon::router;
 use genet_daemon::Daemon;
 use genet_daemon_logic_api::CallerContext;
@@ -18,7 +19,7 @@ use serde_json::json;
 
 const MODULE_ID: &str = "genehub:daemon/logic";
 const KEY_ID: &str = "dev-local";
-const FIXTURE_AGENT_ID: &str = "acp:hot-swap-fixture";
+const FIXTURE_AGENT_ID: &str = "acp:cold-update-fixture";
 const FIXTURE_AGENT_TEST: &str = "acp_fixture_agent_process";
 const FIXTURE_AGENT_RECORD_ENV: &str = "GENET_DAEMON_TEST_AGENT_RECORD";
 const FIXTURE_AGENT_OUTPUT: &str = "fixture-agent-output.txt";
@@ -30,7 +31,7 @@ fn serial() -> &'static tokio::sync::Mutex<()> {
 
 #[tokio::test]
 #[ignore = "requires GENET_DAEMON_LOGIC_WASM naming the signed real Rust guest"]
-async fn running_daemon_hot_updates_rejects_tampering_and_rolls_back_without_restart() {
+async fn running_daemon_cold_updates_reject_tampering_and_replay_without_restart() {
     let _serial = serial().lock().await;
     let source = artifact_path();
     let initial_file = fs::read(&source).unwrap();
@@ -44,84 +45,32 @@ async fn running_daemon_hot_updates_rejects_tampering_and_rolls_back_without_res
     let logic = daemon.state.logic.as_ref().expect("real Wasm logic");
     let before = logic.active().unwrap();
 
-    let next_path = directory.path().join("next.wasm");
-    fs::write(
-        &next_path,
-        sign("hot-update", initial.component.clone())
-            .to_single_file()
-            .unwrap(),
-    )
-    .unwrap();
-    let installed = router::handle(
-        &daemon.state,
-        TransportKind::Loopback,
-        CallerContext::LocalUser,
-        Request::DaemonLogicInstall {
-            path: next_path.display().to_string(),
-        },
-    )
-    .await;
-    let Reply::LogicModule(installed) = installed.reply.unwrap() else {
-        panic!("install returned the wrong reply")
+    let next = sign(before.revision + 1, initial.component.clone());
+    let installed = logic.apply_artifact(next.clone(), false).await.unwrap();
+    let ApplyArtifact::Installed(installed) = installed else {
+        panic!("an idle daemon rejected the candidate")
     };
-    assert_eq!(installed.version.as_deref(), Some("hot-update"));
-    assert_eq!(installed.generation, before.generation + 1);
+    assert_eq!(installed.revision, before.revision + 1);
     assert_eq!(daemon.port, port);
     assert_eq!(std::process::id(), pid);
 
     // Identity is one of the routes actually owned by the guest, so this is a
     // product-path call after replacement rather than a VM-only probe.
-    let identity = router::handle(
-        &daemon.state,
-        TransportKind::Loopback,
-        CallerContext::LocalUser,
-        Request::ConnectionIdentity,
-    )
-    .await;
-    assert!(matches!(identity.reply, Ok(Reply::Hello(_))));
+    assert!(matches!(
+        route_call(&daemon, Request::ConnectionIdentity).await,
+        Ok(Reply::Hello(_))
+    ));
 
-    let mut tampered = fs::read(&next_path).unwrap();
+    let mut tampered = next.to_single_file().unwrap();
     let middle = tampered.len() / 2;
     tampered[middle] ^= 1;
-    let tampered_path = directory.path().join("tampered.wasm");
-    fs::write(&tampered_path, tampered).unwrap();
-    let rejected = router::handle(
-        &daemon.state,
-        TransportKind::Loopback,
-        CallerContext::LocalUser,
-        Request::DaemonLogicInstall {
-            path: tampered_path.display().to_string(),
-        },
-    )
-    .await;
-    assert!(rejected.reply.is_err());
-    assert_eq!(logic.active().unwrap().version, "hot-update");
+    assert!(SignedArtifact::from_single_file(&tampered).is_err());
+    assert_eq!(logic.active().unwrap().revision, before.revision + 1);
     assert_eq!(daemon.port, port);
 
-    let remote = router::handle(
-        &daemon.state,
-        TransportKind::Forwarded,
-        CallerContext::LocalUser,
-        Request::DaemonLogicRollback,
-    )
-    .await;
-    assert!(remote.reply.is_err());
-    assert_eq!(logic.active().unwrap().version, "hot-update");
-
-    let rolled_back = router::handle(
-        &daemon.state,
-        TransportKind::Loopback,
-        CallerContext::LocalUser,
-        Request::DaemonLogicRollback,
-    )
-    .await;
-    let Reply::LogicModule(rolled_back) = rolled_back.reply.unwrap() else {
-        panic!("rollback returned the wrong reply")
-    };
-    assert_eq!(
-        rolled_back.version.as_deref(),
-        Some(before.version.as_str())
-    );
+    let replay = sign(before.revision, initial.component);
+    assert!(logic.apply_artifact(replay, false).await.is_err());
+    assert_eq!(logic.active().unwrap().revision, before.revision + 1);
     assert_eq!(daemon.port, port);
     assert_eq!(std::process::id(), pid);
 
@@ -154,7 +103,7 @@ async fn daemon_start_refuses_to_open_a_listener_without_a_verified_artifact() {
     // digest/signature binding. Startup must reject these bytes before the
     // transport has a chance to bind its configured port.
     let component_len = source.component.len();
-    let mut tampered = sign("unverified-startup", source.component)
+    let mut tampered = sign(source.envelope.logic_revision() + 1, source.component)
         .to_single_file()
         .unwrap();
     tampered[component_len / 2] ^= 1;
@@ -187,7 +136,7 @@ async fn daemon_start_refuses_to_open_a_listener_without_a_verified_artifact() {
 
 #[tokio::test]
 #[ignore = "requires GENET_DAEMON_LOGIC_WASM naming the signed real Rust guest"]
-async fn a_live_agent_process_survives_guest_replacement_and_runs_the_next_round() {
+async fn a_live_agent_blocks_update_until_force_terminates_it() {
     let _serial = serial().lock().await;
     let source = SignedArtifact::from_single_file(&fs::read(artifact_path()).unwrap()).unwrap();
     let directory = tempfile::tempdir().unwrap();
@@ -223,26 +172,33 @@ async fn a_live_agent_process_survives_guest_replacement_and_runs_the_next_round
     assert_eq!(first_records.len(), 1, "one live Agent handled the round");
 
     let before = daemon.state.logic.as_ref().unwrap().active().unwrap();
-    let next_path = directory.path().join("agent-hot-update.wasm");
-    fs::write(
-        &next_path,
-        sign("agent-hot-update", source.component)
-            .to_single_file()
-            .unwrap(),
-    )
-    .unwrap();
-    let installed = daemon_call(
-        &daemon,
-        Request::DaemonLogicInstall {
-            path: next_path.display().to_string(),
-        },
-    )
-    .await;
-    let Reply::LogicModule(installed) = installed else {
-        panic!("install returned the wrong reply: {installed:?}")
+    let candidate = sign(before.revision + 1, source.component);
+    let blocked = daemon
+        .state
+        .logic
+        .as_ref()
+        .unwrap()
+        .apply_artifact(candidate.clone(), false)
+        .await
+        .unwrap();
+    assert!(matches!(blocked, ApplyArtifact::Busy { .. }));
+    assert_eq!(
+        daemon.state.logic.as_ref().unwrap().active().unwrap(),
+        before
+    );
+
+    let installed = daemon
+        .state
+        .logic
+        .as_ref()
+        .unwrap()
+        .apply_artifact(candidate, true)
+        .await
+        .unwrap();
+    let ApplyArtifact::Installed(installed) = installed else {
+        panic!("force did not terminate active work")
     };
-    assert_eq!(installed.version.as_deref(), Some("agent-hot-update"));
-    assert_eq!(installed.generation, before.generation + 1);
+    assert_eq!(installed.revision, before.revision + 1);
     assert_eq!(daemon.port, port);
     assert_eq!(std::process::id(), daemon_pid);
 
@@ -263,9 +219,9 @@ async fn a_live_agent_process_survives_guest_replacement_and_runs_the_next_round
     let snapshot = wait_for_session_text(&daemon, &session_id, "fixture round 2").await;
     let after_records = agent_records(&records);
     assert_eq!(after_records.len(), 2, "both prompts reached an Agent");
-    assert_eq!(
+    assert_ne!(
         after_records[0].pid, after_records[1].pid,
-        "guest replacement must retain the live child process"
+        "a forced cold update must launch a new Agent process"
     );
     assert_eq!(after_records[0].cwd, after_records[1].cwd);
     assert!(snapshot.items.iter().any(
@@ -384,19 +340,11 @@ async fn real_guest_owns_workspace_files_pty_settings_devices_and_catalog_end_to
         .await
         .unwrap();
 
-    let call = |request| {
-        router::handle(
-            &daemon.state,
-            TransportKind::Loopback,
-            CallerContext::LocalUser,
-            request,
-        )
-    };
+    let call = |request| route_call(&daemon, request);
     let opened = call(Request::WorkspaceOpen {
         root: workspace.display().to_string(),
     })
     .await
-    .reply
     .unwrap();
     let Reply::Workspace(opened) = opened else {
         panic!("workspace.open returned the wrong reply")
@@ -410,8 +358,7 @@ async fn real_guest_owns_workspace_files_pty_settings_devices_and_catalog_end_to
             path: file.clone(),
             content: "portable application".into(),
         })
-        .await
-        .reply,
+        .await,
         Ok(Reply::Ack)
     ));
     assert_eq!(
@@ -424,8 +371,7 @@ async fn real_guest_owns_workspace_files_pty_settings_devices_and_catalog_end_to
             path: Some(folder.root_handle.clone()),
             depth: Some(3),
         })
-        .await
-        .reply,
+        .await,
         Ok(Reply::FileTree(_))
     ));
 
@@ -452,12 +398,11 @@ async fn real_guest_owns_workspace_files_pty_settings_devices_and_catalog_end_to
             dialect: Some("openai".into()),
             models: Some(vec!["test-model".into()]),
         })
-        .await
-        .reply,
+        .await,
         Ok(Reply::Settings(_))
     ));
     assert!(matches!(
-        call(Request::DeviceInvite(None)).await.reply,
+        call(Request::DeviceInvite(None)).await,
         Ok(Reply::Invite(_))
     ));
 
@@ -467,52 +412,54 @@ async fn real_guest_owns_workspace_files_pty_settings_devices_and_catalog_end_to
         rows: Some(24),
     })
     .await
-    .reply
     .unwrap();
     let Reply::Pty { pty_id } = pty else {
         panic!("pty.open returned the wrong reply")
     };
     assert!(matches!(
-        call(Request::PtyClose { pty_id }).await.reply,
+        call(Request::PtyClose { pty_id }).await,
         Ok(Reply::Ack)
     ));
 
     // Every operation above survives a full guest instance replacement; no
     // native business object is available to reconstruct it as a fallback.
     let initial = SignedArtifact::from_single_file(&fs::read(artifact_path()).unwrap()).unwrap();
-    let next_path = directory.path().join("next.wasm");
-    fs::write(
-        &next_path,
-        sign("stateful-update", initial.component)
-            .to_single_file()
-            .unwrap(),
-    )
-    .unwrap();
+    let before = daemon.state.logic.as_ref().unwrap().active().unwrap();
     assert!(matches!(
-        call(Request::DaemonLogicInstall {
-            path: next_path.display().to_string(),
-        })
-        .await
-        .reply,
-        Ok(Reply::LogicModule(_))
+        daemon
+            .state
+            .logic
+            .as_ref()
+            .unwrap()
+            .apply_artifact(sign(before.revision + 1, initial.component), false)
+            .await
+            .unwrap(),
+        ApplyArtifact::Installed(_)
     ));
     assert!(matches!(
-        call(Request::WorkspaceList).await.reply,
+        call(Request::WorkspaceList).await,
         Ok(Reply::Workspaces(ref workspaces)) if workspaces.iter().any(|item| item.id == opened.id)
     ));
     assert!(matches!(
-        call(Request::SettingsGet).await.reply,
+        call(Request::SettingsGet).await,
         Ok(Reply::Settings(ref settings)) if settings.providers.iter().any(|item| item.id == "test-provider")
     ));
 
     daemon.shutdown().await;
 }
 
-fn sign(version: &str, component: Vec<u8>) -> SignedArtifact {
+fn sign(revision: u64, component: Vec<u8>) -> SignedArtifact {
     let key = SigningKey::from_bytes(&[7; 32]);
-    let envelope =
-        ArtifactEnvelope::unsigned(MODULE_ID, version, LOGIC_ABI_VERSION, KEY_ID, &component)
-            .unwrap();
+    let envelope = ArtifactEnvelope::unsigned(
+        MODULE_ID,
+        "dev",
+        revision,
+        LOGIC_ABI_VERSION,
+        genehub_proto::PROTOCOL_VERSION,
+        KEY_ID,
+        &component,
+    )
+    .unwrap();
     let signature = key.sign(&envelope.signing_payload().unwrap());
     SignedArtifact::new(envelope.with_signature(&signature), component)
 }
@@ -581,10 +528,10 @@ fn write_fixture_config(data: &Path) {
             "lanEnabled": false,
             "agents": {
                 "custom": {
-                    "hot-swap-fixture": {
+                    "cold-update-fixture": {
                         "extends": "acp",
                         "command": command,
-                        "label": "Hot swap fixture"
+                        "label": "Cold update fixture"
                     }
                 }
             }
@@ -595,15 +542,36 @@ fn write_fixture_config(data: &Path) {
 }
 
 async fn daemon_call(daemon: &Daemon, request: Request) -> Reply {
-    router::handle(
+    route_call(daemon, request).await.unwrap()
+}
+
+async fn route_call(
+    daemon: &Daemon,
+    request: Request,
+) -> Result<Reply, genehub_proto::ProtocolError> {
+    let handled = router::handle(
         &daemon.state,
         TransportKind::Loopback,
         CallerContext::LocalUser,
-        request,
+        Default::default(),
+        serde_json::to_vec(&request).unwrap(),
     )
-    .await
-    .reply
-    .unwrap()
+    .await;
+    if handled.response.status < 400 {
+        serde_json::from_slice(&handled.response.body).map_err(|error| {
+            genehub_proto::ProtocolError {
+                code: genehub_proto::ErrorCode::Internal,
+                message: format!("invalid test reply: {error}"),
+            }
+        })
+    } else {
+        serde_json::from_slice(handled.response.error.as_deref().unwrap_or_default()).map_err(
+            |error| genehub_proto::ProtocolError {
+                code: genehub_proto::ErrorCode::Internal,
+                message: format!("invalid test error: {error}"),
+            },
+        )
+    }
 }
 
 async fn create_fixture_session(daemon: &Daemon, workspace: &Path, cwd: Option<&str>) -> String {

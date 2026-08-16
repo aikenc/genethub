@@ -1,0 +1,210 @@
+name: Promote Official logic
+
+# Same-ABI logic only. The normal path proves these exact component bytes were
+# already exercised by Beta. Platform/ABI changes belong to release.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      beta_revision:
+        description: Beta logicRevision whose component bytes are being promoted
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+    with:
+      force_full: true
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.logic.outputs.revision }}
+      cloud_repository: ${{ steps.logic.outputs.cloud_repository }}
+      cloud_sha: ${{ steps.logic.outputs.cloud_sha }}
+    env:
+      OFFICIAL_HUB_URL: ${{ vars.GENEHUB_HUB_URL || 'https://relay.genethub.com' }}
+      BETA_HUB_URL: ${{ vars.GENEHUB_BETA_HUB_URL || 'https://relay-beta.genethub.com' }}
+      CLOUD_REPOSITORY: ${{ vars.CLOUD_REPO || format('{0}/genethub-cloud', github.repository_owner) }}
+      SIGNING_KEY: ${{ secrets.GENEHUB_OFFICIAL_LOGIC_SIGNING_KEY }}
+      KEY_ID: ${{ vars.GENEHUB_OFFICIAL_LOGIC_KEY_ID }}
+      BETA_REVISION: ${{ inputs.beta_revision }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: official-logic-promotion
+      - name: Build the Beta-proven component and sign it for Official
+        id: logic
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF" = refs/heads/main ] || {
+            echo "::error::Official logic promotion runs only from main"
+            exit 1
+          }
+          public="https://github.com/${GITHUB_REPOSITORY}.git"
+          remote_main="$(git ls-remote --exit-code --refs "$public" refs/heads/main | cut -f1)"
+          [ "$remote_main" = "$GITHUB_SHA" ] || {
+            echo "::error::workflow commit is not the observed public main tip"
+            exit 1
+          }
+          [[ "$BETA_REVISION" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::beta_revision must be a canonical positive integer"
+            exit 1
+          }
+          [[ "$CLOUD_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || exit 1
+          test -n "$SIGNING_KEY" || { echo "::error::Official signing key is required"; exit 1; }
+          [[ "$KEY_ID" =~ ^[A-Za-z0-9._-]{1,64}$ ]] \
+            || { echo "::error::Official key id is invalid"; exit 1; }
+          cloud_ref="$(git ls-remote --exit-code --refs \
+            "https://github.com/$CLOUD_REPOSITORY.git" refs/heads/main)"
+          read -r cloud_sha advertised extra <<<"$cloud_ref"
+          [[ "$cloud_sha" =~ ^[0-9a-f]{40}$ ]] \
+            && [ "$advertised" = refs/heads/main ] && [ -z "${extra:-}" ] || exit 1
+
+          current="$(MANIFEST_URL="$OFFICIAL_HUB_URL/artifacts/manifests/logic/latest.json" \
+            node --input-type=module -e '
+              const response = await fetch(process.env.MANIFEST_URL, {
+                cache: "no-store",
+                redirect: "error",
+                signal: AbortSignal.timeout(30_000),
+              });
+              if (response.status === 404) { process.stdout.write("0"); process.exit(0); }
+              if (!response.ok) throw new Error(`Official manifest returned ${response.status}`);
+              const body = await response.json();
+              if (body.schema !== "genehub.logic-manifest.v1" || body.channel !== "official" ||
+                  !Number.isSafeInteger(body.logicRevision) || body.logicRevision <= 0) {
+                throw new Error("invalid Official logic manifest");
+              }
+              process.stdout.write(String(body.logicRevision));
+            ')"
+          revision="$(CURRENT="$current" node -e '
+            const current = Number(process.env.CURRENT);
+            if (!Number.isSafeInteger(current) || current < 0) throw new Error("invalid current revision");
+            process.stdout.write(String(Math.max(current + 1, Date.now())));
+          ')"
+          cargo build -p genet-daemon-logic --target wasm32-wasip1 --profile daemon-logic-release
+          cargo build --release -p genet-daemon-artifact
+          mkdir -p dist
+          export GENET_DAEMON_LOGIC_SIGNING_KEY="$SIGNING_KEY"
+          target/release/genet-daemon-artifact pack \
+            target/wasm32-wasip1/daemon-logic-release/genet_daemon_logic.wasm \
+            dist/daemon-logic.wasm official "$revision" "$KEY_ID"
+          target/release/genet-daemon-artifact inspect dist/daemon-logic.wasm \
+            > dist/logic-identity.json
+
+          BETA_URL="$BETA_HUB_URL/artifacts/manifests/logic/latest-beta.json" \
+          IDENTITY=dist/logic-identity.json OPEN_SHA="$GITHUB_SHA" \
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const response = await fetch(process.env.BETA_URL, {
+              cache: "no-store",
+              redirect: "error",
+              signal: AbortSignal.timeout(30_000),
+            });
+            if (!response.ok) throw new Error(`Beta manifest returned ${response.status}`);
+            const beta = await response.json();
+            const identity = JSON.parse(readFileSync(process.env.IDENTITY, "utf8"));
+            if (beta.schema !== "genehub.logic-manifest.v1" || beta.channel !== "beta" ||
+                beta.logicRevision !== Number(process.env.BETA_REVISION) ||
+                beta.source?.openSha !== process.env.OPEN_SHA ||
+                beta.platformAbi !== identity.platformAbi ||
+                beta.protocolVersion !== identity.protocolVersion ||
+                beta.artifact?.sha256 !== identity.componentSha256 ||
+                beta.artifact?.size !== identity.componentSize) {
+              throw new Error("Official candidate is not the declared Beta-proven component");
+            }
+          '
+          {
+            printf 'revision=%s\n' "$revision"
+            printf 'cloud_repository=%s\n' "$CLOUD_REPOSITORY"
+            printf 'cloud_sha=%s\n' "$cloud_sha"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: official-logic
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  archive_github:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: official-logic
+          path: dist
+      - run: sha256sum dist/daemon-logic.wasm
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: logic-r${{ needs.build.outputs.revision }}
+          name: Logic r${{ needs.build.outputs.revision }}
+          files: dist/daemon-logic.wasm
+          prerelease: false
+          make_latest: false
+          generate_release_notes: true
+
+  publish_website:
+    needs: [build, archive_github]
+    runs-on: [self-hosted, linux, genehub-publisher]
+    concurrency:
+      group: genehub-logic-official
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      OFFICIAL_STAGE: ${{ vars.GENEHUB_OFFICIAL_STAGE }}
+      OFFICIAL_HUB_URL: ${{ vars.GENEHUB_HUB_URL || 'https://relay.genethub.com' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: genethub
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          repository: ${{ needs.build.outputs.cloud_repository }}
+          ref: ${{ needs.build.outputs.cloud_sha }}
+          token: ${{ secrets.GENEHUB_CLOUD_READ_TOKEN }}
+          path: genethub-cloud
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: official-logic
+          path: release-input/logic
+      - name: Mirror exact GitHub bytes and activate the Official manifest
+        env:
+          REVISION: ${{ needs.build.outputs.revision }}
+          CLOUD_SHA: ${{ needs.build.outputs.cloud_sha }}
+        run: |
+          set -euo pipefail
+          node genethub-cloud/publisher/publish-prepared-logic.mjs \
+            --commit \
+            --cloud-root "$GITHUB_WORKSPACE/genethub-cloud" \
+            --open-root "$GITHUB_WORKSPACE/genethub" \
+            --open-sha "$GITHUB_SHA" \
+            --cloud-sha "$CLOUD_SHA" \
+            --channel official \
+            --store "$OFFICIAL_STAGE/artifacts" \
+            --public-origin "$OFFICIAL_HUB_URL" \
+            --logic "$GITHUB_WORKSPACE/release-input/logic/daemon-logic.wasm" \
+            --logic-identity "$GITHUB_WORKSPACE/release-input/logic/logic-identity.json" \
+            --promoted-from-beta "logic-r${{ inputs.beta_revision }}" \
+            --github-url "https://github.com/$GITHUB_REPOSITORY/releases/download/logic-r$REVISION/daemon-logic.wasm"

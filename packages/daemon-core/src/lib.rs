@@ -18,29 +18,20 @@ mod workspace;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use genehub_proto::{
-    ErrorCode, HelloResult, LogicModuleStatus, ProtocolError, RemoteAccess, Reply, Request,
-    TransportKind, UpdateDownload, PROTOCOL_VERSION,
+    ErrorCode, HelloResult, ProtocolError, RemoteAccess, Reply, Request, TransportKind,
+    PROTOCOL_VERSION,
 };
-use genet_daemon_common::{decode_json, encode_json};
 use genet_daemon_logic_api::{
-    CallerContext, CapabilityBatch, CapabilityCall, CapabilityFailureKind, CapabilityRequest,
-    CapabilityResults, CapabilityValue, ConnectivityRequest, FileLocator, FileRequest, FileRoot,
-    LogicArtifactRequest, LogicBoot, LogicInput, LogicOutcome, LogicOutput, LogicRequest,
-    PlatformCall, PlatformCompletion, PlatformReply, PlatformRequest, SpeechCompletionEvidence,
-    SNAPSHOT_FORMAT_VERSION,
+    CallerContext, CapabilityBatch, CapabilityCall, CapabilityRequest, CapabilityResults,
+    CapabilityValue, ConnectivityRequest, FileLocator, FileRequest, FileRoot, LogicBoot,
+    LogicInput, LogicOutcome, LogicOutput, LogicRequest, PlatformCall, PlatformCompletion,
+    PlatformReply, PlatformRequest, SpeechCompletionEvidence,
 };
-use serde::{Deserialize, Serialize};
-
-const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
-const AUTOMATIC_UPDATE_REFUSAL: &str =
-    "自动更新尚未启用：请从官方发布页手动下载，并核对 SHA256SUMS";
 
 #[derive(Clone, Debug)]
 pub struct LogicApp {
     boot: LogicBoot,
-    handled_requests: u64,
     next_capability_id: u64,
-    pending: std::collections::BTreeMap<u64, Pending>,
     config: Option<config::Config>,
     discoveries: BTreeMap<String, config::Discovery>,
     agent_cache: Option<Vec<genehub_proto::AgentInfo>>,
@@ -48,39 +39,11 @@ pub struct LogicApp {
     terminals: HashMap<String, u64>,
     devices: devices::Devices,
     remote_access: RemoteAccess,
-    update_download: UpdateDownload,
     workspace_roots_ready: bool,
     /// Short-lived, authoritative speech results. These intentionally do not
-    /// enter the hot-update snapshot: losing an unsubmitted correction during
-    /// replacement is safer than persisting dictated text beyond its TTL.
+    /// enter durable process state: losing an unsubmitted correction on a
+    /// restart is safer than persisting dictated text beyond its TTL.
     speech_results: VecDeque<SpeechCompletionEvidence>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Snapshot {
-    format_version: u32,
-    boot: LogicBoot,
-    handled_requests: u64,
-    next_capability_id: u64,
-    pending: BTreeMap<u64, Pending>,
-    config: Option<config::Config>,
-    discoveries: BTreeMap<String, config::Discovery>,
-    agent_cache: Option<Vec<genehub_proto::AgentInfo>>,
-    sessions: session::Sessions,
-    terminals: HashMap<String, u64>,
-    #[serde(default)]
-    devices: devices::Devices,
-    #[serde(default = "offline_remote")]
-    remote_access: RemoteAccess,
-    #[serde(default = "idle_download")]
-    update_download: UpdateDownload,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Pending {
-    call_id: u64,
 }
 
 /// Typed guest-side access to the one opaque byte-batch platform import.
@@ -103,9 +66,7 @@ impl LogicApp {
         validate_boot(&boot)?;
         Ok(Self {
             boot,
-            handled_requests: 0,
             next_capability_id: 1,
-            pending: BTreeMap::new(),
             config: None,
             discoveries: BTreeMap::new(),
             agent_cache: None,
@@ -113,7 +74,6 @@ impl LogicApp {
             terminals: HashMap::new(),
             devices: devices::Devices::default(),
             remote_access: offline_remote(),
-            update_download: UpdateDownload::Idle,
             workspace_roots_ready: false,
             speech_results: VecDeque::new(),
         })
@@ -129,12 +89,12 @@ impl LogicApp {
         capabilities: &mut impl CapabilityExecutor,
     ) -> LogicOutput {
         match input {
-            LogicInput::Request(request) => {
-                self.handled_requests = self.handled_requests.saturating_add(1);
-                self.handle_request(request, capabilities)
-            }
+            LogicInput::Request(request) => self.handle_request(request, capabilities),
             LogicInput::Platform(call) => self.handle_platform(call, capabilities),
-            LogicInput::CapabilityResults(results) => self.handle_capability_results(results),
+            // Capability batches emitted by resource-event handling are
+            // currently fire-and-forget; their native completion only drains
+            // the bounded carrier and cannot complete an unrelated RPC.
+            LogicInput::CapabilityResults(_) => LogicOutput::default(),
             // Unknown or stale resource events are intentionally harmless so a
             // late OS close from a replaced instance cannot trap its successor.
             LogicInput::CapabilityEvent(event) => {
@@ -161,37 +121,48 @@ impl LogicApp {
     ) -> LogicOutput {
         let call_id = input.call_id;
         let transport = input.transport;
+        if let Some(scope) = input.route.workspace_id.as_deref() {
+            if request_workspace(&input.request).is_some_and(|requested| requested != scope) {
+                return LogicOutput::completed(
+                    call_id,
+                    LogicOutcome::Error(ProtocolError {
+                        code: ErrorCode::Forbidden,
+                        message: "the routed capability does not cover this workspace".to_string(),
+                    }),
+                );
+            }
+        }
+        if let Some(invite_id) = input.route.bootstrap_invite.as_deref() {
+            match &input.request {
+                Request::DeviceClaim { code, .. } if code == invite_id => {}
+                Request::DeviceClaim { .. } => {
+                    return LogicOutput::completed(
+                        call_id,
+                        LogicOutcome::Error(ProtocolError {
+                            code: ErrorCode::Unauthorized,
+                            message: "pairing invitation does not match this peer session"
+                                .to_string(),
+                        }),
+                    )
+                }
+                _ => {
+                    return LogicOutput::completed(
+                        call_id,
+                        LogicOutcome::Error(ProtocolError {
+                            code: ErrorCode::Unauthorized,
+                            message: "pairing sessions may only redeem their invitation"
+                                .to_string(),
+                        }),
+                    )
+                }
+            }
+        }
         if let Err(error) = authz::authorize_request(&input.caller, &input.request, &self.devices) {
             return LogicOutput::completed(call_id, LogicOutcome::Error(error));
         }
         let caller = input.caller;
+        let bootstrap_invite = input.route.bootstrap_invite;
         let outcome = match input.request {
-            Request::DaemonLogicStatus => {
-                return self.request_artifact(call_id, LogicArtifactRequest::Status)
-            }
-            Request::DaemonLogicInstall { path } => {
-                if transport != TransportKind::Loopback {
-                    LogicOutcome::Error(ProtocolError {
-                        code: ErrorCode::Forbidden,
-                        message: "daemon logic may only be installed over loopback".to_string(),
-                    })
-                } else {
-                    return self.request_artifact(
-                        call_id,
-                        LogicArtifactRequest::Install { native_path: path },
-                    );
-                }
-            }
-            Request::DaemonLogicRollback => {
-                if transport != TransportKind::Loopback {
-                    LogicOutcome::Error(ProtocolError {
-                        code: ErrorCode::Forbidden,
-                        message: "daemon logic may only be rolled back over loopback".to_string(),
-                    })
-                } else {
-                    return self.request_artifact(call_id, LogicArtifactRequest::Rollback);
-                }
-            }
             Request::ConnectionIdentity => {
                 LogicOutcome::Reply(Box::new(Reply::Hello(HelloResult {
                     daemon_version: self.boot.daemon_version.clone(),
@@ -253,21 +224,6 @@ impl LogicApp {
             }
             Request::AgentList => self.agent_list(false, capabilities),
             Request::AgentRefresh => self.agent_list(true, capabilities),
-            Request::UpdateCheck | Request::UpdateDownload => LogicOutcome::Error(ProtocolError {
-                code: ErrorCode::Unsupported,
-                message: AUTOMATIC_UPDATE_REFUSAL.to_string(),
-            }),
-            Request::UpdateDownloadState => LogicOutcome::Reply(Box::new(Reply::UpdateDownload(
-                self.update_download.clone(),
-            ))),
-            Request::UpdateDismiss => {
-                if !matches!(self.update_download, UpdateDownload::Fetching { .. }) {
-                    self.update_download = UpdateDownload::Idle;
-                }
-                LogicOutcome::Reply(Box::new(Reply::UpdateDownload(
-                    self.update_download.clone(),
-                )))
-            }
             Request::DeviceList => match self.refresh_remote(capabilities).and_then(|()| {
                 self.devices
                     .list(capabilities, &mut self.next_capability_id)
@@ -336,10 +292,28 @@ impl LogicApp {
                     Err(error) => LogicOutcome::Error(error),
                 }
             }
-            Request::DeviceClaim { .. } => LogicOutcome::Error(ProtocolError {
-                code: ErrorCode::Unauthorized,
-                message: "配对邀请只能在对应的加密引导连接中兑换".to_string(),
-            }),
+            Request::DeviceClaim { device_name, .. } => match bootstrap_invite {
+                Some(invite_id) => match self.devices.claim_authenticated(
+                    &invite_id,
+                    &device_name,
+                    &self.boot,
+                    capabilities,
+                    &mut self.next_capability_id,
+                ) {
+                    Ok(PlatformReply::Claimed(credential)) => {
+                        LogicOutcome::Reply(Box::new(Reply::Claimed(credential)))
+                    }
+                    Ok(_) => LogicOutcome::Error(ProtocolError {
+                        code: ErrorCode::Internal,
+                        message: "pairing claim returned the wrong value".to_string(),
+                    }),
+                    Err(error) => LogicOutcome::Error(error),
+                },
+                None => LogicOutcome::Error(ProtocolError {
+                    code: ErrorCode::Unauthorized,
+                    message: "配对邀请只能在对应的加密引导连接中兑换".to_string(),
+                }),
+            },
             Request::DeviceRemoteAttach {
                 relay_url,
                 join_token,
@@ -655,6 +629,44 @@ impl LogicApp {
                 route_workspace_id,
                 start,
             } => self.platform_prepare_speech(route_workspace_id.as_deref(), &start, capabilities),
+            PlatformRequest::PrepareUpdate {
+                terminate_activities,
+            } => {
+                let active_sessions = self.sessions.update_activity_count();
+                let terminals = self.terminals.len().min(u32::MAX as usize) as u32;
+                let was_busy = active_sessions > 0 || terminals > 0;
+                if !was_busy || terminate_activities {
+                    self.sessions
+                        .shutdown(capabilities, &mut self.next_capability_id);
+                    let terminal_ids = self.terminals.keys().cloned().collect::<Vec<_>>();
+                    for terminal_id in terminal_ids {
+                        let _ = terminal::close(
+                            &self.terminals,
+                            &terminal_id,
+                            capabilities,
+                            &mut self.next_capability_id,
+                        );
+                    }
+                    self.terminals.clear();
+                }
+                let remaining_sessions = self.sessions.update_activity_count();
+                let remaining_terminals = self.terminals.len().min(u32::MAX as usize) as u32;
+                Ok(PlatformReply::UpdateReadiness(
+                    genet_daemon_logic_api::UpdateReadiness {
+                        busy: remaining_sessions > 0 || remaining_terminals > 0,
+                        active_sessions: if !was_busy || terminate_activities {
+                            remaining_sessions
+                        } else {
+                            active_sessions
+                        },
+                        terminals: if !was_busy || terminate_activities {
+                            remaining_terminals
+                        } else {
+                            terminals
+                        },
+                    },
+                ))
+            }
             PlatformRequest::RememberSpeechCompletion { evidence } => {
                 self.remember_speech_completion(evidence);
                 Ok(PlatformReply::Ack)
@@ -864,60 +876,6 @@ impl LogicApp {
             }),
             Err(error) => LogicOutcome::Error(error),
         }
-    }
-
-    fn request_artifact(&mut self, call_id: u64, request: LogicArtifactRequest) -> LogicOutput {
-        self.pending.insert(call_id, Pending { call_id });
-        LogicOutput {
-            capability_batches: vec![CapabilityBatch {
-                batch_id: call_id,
-                calls: vec![CapabilityCall {
-                    call_id,
-                    request: CapabilityRequest::LogicArtifact(request),
-                }],
-            }],
-            ..LogicOutput::default()
-        }
-    }
-
-    fn handle_capability_results(&mut self, results: CapabilityResults) -> LogicOutput {
-        let Some(pending) = self.pending.remove(&results.batch_id) else {
-            return LogicOutput::default();
-        };
-        let outcome = match results.results.as_slice() {
-            [result] if result.call_id == pending.call_id => match &result.result {
-                Ok(CapabilityValue::LogicArtifact(state)) => {
-                    LogicOutcome::Reply(Box::new(Reply::LogicModule(LogicModuleStatus {
-                        loaded: true,
-                        version: Some(state.version.clone()),
-                        digest: Some(state.digest.clone()),
-                        origin: Some(state.origin.clone()),
-                        generation: state.generation,
-                    })))
-                }
-                Ok(_) => LogicOutcome::Error(ProtocolError {
-                    code: ErrorCode::Internal,
-                    message: "logic artifact capability returned the wrong value".to_string(),
-                }),
-                Err(error) => LogicOutcome::Error(ProtocolError {
-                    code: match error.kind {
-                        CapabilityFailureKind::Invalid => ErrorCode::BadRequest,
-                        CapabilityFailureKind::Denied => ErrorCode::Forbidden,
-                        CapabilityFailureKind::NotFound => ErrorCode::NotFound,
-                        CapabilityFailureKind::Conflict => ErrorCode::Conflict,
-                        CapabilityFailureKind::Unavailable
-                        | CapabilityFailureKind::TooLarge
-                        | CapabilityFailureKind::Internal => ErrorCode::Internal,
-                    },
-                    message: error.message.clone(),
-                }),
-            },
-            _ => LogicOutcome::Error(ProtocolError {
-                code: ErrorCode::Internal,
-                message: "logic artifact capability returned a malformed batch".to_string(),
-            }),
-        };
-        LogicOutput::completed(pending.call_id, outcome)
     }
 
     fn read_log(
@@ -1655,58 +1613,6 @@ impl LogicApp {
             Err(error) => LogicOutcome::Error(error),
         }
     }
-
-    pub fn snapshot(&self) -> Result<Vec<u8>, String> {
-        encode_json(
-            "logic snapshot",
-            &Snapshot {
-                format_version: SNAPSHOT_FORMAT_VERSION,
-                boot: self.boot.clone(),
-                handled_requests: self.handled_requests,
-                next_capability_id: self.next_capability_id,
-                pending: self.pending.clone(),
-                config: self.config.clone(),
-                discoveries: self.discoveries.clone(),
-                agent_cache: self.agent_cache.clone(),
-                sessions: self.sessions.clone(),
-                terminals: self.terminals.clone(),
-                devices: self.devices.clone(),
-                remote_access: self.remote_access.clone(),
-                update_download: self.update_download.clone(),
-            },
-        )
-    }
-
-    pub fn restore(bytes: &[u8]) -> Result<Self, String> {
-        let snapshot: Snapshot = decode_json("logic snapshot", bytes, MAX_SNAPSHOT_BYTES)?;
-        if snapshot.format_version != SNAPSHOT_FORMAT_VERSION {
-            return Err(format!(
-                "unsupported logic snapshot format {}",
-                snapshot.format_version
-            ));
-        }
-        validate_boot(&snapshot.boot)?;
-        Ok(Self {
-            boot: snapshot.boot,
-            handled_requests: snapshot.handled_requests,
-            next_capability_id: snapshot.next_capability_id,
-            pending: snapshot.pending,
-            config: snapshot.config,
-            discoveries: snapshot.discoveries,
-            agent_cache: snapshot.agent_cache,
-            sessions: snapshot.sessions,
-            terminals: snapshot.terminals,
-            devices: snapshot.devices,
-            remote_access: snapshot.remote_access,
-            update_download: snapshot.update_download,
-            workspace_roots_ready: false,
-            speech_results: VecDeque::new(),
-        })
-    }
-
-    pub fn handled_requests(&self) -> u64 {
-        self.handled_requests
-    }
 }
 
 fn session_request_needs_agent_catalog(request: &Request) -> bool {
@@ -1722,16 +1628,40 @@ fn session_request_needs_agent_catalog(request: &Request) -> bool {
     )
 }
 
+fn request_workspace(request: &Request) -> Option<&str> {
+    match request {
+        Request::SessionFork {
+            target: Some(target),
+            ..
+        }
+        | Request::SessionForkImport { target, .. } => target.workspace_id.as_deref(),
+        Request::SessionCreate { workspace_id, .. }
+        | Request::SessionImportList { workspace_id, .. }
+        | Request::SessionImport { workspace_id, .. }
+        | Request::FileTree { workspace_id, .. }
+        | Request::FileWrite { workspace_id, .. }
+        | Request::FileMkdir { workspace_id, .. }
+        | Request::FileCopy { workspace_id, .. }
+        | Request::FileMove { workspace_id, .. }
+        | Request::FileDelete { workspace_id, .. }
+        | Request::GitStatus { workspace_id }
+        | Request::GitDiff { workspace_id, .. }
+        | Request::GitCommit { workspace_id, .. }
+        | Request::PtyOpen { workspace_id, .. }
+        | Request::SpeechContextPreview { workspace_id, .. }
+        | Request::SpeechFeedbackRecord { workspace_id, .. }
+        | Request::WorkspaceRename { workspace_id, .. }
+        | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
+        _ => None,
+    }
+}
+
 fn offline_remote() -> RemoteAccess {
     RemoteAccess {
         relay_url: None,
         rendezvous_url: None,
         online: false,
     }
-}
-
-fn idle_download() -> UpdateDownload {
-    UpdateDownload::Idle
 }
 
 fn validate_boot(boot: &LogicBoot) -> Result<(), String> {
@@ -2006,6 +1936,7 @@ mod tests {
                 call_id,
                 transport: TransportKind::Loopback,
                 caller: CallerContext::LocalUser,
+                route: Default::default(),
                 request,
             }),
             capabilities,
@@ -2267,13 +2198,14 @@ done
     }
 
     #[test]
-    fn portable_router_owns_identity_update_policy_and_pure_validation() {
+    fn portable_router_owns_identity_and_pure_validation() {
         let mut app = LogicApp::new(boot()).unwrap();
         assert!(matches!(
             app.handle(LogicInput::Request(LogicRequest {
                 call_id: 1,
                 transport: TransportKind::Loopback,
                 caller: CallerContext::LocalUser,
+                route: Default::default(),
                 request: Request::ConnectionIdentity,
             })),
             LogicOutput { completions, .. }
@@ -2281,116 +2213,6 @@ done
                     outcome: LogicOutcome::Reply(reply),
                     ..
                 }] if matches!(**reply, Reply::Hello(_)))
-        ));
-        assert!(matches!(
-            app.handle(LogicInput::Request(LogicRequest {
-                call_id: 2,
-                transport: TransportKind::Forwarded,
-                caller: CallerContext::LocalUser,
-                request: Request::UpdateDownload,
-            })),
-            LogicOutput { completions, .. }
-                if matches!(completions.as_slice(), [genet_daemon_logic_api::LogicCompletion {
-                    outcome: LogicOutcome::Error(ProtocolError {
-                        code: ErrorCode::Unsupported,
-                        ..
-                    }),
-                    ..
-                }])
-        ));
-        for (call_id, request) in [(3, Request::UpdateCheck), (4, Request::UpdateDownload)] {
-            assert!(matches!(
-                app.handle(LogicInput::Request(LogicRequest {
-                    call_id,
-                    transport: TransportKind::Loopback,
-                    caller: CallerContext::LocalUser,
-                    request,
-                })),
-                LogicOutput { completions, .. }
-                    if matches!(completions.as_slice(), [genet_daemon_logic_api::LogicCompletion {
-                        outcome: LogicOutcome::Error(ProtocolError {
-                            code: ErrorCode::Unsupported,
-                            ..
-                        }),
-                        ..
-                    }])
-            ));
-        }
-        for (call_id, request) in [
-            (5, Request::UpdateDownloadState),
-            (6, Request::UpdateDismiss),
-        ] {
-            assert!(matches!(
-                app.handle(LogicInput::Request(LogicRequest {
-                    call_id,
-                    transport: TransportKind::Loopback,
-                    caller: CallerContext::LocalUser,
-                    request,
-                })),
-                LogicOutput { completions, .. }
-                    if matches!(completions.as_slice(), [genet_daemon_logic_api::LogicCompletion {
-                        outcome: LogicOutcome::Reply(reply),
-                        ..
-                    }] if matches!(**reply, Reply::UpdateDownload(UpdateDownload::Idle)))
-            ));
-        }
-        assert_eq!(app.handled_requests(), 6);
-    }
-
-    #[test]
-    fn snapshot_restores_state_without_platform_interpreting_it() {
-        let mut app = LogicApp::new(boot()).unwrap();
-        let _ = app.handle(LogicInput::Request(LogicRequest {
-            call_id: 1,
-            transport: TransportKind::Loopback,
-            caller: CallerContext::LocalUser,
-            request: Request::AgentList,
-        }));
-        let restored = LogicApp::restore(&app.snapshot().unwrap()).unwrap();
-        assert_eq!(restored.handled_requests(), 1);
-    }
-
-    #[test]
-    fn artifact_control_survives_hot_state_transfer_mid_capability() {
-        let mut app = LogicApp::new(boot()).unwrap();
-        let output = app.handle(LogicInput::Request(LogicRequest {
-            call_id: 41,
-            transport: TransportKind::Loopback,
-            caller: CallerContext::LocalUser,
-            request: Request::DaemonLogicStatus,
-        }));
-        assert!(output.completions.is_empty());
-        assert!(matches!(
-            output.capability_batches.as_slice(),
-            [CapabilityBatch { batch_id: 41, calls }]
-                if matches!(calls.as_slice(), [CapabilityCall {
-                    request: CapabilityRequest::LogicArtifact(LogicArtifactRequest::Status),
-                    ..
-                }])
-        ));
-
-        let mut restored = LogicApp::restore(&app.snapshot().unwrap()).unwrap();
-        let output = restored.handle(LogicInput::CapabilityResults(CapabilityResults {
-            batch_id: 41,
-            results: vec![genet_daemon_logic_api::CapabilityResult {
-                call_id: 41,
-                result: Ok(CapabilityValue::LogicArtifact(
-                    genet_daemon_logic_api::LogicArtifactState {
-                        version: "next".into(),
-                        digest: "abc".into(),
-                        origin: "installed".into(),
-                        generation: 7,
-                    },
-                )),
-            }],
-        }));
-        assert!(matches!(
-            output.completions.as_slice(),
-            [genet_daemon_logic_api::LogicCompletion {
-                call_id: 41,
-                outcome: LogicOutcome::Reply(reply),
-                ..
-            }] if matches!(**reply, Reply::LogicModule(LogicModuleStatus { generation: 7, .. }))
         ));
     }
 
@@ -2411,6 +2233,7 @@ done
                 call_id: 1,
                 transport: TransportKind::Loopback,
                 caller: CallerContext::LocalUser,
+                route: Default::default(),
                 request: Request::LogTail { name: None },
             }),
             &mut TestLogs(directory.path().to_path_buf()),
@@ -2428,6 +2251,7 @@ done
                 call_id: 2,
                 transport: TransportKind::Forwarded,
                 caller: CallerContext::LocalUser,
+                route: Default::default(),
                 request: Request::LogTail {
                     name: Some("../config.json".to_string()),
                 },
@@ -2445,7 +2269,7 @@ done
 
     #[cfg(unix)]
     #[test]
-    fn portable_session_owns_persistence_process_protocol_and_hot_state() {
+    fn portable_session_owns_persistence_process_protocol_and_live_state() {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().unwrap();
@@ -2475,6 +2299,7 @@ done
 
         let mut boot = boot();
         boot.builtin_agent_binary = Some(agent.display().to_string());
+        let restart_boot = boot.clone();
         let mut app = LogicApp::new(boot).unwrap();
         let mut capabilities = RealCapabilities::new(&private, &logs);
         let call = |app: &mut LogicApp, capabilities: &mut RealCapabilities, call_id, request| {
@@ -2483,6 +2308,7 @@ done
                     call_id,
                     transport: TransportKind::Loopback,
                     caller: CallerContext::LocalUser,
+                    route: Default::default(),
                     request,
                 }),
                 capabilities,
@@ -2559,8 +2385,8 @@ done
         }
         assert!(completed, "the portable Agent turn never completed");
 
-        let restored = LogicApp::restore(&app.snapshot().unwrap()).unwrap();
-        app = restored;
+        drop(app);
+        app = LogicApp::new(restart_boot).unwrap();
         let snapshot = call(
             &mut app,
             &mut capabilities,
@@ -2637,117 +2463,6 @@ done
                             if text == "portable reply"
                     )))
         ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn portable_interaction_survives_hot_swap_and_resumes_the_same_round() {
-        let mut fixture = waiting_interaction();
-        let waiting = match call(
-            &mut fixture.app,
-            &mut fixture.capabilities,
-            10,
-            Request::SessionGet {
-                session_id: fixture.session_id.clone(),
-            },
-        )
-        .unwrap()
-        {
-            Reply::Snapshot(snapshot) => snapshot,
-            other => panic!("wrong snapshot reply: {other:?}"),
-        };
-        assert_eq!(waiting.summary.status, SessionStatus::Waiting);
-        assert_eq!(waiting.pending_permissions.len(), 1);
-        assert_eq!(waiting.pending_permissions[0].id, "41");
-
-        fixture.app = LogicApp::restore(&fixture.app.snapshot().unwrap()).unwrap();
-        let mode_error = call(
-            &mut fixture.app,
-            &mut fixture.capabilities,
-            11,
-            Request::SessionSetMode {
-                session_id: fixture.session_id.clone(),
-                mode_id: "agent".to_string(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(mode_error.code, ErrorCode::Conflict);
-
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        assert!(matches!(
-            call(
-                &mut fixture.app,
-                &mut fixture.capabilities,
-                12,
-                Request::SessionRespondPermission {
-                    session_id: fixture.session_id.clone(),
-                    request_id: "41".to_string(),
-                    outcome: PermissionOutcome::Selected {
-                        option_id: "yes".to_string(),
-                    },
-                },
-            )
-            .unwrap(),
-            Reply::Ack
-        ));
-        assert_eq!(
-            wait_for_spawn_count(&fixture.spawns, 2),
-            2,
-            "approval must restart the stopped Agent exactly once"
-        );
-
-        let mut completed = false;
-        for _ in 0..20 {
-            let event = fixture.capabilities.event();
-            let output = fixture.app.handle_with(
-                LogicInput::CapabilityEvent(event),
-                &mut fixture.capabilities,
-            );
-            completed |= output.publications.iter().any(|publication| {
-                matches!(
-                    publication,
-                    Publication::Session(SequencedEvent {
-                        event: SessionEvent::TurnCompleted { .. },
-                        ..
-                    })
-                )
-            });
-            if completed {
-                break;
-            }
-        }
-        assert!(completed, "the resumed ACP turn never completed");
-
-        let transcript = std::fs::read_to_string(&fixture.transcript).unwrap();
-        assert!(transcript.contains(r#""modeId":"ask""#));
-        assert!(transcript.contains(r#""modeId":"agent""#));
-        assert!(transcript.contains("The user approved the interrupted permission request"));
-
-        let finished = match call(
-            &mut fixture.app,
-            &mut fixture.capabilities,
-            13,
-            Request::SessionGet {
-                session_id: fixture.session_id.clone(),
-            },
-        )
-        .unwrap()
-        {
-            Reply::Snapshot(snapshot) => snapshot,
-            other => panic!("wrong snapshot reply: {other:?}"),
-        };
-        assert_eq!(finished.summary.status, SessionStatus::Idle);
-        assert_eq!(finished.summary.mode_id.as_deref(), Some("ask"));
-        assert!(finished.pending_permissions.is_empty());
-        assert!(finished.items.iter().any(|item| {
-            matches!(item, TimelineItem::AssistantMessage { text, .. } if text == "resumed safely")
-        }));
-
-        let state = serde_json::to_value(&fixture.app.sessions).unwrap();
-        let round = &state["loaded"][&fixture.session_id]["rounds"][0];
-        assert_eq!(round["adapterTurnIds"].as_array().unwrap().len(), 2);
-        assert!(round["blockedMs"].as_i64().unwrap() > 0);
-        assert_eq!(round["outcome"], "completed");
     }
 
     #[cfg(unix)]

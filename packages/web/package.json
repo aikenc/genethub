@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "license": "AGPL-3.0-or-later",
-  "description": "GeneHub workbench: one build for the browser, the desktop shell and the phone shell",
+  "description": "GeneHub workbench: one website build for browsers, Desktop WebView and mobile",
   "exports": {
     ".": "./src/index.ts",
     "./theme.css": "./src/theme.css",

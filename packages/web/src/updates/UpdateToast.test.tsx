@@ -1,4 +1,8 @@
-import type { Reply, Request } from "@genehub/proto";
+import type {
+  PatchControlRequest,
+  PatchControlResponse,
+  Request,
+} from "@genehub/proto";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -9,9 +13,18 @@ import { useWorkbench } from "../session/store";
 
 import { UpdateToast } from "./UpdateToast";
 
+const active = {
+  channel: "beta",
+  logicRevision: 41,
+  platformAbi: 19,
+  protocolVersion: 3,
+  digest: "a".repeat(64),
+  origin: "downloaded",
+};
+
 function host(overrides: Partial<Host> = {}): Host {
   return {
-    kind: "desktop",
+    kind: "browser",
     endpoint: async () => null,
     notify: () => {},
     openExternal: () => {},
@@ -19,130 +32,114 @@ function host(overrides: Partial<Host> = {}): Host {
   };
 }
 
-function daemon(answers: Partial<Record<Request["type"], () => Reply>>) {
-  const calls: Request[] = [];
+function daemon(answer: (request: PatchControlRequest) => PatchControlResponse) {
+  const patches: PatchControlRequest[] = [];
   const client = {
-    call: async (request: Request) => {
-      calls.push(request);
-      return answers[request.type]?.();
+    patch: async (request: PatchControlRequest) => {
+      patches.push(request);
+      return answer(request);
     },
+    call: async (_request: Request) => undefined,
   } as unknown as Client;
   useWorkbench.setState({ client });
-  return calls;
+  return patches;
 }
 
 beforeEach(() => {
-  useWorkbench.setState({ client: null, download: { state: "idle" }, notice: null });
+  useWorkbench.setState({ client: null, patch: null, patching: false, notice: null });
 });
 
-describe("the box in the corner after a download", () => {
-  /// Nothing was asked for, so nothing is said. A toast that is always there is
-  /// a toast people learn to look past.
-  it("shows nothing while the machine is not fetching anything", () => {
+describe("the signed Wasm patch action", () => {
+  it("shows nothing before a person checks", () => {
     render(<UpdateToast host={host()} />);
     expect(screen.queryByTestId("update-toast")).toBeNull();
   });
 
-  it("reports progress without offering anything to press", () => {
+  it("applies only the candidate selected by the native controller", async () => {
+    const patches = daemon(() => ({ type: "busy", active, blockers: {
+      activeSessions: 1,
+      terminals: 0,
+      nativeResources: 0,
+    } }));
     useWorkbench.setState({
-      download: { state: "fetching", version: "0.1.18", received: 5_242_880, total: 20_971_520 },
-    });
-    render(<UpdateToast host={host()} />);
-
-    expect(screen.getByTestId("update-toast")).toHaveTextContent("正在下载 0.1.18");
-    expect(screen.getByTestId("update-progress")).toHaveStyle({ width: "25%" });
-    expect(screen.queryByTestId("install-update")).toBeNull();
-  });
-
-  /**
-   * A server that sends no length is allowed to. The bar has nothing honest to
-   * say then, and the byte count does — inventing a percentage would be a
-   * progress bar that lies about being nearly done.
-   */
-  it("counts bytes when the release host would not say how many there are", () => {
-    useWorkbench.setState({
-      download: { state: "fetching", version: "0.1.18", received: 3_145_728 },
-    });
-    render(<UpdateToast host={host()} />);
-
-    expect(screen.getByTestId("update-toast")).toHaveTextContent("3.0 MB");
-    expect(screen.getByTestId("update-toast")).not.toHaveTextContent("%");
-  });
-
-  it("never executes a legacy downloaded file and points to the fixed official page", async () => {
-    const installed: string[] = [];
-    const opened: string[] = [];
-    useWorkbench.setState({
-      download: {
-        state: "ready",
-        version: "0.1.18",
-        path: "C:\\Users\\me\\AppData\\Roaming\\GeneHub\\updates\\GeneHub-setup.exe",
+      patch: {
+        type: "status",
+        active,
+        highestAcceptedRevision: 41,
+        availability: {
+          type: "available",
+          artifact: {
+            logicRevision: 42,
+            platformAbi: 19,
+            protocolVersion: 3,
+            digest: "b".repeat(64),
+            size: 1024,
+            openSourceSha: "1".repeat(40),
+            cloudSourceSha: "2".repeat(40),
+          },
+        },
       },
     });
-    render(
-      <UpdateToast
-        host={host({
-          openExternal: (url) => opened.push(url),
-          installUpdate: async (path) => {
-            installed.push(path);
-          },
-        })}
-      />,
-    );
+    render(<UpdateToast host={host()} />);
 
-    expect(screen.getByTestId("update-toast")).toHaveTextContent("自动安装已禁用");
-    expect(screen.getByTestId("update-toast")).toHaveTextContent("SHA256SUMS");
-    expect(screen.queryByTestId("install-update")).toBeNull();
-    expect(installed).toEqual([]);
-
-    await userEvent.click(screen.getByTestId("manual-update-link"));
-    expect(opened).toEqual(["https://github.com/aikenc/genethub/releases"]);
+    await userEvent.click(screen.getByRole("button", { name: "立即更新" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).toMatchObject({ type: "apply", terminateActivities: false });
+    expect(patches[0]).not.toHaveProperty("url");
+    expect(patches[0]).not.toHaveProperty("revision");
   });
 
-  /**
-   * A phone watching someone's desktop is the case this protects. It cannot run
-   * a file that is not on it, and a button that could only fail is worse than
-   * the sentence saying where the installer went.
-   */
-  it("offers no install button where the shell cannot run one", () => {
-    const remoteInstaller = "C:\\Users\\dev\\Downloads\\GeneHub-Setup.exe";
+  it("requires an explicit second action before terminating active work", async () => {
+    const patches = daemon(() => ({
+      type: "applied",
+      requestId: "patch_test",
+      active: { ...active, logicRevision: 42 },
+    }));
     useWorkbench.setState({
-      download: { state: "ready", version: "0.1.18", path: remoteInstaller },
+      patch: {
+        type: "busy",
+        active,
+        blockers: { activeSessions: 2, terminals: 1, nativeResources: 1 },
+      },
     });
-    render(<UpdateToast host={host({ kind: "browser" })} />);
+    render(<UpdateToast host={host()} />);
 
-    expect(screen.queryByTestId("install-update")).toBeNull();
-    expect(screen.getByTestId("update-toast")).toHaveTextContent(remoteInstaller);
+    expect(screen.getByTestId("update-toast")).toHaveTextContent("共 4 项活动工作");
+    await userEvent.click(screen.getByRole("button", { name: "终止任务并更新" }));
+    expect(patches).toHaveLength(0);
+    expect(screen.getByText("确认终止活动任务？")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "确认终止并更新" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).toMatchObject({ type: "apply", terminateActivities: true });
   });
 
-  /// "稍后" means later. Throwing the file away would make the next press pay
-  /// for the whole download again as a punishment for reading the box.
-  it("stops asking without discarding what was downloaded", async () => {
-    const calls = daemon({
-      "update.dismiss": () => ({ type: "updateDownload", data: { state: "idle" } }),
-    });
+  it("routes an ABI mismatch to the human-facing App download page", async () => {
+    const opened: string[] = [];
     useWorkbench.setState({
-      download: { state: "ready", version: "0.1.18", path: "/data/updates/setup.exe" },
+      patch: {
+        type: "status",
+        active,
+        highestAcceptedRevision: 41,
+        availability: {
+          type: "requiresApp",
+          requiredPlatformAbi: 20,
+          appManifestUrls: ["https://relay-beta.genethub.com/artifacts/manifests/app/latest-beta.json"],
+        },
+      },
+    });
+    render(<UpdateToast host={host({ openExternal: (url) => opened.push(url) })} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "查看安装包" }));
+    expect(opened).toEqual(["https://relay-beta.genethub.com/download"]);
+  });
+
+  it("dismisses a completed patch without a daemon round trip", async () => {
+    useWorkbench.setState({
+      patch: { type: "applied", requestId: "patch_done", active },
     });
     render(<UpdateToast host={host()} />);
 
     await userEvent.click(screen.getByTestId("dismiss-update"));
-
     await waitFor(() => expect(screen.queryByTestId("update-toast")).toBeNull());
-    expect(calls).toEqual([{ type: "update.dismiss" }]);
-  });
-
-  it("does not retry an obsolete automatic download path", () => {
-    const calls = daemon({});
-    useWorkbench.setState({
-      download: { state: "failed", version: "0.1.18", message: "下载失败：服务器返回 503" },
-    });
-    render(<UpdateToast host={host()} />);
-
-    expect(screen.getByRole("alert")).toHaveTextContent("下载 0.1.18 失败");
-    expect(screen.getByTestId("update-toast")).toHaveTextContent("503");
-
-    expect(screen.queryByTestId("retry-update")).toBeNull();
-    expect(calls).toEqual([]);
   });
 });

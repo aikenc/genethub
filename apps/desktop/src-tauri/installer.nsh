@@ -46,12 +46,11 @@
   ; has — and the install failed exactly as before.
   ;
   ; Without `/T`, unlike the two below, and that omission is load-bearing: an
-  ; update started from inside the app runs this installer as a *child* of the
-  ; app, so a tree kill here would kill the installer executing it — an upgrade
-  ; that stops half way with the old version already on its way out. The app
-  ; leaves on its own before it gets this far (`install_update`), and what the
-  ; tree was for is covered by the next two lines: the daemon is named
-  ; explicitly, and its agents go down with it.
+  ; installer launched while the app is running may still be a descendant of
+  ; that process, so a tree kill here could kill the installer executing it —
+  ; an upgrade that stops half way with the old version already gone. What the
+  ; tree was for is covered by the next two steps: the daemon is found by its
+  ; lock-file pid, and its agents go down with it.
   nsExec::Exec 'taskkill /F /IM ${GH_DESKTOP_EXE}'
   Pop $0
 

@@ -19,8 +19,6 @@ const MEMORY_EXPORT: &str = "memory";
 const ALLOC_EXPORT: &str = "genehub_alloc";
 const INITIALIZE_EXPORT: &str = "genehub_initialize";
 const HANDLE_EXPORT: &str = "genehub_handle";
-const SNAPSHOT_EXPORT: &str = "genehub_snapshot";
-const RESTORE_EXPORT: &str = "genehub_restore";
 const CAPABILITY_MODULE: &str = "genehub_platform";
 const CAPABILITY_IMPORT: &str = "genehub_capability";
 
@@ -334,20 +332,6 @@ impl LogicVm {
                             "missing or invalid {HANDLE_EXPORT} export: {error:#}"
                         ))
                     })?,
-                snapshot: instance
-                    .get_typed_func::<(), i64>(&mut store, SNAPSHOT_EXPORT)
-                    .map_err(|error| {
-                        PlatformError::Vm(format!(
-                            "missing or invalid {SNAPSHOT_EXPORT} export: {error:#}"
-                        ))
-                    })?,
-                restore: instance
-                    .get_typed_func::<(i32, i32), i64>(&mut store, RESTORE_EXPORT)
-                    .map_err(|error| {
-                        PlatformError::Vm(format!(
-                            "missing or invalid {RESTORE_EXPORT} export: {error:#}"
-                        ))
-                    })?,
             })
         } else {
             None
@@ -431,50 +415,6 @@ impl LogicInstance {
         self.call_with_input(HANDLE_EXPORT, event, |application| {
             application.handle.clone()
         })
-    }
-
-    /// Returns opaque guest-owned state for side-by-side replacement.
-    pub fn snapshot(&self) -> Result<Vec<u8>> {
-        let mut inner = self.inner.lock().map_err(|_| PlatformError::LockPoisoned)?;
-        if inner.poisoned {
-            return Err(PlatformError::InstancePoisoned);
-        }
-        let Some(application) = inner.application.clone() else {
-            return Err(PlatformError::Vm(
-                "logic instance has no application ABI".to_string(),
-            ));
-        };
-        if let Err(error) = reset_fuel(&mut inner.store, self.fuel_per_call) {
-            inner.poisoned = true;
-            return Err(error);
-        }
-        let packed = match application.snapshot.call(&mut inner.store, ()) {
-            Ok(packed) => packed,
-            Err(error) => {
-                inner.poisoned = true;
-                return Err(PlatformError::Vm(format!(
-                    "calling {SNAPSHOT_EXPORT}: {error:#}"
-                )));
-            }
-        };
-        let output = read_guest_output(
-            &application.memory,
-            &mut inner.store,
-            packed,
-            self.max_message_bytes,
-            SNAPSHOT_EXPORT,
-        );
-        if output.is_err() {
-            inner.poisoned = true;
-        }
-        output
-    }
-
-    pub fn restore(&self, snapshot: &[u8]) -> Result<()> {
-        let output = self.call_with_input(RESTORE_EXPORT, snapshot, |application| {
-            application.restore.clone()
-        })?;
-        decode_unit_result(RESTORE_EXPORT, &output)
     }
 
     pub fn health_check(&self) -> Result<()> {
@@ -655,8 +595,6 @@ struct ApplicationExports {
     alloc: TypedFunc<i32, i32>,
     initialize: TypedFunc<(i32, i32), i64>,
     handle: TypedFunc<(i32, i32), i64>,
-    snapshot: TypedFunc<(), i64>,
-    restore: TypedFunc<(i32, i32), i64>,
 }
 
 fn read_guest_output(

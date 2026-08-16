@@ -8,6 +8,14 @@ export type AgentInfo = { id: string, label: string, probe: ProbeState, capabili
  */
 builtin: boolean, };
 
+export type AppInstaller = { target: string, artifact: ArtifactDescriptor, };
+
+export type AppManifest = { schema: string, channel: string, release: string, platformAbi: number, bundledLogic: BundledLogic, installers: Array<AppInstaller>, source: SourceRevision, };
+
+export type ArtifactDescriptor = { sources: Array<ArtifactSource>, sha256: string, size: number, };
+
+export type ArtifactSource = { url: string, };
+
 export type AssetPreviewError = "notFound" | "forbidden" | "unsupported" | "tooLarge" | "sourceChanged";
 
 export type AssetPreviewKind = "image" | "markdown" | "text" | "html" | "video";
@@ -80,6 +88,8 @@ id: string, bytes: number,
  * files, verifying the id it finds there before answering.
  */
 at: string, };
+
+export type BundledLogic = { channel: string, logicRevision: number, platformAbi: number, protocolVersion: number, componentSha256: string, keyId: string, };
 
 /**
  * What an agent can do, declared up front.
@@ -469,10 +479,11 @@ export type LogTail = { name: string, path: string, text: string,
  */
 files: Array<LogEntry>, };
 
-/**
- * The signed portable application currently routed by the native daemon.
- */
-export type LogicModuleStatus = { loaded: boolean, version?: string, digest?: string, origin?: string, generation: number, };
+export type LogicActivation = { enabled: boolean, pausedReason?: string, };
+
+export type LogicIdentity = { channel: string, logicRevision: number, platformAbi: number, protocolVersion: number, digest: string, origin: string, };
+
+export type LogicManifest = { schema: string, channel: string, logicRevision: number, platformAbi: number, protocolVersion: number, artifact: ArtifactDescriptor, source: SourceRevision, activation: LogicActivation, };
 
 export type ModeInfo = { id: string, label: string, description?: string, };
 
@@ -485,6 +496,16 @@ export type ModelInfo = { id: string, label: string, contextWindow?: number, rea
 efforts: Array<string>, };
 
 export type NoticeLevel = "info" | "warning" | "error";
+
+export type PatchArtifactSummary = { logicRevision: number, platformAbi: number, protocolVersion: number, digest: string, size: number, openSourceSha: string, cloudSourceSha: string, };
+
+export type PatchAvailability = { "type": "current" } | { "type": "available", artifact: PatchArtifactSummary, } | { "type": "requiresApp", requiredPlatformAbi: number, appManifestUrls: Array<string>, } | { "type": "paused", reason: string, } | { "type": "unconfigured" };
+
+export type PatchBlockers = { activeSessions: number, terminals: number, nativeResources: number, };
+
+export type PatchControlRequest = { "type": "check" } | { "type": "apply", requestId: string, terminateActivities: boolean, };
+
+export type PatchControlResponse = { "type": "status", active: LogicIdentity, highestAcceptedRevision: number, availability: PatchAvailability, } | { "type": "busy", active: LogicIdentity, blockers: PatchBlockers, } | { "type": "applied", requestId: string, active: LogicIdentity, };
 
 /**
  * How a peer proves possession of an end-to-end secret during carrier setup.
@@ -586,7 +607,7 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "logicModule", "data": LogicModuleStatus } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -660,7 +681,7 @@ workspaceId?: string, } } | { "type": "speech.runtime.probe" } | { "type": "spee
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "update.check" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "daemon.logic.status" } | { "type": "daemon.logic.install", "payload": { path: string, } } | { "type": "daemon.logic.rollback" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */
@@ -725,7 +746,7 @@ export type SequencedEvent = { seq: number, sessionId: string, event: SessionEve
 /**
  * Anything the daemon sends to a client.
  */
-export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "processes", processes: Array<BackgroundProcess>, } | { "type": "desync", sessionId: string, missed: number, };
+export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "processes", processes: Array<BackgroundProcess>, } | { "type": "desync", sessionId: string, missed: number, };
 
 /**
  * A complete daemon-owned artifact bundle. Chat needs only these locators and
@@ -960,6 +981,8 @@ env: { [key in string]?: string },
  */
 timeoutMs?: bigint, };
 
+export type SourceRevision = { openSha: string, cloudSha: string, lockfileSha256: string, };
+
 export type SpeechAudioFormat = { encoding: SpeechEncoding, sampleRateHz: number, channels: number, };
 
 export type SpeechCancelReason = "user" | "pageHidden" | "targetChanged" | "clientBackpressure";
@@ -1188,88 +1211,6 @@ forkCheckpoint?: string, };
  * without knowing anything about storage layouts itself.
  */
 export type UnsupportedFormat = { written: number, supported: number, };
-
-/**
- * How far the machine has got fetching the installer it was asked to fetch.
- *
- * A state rather than a reply to one call, because a download outlives the
- * click that started it: the window can be closed, the workbench reloaded, a
- * second client opened on a phone, and all of them have to see the same thing.
- * The machine is the one place that knows, so it is the one place that says.
- *
- * Fetching is separate from installing on purpose. What ends this is a file on
- * disk and a sentence on screen; the installer stops the daemon and every agent
- * mid-turn, so when to pay that is the user's call.
- */
-export type UpdateDownload = { "state": "idle" } | { "state": "fetching", version: string, 
-/**
- * Bytes on disk so far. A number on the wire, so declared as one here:
- * the generated `bigint` would describe a value `JSON.parse` never
- * produces.
- */
-received: number, 
-/**
- * What the release host said the whole file weighs, when it said. A
- * server that sends no length is unusual but allowed, and a progress
- * bar that invents a total is worse than a byte count that does not.
- */
-total?: number, } | { "state": "ready", version: string, 
-/**
- * Where it landed. Only a shell running on this machine can do
- * anything with it; a browser on a phone shows the sentence and no
- * button.
- */
-path: string, } | { "state": "failed", version: string, message: string, };
-
-/**
- * Whether a newer build has been published, and where a person gets it.
- *
- * Asked for, never volunteered. A machine that promises to keep to itself has no
- * business making an outbound call nobody requested, and the answer is only
- * wanted at the moment someone wonders — which is why this is a menu item and a
- * button rather than a heartbeat.
- *
- * Nothing here *installs* anything either. The machine can fetch the installer
- * once asked (`UpdateDownload`), but running it — which stops the daemon and
- * whatever an agent was mid-turn — stays a click the user makes, not a timer we
- * fire.
- */
-export type UpdateStatus = { 
-/**
- * What this machine is running.
- */
-current: string, 
-/**
- * The newest published version, when the check got an answer at all.
- *
- * Left out of the wire rather than sent as null, here and below, so that the
- * generated `latest?: string` describes what actually arrives.
- */
-latest?: string, 
-/**
- * True only when `latest` is genuinely later. A build from source can be
- * ahead of the newest release, and telling that person to upgrade would be
- * telling them to go backwards.
- */
-newer: boolean, 
-/**
- * The release page: notes and checksums. Optional next to `download_url`,
- * because some people want to read before they fetch.
- */
-url?: string, 
-/**
- * The installer for *this* machine, when the manifest named one.
- *
- * Separate from `url` on purpose: the page is for a person, the file is for
- * a download button that must not open a browser just to fetch a binary.
- */
-downloadUrl?: string, 
-/**
- * Why there is no answer, in the words of whatever failed. The one outcome
- * worth refusing to render is a check that quietly says "up to date" after
- * reaching nothing at all.
- */
-problem?: string, };
 
 export type Usage = { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number, costUsd?: number, };
 

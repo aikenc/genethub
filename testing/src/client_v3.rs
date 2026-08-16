@@ -166,8 +166,7 @@ impl Client {
                         ServerFrame::Notice { message, .. } => {
                             let _ = notice_tx.send(message);
                         }
-                        ServerFrame::UpdateDownloadChanged { .. }
-                        | ServerFrame::BackgroundProcesses { .. } => {}
+                        ServerFrame::BackgroundProcesses { .. } => {}
                         ServerFrame::Desync { session_id, missed } => {
                             panic!("the daemon dropped {missed} events for {session_id}");
                         }

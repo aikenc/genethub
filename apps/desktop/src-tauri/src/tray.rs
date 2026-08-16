@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::AppState;
 
@@ -35,15 +35,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let status = MenuItem::with_id(app, "status", "本机状态：启动中", false, None::<&str>)?;
     app.manage(Status(Mutex::new(status.clone())));
     let pair = MenuItem::with_id(app, "pair", "连接到 Hub", true, None::<&str>)?;
-    // Permanent, not tucked into settings: an identity with no password is
-    // reachable only through a link this makes, so it is the one way back
-    // after a browser is lost (`desktop-client.md` §6).
-    let claim = MenuItem::with_id(app, "claim", "重新生成认领链接", true, None::<&str>)?;
-    // Asked for by hand, and only from here: no timer checks on anyone's behalf,
-    // and nothing downloads itself. What this ends in is a sentence and a link on
-    // the About section of settings — the moment to install is the user's to pick,
-    // because an upgrade stops the daemon and whatever an agent was mid-way
-    // through (`installer.nsh`).
+    let claim = MenuItem::with_id(app, "claim", "重新登录官网", true, None::<&str>)?;
     let update = MenuItem::with_id(app, "update", "检查更新", true, None::<&str>)?;
     // In the tray rather than only in the workbench: the times someone wants the
     // logs include the times the window will not show anything useful.
@@ -78,24 +70,19 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
-            // Both are asked of the daemon, and the window is the only thing
-            // here holding a connection to it. The shell shows the window and
-            // says what was asked for; the workbench does the asking.
             "pair" => {
                 show_main_window(app);
-                let _ = app.emit_to("main", "genehub://pair", ());
+                crate::start_auth(app);
             }
             "claim" => {
                 show_main_window(app);
-                let _ = app.emit_to("main", "genehub://claim", ());
+                crate::start_claim(app);
             }
-            // Same division as those two: the shell shows the window and says
-            // what was asked for, and the workbench does the asking — the daemon
-            // is what knows how to reach the release host, and it is the same
-            // answer whether the question came from here or from a browser.
             "update" => {
-                show_main_window(app);
-                let _ = app.emit_to("main", "genehub://update", ());
+                use tauri_plugin_opener::OpenerExt;
+                let _ = app
+                    .opener()
+                    .open_url(crate::channel::APP_DOWNLOAD_URL, None::<&str>);
             }
             "logs" => {
                 let dir = crate::logs_dir(app);

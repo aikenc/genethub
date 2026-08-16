@@ -7,17 +7,15 @@ import { openAccount } from "./account";
 import { Claim } from "./Claim";
 
 /**
- * Approving a pairing code means signing in, and where that happens is the
- * shell's call. The desktop app opens a window of its own; being thrown out to
- * the system browser and back is the worst minute of a first install.
+ * Approving a pairing code means signing in. Every product surface is an
+ * ordinary browser, so the host opens the verification page as a normal link.
  *
  * Only the pairing-code path reaches this. The ordinary one does not open
  * anything: the Hub enrolls the machine on the spot, which is the whole point
  * of `hub.trial`.
  */
 function openSignIn(host: Host, url: string): void {
-  if (host.openWindow) host.openWindow(url);
-  else host.openExternal(url);
+  host.openExternal(url);
 }
 
 /**

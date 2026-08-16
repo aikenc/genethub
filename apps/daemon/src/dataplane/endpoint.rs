@@ -4,10 +4,11 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    ErrorCode, ExchangeRequestHead, ExchangeResponseHead, ProtocolError, Reply, Request,
-    ServerFrame, TransportKind,
+    ErrorCode, ExchangeRequestHead, ExchangeResponseHead, ProtocolError, TransportKind,
 };
-use genet_daemon_logic_api::{PlatformReply, StreamAuthorization, StreamMethod};
+use genet_daemon_logic_api::{
+    PublicationSecurity, RequestRoute, StreamAuthorization, StreamMethod,
+};
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
@@ -307,6 +308,58 @@ impl ServerStream {
         Ok(())
     }
 
+    /// Emits a business response without deserializing its error object.
+    async fn respond_opaque(
+        &mut self,
+        status: u16,
+        body_length: u64,
+        error: Option<&[u8]>,
+    ) -> Result<()> {
+        if self.local_head_sent
+            || self.local_finished
+            || !(100..=599).contains(&status)
+            || body_length > genehub_proto::MAX_FINITE_EXCHANGE_BODY_BYTES as u64
+        {
+            anyhow::bail!("opaque response head is invalid");
+        }
+        let error = error
+            .map(|bytes| {
+                let value: serde_json::Value =
+                    serde_json::from_slice(bytes).context("guest error is not JSON")?;
+                if !value.is_object() {
+                    anyhow::bail!("guest error is not a JSON object");
+                }
+                Ok(value)
+            })
+            .transpose()?;
+        let mut head = serde_json::json!({
+            "status": status,
+            "metadata": serde_json::Value::Null,
+            "bodyLength": body_length,
+        });
+        if let Some(error) = error {
+            head.as_object_mut()
+                .expect("static response head is an object")
+                .insert("error".to_string(), error);
+        }
+        let payload = serde_json::to_vec(&head)?;
+        if payload.is_empty() || payload.len() > genehub_proto::MAX_EXCHANGE_HEAD_BYTES {
+            anyhow::bail!("opaque response head exceeds its bounded wire field");
+        }
+        self.writer
+            .send(Frame {
+                kind: Kind::Head,
+                stream_id: self.id,
+                value: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
+                payload,
+            })
+            .await?;
+        self.expected_local_bytes = Some(body_length);
+        self.response_status = Some(status);
+        self.local_head_sent = true;
+        Ok(())
+    }
+
     pub(crate) async fn write(&mut self, bytes: &[u8]) -> Result<()> {
         if !self.local_head_sent || self.local_finished {
             anyhow::bail!("response body cannot be written in this stream state");
@@ -344,10 +397,19 @@ impl ServerStream {
 
     pub(super) async fn write_message<T: serde::Serialize>(&mut self, message: &T) -> Result<()> {
         let body = serde_json::to_vec(message)?;
+        self.write_raw_message(&body).await
+    }
+
+    async fn write_raw_message(&mut self, body: &[u8]) -> Result<()> {
+        let value: serde_json::Value =
+            serde_json::from_slice(body).context("guest event is not JSON")?;
+        if !value.is_object() {
+            anyhow::bail!("guest event is not a JSON object");
+        }
         let length = u32::try_from(body.len()).context("event message is too large")?;
         let mut wire = Vec::with_capacity(4 + body.len());
         wire.extend_from_slice(&length.to_be_bytes());
-        wire.extend_from_slice(&body);
+        wire.extend_from_slice(body);
         self.write(&wire).await
     }
 
@@ -398,8 +460,8 @@ impl ServerStream {
 pub(crate) struct PeerServices {
     pub(crate) state: Shared,
     pub(crate) access: PeerAccess,
-    event_sender: mpsc::Sender<ServerFrame>,
-    event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
+    event_sender: mpsc::Sender<Vec<u8>>,
+    event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
     subscriptions: tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     carrier_kind: CarrierKind,
 }
@@ -463,7 +525,7 @@ pub async fn serve(
                         if !frame_allowed(&frame, &watcher) {
                             continue;
                         }
-                        if events.send(frame).await.is_err() {
+                        if events.send(frame.bytes).await.is_err() {
                             return;
                         }
                     }
@@ -820,6 +882,8 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
     }
     match method {
         StreamMethod::Events => handle_events(stream, services).await,
+        StreamMethod::LogicIdentity => handle_logic_identity(stream, services).await,
+        StreamMethod::PatchControl => handle_patch(stream, services).await,
         StreamMethod::AssetPreview => crate::dataplane::preview::handle(stream, services).await,
         StreamMethod::ShellRun => {
             crate::dataplane::exec::handle(stream, services, &authorization).await
@@ -829,22 +893,101 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
     }
 }
 
+async fn handle_logic_identity(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
+    let body = stream.read_body(1).await?;
+    if !body.is_empty() {
+        return send_error(
+            stream,
+            400,
+            ErrorCode::BadRequest,
+            "Platform identity request must be empty",
+        )
+        .await;
+    }
+    let logic = services
+        .state
+        .logic
+        .as_ref()
+        .context("portable daemon logic is unavailable")?;
+    let response = crate::patch::identity(logic.active()?);
+    let body = serde_json::to_vec(&response)?;
+    stream
+        .respond(&ExchangeResponseHead {
+            status: 200,
+            metadata: serde_json::Value::Null,
+            body_length: Some(body.len() as u64),
+            error: None,
+        })
+        .await?;
+    stream.write(&body).await?;
+    stream.finish().await
+}
+
+async fn handle_patch(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
+    let body = stream.read_body(8 * 1024).await?;
+    let request: genehub_proto::PatchControlRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => {
+            return send_error(
+                stream,
+                400,
+                ErrorCode::BadRequest,
+                "invalid Platform patch request",
+            )
+            .await
+        }
+    };
+    let Some(logic) = services.state.logic.as_ref() else {
+        return send_error(
+            stream,
+            503,
+            ErrorCode::Internal,
+            "portable daemon logic is unavailable",
+        )
+        .await;
+    };
+    let operation = match &request {
+        genehub_proto::PatchControlRequest::Check => "patch.check",
+        genehub_proto::PatchControlRequest::Apply { .. } => "patch.apply",
+    };
+    stream.diagnostic_operation = Some(operation.to_string());
+    let response = match services.state.patch.handle(logic, request).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, operation, "Platform patch request failed");
+            return send_error(
+                stream,
+                502,
+                ErrorCode::Internal,
+                "the signed patch feed could not be verified",
+            )
+            .await;
+        }
+    };
+    let body = serde_json::to_vec(&response)?;
+    stream
+        .respond(&ExchangeResponseHead {
+            status: 200,
+            metadata: serde_json::Value::Null,
+            body_length: Some(body.len() as u64),
+            error: None,
+        })
+        .await?;
+    stream.write(&body).await?;
+    stream.finish().await
+}
+
 /// What a peer must have been granted to be told this.
 ///
 /// Matched by name with no wildcard so that a new frame has to be classified
 /// here before it can be broadcast. Anything unsaid would be broadcast to
 /// every authenticated peer, which is the wrong default for a push: the peer
 /// never asked, so it never had a request for the usual check to refuse.
-fn frame_allowed(frame: &ServerFrame, authorization: &StreamAuthorization) -> bool {
-    match frame {
-        ServerFrame::PtyOutput { .. } | ServerFrame::PtyClosed { .. } => authorization.receive_pty,
-        // Command lines of what an agent ran. The same material as the tool
-        // calls in a timeline, and gated the same way.
-        ServerFrame::BackgroundProcesses { .. } => authorization.receive_background_processes,
-        ServerFrame::Event { .. }
-        | ServerFrame::Desync { .. }
-        | ServerFrame::Notice { .. }
-        | ServerFrame::UpdateDownloadChanged { .. } => true,
+fn frame_allowed(frame: &crate::logic::RoutedEvent, authorization: &StreamAuthorization) -> bool {
+    match frame.security {
+        PublicationSecurity::Pty => authorization.receive_pty,
+        PublicationSecurity::BackgroundProcesses => authorization.receive_background_processes,
+        PublicationSecurity::General => true,
     }
 }
 
@@ -865,85 +1008,31 @@ async fn refuse(stream: &mut ServerStream, needed: &str) -> Result<()> {
 
 async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     let body = stream.read_body(MAX_RPC_BODY_BYTES).await?;
-    let request: Request = serde_json::from_slice(&body).context("invalid RPC operation body")?;
     stream.diagnostic_operation = diagnostic_operation(&stream.head.metadata);
-    if let Some(scope) = &services.access.workspace_id {
-        if let Some(requested) = request_workspace(&request) {
-            if requested != scope {
-                return send_error(
-                    stream,
-                    403,
-                    ErrorCode::Forbidden,
-                    "the routed capability does not cover this workspace",
-                )
-                .await;
-            }
-        }
-    }
-
-    if let (
-        Some(invite_id),
-        Request::DeviceClaim {
-            code, device_name, ..
-        },
-    ) = (services.access.bootstrap_invite.as_deref(), &request)
-    {
-        if code != invite_id {
-            return send_error(
-                stream,
-                401,
-                ErrorCode::Unauthorized,
-                "pairing invitation does not match this peer session",
-            )
-            .await;
-        }
-        let reply = match services
-            .state
-            .logic
-            .as_ref()
-            .context("portable daemon logic is unavailable")?
-            .claim_authenticated_invite(invite_id.to_string(), device_name.to_string())
-            .await
-        {
-            Ok(PlatformReply::Claimed(credential)) => Reply::Claimed(credential),
-            Ok(_) => {
-                return send_error(
-                    stream,
-                    500,
-                    ErrorCode::Internal,
-                    "portable invitation claim returned the wrong value",
-                )
-                .await
-            }
-            Err(error) => {
-                return send_error(stream, 401, ErrorCode::Unauthorized, format!("{error:#}")).await
-            }
-        };
-        return send_reply(stream, reply).await;
-    }
-    if services.access.bootstrap_invite.is_some() {
-        return send_error(
-            stream,
-            401,
-            ErrorCode::Unauthorized,
-            "pairing sessions may only redeem their invitation",
-        )
-        .await;
-    }
-
-    // Resolved once and carried into the router: a request that decides what
-    // to enforce on a spawned process must be looking at the same caller the
-    // gate just admitted, not at a second lookup that could disagree with it.
     let caller = authz::principal(&services.access);
-    let handled = router::handle(&services.state, services.access.transport, caller, request).await;
-    match handled.reply {
-        Ok(reply) => {
-            send_reply(stream, reply).await?;
-            apply_side_effect(services, handled.effect).await;
-            Ok(())
-        }
-        Err(error) => send_protocol_error(stream, error).await,
-    }
+    let route = RequestRoute {
+        workspace_id: services.access.workspace_id.clone(),
+        bootstrap_invite: services.access.bootstrap_invite.clone(),
+    };
+    let handled = router::handle(
+        &services.state,
+        services.access.transport,
+        caller,
+        route,
+        body,
+    )
+    .await;
+    stream
+        .respond_opaque(
+            handled.response.status,
+            handled.response.body.len() as u64,
+            handled.response.error.as_deref(),
+        )
+        .await?;
+    stream.write(&handled.response.body).await?;
+    stream.finish().await?;
+    apply_side_effect(services, handled.effect).await;
+    Ok(())
 }
 
 fn diagnostic_id(metadata: &serde_json::Value) -> Option<String> {
@@ -976,6 +1065,8 @@ fn diagnostic_operation(metadata: &serde_json::Value) -> Option<String> {
 
 fn support_stream_operation(method: &str) -> Option<&'static str> {
     match method {
+        genehub_proto::LOGIC_IDENTITY_METHOD => Some("platform.logic.identity"),
+        genehub_proto::PATCH_CONTROL_METHOD => Some("platform.patch"),
         "asset.preview" => Some("asset.preview"),
         "rtc.negotiate" => Some("rtc.negotiate"),
         "shell.run" => Some("shell.run"),
@@ -993,46 +1084,6 @@ fn support_status_code(status: Option<u16>, transport_error: bool) -> Option<&'s
             _ => None,
         }
     }
-}
-
-async fn send_reply(stream: &mut ServerStream, reply: Reply) -> Result<()> {
-    let body = serde_json::to_vec(&reply)?;
-    stream
-        .respond(&ExchangeResponseHead {
-            status: 200,
-            metadata: serde_json::Value::Null,
-            body_length: Some(body.len() as u64),
-            error: None,
-        })
-        .await?;
-    stream.write(&body).await?;
-    stream.finish().await
-}
-
-async fn send_protocol_error(stream: &mut ServerStream, error: ProtocolError) -> Result<()> {
-    let status = match error.code {
-        ErrorCode::BadRequest => 400,
-        ErrorCode::Unauthorized => 401,
-        ErrorCode::Forbidden => 403,
-        ErrorCode::NotFound => 404,
-        ErrorCode::Conflict => 409,
-        ErrorCode::Unsupported => 422,
-        ErrorCode::ProtocolVersion => 426,
-        ErrorCode::Internal => 500,
-        // Not 403: the caller is allowed, the machine is unable. Retrying with
-        // a wider grant would not help, and neither would retrying at all
-        // until this machine gains a backend.
-        ErrorCode::IsolationUnavailable => 501,
-    };
-    stream
-        .respond(&ExchangeResponseHead {
-            status,
-            metadata: serde_json::Value::Null,
-            body_length: Some(0),
-            error: Some(error),
-        })
-        .await?;
-    stream.finish().await
 }
 
 pub(crate) async fn send_error(
@@ -1080,11 +1131,14 @@ async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
             let task = tokio::spawn(async move {
                 loop {
                     let frame = match receiver.recv().await {
-                        Ok(event) => ServerFrame::event(&topic, event),
-                        Err(broadcast::error::RecvError::Lagged(missed)) => ServerFrame::Desync {
-                            session_id: topic.clone(),
-                            missed,
-                        },
+                        Ok(event) => event,
+                        Err(broadcast::error::RecvError::Lagged(missed)) => {
+                            serde_json::to_vec(&serde_json::json!({
+                                "type": "desync",
+                                "data": { "sessionId": topic.clone(), "missed": missed },
+                            }))
+                            .expect("static desync frame is JSON")
+                        }
                         Err(broadcast::error::RecvError::Closed) => return,
                     };
                     if events.send(frame).await.is_err() {
@@ -1120,37 +1174,9 @@ async fn handle_events(stream: &mut ServerStream, services: &PeerServices) -> Re
         })
         .await?;
     while let Some(frame) = receiver.recv().await {
-        stream.write_message(&frame).await?;
+        stream.write_raw_message(&frame).await?;
     }
     stream.finish().await
-}
-
-fn request_workspace(request: &Request) -> Option<&str> {
-    match request {
-        Request::SessionFork {
-            target: Some(target),
-            ..
-        }
-        | Request::SessionForkImport { target, .. } => target.workspace_id.as_deref(),
-        Request::SessionCreate { workspace_id, .. }
-        | Request::SessionImportList { workspace_id, .. }
-        | Request::SessionImport { workspace_id, .. }
-        | Request::FileTree { workspace_id, .. }
-        | Request::FileWrite { workspace_id, .. }
-        | Request::FileMkdir { workspace_id, .. }
-        | Request::FileCopy { workspace_id, .. }
-        | Request::FileMove { workspace_id, .. }
-        | Request::FileDelete { workspace_id, .. }
-        | Request::GitStatus { workspace_id }
-        | Request::GitDiff { workspace_id, .. }
-        | Request::GitCommit { workspace_id, .. }
-        | Request::PtyOpen { workspace_id, .. }
-        | Request::SpeechContextPreview { workspace_id, .. }
-        | Request::SpeechFeedbackRecord { workspace_id, .. }
-        | Request::WorkspaceRename { workspace_id, .. }
-        | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
-        _ => None,
-    }
 }
 
 async fn run_writer(
@@ -1275,46 +1301,6 @@ mod tests {
         assert_eq!(
             diagnostic_operation(&serde_json::json!({ "operation": "settings/get?token=x" })),
             None
-        );
-    }
-
-    #[test]
-    fn directed_forks_are_scoped_to_the_destination_workspace() {
-        let target = genehub_proto::ForkTarget {
-            agent_id: "codex".into(),
-            workspace_id: Some("target-workspace".into()),
-            model_id: None,
-            mode_id: None,
-            effort_id: None,
-        };
-        assert_eq!(
-            request_workspace(&Request::SessionFork {
-                session_id: "source".into(),
-                turn_id: "turn".into(),
-                target: Some(target.clone()),
-            }),
-            Some("target-workspace")
-        );
-        assert_eq!(
-            request_workspace(&Request::SessionForkImport {
-                transfer: genehub_proto::ForkTransfer {
-                    source_session_id: "source".into(),
-                    source_turn_id: "turn".into(),
-                    source_agent_id: "codex".into(),
-                    source_round_id: None,
-                    title: None,
-                    items: Vec::new(),
-                    coverage: genehub_proto::HistoryCoverage {
-                        source_item_count: Some(0),
-                        retained_item_count: 0,
-                        omitted_item_count: 0,
-                        retrieval: genehub_proto::RetrievalCapability::Genehub,
-                        reason: None,
-                    },
-                },
-                target,
-            }),
-            Some("target-workspace")
         );
     }
 }

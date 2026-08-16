@@ -4,22 +4,6 @@ use crate::timeline::TimelineItem;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// The signed portable application currently routed by the native daemon.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct LogicModuleStatus {
-    pub loaded: bool,
-    #[ts(optional)]
-    pub version: Option<String>,
-    #[ts(optional)]
-    pub digest: Option<String>,
-    #[ts(optional)]
-    pub origin: Option<String>,
-    #[ts(type = "number")]
-    pub generation: u64,
-}
-
 /// What an agent can do, declared up front.
 ///
 /// The frontend renders controls from this rather than probing with calls that
@@ -800,99 +784,6 @@ pub enum IsolationBackend {
     Seatbelt,
     AppContainer,
     None,
-}
-
-/// Whether a newer build has been published, and where a person gets it.
-///
-/// Asked for, never volunteered. A machine that promises to keep to itself has no
-/// business making an outbound call nobody requested, and the answer is only
-/// wanted at the moment someone wonders — which is why this is a menu item and a
-/// button rather than a heartbeat.
-///
-/// Nothing here *installs* anything either. The machine can fetch the installer
-/// once asked (`UpdateDownload`), but running it — which stops the daemon and
-/// whatever an agent was mid-turn — stays a click the user makes, not a timer we
-/// fire.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct UpdateStatus {
-    /// What this machine is running.
-    pub current: String,
-    /// The newest published version, when the check got an answer at all.
-    ///
-    /// Left out of the wire rather than sent as null, here and below, so that the
-    /// generated `latest?: string` describes what actually arrives.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub latest: Option<String>,
-    /// True only when `latest` is genuinely later. A build from source can be
-    /// ahead of the newest release, and telling that person to upgrade would be
-    /// telling them to go backwards.
-    pub newer: bool,
-    /// The release page: notes and checksums. Optional next to `download_url`,
-    /// because some people want to read before they fetch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub url: Option<String>,
-    /// The installer for *this* machine, when the manifest named one.
-    ///
-    /// Separate from `url` on purpose: the page is for a person, the file is for
-    /// a download button that must not open a browser just to fetch a binary.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub download_url: Option<String>,
-    /// Why there is no answer, in the words of whatever failed. The one outcome
-    /// worth refusing to render is a check that quietly says "up to date" after
-    /// reaching nothing at all.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub problem: Option<String>,
-}
-
-/// How far the machine has got fetching the installer it was asked to fetch.
-///
-/// A state rather than a reply to one call, because a download outlives the
-/// click that started it: the window can be closed, the workbench reloaded, a
-/// second client opened on a phone, and all of them have to see the same thing.
-/// The machine is the one place that knows, so it is the one place that says.
-///
-/// Fetching is separate from installing on purpose. What ends this is a file on
-/// disk and a sentence on screen; the installer stops the daemon and every agent
-/// mid-turn, so when to pay that is the user's call.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(tag = "state", rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub enum UpdateDownload {
-    /// Nobody has asked for anything, or the last answer was dismissed.
-    Idle,
-    #[serde(rename_all = "camelCase")]
-    Fetching {
-        version: String,
-        /// Bytes on disk so far. A number on the wire, so declared as one here:
-        /// the generated `bigint` would describe a value `JSON.parse` never
-        /// produces.
-        #[ts(type = "number")]
-        received: u64,
-        /// What the release host said the whole file weighs, when it said. A
-        /// server that sends no length is unusual but allowed, and a progress
-        /// bar that invents a total is worse than a byte count that does not.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        #[ts(type = "number")]
-        total: Option<u64>,
-    },
-    /// The installer is on this machine's disk and nothing has been run.
-    #[serde(rename_all = "camelCase")]
-    Ready {
-        version: String,
-        /// Where it landed. Only a shell running on this machine can do
-        /// anything with it; a browser on a phone shows the sentence and no
-        /// button.
-        path: String,
-    },
-    #[serde(rename_all = "camelCase")]
-    Failed { version: String, message: String },
 }
 
 /// The machine-level settings a client may see and change.

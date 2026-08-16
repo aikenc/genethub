@@ -26,6 +26,8 @@ pub fn principal(access: &PeerAccess) -> CallerContext {
 pub fn stream_method(method: &str) -> Option<StreamMethod> {
     match method {
         "events" => Some(StreamMethod::Events),
+        genehub_proto::LOGIC_IDENTITY_METHOD => Some(StreamMethod::LogicIdentity),
+        genehub_proto::PATCH_CONTROL_METHOD => Some(StreamMethod::PatchControl),
         "asset.preview" => Some(StreamMethod::AssetPreview),
         "shell.run" => Some(StreamMethod::ShellRun),
         "rtc.negotiate" => Some(StreamMethod::RtcNegotiate),

@@ -9,7 +9,7 @@ use genet_daemon_platform::{
 use support::{healthy_component, signed_component_with_key_id, signing_key, MODULE_ID};
 
 const COMPONENT_FILE: &str = "daemon-logic.wasm";
-const PORTABLE_VERSION: &str = "portable-linux-ci";
+const PORTABLE_REVISION: u64 = 77;
 const KEY_ID: &str = "dev-local";
 
 /// A producer-side assertion for the exact application artifact that Linux
@@ -24,7 +24,7 @@ fn write_linux_portable_fixture() {
     let artifact = SignedArtifact::from_single_file(&bytes).unwrap();
     assert_eq!(artifact.envelope.module_id(), MODULE_ID);
     assert_eq!(artifact.envelope.key_id(), KEY_ID);
-    assert_eq!(artifact.envelope.version(), PORTABLE_VERSION);
+    assert_eq!(artifact.envelope.logic_revision(), PORTABLE_REVISION);
     assert_eq!(artifact.to_single_file().unwrap(), bytes);
 }
 
@@ -40,18 +40,19 @@ fn consume_linux_built_fixture_through_update_and_restart() {
             .unwrap();
     assert_eq!(candidate.envelope.module_id(), MODULE_ID);
     assert_eq!(candidate.envelope.key_id(), KEY_ID);
-    assert_eq!(candidate.envelope.version(), PORTABLE_VERSION);
+    assert_eq!(candidate.envelope.logic_revision(), PORTABLE_REVISION);
 
     let state = tempfile::tempdir().unwrap();
     let key = signing_key(7);
     let verifier = ArtifactVerifier::new(
         MODULE_ID,
+        "dev",
         LOGIC_ABI_VERSION,
         16 * 1024 * 1024,
         [(KEY_ID.to_string(), key.verifying_key())],
     )
     .unwrap();
-    let fallback = signed_component_with_key_id(&key, KEY_ID, "embedded", healthy_component(1));
+    let fallback = signed_component_with_key_id(&key, KEY_ID, 1, healthy_component(1));
     let runtime = PlatformRuntime::open(
         state.path(),
         verifier.clone(),
@@ -61,7 +62,7 @@ fn consume_linux_built_fixture_through_update_and_restart() {
     .unwrap();
 
     let installed = runtime.install(candidate).unwrap();
-    assert_eq!(installed.version, PORTABLE_VERSION);
+    assert_eq!(installed.revision, PORTABLE_REVISION);
     assert_eq!(runtime.probe(100).unwrap(), 177);
     drop(runtime);
 

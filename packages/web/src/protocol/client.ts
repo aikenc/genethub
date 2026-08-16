@@ -4,13 +4,15 @@ import type {
   BackgroundProcess,
   HelloResult,
   PeerWelcome,
+  LogicIdentity,
+  PatchControlRequest,
+  PatchControlResponse,
   ProtocolError,
   Reply,
   Request,
   SequencedEvent,
   ServerFrame,
   SupportDiagnostics,
-  UpdateDownload,
 } from "@genehub/proto";
 
 import {
@@ -30,9 +32,16 @@ import {
   type RtcDataLink,
 } from "../dataplane";
 import type { BinaryWebSocketLike } from "../dataplane/websocket";
+import {
+  PROTOCOL_VERSION,
+  UnsupportedBusinessProtocolError,
+  protocolCodec,
+  type ProtocolCodec,
+} from "./codec";
 
-export const PROTOCOL_VERSION = DATA_PLANE_VERSION;
+export { PROTOCOL_VERSION } from "./codec";
 export const MAX_RPC_BODY_BYTES = 2_900_000;
+const MAX_PLATFORM_RESPONSE_BYTES = 256 * 1024;
 const MAX_PREVIEW_BYTES = 4 * 1024 * 1024;
 const MAX_EVENT_BYTES = 3 * 1024 * 1024;
 const encoder = new TextEncoder();
@@ -231,7 +240,6 @@ export class Client {
   private readonly rtcListeners = new Set<(state: RtcState) => void>();
   private readonly ptyListeners = new Set<(ptyId: string, data: string | null) => void>();
   private readonly noticeListeners = new Set<(level: string, message: string) => void>();
-  private readonly downloadListeners = new Set<(download: UpdateDownload) => void>();
   private readonly processListeners = new Set<(processes: BackgroundProcess[]) => void>();
   private state: ConnectionState = "connecting";
   private stopped = false;
@@ -254,9 +262,11 @@ export class Client {
   private connectionEpoch = 0;
   private connectionAttemptId: string | null = null;
   private carrier: "websocket" | "fabric" | null = null;
+  private businessCodec: ProtocolCodec = protocolCodec(PROTOCOL_VERSION);
 
   failure: ProtocolError | null = null;
   identity: HelloResult | null = null;
+  logicIdentity: LogicIdentity | null = null;
 
   constructor(private readonly options: ClientOptions) {
     this.activeChannelCredential = options.channelCredential;
@@ -310,11 +320,6 @@ export class Client {
   onNotice(listener: (level: string, message: string) => void): () => void {
     this.noticeListeners.add(listener);
     return () => this.noticeListeners.delete(listener);
-  }
-
-  onUpdateDownload(listener: (download: UpdateDownload) => void): () => void {
-    this.downloadListeners.add(listener);
-    return () => this.downloadListeners.delete(listener);
   }
 
   onBackgroundProcesses(listener: (processes: BackgroundProcess[]) => void): () => void {
@@ -437,6 +442,26 @@ export class Client {
         this.queue.push(pending);
       }
     });
+  }
+
+  /**
+   * Stable native control path for signed Wasm discovery and activation.
+   * URLs, revisions and keys are deliberately absent from the request type.
+   */
+  async patch(request: PatchControlRequest): Promise<PatchControlResponse> {
+    const endpoint = this.requireReadyEndpoint();
+    const response = await this.patchOn(endpoint, request);
+    this.logicIdentity = response.active;
+    if (response.type === "applied") {
+      this.businessCodec = protocolCodec(response.active.protocolVersion);
+      const identity = await this.rpc(endpoint, { type: "connection.identity" });
+      if (identity?.type !== "hello") {
+        throw new PeerAuthenticationError("更新后的 Wasm 没有返回身份信息");
+      }
+      this.verifyIdentity(identity.data);
+      this.identity = identity.data;
+    }
+    return response;
   }
 
   async preview(workspaceHandle: string, path: string): Promise<AssetPreviewResult> {
@@ -616,7 +641,7 @@ export class Client {
       this.clearConnectTimer();
       void this.establish(socket, epoch).catch((error: unknown) => {
         if (!this.isCurrent(socket, epoch)) return;
-        if (error instanceof PeerAuthenticationError) {
+        if (fatalConnectionError(error)) {
           this.failClosed(error.message);
         } else {
           this.report(error);
@@ -674,7 +699,7 @@ export class Client {
           await this.activateEndpoint(link.endpoint, epoch);
         } catch (error) {
           if (!this.isCurrentEpoch(epoch)) return;
-          if (error instanceof PeerAuthenticationError) this.failClosed(error.message);
+          if (fatalConnectionError(error)) this.failClosed(error.message);
           else {
             this.report(error);
             link.close();
@@ -748,6 +773,9 @@ export class Client {
       return;
     }
 
+    const active = await this.logicIdentityOn(endpoint);
+    this.logicIdentity = active;
+    this.businessCodec = protocolCodec(active.protocolVersion);
     const identity = await this.rpc(endpoint, { type: "connection.identity" });
     if (identity?.type !== "hello") {
       throw new PeerAuthenticationError("the encrypted peer identity was not returned");
@@ -872,7 +900,7 @@ export class Client {
     requestId = diagnosticId("internal"),
   ): Promise<Reply | undefined> {
     const budget = timeoutMs ?? this.options.requestTimeoutMs ?? 60_000;
-    const body = encoder.encode(JSON.stringify(request));
+    const body = this.businessCodec.encodeRequest(request);
     const stream = endpoint.open({
       version: DATA_PLANE_VERSION,
       method: "rpc",
@@ -896,13 +924,67 @@ export class Client {
         throw new ClientRequestTooLargeError();
       }
       const value = await collectBody(stream.body(), MAX_RPC_BODY_BYTES);
-      return value.byteLength === 0 ? undefined : (JSON.parse(decoder.decode(value)) as Reply);
+      return value.byteLength === 0 ? undefined : this.businessCodec.decodeReply(value);
     })();
     return withTimeout(
       operation,
       budget,
       "the daemon did not answer the request before its deadline",
       () => stream.reset(DataReset.Timeout),
+    );
+  }
+
+  private async patchOn(
+    endpoint: DataEndpoint,
+    request: PatchControlRequest,
+  ): Promise<PatchControlResponse> {
+    const body = encoder.encode(JSON.stringify(request));
+    const stream = endpoint.open({
+      version: DATA_PLANE_VERSION,
+      method: "platform.patch",
+      metadata: null,
+      bodyLength: body.byteLength,
+      timeoutMs: 120_000,
+    });
+    const operation = (async () => {
+      await stream.write(body);
+      await stream.finish();
+      const head = await stream.responseHead;
+      if (head.error) throw new ProtocolError_(head.error);
+      if (head.status !== 200) {
+        throw new ProtocolError_({
+          code: "internal",
+          message: `Platform patch control failed (${head.status})`,
+        });
+      }
+      const value = await collectBody(stream.body(), MAX_PLATFORM_RESPONSE_BYTES);
+      return JSON.parse(decoder.decode(value)) as PatchControlResponse;
+    })();
+    return withTimeout(operation, 120_000, "补丁控制器没有在期限内响应", () =>
+      stream.reset(DataReset.Timeout),
+    );
+  }
+
+  private async logicIdentityOn(endpoint: DataEndpoint): Promise<LogicIdentity> {
+    const stream = endpoint.open({
+      version: DATA_PLANE_VERSION,
+      method: "platform.logic.identity",
+      metadata: null,
+      bodyLength: 0,
+      timeoutMs: 10_000,
+    });
+    const operation = (async () => {
+      await stream.finish();
+      const head = await stream.responseHead;
+      if (head.error) throw new ProtocolError_(head.error);
+      if (head.status !== 200) {
+        throw new PeerAuthenticationError(`Platform identity failed (${head.status})`);
+      }
+      const value = await collectBody(stream.body(), 8 * 1024);
+      return JSON.parse(decoder.decode(value)) as LogicIdentity;
+    })();
+    return withTimeout(operation, 10_000, "Platform 身份读取超时", () =>
+      stream.reset(DataReset.Timeout),
     );
   }
 
@@ -952,7 +1034,7 @@ export class Client {
           throw new DataPlaneError("invalid event message length");
         }
         if (buffered.byteLength < 4 + length) break;
-        const frame = JSON.parse(decoder.decode(buffered.slice(4, 4 + length))) as ServerFrame;
+        const frame = this.businessCodec.decodeServerFrame(buffered.slice(4, 4 + length));
         buffered = buffered.slice(4 + length);
         this.receiveEvent(frame);
       }
@@ -989,9 +1071,6 @@ export class Client {
       case "processes":
         for (const listener of this.processListeners)
           this.callListener(() => listener(frame.processes));
-        return;
-      case "updateDownload":
-        for (const listener of this.downloadListeners) this.callListener(() => listener(frame.download));
         return;
       case "desync":
         void this.fillGap(frame.sessionId);
@@ -1499,6 +1578,15 @@ class PeerAuthenticationError extends Error {
     super(message, options);
     this.name = "PeerAuthenticationError";
   }
+}
+
+function fatalConnectionError(
+  error: unknown,
+): error is PeerAuthenticationError | UnsupportedBusinessProtocolError {
+  return (
+    error instanceof PeerAuthenticationError ||
+    error instanceof UnsupportedBusinessProtocolError
+  );
 }
 
 function nextBinaryMessage(socket: WebSocketLike, timeoutMs: number): Promise<Uint8Array> {

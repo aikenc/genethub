@@ -9,12 +9,12 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
 ## 1. 一句话架构
 
 ```
-     浏览器 / 桌面 / 手机  ← 同一份工作台前端
+     官网 / Desktop WebView / 手机浏览器  ← 同一份工作台前端
               │
               │  protocol-v3 DataEndpoint（本仓 packages/proto 定义）：
-              │   ① 同机 127.0.0.1 WebSocket
-              │   ② 跨设备 /fabric/v2 E2EE baseline
-              │   ③ 网络允许时 WebRTC DataChannel direct
+              │   ① 官网 /fabric/v2 E2EE baseline
+              │   ② 网络允许时 WebRTC DataChannel direct
+              │   ③ CLI、自建直连与运维可用 loopback WebSocket
               ▼
         ┌──────────┐         出站 WS        ┌───────────┐
         │  daemon  │ ─── /fabric/v2 ──────► │   relay   │
@@ -91,8 +91,8 @@ enum Driver {
 
 registry 仍显式声明 `Capabilities`，前端在渲染按钮前就知道能否中断、切模型、
 切模式或恢复。driver 只解释协议；启动、stdin/stdout、退出、持久暂停与恢复由
-`packages/daemon-core/src/session/mod.rs` 的统一状态机执行。完整 driver 状态进入
-guest snapshot，原生 session id 进入耐久 meta。
+`packages/daemon-core/src/session/mod.rs` 的统一状态机执行。完整 driver 状态与原生
+session id 都进入业务域自己的耐久 session 数据；Wasm 冷更新时不搬运运行时内存。
 
 模型、**思考强度**、**模式**是三条独立的轴，不要混用。思考强度是「想多久」（`ModelInfo.efforts` 里由模型自己报出档位，`session.setEffort` 切换）；模式是「动手前问不问」（`Catalog.modes`，`session.setMode`）。这两件事曾经共用一个 `modeId` 字段——内置 agent 拿它当思考档位，Claude 拿它当工具审批策略——于是同一个控件在不同 agent 下是两个毫不相干的意思，唯一的区分办法是去读另一个能力位。一条轴一件事之后，前端不需要知道是哪个 agent 就能把控件画对。
 
@@ -245,22 +245,26 @@ interface FabricAuthority {
 
 ### 6.6 baseline 与 direct
 
-桌面壳内的 WebView 直连同一台机器的 `127.0.0.1`。跨设备先走 `/fabric/v2` baseline，再通过加密的 `rtc.negotiate` Exchange 协商 ordered reliable DataChannel。RTC connected 后新 logical streams 优先 direct；RTC 失败或关闭时 baseline 继续承载同一 v3 协议。没有 TURN、live migration 或自动重放。
+官网、桌面 WebView 和手机浏览器都先走 `/fabric/v2` baseline，再通过加密的 `rtc.negotiate` Exchange
+协商 ordered reliable DataChannel。同机连接应优先拿到 host candidate；RTC connected 后新 logical
+streams 优先 direct，失败或关闭时 baseline 继续承载同一 v3 协议。没有 TURN、live migration 或自动
+重放。loopback 只保留给 CLI、Desktop 原生监督和运维，不向官网产品页开放。
 
 完整数据面见 [e2ee-data-plane.md](./e2ee-data-plane.md)，Relay 实现边界见 [relay.md](./relay.md)。
 
 ---
 
-## 7. 前端：一份代码，四个宿主
+## 7. 前端：一份代码，四个入口
 
 | 宿主 | 怎么来的 | 连哪里 |
 |------|---------|--------|
-| 浏览器 | 直接访问 | relay 票据 |
-| 桌面（Tauri） | 系统 WebView 加载同一份产物 | 本机 daemon |
-| 手机（Tauri Mobile） | 同上 | relay |
-| 自建部署 | 静态文件 | 同浏览器 |
+| 浏览器 | 直接访问官网 | Fabric ticket，随后可升级 WebRTC |
+| 桌面（Tauri） | 系统 WebView 打开固定 channel 官网 | 与浏览器相同；同机优先 WebRTC direct |
+| 手机浏览器 | 直接访问同一官网 | 与浏览器相同 |
+| 自建部署 | 自托管同一静态工作台 | 与浏览器相同 |
 
-宿主差异收敛在 `packages/web/src/host/` 一个模块里，业务组件不允许出现 `if (isTauri)`。范围与移动端约束见 [web-workbench.md](./web-workbench.md)。
+`packages/web/src/host/` 只封装浏览器差异与连接入口；远程页面没有 Tauri bridge，业务组件不允许出现
+`if (isTauri)`。范围与移动端约束见 [web-workbench.md](./web-workbench.md)。
 
 **本仓前端的范围是：会话、项目、文件、终端、以及你自己的设备管理。** 账号体系的界面不在本仓——它属于运营控制面的人，跟"用哪个 agent 干活"是两件事。
 
@@ -272,8 +276,8 @@ interface FabricAuthority {
 apps/daemon      ← Rust：会话内核 + adapter 层 + 本地 WS + 出站长连接
 apps/agent       ← Rust：内置 Genet Agent（众多 adapter 中的一个后端）
 apps/relay       ← Node：转发层。无数据库、无业务、可自建
-apps/desktop     ← 仅 Windows/macOS 的 Tauri 2 壳；复用 Web 工作台
-packages/web     ← 工作台前端（四个宿主同一份产物）
+apps/desktop     ← 仅 Windows/macOS 的最小 Tauri 2 壳；监督 daemon、鉴权并打开官网
+packages/web     ← 官网/浏览器工作台；Desktop WebView 直接消费已部署版本
 packages/proto   ← 会话协议的唯一定义处，生成 TS 类型与 Rust 结构
 skills/          ← 教 Agent 怎么用 genet CLI 的 Agent Skills
 testing/         ← 跨部件旅程测试（daemon + agent + mock 模型）

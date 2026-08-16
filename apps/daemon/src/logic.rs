@@ -1,4 +1,4 @@
-//! Thin product integration for the hot-updatable daemon Wasm application.
+//! Thin product integration for the replaceable daemon Wasm application.
 //!
 //! The native side knows artifact trust, VM lifecycle and one byte-batch call.
 //! It does not inspect request fields or split strings into host functions.
@@ -12,17 +12,18 @@ use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use genehub_proto::{Request, SequencedEvent, ServerFrame, TransportKind};
+use genehub_proto::TransportKind;
 use genet_daemon_logic_api::{
     decode_message, encode_message, CallerContext, CapabilityBatch, CapabilityCall,
     CapabilityFailure, CapabilityFailureKind, CapabilityRequest, CapabilityResult,
-    CapabilityResults, CapabilityValue, ConnectionDirective, ConnectivityRequest,
-    LogicArtifactRequest, LogicArtifactState, LogicBoot, LogicInput, LogicOutcome, LogicOutput,
-    LogicRequest, PlatformCall, PlatformReply, PlatformRequest, Publication, StreamAuthorization,
-    StreamMethod,
+    CapabilityResults, CapabilityValue, CarrierInput, CarrierOutput, CarrierPublication,
+    CarrierRequest, CarrierResponse, ConnectionDirective, ConnectivityRequest, LogicBoot,
+    PlatformCall, PlatformReply, PlatformRequest, PublicationSecurity, RequestRoute,
+    StreamAuthorization, StreamMethod,
 };
 use genet_daemon_platform::{
-    ActiveLogic, ArtifactVerifier, PlatformRuntime, SignedArtifact, VmPolicy, LOGIC_ABI_VERSION,
+    ActiveLogic, ArtifactVerifier, PlatformRuntime, PreparedLogic, SignedArtifact, VmPolicy,
+    LOGIC_ABI_VERSION,
 };
 use genet_daemon_system::SystemHost;
 use tokio::sync::{broadcast, Mutex};
@@ -45,10 +46,9 @@ pub struct LogicHost {
         Option<tokio::sync::mpsc::Receiver<genet_daemon_logic_api::CapabilityEvent>>,
     >,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    subscriptions:
-        std::sync::Mutex<std::collections::HashMap<String, broadcast::Sender<SequencedEvent>>>,
+    subscriptions: std::sync::Mutex<std::collections::HashMap<String, broadcast::Sender<Vec<u8>>>>,
     device_revocations: broadcast::Sender<String>,
-    fanout: std::sync::OnceLock<broadcast::Sender<ServerFrame>>,
+    fanout: std::sync::OnceLock<broadcast::Sender<RoutedEvent>>,
 }
 
 #[derive(Clone)]
@@ -75,15 +75,29 @@ enum BrokerReply {
 }
 
 pub struct LogicRoute {
-    pub outcome: LogicOutcome,
+    pub response: CarrierResponse,
     pub connection: LogicConnection,
+}
+
+#[derive(Clone, Debug)]
+pub struct RoutedEvent {
+    pub security: PublicationSecurity,
+    pub bytes: Vec<u8>,
+}
+
+pub enum ApplyArtifact {
+    Busy {
+        readiness: genet_daemon_logic_api::UpdateReadiness,
+        native_resources: u32,
+    },
+    Installed(ActiveLogic),
 }
 
 pub enum LogicConnection {
     None,
     Subscribe {
         session_id: String,
-        receiver: broadcast::Receiver<SequencedEvent>,
+        receiver: broadcast::Receiver<Vec<u8>>,
     },
     Unsubscribe {
         session_id: String,
@@ -112,6 +126,7 @@ impl LogicHost {
         let (key_id, key) = trusted_key()?;
         let verifier = ArtifactVerifier::new(
             MODULE_ID,
+            crate::channel::CHANNEL,
             LOGIC_ABI_VERSION,
             MAX_ARTIFACT_BYTES,
             [(key_id, key)],
@@ -169,7 +184,7 @@ impl LogicHost {
         )?);
         tracing::info!(
             path = %artifact_path.display(),
-            version = %runtime.active()?.version,
+            revision = runtime.active()?.revision,
             "daemon Wasm logic active"
         );
         let (device_revocations, _) = broadcast::channel(64);
@@ -190,15 +205,17 @@ impl LogicHost {
         self: &Arc<Self>,
         transport: TransportKind,
         caller: CallerContext,
-        request: Request,
+        route: RequestRoute,
+        body: Vec<u8>,
     ) -> Result<LogicRoute> {
         let _execution = self.execution.lock().await;
         let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
-        let input = LogicInput::Request(LogicRequest {
+        let input = CarrierInput::Request(CarrierRequest {
             call_id,
             transport,
             caller,
-            request,
+            route,
+            body,
         });
         let mut inputs = VecDeque::from([input]);
         let mut completion = None;
@@ -222,17 +239,17 @@ impl LogicHost {
                     );
                 }
                 connection = self.connection(finished.connection)?;
-                if completion.replace(finished.outcome).is_some() {
+                if completion.replace(finished.response).is_some() {
                     anyhow::bail!("portable logic completed call {call_id} more than once");
                 }
             }
             for batch in output.capability_batches {
                 let results = self.execute_batch(batch).await;
-                inputs.push_back(LogicInput::CapabilityResults(results));
+                inputs.push_back(CarrierInput::CapabilityResults(results));
             }
         }
         Ok(LogicRoute {
-            outcome: completion.context("portable logic did not complete the routed request")?,
+            response: completion.context("portable logic did not complete the routed request")?,
             connection,
         })
     }
@@ -249,7 +266,7 @@ impl LogicHost {
     /// agent protocol or session event.
     pub async fn start_event_pump(
         self: &Arc<Self>,
-        fanout: broadcast::Sender<ServerFrame>,
+        fanout: broadcast::Sender<RoutedEvent>,
     ) -> Result<()> {
         let mut task = self.event_task.lock().await;
         if task.is_some() {
@@ -278,10 +295,10 @@ impl LogicHost {
     async fn drive_event(
         &self,
         event: genet_daemon_logic_api::CapabilityEvent,
-        fanout: &broadcast::Sender<ServerFrame>,
+        fanout: &broadcast::Sender<RoutedEvent>,
     ) -> Result<()> {
         let _execution = self.execution.lock().await;
-        let mut inputs = VecDeque::from([LogicInput::CapabilityEvent(event)]);
+        let mut inputs = VecDeque::from([CarrierInput::CapabilityEvent(event)]);
         let mut turns = 0_usize;
         while let Some(input) = inputs.pop_front() {
             turns += 1;
@@ -294,7 +311,7 @@ impl LogicHost {
             }
             self.publish(output.publications.drain(..), Some(fanout))?;
             for batch in output.capability_batches {
-                inputs.push_back(LogicInput::CapabilityResults(
+                inputs.push_back(CarrierInput::CapabilityResults(
                     self.execute_batch(batch).await,
                 ));
             }
@@ -304,22 +321,25 @@ impl LogicHost {
 
     fn publish(
         &self,
-        publications: impl IntoIterator<Item = Publication>,
-        fanout: Option<&broadcast::Sender<ServerFrame>>,
+        publications: impl IntoIterator<Item = CarrierPublication>,
+        fanout: Option<&broadcast::Sender<RoutedEvent>>,
     ) -> Result<()> {
         for publication in publications {
             match publication {
-                Publication::Session(event) => {
-                    let sender = self.session_sender(&event.session_id)?;
+                CarrierPublication::Session { session_id, event } => {
+                    let sender = self.session_sender(&session_id)?;
                     let _ = sender.send(event);
                 }
-                Publication::Fanout(frame) => {
+                CarrierPublication::Fanout { security, frame } => {
                     let fanout = fanout.or_else(|| self.fanout.get()).context(
                         "portable logic emitted a fanout frame before the event pump started",
                     )?;
-                    let _ = fanout.send(frame);
+                    let _ = fanout.send(RoutedEvent {
+                        security,
+                        bytes: frame,
+                    });
                 }
-                Publication::DeviceRevoked { device_id } => {
+                CarrierPublication::DeviceRevoked { device_id } => {
                     let _ = self.device_revocations.send(device_id);
                 }
             }
@@ -329,8 +349,13 @@ impl LogicHost {
 
     async fn platform_request(&self, request: PlatformRequest) -> Result<PlatformReply> {
         let _execution = self.execution.lock().await;
+        self.platform_request_locked(request).await
+    }
+
+    async fn platform_request_locked(&self, request: PlatformRequest) -> Result<PlatformReply> {
         let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
-        let mut inputs = VecDeque::from([LogicInput::Platform(PlatformCall { call_id, request })]);
+        let mut inputs =
+            VecDeque::from([CarrierInput::Platform(PlatformCall { call_id, request })]);
         let mut completion = None;
         let mut turns = 0_usize;
         while let Some(input) = inputs.pop_front() {
@@ -357,7 +382,7 @@ impl LogicHost {
                 }
             }
             for batch in output.capability_batches {
-                inputs.push_back(LogicInput::CapabilityResults(
+                inputs.push_back(CarrierInput::CapabilityResults(
                     self.execute_batch(batch).await,
                 ));
             }
@@ -516,7 +541,7 @@ impl LogicHost {
         })
     }
 
-    fn session_sender(&self, session_id: &str) -> Result<broadcast::Sender<SequencedEvent>> {
+    fn session_sender(&self, session_id: &str) -> Result<broadcast::Sender<Vec<u8>>> {
         let mut subscriptions = self
             .subscriptions
             .lock()
@@ -527,10 +552,10 @@ impl LogicHost {
             .clone())
     }
 
-    fn dispatch_with(runtime: &PlatformRuntime, input: &LogicInput) -> Result<LogicOutput> {
+    fn dispatch_with(runtime: &PlatformRuntime, input: &CarrierInput) -> Result<CarrierOutput> {
         let input = encode_message("logic input", input).map_err(anyhow::Error::msg)?;
         let output = runtime.handle(&input)?;
-        decode_message::<std::result::Result<LogicOutput, String>>(
+        decode_message::<std::result::Result<CarrierOutput, String>>(
             "logic output",
             &output,
             4 * 1024 * 1024,
@@ -539,7 +564,7 @@ impl LogicHost {
         .map_err(anyhow::Error::msg)
     }
 
-    async fn dispatch_blocking(&self, input: LogicInput) -> Result<LogicOutput> {
+    async fn dispatch_blocking(&self, input: CarrierInput) -> Result<CarrierOutput> {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || Self::dispatch_with(&runtime, &input))
             .await
@@ -547,81 +572,64 @@ impl LogicHost {
     }
 
     async fn execute_batch(&self, batch: CapabilityBatch) -> CapabilityResults {
-        let mut results = Vec::with_capacity(batch.calls.len());
-        for call in batch.calls {
-            results.push(match call.request {
-                CapabilityRequest::LogicArtifact(request) => {
-                    self.execute_artifact(call.call_id, request)
-                }
-                request => {
-                    let mut result = self
-                        .system
-                        .execute(CapabilityBatch {
-                            batch_id: batch.batch_id,
-                            calls: vec![CapabilityCall {
-                                call_id: call.call_id,
-                                request,
-                            }],
-                        })
-                        .await
-                        .results;
-                    result.pop().unwrap_or_else(|| CapabilityResult {
-                        call_id: call.call_id,
-                        result: Err(capability_failure(
-                            CapabilityFailureKind::Internal,
-                            "system capability returned no result",
-                        )),
-                    })
-                }
-            });
-        }
-        CapabilityResults {
-            batch_id: batch.batch_id,
-            results,
-        }
-    }
-
-    fn execute_artifact(&self, call_id: u64, request: LogicArtifactRequest) -> CapabilityResult {
-        let result = match request {
-            LogicArtifactRequest::Status => self.runtime.active(),
-            LogicArtifactRequest::Install { native_path } => read_artifact(Path::new(&native_path))
-                .map_err(|error| genet_daemon_platform::PlatformError::State(format!("{error:#}")))
-                .and_then(|artifact| self.runtime.install(artifact)),
-            LogicArtifactRequest::Rollback => self.runtime.rollback(),
-        }
-        .map(|active| {
-            CapabilityValue::LogicArtifact(LogicArtifactState {
-                version: active.version,
-                digest: active.digest,
-                origin: format!("{:?}", active.origin).to_ascii_lowercase(),
-                generation: active.generation,
-            })
-        })
-        .map_err(|error| capability_failure(CapabilityFailureKind::Unavailable, error.to_string()));
-        CapabilityResult { call_id, result }
+        self.system.execute(batch).await
     }
 
     pub fn active(&self) -> Result<ActiveLogic> {
         Ok(self.runtime.active()?)
     }
 
-    pub fn status(&self) -> Result<genehub_proto::LogicModuleStatus> {
-        let active = self.active()?;
-        Ok(genehub_proto::LogicModuleStatus {
-            loaded: true,
-            version: Some(active.version),
-            digest: Some(active.digest),
-            origin: Some(format!("{:?}", active.origin).to_ascii_lowercase()),
-            generation: active.generation,
-        })
+    pub fn highest_accepted_revision(&self) -> Result<u64> {
+        Ok(self.runtime.highest_accepted_revision()?)
     }
 
-    pub fn install_file(&self, path: &Path) -> Result<ActiveLogic> {
-        Ok(self.runtime.install(read_artifact(path)?)?)
+    pub async fn native_resource_count(&self) -> u32 {
+        self.system.system.resource_count().await
     }
 
-    pub fn rollback(&self) -> Result<ActiveLogic> {
-        Ok(self.runtime.rollback()?)
+    pub async fn apply_artifact(
+        &self,
+        artifact: SignedArtifact,
+        terminate_activities: bool,
+    ) -> Result<ApplyArtifact> {
+        let runtime = Arc::clone(&self.runtime);
+        let prepared = tokio::task::spawn_blocking(move || runtime.prepare(artifact))
+            .await
+            .context("portable candidate preparation worker stopped")??;
+        self.apply_prepared(prepared, terminate_activities).await
+    }
+
+    async fn apply_prepared(
+        &self,
+        prepared: PreparedLogic,
+        terminate_activities: bool,
+    ) -> Result<ApplyArtifact> {
+        let _execution = self.execution.lock().await;
+        let readiness = match self
+            .platform_request_locked(PlatformRequest::PrepareUpdate {
+                terminate_activities,
+            })
+            .await?
+        {
+            PlatformReply::UpdateReadiness(readiness) => readiness,
+            _ => anyhow::bail!("portable update gate returned the wrong value"),
+        };
+        let native_resources = self.system.system.resource_count().await;
+        if readiness.busy || (!terminate_activities && native_resources > 0) {
+            return Ok(ApplyArtifact::Busy {
+                readiness,
+                native_resources,
+            });
+        }
+
+        // The guest has stopped its product activities. Close every native
+        // handle before the new cold instance becomes routable.
+        self.system.system.quiesce().await;
+        let runtime = Arc::clone(&self.runtime);
+        let active = tokio::task::spawn_blocking(move || runtime.activate(prepared))
+            .await
+            .context("portable update worker stopped")??;
+        Ok(ApplyArtifact::Installed(active))
     }
 
     pub async fn shutdown(&self) {
@@ -700,15 +708,6 @@ impl CapabilityBroker {
 
     fn handle_bytes(&self, request: &[u8]) -> std::result::Result<Vec<u8>, String> {
         let batch: CapabilityBatch = decode_message("capability batch", request, 4 * 1024 * 1024)?;
-        if batch
-            .calls
-            .iter()
-            .any(|call| matches!(call.request, CapabilityRequest::LogicArtifact(_)))
-        {
-            return Err(
-                "logic artifact replacement cannot re-enter the active VM call".to_string(),
-            );
-        }
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
         self.commands
             .try_send(BrokerCommand::Execute {

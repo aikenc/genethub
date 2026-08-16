@@ -1349,7 +1349,9 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
+ "genehub-proto",
  "genet-daemon-platform",
+ "serde_json",
 ]
 
 [[package]]
@@ -1385,9 +1387,11 @@ dependencies = [
 name = "genet-daemon-logic"
 version = "0.0.0"
 dependencies = [
+ "genehub-proto",
  "genet-daemon-common",
  "genet-daemon-core",
  "genet-daemon-logic-api",
+ "serde_json",
 ]
 
 [[package]]
@@ -1416,6 +1420,7 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "wat",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

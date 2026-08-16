@@ -12,7 +12,7 @@ afterEach(() => {
 
 function host(overrides: Partial<Host> = {}): Host {
   return {
-    kind: "desktop",
+    kind: "browser",
     endpoint: async () => null,
     notify: () => {},
     openExternal: () => {},
@@ -60,13 +60,12 @@ describe("connecting a machine to a Hub", () => {
     expiresAt: "2026-01-01T00:00:00Z",
   } as const;
 
-  it("approves the code in a window of this app rather than throwing the user out", async () => {
-    const openWindow = vi.fn();
+  it("opens the authorization page as an ordinary browser link", async () => {
     const openExternal = vi.fn();
     render(
       <Pairing
         status={PAIRING}
-        host={host({ openWindow, openExternal })}
+        host={host({ openExternal })}
         onPair={async () => {}}
         onUnpair={async () => {}}
       />,
@@ -75,26 +74,6 @@ describe("connecting a machine to a Hub", () => {
     expect(screen.getByTestId("user-code")).toHaveTextContent("VCL9-47CG");
     await userEvent.click(screen.getByText("打开授权页面"));
 
-    // Being bounced out to the system browser and back is the worst minute of a
-    // first install, and this app is a browser already.
-    expect(openWindow).toHaveBeenCalledWith("https://hub.example.com/activate?code=VCL9-47CG");
-    expect(openExternal).not.toHaveBeenCalled();
-  });
-
-  it("falls back to a plain link where the shell has no window of its own", async () => {
-    // A browser: a tab is already a window of this app, and pretending
-    // otherwise would mean the button does nothing there.
-    const openExternal = vi.fn();
-    render(
-      <Pairing
-        status={PAIRING}
-        host={host({ kind: "browser", openExternal })}
-        onPair={async () => {}}
-        onUnpair={async () => {}}
-      />,
-    );
-
-    await userEvent.click(screen.getByText("打开授权页面"));
     expect(openExternal).toHaveBeenCalledWith("https://hub.example.com/activate?code=VCL9-47CG");
   });
 
@@ -152,12 +131,11 @@ describe("connecting a machine to a Hub", () => {
    */
   it("connects in one press, without a window or a code, where the Hub is known", async () => {
     const onTrial = vi.fn(async () => null);
-    const openWindow = vi.fn();
     const openExternal = vi.fn();
     render(
       <Pairing
         status={{ state: "unpaired" }}
-        host={host({ openWindow, openExternal })}
+        host={host({ openExternal })}
         defaultHubUrl="https://relay.example.com"
         onPair={async () => {}}
         onTrial={onTrial}
@@ -167,7 +145,6 @@ describe("connecting a machine to a Hub", () => {
 
     await userEvent.click(screen.getByTestId("connect-hub"));
     expect(onTrial).toHaveBeenCalledWith("https://relay.example.com");
-    expect(openWindow).not.toHaveBeenCalled();
     expect(openExternal).not.toHaveBeenCalled();
   });
 
@@ -308,8 +285,7 @@ describe("connecting a machine to a Hub", () => {
     expect(screen.queryByText(/恢复密钥/)).not.toBeInTheDocument();
   });
 
-  it("opens a claim link in this app where there is a window for it", async () => {
-    const openWindow = vi.fn();
+  it("keeps a normal browser action beside the claim link", async () => {
     const openExternal = vi.fn();
     const claim = {
       claimUrl: "https://hub.example.com/link/abc",
@@ -322,32 +298,17 @@ describe("connecting a machine to a Hub", () => {
       online: true,
     } as const;
 
-    const { rerender } = render(
+    render(
       <Pairing
         status={paired}
         claim={claim}
-        host={host({ openWindow, openExternal })}
+        host={host({ openExternal })}
         onPair={async () => {}}
         onUnpair={async () => {}}
       />,
     );
-    await userEvent.click(screen.getByText("在这个应用里打开"));
-    expect(openWindow).toHaveBeenCalledWith(claim.claimUrl);
-
-    // The link's main job is still the other device, so the plain one stays.
     await userEvent.click(screen.getByText("在浏览器里打开"));
     expect(openExternal).toHaveBeenCalledWith(claim.claimUrl);
-
-    rerender(
-      <Pairing
-        status={paired}
-        claim={claim}
-        host={host({ kind: "browser" })}
-        onPair={async () => {}}
-        onUnpair={async () => {}}
-      />,
-    );
-    expect(screen.queryByText("在这个应用里打开")).toBeNull();
   });
 
   it("opens the account carrying this machine's identity, not as a stranger", async () => {
@@ -384,9 +345,7 @@ describe("connecting a machine to a Hub", () => {
         "https://hub.example.com/link/abc?next=%2Faccount",
       ),
     );
-    // The system browser, not a window of this app: it is somebody's account on
-    // the open web, and the session should stay where they can see it.
-    expect(host().openWindow).toBeUndefined();
+    // The account is ordinary Web; no native window bridge is involved.
   });
 
   it("says so rather than opening nothing when there is no Hub", async () => {

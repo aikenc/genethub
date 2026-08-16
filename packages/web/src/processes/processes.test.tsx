@@ -18,7 +18,6 @@ function stubDaemon(answers: Partial<Record<Request["type"], (payload: never) =>
     },
     onPty: () => () => {},
     onNotice: () => () => {},
-    onUpdateDownload: () => () => {},
     onBackgroundProcesses: () => () => {},
     onStateChange: () => () => {},
   } as unknown as Client;

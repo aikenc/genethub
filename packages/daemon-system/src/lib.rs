@@ -18,16 +18,15 @@ use std::sync::Arc;
 
 use genet_daemon_logic_api::{
     CapabilityBatch, CapabilityCall, CapabilityEvent, CapabilityFailure, CapabilityFailureKind,
-    CapabilityRequest, CapabilityResult, CapabilityResults, CapabilityValue, LogicArtifactRequest,
-    MAX_CAPABILITY_BATCH,
+    CapabilityRequest, CapabilityResult, CapabilityResults, CapabilityValue, MAX_CAPABILITY_BATCH,
 };
 use tokio::sync::{mpsc, RwLock};
 
 pub use filesystem::SystemRoots;
 
-/// Process-wide native resources for one daemon application instance.
-/// Resources survive guest hot replacement; a restored guest keeps using the
-/// same opaque ids from its snapshot.
+/// Process-wide native resources for the current daemon application instance.
+/// A cold logic replacement closes every handle before the new guest starts;
+/// opaque ids never cross revisions.
 pub struct SystemHost {
     roots: Arc<RwLock<SystemRoots>>,
     file_locks: filesystem::FileLocks,
@@ -150,17 +149,6 @@ impl SystemHost {
                 CapabilityFailureKind::Unavailable,
                 "speech runtime is handled by the daemon transport owner",
             )),
-            CapabilityRequest::LogicArtifact(request) => {
-                let operation = match request {
-                    LogicArtifactRequest::Status => "status",
-                    LogicArtifactRequest::Install { .. } => "install",
-                    LogicArtifactRequest::Rollback => "rollback",
-                };
-                Err(failure(
-                    CapabilityFailureKind::Unavailable,
-                    format!("logic artifact {operation} is handled by the VM owner"),
-                ))
-            }
         };
         CapabilityResult {
             call_id: call.call_id,
@@ -168,12 +156,27 @@ impl SystemHost {
         }
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn quiesce(&self) {
         self.file_locks.close_all();
         self.terminals.close_all().await;
         self.processes.close_all().await;
         self.sockets.close_all().await;
         self.rtc.close_all().await;
+    }
+
+    pub async fn resource_count(&self) -> u32 {
+        let total = self
+            .file_locks
+            .count()
+            .saturating_add(self.terminals.count().await)
+            .saturating_add(self.processes.count().await)
+            .saturating_add(self.sockets.count().await)
+            .saturating_add(self.rtc.count().await);
+        u32::try_from(total).unwrap_or(u32::MAX)
+    }
+
+    pub async fn shutdown(&self) {
+        self.quiesce().await;
     }
 }
 

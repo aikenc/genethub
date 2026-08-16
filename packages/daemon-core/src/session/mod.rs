@@ -75,8 +75,8 @@ pub struct Sessions {
 #[serde(rename_all = "camelCase")]
 struct LiveSession {
     meta: SessionMeta,
-    /// Opaque native handle for `<session>/writer.lock`. It is serialized so
-    /// guest hot replacement cannot accidentally open a second writer.
+    /// Opaque native handle for `<session>/writer.lock` within this guest.
+    /// Cold replacement drains it and the new guest reacquires the lock.
     /// Zero means the session is loaded read-only. A writer lock is acquired
     /// lazily before the first mutation, so listing history does not exclude a
     /// second daemon from working in an unrelated session.
@@ -1461,6 +1461,18 @@ impl Sessions {
             live.active_turn = None;
             live.closed = true;
         }
+    }
+
+    pub(super) fn update_activity_count(&self) -> u32 {
+        self.loaded
+            .values()
+            .filter(|live| {
+                live.active_turn.is_some()
+                    || !live.pending_permissions.is_empty()
+                    || live.process.is_some()
+            })
+            .count()
+            .min(u32::MAX as usize) as u32
     }
 
     pub(super) fn ensure_workspace_removable(

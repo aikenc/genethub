@@ -41,7 +41,7 @@ run([
   "pack-dev",
   raw,
   output,
-  "0.0.0-dev",
+  "1",
 ]);
 const elapsed = ((performance.now() - started) / 1000).toFixed(2);
 console.log(`ready: ${output} (${statSync(output).size} bytes, ${elapsed}s)`);

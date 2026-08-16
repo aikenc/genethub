@@ -168,6 +168,10 @@ impl Sockets {
         }
         self.inner.resources.write().await.clear();
     }
+
+    pub async fn count(&self) -> usize {
+        self.inner.resources.read().await.len()
+    }
 }
 
 async fn run_socket<S>(

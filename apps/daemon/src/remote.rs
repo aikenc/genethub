@@ -11,7 +11,7 @@
 use std::sync::{Arc, Weak};
 
 use anyhow::{anyhow, Context, Result};
-use genehub_proto::{RemoteAccess, ServerFrame};
+use genehub_proto::RemoteAccess;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::config::{MachineState, Paths, Rendezvous};
@@ -31,7 +31,7 @@ fn rendezvous_id(machine_id: &str, machine_secret: &str) -> String {
 
 pub struct Remote {
     attached: Mutex<Option<Attached>>,
-    pty: broadcast::Sender<ServerFrame>,
+    pty: broadcast::Sender<crate::logic::RoutedEvent>,
     /// Weak for the same reason the Hub link's is: the state owns this.
     state: Weak<AppState>,
 }
@@ -44,7 +44,7 @@ struct Attached {
 pub type SharedRemote = Arc<Remote>;
 
 impl Remote {
-    pub fn new(_paths: Paths, pty: broadcast::Sender<ServerFrame>) -> SharedRemote {
+    pub fn new(_paths: Paths, pty: broadcast::Sender<crate::logic::RoutedEvent>) -> SharedRemote {
         Arc::new(Remote {
             attached: Mutex::new(None),
             pty,
@@ -159,7 +159,7 @@ impl Remote {
 
 fn dial(
     state: &Arc<AppState>,
-    pty: &broadcast::Sender<ServerFrame>,
+    pty: &broadcast::Sender<crate::logic::RoutedEvent>,
     config: &Rendezvous,
     machine: &MachineState,
 ) -> FabricUplink {

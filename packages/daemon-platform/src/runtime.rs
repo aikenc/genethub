@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::artifact::{ArtifactVerifier, SignedArtifact, VerifiedArtifact};
 use crate::error::{PlatformError, Result};
-use crate::store::{ArtifactStore, SlotState};
+use crate::store::ArtifactStore;
 use crate::vm::{LogicInstance, LogicVm, VmPolicy};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,26 +15,28 @@ pub enum ActiveOrigin {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActiveLogic {
-    pub generation: u64,
     pub artifact_id: String,
+    pub channel: String,
+    pub revision: u64,
+    pub platform_abi: u32,
+    pub protocol_version: u32,
     pub digest: String,
-    pub version: String,
     pub origin: ActiveOrigin,
 }
 
-/// Owns the durable slots and the currently routed Wasm instance.
+/// Owns the one durable downloaded artifact and the currently routed Wasm.
 ///
-/// Candidate compilation happens beside the active instance. The active route
-/// changes under one short write lock only after signature, ABI and self-check
-/// validation and a durable slot commit have all succeeded.
+/// Updating is intentionally a cold application transition: a candidate is
+/// verified, booted and health-checked, then published under an exclusive
+/// route lock. No guest snapshot, previous slot or automatic rollback exists.
+/// The caller must hold the product-level idle/force update gate before calling
+/// [`Self::install`].
 pub struct PlatformRuntime {
     verifier: ArtifactVerifier,
     vm: LogicVm,
     store: ArtifactStore,
-    fallback: VerifiedArtifact,
     application_boot: Option<Arc<[u8]>>,
     current: RwLock<Arc<LoadedLogic>>,
-    checkpoint: RwLock<Option<Arc<[u8]>>>,
     execution: RwLock<()>,
     application_calls: Mutex<()>,
     mutation: Mutex<()>,
@@ -42,6 +44,14 @@ pub struct PlatformRuntime {
 
 struct LoadedLogic {
     info: ActiveLogic,
+    instance: Arc<LogicInstance>,
+}
+
+/// A verified, booted candidate that has not changed durable or routed state.
+/// Keeping preparation separate lets the daemon reject a broken download
+/// before it terminates any active product work.
+pub struct PreparedLogic {
+    artifact: VerifiedArtifact,
     instance: Arc<LogicInstance>,
 }
 
@@ -55,8 +65,6 @@ impl PlatformRuntime {
         Self::open_inner(root, verifier, vm_policy, embedded_fallback, None)
     }
 
-    /// Opens a long-lived application instance. `boot` is an opaque batch
-    /// supplied to every candidate before it can receive restored state.
     pub fn open_application(
         root: impl Into<PathBuf>,
         verifier: ArtifactVerifier,
@@ -99,73 +107,60 @@ impl PlatformRuntime {
             application_boot.as_deref(),
         )?);
         let store = ArtifactStore::open(root, verifier.clone())?;
-        store.persist(&fallback)?;
 
-        let latest = store.latest_state()?;
-        let mut selected = None;
-        if let Some(state) = latest.as_ref() {
-            selected = try_load(
-                &store,
-                &vm,
-                &state.active_artifact_id,
-                application_boot.as_deref(),
-            )
-            .map(|loaded| {
-                let origin = if loaded.0.artifact_id() == fallback.artifact_id() {
-                    ActiveOrigin::Embedded
-                } else {
-                    ActiveOrigin::Installed
-                };
-                (loaded, origin)
-            });
-            if selected.is_none() {
-                if let Some(previous) = state.previous_artifact_id.as_deref() {
-                    selected = try_load(&store, &vm, previous, application_boot.as_deref())
-                        .map(|loaded| (loaded, ActiveOrigin::Recovered));
-                }
-            }
+        let fallback_revision = fallback.envelope().logic_revision();
+        let mut highest = store.highest_revision()?;
+        if fallback_revision > highest {
+            // A new App always wins over a downloaded artifact from its older
+            // ABI baseline, while the scalar itself can only move forward.
+            store.advance_high_water(fallback_revision)?;
+            store.discard_active()?;
+            store.discard_candidate()?;
+            highest = fallback_revision;
+        } else if let Err(_candidate_error) = store.recover_candidate() {
+            // A staged file is never authoritative by itself. If verification
+            // or publication recovery fails, ignore it and select active or
+            // the embedded baseline below.
+            store.discard_candidate()?;
         }
 
-        let ((artifact, instance), origin) = selected.unwrap_or_else(|| {
-            (
-                (fallback.clone(), fallback_instance),
-                if latest.is_some() {
-                    ActiveOrigin::Recovered
-                } else {
-                    ActiveOrigin::Embedded
-                },
-            )
-        });
-
-        let state = match latest {
-            Some(state) if state.active_artifact_id == artifact.artifact_id() => state,
-            _ => {
-                let previous = if artifact.artifact_id() == fallback.artifact_id() {
-                    None
-                } else {
-                    Some(fallback.artifact_id())
-                };
-                store.commit(artifact.artifact_id(), previous)?
+        let selected = match store.load_active() {
+            Ok(Some(artifact))
+                if artifact.envelope().logic_revision() == highest
+                    && artifact.envelope().logic_revision() >= fallback_revision =>
+            {
+                prepare_instance(&vm, &artifact, application_boot.as_deref())
+                    .ok()
+                    .map(|instance| (artifact, Arc::new(instance)))
             }
+            Ok(_) | Err(_) => None,
         };
-        let loaded = Arc::new(LoadedLogic {
-            info: active_info(&state, &artifact, origin),
-            instance,
-        });
-        let checkpoint = if application_boot.is_some() {
-            Some(Arc::from(loaded.instance.snapshot()?))
+
+        let loaded = if let Some((artifact, instance)) = selected {
+            Arc::new(LoadedLogic {
+                info: active_info(&artifact, ActiveOrigin::Installed),
+                instance,
+            })
         } else {
-            None
+            // Corruption or a now-incompatible active artifact never lowers
+            // the anti-replay fence. The bundled baseline is always allowed.
+            let origin = if highest > fallback_revision {
+                ActiveOrigin::Recovered
+            } else {
+                ActiveOrigin::Embedded
+            };
+            Arc::new(LoadedLogic {
+                info: active_info(&fallback, origin),
+                instance: fallback_instance,
+            })
         };
 
         Ok(Self {
             verifier,
             vm,
             store,
-            fallback,
             application_boot,
             current: RwLock::new(loaded),
-            checkpoint: RwLock::new(checkpoint),
             execution: RwLock::new(()),
             application_calls: Mutex::new(()),
             mutation: Mutex::new(()),
@@ -173,25 +168,32 @@ impl PlatformRuntime {
     }
 
     pub fn active(&self) -> Result<ActiveLogic> {
-        Ok(self
-            .current
-            .read()
-            .map_err(|_| PlatformError::LockPoisoned)?
-            .info
-            .clone())
+        Ok(self.current_loaded()?.info.clone())
     }
 
-    /// Verifies and compiles a candidate while the current instance keeps
-    /// serving. Only the durable commit and route swap are serialized.
+    pub fn highest_accepted_revision(&self) -> Result<u64> {
+        self.store.highest_revision()
+    }
+
+    /// Verifies, boots and health-checks a candidate before changing durable
+    /// or live state. Calls are excluded only for the final single-active
+    /// publication; no state is transferred from the old guest.
     pub fn install(&self, candidate: SignedArtifact) -> Result<ActiveLogic> {
+        self.activate(self.prepare(candidate)?)
+    }
+
+    pub fn prepare(&self, candidate: SignedArtifact) -> Result<PreparedLogic> {
         let artifact = self.verifier.verify(&candidate)?;
         let instance = Arc::new(prepare_instance(
             &self.vm,
             &artifact,
             self.application_boot.as_deref(),
         )?);
-        self.store.persist(&artifact)?;
+        Ok(PreparedLogic { artifact, instance })
+    }
 
+    pub fn activate(&self, candidate: PreparedLogic) -> Result<ActiveLogic> {
+        let PreparedLogic { artifact, instance } = candidate;
         let _mutation = self
             .mutation
             .lock()
@@ -200,212 +202,58 @@ impl PlatformRuntime {
             .execution
             .write()
             .map_err(|_| PlatformError::LockPoisoned)?;
-        let current = self.current_loaded()?;
-        let checkpoint = self.transfer_state(&current.instance, &instance)?;
-        if current.info.artifact_id == artifact.artifact_id() {
-            let replacement = Arc::new(LoadedLogic {
-                info: current.info.clone(),
-                instance,
+        let revision = artifact.envelope().logic_revision();
+        let highest = self.store.highest_revision()?;
+        if revision < highest {
+            return Err(PlatformError::RevisionReplay {
+                candidate: revision,
+                highest,
             });
-            self.replace_current(replacement)?;
-            self.replace_checkpoint(checkpoint)?;
-            return Ok(current.info.clone());
         }
 
-        let state = self
-            .store
-            .commit(artifact.artifact_id(), Some(&current.info.artifact_id))?;
+        self.store.stage(&artifact)?;
+        self.store.advance_high_water(revision)?;
+        self.store.commit_candidate(revision)?;
+
         let replacement = Arc::new(LoadedLogic {
-            info: active_info(&state, &artifact, ActiveOrigin::Installed),
+            info: active_info(&artifact, ActiveOrigin::Installed),
             instance,
         });
         let info = replacement.info.clone();
         self.replace_current(replacement)?;
-        self.replace_checkpoint(checkpoint)?;
         Ok(info)
     }
 
-    pub fn rollback(&self) -> Result<ActiveLogic> {
-        let _mutation = self
-            .mutation
-            .lock()
-            .map_err(|_| PlatformError::LockPoisoned)?;
-        let _execution = self
-            .execution
-            .write()
-            .map_err(|_| PlatformError::LockPoisoned)?;
-        let current = self.current_loaded()?;
-        let state = self
-            .store
-            .latest_state()?
-            .ok_or(PlatformError::NoPreviousArtifact)?;
-        if state.active_artifact_id != current.info.artifact_id {
-            return Err(PlatformError::State(
-                "durable active slot disagrees with the live route".to_string(),
-            ));
-        }
-        let previous = state
-            .previous_artifact_id
-            .as_deref()
-            .ok_or(PlatformError::NoPreviousArtifact)?;
-        let (artifact, instance) = try_load(
-            &self.store,
-            &self.vm,
-            previous,
-            self.application_boot.as_deref(),
-        )
-        .ok_or_else(|| {
-            PlatformError::State("previous artifact is missing or invalid".to_string())
-        })?;
-        let checkpoint = self.transfer_state(&current.instance, &instance)?;
-        let committed = self
-            .store
-            .commit(previous, Some(&current.info.artifact_id))?;
-        let replacement = Arc::new(LoadedLogic {
-            info: active_info(&committed, &artifact, ActiveOrigin::Recovered),
-            instance,
-        });
-        let info = replacement.info.clone();
-        self.replace_current(replacement)?;
-        self.replace_checkpoint(checkpoint)?;
-        Ok(info)
-    }
-
-    /// Calls the active guest. A trap poisons that instance and triggers a
-    /// best-effort rollback before this error is returned to the caller.
     pub fn probe(&self, input: i64) -> Result<i64> {
-        let result = {
-            let _execution = self
-                .execution
-                .read()
-                .map_err(|_| PlatformError::LockPoisoned)?;
-            let active = self.current_loaded()?;
-            (active.clone(), active.instance.probe(input))
-        };
-        let (active, result) = result;
-        match result {
-            Ok(output) => Ok(output),
-            Err(call_error) => {
-                let recovery = self.recover_failed(&active.info.artifact_id);
-                let recovery_message = match recovery {
-                    Ok(Some(info)) => format!("; recovered to {}", info.version),
-                    Ok(None) => "; active route had already changed".to_string(),
-                    Err(error) => format!("; automatic recovery failed: {error}"),
-                };
-                Err(PlatformError::Vm(format!(
-                    "active logic {} failed: {call_error}{recovery_message}",
-                    active.info.version
-                )))
-            }
-        }
-    }
-
-    /// Routes one complete event through the current application instance.
-    /// A successful call refreshes the opaque recovery checkpoint. A trap
-    /// discards that instance and restores the last checkpoint into the
-    /// previous signed artifact without restarting the native process.
-    pub fn handle(&self, event: &[u8]) -> Result<Vec<u8>> {
-        let result = {
-            let _execution = self
-                .execution
-                .read()
-                .map_err(|_| PlatformError::LockPoisoned)?;
-            let _call = self
-                .application_calls
-                .lock()
-                .map_err(|_| PlatformError::LockPoisoned)?;
-            let active = self.current_loaded()?;
-            match active.instance.handle(event) {
-                Ok(output) => match active.instance.snapshot() {
-                    Ok(snapshot) => {
-                        self.replace_checkpoint(Some(Arc::from(snapshot)))?;
-                        (active, Ok(output))
-                    }
-                    Err(error) => (active, Err(error)),
-                },
-                Err(error) => (active, Err(error)),
-            }
-        };
-        let (active, result) = result;
-        match result {
-            Ok(output) => Ok(output),
-            Err(call_error) => {
-                let recovery = self.recover_failed(&active.info.artifact_id);
-                let recovery_message = match recovery {
-                    Ok(Some(info)) => format!("; recovered to {}", info.version),
-                    Ok(None) => "; active route had already changed".to_string(),
-                    Err(error) => format!("; automatic recovery failed: {error}"),
-                };
-                Err(PlatformError::Vm(format!(
-                    "active logic {} failed: {call_error}{recovery_message}",
-                    active.info.version
-                )))
-            }
-        }
-    }
-
-    fn recover_failed(&self, failed_artifact_id: &str) -> Result<Option<ActiveLogic>> {
-        let _mutation = self
-            .mutation
-            .lock()
-            .map_err(|_| PlatformError::LockPoisoned)?;
         let _execution = self
             .execution
-            .write()
+            .read()
             .map_err(|_| PlatformError::LockPoisoned)?;
-        let current = self.current_loaded()?;
-        if current.info.artifact_id != failed_artifact_id {
-            return Ok(None);
-        }
+        let active = self.current_loaded()?;
+        active.instance.probe(input).map_err(|error| {
+            PlatformError::Vm(format!(
+                "active logic revision {} failed: {error}; install a higher revision",
+                active.info.revision
+            ))
+        })
+    }
 
-        let state = self.store.latest_state()?;
-        let previous = state
-            .as_ref()
-            .filter(|state| state.active_artifact_id == failed_artifact_id)
-            .and_then(|state| state.previous_artifact_id.as_deref());
-        let mut recovered = previous
-            .filter(|artifact_id| *artifact_id != failed_artifact_id)
-            .and_then(|artifact_id| {
-                try_load(
-                    &self.store,
-                    &self.vm,
-                    artifact_id,
-                    self.application_boot.as_deref(),
-                )
-            });
-        if recovered.is_none() && self.fallback.artifact_id() != failed_artifact_id {
-            recovered = Some((
-                self.fallback.clone(),
-                Arc::new(prepare_instance(
-                    &self.vm,
-                    &self.fallback,
-                    self.application_boot.as_deref(),
-                )?),
-            ));
-        }
-        let Some((artifact, instance)) = recovered else {
-            return Err(PlatformError::State(
-                "no healthy artifact remains after the active instance failed".to_string(),
-            ));
-        };
-        if let Some(checkpoint) = self.current_checkpoint()? {
-            instance.restore(&checkpoint)?;
-            instance.health_check()?;
-        }
-        self.store.persist(&artifact)?;
-        let previous = if artifact.artifact_id() == self.fallback.artifact_id() {
-            None
-        } else {
-            Some(self.fallback.artifact_id())
-        };
-        let committed = self.store.commit(artifact.artifact_id(), previous)?;
-        let replacement = Arc::new(LoadedLogic {
-            info: active_info(&committed, &artifact, ActiveOrigin::Recovered),
-            instance,
-        });
-        let info = replacement.info.clone();
-        self.replace_current(replacement)?;
-        Ok(Some(info))
+    pub fn handle(&self, event: &[u8]) -> Result<Vec<u8>> {
+        let _execution = self
+            .execution
+            .read()
+            .map_err(|_| PlatformError::LockPoisoned)?;
+        let _call = self
+            .application_calls
+            .lock()
+            .map_err(|_| PlatformError::LockPoisoned)?;
+        let active = self.current_loaded()?;
+        active.instance.handle(event).map_err(|error| {
+            PlatformError::Vm(format!(
+                "active logic revision {} failed: {error}; install a higher revision",
+                active.info.revision
+            ))
+        })
     }
 
     fn current_loaded(&self) -> Result<Arc<LoadedLogic>> {
@@ -423,47 +271,6 @@ impl PlatformRuntime {
             .map_err(|_| PlatformError::LockPoisoned)? = replacement;
         Ok(())
     }
-
-    fn transfer_state(
-        &self,
-        current: &LogicInstance,
-        candidate: &LogicInstance,
-    ) -> Result<Option<Arc<[u8]>>> {
-        if self.application_boot.is_none() {
-            return Ok(None);
-        }
-        let snapshot = current.snapshot()?;
-        candidate.restore(&snapshot)?;
-        candidate.health_check()?;
-        Ok(Some(Arc::from(snapshot)))
-    }
-
-    fn current_checkpoint(&self) -> Result<Option<Arc<[u8]>>> {
-        Ok(self
-            .checkpoint
-            .read()
-            .map_err(|_| PlatformError::LockPoisoned)?
-            .clone())
-    }
-
-    fn replace_checkpoint(&self, checkpoint: Option<Arc<[u8]>>) -> Result<()> {
-        *self
-            .checkpoint
-            .write()
-            .map_err(|_| PlatformError::LockPoisoned)? = checkpoint;
-        Ok(())
-    }
-}
-
-fn try_load(
-    store: &ArtifactStore,
-    vm: &LogicVm,
-    artifact_id: &str,
-    boot: Option<&[u8]>,
-) -> Option<(VerifiedArtifact, Arc<LogicInstance>)> {
-    let artifact = store.load(artifact_id).ok()?;
-    let instance = Arc::new(prepare_instance(vm, &artifact, boot).ok()?);
-    Some((artifact, instance))
 }
 
 fn prepare_instance(
@@ -479,16 +286,14 @@ fn prepare_instance(
     Ok(instance)
 }
 
-fn active_info(
-    state: &SlotState,
-    artifact: &VerifiedArtifact,
-    origin: ActiveOrigin,
-) -> ActiveLogic {
+fn active_info(artifact: &VerifiedArtifact, origin: ActiveOrigin) -> ActiveLogic {
     ActiveLogic {
-        generation: state.generation,
         artifact_id: artifact.artifact_id().to_string(),
+        channel: artifact.envelope().channel().to_string(),
+        revision: artifact.envelope().logic_revision(),
+        platform_abi: artifact.envelope().platform_abi(),
+        protocol_version: artifact.envelope().protocol_version(),
         digest: artifact.digest().to_string(),
-        version: artifact.envelope.version().to_string(),
         origin,
     }
 }

@@ -12,7 +12,7 @@ mod vm;
 
 pub use artifact::{ArtifactEnvelope, ArtifactVerifier, SignedArtifact, VerifiedArtifact};
 pub use error::{PlatformError, Result};
-pub use runtime::{ActiveLogic, ActiveOrigin, PlatformRuntime};
+pub use runtime::{ActiveLogic, ActiveOrigin, PlatformRuntime, PreparedLogic};
 pub use vm::{
     CapabilityHandler, LogicInstance, LogicVm, VmLimits, VmPolicy, WasiPolicy, WasiPreopen,
 };

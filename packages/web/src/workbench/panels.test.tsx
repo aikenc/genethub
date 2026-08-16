@@ -1,4 +1,9 @@
-import type { Reply, Request } from "@genehub/proto";
+import type {
+  PatchControlRequest,
+  PatchControlResponse,
+  Reply,
+  Request,
+} from "@genehub/proto";
 import type { ProviderInfo } from "@genehub/proto";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -20,17 +25,40 @@ import { browserHost } from "../host";
  * thing and put the answer somewhere a person can see it. A stub at the
  * protocol boundary tests exactly that and nothing about React.
  */
-function stubDaemon(answers: Partial<Record<Request["type"], (payload: never) => Reply>>) {
+const activeLogic = {
+  channel: "dev",
+  logicRevision: 17,
+  platformAbi: 19,
+  protocolVersion: 3,
+  digest: "a".repeat(64),
+  origin: "bundled",
+};
+
+function stubDaemon(
+  answers: Partial<Record<Request["type"], (payload: never) => Reply>>,
+  patchAnswer: (
+    request: PatchControlRequest,
+  ) => PatchControlResponse | Promise<PatchControlResponse> = () => ({
+    type: "status",
+    active: activeLogic,
+    highestAcceptedRevision: activeLogic.logicRevision,
+    availability: { type: "current" },
+  }),
+) {
   const calls: Request[] = [];
+  const patchCalls: PatchControlRequest[] = [];
   const client = {
     call: async (request: Request) => {
       calls.push(request);
       const answer = answers[request.type];
       return answer?.((request as { payload?: never }).payload as never);
     },
+    patch: async (request: PatchControlRequest) => {
+      patchCalls.push(request);
+      return patchAnswer(request);
+    },
     onPty: () => () => {},
     onNotice: () => () => {},
-    onUpdateDownload: () => () => {},
     onBackgroundProcesses: () => () => {},
     onStateChange: () => () => {},
     identity: {
@@ -42,8 +70,9 @@ function stubDaemon(answers: Partial<Record<Request["type"], (payload: never) =>
       transport: "forwarded",
       rtcSupported: false,
     },
+    logicIdentity: activeLogic,
   } as unknown as Client;
-  return { client, calls };
+  return { client, calls, patchCalls };
 }
 
 function install(client: Client) {
@@ -74,9 +103,8 @@ beforeEach(() => {
     diff: null,
     settings: null,
     log: null,
-    update: null,
-    updating: false,
-    download: { state: "idle" },
+    patch: null,
+    patching: false,
     previewFloat: null,
   });
 });
@@ -130,24 +158,6 @@ describe("the log panel", () => {
     expect((asked[1] as { payload: { name: string | null } }).payload.name).toBe("startup.log");
   });
 
-  /// Desktop only. In a browser the button would do nothing, and a control that
-  /// does nothing is worse than no control.
-  it("offers to open the directory only where there is one to open", async () => {
-    const { client } = stubDaemon({
-      "log.tail": () => ({
-        type: "log",
-        data: { name: "daemon.log", path: "/tmp/logs/daemon.log", text: "", files: [] },
-      }),
-    });
-    install(client);
-
-    const { unmount } = render(<LogsPanel />);
-    expect(screen.queryByText("打开日志目录")).toBeNull();
-    unmount();
-
-    render(<LogsPanel onOpenDirectory={() => {}} />);
-    expect(screen.getByText("打开日志目录")).toBeTruthy();
-  });
 });
 
 describe("the files panel", () => {
@@ -711,21 +721,23 @@ describe("the version section", () => {
   // `dev`, a release build stamps its own, and either is correct.
   const prefix = { official: "正式版", beta: "Beta版", alpha: "Alpha版", dev: "开发版" }[CHANNEL];
 
-  /** A shell that knows its own build, the way the desktop one does. */
-  function desktopish(version: string, opened: string[] = []) {
+  /** The desktop WebView is the same ordinary website host as a browser tab. */
+  function website(opened: string[] = []) {
     return {
       ...browserHost(),
-      appVersion: async () => version,
       openExternal: (url: string) => opened.push(url),
     };
   }
 
-  function connected(answers: Parameters<typeof stubDaemon>[0]) {
+  function connected(
+    answers: Parameters<typeof stubDaemon>[0],
+    patchAnswer?: Parameters<typeof stubDaemon>[1],
+  ) {
     const stub = stubDaemon({
       "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
       ...answers,
-    });
+    }, patchAnswer);
     (stub.client as { identity?: unknown }).identity = {
       machineId: "m_1",
       fingerprint: "AAAA-BBBB-CCCC-DDDD",
@@ -743,13 +755,14 @@ describe("the version section", () => {
    * the answer on screen was 0.1.0 on every machine.
    */
   it("says which build this is before anyone asks it anything", async () => {
-    const { client, calls } = connected({});
+    const { client, patchCalls } = connected({});
     void client;
 
-    render(<SettingsPanel host={desktopish("0.1.17")} />);
+    render(<SettingsPanel host={website()} />);
 
-    expect(await screen.findByTestId("app-version")).toHaveTextContent(`${prefix} 0.1.17`);
-    expect(screen.getByTestId("daemon-version")).toHaveTextContent(`daemon ${prefix} 0.1.17`);
+    expect(await screen.findByTestId("daemon-version")).toHaveTextContent(
+      `App/Platform ${prefix} 0.1.17`,
+    );
     // The page is a third artefact, deployed on its own schedule, and the two
     // numbers above say nothing about it. An hour went once on a phone that was
     // three releases behind while the screen said "daemon 0.1.21" and looked
@@ -758,70 +771,67 @@ describe("the version section", () => {
     expect(screen.getByTestId("page-build")).toHaveTextContent(/页面 \S/);
     // Nothing is asked until the button is pressed. An outbound call on mount is
     // the thing this design is avoiding.
-    expect(calls.some((call) => call.type === "update.check")).toBe(false);
+    expect(patchCalls).toEqual([]);
   });
 
-  it("ignores executable URLs from an old daemon and offers only the fixed manual page", async () => {
+  it("checks signed Wasm through Platform and keeps App downloads on the current channel page", async () => {
     const opened: string[] = [];
-    const { calls } = connected({
-      "update.check": () => ({
-        type: "update",
-        data: {
-          current: "0.1.17",
-          latest: "0.1.18",
-          newer: true,
-          url: "https://example.test/releases/tag/v0.1.18",
-          downloadUrl: "https://example.test/GeneHub-setup.exe",
+    const { patchCalls } = connected({}, () => ({
+      type: "status",
+      active: activeLogic,
+      highestAcceptedRevision: 17,
+      availability: {
+        type: "available",
+        artifact: {
+          logicRevision: 18,
+          platformAbi: 19,
+          protocolVersion: 3,
+          digest: "b".repeat(64),
+          size: 1024,
+          openSourceSha: "1".repeat(40),
+          cloudSourceSha: "2".repeat(40),
         },
-      }),
-    });
+      },
+    }));
 
-    render(<SettingsPanel host={desktopish("0.1.17", opened)} />);
+    render(<SettingsPanel host={website(opened)} />);
     await userEvent.click(await screen.findByTestId("check-update"));
 
-    expect(await screen.findByText(/有新版本 0\.1\.18/)).toBeTruthy();
+    expect(await screen.findByText(/Wasm 补丁 r18 可用/)).toBeTruthy();
     expect(screen.getByTestId("manual-update-note")).toHaveTextContent("自动下载和安装暂未启用");
-    expect(screen.queryByTestId("download-update")).toBeNull();
-    expect(calls.some((call) => call.type === "update.download")).toBe(false);
+    expect(patchCalls).toEqual([{ type: "check" }]);
     expect(opened).toEqual([]);
 
     await userEvent.click(screen.getByTestId("manual-update-link"));
-    expect(opened).toEqual(["https://github.com/aikenc/genethub/releases"]);
+    expect(opened).toEqual([
+      CHANNEL === "dev" ? "https://genethub.com/download" : "http://localhost:3000/download",
+    ]);
   });
 
   /// The one answer worth refusing to give: reaching nothing is not the same
   /// sentence as being up to date, and only one of the two is true.
   it("does not report being up to date when it reached nothing", async () => {
-    connected({
-      "update.check": () => ({
-        type: "update",
-        data: {
-          current: "0.1.17",
-          newer: false,
-          problem: "asking where the newest version is: dns error",
-        },
-      }),
-    });
+    connected({}, () => ({
+      type: "status",
+      active: activeLogic,
+      highestAcceptedRevision: 17,
+      availability: { type: "paused", reason: "补丁源 dns error" },
+    }));
 
-    render(<SettingsPanel host={desktopish("0.1.17")} />);
+    render(<SettingsPanel host={website()} />);
     await userEvent.click(await screen.findByTestId("check-update"));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("dns error");
-    expect(screen.queryByText("已经是最新的了。")).toBeNull();
+    expect(await screen.findByText(/补丁发布已暂停：补丁源 dns error/)).toBeTruthy();
+    expect(screen.queryByText(/最新修订/)).toBeNull();
   });
 
   it("says so when there is nothing to do", async () => {
-    connected({
-      "update.check": () => ({
-        type: "update",
-        data: { current: "0.1.17", latest: "0.1.17", newer: false },
-      }),
-    });
+    connected({});
 
-    render(<SettingsPanel host={desktopish("0.1.17")} />);
+    render(<SettingsPanel host={website()} />);
     await userEvent.click(await screen.findByTestId("check-update"));
 
-    expect(await screen.findByText("daemon 已经是最新的了。")).toBeTruthy();
+    expect(await screen.findByText("Wasm 已经是当前通道最新修订。")).toBeTruthy();
   });
 
   /**
@@ -834,10 +844,6 @@ describe("the version section", () => {
     const stub = stubDaemon({
       "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
-      "update.check": () => ({
-        type: "update",
-        data: { current: "0.0.0", latest: "0.1.18", newer: false },
-      }),
     });
     (stub.client as { identity?: unknown }).identity = {
       machineId: "m_1",
@@ -848,93 +854,40 @@ describe("the version section", () => {
     };
     install(stub.client);
 
-    render(<SettingsPanel host={desktopish("0.0.0")} />);
+    render(<SettingsPanel host={website()} />);
 
-    expect(await screen.findByTestId("app-version")).toHaveTextContent("应用 开发版");
-    expect(screen.getByTestId("daemon-version")).toHaveTextContent("daemon 开发版");
+    expect(await screen.findByTestId("daemon-version")).toHaveTextContent("App/Platform 开发版");
 
     await userEvent.click(screen.getByTestId("check-update"));
-    expect(await screen.findByText(/开发版，不跟发布版本比较/)).toBeTruthy();
-    expect(screen.queryByText(/有新版本/)).toBeNull();
-    expect(screen.queryByText("已经是最新的了。")).toBeNull();
+    expect(await screen.findByText("Wasm 已经是当前通道最新修订。")).toBeTruthy();
+    expect(screen.queryByText(/客户端 App 有新版本/)).toBeNull();
   });
 
-  it("adds the isolated dev branch name to both source-built versions", async () => {
-    vi.stubEnv("VITE_GENEHUB_DEV_NAME", "dev-ui");
-    const stub = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
-      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
-    });
-    (stub.client as { identity?: unknown }).identity = {
-      machineId: "m_1",
-      fingerprint: "AAAA-BBBB-CCCC-DDDD",
-      daemonVersion: "0.0.0",
-      protocolVersion: 1,
-      transport: "loopback",
-    };
-    install(stub.client);
+  it.skipIf(CHANNEL !== "dev")(
+    "adds the isolated dev branch name to the source-built Platform version",
+    async () => {
+      vi.stubEnv("VITE_GENEHUB_DEV_NAME", "dev-ui");
+      const stub = stubDaemon({
+        "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+        "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      });
+      (stub.client as { identity?: unknown }).identity = {
+        machineId: "m_1",
+        fingerprint: "AAAA-BBBB-CCCC-DDDD",
+        daemonVersion: "0.0.0",
+        protocolVersion: 1,
+        transport: "loopback",
+      };
+      install(stub.client);
 
-    render(<SettingsPanel host={desktopish("0.0.0")} />);
+      render(<SettingsPanel host={website()} />);
 
-    expect(await screen.findByTestId("app-version")).toHaveTextContent("应用 开发版 dev-ui");
-    expect(screen.getByTestId("daemon-version")).toHaveTextContent("daemon 开发版 dev-ui");
-    vi.unstubAllEnvs();
-  });
-
-  /**
-   * The failure `installer.nsh` was written for, seen from the other end: an
-   * installer that could not replace the daemon leaves the two halves on
-   * different versions, and the app looks fine while being wrong.
-   */
-  it("points out that the two halves are on different versions", async () => {
-    connected({});
-
-    render(
-      <SettingsPanel
-        host={desktopish("0.1.18")}
-        endpoint={{ url: "ws://127.0.0.1:1/ws", via: "loopback", label: "本机" }}
-      />,
-    );
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("只装了一半");
-  });
-
-  it("checks the client App separately when controlling a remote daemon", async () => {
-    const opened: string[] = [];
-    connected({
-      "update.check": () => ({
-        type: "update",
-        data: { current: "0.1.18", latest: "0.1.18", newer: false },
-      }),
-    });
-    const host = {
-      ...desktopish("0.1.16", opened),
-      checkAppUpdate: async () => ({
-        current: "0.1.16",
-        latest: "0.1.18",
-        newer: true,
-        url: "https://example.test/releases/tag/v0.1.18",
-        downloadUrl: "https://example.test/GeneHub-setup.exe",
-      }),
-    };
-
-    render(
-      <SettingsPanel
-        host={host}
-        endpoint={{ url: "wss://example.test/fabric/v2?ticket=test", via: "relay", label: "服务器" }}
-      />,
-    );
-    await userEvent.click(await screen.findByTestId("check-update"));
-
-    expect(await screen.findByText(/客户端 App 有新版本 0\.1\.18/)).toBeTruthy();
-    expect(screen.getByText("daemon 已经是最新的了。")).toBeTruthy();
-    expect(screen.getByTestId("remote-version-note")).toHaveTextContent("分别更新");
-    expect(screen.queryByText(/只装了一半/)).toBeNull();
-
-    expect(screen.queryByTestId("download-app-update")).toBeNull();
-    await userEvent.click(screen.getByTestId("manual-update-link"));
-    expect(opened).toEqual(["https://github.com/aikenc/genethub/releases"]);
-  });
+      expect(await screen.findByTestId("daemon-version")).toHaveTextContent(
+        "App/Platform 开发版 dev-ui",
+      );
+      vi.unstubAllEnvs();
+    },
+  );
 
   /// A browser is not a build of anything, so there is no second number to print.
   it("prints one version in a browser, not an empty label", async () => {
@@ -942,7 +895,9 @@ describe("the version section", () => {
 
     render(<SettingsPanel host={browserHost()} />);
 
-    expect(await screen.findByTestId("daemon-version")).toHaveTextContent(`daemon ${prefix} 0.1.17`);
+    expect(await screen.findByTestId("daemon-version")).toHaveTextContent(
+      `App/Platform ${prefix} 0.1.17`,
+    );
     expect(screen.queryByTestId("app-version")).toBeNull();
   });
 });

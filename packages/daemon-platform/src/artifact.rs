@@ -9,14 +9,14 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{PlatformError, Result};
 
-const ENVELOPE_FORMAT_VERSION: u32 = 1;
-const SIGNATURE_DOMAIN: &[u8] = b"genehub-daemon-artifact-v1\0";
-const ARTIFACT_ID_DOMAIN: &[u8] = b"genehub-daemon-artifact-id-v1\0";
+const ENVELOPE_FORMAT_VERSION: u32 = 2;
+const SIGNATURE_DOMAIN: &[u8] = b"genehub-daemon-artifact-v2\0";
+const ARTIFACT_ID_DOMAIN: &[u8] = b"genehub-daemon-artifact-id-v2\0";
 const MAX_MODULE_ID_BYTES: usize = 128;
-const MAX_VERSION_BYTES: usize = 128;
+const MAX_CHANNEL_BYTES: usize = 32;
 const MAX_KEY_ID_BYTES: usize = 64;
 const ED25519_SIGNATURE_BASE64_BYTES: usize = 86;
-const ARTIFACT_CUSTOM_SECTION: &str = "genehub.daemon.artifact.v1";
+const ARTIFACT_CUSTOM_SECTION: &str = "genehub.daemon.artifact.v2";
 const MAX_ENVELOPE_BYTES: usize = 16 * 1024;
 
 /// Signed, immutable metadata stored beside one Wasm component.
@@ -25,8 +25,10 @@ const MAX_ENVELOPE_BYTES: usize = 16 * 1024;
 pub struct ArtifactEnvelope {
     format_version: u32,
     module_id: String,
-    version: String,
-    abi_version: u32,
+    channel: String,
+    logic_revision: u64,
+    platform_abi: u32,
+    protocol_version: u32,
     size: u64,
     sha256: String,
     key_id: String,
@@ -38,16 +40,20 @@ impl ArtifactEnvelope {
     /// and attaches it with [`Self::with_signature`].
     pub fn unsigned(
         module_id: impl Into<String>,
-        version: impl Into<String>,
-        abi_version: u32,
+        channel: impl Into<String>,
+        logic_revision: u64,
+        platform_abi: u32,
+        protocol_version: u32,
         key_id: impl Into<String>,
         component: &[u8],
     ) -> Result<Self> {
         let envelope = Self {
             format_version: ENVELOPE_FORMAT_VERSION,
             module_id: module_id.into(),
-            version: version.into(),
-            abi_version,
+            channel: channel.into(),
+            logic_revision,
+            platform_abi,
+            protocol_version,
             size: u64::try_from(component.len()).map_err(|_| {
                 PlatformError::Verification("component size does not fit in u64".to_string())
             })?,
@@ -71,8 +77,10 @@ impl ArtifactEnvelope {
         payload.extend_from_slice(SIGNATURE_DOMAIN);
         payload.extend_from_slice(&self.format_version.to_be_bytes());
         append_field(&mut payload, self.module_id.as_bytes())?;
-        append_field(&mut payload, self.version.as_bytes())?;
-        payload.extend_from_slice(&self.abi_version.to_be_bytes());
+        append_field(&mut payload, self.channel.as_bytes())?;
+        payload.extend_from_slice(&self.logic_revision.to_be_bytes());
+        payload.extend_from_slice(&self.platform_abi.to_be_bytes());
+        payload.extend_from_slice(&self.protocol_version.to_be_bytes());
         payload.extend_from_slice(&self.size.to_be_bytes());
         append_field(&mut payload, self.sha256.as_bytes())?;
         append_field(&mut payload, self.key_id.as_bytes())?;
@@ -83,12 +91,20 @@ impl ArtifactEnvelope {
         &self.module_id
     }
 
-    pub fn version(&self) -> &str {
-        &self.version
+    pub fn channel(&self) -> &str {
+        &self.channel
     }
 
-    pub fn abi_version(&self) -> u32 {
-        self.abi_version
+    pub fn logic_revision(&self) -> u64 {
+        self.logic_revision
+    }
+
+    pub fn platform_abi(&self) -> u32 {
+        self.platform_abi
+    }
+
+    pub fn protocol_version(&self) -> u32 {
+        self.protocol_version
     }
 
     pub fn size(&self) -> u64 {
@@ -111,7 +127,22 @@ impl ArtifactEnvelope {
             )));
         }
         validate_text("module id", &self.module_id, MAX_MODULE_ID_BYTES)?;
-        validate_text("version", &self.version, MAX_VERSION_BYTES)?;
+        validate_channel(&self.channel)?;
+        if self.logic_revision == 0 {
+            return Err(PlatformError::Verification(
+                "logic revision must be positive".to_string(),
+            ));
+        }
+        if self.platform_abi == 0 {
+            return Err(PlatformError::Verification(
+                "platform ABI must be positive".to_string(),
+            ));
+        }
+        if self.protocol_version == 0 {
+            return Err(PlatformError::Verification(
+                "protocol version must be positive".to_string(),
+            ));
+        }
         validate_key_id(&self.key_id)?;
         if self.sha256.len() != 64
             || !self
@@ -235,8 +266,8 @@ pub struct VerifiedArtifact {
 }
 
 impl VerifiedArtifact {
-    /// Identity of this exact signed release manifest. Unlike the component
-    /// digest, this changes when its version or signing key changes.
+    /// Identity of this exact signed artifact envelope. Unlike the component
+    /// digest, this changes when its channel, revision or signing key changes.
     pub fn artifact_id(&self) -> &str {
         &self.artifact_id
     }
@@ -260,7 +291,8 @@ impl VerifiedArtifact {
 #[derive(Clone)]
 pub struct ArtifactVerifier {
     expected_module_id: String,
-    expected_abi_version: u32,
+    expected_channel: String,
+    expected_platform_abi: u32,
     max_artifact_bytes: usize,
     trusted_keys: Arc<BTreeMap<String, VerifyingKey>>,
 }
@@ -268,12 +300,15 @@ pub struct ArtifactVerifier {
 impl ArtifactVerifier {
     pub fn new(
         expected_module_id: impl Into<String>,
-        expected_abi_version: u32,
+        expected_channel: impl Into<String>,
+        expected_platform_abi: u32,
         max_artifact_bytes: usize,
         trusted_keys: impl IntoIterator<Item = (String, VerifyingKey)>,
     ) -> Result<Self> {
         let expected_module_id = expected_module_id.into();
         validate_text("module id", &expected_module_id, MAX_MODULE_ID_BYTES)?;
+        let expected_channel = expected_channel.into();
+        validate_channel(&expected_channel)?;
         if max_artifact_bytes == 0 {
             return Err(PlatformError::Verification(
                 "maximum artifact size must be positive".to_string(),
@@ -295,7 +330,8 @@ impl ArtifactVerifier {
         }
         Ok(Self {
             expected_module_id,
-            expected_abi_version,
+            expected_channel,
+            expected_platform_abi,
             max_artifact_bytes,
             trusted_keys: Arc::new(keys),
         })
@@ -310,10 +346,16 @@ impl ArtifactVerifier {
                 envelope.module_id, self.expected_module_id
             )));
         }
-        if envelope.abi_version != self.expected_abi_version {
+        if envelope.channel != self.expected_channel {
+            return Err(PlatformError::Verification(format!(
+                "artifact channel {} does not match platform channel {}",
+                envelope.channel, self.expected_channel
+            )));
+        }
+        if envelope.platform_abi != self.expected_platform_abi {
             return Err(PlatformError::Verification(format!(
                 "artifact ABI {} does not match platform ABI {}",
-                envelope.abi_version, self.expected_abi_version
+                envelope.platform_abi, self.expected_platform_abi
             )));
         }
         if artifact.component.len() > self.max_artifact_bytes {
@@ -419,6 +461,20 @@ fn validate_text(label: &str, value: &str, max_bytes: usize) -> Result<()> {
         return Err(PlatformError::Verification(format!(
             "{label} must contain 1 through {max_bytes} non-control UTF-8 bytes"
         )));
+    }
+    Ok(())
+}
+
+fn validate_channel(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > MAX_CHANNEL_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(PlatformError::Verification(
+            "channel must be a lowercase identifier".to_string(),
+        ));
     }
     Ok(())
 }

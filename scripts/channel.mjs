@@ -133,16 +133,26 @@ const TABLE = {
     alpha: "GeneHub Alpha Agent",
   },
 
-  // The update manifest needs a stable address per channel. Official rides
-  // the latest release; prereleases cannot — GitHub's `latest` never names
-  // one — so beta and alpha releases additionally publish to rolling `beta`
-  // and `alpha` tags, which is what makes these addresses stay put
-  // (release.yml). dev has none: a source build is not on the scale at all.
-  manifest_url: {
-    dev: "",
-    official: "https://github.com/aikenc/genethub/releases/latest/download/latest.json",
-    beta: "https://github.com/aikenc/genethub/releases/download/beta/latest-beta.json",
-    alpha: "https://github.com/aikenc/genethub/releases/download/alpha/latest-alpha.json",
+  // App and signed logic advance independently. Official prefers the website
+  // mirror and falls back to GitHub exact bytes; fast channels are website-
+  // only and need no rolling GitHub release.
+  app_manifest_urls: {
+    dev: [],
+    official: ["https://relay.genethub.com/artifacts/manifests/app/latest.json"],
+    beta: ["https://relay-beta.genethub.com/artifacts/manifests/app/latest-beta.json"],
+    alpha: ["https://relay-alpha.genethub.com/artifacts/manifests/app/latest-alpha.json"],
+  },
+  logic_manifest_urls: {
+    dev: [],
+    official: ["https://relay.genethub.com/artifacts/manifests/logic/latest.json"],
+    beta: ["https://relay-beta.genethub.com/artifacts/manifests/logic/latest-beta.json"],
+    alpha: ["https://relay-alpha.genethub.com/artifacts/manifests/logic/latest-alpha.json"],
+  },
+  web_app_url: {
+    dev: "http://127.0.0.1:5173/app",
+    official: "https://relay.genethub.com/app",
+    beta: "https://relay-beta.genethub.com/app",
+    alpha: "https://relay-alpha.genethub.com/app",
   },
 
   // Default Hub this channel's CLI/daemon dials (`genethub-cli.md` §4.1).
@@ -168,21 +178,6 @@ const TABLE = {
   },
   tarball_prefix: { dev: "genet-dev", official: "genet", beta: "genet-beta", alpha: "genet-alpha" },
 
-  // What the WebView is allowed to dial. Loopback is always there (the local
-  // daemon). Released channels also need https/wss: the workbench reaches a
-  // remote machine by opening `wss://…/fabric/v2?ticket=…` itself — if
-  // CSP lists only loopback, hub.connect succeeds, the ticket is never
-  // redeemed, and the UI sits on 「已断开」while burning tickets in a loop.
-  // Wide `https: wss:` (not a pinned host) so a user who pairs with their own
-  // Hub is not locked to the default name. Dev stays loopback-only: it has no
-  // default Hub and is not a shipping build.
-  connect_src: {
-    dev: "'self' ws://127.0.0.1:* http://127.0.0.1:* ipc: http://ipc.localhost",
-    official:
-      "'self' ws://127.0.0.1:* http://127.0.0.1:* https: wss: ipc: http://ipc.localhost",
-    beta: "'self' ws://127.0.0.1:* http://127.0.0.1:* https: wss: ipc: http://ipc.localhost",
-    alpha: "'self' ws://127.0.0.1:* http://127.0.0.1:* https: wss: ipc: http://ipc.localhost",
-  },
 };
 
 const value = (key, channel) => {
@@ -239,17 +234,12 @@ function rewriteInSection(path, sectionStart, pattern, substitute) {
 }
 
 const rustModule = (channel) => {
-  const manifestUrl = value("manifest_url", channel);
-  // rustfmt's line budget decides the shape: the released channels' URLs do
-  // not fit on one line and dev's empty string does, and CI rejects a tree
-  // rustfmt would rewrite — so the generator emits what rustfmt would.
-  const manifestConst =
-    `pub const DEFAULT_MANIFEST_URL: &str = "${manifestUrl}";`.length <= 100
-      ? `pub const DEFAULT_MANIFEST_URL: &str = "${manifestUrl}";`
-      : `// Broken across two lines: the released channels' URLs are longer than
-// rustfmt's line budget, and CI rejects a tree rustfmt would rewrite.
-pub const DEFAULT_MANIFEST_URL: &str =
-    "${manifestUrl}";`;
+  const appManifestUrls = value("app_manifest_urls", channel);
+  const logicManifestUrls = value("logic_manifest_urls", channel);
+  const rustArray = (values) => `&[${values.map((entry) => `"${entry}"`).join(", ")}]`;
+  const appDownloadUrl = appManifestUrls[0]
+    ? new URL("/download", appManifestUrls[0]).toString()
+    : "https://genethub.com/download";
   return `//! Which release channel this build belongs to.
 //!
 //! Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
@@ -284,13 +274,17 @@ pub const ENV_AGENT_HOME: &str = "${value("env_agent_home", channel)}";
 pub const DEFAULT_MACHINE_NAME: &str = "${value("default_machine_name", channel)}";
 /// What the built-in agent calls itself in the picker.
 pub const AGENT_LABEL: &str = "${value("agent_label", channel)}";
-/// Where the published builds of this channel announce themselves.
-/// Empty for dev: a source build is not on the update scale at all.
-${manifestConst}
+/// Independent discovery feeds. Web requests never provide these values.
+pub const APP_MANIFEST_URLS: &[&str] = ${rustArray(appManifestUrls)};
+pub const LOGIC_MANIFEST_URLS: &[&str] = ${rustArray(logicManifestUrls)};
+/// Human-facing, channel-local App installation page.
+pub const APP_DOWNLOAD_URL: &str = "${appDownloadUrl}";
 /// Default Hub for \`genet hub login\` and a standalone first pair.
 /// Empty for dev: a source build points nowhere unless told.
 pub const DEFAULT_HUB_URL: &str = "${value("hub_url", channel)}";
 pub const ENV_HUB_URL: &str = "${value("env_hub_url", channel)}";
+/// Fixed product Web loaded by the Desktop shell.
+pub const WEB_APP_URL: &str = "${value("web_app_url", channel)}";
 `;
 };
 
@@ -313,7 +307,12 @@ pub const ENV_HOME: &str = "${value("env_agent_home", channel)}";
 pub const HOME_DIR_NAME: &str = "${value("agent_home_dir", channel)}";
 `;
 
-const desktopModule = (channel) => `//! Which release channel this build belongs to.
+const desktopModule = (channel) => {
+  const appManifestUrls = value("app_manifest_urls", channel);
+  const appDownloadUrl = appManifestUrls[0]
+    ? new URL("/download", appManifestUrls[0]).toString()
+    : "https://genethub.com/download";
+  return `//! Which release channel this build belongs to.
 //!
 //! Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
 //! file. The tree always says \`dev\`; a release build is the workflow
@@ -340,19 +339,42 @@ pub const CLI_BINARY: &str = "${value("cli_binary", channel)}";
 /// adopting the other channel's daemon through a stale endpoint file.
 pub const ENV_DATA_DIR: &str = "${value("env_data_dir", channel)}";
 pub const TRAY_ID: &str = "${value("tray_id", channel)}";
+/// Fixed Hub used only by native first-run enrollment.
+pub const HUB_URL: &str = "${value("hub_url", channel)}";
+/// Fixed product Web loaded by the Desktop shell.
+pub const WEB_APP_URL: &str = "${value("web_app_url", channel)}";
+/// Human-facing, channel-local App installation page.
+pub const APP_DOWNLOAD_URL: &str = "${appDownloadUrl}";
 `;
+};
 
 const tsModule = (channel) => `// Which release channel this build belongs to.
 //
 // Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
 // file. The tree always says "dev"; a release build is the workflow stamping
-// its channel in before it compiles.
-export const CHANNEL: ${CHANNEL_TYPE} = "${value("channel", channel)}";
-export const PRODUCT = "${value("product", channel)}";
-// The desktop shell checks its own release independently from whichever
-// daemon the workbench currently controls. In a browser this stays unused;
-// in a source build it is empty, because dev is not on a release scale.
-export const MANIFEST_URL = "${value("manifest_url", channel)}";
+// its channel in before it compiles. The separately deployed hosted Web sets
+// VITE_GENEHUB_CHANNEL instead, so publishing a page never mutates the paired
+// Open checkout just to stamp a native release identity.
+export type ReleaseChannel = ${CHANNEL_TYPE};
+const STAMPED_CHANNEL: ReleaseChannel = "${value("channel", channel)}";
+const hostedChannel = import.meta.env.VITE_GENEHUB_CHANNEL;
+export const CHANNEL: ReleaseChannel = isReleaseChannel(hostedChannel) ? hostedChannel : STAMPED_CHANNEL;
+const PRODUCTS: Record<ReleaseChannel, string> = {
+  dev: "${value("product", "dev")}",
+  official: "${value("product", "official")}",
+  beta: "${value("product", "beta")}",
+  alpha: "${value("product", "alpha")}",
+};
+export const PRODUCT = import.meta.env.VITE_GENEHUB_BRAND || PRODUCTS[CHANNEL];
+// Fixed discovery feeds. The App feed also supplies the channel-local human
+// download page when Platform reports an ABI mismatch. Dev has no remote feed.
+export const APP_MANIFEST_URLS: readonly string[] = ${JSON.stringify(value("app_manifest_urls", channel))};
+export const LOGIC_MANIFEST_URLS: readonly string[] = ${JSON.stringify(value("logic_manifest_urls", channel))};
+export const WEB_APP_URL = "${value("web_app_url", channel)}";
+
+function isReleaseChannel(value: unknown): value is ReleaseChannel {
+  return value === "dev" || value === "official" || value === "beta" || value === "alpha";
+}
 `;
 
 const shellEnv = (channel) => `# Written by scripts/channel.mjs — edit that script, not this file.
@@ -394,8 +416,6 @@ function stamp(channel) {
   // and locks apart. Every substitute keeps the line's tail — a whole-line
   // replacement eats the trailing comma and the next Tauri build reports a
   // parse error, not a wrong name.
-  const csp =
-    `default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ${value("connect_src", channel)}`;
   rewriteLines(join(repo, "apps/desktop/src-tauri/tauri.conf.json"), [
     [/^  "productName": "[^"]*"/, (line) => line.replace(/"productName": "[^"]*"/, `"productName": "${pathName}"`)],
     [/^  "identifier": "[^"]*"/, (line) => line.replace(/"identifier": "[^"]*"/, `"identifier": "${identifier}"`)],
@@ -403,9 +423,6 @@ function stamp(channel) {
     // Indentation-agnostic: the windows block moved a level when the CLI
     // merge restructured it, and a fixed-indent pattern misses silently.
     [/^(\s*)"title": "[^"]*"/, (line) => line.replace(/"title": "[^"]*"/, `"title": "${product}"`)],
-    // Whole-line replace: the CSP string itself contains quotes, so a
-    // field-only substitute would leave a broken JSON value behind.
-    [/^\s*"csp": "/, `      "csp": "${csp}"`],
   ]);
 
   // The binaries' own names. Crate (package) names stay put — source packages
@@ -442,7 +459,6 @@ function stamp(channel) {
   const conf = readFileSync(join(repo, "apps/desktop/src-tauri/tauri.conf.json"), "utf8");
   console.log(conf.match(/"productName".*$/m)[0].trim());
   console.log(conf.match(/"identifier".*$/m)[0].trim());
-  console.log(conf.match(/"csp".*$/m)[0].trim());
   console.log(readFileSync(join(repo, "scripts/install.sh"), "utf8").match(/^# channel:.*$/m)[0]);
 }
 

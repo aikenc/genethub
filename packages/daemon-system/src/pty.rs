@@ -287,6 +287,10 @@ impl Ptys {
             let _ = terminal.killer.lock().await.kill();
         }
     }
+
+    pub async fn count(&self) -> usize {
+        self.inner.sessions.lock().await.len()
+    }
 }
 
 fn validate_dimensions(cols: u16, rows: u16) -> Result<(), CapabilityFailure> {

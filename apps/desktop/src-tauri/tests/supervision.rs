@@ -129,13 +129,8 @@ fn starting_waits_until_the_daemon_says_where_it_is_listening() {
     assert!(endpoint.port > 0);
     assert!(
         !endpoint.token.is_empty(),
-        "the shell needs the private key to mint one-use admissions"
+        "the shell needs the private key to supervise the exact daemon"
     );
-    let dial = daemon
-        .dial_endpoint()
-        .expect("the running daemon should mint an admission");
-    assert!(!dial.url.contains(&endpoint.token));
-    assert!(!dial.url.contains("token="));
     assert!(daemon.is_running());
 
     // The port is live, not just printed.

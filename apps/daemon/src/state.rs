@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use genehub_proto::ServerFrame;
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::config::{Config, MachineState, Paths};
@@ -30,13 +29,16 @@ pub struct AppState {
     /// `None` exists only in unit-test process scaffolding. A real Daemon start
     /// fails closed unless a verified signed application is active.
     pub logic: Option<Arc<crate::logic::LogicHost>>,
+    /// Signed-application discovery and activation. Its URLs come only from
+    /// channel-stamped App constants, never from a Web request.
+    pub patch: Arc<crate::patch::PatchService>,
     /// Native transport/runtime diagnostics contain categorical platform
     /// facts only; product routing decides whether they are returned.
     pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
     /// Resident audio/runtime resources. Speech settings and context policy
     /// are supplied by the portable application.
     pub speech: Arc<crate::speech::SpeechBroker>,
-    pub fanout: std::sync::OnceLock<broadcast::Sender<ServerFrame>>,
+    pub fanout: std::sync::OnceLock<broadcast::Sender<crate::logic::RoutedEvent>>,
     pub shutdown: Arc<tokio::sync::Notify>,
 }
 
@@ -49,6 +51,9 @@ impl AppState {
         let machine = MachineState::load_or_create(&paths.state_file())?;
         let version = env!("CARGO_PKG_VERSION").to_string();
         let logic = crate::logic::LogicHost::discover(&paths, &machine, &version)?;
+        let patch = Arc::new(crate::patch::PatchService::new(
+            crate::patch::PatchConfig::stamped(),
+        )?);
         let state = Arc::new(Self {
             paths,
             config,
@@ -59,6 +64,7 @@ impl AppState {
             link: std::sync::OnceLock::new(),
             remote: std::sync::OnceLock::new(),
             logic,
+            patch,
             diagnostics: Arc::new(crate::diagnostics::Diagnostics::new()),
             speech: Arc::new(crate::speech::SpeechBroker::new()),
             fanout: std::sync::OnceLock::new(),
@@ -93,12 +99,6 @@ impl AppState {
         });
         crate::config::save_private(&path, serde_json::to_string_pretty(&body)?.as_bytes())?;
         Ok(path)
-    }
-
-    pub fn push(&self, frame: ServerFrame) {
-        if let Some(fanout) = self.fanout.get() {
-            let _ = fanout.send(frame);
-        }
     }
 }
 

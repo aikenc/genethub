@@ -2,7 +2,7 @@ import type { DirectoryListing } from "@genehub/proto";
 import { useState } from "react";
 import { createPortal } from "react-dom";
 
-import type { Endpoint, Host } from "../host";
+import type { Endpoint } from "../host";
 import { warnOp } from "../session/op-log";
 import { useWorkbench } from "../session/store";
 import { ProjectIcon } from "./WorkspaceIcon";
@@ -10,20 +10,18 @@ import { ProjectIcon } from "./WorkspaceIcon";
 /**
  * How a folder or saved VS Code workspace gets onto the workbench.
  *
- * A local daemon uses the operating system picker. A remote daemon exposes its
- * own directory tree through the connection, so choosing a folder stays a
- * browse operation instead of becoming a memory test for an absolute path.
+ * The daemon exposes its directory tree through the connection, so choosing a
+ * folder stays a browse operation instead of becoming a memory test for an
+ * absolute path on another machine.
  *
  * On Windows the remote picker climbs past a drive root into a machine-roots
  * listing so the person can switch disks without typing a path.
  */
 export function OpenProject({
-  host,
   endpoint,
   onOpened,
   compact = false,
 }: {
-  host: Host;
   endpoint: Endpoint;
   onOpened?: () => void;
   compact?: boolean;
@@ -41,7 +39,6 @@ export function OpenProject({
   const activeWorkspace =
     workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null;
   const rememberedDirectory = () => recallPickerDirectory(endpoint);
-  const startingDirectory = () => activeWorkspace?.root ?? rememberedDirectory();
 
   const open = async (root: string) => {
     if (!root.trim()) return;
@@ -58,23 +55,6 @@ export function OpenProject({
       onOpened?.();
     } catch (failure) {
       setError(warnOp("workspace.open", failure));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const canBrowseThisMachine = endpoint.via === "loopback" && host.pickDirectory;
-
-  const pickNative = async (
-    pick: (initialDirectory?: string) => Promise<string | null>,
-  ) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const picked = await pick(startingDirectory());
-      if (picked) await open(picked);
-    } catch (failure) {
-      setError(warnOp("workspace.pick", failure));
     } finally {
       setBusy(false);
     }
@@ -156,32 +136,6 @@ export function OpenProject({
       setPickerBusy(false);
     }
   };
-
-  if (canBrowseThisMachine) {
-    return (
-      <div className={compact ? "flex flex-col gap-1" : "flex flex-col items-center gap-2"}>
-        <button
-          type="button"
-          className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-40"
-          disabled={busy}
-          onClick={() => void pickNative(host.pickDirectory!)}
-        >
-          {busy ? "打开中…" : "打开项目文件夹…"}
-        </button>
-        {host.pickWorkspaceFile ? (
-          <button
-            type="button"
-            className="rounded border border-line px-3 py-1.5 text-xs text-muted hover:bg-raised disabled:opacity-40"
-            disabled={busy}
-            onClick={() => void pickNative(host.pickWorkspaceFile!)}
-          >
-            打开 .code-workspace…
-          </button>
-        ) : null}
-        {error ? <p className="text-xs text-danger">{error}</p> : null}
-      </div>
-    );
-  }
 
   return (
     <div className={compact ? "" : "flex flex-col items-center gap-2"}>

@@ -77,45 +77,29 @@ pub async fn daemon(args: &[String]) -> i32 {
         "start" => no_extra(rest, start),
         "stop" => no_extra(rest, stop),
         "restart" => no_extra(rest, restart),
-        "logic" => logic(rest).await,
+        "patch" => patch(rest).await,
         _ => crate::usage(),
     }
 }
 
-async fn logic(args: &[String]) -> i32 {
+async fn patch(args: &[String]) -> i32 {
     let request = match args {
-        [verb] if verb == "status" => genehub_proto::Request::DaemonLogicStatus,
-        [verb, path] if verb == "install" => {
-            let path = match std::fs::canonicalize(path) {
-                Ok(path) if path.is_file() => path,
-                Ok(path) => fail(
-                    "invalid_args",
-                    &format!("logic artifact is not a file: {}", path.display()),
-                    crate::EXIT_INVALID_ARGS,
-                ),
-                Err(error) => fail(
-                    "invalid_args",
-                    &format!("could not resolve logic artifact {path}: {error}"),
-                    crate::EXIT_INVALID_ARGS,
-                ),
-            };
-            genehub_proto::Request::DaemonLogicInstall {
-                path: path.display().to_string(),
+        [verb] if verb == "check" => genehub_proto::PatchControlRequest::Check,
+        [verb] if verb == "apply" => genehub_proto::PatchControlRequest::Apply {
+            request_id: format!("patch_{}", uuid::Uuid::new_v4().simple()),
+            terminate_activities: false,
+        },
+        [verb, force] if verb == "apply" && force == "--force" => {
+            genehub_proto::PatchControlRequest::Apply {
+                request_id: format!("patch_{}", uuid::Uuid::new_v4().simple()),
+                terminate_activities: true,
             }
         }
-        [verb] if verb == "rollback" => genehub_proto::Request::DaemonLogicRollback,
         _ => return crate::usage(),
     };
     let rpc = crate::rpc::Rpc::connect_or_exit().await;
-    match rpc.call(request).await {
-        Ok(genehub_proto::Reply::LogicModule(status)) => {
-            ok(serde_json::to_value(status).expect("logic status is serializable"))
-        }
-        Ok(other) => fail(
-            "protocol",
-            &format!("daemon returned an unexpected reply: {other:?}"),
-            EXIT_FAILED,
-        ),
+    match rpc.patch(request).await {
+        Ok(response) => ok(serde_json::to_value(response).expect("patch response is serializable")),
         Err(error) => fail("logic_update", &error.to_string(), EXIT_FAILED),
     }
 }
@@ -225,9 +209,9 @@ async fn overview() -> i32 {
     ok(value)
 }
 
-/// `genet daemon endpoint` — how to connect, for a browser, an SSH tunnel or
-/// another agent. The reusable token stays in the owner-only file; the answer
-/// contains a short-lived, single-use admission URL.
+/// `genet daemon endpoint` — admission for a local CLI or diagnostic client.
+/// The reusable token stays in the owner-only file; the answer contains a
+/// short-lived, single-use loopback URL and is never a cross-device bearer.
 fn endpoint() -> i32 {
     let paths = paths();
     let mut value = facts(&paths);

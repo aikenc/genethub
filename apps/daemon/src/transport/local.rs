@@ -14,7 +14,6 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use genehub_proto::ServerFrame;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -41,12 +40,12 @@ pub struct Listener {
 ///
 /// A terminal is shared across a user's devices on purpose: picking up a
 /// running command on your phone is the point of the product.
-pub type PtyFanout = broadcast::Sender<ServerFrame>;
+pub type PtyFanout = broadcast::Sender<crate::logic::RoutedEvent>;
 
 /// Creates the process-wide event bus. Native PTY/process bytes pass through
 /// the Wasm application before they are published here.
 pub fn pty_fanout() -> PtyFanout {
-    broadcast::channel::<ServerFrame>(1024).0
+    broadcast::channel::<crate::logic::RoutedEvent>(1024).0
 }
 
 pub async fn serve(state: Shared, pty_tx: PtyFanout) -> Result<Listener> {

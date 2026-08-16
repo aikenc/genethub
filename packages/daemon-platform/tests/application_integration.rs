@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use genehub_proto::{Reply, Request, TransportKind, PROTOCOL_VERSION};
 use genet_daemon_logic_api::{
-    decode_message, encode_message, LogicBoot, LogicInput, LogicOutcome, LogicOutput, LogicRequest,
+    decode_message, encode_message, CarrierInput, CarrierOutput, CarrierRequest, LogicBoot,
+    LogicOutcome,
 };
 use genet_daemon_platform::{
     LogicVm, PlatformRuntime, SignedArtifact, VmPolicy, LOGIC_ABI_VERSION,
@@ -14,7 +15,7 @@ use support::{signed_component, signing_key, verifier};
 
 #[test]
 #[ignore = "requires GENET_DAEMON_LOGIC_WASM built for wasm32-wasip1"]
-fn real_rust_application_runs_statefully_and_restores_across_instances() {
+fn real_rust_application_is_stateful_only_within_one_cold_instance() {
     let component = application_component();
     let logs = tempfile::tempdir().unwrap();
     let vm = LogicVm::new(application_policy(logs.path())).unwrap();
@@ -27,32 +28,22 @@ fn real_rust_application_runs_statefully_and_restores_across_instances() {
         LogicOutcome::Reply(reply) if matches!(*reply, Reply::Hello(_))
     ));
     let _ = call(&first, Request::AgentList);
-    let snapshot = first.snapshot().unwrap();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&snapshot).unwrap()["handledRequests"],
-        2
-    );
-
     let second = vm.instantiate(&component).unwrap();
     second.initialize(&boot_bytes()).unwrap();
-    second.restore(&snapshot).unwrap();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&second.snapshot().unwrap()).unwrap()
-            ["handledRequests"],
-        2
-    );
+    // A cold replacement starts from durable product storage and boot facts;
+    // transient in-memory request state is deliberately not transferred.
     assert!(matches!(
-        call(&second, Request::UpdateDownload),
-        LogicOutcome::Error(_)
+        call(&second, Request::ConnectionIdentity),
+        LogicOutcome::Reply(reply) if matches!(*reply, Reply::Hello(_))
     ));
 }
 
 #[test]
 #[ignore = "requires GENET_DAEMON_LOGIC_WASM built for wasm32-wasip1"]
-fn real_application_single_file_hot_updates_without_restarting_runtime() {
+fn real_application_single_file_cold_updates_without_state_transfer() {
     let component = application_component();
     let key = signing_key(7);
-    let fallback = signed_component(&key, "embedded", component.clone());
+    let fallback = signed_component(&key, 1, component.clone());
     let packaged = fallback.to_single_file().unwrap();
     let decoded = SignedArtifact::from_single_file(&packaged).unwrap();
     assert_eq!(decoded.component, component);
@@ -75,20 +66,18 @@ fn real_application_single_file_hot_updates_without_restarting_runtime() {
     let before = runtime.active().unwrap();
 
     let installed = runtime
-        .install(signed_component(&key, "next", component))
+        .install(signed_component(&key, 2, component))
         .unwrap();
-    assert_eq!(installed.generation, before.generation + 1);
-    assert_eq!(installed.version, "next");
+    assert_eq!(before.revision, 1);
+    assert_eq!(installed.revision, 2);
     assert!(matches!(
         runtime_call(&runtime, Request::AgentList),
         LogicOutcome::Error(_)
     ));
 
-    let rolled_back = runtime.rollback().unwrap();
-    assert_eq!(rolled_back.version, "embedded");
     assert!(matches!(
-        runtime_call(&runtime, Request::UpdateCheck),
-        LogicOutcome::Error(_)
+        runtime_call(&runtime, Request::ConnectionIdentity),
+        LogicOutcome::Reply(reply) if matches!(*reply, Reply::Hello(_))
     ));
 }
 
@@ -141,12 +130,13 @@ fn boot_bytes() -> Vec<u8> {
 
 fn request(request: Request) -> Vec<u8> {
     encode_message(
-        "logic input",
-        &LogicInput::Request(LogicRequest {
+        "carrier input",
+        &CarrierInput::Request(CarrierRequest {
             call_id: 7,
             transport: TransportKind::Loopback,
             caller: genet_daemon_logic_api::CallerContext::LocalUser,
-            request,
+            route: Default::default(),
+            body: serde_json::to_vec(&request).unwrap(),
         }),
     )
     .unwrap()
@@ -154,22 +144,26 @@ fn request(request: Request) -> Vec<u8> {
 
 fn call(instance: &genet_daemon_platform::LogicInstance, request_value: Request) -> LogicOutcome {
     let output = instance.handle(&request(request_value)).unwrap();
-    decode_message::<Result<LogicOutput, String>>("logic output", &output, 4 * 1024 * 1024)
-        .unwrap()
-        .unwrap()
-        .completions
-        .pop()
-        .unwrap()
-        .outcome
+    outcome(output)
 }
 
 fn runtime_call(runtime: &PlatformRuntime, request_value: Request) -> LogicOutcome {
     let output = runtime.handle(&request(request_value)).unwrap();
-    decode_message::<Result<LogicOutput, String>>("logic output", &output, 4 * 1024 * 1024)
-        .unwrap()
-        .unwrap()
-        .completions
-        .pop()
-        .unwrap()
-        .outcome
+    outcome(output)
+}
+
+fn outcome(output: Vec<u8>) -> LogicOutcome {
+    let response =
+        decode_message::<Result<CarrierOutput, String>>("carrier output", &output, 4 * 1024 * 1024)
+            .unwrap()
+            .unwrap()
+            .completions
+            .pop()
+            .unwrap()
+            .response;
+    if let Some(error) = response.error {
+        LogicOutcome::Error(serde_json::from_slice(&error).unwrap())
+    } else {
+        LogicOutcome::Reply(Box::new(serde_json::from_slice(&response.body).unwrap()))
+    }
 }

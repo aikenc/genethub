@@ -7,6 +7,8 @@ use genet_daemon_platform::{
 
 pub const MODULE_ID: &str = "genehub:daemon/logic";
 pub const KEY_ID: &str = "official-test";
+pub const CHANNEL: &str = "dev";
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub fn signing_key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
@@ -15,6 +17,7 @@ pub fn signing_key(seed: u8) -> SigningKey {
 pub fn verifier(key: &SigningKey, max_artifact_bytes: usize) -> ArtifactVerifier {
     ArtifactVerifier::new(
         MODULE_ID,
+        CHANNEL,
         LOGIC_ABI_VERSION,
         max_artifact_bytes,
         [(KEY_ID.to_string(), key.verifying_key())],
@@ -22,19 +25,26 @@ pub fn verifier(key: &SigningKey, max_artifact_bytes: usize) -> ArtifactVerifier
     .unwrap()
 }
 
-pub fn signed_component(key: &SigningKey, version: &str, component: Vec<u8>) -> SignedArtifact {
-    signed_component_with_key_id(key, KEY_ID, version, component)
+pub fn signed_component(key: &SigningKey, revision: u64, component: Vec<u8>) -> SignedArtifact {
+    signed_component_with_key_id(key, KEY_ID, revision, component)
 }
 
 pub fn signed_component_with_key_id(
     key: &SigningKey,
     key_id: &str,
-    version: &str,
+    revision: u64,
     component: Vec<u8>,
 ) -> SignedArtifact {
-    let envelope =
-        ArtifactEnvelope::unsigned(MODULE_ID, version, LOGIC_ABI_VERSION, key_id, &component)
-            .unwrap();
+    let envelope = ArtifactEnvelope::unsigned(
+        MODULE_ID,
+        CHANNEL,
+        revision,
+        LOGIC_ABI_VERSION,
+        PROTOCOL_VERSION,
+        key_id,
+        &component,
+    )
+    .unwrap();
     let signature = key.sign(&envelope.signing_payload().unwrap());
     SignedArtifact::new(envelope.with_signature(&signature), component)
 }

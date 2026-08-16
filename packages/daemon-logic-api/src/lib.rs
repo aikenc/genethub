@@ -34,8 +34,7 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
 }
 
 /// Core-Wasm export contract implemented by `genet-daemon-logic`.
-pub const ABI_VERSION: u32 = 18;
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
+pub const ABI_VERSION: u32 = 19;
 pub const MAX_CAPABILITY_BATCH: usize = 64;
 pub const MAX_CAPABILITY_CHUNK_BYTES: usize = 3 * 1024 * 1024;
 
@@ -130,7 +129,20 @@ pub struct LogicRequest {
     /// in the guest, so native transport cannot silently grow a second policy
     /// router.
     pub caller: CallerContext,
+    /// Authenticated route facts supplied by the carrier. Business field
+    /// interpretation and scope comparison happen inside the guest.
+    #[serde(default)]
+    pub route: RequestRoute,
     pub request: Request,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequestRoute {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub bootstrap_invite: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,10 +169,32 @@ pub enum LogicInput {
     CapabilityEvent(CapabilityEvent),
 }
 
+/// Native/Wasm carrier request. `body` is the exact external business JSON;
+/// Platform validates only its byte bound and never deserializes a Request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CarrierRequest {
+    pub call_id: u64,
+    pub transport: TransportKind,
+    pub caller: CallerContext,
+    #[serde(default)]
+    pub route: RequestRoute,
+    pub body: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum CarrierInput {
+    Request(CarrierRequest),
+    Platform(PlatformCall),
+    CapabilityResults(CapabilityResults),
+    CapabilityEvent(CapabilityEvent),
+}
+
 /// Native transport asks the signed application to make a security decision
 /// through the same bounded byte ABI as ordinary RPC. The platform still owns
-/// sockets and AEAD records; authorization state and replay policy stay hot
-/// updateable inside the guest.
+/// sockets and AEAD records; authorization state and replay policy stay
+/// independently replaceable inside the guest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformCall {
@@ -218,6 +252,12 @@ pub enum PlatformRequest {
         route_workspace_id: Option<String>,
         start: SpeechStart,
     },
+    /// Stable cold-update gate. The guest reports transient work and, only
+    /// after explicit confirmation, terminates it before Platform quiesces OS
+    /// resources and replaces the instance.
+    PrepareUpdate {
+        terminate_activities: bool,
+    },
     /// Transfers one already-validated completion from the resident audio
     /// driver into guest-owned feedback policy. This is a single bounded
     /// message, not a field-by-field string ABI.
@@ -226,8 +266,8 @@ pub enum PlatformRequest {
     },
     /// Gives the portable application a final bounded opportunity to stop
     /// session-owned descendants before native resource tables disappear.
-    /// Hot replacement does not send this: resources deliberately survive a
-    /// guest update and are rebound through the transferred snapshot.
+    /// Cold replacement uses `PrepareUpdate` first; process shutdown uses this
+    /// final catch-all before the capability broker itself stops.
     Shutdown,
 }
 
@@ -235,6 +275,8 @@ pub enum PlatformRequest {
 #[serde(rename_all = "camelCase")]
 pub enum StreamMethod {
     Events,
+    LogicIdentity,
+    PatchControl,
     AssetPreview,
     ShellRun,
     RtcNegotiate,
@@ -295,7 +337,16 @@ pub enum PlatformReply {
     WorkspaceExecution(WorkspaceExecution),
     StreamAuthorization(StreamAuthorization),
     SpeechPrepared(SpeechConfig),
+    UpdateReadiness(UpdateReadiness),
     Ack,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateReadiness {
+    pub busy: bool,
+    pub active_sessions: u32,
+    pub terminals: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -353,8 +404,8 @@ impl LogicOutput {
 }
 
 /// Connection-local transport work chosen by portable routing policy. Native
-/// code owns the broadcast receiver, while the guest owns what is subscribed
-/// and the snapshot/replay semantics.
+/// code owns the broadcast receiver, while the guest owns subscription and
+/// sequence/resync semantics.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
 pub enum ConnectionDirective {
@@ -375,6 +426,65 @@ pub enum Publication {
     Session(SequencedEvent),
     Fanout(ServerFrame),
     DeviceRevoked { device_id: String },
+}
+
+/// Opaque response produced by the guest for one business RPC. The status is
+/// stable HTTP-like carrier metadata; `body` and `error` remain exact JSON
+/// bytes owned by the active protocol implementation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CarrierResponse {
+    pub status: u16,
+    pub body: Vec<u8>,
+    #[serde(default)]
+    pub error: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CarrierCompletion {
+    pub call_id: u64,
+    pub response: CarrierResponse,
+    #[serde(default)]
+    pub connection: ConnectionDirective,
+}
+
+/// Native uses only these stable security classes to filter an opaque event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PublicationSecurity {
+    General,
+    Pty,
+    BackgroundProcesses,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum CarrierPublication {
+    Session {
+        session_id: String,
+        event: Vec<u8>,
+    },
+    Fanout {
+        security: PublicationSecurity,
+        frame: Vec<u8>,
+    },
+    DeviceRevoked {
+        device_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CarrierOutput {
+    #[serde(default)]
+    pub completions: Vec<CarrierCompletion>,
+    #[serde(default)]
+    pub platform_completions: Vec<PlatformCompletion>,
+    #[serde(default)]
+    pub capability_batches: Vec<CapabilityBatch>,
+    #[serde(default)]
+    pub publications: Vec<CarrierPublication>,
 }
 
 /// A group of independent raw system operations. The guest emits one batch and
@@ -469,7 +579,6 @@ pub enum CapabilityRequest {
         bytes: u32,
     },
     Clock,
-    LogicArtifact(LogicArtifactRequest),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -521,7 +630,6 @@ pub enum CapabilityValue {
     SpeechCapabilities(SpeechCapabilities),
     SpeechRuntimeStatus(SpeechRuntimeStatus),
     SpeechRuntimeConfig(SpeechRuntimeConfig),
-    LogicArtifact(LogicArtifactState),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,7 +734,8 @@ pub enum FileRequest {
         length: u32,
     },
     /// Acquires a kernel-backed advisory lock and keeps its file handle in the
-    /// native resource table. The opaque id survives guest hot replacement.
+    /// native resource table for this guest instance. Cold replacement drains
+    /// it; the next guest reacquires locks from durable domain metadata.
     Lock {
         locator: FileLocator,
         exclusive: bool,
@@ -946,21 +1055,4 @@ pub enum RtcRequest {
 pub enum RtcDescriptionKind {
     Offer,
     Answer,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "camelCase")]
-pub enum LogicArtifactRequest {
-    Status,
-    Install { native_path: String },
-    Rollback,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LogicArtifactState {
-    pub version: String,
-    pub digest: String,
-    pub origin: String,
-    pub generation: u64,
 }

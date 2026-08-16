@@ -32,10 +32,14 @@ pub const ENV_AGENT_HOME: &str = "GENET_AGENT_DEV_HOME";
 pub const DEFAULT_MACHINE_NAME: &str = "GeneHub Dev machine";
 /// What the built-in agent calls itself in the picker.
 pub const AGENT_LABEL: &str = "GeneHub Dev Agent";
-/// Where the published builds of this channel announce themselves.
-/// Empty for dev: a source build is not on the update scale at all.
-pub const DEFAULT_MANIFEST_URL: &str = "";
+/// Independent discovery feeds. Web requests never provide these values.
+pub const APP_MANIFEST_URLS: &[&str] = &[];
+pub const LOGIC_MANIFEST_URLS: &[&str] = &[];
+/// Human-facing, channel-local App installation page.
+pub const APP_DOWNLOAD_URL: &str = "https://genethub.com/download";
 /// Default Hub for `genet hub login` and a standalone first pair.
 /// Empty for dev: a source build points nowhere unless told.
 pub const DEFAULT_HUB_URL: &str = "";
 pub const ENV_HUB_URL: &str = "GENEHUB_DEV_HUB_URL";
+/// Fixed product Web loaded by the Desktop shell.
+pub const WEB_APP_URL: &str = "http://127.0.0.1:5173/app";

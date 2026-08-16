@@ -184,7 +184,10 @@ fn allows(caller: &CallerContext, capability: Capability, devices: &Devices) -> 
 
 fn stream_required(stream: StreamMethod) -> Capability {
     match stream {
-        StreamMethod::Events | StreamMethod::RtcNegotiate => Capability::Handshake,
+        StreamMethod::Events | StreamMethod::LogicIdentity | StreamMethod::RtcNegotiate => {
+            Capability::Handshake
+        }
+        StreamMethod::PatchControl => Capability::Update,
         StreamMethod::AssetPreview => Capability::Files,
         StreamMethod::ShellRun => Capability::Pty,
         StreamMethod::SpeechTranscribe => Capability::Speech,
@@ -218,10 +221,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::DiagnosticsSnapshot
         | Request::HubStatus
         | Request::HubMachines
-        | Request::SpeechCapabilities
-        | Request::UpdateCheck
-        | Request::UpdateDownloadState
-        | Request::DaemonLogicStatus => Capability::Read,
+        | Request::SpeechCapabilities => Capability::Read,
 
         Request::FileWrite { .. }
         | Request::FileMkdir { .. }
@@ -287,11 +287,6 @@ pub fn required(request: &Request) -> Capability {
         | Request::DeviceRevoke { .. }
         | Request::DeviceRemoteAttach { .. }
         | Request::DeviceRemoteDetach => Capability::Devices,
-
-        Request::UpdateDownload
-        | Request::UpdateDismiss
-        | Request::DaemonLogicInstall { .. }
-        | Request::DaemonLogicRollback => Capability::Update,
     }
 }
 

@@ -198,9 +198,9 @@ pub fn usage() -> i32 {
   genet daemon restart              stop + start
   genet daemon status               whether the daemon is running
   genet daemon endpoint             one-use local wsUrl and process facts
-  genet daemon logic status         active signed Wasm logic version
-  genet daemon logic install <file> verify and hot-activate one signed .wasm
-  genet daemon logic rollback       hot-activate the previous signed .wasm
+  genet daemon patch check          check the channel-stamped signed Wasm feed
+  genet daemon patch apply [--force]
+                                    activate it; --force terminates active work
   genet hub status                  Hub pairing state
   genet hub login [--hub <url>] [--name <display>] [--wait]
                                     enroll with the Hub; print a browser URL

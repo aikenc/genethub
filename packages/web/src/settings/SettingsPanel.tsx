@@ -1,8 +1,8 @@
 import type {
+  PatchControlResponse,
   ProviderInfo,
   SpeechRuntimeStatus,
   SpeechSettings,
-  UpdateStatus,
 } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
@@ -14,6 +14,7 @@ import type { RtcState } from "../protocol/client";
 import { useWorkbench } from "../session/store";
 import { THEME_OPTIONS, useTheme } from "../theme/store";
 import { readRtcEnabled, writeRtcEnabled } from "./rtc";
+import { APP_DOWNLOAD_PAGE } from "../updates/links";
 
 /**
  * The providers offered before anything is configured.
@@ -27,7 +28,6 @@ const OFFERED = [
   { id: "anthropic", label: "Anthropic" },
 ];
 
-const OFFICIAL_RELEASES = "https://github.com/aikenc/genethub/releases";
 const QWEN3_ASR_DOCS = "https://github.com/QwenLM/Qwen3-ASR";
 const SPEECH_ADAPTER_DOCS =
   "https://github.com/aikenc/genethub/blob/main/docs/speech-runtime-adapter.md";
@@ -137,7 +137,7 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
         />
       </section>
 
-      <Version host={host} endpoint={endpoint} daemonVersion={client?.identity?.daemonVersion} />
+      <Version host={host} daemonVersion={client?.identity?.daemonVersion} />
     </div>
   );
 }
@@ -502,41 +502,32 @@ const shown = (version: string) =>
 /**
  * Which build this is, and whether a newer one has been published.
  *
- * Two numbers rather than one because they are two executables. A local Windows
- * bundle stamps one version into both, so disagreement there means an upgrade
- * only half landed. A remote daemon belongs to another machine and legitimately
- * updates on a different schedule; the endpoint decides which sentence applies.
- *
- * The check is a button and never a timer. The selected daemon checks itself;
- * the desktop shell checks its own Windows App. A local bundle can still fetch
- * through its daemon, while a remote client opens the installer on this computer.
+ * The selected machine reports its App/Platform build and independently
+ * reports the active Wasm revision. The page build is a third identity because
+ * Web is deployed directly. The check is explicit rather than a timer.
  */
 function Version({
   host,
-  endpoint,
   daemonVersion,
 }: {
   host: Host;
-  endpoint?: Endpoint | null;
   daemonVersion?: string;
 }) {
-  const { update, appUpdate, updating, appUpdating, checkUpdates, client } = useWorkbench();
-  const [app, setApp] = useState<string | null>(null);
-  const localBundle = endpoint?.via === "loopback";
-
-  useEffect(() => {
-    void host.appVersion?.().then(setApp);
-  }, [host]);
+  const { patch, patching, checkUpdates, client } = useWorkbench();
 
   return (
     <section>
       <h2 className="mb-2 text-sm font-medium">版本</h2>
       <div className="flex flex-col gap-2 rounded bg-surface px-3 py-2 text-xs">
         <div className="flex flex-wrap items-center gap-3">
-          {app ? <span data-testid="app-version">应用 {shown(app)}</span> : null}
           <span className="text-muted" data-testid="daemon-version">
-            daemon {daemonVersion ? shown(daemonVersion) : "未连接"}
+            App/Platform {daemonVersion ? shown(daemonVersion) : "未连接"}
           </span>
+          {client?.logicIdentity ? (
+            <span className="text-muted" data-testid="logic-version">
+              Wasm r{client.logicIdentity.logicRevision} · 协议 v{client.logicIdentity.protocolVersion}
+            </span>
+          ) : null}
           <button
             type="button"
             data-testid="check-update"
@@ -544,10 +535,10 @@ function Version({
             // The machine is what does the looking, so with no connection there
             // is nothing to ask — and a button that can only answer "还没连上"
             // should not be pressable in the first place.
-            disabled={updating || appUpdating || !client}
-            onClick={() => void checkUpdates(host)}
+            disabled={patching || !client}
+            onClick={() => void checkUpdates()}
           >
-            {updating || appUpdating ? "检查中…" : "检查更新"}
+            {patching ? "检查中…" : "检查更新"}
           </button>
         </div>
         {/* The page is a third artefact, served from wherever it was last
@@ -563,32 +554,18 @@ function Version({
           页面 {BUILD}
         </code>
         <p className="text-muted" data-testid="manual-update-note">
-          应用内自动下载和安装暂未启用。请从官方发布页手动下载，并通过独立可信渠道核对
+          应用内自动下载和安装暂未启用。请从当前发布通道的下载页手动下载，并通过独立可信渠道核对
           SHA256SUMS；同站点提供的校验值只能发现下载损坏。
           <button
             type="button"
             data-testid="manual-update-link"
             className="ml-1 underline decoration-dotted hover:text-accent"
-            onClick={() => host.openExternal(OFFICIAL_RELEASES)}
+            onClick={() => host.openExternal(APP_DOWNLOAD_PAGE)}
           >
-            打开官方发布页
+            打开下载页
           </button>
         </p>
-        {/* Not for a build from source: a developer running a fresh shell against
-            an installed daemon is not a broken upgrade, and saying so would be
-            crying wolf at the one person who can tell the difference. */}
-        {localBundle && app && daemonVersion && app !== daemonVersion && app !== UNRELEASED ? (
-          <p role="alert" className="text-danger">
-            两个版本不一致，上次升级大概只装了一半。重新装一遍安装包，或者从托盘退出再打开。
-          </p>
-        ) : null}
-        {!localBundle && app && daemonVersion && app !== daemonVersion ? (
-          <p className="text-muted" data-testid="remote-version-note">
-            客户端 App 和远程 daemon 分别更新，版本可以不同。
-          </p>
-        ) : null}
-        {appUpdate && (!localBundle || appUpdate.newer) ? <AppAnswer status={appUpdate} /> : null}
-        <Answer status={update} subject={localBundle ? "整机" : "daemon"} />
+        <PatchAnswer response={patch} />
       </div>
     </section>
   );
@@ -601,52 +578,26 @@ function Version({
  * nothing looks broken, and a check that reached nothing must never be allowed to
  * read as "you are up to date".
  */
-function Answer({ status, subject }: { status: UpdateStatus | null; subject: "整机" | "daemon" }) {
-  if (!status) return null;
-  if (status.problem) {
-    return (
-      <p role="alert" className="text-danger">
-        没查到 {subject} 有没有新版本：{status.problem}
-      </p>
-    );
+function PatchAnswer({ response }: { response: PatchControlResponse | null }) {
+  if (!response) return null;
+  if (response.type === "applied") {
+    return <p className="text-muted">Wasm 已更新到 r{response.active.logicRevision}。</p>;
   }
-  // A build from source is neither behind nor "the latest": it is not on the
-  // scale at all, and "已经是最新的了" would be a claim nobody can check.
-  if (status.current === UNRELEASED) {
-    return (
-      <p className="text-muted">这是从源码构建的开发版，不跟发布版本比较。最新发布是 {status.latest ?? "未知"}。</p>
-    );
+  if (response.type === "busy") {
+    return <p className="text-muted">有活动任务；可在右下角选择等待或终止任务后更新。</p>;
   }
-  if (!status.newer) {
-    return <p className="text-muted">{subject} 已经是最新的了。</p>;
+  switch (response.availability.type) {
+    case "current":
+      return <p className="text-muted">Wasm 已经是当前通道最新修订。</p>;
+    case "available":
+      return <p className="text-muted">Wasm 补丁 r{response.availability.artifact.logicRevision} 可用。</p>;
+    case "requiresApp":
+      return <p className="text-muted">新补丁需要 ABI {response.availability.requiredPlatformAbi}，请更新 App 安装包。</p>;
+    case "paused":
+      return <p className="text-muted">补丁发布已暂停：{response.availability.reason}</p>;
+    case "unconfigured":
+      return <p className="text-muted">当前开发通道未配置远程补丁源。</p>;
   }
-
-  return (
-    <p className="text-muted">
-      {subject} 有新版本 {status.latest}。自动下载未启用，请使用上方官方发布页手动更新。
-    </p>
-  );
-}
-
-function AppAnswer({ status }: { status: UpdateStatus }) {
-  if (status.problem) {
-    return (
-      <p role="alert" className="text-danger">
-        没查到客户端 App 有没有新版本：{status.problem}
-      </p>
-    );
-  }
-  if (status.current === UNRELEASED) {
-    return <p className="text-muted">客户端 App 是源码构建的开发版，不跟发布版本比较。</p>;
-  }
-  if (!status.newer) {
-    return <p className="text-muted">客户端 App 已经是最新的了。</p>;
-  }
-  return (
-    <p className="text-muted">
-      客户端 App 有新版本 {status.latest}。自动下载未启用，请使用上方官方发布页手动更新。
-    </p>
-  );
 }
 
 /**

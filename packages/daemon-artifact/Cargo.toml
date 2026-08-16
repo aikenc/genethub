@@ -8,7 +8,9 @@ description = "Release tool for producing one signed GeneHub daemon Wasm file"
 [dependencies]
 base64.workspace = true
 ed25519-dalek.workspace = true
+genehub-proto = { path = "../proto" }
 genet-daemon-platform = { path = "../daemon-platform" }
+serde_json.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

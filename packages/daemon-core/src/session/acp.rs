@@ -2,7 +2,8 @@
 //!
 //! The platform only owns a byte-stream process. Handshake, session resume,
 //! prompt framing, permissions, Cursor extensions and timeline translation
-//! remain in the portable guest and survive a guest hot swap.
+//! remain in the portable guest. Durable session state is reopened after a
+//! cold Wasm replacement; live Agent processes deliberately do not survive it.
 
 use std::collections::BTreeMap;
 

@@ -69,7 +69,6 @@ function stubClient() {
     close() {},
     onStateChange: () => () => {},
     onNotice: () => () => {},
-    onUpdateDownload: () => () => {},
     onBackgroundProcesses: () => () => {},
     onEvent: () => () => {},
     onPty: () => () => {},

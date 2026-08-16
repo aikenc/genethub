@@ -3,10 +3,10 @@
 //
 // The CLI (which is also the daemon) and the built-in agent are release
 // binaries copied into `bin/`, where Tauri picks them up as bundled
-// resources. Nothing here needs Node at runtime: the UI is a static build
-// loaded by the system WebView, which is what keeps the installer small and
-// the machine free of a runtime it never asked for (`docs/desktop-client.md`
-// §4.1).
+// resources. Nothing here needs Node at runtime: Tauri bundles only the tiny
+// boot/error page, then the system WebView navigates to the channel website.
+// The installer therefore contains no product Web build and the machine gets
+// no runtime it never asked for (`docs/desktop-client.md` §4.1).
 
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";

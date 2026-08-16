@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { browserHost, desktopHost, detectHost } from "./index";
+import { browserHost, detectHost } from "./index";
 
 describe("finding the machine to connect to", () => {
   it("reads the endpoint out of the fragment, where it stays out of server logs", async () => {
@@ -27,45 +27,13 @@ describe("finding the machine to connect to", () => {
     expect(await browserHost({ hash: "" }).endpoint()).toBeNull();
   });
 
-  it("builds the loopback url from what the desktop shell read off the daemon", async () => {
-    const invoke = vi.fn(async () => ({
-      port: 42123,
-      url: "ws://127.0.0.1:42123/ws?challenge=fresh&pid=42&expiresAt=1&proof=proof",
-      machineId: "m_1",
-      fingerprint: "AB-CD",
-      pid: 42,
-      challenge: "fresh",
-      expiresAt: 1,
-      serverProof: "server-proof",
-    }));
-    vi.stubGlobal("window", { __TAURI__: { core: { invoke } } });
-
-    const endpoint = await desktopHost().endpoint();
-    expect(endpoint).toEqual({
-      url: "ws://127.0.0.1:42123/ws?challenge=fresh&pid=42&expiresAt=1&proof=proof",
-      via: "loopback",
-      label: "这台电脑",
-      // Carried through so the settings page can hold it up against what the
-      // handshake claims.
-      fingerprint: "AB-CD",
-      localServerProof: {
-        proof: "server-proof",
-        challenge: "fresh",
-        pid: 42,
-        machineId: "m_1",
-        fingerprint: "AB-CD",
-        expiresAt: 1,
-      },
-    });
-    vi.unstubAllGlobals();
-  });
-
-  it("picks the desktop host only when the shell is actually there", () => {
-    vi.stubGlobal("window", {});
+  it("stays an ordinary browser even when displayed inside a native WebView", () => {
     expect(detectHost().kind).toBe("browser");
-
+    // A compromised or accidentally injected marker must not activate a native
+    // product path. The released shell sets withGlobalTauri=false as the harder
+    // boundary; this keeps the Web package independent as well.
     vi.stubGlobal("window", { __TAURI__: { core: { invoke: vi.fn() } } });
-    expect(detectHost().kind).toBe("desktop");
+    expect(detectHost().kind).toBe("browser");
     vi.unstubAllGlobals();
   });
 });

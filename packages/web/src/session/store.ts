@@ -10,6 +10,7 @@ import type {
   HubClaim,
   HubStatus,
   LogTail,
+  PatchControlResponse,
   RemoteAccess,
   PermissionOutcome,
   BlobRef,
@@ -19,13 +20,10 @@ import type {
   SessionSummary,
   Settings,
   SpeechRuntimeStatus,
-  UpdateDownload,
-  UpdateStatus,
   WorkspaceInfo,
 } from "@genehub/proto";
 import { create } from "zustand";
 
-import type { Host } from "../host";
 import type { Client, ConnectionState } from "../protocol/client";
 import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
@@ -128,6 +126,7 @@ export type ComposerDraftInsert = {
 };
 
 let composerDraftInsertSequence = 0;
+let patchRequestId: string | null = null;
 
 interface WorkbenchState {
   client: Client | null;
@@ -193,29 +192,10 @@ interface WorkbenchState {
   settings: Settings | null;
   /** The log being read, if the log tab has been opened. */
   log: LogTail | null;
-  /**
-   * The answer to the last update check, or null because nobody has asked.
-   *
-   * Never fetched on mount, and never on a timer: this is the one piece of state
-   * here that only exists because a person pressed something (`UpdateStatus`).
-   * It lives in the store rather than in the About section because the tray can
-   * ask too, and both have to end up on the same screen.
-   */
-  update: UpdateStatus | null;
-  /** The desktop shell's answer, independent of the selected machine. */
-  appUpdate: UpdateStatus | null;
-  /** A check is in flight. Shared, for the same reason `update` is. */
-  updating: boolean;
-  appUpdating: boolean;
-  /**
-   * How far the machine has got fetching the installer.
-   *
-   * Owned by the machine, not by us: this is the one piece of state here that
-   * keeps moving after the panel that started it is closed, and two windows
-   * watching the same download have to agree. What arrives is either the answer
-   * to `update.downloadState` or a push, and both write the same field.
-   */
-  download: UpdateDownload;
+  /** Last explicit signed-Wasm check/apply result from the stable Platform path. */
+  patch: PatchControlResponse | null;
+  /** A check or activation is in flight. */
+  patching: boolean;
 
   attach(client: Client): Promise<void>;
   /** Refreshes daemon-owned session status for the sidebar. */
@@ -239,17 +219,13 @@ interface WorkbenchState {
    * can open.
    */
   loadLog(name?: string): Promise<void>;
-  /** Asks the machine whether a newer build has been published. */
-  checkUpdate(): Promise<void>;
-  /** Checks both the selected daemon and, when present, this desktop App. */
-  checkUpdates(host: Host): Promise<void>;
-  /**
-   * Asks the machine to fetch the installer. Returns once it has started, not
-   * once it has finished: what happens after that arrives as pushes.
-   */
-  downloadUpdate(): Promise<void>;
-  /** Stops the prompt asking, without throwing the downloaded file away. */
-  dismissUpdate(): Promise<void>;
+  /** Checks the selected daemon's stamped signed-Wasm feed. */
+  checkPatch(): Promise<void>;
+  /** Checks the selected machine's signed Wasm/App dependency feed. */
+  checkUpdates(): Promise<void>;
+  /** Applies only the stamped candidate; force first terminates active work. */
+  applyPatch(terminateActivities?: boolean): Promise<void>;
+  clearPatch(): void;
   setProvider(input: {
     providerId: string;
     apiKey?: string;
@@ -539,11 +515,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   diff: null,
   settings: null,
   log: null,
-  update: null,
-  appUpdate: null,
-  updating: false,
-  appUpdating: false,
-  download: { state: "idle" },
+  patch: null,
+  patching: false,
 
   async attach(client) {
     reconnectNotice = null;
@@ -585,21 +558,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       }
     });
     client.onNotice((_level, message) => set({ notice: message }));
-    client.onUpdateDownload((download) => set({ download }));
     client.onBackgroundProcesses((backgroundProcesses) => set({ backgroundProcesses }));
     try {
-      // Hub status and the download prompt do not read anything the catalog
-      // loads, so they fly alongside it instead of queueing behind two relay
-      // round trips — on a slow link that queueing is most of what switching
-      // to a machine used to cost.
+      // Hub status does not read anything the catalog loads, so it flies
+      // alongside it instead of queueing behind two relay round trips.
       const ancillary = (async () => {
         await get().refreshHub();
-        // Asked on connect, unlike the update check itself. A download that was
-        // running when the window closed is still running, and the prompt to
-        // install it has to come back with the window rather than wait for
-        // someone to go looking in settings for a file they already have.
-        const download = await client.call({ type: "update.downloadState" });
-        if (download?.type === "updateDownload") set({ download: download.data });
       })().catch((error: unknown) => unattended(client, get, set)(error));
       await refreshCatalog(client, set);
       if (get().client === client) await land(get);
@@ -1371,50 +1335,50 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (reply?.type === "log") set({ log: reply.data });
   },
 
-  async checkUpdate() {
-    // The previous answer goes away as the next check starts, so a stale "已是
-    // 最新" cannot be read as the result of the press that just happened.
-    set({ notice: null, update: null, updating: true });
+  async checkPatch() {
+    set({ notice: null, patch: null, patching: true });
     try {
-      const reply = await asked(set, () =>
-        require_(get().client).call({ type: "update.check" }),
+      const response = await asked(set, () =>
+        require_(get().client).patch({ type: "check" }),
       );
-      if (reply?.type === "update") set({ update: reply.data });
+      if (response) set({ patch: response });
     } finally {
-      set({ updating: false });
+      set({ patching: false });
     }
   },
 
-  async checkUpdates(host) {
-    set({ appUpdate: null, appUpdating: Boolean(host.checkAppUpdate) });
-    await Promise.all([
-      get().checkUpdate(),
-      host.checkAppUpdate
-        ? host
-            .checkAppUpdate()
-            .then((appUpdate) => set({ appUpdate }))
-            .finally(() => set({ appUpdating: false }))
-        : Promise.resolve(),
-    ]);
+  async checkUpdates() {
+    await get().checkPatch();
   },
 
-  async downloadUpdate() {
-    const reply = await asked(set, () =>
-      require_(get().client).call({ type: "update.download" }),
-    );
-    if (reply?.type === "updateDownload") set({ download: reply.data });
+  async applyPatch(terminateActivities = false) {
+    const client = require_(get().client);
+    patchRequestId ??= newPatchRequestId();
+    set({ notice: null, patching: true });
+    try {
+      const response = await asked(set, () =>
+        client.patch({
+          type: "apply",
+          requestId: patchRequestId!,
+          terminateActivities,
+        }),
+      );
+      if (!response) return;
+      set({ patch: response });
+      if (response.type !== "busy") patchRequestId = null;
+      if (response.type === "applied") {
+        await Promise.all([
+          refreshCatalog(client, set),
+          get().refreshSessions(),
+        ]).catch(unattended(client, get, set));
+      }
+    } finally {
+      set({ patching: false });
+    }
   },
 
-  async dismissUpdate() {
-    // Set here as well as from the reply, so the prompt goes away on the click
-    // rather than after a round trip. The machine's answer overwrites it a
-    // moment later and they agree, except when the download is still running —
-    // and then the machine is right and this was never dismissed.
-    set({ download: { state: "idle" } });
-    const reply = await asked(set, () =>
-      require_(get().client).call({ type: "update.dismiss" }),
-    );
-    if (reply?.type === "updateDownload") set({ download: reply.data });
+  clearPatch() {
+    set({ patch: null });
   },
 
   async setProvider({ providerId, apiKey, baseUrl, label, dialect, models }) {
@@ -1886,6 +1850,14 @@ async function asked<T>(set: Setter, run: () => Promise<T>): Promise<T | undefin
   } catch (error) {
     reportError(set, error);
     return undefined;
+  }
+}
+
+function newPatchRequestId(): string {
+  try {
+    return `patch_${crypto.randomUUID().replaceAll("-", "")}`;
+  } catch {
+    return `patch_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
   }
 }
 

@@ -104,6 +104,10 @@ jobs:
                 rust=true
                 daemon_platform=true
                 ;;
+              scripts/*)
+                rust=true
+                daemon_platform=true
+                ;;
               apps/relay/*)
                 relay=true
                 ;;
@@ -241,6 +245,7 @@ jobs:
           npm ci --prefix .github/agent-clis
           echo "$GITHUB_WORKSPACE/.github/agent-clis/node_modules/.bin" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
+      - run: node --test scripts/beta-promotion.test.mjs
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The journeys start real daemon and agent processes, and `cargo test` does
       # not build another package's executables — it only compiles them as test
@@ -327,7 +332,7 @@ jobs:
           cargo run --quiet -p genet-daemon-artifact -- pack-dev \
             target/wasm32-wasip1/daemon-logic-release/genet_daemon_logic.wasm \
             "$GENET_PORTABLE_FIXTURE_DIR/daemon-logic.wasm" \
-            portable-linux-ci
+            77
           cargo test -p genet-daemon-platform \
             --test portable_artifact_handoff \
             write_linux_portable_fixture \
@@ -341,7 +346,7 @@ jobs:
 
   # The platform kernel is deliberately exercised on all supported desktop
   # operating systems. These tests execute real Wasmtime modules and the
-  # durable update-slot implementation, including each OS's rename/fsync path.
+  # baseline/active/candidate store, including each OS's rename/fsync path.
   daemon-platform:
     needs: [changes, daemon_platform_artifact]
     if: >-
@@ -389,14 +394,14 @@ jobs:
       # catches host-dependent assumptions (path spelling, line endings, clock
       # and filesystem behaviour) before the artifact reaches a consumer.
       - run: cargo test -p genet-daemon-core --all-targets
-      - name: Run the real application ABI and state-transfer tests
+      - name: Run the real application ABI and cold-replacement tests
         env:
           GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-platform-fixture/daemon-logic.wasm
         run: >-
           cargo test -p genet-daemon-platform
           --test application_integration
           -- --ignored
-      - name: Start the product daemon and hot-update it without restart
+      - name: Start the product daemon and replace its logic without Platform restart
         env:
           GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-platform-fixture/daemon-logic.wasm
         run: >-

@@ -1,84 +1,57 @@
 # daemon-platform
 
-`genet-daemon-platform` is the native trust, Wasmtime and activation kernel for
-GeneHub's signed Rust/Wasm daemon application. It deliberately has no dependency
-on `genehub-proto`, sessions, adapters, devices, PTY or networking policy.
+`genet-daemon-platform` is the small native trust and execution kernel for the signed daemon application.
 
-It owns only:
+It owns:
 
-- Ed25519 trust roots and verification before compilation;
-- the bounded Wasmtime engine, module cache, stores and instances;
-- one opaque byte-batch application ABI;
-- side-by-side candidate initialization, snapshot/restore and health checks;
-- durable active/previous artifact slots, atomic route replacement and recovery.
+- signed artifact v2 verification and exact channel/ABI/revision identity;
+- Wasmtime/WASI limits and application boot/health checks;
+- one embedded baseline, one downloaded active artifact, a temporary candidate and one anti-replay high-water mark;
+- prepare-then-activate cold replacement under an exclusive route lock.
 
-The distributed artifact is one valid Wasm file. Its final custom section,
-`genehub.daemon.artifact.v1`, contains the signed canonical envelope; there is
-no sidecar manifest to lose or mismatch. The signature binds module id, version,
-ABI, byte length, SHA-256 and key id to the exact core-Wasm prefix.
+It deliberately does not own business protocol parsing, product authorization, update URLs supplied by clients,
+guest memory transfer, previous slots or rollback. The daemon-level UpdateGate must establish idle/force cleanup
+before calling `prepare` / `activate`.
 
-## Source modules versus deployment files
+The Wasm ABI is `genet-daemon-logic-api::ABI_VERSION` (currently 19). `platformAbi` is the only compatibility gate;
+business `protocolVersion` is opaque to this crate and is reported to Web after activation.
 
-The guest is a normal safe-Rust dependency graph:
+## Storage contract
+
+Inside the Platform state directory:
 
 ```text
-genehub-proto + daemon-logic-api
-              │
-daemon-common ├──> daemon-core ──> daemon-logic (cdylib entry)
+active.wasm
+candidate.wasm
+highest-revision
 ```
 
-Those crates call one another as ordinary Rust. They statically link into one
-`daemon-logic.wasm`; they are not Wasm microservices and create no host calls.
-Additional business crates should join this graph without increasing the
-artifact count. A second deployable artifact requires a real independent state,
-rollback and release domain.
+Every write is bounded and atomically renamed. The high-water mark advances before candidate publication, so a
+crash can only leave a verifiable candidate at the same fenced revision. Recovery can finish that rename, discard
+an invalid candidate, or start the embedded baseline without lowering the fence.
 
 ## Local development
 
-Build and development-sign the guest:
+Build a raw component and wrap it with the development root:
 
-```sh
+```bash
 node scripts/daemon-logic.mjs
 ```
 
-The result is `target/daemon-logic.wasm`. Run a source build against it with:
+Exercise an isolated publication candidate without a tag, release or remote write:
 
-```sh
-GENET_DAEMON_LOGIC_WASM="$PWD/target/daemon-logic.wasm" \
-  cargo run -p genet-cli -- daemon run
+```bash
+node scripts/publish-daemon-logic.mjs --channel beta --discard-candidate
 ```
 
-Inspect or replace the live module without restarting the native daemon:
-
-```sh
-genet-dev daemon logic status
-genet-dev daemon logic install /absolute/path/to/signed.wasm
-genet-dev daemon logic rollback
-```
-
-Release signing never uses the development key. The public Linux release job
-reads `GENET_DAEMON_LOGIC_SIGNING_KEY`, builds the guest once, appends the signed
-section once, and hands those exact bytes to every native packager.
+The runtime has no local install/rollback business RPC. Use the daemon's fixed `platform.patch` controller when
+testing the product path.
 
 ## Tests
 
-```sh
-cargo test -p genet-daemon-platform --all-targets
-
-GENET_DAEMON_LOGIC_WASM="$PWD/target/daemon-logic.wasm" \
-  cargo test -p genet-daemon-platform --test application_integration -- --ignored
-
-GENET_DAEMON_LOGIC_WASM="$PWD/target/daemon-logic.wasm" \
-  cargo test -p genet-daemon --test logic_update_integration -- --ignored
-
-GENET_DAEMON_LOGIC_WASM="$PWD/target/daemon-logic.wasm" \
-  cargo test -p genet-cli --test logic_update_contract -- --ignored
+```bash
+cargo test -p genet-daemon-platform
 ```
 
-CI additionally downloads one Linux-built signed file on Linux x64/ARM64,
-Windows x64 and macOS x64/ARM64 and runs the real VM, product-daemon and CLI
-update tests. Consumer jobs never rebuild guest bytes.
-
-The complete decision, implemented boundary, build measurements and validation
-contract are in
-[`docs/daemon-wasm.md`](../../docs/daemon-wasm.md).
+Integration coverage includes signature/channel/ABI/revision rejection, bounded files, candidate boot failure,
+single-active commit, crash recovery, corrupted active fallback and replay refusal.

@@ -16,6 +16,7 @@ pub mod lifecycle;
 pub mod link;
 pub mod logic;
 pub mod logs;
+pub mod patch;
 pub mod process;
 pub mod remote;
 pub mod router;

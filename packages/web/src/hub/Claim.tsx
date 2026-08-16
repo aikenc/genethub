@@ -19,20 +19,6 @@ export function Claim({ claim, host }: { claim: HubClaim; host: Host }) {
         <div className="min-w-0 flex-1 space-y-2">
           <p className="break-all font-mono text-[11px] text-faint">{claim.claimUrl}</p>
           <div className="flex flex-wrap gap-2">
-            {/* Where the app owns a window, opening it there is the better
-                answer: the link is for getting *this* identity signed in, and
-                being thrown out to a different browser and back is the worst
-                minute of a first install. Not a replacement — the other
-                device is still the main use, and that needs a real link. */}
-            {host.openWindow ? (
-              <button
-                type="button"
-                className="rounded border border-line px-2 py-1 text-xs hover:border-accent"
-                onClick={() => host.openWindow!(claim.claimUrl)}
-              >
-                在这个应用里打开
-              </button>
-            ) : null}
             <button
               type="button"
               className="rounded border border-line px-2 py-1 text-xs"

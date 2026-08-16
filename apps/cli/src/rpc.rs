@@ -23,6 +23,7 @@ use crate::machines::PairedMachine;
 use crate::{fail, EXIT_UNREACHABLE};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+const PATCH_TIMEOUT: Duration = Duration::from_secs(120);
 /// One event frame. Generous next to any single session event and bounded so a
 /// malformed length cannot make the client allocate on request.
 const MAX_EVENT_FRAME_BYTES: usize = 1024 * 1024;
@@ -335,6 +336,42 @@ impl Rpc {
 
     pub async fn call(&self, request: Request) -> Result<Reply, RpcError> {
         rpc_call(&self.endpoint, request).await
+    }
+
+    /// Uses the Platform carrier directly. The active Wasm remains the owner
+    /// of ordinary CLI business commands, while patch discovery must survive
+    /// a business-protocol mismatch.
+    pub async fn patch(
+        &self,
+        request: genehub_proto::PatchControlRequest,
+    ) -> Result<genehub_proto::PatchControlResponse, RpcError> {
+        let body = serde_json::to_vec(&request)
+            .map_err(|error| RpcError::Transport(format!("encode patch request: {error}")))?;
+        let response = tokio::time::timeout(
+            PATCH_TIMEOUT,
+            self.endpoint.exchange(
+                genehub_proto::PATCH_CONTROL_METHOD,
+                Value::Null,
+                body,
+                Some(PATCH_TIMEOUT.as_millis() as u32),
+            ),
+        )
+        .await
+        .map_err(|_| RpcError::Transport("timed out waiting for the patch controller".into()))?
+        .map_err(|error| {
+            RpcError::Transport(format!("Platform patch exchange failed: {error:#}"))
+        })?;
+        if let Some(error) = response.head.error {
+            return Err(RpcError::Remote(error));
+        }
+        if response.head.status != 200 {
+            return Err(RpcError::Transport(format!(
+                "Platform patch controller returned status {}",
+                response.head.status
+            )));
+        }
+        serde_json::from_slice(&response.body)
+            .map_err(|error| RpcError::Transport(format!("decode patch response: {error}")))
     }
 
     /// Starts receiving this peer's event frames.

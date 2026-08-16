@@ -8,7 +8,7 @@
 use std::sync::{Arc, Weak};
 
 use anyhow::Result;
-use genehub_proto::{HubMachine, HubStatus, HubTicket, ServerFrame};
+use genehub_proto::{HubMachine, HubStatus, HubTicket};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::config::{Enrollment, Paths};
@@ -51,7 +51,7 @@ pub struct Link {
     stage: Mutex<Stage>,
     /// Terminal output has to reach relayed clients too, so the uplink needs
     /// the same fanout the local listener uses.
-    pty: broadcast::Sender<ServerFrame>,
+    pty: broadcast::Sender<crate::logic::RoutedEvent>,
     /// Weak, because the state owns this link: an `Arc` both ways would keep
     /// the whole daemon alive after shutdown.
     state: Weak<AppState>,
@@ -60,7 +60,7 @@ pub struct Link {
 pub type SharedLink = Arc<Link>;
 
 impl Link {
-    pub fn new(_paths: Paths, pty: broadcast::Sender<ServerFrame>) -> SharedLink {
+    pub fn new(_paths: Paths, pty: broadcast::Sender<crate::logic::RoutedEvent>) -> SharedLink {
         Arc::new(Link {
             stage: Mutex::new(Stage::Unpaired),
             pty,
@@ -518,7 +518,7 @@ fn pairing_status(hub_url: &str, code: &hub::PairingCode) -> HubStatus {
 
 fn dial(
     state: &Arc<AppState>,
-    pty: &broadcast::Sender<ServerFrame>,
+    pty: &broadcast::Sender<crate::logic::RoutedEvent>,
     enrollment: &Enrollment,
 ) -> FabricUplink {
     let _ = pty;
