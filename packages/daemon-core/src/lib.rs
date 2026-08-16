@@ -1281,15 +1281,13 @@ impl LogicApp {
                 self.config.as_ref().expect("config loaded"),
                 &self.discoveries,
             );
-            match agents::list(
+            let agents = agents::list(
                 &self.boot,
                 &runtime_config,
                 capabilities,
                 &mut self.next_capability_id,
-            ) {
-                Ok(agents) => self.agent_cache = Some(agents),
-                Err(error) => return Err(error),
-            }
+            )?;
+            self.agent_cache = Some(agents);
         }
         Ok(())
     }
