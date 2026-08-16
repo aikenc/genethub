@@ -111,7 +111,16 @@ impl Ptys {
             }
             PtyRequest::Close { resource_id } => {
                 if let Some(terminal) = self.inner.sessions.lock().await.remove(&resource_id) {
-                    terminal.killer.lock().await.kill().map_err(pty_failure)?;
+                    let killed = terminal.killer.lock().await.kill();
+                    // portable-pty 0.9.0 reverses the Win32 TerminateProcess
+                    // return check in its cloned killer: success is Err and
+                    // failure is Ok. Upstream fixed this in 8afe0ad, but no
+                    // corrected crate release exists yet, so this pinned
+                    // version cannot report a trustworthy Windows result.
+                    #[cfg(windows)]
+                    drop(killed);
+                    #[cfg(not(windows))]
+                    killed.map_err(pty_failure)?;
                 }
                 Ok(CapabilityValue::Unit)
             }
