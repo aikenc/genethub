@@ -335,7 +335,7 @@ export const Markdown = memo(function Markdown({
           },
           pre: ({ children }) => <>{children}</>,
           table: ({ children }) => (
-            <div className="gh-table-wrap touch-pan-x">
+            <div className="gh-table-wrap">
               <table>{children}</table>
             </div>
           ),
@@ -557,7 +557,28 @@ function loadMermaid(): Promise<(typeof import("mermaid"))["default"]> {
       securityLevel: "strict",
       suppressErrorRendering: true,
       theme: "base",
-      flowchart: { htmlLabels: false, useMaxWidth: true },
+      /*
+       * Top level, not only under `flowchart`: Mermaid 11 reads the per-diagram
+       * flag for sizing but keeps putting node labels in `<foreignObject>`
+       * unless this one is off. Those labels are HTML, and an SVG loaded as an
+       * image never renders HTML — the diagram arrived as a set of empty boxes
+       * with only the edge labels, which are plain `<text>`, still in it.
+       */
+      htmlLabels: false,
+      /*
+       * `useMaxWidth` writes `width="100%"`, which leaves an SVG-as-image with
+       * no intrinsic width at all: the browser falls back to its 300px default
+       * and every diagram, wide or narrow, was resampled to that. Off, the SVG
+       * carries its real pixel size and the stylesheet decides how it fits.
+       */
+      flowchart: { htmlLabels: false, useMaxWidth: false },
+      sequence: { useMaxWidth: false },
+      gantt: { useMaxWidth: false },
+      class: { useMaxWidth: false },
+      state: { useMaxWidth: false },
+      journey: { useMaxWidth: false },
+      pie: { useMaxWidth: false },
+      er: { useMaxWidth: false },
     });
     return mermaid;
   });
@@ -572,7 +593,20 @@ function loadMermaid(): Promise<(typeof import("mermaid"))["default"]> {
 function safeMermaidSvg(svg: string): string {
   const document_ = new DOMParser().parseFromString(svg, "image/svg+xml");
   if (document_.querySelector("parsererror")) throw new Error("流程图输出无效");
-  document_.querySelectorAll("script, foreignObject, image, a").forEach((node) => node.remove());
+  /*
+   * A diagram that reaches us with HTML labels cannot be shown: dropping the
+   * `foreignObject` leaves empty shapes, and keeping it renders nothing either
+   * once the SVG is an image. Say so and fall back to the source, rather than
+   * putting a silently blank picture on screen.
+   */
+  if (document_.querySelector("foreignObject")) {
+    throw new Error("流程图输出使用了无法安全渲染的 HTML 标签");
+  }
+  document_.querySelectorAll("script, image").forEach((node) => node.remove());
+  // Unwrap rather than remove: the link is what we refuse, not its label.
+  document_.querySelectorAll("a").forEach((node) => {
+    node.replaceWith(...Array.from(node.childNodes));
+  });
   document_.querySelectorAll("*").forEach((node) => {
     for (const attribute of Array.from(node.attributes)) {
       const name = attribute.name.toLowerCase();
