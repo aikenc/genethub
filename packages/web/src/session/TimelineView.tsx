@@ -37,8 +37,8 @@ const SLOW_START_MS = 800;
  * down to find what scrolled past. Only that direction counts: chasing new
  * messages towards the bottom is when the composer is most wanted, so tucking
  * it away there would be exactly wrong. */
-const TRAVEL_PX_PER_MS = 0.45;
-const TRAVEL_HOLD_MS = 350;
+const TRAVEL_PX_PER_MS = 1;
+const TRAVEL_HOLD_MS = 280;
 /** Longer than this between samples and the run has ended, whatever the last
  * pair of them said — a jump from `scrollIntoView` arrives as one lone sample
  * and so can never accumulate a hold. */
