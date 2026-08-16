@@ -158,11 +158,20 @@ for binary in "$cli_binary" "$agent_binary"; do
   cp "$found" "$bin_dir/$binary"
   chmod 755 "$bin_dir/$binary"
 done
+logic="$(find "$tmp/unpacked" -name daemon-logic.wasm -type f -print | head -n 1)"
+[ -n "$logic" ] || die "daemon-logic.wasm is missing from $asset"
+# The daemon locates this immutable, signed file beside its own executable.
+# Verification happens again inside the native trust kernel before Wasmtime
+# sees any byte; the tarball checksum alone is not treated as authenticity.
+rm -f "$bin_dir/daemon-logic.wasm"
+cp "$logic" "$bin_dir/daemon-logic.wasm"
+chmod 644 "$bin_dir/daemon-logic.wasm"
 
 say ""
 say "Installed:"
 say "  $bin_dir/$cli_binary"
 say "  $bin_dir/$agent_binary"
+say "  $bin_dir/daemon-logic.wasm"
 
 # Explicit first-install automation may opt into starting/restarting the daemon
 # after files have landed. The CLI self-update command is deliberately disabled

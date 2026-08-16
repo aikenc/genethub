@@ -320,6 +320,35 @@ pub fn own_group(command: &mut tokio::process::Command) {
     let _ = command;
 }
 
+/// Starts a console program without opening a separate console window from a
+/// GUI daemon. This is platform mechanics shared by every resident child
+/// driver, not adapter policy.
+pub fn without_a_window(command: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
+/// Stops a raw Tokio child and the process tree rooted at it. Drivers which
+/// cannot use [`Group`] still get the same teardown guarantee.
+pub async fn kill_child_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        stop_tree(pid);
+    }
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        stop_tree(pid);
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
 /// A running command, and everything it starts, held together.
 ///
 /// `tokio`'s own `kill_on_drop` stops the process it spawned and nothing

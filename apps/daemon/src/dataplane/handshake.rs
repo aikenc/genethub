@@ -1,5 +1,6 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use genehub_proto::{DeviceAuth, InviteAuth, PeerAuth, PeerHello, PeerWelcome, TransportKind};
+use genet_daemon_logic_api::PlatformReply;
 
 use crate::channel_auth::{self, SessionKey};
 use crate::dataplane::endpoint::PeerAccess;
@@ -13,7 +14,7 @@ pub struct AcceptedPeer {
 }
 
 /// Performs one PSK mutual handshake before any business stream exists.
-pub fn accept(
+pub async fn accept(
     state: &Shared,
     transport: TransportKind,
     admission: Admission,
@@ -35,7 +36,7 @@ pub fn accept(
     if hello.client_name.is_empty() || hello.client_name.len() > 80 {
         anyhow::bail!("invalid peer client name");
     }
-    let server_nonce = crate::devices::random_token();
+    let server_nonce = uuid::Uuid::new_v4().simple().to_string();
     let (proof, key, device_id, bootstrap_invite) = match (&hello.auth, &admission) {
         (
             PeerAuth::Loopback {
@@ -64,15 +65,37 @@ pub fn accept(
             },
             Admission::DeviceRequired,
         ) => {
-            let (id, answer, key) = state.devices.authenticate_session(
-                &DeviceAuth {
-                    device_id: device_id.clone(),
-                    nonce: nonce.clone(),
-                    proof: proof.clone(),
-                },
-                &server_nonce,
-            )?;
-            (answer, key, Some(id), None)
+            let reply = state
+                .logic
+                .as_ref()
+                .context("portable daemon logic is unavailable")?
+                .authenticate_device(
+                    DeviceAuth {
+                        device_id: device_id.clone(),
+                        nonce: nonce.clone(),
+                        proof: proof.clone(),
+                    },
+                    server_nonce.clone(),
+                )
+                .await?;
+            match reply {
+                PlatformReply::Authenticated {
+                    subject_id,
+                    proof,
+                    encryption_key,
+                    context,
+                } => (
+                    proof,
+                    SessionKey::from_portable(encryption_key, context),
+                    Some(subject_id),
+                    None,
+                ),
+                _ => {
+                    return Err(anyhow!(
+                        "portable device authentication returned the wrong value"
+                    ))
+                }
+            }
         }
         (
             PeerAuth::Hosted {
@@ -130,15 +153,37 @@ pub fn accept(
             },
             Admission::DeviceRequired,
         ) => {
-            let (id, answer, key) = state.devices.authenticate_invite(
-                &InviteAuth {
-                    invite_id: invite_id.clone(),
-                    nonce: nonce.clone(),
-                    proof: proof.clone(),
-                },
-                &server_nonce,
-            )?;
-            (answer, key, None, Some(id))
+            let reply = state
+                .logic
+                .as_ref()
+                .context("portable daemon logic is unavailable")?
+                .authenticate_invite(
+                    InviteAuth {
+                        invite_id: invite_id.clone(),
+                        nonce: nonce.clone(),
+                        proof: proof.clone(),
+                    },
+                    server_nonce.clone(),
+                )
+                .await?;
+            match reply {
+                PlatformReply::Authenticated {
+                    subject_id,
+                    proof,
+                    encryption_key,
+                    context,
+                } => (
+                    proof,
+                    SessionKey::from_portable(encryption_key, context),
+                    None,
+                    Some(subject_id),
+                ),
+                _ => {
+                    return Err(anyhow!(
+                        "portable invitation authentication returned the wrong value"
+                    ))
+                }
+            }
         }
         _ => return Err(anyhow!("peer authentication does not match this admission")),
     };
@@ -167,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn loopback_is_a_full_mutual_psk_handshake() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, _) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+        let state = crate::AppState::build(crate::config::Paths::new(dir.path()))
             .await
             .unwrap();
         let secret = "one-use-server-proof";
@@ -192,6 +237,7 @@ mod tests {
             None,
             None,
         )
+        .await
         .unwrap();
         channel_auth::verify_proof(
             &channel_auth::server_proof(secret, "loopback", nonce, &accepted.welcome.server_nonce),

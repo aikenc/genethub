@@ -1,0 +1,13 @@
+[package]
+name = "genet-daemon-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Portable shared utilities for GeneHub daemon business crates"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

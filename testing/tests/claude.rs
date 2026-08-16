@@ -1,5 +1,5 @@
 //! The same journey, driven through Claude Code — natively, not through the
-//! `claude-agent-acp` wrapper (`apps/daemon/src/adapter/claude.rs`).
+//! `claude-agent-acp` wrapper (`packages/daemon-core/src/session/claude.rs`).
 //!
 //! Unlike OpenCode, Claude Code does not speak an OpenAI-compatible wire
 //! format, so it cannot be pointed at the mock: DeepSeek's Anthropic-compatible
@@ -57,7 +57,7 @@ async fn claude_code_reaches_the_same_timeline_as_the_built_in_agent() {
 }
 
 /// Going native over the ACP wrapper exists specifically to get per-tool
-/// permission control back (see `adapter::claude`'s doc comment). This is the
+/// permission control back (see the portable Claude driver's doc comment). This is the
 /// one journey that actually exercises that control protocol end to end,
 /// through `session.setMode` rather than answering each prompt by hand: real
 /// tool execution, real permission grant, real file on disk.

@@ -28,6 +28,10 @@ const DAEMON = builtBinary(
   ["genet-dev", "genet-beta", "genet-alpha", "genet"],
   process.env.GENET_E2E_DAEMON,
 );
+const LOGIC =
+  process.env.GENET_DAEMON_LOGIC_WASM?.trim() ||
+  path.join(REPO, "target", "daemon-logic.wasm");
+const DAEMON_START_TIMEOUT_MS = 60_000;
 const AGENT = builtBinary(
   REPO,
   ["genet-agent-dev", "genet-agent-beta", "genet-agent-alpha", "genet-agent"],
@@ -51,7 +55,7 @@ const socketFactory = (url: string) =>
  * fail to add up to a usable product.
  */
 describe.skipIf(
-  missingArtifacts({ daemon: DAEMON, agent: AGENT, relay: RELAY }),
+  missingArtifacts({ daemon: DAEMON, logic: LOGIC, agent: AGENT, relay: RELAY }),
 )("reaching a machine with nothing but open-source pieces", () => {
   let relay: ChildProcess;
   let relayOrigin: string;
@@ -98,7 +102,7 @@ describe.skipIf(
       const status = await owner.call({ type: "device.list" });
       return status?.type === "devices" && status.data.remote.online;
     }, 15_000);
-  }, 40_000);
+  }, 90_000);
 
   afterAll(async () => {
     owner?.close();
@@ -416,6 +420,7 @@ function startDaemon(
     const child = spawn(DAEMON, ["daemon", "run"], {
       env: {
         ...process.env,
+        GENET_DAEMON_LOGIC_WASM: LOGIC,
         // Installed side by side in production; in a test the agent is wherever
         // cargo put it.
         ...daemonEnvironment(DAEMON, {
@@ -427,13 +432,28 @@ function startDaemon(
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const timer = setTimeout(
-      () => reject(new Error("the daemon never reported a port")),
-      15_000,
+    let settled = false;
+    let stderr = "";
+    const fail = (reason: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill("SIGKILL");
+      reject(new Error(`${reason}${stderr ? `\ndaemon stderr:\n${stderr}` : ""}`));
+    };
+    const timer = setTimeout(() => {
+      fail(
+        `the daemon never reported a port within ${DAEMON_START_TIMEOUT_MS / 1000}s`,
+      );
+    }, DAEMON_START_TIMEOUT_MS);
+    child.once("error", (error) => fail(`the daemon could not start: ${error}`));
+    child.once("exit", (code, signal) =>
+      fail(`the daemon exited before listening (code=${code}, signal=${signal})`),
     );
-    child.stderr?.on("data", (chunk) =>
-      process.stderr.write(`[daemon] ${chunk}`),
-    );
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+      process.stderr.write(`[daemon] ${chunk}`);
+    });
     child.stdout?.on("data", (chunk: Buffer) => {
       for (const line of chunk.toString().split("\n").filter(Boolean)) {
         const frame = JSON.parse(line) as {
@@ -449,6 +469,7 @@ function startDaemon(
           };
         };
         if (frame.event !== "listening") continue;
+        settled = true;
         clearTimeout(timer);
         resolve({
           process: child,

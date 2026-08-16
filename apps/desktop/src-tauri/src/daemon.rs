@@ -26,6 +26,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 const MAX_LOOPBACK_HTTP_RESPONSE_BYTES: usize = 64 * 1024;
+/// A cold daemon must compile and initialize the signed Wasm application
+/// before it can publish its listener. Shared release runners can take longer
+/// than twenty seconds when several supervision cases start concurrently.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What the daemon prints once it is listening. The port is chosen by the OS,
 /// so reading it back is the only way to know where to connect.
@@ -255,7 +259,7 @@ impl Daemon {
             }
         });
 
-        match rx.recv_timeout(Duration::from_secs(20)) {
+        match rx.recv_timeout(START_TIMEOUT) {
             Ok(()) => {
                 let (endpoint, published_pid) = self
                     .published()

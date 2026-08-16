@@ -39,13 +39,11 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     if request.source.workspace_handle != expected_handle {
         return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await;
     }
-    if services.state.workspaces.get(workspace_id).await.is_err() {
-        return preview_error(stream, 404, AssetPreviewError::NotFound, None).await;
-    }
-    let resolved = match services
-        .state
-        .workspaces
-        .resolve(workspace_id, &request.source.path)
+    let Some(logic) = services.state.logic.as_ref() else {
+        return preview_error(stream, 503, AssetPreviewError::SourceChanged, None).await;
+    };
+    let resolved = match logic
+        .resolve_workspace_file(workspace_id.to_string(), request.source.path.clone())
         .await
     {
         Ok(resolved) => resolved,
@@ -65,8 +63,15 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         Ok(Err(_)) => return Err(anyhow!("preview worker pool stopped")),
         Err(_) => return preview_error(stream, 408, AssetPreviewError::SourceChanged, None).await,
     };
-    let root = resolved.root;
-    let path = resolved.relative.to_string_lossy().replace('\\', "/");
+    let Some(root) = resolved.parent().map(std::path::Path::to_path_buf) else {
+        return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await;
+    };
+    let Some(path) = resolved
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+    else {
+        return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await;
+    };
     let read = tokio::task::spawn_blocking(move || {
         let _slot = slot;
         crate::files::preview(&root, &path)

@@ -1,0 +1,28 @@
+[package]
+name = "genet-daemon-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Portable GeneHub daemon business state and routing core"
+
+[dependencies]
+genehub-proto = { path = "../proto" }
+genet-daemon-common = { path = "../daemon-common" }
+genet-daemon-logic-api = { path = "../daemon-logic-api" }
+serde.workspace = true
+serde_json.workspace = true
+url = "2"
+json5.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+genet-daemon-system = { path = "../daemon-system" }
+tokio.workspace = true
+fs2.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

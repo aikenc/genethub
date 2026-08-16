@@ -1376,8 +1376,8 @@ async fn reconnecting_replays_the_gap_without_losing_or_repeating_events() {
 #[tokio::test]
 async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
     let journey = Journey::start_with(genehub_testing::Mode::Mock, |config| {
-        // Small enough that a single turn overflows it.
-        config.replay_window = 2;
+        // Small enough that the portable Agent turn's two events overflow it.
+        config.replay_window = 1;
     })
     .await
     .expect("journey starts");
@@ -1405,11 +1405,15 @@ async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
         .unwrap()
     {
         Reply::Subscribed {
-            snapshot, reset, ..
+            snapshot,
+            replayed,
+            reset,
         } => {
             assert!(
                 reset,
-                "a gap we cannot fill must be admitted, not papered over"
+                "a gap we cannot fill must be admitted, not papered over (snapshot seq {}, replayed {:?})",
+                snapshot.seq,
+                replayed.iter().map(|event| event.seq).collect::<Vec<_>>()
             );
             assert!(
                 !snapshot.items.is_empty(),
@@ -1769,7 +1773,7 @@ async fn a_message_naming_continues_round_after_an_interrupt_still_runs_normally
 
 /// The round ledger (`docs/agent-analysis-substrate-proposal.md` §8 step 2)
 /// exercised through the real wire protocol end to end, not just the
-/// in-process unit tests in `apps/daemon/src/session/manager.rs`: a real
+/// in-process unit tests in `packages/daemon-core/src/session/mod.rs`: a real
 /// daemon, a real workspace, a real (mock) turn, then the file it wrote.
 #[tokio::test]
 async fn a_completed_round_is_recorded_in_the_round_ledger_on_disk() {
@@ -2331,7 +2335,7 @@ async fn a_log_request_cannot_reach_outside_the_log_directory() {
 /// landed — not what the session metadata claims.
 #[tokio::test]
 async fn a_session_starts_where_it_was_told_to_and_cannot_be_told_to_leave() {
-    let journey = Journey::start().await.expect("journey starts");
+    let mut journey = Journey::start().await.expect("journey starts");
     mock_only!(journey);
     std::fs::create_dir_all(journey.project().join("services/api")).expect("subdirectory exists");
 
@@ -2383,6 +2387,49 @@ async fn a_session_starts_where_it_was_told_to_and_cannot_be_told_to_leave() {
     assert!(
         !journey.file_exists("result.txt"),
         "nothing should have been written at the workspace root"
+    );
+
+    std::fs::remove_file(journey.project().join("services/api/result.txt"))
+        .expect("the first result is removed before restart");
+    journey
+        .restart_daemon()
+        .await
+        .expect("the daemon restarts with the same session store");
+    journey
+        .client
+        .call(Request::Subscribe {
+            session_id: summary.id.clone(),
+            since_seq: None,
+            expand_last_round: false,
+        })
+        .await
+        .expect("the subdirectory session reopens after restart");
+    script_the_task(&journey).await;
+    journey
+        .send(&summary.id, TASK)
+        .await
+        .expect("the reopened session accepts another prompt");
+    let events = journey
+        .client
+        .drain_turn()
+        .await
+        .expect("the restarted turn ends");
+    assert!(
+        events.completed(),
+        "the restarted turn should complete; saw {:?}",
+        events.failure()
+    );
+    assert_eq!(
+        journey
+            .read_file("services/api/result.txt")
+            .as_deref()
+            .map(str::trim),
+        Some("DONE"),
+        "the persisted session cwd survives a complete daemon restart"
+    );
+    assert!(
+        !journey.file_exists("result.txt"),
+        "restart must not reset the session cwd to the workspace root"
     );
 
     // Refusing beats clamping to the root: a task quietly run somewhere else

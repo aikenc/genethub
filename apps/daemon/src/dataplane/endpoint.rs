@@ -7,10 +7,11 @@ use genehub_proto::{
     ErrorCode, ExchangeRequestHead, ExchangeResponseHead, ProtocolError, Reply, Request,
     ServerFrame, TransportKind,
 };
+use genet_daemon_logic_api::{PlatformReply, StreamAuthorization, StreamMethod};
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
-use crate::authz::{self, Capability, Principal, StreamMethod};
+use crate::authz;
 use crate::channel_auth::{self, Direction, SessionKey};
 use crate::dataplane::frame::{Frame, Kind, MAX_PAYLOAD_BYTES};
 use crate::router::{self, SideEffect};
@@ -442,7 +443,13 @@ pub async fn serve(
     //
     // Decided once, at connection: grants are fixed when a device is paired,
     // and revoking one drops its connections rather than editing them.
-    let watcher = Principal::of(&state, &access);
+    let logic = state
+        .logic
+        .as_ref()
+        .context("portable daemon logic is unavailable")?;
+    let watcher = logic
+        .authorize_stream(authz::principal(&access), StreamMethod::Events)
+        .await?;
     state
         .diagnostics
         .record("stream", "data.endpoint", "online", None);
@@ -453,9 +460,7 @@ pub async fn serve(
             loop {
                 match receiver.recv().await {
                     Ok(frame) => {
-                        if frame_requires(&frame)
-                            .is_some_and(|capability| !watcher.allows(capability))
-                        {
+                        if !frame_allowed(&frame, &watcher) {
                             continue;
                         }
                         if events.send(frame).await.is_err() {
@@ -469,9 +474,9 @@ pub async fn serve(
         })
     });
 
-    let mut revocations = state.devices.subscribe_revocations();
+    let mut revocations = logic.subscribe_device_revocations();
     if let Some(device_id) = &access.device_id {
-        state.devices.mark_connected(device_id);
+        logic.device_connection(device_id.clone(), true).await?;
     }
     let mut streams = HashMap::<u32, StreamState>::new();
     let mut handlers = JoinSet::new();
@@ -530,7 +535,9 @@ pub async fn serve(
     }
     writer_task.abort();
     if let Some(device_id) = &access.device_id {
-        state.devices.mark_disconnected(device_id);
+        if let Err(error) = logic.device_connection(device_id.clone(), false).await {
+            tracing::warn!(%error, %device_id, "portable device presence did not settle");
+        }
     }
     state.diagnostics.record(
         "stream",
@@ -791,23 +798,32 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
         // operation, and they do not all cost the same.
         return handle_rpc(stream, services).await;
     }
-    let Some(method) = StreamMethod::parse(&stream.head.method) else {
+    let Some(method) = authz::stream_method(&stream.head.method) else {
         return send_error(stream, 404, ErrorCode::NotFound, "unknown exchange method").await;
     };
-    let needed = method.required();
-    if !Principal::of(&services.state, &services.access).allows(needed) {
+    let authorization = services
+        .state
+        .logic
+        .as_ref()
+        .context("portable daemon logic is unavailable")?
+        .authorize_stream(authz::principal(&services.access), method)
+        .await?;
+    if !authorization.allowed {
+        let missing = authorization.missing_grant.as_deref().unwrap_or("unknown");
         services.state.diagnostics.record(
             "stream",
             "authorization",
             "error",
-            Some(needed.as_str()),
+            Some(authz::diagnostic_grant_code(missing)),
         );
-        return refuse(stream, needed).await;
+        return refuse(stream, missing).await;
     }
     match method {
         StreamMethod::Events => handle_events(stream, services).await,
         StreamMethod::AssetPreview => crate::dataplane::preview::handle(stream, services).await,
-        StreamMethod::ShellRun => crate::dataplane::exec::handle(stream, services).await,
+        StreamMethod::ShellRun => {
+            crate::dataplane::exec::handle(stream, services, &authorization).await
+        }
         StreamMethod::RtcNegotiate => crate::dataplane::rtc::handle(stream, services).await,
         StreamMethod::SpeechTranscribe => crate::speech::handle(stream, services).await,
     }
@@ -819,16 +835,16 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
 /// here before it can be broadcast. Anything unsaid would be broadcast to
 /// every authenticated peer, which is the wrong default for a push: the peer
 /// never asked, so it never had a request for the usual check to refuse.
-fn frame_requires(frame: &ServerFrame) -> Option<Capability> {
+fn frame_allowed(frame: &ServerFrame, authorization: &StreamAuthorization) -> bool {
     match frame {
-        ServerFrame::PtyOutput { .. } | ServerFrame::PtyClosed { .. } => Some(Capability::Pty),
+        ServerFrame::PtyOutput { .. } | ServerFrame::PtyClosed { .. } => authorization.receive_pty,
         // Command lines of what an agent ran. The same material as the tool
         // calls in a timeline, and gated the same way.
-        ServerFrame::BackgroundProcesses { .. } => Some(Capability::Session),
+        ServerFrame::BackgroundProcesses { .. } => authorization.receive_background_processes,
         ServerFrame::Event { .. }
         | ServerFrame::Desync { .. }
         | ServerFrame::Notice { .. }
-        | ServerFrame::UpdateDownloadChanged { .. } => None,
+        | ServerFrame::UpdateDownloadChanged { .. } => true,
     }
 }
 
@@ -837,15 +853,12 @@ fn frame_requires(frame: &ServerFrame) -> Option<Capability> {
 /// It names the missing capability rather than the request, so that a caller
 /// that was narrowed on purpose can tell that apart from a request it got
 /// wrong, and ask for the right invitation instead of retrying.
-async fn refuse(stream: &mut ServerStream, needed: Capability) -> Result<()> {
+async fn refuse(stream: &mut ServerStream, needed: &str) -> Result<()> {
     send_error(
         stream,
         403,
         ErrorCode::Forbidden,
-        format!(
-            "this device was not granted `{}` on this machine",
-            needed.as_str()
-        ),
+        format!("this device was not granted `{}` on this machine", needed),
     )
     .await
 }
@@ -886,14 +899,21 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         }
         let reply = match services
             .state
-            .devices
-            .claim_authenticated(invite_id, device_name)
+            .logic
+            .as_ref()
+            .context("portable daemon logic is unavailable")?
+            .claim_authenticated_invite(invite_id.to_string(), device_name.to_string())
+            .await
         {
-            Ok((mut credential, _)) => {
-                credential.machine_name = crate::link::default_display_name();
-                credential.machine_id = services.state.machine.machine_id.clone();
-                credential.fingerprint = services.state.machine.fingerprint();
-                Reply::Claimed(credential)
+            Ok(PlatformReply::Claimed(credential)) => Reply::Claimed(credential),
+            Ok(_) => {
+                return send_error(
+                    stream,
+                    500,
+                    ErrorCode::Internal,
+                    "portable invitation claim returned the wrong value",
+                )
+                .await
             }
             Err(error) => {
                 return send_error(stream, 401, ErrorCode::Unauthorized, format!("{error:#}")).await
@@ -914,18 +934,8 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     // Resolved once and carried into the router: a request that decides what
     // to enforce on a spawned process must be looking at the same caller the
     // gate just admitted, not at a second lookup that could disagree with it.
-    let caller = Principal::of(&services.state, &services.access);
-    let needed = authz::required(&request);
-    if !caller.allows(needed) {
-        services
-            .state
-            .diagnostics
-            .record("rpc", "authorization", "error", Some(needed.as_str()));
-        return refuse(stream, needed).await;
-    }
-
-    let handled =
-        router::handle(&services.state, services.access.transport, &caller, request).await;
+    let caller = authz::principal(&services.access);
+    let handled = router::handle(&services.state, services.access.transport, caller, request).await;
     match handled.reply {
         Ok(reply) => {
             send_reply(stream, reply).await?;

@@ -50,7 +50,7 @@
 <workspace>/.genethub/sessions/<session-id>/
   writer.lock                      此会话写入权的内核锁，内容始终为空
   writer                           持锁者的名字，只用于提示
-  meta.json                        会话元数据，含数据格式版本号
+  meta.json                        会话元数据，含格式号与根相对 cwdPath
   chat.jsonl                       会话层：叙事行 + 每个 round 一行折叠态
   rounds/r-000/index.jsonl         round 层索引：一行一个 trunk 摘要
   rounds/r-000/t-0000.jsonl        trunk 明细：batch 行与 blob overview 行
@@ -62,7 +62,7 @@
 <workspace>/.genethub/tombstones/<session-id>.json  持锁写入的逻辑删除标记
 ```
 
-会话目录**自包含**：没有任何一个文件名、也没有 `meta.json` 里的任何一个字段依赖外部上下文——它属于哪个工作区由它躺在哪里决定（§3.4）。整个目录可以整体移动、整体删除、整体备份，换一个 channel 打开也还是同一批对话。
+会话目录**自包含**：持久身份由它所在的物理根、稳定 `projectKey` 和根相对 `cwdPath` 决定，不依赖某次安装随机生成的 workspace id 或 root handle（§3.4）。`meta.json` 里可能带有写入进程的 native `cwd` 投影用于兼容，但读取时会按当前注册根重建并在 Agent 启动前重新 canonicalize。整个目录可以整体移动、整体删除、整体备份，换一个 channel 打开也还是同一批对话。
 
 ### 3.0 会话存在工作区里
 
@@ -156,13 +156,15 @@ Chat 只发送 `manifest.json` 的工作区相对路径、文件数和总字节�
 
 会话存在项目里，就意味着 beta、正式版、各个 dev 版本对着同一个目录时看到的是**同一批对话**。这是「跟着代码走」这个决定的直接后果，也是它真正的价值：换个通道装一次，历史还在。要让这件事成立，四个问题必须先答清楚。
 
-**身份由位置决定，不由文件内容决定。** `workspaceId` 是每次安装各自随机生成的 uuid，beta 写下的那个对正式版毫无意义。所以它**不再存进 `meta.json`**，而是在读取时由会话所在的目录反推——目录本身就是那个不会变的事实。这也是「路径即索引」在身份上的同一条规则。
+**身份由位置和稳定项目键决定，不信任本地句柄。** `workspaceId` 与 `rootHandle` 是每次安装各自生成的本地能力句柄；即使兼容元数据里存在，读取时也会用当前注册表覆盖。会话先由它所在的物理根定位；同一根被 folder workspace 与 `.code-workspace` 同时使用时，再由 `projectKey` 选择所有者。这也是「路径即索引」在身份上的同一条规则。
 
-**版本号是会话级的一个整数。** `meta.json` 里的 `format` 说明这份会话是什么形状写下的（当前为 `4`）。读的时候先只解析 `{format, title, createdAtMs, updatedAtMs}` 这个**永不改形状的头部**，再决定要不要解析其余部分：一个必须先完整解析成功才能发现的版本号，等于没有版本号——它要应付的恰恰是「文件其余部分已经变了」的情况。
+**工作目录持久化为根相对 locator。** `cwdPath` 始终用 `/` 分隔、相对于承载该会话的 workspace root；native `cwd` 只是第三方 Agent 协议需要的当前平台投影。重新打开或换 channel 时，daemon 先把 `cwdPath` 重基到当前注册根；每次启动 Agent 前再交给 native 文件能力 canonicalize，拒绝不存在目录、越界和 symlink 逃逸。格式 4–6 的会话没有 `cwdPath`，只在旧 native `cwd` 仍位于当前注册根内时安全恢复；否则明确拒绝，而不是悄悄退回 workspace 根。
+
+**版本号是会话级的一个整数。** `meta.json` 里的 `format` 说明最后写入它的 daemon 理解哪组语义（当前为 `7`：4 是 path-as-index；5 增加 fork lineage/context seed；6 增加导入来源与只读 continuation；7 增加跨平台 `cwdPath`）。读的时候先只解析 `{format, title, createdAtMs, updatedAtMs, projectKey}` 这个**永不改形状的头部**，再决定要不要解析其余部分：一个必须先完整解析成功才能发现的版本号，等于没有版本号——它要应付的恰恰是「文件其余部分已经变了」的情况。
 
 - `format` 高于本机支持：会话**仍然列出**（它就在用户自己的项目文件夹里，无声消失比一行灰掉的记录糟糕得多），但打不开。列表行带 `unsupported: {written, supported}`，前端灰掉并说明「升级后才能打开」；daemon 侧任何 `live()` 一律拒绝。
-- `format` 缺失：按 `4` 处理，那是唯一进过工作目录的布局。
-- **只读不升级。** 只有写操作会把 `format` 盖成本机版本，而且是在 `save_meta` 里统一盖的，不靠每个调用点记得。旧版本读一遍新会话不会改变任何东西。
+- `format` 缺失：按 `4` 处理，那是引入版本字段前唯一进过工作目录的布局。
+- **只读不升级，首次写入统一升级。** 列表和打开不会改文件；任何真正写 `meta.json` 的操作都在 `save_meta` 里统一盖成本机版本，不靠每个调用点记得。这样旧会话可无损查看，而一旦新版语义落盘，旧 daemon 就不会误开。
 - **什么时候该 +1：** 只有当旧版本读了会**读错**的时候。加字段不算——serde 会忽略不认识的字段，旧版本照常工作，为此升版号纯属把人白白挡在外面。每次 +1 对新版本写过的每个会话都是单向门，这个分量正合适。
 
 **写入互斥用 `<session>/writer.lock`。** 两个 daemon 同时往同一个 `chat.jsonl` 里追加 round，谁也说不清结果。所以第一次写入某个会话时抢一把内核文件锁（`fs2::try_lock_exclusive`），拿到才写。锁不放在 workspace：不同 channel 可以同时在同一项目里写不同会话，从已完成 turn Fork 出来的新会话也不会被源会话的 writer 阻塞。
@@ -226,6 +228,7 @@ N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = �
 - **blob 定位不扫描：** 写入 5000 条 blob 的总读字节数与已写入总量无关（旧实现是平方级）；`blob.get` 的读取字节数等于该 blob 自身长度。
 - **边界：** 独白开启新 batch；累计至少 16 次工具后遇到 thinking 开启新 batch；连续 64 次工具强制关闭 batch；128 个 blob 是异常流安全上限。trunk 在工具调用超过 100 次后的下一个 batch 起点切换。无独白时 batch 文本回退到首个 thinking 前 100 字，再回退到「调用了 N 次工具」。
 - **跨 channel 复用：** 另一个 channel 注册同一个目录后，既有会话照常列出、照常打开、照常续聊，不依赖它自己那份 workspace id。
+- **cwd 可移植且受限：** 子目录会话在 daemon/VM 完整重启后仍从同一目录启动；native 投影按当前根重建，启动前再次 canonicalize，不能通过持久化字符串或 symlink 越出注册根。
 - **版本单向：** `format` 高于本机的会话仍出现在列表里并说明原因，但打不开；本机只读它不会改动 `meta.json`。
 - **写入互斥：** 同一 session 的第二个 daemon 写入被拒绝并指出占用者，读取不受影响；不同 session 可跨 channel 并行写；占用者退出后无需重启即可恢复写入；从稳定 turn Fork 的新 session 不受源 session 锁影响。
 - **删除原子且可回收：** `session.delete` 持有该 session 的 writer lock 写入 durable tombstone；从此所有 channel 都隐藏并拒绝写入该 id。随后释放锁并删除整个会话目录，包括 blobs 与 scratch；Windows 若因开放 handle 暂时不能删除，启动/列表扫描会继续回收，墓碑保证残留目录永不复活。

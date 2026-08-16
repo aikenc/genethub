@@ -11,6 +11,14 @@ use anyhow::{anyhow, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+pub fn random_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
 const HANDSHAKE_DOMAIN: &[u8] = b"genehub-channel-handshake-v1";
 const KEY_DOMAIN: &[u8] = b"genehub-channel-key-v1";
 const DATA_RECORD_DOMAIN: &[u8] = b"genehub-data-record-v1";
@@ -21,6 +29,19 @@ const DATA_RECORD_HEADER_BYTES: usize = 12;
 pub struct SessionKey {
     encryption_key: [u8; 32],
     context: String,
+}
+
+impl SessionKey {
+    /// Reconstitutes the portable policy result inside the native AEAD driver.
+    /// Authorization and key derivation happen in the signed guest; native code
+    /// receives only the connection-scoped key and transcript context it needs
+    /// to seal records.
+    pub fn from_portable(encryption_key: [u8; 32], context: String) -> Self {
+        Self {
+            encryption_key,
+            context,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -167,6 +167,72 @@ jobs:
             printf 'hub_url=%s\n' "$hub_url"
           } >> "$GITHUB_OUTPUT"
 
+  # The portable application is built once on Linux and signed once. Every
+  # native package below downloads this exact file; no Windows/macOS compiler
+  # participates in logic publication.
+  daemon_logic:
+    needs: [channel, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: release-daemon-logic
+      - name: Build and sign the one cross-platform logic artifact
+        shell: bash
+        env:
+          GENET_DAEMON_LOGIC_SIGNING_KEY: ${{ secrets.GENET_DAEMON_LOGIC_SIGNING_KEY }}
+          RELEASE_KEY_ID: ${{ vars.GENET_DAEMON_LOGIC_KEY_ID }}
+        run: |
+          set -euo pipefail
+          node scripts/version.mjs --from-tag
+          node scripts/channel.mjs --from-tag
+          cargo build -p genet-daemon-logic \
+            --target wasm32-wasip1 \
+            --profile daemon-logic-release
+          mkdir -p dist
+          raw=target/wasm32-wasip1/daemon-logic-release/genet_daemon_logic.wasm
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            test -n "$GENET_DAEMON_LOGIC_SIGNING_KEY" || {
+              echo "::error::GENET_DAEMON_LOGIC_SIGNING_KEY is required for a release tag"
+              exit 1
+            }
+            [[ "$RELEASE_KEY_ID" =~ ^[A-Za-z0-9._-]+$ ]] || {
+              echo "::error::GENET_DAEMON_LOGIC_KEY_ID must be a non-empty identifier"
+              exit 1
+            }
+            version="${GITHUB_REF_NAME#v}"
+            cargo run --quiet -p genet-daemon-artifact -- \
+              pack "$raw" dist/daemon-logic.wasm "$version" "$RELEASE_KEY_ID"
+            public_key="$(cargo run --quiet -p genet-daemon-artifact -- public-key)"
+            key_id="$RELEASE_KEY_ID"
+          else
+            cargo run --quiet -p genet-daemon-artifact -- \
+              pack-dev "$raw" dist/daemon-logic.wasm 0.0.0-dev
+            public_key="$(cargo run --quiet -p genet-daemon-artifact -- dev-public-key)"
+            key_id=dev-local
+          fi
+          {
+            printf 'GENET_DAEMON_LOGIC_KEY_ID=%s\n' "$key_id"
+            printf 'GENET_DAEMON_LOGIC_PUBLIC_KEY=%s\n' "$public_key"
+          } > dist/trust.env
+          test "$(od -An -tx1 -N4 dist/daemon-logic.wasm | tr -d ' \n')" = 0061736d
+          sha256sum dist/daemon-logic.wasm
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: daemon-logic-release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
   # Windows is the only platform that gets an installer in this version.
   #
   # Linux gets the pair of binaries below instead: a Linux box is usually reached
@@ -176,7 +242,7 @@ jobs:
   # dependency. macOS waits for signing and notarisation, without which the
   # download is a security warning with an app behind it.
   installers:
-    needs: [channel, verify]
+    needs: [channel, verify, daemon_logic]
     strategy:
       fail-fast: false
       matrix:
@@ -195,6 +261,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-logic-release
+          path: ${{ runner.temp }}/daemon-logic
 
       - run: npm ci
         working-directory: packages/web
@@ -223,6 +293,7 @@ jobs:
         shell: bash
         env:
           BUNDLES: ${{ matrix.bundles }}
+          GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-logic/daemon-logic.wasm
           # The Hub this build suggests, per channel. Only published builds get
           # one: a copy someone compiles from this repository has no business
           # defaulting to somebody else's service, and the field stays empty
@@ -234,6 +305,9 @@ jobs:
           VITE_GENEHUB_HUB_URL: ${{ needs.channel.outputs.hub_url }}
         run: |
           set -uo pipefail
+          set -a
+          . "${{ runner.temp }}/daemon-logic/trust.env"
+          set +a
           # The runner's shell already has `-e`, which would end this script at
           # the failing pipeline and skip the reporting below entirely.
           set +e
@@ -310,6 +384,8 @@ jobs:
       # nobody notices until a user hits it (`docs/roadmap.md` MVP 验收清单).
       - name: Smoke the daemon on this platform
         shell: bash
+        env:
+          GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-logic/daemon-logic.wasm
         run: |
           set -uo pipefail
           . scripts/channel.env
@@ -320,6 +396,10 @@ jobs:
           # job that lost its stamping step would ship a daemon calling itself
           # 0.0.0 — which tells every user they run an unreleased build, silently.
           node scripts/version.mjs --verify "target/release/$CLI_BINARY$exe" || exit 1
+          test -f "apps/desktop/src-tauri/bin/daemon-logic.wasm" || {
+            echo "FAIL: installer resources lost daemon-logic.wasm" >&2
+            exit 1
+          }
           env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
             "target/release/$CLI_BINARY$exe" daemon run >"$root/out.json" 2>"$root/err.log" &
           pid=$!
@@ -388,7 +468,7 @@ jobs:
   # on ubuntu-22.04 was requiring GLIBC_2.34 and failing on those machines with
   # a wall of `version 'GLIBC_…' not found` — exactly what `curl | sh` users hit.
   binaries:
-    needs: [channel, verify]
+    needs: [channel, verify, daemon_logic]
     strategy:
       fail-fast: false
       matrix:
@@ -408,13 +488,24 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.target }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-logic-release
+          path: ${{ runner.temp }}/daemon-logic
       # As in the installer job: the tag is where the version and the channel
       # come from.
       - run: |
           node scripts/version.mjs --from-tag
           node scripts/channel.mjs --from-tag
         shell: bash
-      - run: cargo build --release -p genet-cli -p genet-agent --target ${{ matrix.target }}
+      - name: Build native binaries with the artifact's pinned public key
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          . "${{ runner.temp }}/daemon-logic/trust.env"
+          set +a
+          cargo build --release -p genet-cli -p genet-agent --target ${{ matrix.target }}
       - name: Pack
         shell: bash
         env:
@@ -423,8 +514,11 @@ jobs:
           set -euo pipefail
           . scripts/channel.env
           mkdir -p dist
+          cp "${{ runner.temp }}/daemon-logic/daemon-logic.wasm" \
+            "target/${{ matrix.target }}/release/daemon-logic.wasm"
           tar -czf "dist/$TARBALL_PREFIX-linux-x64.tar.gz" \
-            -C "target/${{ matrix.target }}/release" "$CLI_BINARY" "$AGENT_BINARY"
+            -C "target/${{ matrix.target }}/release" \
+            "$CLI_BINARY" "$AGENT_BINARY" daemon-logic.wasm
           ls -la dist
       # What the tarball promises: two binaries that start on a machine with no
       # graphical session and nothing else installed — including no particular
@@ -469,7 +563,7 @@ jobs:
           path: dist/*
 
   publish:
-    needs: [channel, installers, binaries]
+    needs: [channel, daemon_logic, installers, binaries]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -487,6 +581,11 @@ jobs:
         with:
           name: linux-tarball
           path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-logic-release
+          path: logic
+      - run: cp logic/daemon-logic.wasm dist/daemon-logic.wasm
       - run: ls -la dist
       # A fixed address for "what is the newest version", so the app's 检查更新
       # has something to ask that is not the GitHub API: 60 requests an hour is

@@ -18,11 +18,11 @@
 
 use anyhow::{Context, Result};
 use genehub_proto::{ErrorCode, ExchangeResponseHead, ShellFrame, ShellRunRequest};
+use genet_daemon_logic_api::StreamAuthorization;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
 use super::endpoint::{send_error, PeerServices, ServerStream};
-use crate::authz::Principal;
 
 /// How much of one read is turned into one frame. Large enough that a chatty
 /// build does not become a frame per line, small enough that the first output
@@ -48,7 +48,11 @@ const SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 /// and name it.
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
 
-pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
+pub(super) async fn handle(
+    stream: &mut ServerStream,
+    services: &PeerServices,
+    authorization: &StreamAuthorization,
+) -> Result<()> {
     // Whatever the caller sent is the command's standard input. Read before
     // anything is spawned, because the command must not start until its input
     // is known — a reader that reaches end-of-file early gets a different and
@@ -90,50 +94,48 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
             .await;
         }
     }
-    let workspace = match services.state.workspaces.get(&request.workspace_id).await {
+    let logic = services
+        .state
+        .logic
+        .as_ref()
+        .context("portable daemon logic is unavailable")?;
+    let (cwd, roots) = match logic
+        .resolve_workspace_execution(request.workspace_id.clone(), request.cwd.clone())
+        .await
+    {
         Ok(workspace) => workspace,
         Err(error) => {
-            return send_error(stream, 404, ErrorCode::NotFound, format!("{error:#}")).await
+            let message = format!("{error:#}");
+            let (status, code) = if message.contains("escapes")
+                || message.contains("not registered")
+                || message.contains("not in the root set")
+            {
+                (403, ErrorCode::Forbidden)
+            } else if message.contains("no such") {
+                (404, ErrorCode::NotFound)
+            } else {
+                (400, ErrorCode::BadRequest)
+            };
+            return send_error(stream, status, code, message).await;
         }
     };
-
-    let cwd = match &request.cwd {
-        None => workspace.root.clone(),
-        // Any of the workspace's folders, not only the first: a multi-folder
-        // workspace is one project. Refusing beats clamping to the root — a
-        // command quietly run in the wrong directory looks like it worked.
-        Some(cwd) => {
-            let candidate = std::path::Path::new(cwd);
-            let resolved = workspace
-                .folders
-                .iter()
-                .find_map(|folder| {
-                    crate::session::store::ensure_within(&folder.root, candidate).ok()
-                })
-                .or_else(|| crate::session::store::ensure_within(&workspace.root, candidate).ok());
-            match resolved {
-                Some(resolved) => resolved,
-                None => {
-                    return send_error(
-                        stream,
-                        403,
-                        ErrorCode::Forbidden,
-                        format!("cwd {cwd} escapes the workspace"),
-                    )
-                    .await
-                }
-            }
+    let confinement = if authorization.confinement_required {
+        let report = crate::isolation::report();
+        if !report.enforced {
+            return send_error(
+                stream,
+                501,
+                ErrorCode::IsolationUnavailable,
+                format!(
+                    "this has to run confined to the workspace and this machine cannot do that: {}",
+                    report.detail
+                ),
+            )
+            .await;
         }
-    };
-
-    let caller = Principal::of(&services.state, &services.access);
-    let confinement = match crate::isolation::required_for(&caller, &workspace) {
-        Ok(confinement) => confinement,
-        // Not 403: the caller is allowed and the machine is unable, and no
-        // wider grant would change that.
-        Err(refusal) => {
-            return send_error(stream, 501, ErrorCode::IsolationUnavailable, refusal).await
-        }
+        Some(crate::isolation::Policy::for_workspace(&roots))
+    } else {
+        None
     };
 
     let argv = crate::process::launch_argv(program, confinement.as_ref())?;

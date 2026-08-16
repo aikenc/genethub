@@ -27,7 +27,7 @@ impl Client {
     pub async fn connect_loopback(daemon: &genet_daemon::Daemon) -> Result<Self> {
         let admission = daemon.websocket_admission();
         let (mut socket, _) = tokio_tungstenite::connect_async(&admission.url).await?;
-        let nonce = genet_daemon::devices::random_token();
+        let nonce = genet_daemon::channel_auth::random_token();
         let context = "loopback";
         let hello = PeerHello {
             version: genehub_proto::DATA_PLANE_VERSION,
@@ -247,7 +247,8 @@ impl Client {
             &serde_json::to_vec(&hello)?,
             None,
             None,
-        )?;
+        )
+        .await?;
         genet_daemon::channel_auth::verify_proof(
             &genet_daemon::channel_auth::server_proof(
                 secret,

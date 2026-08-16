@@ -375,7 +375,22 @@ fn start_catalog_sync(state: &Arc<AppState>, enrollment: &Enrollment) -> Catalog
             let Some(state) = weak_state.upgrade() else {
                 return;
             };
-            let catalog = state.workspaces.catalog().await;
+            let catalog = match state.logic.as_ref() {
+                Some(logic) => match logic.workspace_catalog().await {
+                    Ok(catalog) => catalog,
+                    Err(error) => {
+                        tracing::warn!(%error, "portable workspace catalogue is unavailable");
+                        tokio::time::sleep(std::time::Duration::from_secs(retry_seconds)).await;
+                        retry_seconds = (retry_seconds * 2).min(300);
+                        continue;
+                    }
+                },
+                None => {
+                    tokio::time::sleep(std::time::Duration::from_secs(retry_seconds)).await;
+                    retry_seconds = (retry_seconds * 2).min(300);
+                    continue;
+                }
+            };
             let version = (catalog.generation.clone(), catalog.revision);
             let changed = published.as_ref() != Some(&version);
             drop(state);
@@ -436,7 +451,7 @@ async fn sync_catalog_version(
     client: &hub::Client,
     weak_state: &Weak<AppState>,
     enrollment: &Enrollment,
-    catalog: &crate::workspace::WorkspaceCatalog,
+    catalog: &genet_daemon_logic_api::WorkspaceCatalog,
     acknowledged_generation: &mut Option<String>,
     published: &mut Option<(String, u64)>,
 ) -> Result<()> {
@@ -630,10 +645,18 @@ mod tests {
         }
         .save(&state_path)
         .unwrap();
-        let (state, _) = AppState::build(paths.clone()).await.unwrap();
+        let state = AppState::build(paths.clone()).await.unwrap();
         let weak_state = Arc::downgrade(&state);
         let client = hub::Client::new(&hub_url);
-        let catalog = state.workspaces.catalog().await;
+        let catalog = genet_daemon_logic_api::WorkspaceCatalog {
+            generation: "wcg_local".into(),
+            revision: 1,
+            workspaces: vec![genet_daemon_logic_api::CatalogWorkspace {
+                local_workspace_id: "workspace-local".into(),
+                reported_name: "Project".into(),
+                is_git_repo: true,
+            }],
+        };
         let version = (catalog.generation.clone(), catalog.revision);
         let mut acknowledged_generation = Some("wcg_previous".to_string());
         let mut published = None;

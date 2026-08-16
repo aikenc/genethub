@@ -41,7 +41,7 @@
 ### 明确不做
 
 - 手机原生 App（M2；MVP 用手机浏览器，界面已按小屏适配）
-- Codex 的 skills 菜单、子 agent 内部步骤：原生 `app-server` 适配器已经落地（`adapter::codex`），`thread/resume` 和贴图也已接上；这两项是它明确还没接的部分，理由见 [third-party-agents.md](./third-party-agents.md) §4 末尾；对应能力位不申报，界面上因此没有对应控件，而不是点了不生效
+- Codex 的 skills 菜单、子 agent 内部步骤：原生 `app-server` driver 已落地（`packages/daemon-core/src/session/codex.rs`），`thread/resume` 和贴图也已接上；这两项是它明确还没接的部分，理由见 [third-party-agents.md](./third-party-agents.md) §4 末尾；对应能力位不申报，界面上因此没有对应控件，而不是点了不生效
 - Codex 接 DeepSeek：不是我们的待办，是 Codex（只认 Responses API）与 DeepSeek（只有 Chat Completions）两个上游之间的协议缺口，见 [third-party-agents.md](./third-party-agents.md) §4；换成原生 `app-server` 传输不会让这个缺口消失
 - 应用内自动更新（手动重装）
 - 平台级零知识与前向保密（M4；当前转发业务帧已对 Relay 加密，但托管 Control 生成对称会话 secret，见 [security-model.md](./security-model.md) §1.1）
@@ -72,8 +72,8 @@
 - [x] daemon 内核代码中不存在按 agent 名字分支的逻辑
 - [x] 未知工具类型走 `Unknown` 兜底渲染，不白屏、不丢事件
 - [x] 同一段前端代码分别驱动内置 agent 与一个真实外部 agent，渲染结果形状一致
-- [x] Claude Code（原生 `stream-json`，`adapter::claude`）接 DeepSeek 官方 Anthropic 兼容端点，真实模型端到端跑通并固化为四条回归测试（`testing/tests/claude.rs`）：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具确实没有落盘
-- [x] Codex（原生 `app-server`，`adapter::codex`）默认注册、探测（含未登录时报出那一行命令而不是让首个 prompt 挂住）与三个选择器展示正常；接 DeepSeek 的已知限制记录在案，不在本项目范围内解决
+- [x] Claude Code（原生 `stream-json` portable driver）接 DeepSeek 官方 Anthropic 兼容端点，真实模型端到端跑通并固化为四条回归测试（`testing/tests/claude.rs`）：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具确实没有落盘
+- [x] Codex（原生 `app-server` portable driver）默认注册、探测（含未登录时报出那一行命令而不是让首个 prompt 挂住）与三个选择器展示正常；接 DeepSeek 的已知限制记录在案，不在本项目范围内解决
 
 **接入与安全**
 

@@ -1,35 +1,30 @@
-mod context;
 mod external;
-mod feedback;
 mod mock;
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 use genehub_proto::{
     decode_speech_audio, decode_speech_json, encode_speech_json, SpeechAudioFormat,
     SpeechCancelReason, SpeechCandidate, SpeechCapabilities, SpeechCompleted, SpeechContextLimits,
-    SpeechContextPack, SpeechContextUpdate, SpeechFailure, SpeechFailureCode,
-    SpeechFeedbackReceipt, SpeechFeedbackScope, SpeechFrame, SpeechFrameDecoder, SpeechFrameKind,
-    SpeechNBestCapabilities, SpeechPartial, SpeechReady, SpeechRuntimeCapabilities,
-    SpeechRuntimeDescriptor, SpeechRuntimeStatus, SpeechScoreKind, SpeechSegment,
-    SpeechSegmentationCapabilities, SpeechSettings, SpeechStart, MAX_SPEECH_CANDIDATES,
-    MAX_SPEECH_CONTEXT_BYTES, MAX_SPEECH_DURATION_MS, MAX_SPEECH_FRAME_PAYLOAD_BYTES,
-    MAX_SPEECH_PROMPT_CHARS, MAX_SPEECH_SEGMENTS, MAX_SPEECH_SEGMENT_CANDIDATE_CHARS,
-    MAX_SPEECH_TRANSCRIPT_CHARS, MAX_SPEECH_UNCERTAIN_SPANS, SPEECH_PROTOCOL_VERSION,
-    SPEECH_RUNTIME_CAPABILITIES_SCHEMA,
+    SpeechContextPack, SpeechContextUpdate, SpeechFailure, SpeechFailureCode, SpeechFrame,
+    SpeechFrameDecoder, SpeechFrameKind, SpeechNBestCapabilities, SpeechPartial, SpeechReady,
+    SpeechRuntimeCapabilities, SpeechRuntimeDescriptor, SpeechRuntimeStatus, SpeechScoreKind,
+    SpeechSegment, SpeechSegmentationCapabilities, SpeechSettings, SpeechStart,
+    MAX_SPEECH_CANDIDATES, MAX_SPEECH_CONTEXT_BYTES, MAX_SPEECH_DURATION_MS,
+    MAX_SPEECH_FRAME_PAYLOAD_BYTES, MAX_SPEECH_PROMPT_CHARS, MAX_SPEECH_SEGMENTS,
+    MAX_SPEECH_SEGMENT_CANDIDATE_CHARS, MAX_SPEECH_TRANSCRIPT_CHARS, MAX_SPEECH_UNCERTAIN_SPANS,
+    SPEECH_PROTOCOL_VERSION, SPEECH_RUNTIME_CAPABILITIES_SCHEMA,
 };
+use genet_daemon_logic_api::{SpeechCompletionEvidence, SpeechConfig, SpeechRuntimeConfig};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Semaphore};
 
-use crate::config::{SpeechConfig, SpeechRuntimeConfig};
 use crate::dataplane::endpoint::{PeerServices, ServerStream, StreamInput};
 
 const MAX_RUNTIME_SESSIONS: usize = 4;
-const MAX_FEEDBACK_RESULTS: usize = 64;
-const FEEDBACK_RESULT_TTL: Duration = Duration::from_secs(30 * 60);
 const MAX_PINNED_TERMS: usize = 50;
 const MAX_AUTOMATIC_TERMS: usize = 150;
 const MAX_LANGUAGE_HINTS: usize = 4;
@@ -181,19 +176,6 @@ struct RuntimeSession {
     events: mpsc::Receiver<RuntimeEvent>,
 }
 
-#[derive(Clone)]
-struct FeedbackEvidence {
-    recorded_at: Instant,
-    workspace_id: String,
-    request_id: String,
-    runtime: SpeechRuntimeDescriptor,
-    context_snapshot_id: String,
-    candidates: Vec<SpeechCandidate>,
-    segments: Vec<SpeechSegment>,
-    score_kind: SpeechScoreKind,
-    scores_calibrated: bool,
-}
-
 type CapabilityCacheKey = (bool, Option<SpeechRuntimeConfig>);
 type CapabilityCache = Option<(CapabilityCacheKey, SpeechRuntimeCapabilities)>;
 
@@ -214,8 +196,6 @@ pub struct SpeechBroker {
     stub_runtime: Arc<dyn SpeechRuntime>,
     capability_cache: tokio::sync::RwLock<CapabilityCache>,
     slots: Arc<Semaphore>,
-    feedback_writes: tokio::sync::Mutex<()>,
-    feedback_results: tokio::sync::Mutex<VecDeque<FeedbackEvidence>>,
 }
 
 impl SpeechBroker {
@@ -225,8 +205,6 @@ impl SpeechBroker {
             stub_runtime: Arc::new(mock::ProtocolStubRuntime),
             capability_cache: tokio::sync::RwLock::new(None),
             slots: Arc::new(Semaphore::new(MAX_RUNTIME_SESSIONS)),
-            feedback_writes: tokio::sync::Mutex::new(()),
-            feedback_results: tokio::sync::Mutex::new(VecDeque::new()),
         }
     }
 
@@ -270,7 +248,7 @@ impl SpeechBroker {
         &self,
         command: String,
         args: Vec<String>,
-    ) -> Result<crate::config::SpeechRuntimeConfig> {
+    ) -> Result<SpeechRuntimeConfig> {
         let runtime = external::validate_registration(command, args)?;
         let candidate = SpeechConfig {
             runtime: Some(runtime.clone()),
@@ -310,49 +288,6 @@ impl SpeechBroker {
             .open(config, start, &capabilities)
             .await
     }
-
-    async fn remember_completion(&self, evidence: FeedbackEvidence) {
-        let mut results = self.feedback_results.lock().await;
-        discard_expired_feedback(&mut results, Instant::now());
-        // Request ids are client-generated and only unique within a project.
-        // A collision in another workspace must not evict valid feedback
-        // evidence for this one.
-        results.retain(|stored| {
-            stored.workspace_id != evidence.workspace_id || stored.request_id != evidence.request_id
-        });
-        while results.len() >= MAX_FEEDBACK_RESULTS {
-            results.pop_front();
-        }
-        results.push_back(evidence);
-    }
-
-    async fn feedback_evidence(
-        &self,
-        workspace_id: &str,
-        request_id: &str,
-    ) -> Result<FeedbackEvidence> {
-        let mut results = self.feedback_results.lock().await;
-        discard_expired_feedback(&mut results, Instant::now());
-        results
-            .iter()
-            .find(|stored| {
-                stored.workspace_id == workspace_id && stored.request_id == request_id
-            })
-            .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "本次语音候选已经过期或不属于当前项目；为避免伪造训练数据，请重新录音后再选择候选"
-                )
-            })
-    }
-}
-
-fn discard_expired_feedback(results: &mut VecDeque<FeedbackEvidence>, now: Instant) {
-    results.retain(|stored| {
-        now.checked_duration_since(stored.recorded_at)
-            .unwrap_or_default()
-            <= FEEDBACK_RESULT_TTL
-    });
 }
 
 impl Default for SpeechBroker {
@@ -607,100 +542,6 @@ pub fn validate_settings(
     Ok((terms, languages))
 }
 
-pub async fn compile_context_for_state(
-    state: &crate::state::Shared,
-    workspace_id: &str,
-    session_id: Option<&str>,
-    draft: Option<&str>,
-) -> Result<SpeechContextPack> {
-    context::compile(state, workspace_id, session_id, draft).await
-}
-
-pub(crate) struct FeedbackSubmission {
-    pub workspace_id: String,
-    pub request_id: String,
-    pub selected_candidate_id: String,
-    pub rejected_candidate_id: Option<String>,
-    pub scope: Option<SpeechFeedbackScope>,
-}
-
-pub(crate) async fn record_feedback_for_state(
-    state: &crate::state::Shared,
-    submission: FeedbackSubmission,
-) -> Result<SpeechFeedbackReceipt> {
-    let request_id = submission.request_id.clone();
-    let level = submission
-        .scope
-        .as_ref()
-        .map(|scope| scope.level)
-        .unwrap_or(genehub_proto::SpeechFeedbackLevel::Utterance);
-    if !valid_speech_request_id(&request_id) {
-        let correlation_id = speech_correlation_id(&request_id);
-        tracing::warn!(
-            event = "speech_feedback_rejected",
-            correlation_id = %correlation_id,
-            request_id_bytes = request_id.len(),
-            scope = ?level,
-            "speech preference used an invalid request id; content was withheld"
-        );
-        anyhow::bail!("invalid speech preference request id（错误编号 {correlation_id}）");
-    }
-    let evidence = match state
-        .speech
-        .feedback_evidence(&submission.workspace_id, &submission.request_id)
-        .await
-    {
-        Ok(evidence) => evidence,
-        Err(error) => {
-            tracing::warn!(
-                event = "speech_feedback_rejected",
-                request_id = %request_id,
-                correlation_id = %speech_correlation_id(&request_id),
-                scope = ?level,
-                error_fingerprint = %diagnostic_fingerprint(&format!("{error:#}")),
-                "speech preference lacked authoritative completion evidence; content was withheld"
-            );
-            return Err(error);
-        }
-    };
-    let runtime = evidence.runtime.clone();
-    // One writer covers both JSONL and learned terms so concurrent remote
-    // corrections cannot interleave records or defeat case-insensitive dedupe.
-    let _write = state.speech.feedback_writes.lock().await;
-    match feedback::record(state, submission, evidence).await {
-        Ok(receipt) => {
-            tracing::info!(
-                event = "speech_feedback_recorded",
-                request_id = %request_id,
-                correlation_id = %speech_correlation_id(&request_id),
-                runtime_id = %runtime.id,
-                model_id = %runtime.model,
-                implementation = %runtime.implementation,
-                scope = ?level,
-                stored = receipt.stored,
-                feedback_id = ?receipt.feedback_id,
-                learned_terms = receipt.learned_terms.len(),
-                "speech preference handled; transcript and candidate content were withheld"
-            );
-            Ok(receipt)
-        }
-        Err(error) => {
-            tracing::warn!(
-                event = "speech_feedback_failed",
-                request_id = %request_id,
-                correlation_id = %speech_correlation_id(&request_id),
-                runtime_id = %runtime.id,
-                model_id = %runtime.model,
-                implementation = %runtime.implementation,
-                scope = ?level,
-                error_fingerprint = %diagnostic_fingerprint(&format!("{error:#}")),
-                "speech preference failed; error and content were withheld"
-            );
-            Err(error)
-        }
-    }
-}
-
 pub(crate) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     if stream.head.body_length.is_some() {
         return crate::dataplane::endpoint::send_error(
@@ -782,7 +623,32 @@ pub(crate) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         "speech request accepted without logging prompt or transcript content"
     );
 
-    if let Err(error) = validate_start(&start, services).await {
+    let config = match services
+        .state
+        .logic
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("portable daemon logic is unavailable"))?
+        .prepare_speech(services.access.workspace_id.clone(), start.clone())
+        .await
+    {
+        Ok(config) => config,
+        Err(error) => {
+            let diagnostic_error = failure(
+                SpeechFailureCode::ProtocolMismatch,
+                "语音请求参数无效",
+                false,
+            );
+            diagnostics.log_failure("guest_validate_start", &diagnostic_error);
+            return crate::dataplane::endpoint::send_error(
+                stream,
+                400,
+                genehub_proto::ErrorCode::BadRequest,
+                format!("{error:#}（错误编号 {}）", diagnostics.correlation_id),
+            )
+            .await;
+        }
+    };
+    if let Err(error) = validate_start(&start) {
         let diagnostic_error = failure(
             SpeechFailureCode::ProtocolMismatch,
             "语音请求参数无效",
@@ -823,7 +689,6 @@ pub(crate) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         .await?;
         return stream.finish().await;
     };
-    let config = services.state.config.read().await.speech.clone();
     let mut runtime = match services.state.speech.open(&config, &start).await {
         Ok(session) => session,
         Err(error) => {
@@ -958,21 +823,32 @@ pub(crate) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
                     .await?;
                     return stream.finish().await;
                 }
-                services
-                    .state
-                    .speech
-                    .remember_completion(FeedbackEvidence {
-                        recorded_at: Instant::now(),
-                        workspace_id: start.workspace_id.clone(),
-                        request_id: start.request_id.clone(),
-                        runtime: runtime_descriptor.clone(),
-                        context_snapshot_id: completed.context_snapshot_id.clone(),
-                        candidates: completed.candidates.clone(),
-                        segments: completed.segments.clone().unwrap_or_default(),
-                        score_kind: completed.score_kind,
-                        scores_calibrated: completed.scores_calibrated,
-                    })
-                    .await;
+                let evidence = SpeechCompletionEvidence {
+                    recorded_at_millis: chrono::Utc::now().timestamp_millis(),
+                    workspace_id: start.workspace_id.clone(),
+                    request_id: start.request_id.clone(),
+                    runtime: runtime_descriptor.clone(),
+                    context_snapshot_id: completed.context_snapshot_id.clone(),
+                    candidates: completed.candidates.clone(),
+                    segments: completed.segments.clone().unwrap_or_default(),
+                    score_kind: completed.score_kind,
+                    scores_calibrated: completed.scores_calibrated,
+                };
+                let Some(logic) = services.state.logic.as_ref() else {
+                    write_failure(
+                        stream,
+                        &diagnostics,
+                        "feedback_evidence",
+                        &failure(
+                            SpeechFailureCode::RuntimeUnavailable,
+                            "signed daemon application is unavailable",
+                            true,
+                        ),
+                    )
+                    .await?;
+                    return stream.finish().await;
+                };
+                logic.remember_speech_completion(evidence).await?;
                 tracing::info!(
                     event = "speech_completed",
                     request_id = %diagnostics.request_id,
@@ -1169,24 +1045,9 @@ pub(crate) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     }
 }
 
-async fn validate_start(start: &SpeechStart, services: &PeerServices) -> Result<()> {
+fn validate_start(start: &SpeechStart) -> Result<()> {
     if !valid_speech_request_id(&start.request_id) {
         anyhow::bail!("speech request id must contain only ASCII letters, digits, '-' or '_'");
-    }
-    if services
-        .access
-        .workspace_id
-        .as_deref()
-        .is_some_and(|scope| scope != start.workspace_id)
-    {
-        anyhow::bail!("the routed capability does not cover this workspace");
-    }
-    services.state.workspaces.get(&start.workspace_id).await?;
-    if let Some(session_id) = start.session_id.as_deref() {
-        let snapshot = services.state.sessions.snapshot(session_id).await?;
-        if snapshot.summary.workspace_id != start.workspace_id {
-            anyhow::bail!("session is not a member of this workspace");
-        }
     }
     if start.audio != SpeechAudioFormat::default() {
         anyhow::bail!("speech audio must be mono 16 kHz PCM s16le");
@@ -1713,62 +1574,6 @@ mod tests {
             SpeechRuntimeStatus::Unavailable { .. }
         ));
         assert_eq!(external.runtime.implementation, "unconfigured");
-    }
-
-    #[tokio::test]
-    async fn feedback_evidence_is_workspace_bound_bounded_and_expires() {
-        let broker = SpeechBroker::new();
-        let evidence = |index: usize, recorded_at: Instant| FeedbackEvidence {
-            recorded_at,
-            workspace_id: "workspace-a".into(),
-            request_id: format!("request-{index}"),
-            runtime: SpeechRuntimeDescriptor::default(),
-            context_snapshot_id: format!("context-{index}"),
-            candidates: vec![],
-            segments: vec![],
-            score_kind: SpeechScoreKind::Unavailable,
-            scores_calibrated: false,
-        };
-        for index in 0..=MAX_FEEDBACK_RESULTS {
-            broker
-                .remember_completion(evidence(index, Instant::now()))
-                .await;
-        }
-        assert!(broker
-            .feedback_evidence("workspace-a", "request-0")
-            .await
-            .is_err());
-        assert!(broker
-            .feedback_evidence("workspace-a", &format!("request-{MAX_FEEDBACK_RESULTS}"))
-            .await
-            .is_ok());
-        assert!(broker
-            .feedback_evidence("workspace-b", &format!("request-{MAX_FEEDBACK_RESULTS}"))
-            .await
-            .is_err());
-
-        let mut other_workspace = evidence(MAX_FEEDBACK_RESULTS, Instant::now());
-        other_workspace.workspace_id = "workspace-b".into();
-        broker.remember_completion(other_workspace).await;
-        assert!(broker
-            .feedback_evidence("workspace-a", &format!("request-{MAX_FEEDBACK_RESULTS}"))
-            .await
-            .is_ok());
-        assert!(broker
-            .feedback_evidence("workspace-b", &format!("request-{MAX_FEEDBACK_RESULTS}"))
-            .await
-            .is_ok());
-
-        broker
-            .remember_completion(evidence(
-                999,
-                Instant::now() - FEEDBACK_RESULT_TTL - Duration::from_secs(1),
-            ))
-            .await;
-        assert!(broker
-            .feedback_evidence("workspace-a", "request-999")
-            .await
-            .is_err());
     }
 
     #[test]

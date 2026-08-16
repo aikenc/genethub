@@ -12,10 +12,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use genehub_testing::harness::agent_command_override;
+use genehub_proto::{DeviceInvite, InviteScope, Reply, Request, WorkspaceInfo};
+use genehub_testing::harness::{
+    agent_command_override, Config as TestConfig, ProviderConfig as TestProviderConfig,
+};
 use genehub_testing::mock_llm::{MockLlm, Turn};
-use genet_daemon::authz::{Capability, GrantSet};
-use genet_daemon::config::{Config, Paths, ProviderConfig};
+use genehub_testing::Client as TestClient;
+use genet_daemon::config::Paths;
 use genet_daemon::Daemon;
 use serde_json::Value;
 
@@ -190,18 +193,59 @@ impl Cli {
 
 /// The one provider the far machine has, pointed at the mock.
 fn write_provider_config(data: &Path, model_base_url: &str) {
-    let mut config = Config::default();
+    let mut config = TestConfig::default();
     config.agents.providers.insert(
         "deepseek".to_string(),
-        ProviderConfig {
+        TestProviderConfig {
             api_key: Some("sk-mock".to_string()),
             base_url: Some(model_base_url.to_string()),
             ..Default::default()
         },
     );
-    config
-        .save(&data.join("config.json"))
-        .expect("writing the machine's config");
+    std::fs::write(
+        data.join("config.json"),
+        serde_json::to_vec_pretty(&config).expect("serializing the machine's config"),
+    )
+    .expect("writing the machine's config");
+}
+
+/// Uses the same loopback RPC surface as the desktop owner. Tests must not
+/// reach into native state: device, workspace and settings policy belongs to
+/// the signed Wasm application now.
+async fn owner_call(daemon: &Daemon, request: Request) -> Reply {
+    let client = TestClient::connect_loopback(daemon)
+        .await
+        .expect("the machine's owner connects over loopback");
+    let reply = client
+        .call(request)
+        .await
+        .expect("the machine's owner request succeeds");
+    client.close().await;
+    reply
+}
+
+async fn create_invite(daemon: &Daemon, grants: Option<&[&str]>) -> DeviceInvite {
+    let scope = grants.map(|grants| InviteScope {
+        grants: grants.iter().map(|grant| (*grant).to_string()).collect(),
+    });
+    match owner_call(daemon, Request::DeviceInvite(scope)).await {
+        Reply::Invite(invite) => invite,
+        other => panic!("expected an invitation, got {other:?}"),
+    }
+}
+
+async fn open_workspace(daemon: &Daemon, root: &Path) -> WorkspaceInfo {
+    match owner_call(
+        daemon,
+        Request::WorkspaceOpen {
+            root: root.display().to_string(),
+        },
+    )
+    .await
+    {
+        Reply::Workspace(workspace) => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    }
 }
 
 /// Puts the machine at a rendezvous and waits until it is actually there.
@@ -244,7 +288,7 @@ async fn a_machine_across_a_relay_answers_exactly_as_the_local_one_does() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     // Pairing, from a CLI installation that has never heard of this machine.
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = create_invite(&daemon, None).await;
     let cli = Cli::new();
     let (paired, code) = cli.run(&[
         "machine",
@@ -279,10 +323,7 @@ async fn a_machine_across_a_relay_answers_exactly_as_the_local_one_does() {
 
     // A narrowed invitation is narrow on the wire, not only in the record: this
     // device may look, and may not decide who else gets in.
-    let narrow = daemon
-        .state
-        .devices
-        .invite_with(GrantSet::of([Capability::Read]));
+    let narrow = create_invite(&daemon, Some(&["read"])).await;
     let onlooker = Cli::new();
     let (paired, code) = onlooker.run(&[
         "machine",
@@ -355,7 +396,7 @@ async fn a_prompt_typed_here_is_answered_by_an_agent_running_there() {
         .expect("the machine could not be started");
     let rendezvous = attach(&daemon, &relay.origin).await;
 
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = create_invite(&daemon, None).await;
     let cli = Cli::new();
     let (paired, code) = cli.run(&[
         "machine",
@@ -417,15 +458,10 @@ async fn a_command_typed_here_runs_there_and_reports_what_it_did() {
     let daemon = Daemon::start(Paths::new(data.path()))
         .await
         .expect("the machine could not be started");
-    daemon
-        .state
-        .workspaces
-        .open(&project, None)
-        .await
-        .expect("the far machine opens its workspace");
+    open_workspace(&daemon, &project).await;
     let rendezvous = attach(&daemon, &relay.origin).await;
 
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = create_invite(&daemon, None).await;
     let cli = Cli::new();
     let (paired, code) = cli.run(&[
         "machine",
@@ -566,7 +602,7 @@ async fn a_device_that_was_revoked_is_told_to_pair_again_rather_than_to_wait() {
         .expect("the machine could not be started");
     let rendezvous = attach(&daemon, &relay.origin).await;
 
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = create_invite(&daemon, None).await;
     let cli = Cli::new();
     let (paired, code) = cli.run(&[
         "machine",
@@ -583,19 +619,19 @@ async fn a_device_that_was_revoked_is_told_to_pair_again_rather_than_to_wait() {
         .expect("the pairing did not name the machine")
         .to_string();
 
-    let device_id = daemon
-        .state
-        .devices
-        .list()
+    let devices = match owner_call(&daemon, Request::DeviceList).await {
+        Reply::Devices { devices, .. } => devices,
+        other => panic!("expected devices, got {other:?}"),
+    };
+    let device_id = devices
         .into_iter()
         .find(|device| device.name.contains("lose its welcome"))
         .expect("the machine did not record the device it just admitted")
         .id;
-    daemon
-        .state
-        .devices
-        .revoke(&device_id)
-        .expect("revoking the device");
+    match owner_call(&daemon, Request::DeviceRevoke { device_id }).await {
+        Reply::Devices { .. } => {}
+        other => panic!("expected devices after revocation, got {other:?}"),
+    }
 
     let (refused, code) = cli.run(&["session", "list", "--machine", &machine_id]);
     assert_eq!(refused["error"]["code"], "credentialRevoked", "{refused}");
@@ -626,15 +662,10 @@ async fn the_same_command_returns_the_same_bytes_from_here_and_from_there() {
     let daemon = Daemon::start(Paths::new(data.path()))
         .await
         .expect("the machine could not be started");
-    daemon
-        .state
-        .workspaces
-        .open(&project, None)
-        .await
-        .expect("opening a workspace so the answer is not empty");
+    open_workspace(&daemon, &project).await;
     let rendezvous = attach(&daemon, &relay.origin).await;
 
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = create_invite(&daemon, None).await;
     let elsewhere = Cli::new();
     let (paired, code) = elsewhere.run(&[
         "machine",
@@ -710,7 +741,7 @@ async fn a_backgrounded_conversation_keeps_going_and_can_be_picked_up_again() {
         .await
         .expect("the machine could not be started");
     let rendezvous = attach(&daemon, &relay.origin).await;
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = create_invite(&daemon, None).await;
     let cli = Cli::new();
     let (paired, code) = cli.run(&[
         "machine",
@@ -873,7 +904,7 @@ async fn a_machine_that_answers_with_a_different_identity_is_refused() {
         .expect("the machine could not be started");
     let rendezvous = attach(&daemon, &relay.origin).await;
 
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = create_invite(&daemon, None).await;
     let cli = Cli::new();
     let (paired, code) = cli.run(&[
         "machine",

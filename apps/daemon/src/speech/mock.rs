@@ -5,7 +5,7 @@ use genehub_proto::{
 };
 use tokio::sync::mpsc;
 
-use crate::config::SpeechConfig;
+use genet_daemon_logic_api::SpeechConfig;
 
 use super::{
     stub_runtime_capabilities, RuntimeCommand, RuntimeEvent, RuntimeSession, SpeechRuntime,

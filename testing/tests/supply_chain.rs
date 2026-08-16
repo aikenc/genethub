@@ -40,7 +40,7 @@ fn release_actions_are_immutable_and_publish_alone_can_write_contents() {
         .iter()
         .filter(|action| action.starts_with("actions/checkout@"))
         .count();
-    assert_eq!(checkout_count, 3);
+    assert_eq!(checkout_count, 4);
     assert_eq!(
         workflow.matches("persist-credentials: false").count(),
         checkout_count,
