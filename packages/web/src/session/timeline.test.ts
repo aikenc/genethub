@@ -244,33 +244,33 @@ describe("the scroll that should tuck the composer", () => {
   }
 
   it("ignores a flick that decays before the hold is up", () => {
-    expect(scrollBack(300, 40).fired).toBe(0);
+    expect(scrollBack(250, 60).fired).toBe(0);
   });
 
   it("ignores a long but unhurried read", () => {
-    // 15px a frame is 0.3px/ms: a deliberate drag, and under the bar however
+    // 40px a frame is 0.8px/ms: a deliberate drag, and under the bar however
     // long it is kept up.
-    expect(scrollBack(4000, 15).fired).toBe(0);
+    expect(scrollBack(4000, 40).fired).toBe(0);
   });
 
   it("fires once for a sustained drag back, however long it runs", () => {
-    expect(scrollBack(400, 40).fired).toBe(1);
-    expect(scrollBack(8000, 40).fired).toBe(1);
+    expect(scrollBack(300, 60).fired).toBe(1);
+    expect(scrollBack(8000, 60).fired).toBe(1);
   });
 
   it("leaves the composer alone when the reader is chasing new messages", () => {
     // Same speed, same duration, towards the bottom instead of away from it:
     // that is where the field is wanted, so it must not go anywhere.
-    expect(scrollBack(8000, -40).fired).toBe(0);
+    expect(scrollBack(8000, -60).fired).toBe(0);
   });
 
   it("starts over once the scrolling stops", () => {
-    const first = scrollBack(400, 40);
+    const first = scrollBack(300, 60);
     expect(first.fired).toBe(1);
     // A gap longer than a frame or two is a new gesture, not a continuation.
     const resumed = trackTimelineScroll(first.run, first.run.top, first.run.time + 900);
     expect(resumed.fastSince).toBeNull();
-    expect(scrollBack(400, 40, resumed).fired).toBe(1);
+    expect(scrollBack(300, 60, resumed).fired).toBe(1);
   });
 
   it("does not read a jump through the transcript as a drag", () => {
