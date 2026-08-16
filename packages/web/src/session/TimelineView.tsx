@@ -141,8 +141,7 @@ export function TimelineView({
   onReturnToBottom?(): void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
-  const content = useRef<HTMLDivElement>(null);
-  const pinnedRef = useRef(true);
+  const bottom = useRef<HTMLDivElement>(null);
   const scrollRun = useRef(idleTimelineScroll());
   const [pinned, setPinned] = useState(true);
   const [adrift, setAdrift] = useState(false);
@@ -169,61 +168,15 @@ export function TimelineView({
   // to read something — then leave them where they are. A message of one's own
   // counts as new content: it is the one thing the sender is certainly watching
   // for.
-  // Straight to the end of the scroll range, not `scrollIntoView` on a sentinel
-  // at the end of the content. That stops as soon as the sentinel is in view and
-  // leaves the scroller's own bottom padding below the fold — measured at 43px,
-  // which is enough to park the newest line flush against the cut edge, right
-  // where the composer's shadow falls. Here the padding is what rests at the
-  // edge and the last line sits clear of it.
   useEffect(() => {
-    const element = scroller.current;
-    if (pinned && element) element.scrollTop = element.scrollHeight;
+    if (pinned) bottom.current?.scrollIntoView({ block: "end" });
   }, [state.items, state.pending, rounds, pinned]);
-
-  // Following the transcript is a layout concern, not a data concern. Safari
-  // can grow the rendered Markdown after React has committed (font fallback,
-  // code styling and streamed line wrapping all do this), without changing any
-  // dependency above or firing a scroll event. Observe the actual content box
-  // and keep its end pinned only while the reader has not deliberately left it.
-  useEffect(() => {
-    const element = scroller.current;
-    const body = content.current;
-    if (!element || !body || typeof ResizeObserver === "undefined") return;
-    let frame = 0;
-    const observer = new ResizeObserver(() => {
-      if (!pinnedRef.current) return;
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        if (pinnedRef.current) element.scrollTop = element.scrollHeight;
-      });
-    });
-    observer.observe(body);
-    return () => {
-      cancelAnimationFrame(frame);
-      observer.disconnect();
-    };
-  }, []);
-
-  // Text reflows when the webfont lands, after the effect above has already
-  // parked the view, and the transcript is then a couple of dozen pixels short
-  // of its own end — enough to leave the newest line against the cut edge.
-  useEffect(() => {
-    let cancelled = false;
-    void document.fonts?.ready.then(() => {
-      const element = scroller.current;
-      if (!cancelled && pinned && element) element.scrollTop = element.scrollHeight;
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [pinned]);
 
   const returnToBottom = () => {
     const element = scroller.current;
     // A run that ends in a jump home is over, and the smooth scroll it starts
     // runs the other way anyway, so nothing left in it should be believed.
     scrollRun.current = idleTimelineScroll();
-    pinnedRef.current = true;
     setPinned(true);
     setAdrift(false);
     onReturnToBottom?.();
@@ -234,13 +187,12 @@ export function TimelineView({
     <>
       <div
         ref={scroller}
-        className="mx-auto h-full min-w-0 max-w-chat flex-1 overflow-x-hidden overflow-y-auto px-4 py-6"
+        className="mx-auto h-full min-w-0 max-w-chat flex-1 space-y-4 overflow-x-hidden overflow-y-auto px-4 py-6"
         data-testid="timeline"
         onScroll={(event) => {
           const element = event.currentTarget;
           const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
           const home = distance < 40;
-          pinnedRef.current = home;
           setPinned(home);
           setAdrift(showsReturnToBottom(distance, adrift));
           if (home && !pinned) onReturnToBottom?.();
@@ -253,7 +205,6 @@ export function TimelineView({
           if (run.triggered) onScrollBack?.();
         }}
       >
-        <div ref={content} className="space-y-4">
         {contextualTurns.map(
           ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
             const hasRound = Boolean(round);
@@ -325,7 +276,7 @@ export function TimelineView({
             <LogLink />
           </div>
         ) : null}
-        </div>
+        <div ref={bottom} />
       </div>
       <div className="pointer-events-none absolute inset-x-0 bottom-3 px-4">
         <div className="mx-auto flex max-w-chat justify-end">
