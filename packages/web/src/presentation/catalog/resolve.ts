@@ -1,4 +1,4 @@
-import type { AgentInfo } from "@genehub/proto";
+import type { AgentInfo, ModelInfo } from "@genehub/proto";
 
 import { agentAssets, type AgentAssetId } from "../../assets/agents";
 import agentConfig from "./agents.json";
@@ -7,9 +7,10 @@ import badgeConfig from "./runtime-badges.json";
 import type {
   AgentAssetVariants,
   AgentVisualRule,
+  EffortBadge,
+  EffortLevel,
   ModelAliasRule,
   PermissionBadge,
-  RuntimeBadge,
 } from "./types";
 
 export type AgentPresentation =
@@ -133,17 +134,44 @@ export function resolveModelPresentation({
   };
 }
 
-export function resolveEffortBadge(effortId?: string | null): RuntimeBadge {
+export function resolveEffortBadge(effortId?: string | null): EffortBadge {
   const id = effortId?.trim() || "default";
   const efforts = badgeConfig.efforts as Record<
     string,
-    { shortLabel: string; fullLabel: string }
+    { shortLabel: string; fullLabel: string; level: EffortLevel }
   >;
   const known = efforts[id];
   return {
-    emoji: "🤔",
+    level: known?.level ?? "auto",
     shortLabel: known?.shortLabel ?? truncateGraphemes(id, 2, ""),
     fullLabel: known?.fullLabel ?? id,
+  };
+}
+
+export interface ModelTraits {
+  reasoning: boolean;
+  /** Whether images can go into this model's context. */
+  multimodal: boolean;
+}
+
+/**
+ * The two things about a model that a one-line row can still show.
+ *
+ * `reasoning` is the model's own answer, carried on `ModelInfo`. Vision is not
+ * on the wire at all — no provider list says it, and neither Claude Code nor
+ * Codex reports it through their catalogs — so it is read from the model's
+ * name against a curated list of families that have it. The list is only ever
+ * allowed to add the icon: an unlisted model shows nothing, which reads as
+ * "not known to take images" rather than as a promise that it cannot.
+ */
+export function resolveModelTraits(
+  model: Pick<ModelInfo, "id" | "label" | "reasoning">,
+): ModelTraits {
+  const hints = modelConfig.multimodalHints as string[];
+  const haystack = `${model.id} ${model.label ?? ""}`.toLocaleLowerCase();
+  return {
+    reasoning: model.reasoning,
+    multimodal: hints.some((hint) => haystack.includes(hint)),
   };
 }
 

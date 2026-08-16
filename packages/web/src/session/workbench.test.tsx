@@ -1,5 +1,12 @@
-import type { AgentInfo, RoundLayer, RoundTrunk, TimelineItem } from "@genehub/proto";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type {
+  AgentInfo,
+  RoundLayer,
+  RoundTrunk,
+  SessionSummary,
+  TimelineItem,
+  WorkspaceInfo,
+} from "@genehub/proto";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,16 +14,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useWorkbench } from "./store";
 import type { Client } from "../protocol/client";
 import {
-  COMPOSER_TEXTAREA_COLLAPSED_HEIGHT,
   COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT,
   COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT,
-  COMPOSER_TEXTAREA_PHONE_COLLAPSED_HEIGHT,
   COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT,
   COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT,
   Composer,
   resizeComposerTextarea,
 } from "./Composer";
 import { ComposerControls } from "./ComposerControls";
+import { NewSessionPanel } from "./NewSessionPanel";
 import { PermissionCard } from "./Permission";
 import { TimelineView } from "./TimelineView";
 import { ToolCallView } from "./ToolCall";
@@ -60,15 +66,19 @@ const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
 const { retryPending, editPending } = useWorkbench.getState();
 
 afterEach(() => {
+  // Before the store is reset, so a mounted subscriber cannot re-render into it.
+  cleanup();
   useWorkbench.setState({
     timeline: emptyTimeline(),
     sessions: [],
     activeSessionId: null,
     agents: [],
     workspaces: [],
+    draft: null,
     retryPending,
     editPending,
   });
+  localStorage.clear();
 });
 
 /** Puts one session's round layer on screen, the way a snapshot would. */
@@ -979,7 +989,7 @@ describe("the controls offered to the user", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
     const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
-    expect(within(dialog).getByText("Agent")).toBeInTheDocument();
+    expect(within(dialog).getByRole("tablist", { name: "Agent" })).toBeInTheDocument();
     expect(within(dialog).queryByText("模型")).not.toBeInTheDocument();
     expect(within(dialog).queryByText("模式")).not.toBeInTheDocument();
   });
@@ -1001,9 +1011,8 @@ describe("the controls offered to the user", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
     const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
-    expect(within(dialog).getByRole("radio", { name: "GeneHub Agent" })).toBeInTheDocument();
-    expect(within(dialog).getByRole("radio", { name: "OpenCode 未安装" })).toBeDisabled();
-    expect(within(dialog).getByText("未安装")).toBeInTheDocument();
+    expect(within(dialog).getByRole("tab", { name: "GeneHub Agent" })).toBeEnabled();
+    expect(within(dialog).getByRole("tab", { name: "OpenCode 未安装" })).toBeDisabled();
   });
 
   it("sends on enter and keeps shift+enter for a new line", async () => {
@@ -1025,26 +1034,22 @@ describe("the controls offered to the user", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
-  it("uses one idle line, three-to-five phone lines, and four-to-seven desktop lines", () => {
+  it("uses three-to-five phone lines and four-to-seven desktop lines, with no smaller size", () => {
     const box = document.createElement("textarea");
     Object.defineProperty(box, "scrollHeight", { configurable: true, value: 40 });
-    expect(resizeComposerTextarea(box, false, false)).toBe(COMPOSER_TEXTAREA_PHONE_COLLAPSED_HEIGHT);
+    expect(resizeComposerTextarea(box, false)).toBe(COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT);
     expect(box.style.overflowY).toBe("hidden");
-
-    expect(resizeComposerTextarea(box, false, true)).toBe(COMPOSER_TEXTAREA_COLLAPSED_HEIGHT);
-
-    expect(resizeComposerTextarea(box, true, false)).toBe(COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT);
     Object.defineProperty(box, "scrollHeight", { configurable: true, value: 156 });
-    expect(resizeComposerTextarea(box, true, false)).toBe(156);
+    expect(resizeComposerTextarea(box, false)).toBe(156);
 
     Object.defineProperty(box, "scrollHeight", { configurable: true, value: 240 });
-    expect(resizeComposerTextarea(box, true, false)).toBe(COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT);
+    expect(resizeComposerTextarea(box, false)).toBe(COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT);
     expect(box.style.overflowY).toBe("auto");
 
     Object.defineProperty(box, "scrollHeight", { configurable: true, value: 40 });
-    expect(resizeComposerTextarea(box, true, true)).toBe(COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT);
+    expect(resizeComposerTextarea(box, true)).toBe(COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT);
     Object.defineProperty(box, "scrollHeight", { configurable: true, value: 220 });
-    expect(resizeComposerTextarea(box, true, true)).toBe(COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT);
+    expect(resizeComposerTextarea(box, true)).toBe(COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT);
     expect(box.style.overflowY).toBe("auto");
   });
 
@@ -1153,7 +1158,7 @@ describe("the controls offered to the user", () => {
       const view = render(<Composer {...composerProps({ phase })} />);
       const label = phase === "idle" ? "发送" : phase === "sending" ? "发送中" : "停止";
       const control = screen.getByLabelText(label);
-      const classes = ["h-[45px]", "w-[45px]", "md:h-[30px]", "md:w-[30px]"].filter((name) =>
+      const classes = ["h-9", "w-9", "md:h-6", "md:w-6"].filter((name) =>
         control.classList.contains(name),
       );
       view.unmount();
@@ -1237,98 +1242,54 @@ describe("the controls offered to the user", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
-  it("expands from one idle line when focused and collapses again on blur", async () => {
+  it("keeps one writing-sized card whether or not the field has focus", async () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
 
     const box = screen.getByLabelText("任务描述");
     const summary = screen.getByRole("button", { name: /Agent：GeneHub Agent/ });
-    const card = box.closest("[data-composer-state]");
+    const card = box.closest("[data-composer-card]");
     const inputSlot = box.closest('[data-composer-slot="input"]');
     const runtimeRow = card?.querySelector('[data-composer-slot="runtime"]');
     const actionsRow = card?.querySelector('[data-composer-slot="actions"]');
     const fileButton = screen.getByRole("button", { name: /添加文件/ });
     const sendButton = screen.getByRole("button", { name: "发送" });
+    const geometry = () => {
+      expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT}px` });
+      expect(box).toHaveClass("leading-9", "md:leading-6", "py-1.5", "md:py-1");
+      expect(inputSlot).toHaveClass("col-span-2", "col-start-1", "row-start-1");
+      expect(runtimeRow).toHaveClass("h-9", "md:h-6", "row-start-2");
+      expect(actionsRow).toHaveClass("h-9", "md:h-6", "row-start-2");
+      expect(summary).toHaveClass("h-9", "md:h-6", "text-[14px]", "md:text-[12px]");
+      expect(fileButton).toHaveClass("h-9", "w-9", "md:h-6", "md:w-6");
+      expect(sendButton).toHaveClass("h-9", "w-9", "md:h-6", "md:w-6");
+    };
+
     expect(box).toHaveAttribute("rows", "1");
-    expect(box).toHaveAttribute("data-expanded", "false");
-    expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_COLLAPSED_HEIGHT}px` });
-    expect(box).toHaveClass(
-      "leading-9",
-      "md:leading-6",
-      "py-[3px]",
-      "md:py-0.5",
-      "focus-visible:outline-transparent",
-    );
-    expect(card).toHaveAttribute("data-composer-state", "idle");
+    expect(box).toHaveClass("focus-visible:outline-transparent");
     expect(card).toHaveClass("border-line-strong");
-    expect(inputSlot).toHaveClass("col-start-1", "row-start-1");
-    expect(inputSlot).not.toHaveClass("col-span-2");
-    expect(runtimeRow).toHaveAttribute("data-row-units", "0.5");
-    expect(runtimeRow).toHaveClass("h-[18px]", "md:h-3", "row-start-2");
-    expect(actionsRow).toHaveAttribute("data-row-units", "1.25");
-    expect(actionsRow).toHaveClass("h-[45px]", "md:h-8", "row-span-2", "self-center");
-    expect(summary).toHaveClass(
-      "h-[18px]",
-      "md:h-3",
-      "text-[14px]",
-      "md:text-[11px]",
-      "!min-h-0",
-      "!min-w-0",
-      "after:-inset-y-1.5",
-      "focus-visible:outline-muted/60",
-    );
+    expect(summary).toHaveClass("!min-h-0", "!min-w-0", "focus-visible:outline-muted/60");
     expect(summary).not.toHaveClass("focus-visible:outline-accent");
     expect(summary.firstElementChild).toHaveClass("opacity-75");
-    expect(fileButton).toHaveClass("h-[45px]", "w-[45px]", "md:h-[30px]", "md:w-[30px]", "!min-h-0", "!min-w-0");
-    expect(sendButton).toHaveClass("h-[45px]", "w-[45px]", "md:h-[30px]", "md:w-[30px]", "!min-h-0", "!min-w-0");
-    expect(fileButton).toHaveClass("focus-visible:outline-muted/60");
-    expect(sendButton).toHaveClass("focus-visible:outline-muted/60");
+    expect(fileButton).toHaveClass("!min-h-0", "!min-w-0", "focus-visible:outline-muted/60");
+    expect(sendButton).toHaveClass("!min-h-0", "!min-w-0", "focus-visible:outline-muted/60");
+    geometry();
+
     await userEvent.click(box);
-    expect(box).toHaveAttribute("data-expanded", "true");
-    expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT}px` });
-    expect(box).toHaveClass("leading-9", "md:leading-6", "py-1.5", "md:py-1");
-    expect(card).toHaveAttribute("data-composer-state", "active");
     expect(card).toHaveClass("border-muted/50");
-    expect(card).not.toHaveClass("border-accent/60");
-    expect(inputSlot).toHaveClass("col-span-2", "col-start-1", "row-start-1");
-    expect(runtimeRow).toHaveAttribute("data-row-units", "1");
-    expect(runtimeRow).toHaveClass("h-9", "md:h-6", "row-start-2");
-    expect(actionsRow).toHaveAttribute("data-row-units", "1");
-    expect(actionsRow).toHaveClass("h-9", "md:h-6", "row-start-2");
-    expect(summary).toHaveClass("h-9", "md:h-6", "text-[14px]", "md:text-[12px]");
-    expect(fileButton).toHaveClass("h-9", "w-9", "md:h-6", "md:w-6");
-    expect(sendButton).toHaveClass("h-9", "w-9", "md:h-6", "md:w-6");
     expect(summary).toHaveAttribute("aria-expanded", "false");
-    expect(document.querySelectorAll('select')).toHaveLength(0);
+    expect(document.querySelectorAll("select")).toHaveLength(0);
+    geometry();
 
     fireEvent.blur(box);
-    expect(box).toHaveAttribute("data-expanded", "false");
-    expect(box).toHaveStyle({ height: `${COMPOSER_TEXTAREA_COLLAPSED_HEIGHT}px` });
+    expect(card).toHaveClass("border-line-strong");
+    geometry();
   });
 
-  it("keeps the expanded row stable while runtime settings take focus", async () => {
-    render(<Composer {...composerProps({ agentLocked: true })} />);
-
-    const box = screen.getByLabelText("任务描述");
-    const card = box.closest("[data-composer-state]");
-    await userEvent.click(box);
-    expect(card).toHaveAttribute("data-composer-state", "active");
-
-    await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
-    expect(screen.getByRole("dialog", { name: "Agent 与运行设置" })).toBeInTheDocument();
-    expect(card).toHaveAttribute("data-composer-state", "active");
-    expect(box).toHaveAttribute("data-expanded", "true");
-
-    await userEvent.click(screen.getByRole("button", { name: "关闭运行设置" }));
-    expect(card).toHaveAttribute("data-composer-state", "idle");
-    expect(box).toHaveAttribute("data-expanded", "false");
-  });
-
-  it("does not collapse before an active file-button click reaches the picker", async () => {
+  it("does not move the file button out from under an in-flight click", async () => {
     const { container } = render(
       <Composer {...composerProps({ attachmentsSupported: true })} />,
     );
     const box = screen.getByLabelText("任务描述");
-    const card = box.closest("[data-composer-state]");
     const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
     const pickerClick = vi.spyOn(picker, "click").mockImplementation(() => {});
 
@@ -1336,29 +1297,27 @@ describe("the controls offered to the user", () => {
     await userEvent.click(screen.getByRole("button", { name: /添加文件/ }));
 
     expect(pickerClick).toHaveBeenCalledOnce();
-    expect(card).toHaveAttribute("data-composer-state", "active");
     expect(box).toHaveFocus();
   });
 
-  it("sends before a pointer-triggered collapse returns to the idle row", async () => {
+  it("keeps the caret in the field after a pointer send", async () => {
     const onSend = vi.fn();
     render(<Composer {...composerProps({ onSend })} />);
     const box = screen.getByLabelText("任务描述");
-    const card = box.closest("[data-composer-state]");
 
     await userEvent.type(box, "继续调整");
     await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
     expect(onSend).toHaveBeenCalledWith("继续调整", []);
-    expect(card).toHaveAttribute("data-composer-state", "idle");
-    expect(box).toHaveAttribute("data-expanded", "false");
+    expect(box).toHaveValue("");
+    expect(box).toHaveFocus();
   });
 
   it("keeps the rich settings viewable when Agent switching is locked", async () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
     await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
     const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
-    expect(within(dialog).getByRole("radio", { name: "GeneHub Agent" })).toBeDisabled();
+    expect(within(dialog).getByRole("tab", { name: "GeneHub Agent" })).toBeDisabled();
     expect(within(dialog).getByText(/当前会话已有内容/)).toBeInTheDocument();
   });
 
@@ -1659,5 +1618,147 @@ describe("a turn that failed", () => {
     await userEvent.click(screen.getByText("查看日志"));
 
     expect(useWorkbench.getState().tabs.map((tab) => tab.kind)).toContain("logs");
+  });
+});
+
+/**
+ * "新建会话的项目好像是左侧会话列表选中的。比较隐晦。" The transcript is empty
+ * because there is nothing to transcribe yet, and that is the room the two
+ * decisions a new conversation still needs belong in.
+ */
+describe("an unstarted conversation", () => {
+  const workspace = (id: string, name: string, root: string): WorkspaceInfo => ({
+    id,
+    name,
+    root,
+    isGitRepo: true,
+    folders: [],
+  });
+
+  const worked = (id: string, workspaceId: string, updatedAtMs: number): SessionSummary => ({
+    id,
+    workspaceId,
+    agentId: "genet",
+    title: undefined,
+    createdAtMs: 0,
+    updatedAtMs,
+    archived: false,
+    status: "idle",
+  });
+
+  function draft() {
+    useWorkbench.setState({
+      workspaces: [
+        workspace("w1", "genethub", "/srv/genethub"),
+        workspace("w2", "console", "/srv/console"),
+      ],
+      agents: [agent(), agent({ id: "codex", label: "Codex", builtin: false })],
+      sessions: [],
+      activeSessionId: null,
+      tabs: [],
+      tabLimit: 16,
+    });
+    useWorkbench.getState().newSession("w1", "genet");
+  }
+
+  /** The buttons of one titled section, without its own header controls. */
+  const listed = (section: string) =>
+    within(within(screen.getByRole("region", { name: section })).getByRole("list"))
+      .getAllByRole("button")
+      .map((button) => button.textContent);
+  const openings = () => listed("可以先问问");
+
+  it("names every project and switches the draft to the one that is picked", async () => {
+    draft();
+    render(<NewSessionPanel />);
+
+    expect(screen.getByRole("button", { name: /genethub/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /console/ }));
+
+    expect(useWorkbench.getState().draft?.workspaceId).toBe("w2");
+    expect(useWorkbench.getState().activeSessionId).toBeNull();
+  });
+
+  /**
+   * The Agent and model live in the composer's own footer, one line below this
+   * panel. Asking for them again here made the first message look like it
+   * needed four decisions when it needs one.
+   */
+  it("leaves the Agent and model to the composer", () => {
+    draft();
+    render(<NewSessionPanel />);
+
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+  });
+
+  /** An empty composer under "描述任务…" is the hardest moment in the product. */
+  it("offers openings, writes one into the composer, and can draw another set", async () => {
+    draft();
+    render(<NewSessionPanel />);
+
+    const first = openings();
+    expect(first).toHaveLength(4);
+
+    await userEvent.click(screen.getByText(first[0]!));
+    expect(
+      useWorkbench.getState().composerDraftInserts.map((insert) => insert.text),
+    ).toEqual([first[0]]);
+
+    await userEvent.click(screen.getByRole("button", { name: "换一批建议" }));
+    expect(openings()).toHaveLength(4);
+  });
+
+  /**
+   * "点击项目后，选中的项目会立刻切换到第一。来回跳变很不好。" The order is
+   * decided once, when the panel opens.
+   */
+  it("does not reshuffle the grid under the finger that just picked a project", async () => {
+    draft();
+    render(<NewSessionPanel />);
+    const names = () => listed("项目");
+    expect(names()).toEqual(["genethub", "console"]);
+
+    await userEvent.click(screen.getByRole("button", { name: "console" }));
+
+    expect(useWorkbench.getState().draft?.workspaceId).toBe("w2");
+    expect(names()).toEqual(["genethub", "console"]);
+    expect(screen.getByRole("button", { name: "console" })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+  });
+
+  /**
+   * Four projects, and the one the sidebar has selected is always one of them.
+   * Being offered a list that does not include the project you are looking at
+   * reads as the panel having changed it.
+   */
+  it("leads with the selected project, then the most recently worked in", async () => {
+    const many = Array.from({ length: 6 }, (_, index) =>
+      workspace(`w${index}`, `project-${index}`, `/srv/p${index}`),
+    );
+    useWorkbench.setState({
+      workspaces: many,
+      agents: [agent()],
+      sessions: [worked("a", "w4", 900), worked("b", "w2", 300)],
+      activeSessionId: null,
+      tabs: [],
+      tabLimit: 16,
+    });
+    useWorkbench.getState().newSession("w5", "genet");
+    render(<NewSessionPanel />);
+
+    const names = () =>
+      screen
+        .getAllByRole("button", { name: /^project-/ })
+        .map((button) => button.textContent);
+    expect(names()).toEqual(["project-5", "project-4", "project-2", "project-0"]);
+
+    await userEvent.click(screen.getByRole("button", { name: "更多 2" }));
+    expect(names()).toHaveLength(6);
   });
 });

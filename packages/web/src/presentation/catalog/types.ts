@@ -31,3 +31,19 @@ export interface RuntimeBadge {
 export interface PermissionBadge extends RuntimeBadge {
   risk: "restricted" | "prompted" | "write" | "unrestricted" | "unknown";
 }
+
+/**
+ * Where a thinking level sits on the dial, rather than which emoji it gets.
+ *
+ * `auto` is the Agent's own default and any level we have never heard of:
+ * both are levels we cannot place, and guessing a position for them would
+ * claim knowledge the catalog does not have. `off` is a placed level — the
+ * bottom of the dial — and reads differently from not knowing.
+ */
+export type EffortLevel = "auto" | "off" | 1 | 2 | 3 | 4 | 5;
+
+export interface EffortBadge {
+  level: EffortLevel;
+  shortLabel: string;
+  fullLabel: string;
+}

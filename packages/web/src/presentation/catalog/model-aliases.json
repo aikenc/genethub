@@ -16,5 +16,29 @@
     { "agentId": "claude", "modelId": "default", "shortLabel": "Default" },
     { "agentId": "claude", "modelId": "sonnet", "shortLabel": "Sonnet" },
     { "agentId": "claude", "modelId": "opus", "shortLabel": "Opus" }
+  ],
+  "multimodalHints": [
+    "gpt-4o",
+    "gpt-4.1",
+    "gpt-5",
+    "o3",
+    "o4-mini",
+    "sonnet",
+    "opus",
+    "haiku",
+    "claude-3",
+    "claude-4",
+    "gemini",
+    "grok-4",
+    "-vl",
+    "vision",
+    "llava",
+    "pixtral",
+    "internvl",
+    "minicpm-v",
+    "glm-4v",
+    "step-1v",
+    "llama-4",
+    "molmo"
   ]
 }
