@@ -1,5 +1,3 @@
-#[cfg(windows)]
-use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -296,15 +294,12 @@ fn sync_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn sync_directory(path: &Path) -> Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?
-        .sync_all()?;
+fn sync_directory(_path: &Path) -> Result<()> {
+    // Win32 exposes directory handles through FILE_FLAG_BACKUP_SEMANTICS, but
+    // FlushFileBuffers (which File::sync_all uses) requires a writable file
+    // handle and does not provide a supported directory-fsync equivalent.
+    // Every artifact and state file is synced before its rename becomes visible;
+    // there is no additional directory flush operation to perform on Windows.
     Ok(())
 }
 

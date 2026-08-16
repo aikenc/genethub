@@ -300,7 +300,9 @@ jobs:
   # the product requirement that one published Wasm works everywhere.
   daemon_platform_artifact:
     needs: changes
-    if: needs.changes.outputs.daemon_platform == 'true'
+    if: >-
+      needs.changes.outputs.daemon_platform == 'true'
+      || needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -528,19 +530,31 @@ jobs:
       - run: npm run build
 
   desktop:
-    needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    needs: [changes, daemon_platform_artifact]
+    if: >-
+      always()
+      && needs.changes.result == 'success'
+      && needs.changes.outputs.desktop == 'true'
+      && needs.daemon_platform_artifact.result == 'success'
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      GENET_DAEMON_LOGIC_WASM: ${{ github.workspace }}/target/daemon-platform-fixture/daemon-logic.wasm
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # Supervision starts the real fail-closed daemon, so it consumes the same
+      # signed Linux-built guest that the five-OS platform matrix verifies.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-platform-portable-fixture
+          path: target/daemon-platform-fixture
       - run: cargo build -p genet-cli
       # Daemon persistence is shared by the CLI and desktop shell. In
       # particular, the owner-only Windows DACL assertions must execute on a
@@ -590,6 +604,7 @@ jobs:
           WEB: ${{ needs.web.result }}
           DESKTOP: ${{ needs.desktop.result }}
           WANT_RUST: ${{ needs.changes.outputs.rust }}
+          WANT_DAEMON_ARTIFACT: ${{ needs.changes.outputs.daemon_platform == 'true' || needs.changes.outputs.desktop == 'true' }}
           WANT_DAEMON_PLATFORM: ${{ needs.changes.outputs.daemon_platform }}
           WANT_RELAY: ${{ needs.changes.outputs.relay }}
           WANT_WEB: ${{ needs.changes.outputs.web }}
@@ -614,7 +629,7 @@ jobs:
           check changes "$CHANGES" true
           check lockfiles "$LOCKFILES" true
           check rust "$RUST" "$WANT_RUST"
-          check daemon_platform_artifact "$DAEMON_PLATFORM_ARTIFACT" "$WANT_DAEMON_PLATFORM"
+          check daemon_platform_artifact "$DAEMON_PLATFORM_ARTIFACT" "$WANT_DAEMON_ARTIFACT"
           check daemon-platform "$DAEMON_PLATFORM" "$WANT_DAEMON_PLATFORM"
           check relay "$RELAY" "$WANT_RELAY"
           check web "$WEB" "$WANT_WEB"

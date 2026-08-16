@@ -256,6 +256,7 @@ async fn batches_randomness_and_clocks_are_bounded() {
 #[tokio::test]
 async fn process_streams_are_ordered_and_survive_the_request_that_spawned_them() {
     let root = tempfile::tempdir().unwrap();
+    let native_root = root.path().canonicalize().unwrap();
     let host = SystemHost::new(root.path().join("private"), root.path().join("logs")).unwrap();
     let mut events = host.take_events().unwrap();
     let spawned = one(
@@ -269,7 +270,7 @@ async fn process_streams_are_ordered_and_survive_the_request_that_spawned_them()
             env: BTreeMap::new(),
             cwd: Some(FileLocator {
                 root: FileRoot::NativePath,
-                path: root.path().display().to_string(),
+                path: native_root.display().to_string(),
             }),
             confinement: genet_daemon_logic_api::ConfinementMode::None,
             capture_stdout: true,
@@ -338,6 +339,7 @@ async fn process_streams_are_ordered_and_survive_the_request_that_spawned_them()
 #[tokio::test]
 async fn process_dialogue_preserves_one_process_across_bounded_request_steps() {
     let root = tempfile::tempdir().unwrap();
+    let native_root = root.path().canonicalize().unwrap();
     let host = SystemHost::new(root.path().join("private"), root.path().join("logs")).unwrap();
     let result = one(
         &host,
@@ -351,7 +353,7 @@ async fn process_dialogue_preserves_one_process_across_bounded_request_steps() {
                 env: BTreeMap::new(),
                 cwd: Some(FileLocator {
                     root: FileRoot::NativePath,
-                    path: root.path().display().to_string(),
+                    path: native_root.display().to_string(),
                 }),
                 confinement: genet_daemon_logic_api::ConfinementMode::None,
                 capture_stdout: true,
@@ -386,6 +388,7 @@ async fn process_dialogue_preserves_one_process_across_bounded_request_steps() {
 #[tokio::test]
 async fn pty_output_and_close_are_resource_events() {
     let root = tempfile::tempdir().unwrap();
+    let native_root = root.path().canonicalize().unwrap();
     let host = SystemHost::new(root.path().join("private"), root.path().join("logs")).unwrap();
     let mut events = host.take_events().unwrap();
     let opened = one(
@@ -393,7 +396,7 @@ async fn pty_output_and_close_are_resource_events() {
         CapabilityRequest::Pty(PtyRequest::Open {
             cwd: FileLocator {
                 root: FileRoot::NativePath,
-                path: root.path().display().to_string(),
+                path: native_root.display().to_string(),
             },
             confinement: genet_daemon_logic_api::ConfinementMode::None,
             cols: 80,
