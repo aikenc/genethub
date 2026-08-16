@@ -3,14 +3,19 @@ use std::fs;
 use std::io::{BufRead, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::{extract::State, routing::get, Router};
 use ed25519_dalek::{Signer, SigningKey};
 use genehub_proto::{
-    ProbeState, Reply, Request, SessionSnapshot, SessionStatus, TimelineItem, TransportKind,
+    ArtifactDescriptor, ArtifactSource, LogicActivation, LogicManifest, PatchAvailability,
+    PatchControlRequest, PatchControlResponse, ProbeState, Reply, Request, SessionSnapshot,
+    SessionStatus, SourceRevision, TimelineItem, TransportKind, LOGIC_MANIFEST_SCHEMA,
 };
 use genet_daemon::config::Paths;
 use genet_daemon::logic::ApplyArtifact;
+use genet_daemon::patch::{PatchConfig, PatchService};
 use genet_daemon::router;
 use genet_daemon::Daemon;
 use genet_daemon_logic_api::CallerContext;
@@ -74,6 +79,114 @@ async fn running_daemon_cold_updates_reject_tampering_and_replay_without_restart
     assert_eq!(daemon.port, port);
     assert_eq!(std::process::id(), pid);
 
+    daemon.shutdown().await;
+}
+
+/// Covers the update seam that component tests cannot: a real manifest and
+/// signed single-file artifact cross HTTP, are admitted by PatchService, and
+/// replace the live Rust guest while the daemon remains usable.
+#[tokio::test]
+#[ignore = "requires GENET_DAEMON_LOGIC_WASM naming the signed real Rust guest"]
+async fn signed_patch_feed_downloads_and_activates_real_guest_without_daemon_restart() {
+    let _serial = serial().lock().await;
+    let initial = SignedArtifact::from_single_file(&fs::read(artifact_path()).unwrap()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(Paths::new(directory.path())).await.unwrap();
+    let logic = daemon.state.logic.as_ref().expect("real Wasm logic");
+    let before = logic.active().unwrap();
+    let pid = std::process::id();
+    let port = daemon.port;
+
+    let candidate = sign(before.revision + 1, initial.component);
+    let artifact = candidate.to_single_file().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let manifest = LogicManifest {
+        schema: LOGIC_MANIFEST_SCHEMA.into(),
+        channel: candidate.envelope.channel().into(),
+        logic_revision: candidate.envelope.logic_revision(),
+        platform_abi: candidate.envelope.platform_abi(),
+        protocol_version: candidate.envelope.protocol_version(),
+        artifact: ArtifactDescriptor {
+            sources: vec![ArtifactSource {
+                url: format!("{origin}/daemon-logic.wasm"),
+            }],
+            sha256: candidate.envelope.sha256().into(),
+            size: candidate.envelope.size(),
+        },
+        source: SourceRevision {
+            open_sha: "a".repeat(40),
+            cloud_sha: "b".repeat(40),
+            lockfile_sha256: "c".repeat(64),
+        },
+        activation: LogicActivation {
+            enabled: true,
+            paused_reason: None,
+        },
+    };
+    let bodies = Arc::new((serde_json::to_vec(&manifest).unwrap(), artifact));
+    let router = Router::new()
+        .route(
+            "/latest.json",
+            get(|State(bodies): State<Arc<(Vec<u8>, Vec<u8>)>>| async move { bodies.0.clone() }),
+        )
+        .route(
+            "/daemon-logic.wasm",
+            get(|State(bodies): State<Arc<(Vec<u8>, Vec<u8>)>>| async move { bodies.1.clone() }),
+        )
+        .with_state(bodies);
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let service = PatchService::new(PatchConfig::for_integration_test(
+        "dev",
+        format!("{origin}/latest.json"),
+    ))
+    .unwrap();
+
+    let checked = service
+        .handle(logic, PatchControlRequest::Check)
+        .await
+        .unwrap();
+    assert!(matches!(
+        checked,
+        PatchControlResponse::Status {
+            availability: PatchAvailability::Available { ref artifact },
+            ..
+        } if artifact.logic_revision == before.revision + 1
+    ));
+    let applied = service
+        .handle(
+            logic,
+            PatchControlRequest::Apply {
+                request_id: "patch_real_feed_contract".into(),
+                terminate_activities: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        applied,
+        PatchControlResponse::Applied { ref active, .. }
+            if active.logic_revision == before.revision + 1
+    ));
+    assert_eq!(logic.active().unwrap().revision, before.revision + 1);
+    assert_eq!(std::process::id(), pid);
+    assert_eq!(daemon.port, port);
+    assert!(matches!(
+        route_call(&daemon, Request::ConnectionIdentity).await,
+        Ok(Reply::Hello(_))
+    ));
+    assert!(matches!(
+        service
+            .handle(logic, PatchControlRequest::Check)
+            .await
+            .unwrap(),
+        PatchControlResponse::Status {
+            availability: PatchAvailability::Current,
+            ..
+        }
+    ));
+
+    server.abort();
     daemon.shutdown().await;
 }
 

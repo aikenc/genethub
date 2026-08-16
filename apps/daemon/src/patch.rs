@@ -52,8 +52,12 @@ impl PatchConfig {
         }
     }
 
-    #[cfg(test)]
-    fn test(channel: &str, logic_manifest_url: String) -> Self {
+    /// Builds a loopback-only feed for integration tests. Production builds do
+    /// not contain this constructor, so an installed App can only use the
+    /// release origins stamped into its Platform binary.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn for_integration_test(channel: &str, logic_manifest_url: String) -> Self {
         Self {
             channel: channel.to_string(),
             logic_manifest_urls: vec![logic_manifest_url],
@@ -582,8 +586,11 @@ mod tests {
             .with_state(bodies);
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
-        let service =
-            PatchService::new(PatchConfig::test("dev", format!("{origin}/latest.json"))).unwrap();
+        let service = PatchService::new(PatchConfig::for_integration_test(
+            "dev",
+            format!("{origin}/latest.json"),
+        ))
+        .unwrap();
         let fetched = service
             .fetch_manifest(&format!("{origin}/latest.json"))
             .await
@@ -625,7 +632,7 @@ mod tests {
         let stamped_server =
             tokio::spawn(async move { axum::serve(stamped_listener, stamped).await.unwrap() });
 
-        let service = PatchService::new(PatchConfig::test(
+        let service = PatchService::new(PatchConfig::for_integration_test(
             "dev",
             format!("{stamped_origin}/latest.json"),
         ))
@@ -700,7 +707,7 @@ mod tests {
         };
         let mut candidate = manifest(&signed, "http://127.0.0.1/logic.wasm".into());
         candidate.artifact.sha256 = "d".repeat(64);
-        let service = PatchService::new(PatchConfig::test(
+        let service = PatchService::new(PatchConfig::for_integration_test(
             "dev",
             "http://127.0.0.1/latest.json".into(),
         ))
@@ -716,7 +723,7 @@ mod tests {
 
     #[test]
     fn beta_artifacts_stay_on_the_stamped_website_origin() {
-        let service = PatchService::new(PatchConfig::test(
+        let service = PatchService::new(PatchConfig::for_integration_test(
             "beta",
             "http://127.0.0.1/latest.json".into(),
         ))
