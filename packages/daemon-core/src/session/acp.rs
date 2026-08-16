@@ -88,6 +88,13 @@ struct Turn {
     text_item: Option<String>,
     reasoning_item: Option<String>,
     interrupt_requested: bool,
+    /// The announced `tool_call` frame for each live tool call, keyed by
+    /// `toolCallId`. ACP sends the title, kind and locations once and then
+    /// reports progress with `tool_call_update` frames that carry only the
+    /// fields that changed, so the announcement has to be kept to render an
+    /// update as the same tool call rather than as an anonymous one.
+    #[serde(default)]
+    tool_calls: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -313,7 +320,21 @@ impl Driver {
                         },
                     });
                 }
-                _ => self.fail_handshake(message, output),
+                // A model or mode this Agent will not accept is a preference
+                // we cannot honour, not a broken session. Agents revise their
+                // model list between releases, so treating the refusal as a
+                // handshake failure would make every later turn of a session
+                // that remembers a retired model fail before it starts. The
+                // Agent keeps its own default and the prompt still runs.
+                Pending::SetModel => {
+                    self.applied_model = true;
+                    self.continue_configuring(output);
+                }
+                Pending::SetMode => {
+                    self.applied_mode = true;
+                    self.continue_configuring(output);
+                }
+                Pending::Initialize | Pending::OpenSession => self.fail_handshake(message, output),
             }
             return;
         }
@@ -361,19 +382,11 @@ impl Driver {
             }
             Pending::SetModel => {
                 self.applied_model = true;
-                match self.configure_next() {
-                    Ok(Some(write)) => output.writes.push(write),
-                    Ok(None) => self.ready(output),
-                    Err(error) => self.fail_handshake(error, output),
-                }
+                self.continue_configuring(output);
             }
             Pending::SetMode => {
                 self.applied_mode = true;
-                match self.configure_next() {
-                    Ok(Some(write)) => output.writes.push(write),
-                    Ok(None) => self.ready(output),
-                    Err(error) => self.fail_handshake(error, output),
-                }
+                self.continue_configuring(output);
             }
             Pending::Prompt { turn_id } => {
                 let canceled = matches!(
@@ -400,6 +413,16 @@ impl Driver {
                     });
                 }
             }
+        }
+    }
+
+    /// Sends the next configuration call, or opens the session for prompting
+    /// once there is nothing left to configure.
+    fn continue_configuring(&mut self, output: &mut LineOutput) {
+        match self.configure_next() {
+            Ok(Some(write)) => output.writes.push(write),
+            Ok(None) => self.ready(output),
+            Err(error) => self.fail_handshake(error, output),
         }
     }
 
@@ -725,22 +748,23 @@ impl Driver {
                 let Some(id) = update.get("toolCallId").and_then(Value::as_str) else {
                     return;
                 };
+                let merged = self.merge_tool_call(id, update);
                 events.push(SessionEvent::Item {
                     turn_id,
                     item: TimelineItem::ToolCall {
                         id: id.to_string(),
-                        name: update
+                        name: merged
                             .get("title")
                             .and_then(Value::as_str)
                             .unwrap_or("tool")
                             .to_string(),
-                        status: match update.get("status").and_then(Value::as_str) {
+                        status: match merged.get("status").and_then(Value::as_str) {
                             Some("in_progress") => ToolStatus::Running,
                             Some("completed") => ToolStatus::Ok,
                             Some("failed") => ToolStatus::Error,
                             _ => ToolStatus::Pending,
                         },
-                        detail: detail_from_update(update),
+                        detail: detail_from_update(&merged),
                     },
                 });
             }
@@ -760,6 +784,27 @@ impl Driver {
             }
             _ => {}
         }
+    }
+
+    /// Folds one `tool_call`/`tool_call_update` frame into what is already
+    /// known about that tool call and returns the whole picture.
+    ///
+    /// Every field an update omits keeps the value the announcement gave it,
+    /// so a status-only update no longer erases the title, kind and locations
+    /// that decide how the call is rendered. Fields the update does carry win,
+    /// because ACP sends the complete replacement value for each of them.
+    fn merge_tool_call(&mut self, id: &str, update: &Value) -> Value {
+        let entry = self
+            .turn
+            .tool_calls
+            .entry(id.to_string())
+            .or_insert_with(|| json!({}));
+        if let (Some(target), Some(fields)) = (entry.as_object_mut(), update.as_object()) {
+            for (key, value) in fields {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        entry.clone()
     }
 
     fn next_item_id(&mut self) -> String {
@@ -1162,11 +1207,23 @@ fn detail_from_update(update: &Value) -> ToolCallDetail {
         .get("kind")
         .and_then(Value::as_str)
         .unwrap_or("other");
+    // `locations` is the declared place for the file a call touches, but an
+    // Agent that reports a diff carries the path on the diff block instead and
+    // sends no locations at all. Without the fallback such an edit renders as
+    // a diff belonging to no file.
     let path = update
         .get("locations")
         .and_then(Value::as_array)
         .and_then(|values| values.first())
         .and_then(|value| value.get("path"))
+        .or_else(|| {
+            update
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find_map(|block| block.get("path"))
+        })
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
@@ -1288,6 +1345,116 @@ mod tests {
         assert!(String::from_utf8_lossy(&model.writes[0]).contains("\"value\":\"agent\""));
         let mode = driver.line(&response(4, json!({})));
         assert!(String::from_utf8_lossy(&mode.writes[0]).contains("session/prompt"));
+    }
+
+    /// The frame sequence below is the one `cursor-agent acp` really sends for
+    /// a file edit: one `tool_call` carrying the title and kind, then updates
+    /// that carry only the status and the diff.
+    #[test]
+    fn a_tool_call_update_keeps_the_identity_the_announcement_gave_it() {
+        let mut driver = Driver::new("cursor", "/work".into(), None, None, None, None);
+        driver.turn.id = Some("turn-1".into());
+
+        let announced = driver.line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"update":{
+                "sessionUpdate":"tool_call","toolCallId":"call-1","title":"Edit File",
+                "kind":"edit","status":"pending","rawInput":{}
+            }}})
+            .to_string(),
+        );
+        assert!(matches!(
+            announced.events.first(),
+            Some(SessionEvent::Item { item: TimelineItem::ToolCall { name, status, .. }, .. })
+                if name == "Edit File" && *status == ToolStatus::Pending
+        ));
+
+        let running = driver.line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"in_progress"
+            }}})
+            .to_string(),
+        );
+        assert!(
+            matches!(
+                running.events.first(),
+                Some(SessionEvent::Item { item: TimelineItem::ToolCall { name, status, detail, .. }, .. })
+                    if name == "Edit File"
+                        && *status == ToolStatus::Running
+                        && matches!(detail, ToolCallDetail::Edit { .. })
+            ),
+            "a status-only update must not turn the call anonymous; got {:?}",
+            running.events.first()
+        );
+
+        let completed = driver.line(
+            &json!({"jsonrpc":"2.0","method":"session/update","params":{"update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed",
+                "content":[{"type":"diff","path":"/work/ping.txt","newText":"pong"}]
+            }}})
+            .to_string(),
+        );
+        let Some(SessionEvent::Item {
+            item:
+                TimelineItem::ToolCall {
+                    name,
+                    status,
+                    detail,
+                    ..
+                },
+            ..
+        }) = completed.events.first()
+        else {
+            panic!("the completion is a tool call: {:?}", completed.events);
+        };
+        assert_eq!(name, "Edit File");
+        assert_eq!(*status, ToolStatus::Ok);
+        assert!(
+            matches!(detail, ToolCallDetail::Edit { path, diff }
+                if path == "/work/ping.txt" && diff == "pong"),
+            "the diff belongs to the edit the announcement described; got {detail:?}"
+        );
+    }
+
+    /// Agents drop models between releases, so a session that remembers a
+    /// retired one must still be able to talk.
+    #[test]
+    fn a_refused_model_leaves_the_session_usable() {
+        let mut driver = Driver::new(
+            "cursor",
+            "/work".to_string(),
+            None,
+            Some("a-model-this-agent-retired"),
+            None,
+            None,
+        );
+        driver.prompt("turn-1", "hello".to_string(), &[]).unwrap();
+        driver.line(&response(1, json!({})));
+        let opened = driver.line(&response(
+            2,
+            json!({
+                "sessionId": "remote-1",
+                "configOptions": [{"type":"select","category":"model","id":"model"}]
+            }),
+        ));
+        assert!(String::from_utf8_lossy(&opened.writes[0]).contains("set_config_option"));
+
+        let refused = driver.line(
+            &json!({"jsonrpc":"2.0","id":3,"error":{
+                "code":-32602,"message":"Invalid params",
+                "data":{"message":"Invalid model value: a-model-this-agent-retired"}
+            }})
+            .to_string(),
+        );
+        assert!(
+            refused.events.is_empty(),
+            "refusing a model preference is not a failed turn; got {:?}",
+            refused.events
+        );
+        assert!(
+            String::from_utf8_lossy(&refused.writes[0]).contains("session/prompt"),
+            "the prompt still runs on the Agent's own default; got {:?}",
+            refused.writes.first().map(|w| String::from_utf8_lossy(w))
+        );
     }
 
     #[test]
