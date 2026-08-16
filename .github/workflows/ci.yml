@@ -96,7 +96,7 @@ jobs:
                 rust=true
                 daemon_platform=true
                 ;;
-              packages/daemon-platform/*|packages/daemon-logic/*|packages/daemon-logic-api/*|packages/daemon-common/*|packages/daemon-core/*|packages/daemon-artifact/*)
+              packages/daemon-platform/*|packages/daemon-system/*|packages/daemon-logic/*|packages/daemon-logic-api/*|packages/daemon-common/*|packages/daemon-core/*|packages/daemon-artifact/*)
                 rust=true
                 daemon_platform=true
                 ;;
@@ -135,7 +135,7 @@ jobs:
           if [ "$rust" = true ]; then
             for f in "${files[@]}"; do
               case "$f" in
-                apps/daemon/*|apps/cli/*|packages/daemon-platform/*|packages/daemon-logic/*|packages/daemon-logic-api/*|packages/daemon-common/*|packages/daemon-core/*|packages/daemon-artifact/*|packages/proto/*|Cargo.toml|Cargo.lock)
+                apps/daemon/*|apps/cli/*|packages/daemon-platform/*|packages/daemon-system/*|packages/daemon-logic/*|packages/daemon-logic-api/*|packages/daemon-common/*|packages/daemon-core/*|packages/daemon-artifact/*|packages/proto/*|Cargo.toml|Cargo.lock)
                   desktop=true
                   break
                   ;;
@@ -374,6 +374,18 @@ jobs:
           name: daemon-platform-portable-fixture
           path: ${{ runner.temp }}/daemon-platform-fixture
       - run: cargo test -p genet-daemon-platform --all-targets
+      # The OS driver layer moved out of `apps/daemon` into these crates during
+      # the Wasm migration. `cargo test -p genet-daemon --lib` in the desktop
+      # job used to execute those file-lock, process, PTY and socket assertions
+      # on Windows and macOS; after the move nothing did, and this crate is
+      # precisely the one with per-OS implementations behind `cfg(windows)`.
+      - run: cargo test -p genet-daemon-system --all-targets
+      # The portable half is compiled to Wasm for delivery, but it is ordinary
+      # Rust and its tests are the only executable description of request
+      # policy, session state and persistence. Running them natively per OS
+      # catches host-dependent assumptions (path spelling, line endings, clock
+      # and filesystem behaviour) before the artifact reaches a consumer.
+      - run: cargo test -p genet-daemon-core --all-targets
       - name: Run the real application ABI and state-transfer tests
         env:
           GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-platform-fixture/daemon-logic.wasm
@@ -554,7 +566,15 @@ jobs:
   # Single required check for branch protection. Skipped path-filtered jobs are
   # fine; a failed or cancelled job that was supposed to run is not.
   gate:
-    needs: [changes, lockfiles, rust, relay, web, desktop]
+    needs:
+      - changes
+      - lockfiles
+      - rust
+      - daemon_platform_artifact
+      - daemon-platform
+      - relay
+      - web
+      - desktop
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -564,10 +584,13 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           LOCKFILES: ${{ needs.lockfiles.result }}
           RUST: ${{ needs.rust.result }}
+          DAEMON_PLATFORM_ARTIFACT: ${{ needs.daemon_platform_artifact.result }}
+          DAEMON_PLATFORM: ${{ needs['daemon-platform'].result }}
           RELAY: ${{ needs.relay.result }}
           WEB: ${{ needs.web.result }}
           DESKTOP: ${{ needs.desktop.result }}
           WANT_RUST: ${{ needs.changes.outputs.rust }}
+          WANT_DAEMON_PLATFORM: ${{ needs.changes.outputs.daemon_platform }}
           WANT_RELAY: ${{ needs.changes.outputs.relay }}
           WANT_WEB: ${{ needs.changes.outputs.web }}
           WANT_DESKTOP: ${{ needs.changes.outputs.desktop }}
@@ -591,6 +614,8 @@ jobs:
           check changes "$CHANGES" true
           check lockfiles "$LOCKFILES" true
           check rust "$RUST" "$WANT_RUST"
+          check daemon_platform_artifact "$DAEMON_PLATFORM_ARTIFACT" "$WANT_DAEMON_PLATFORM"
+          check daemon-platform "$DAEMON_PLATFORM" "$WANT_DAEMON_PLATFORM"
           check relay "$RELAY" "$WANT_RELAY"
           check web "$WEB" "$WANT_WEB"
           check desktop "$DESKTOP" "$WANT_DESKTOP"
