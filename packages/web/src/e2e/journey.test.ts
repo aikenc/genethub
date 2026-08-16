@@ -37,6 +37,7 @@ const DAEMON = builtBinary(
 const LOGIC =
   process.env.GENET_DAEMON_LOGIC_WASM?.trim() ||
   path.join(REPO, "target", "daemon-logic.wasm");
+const DAEMON_START_TIMEOUT_MS = 60_000;
 
 /**
  * The workbench's own client, against a real daemon and a real agent.
@@ -108,7 +109,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON, logic: LOGIC }))(
         throw new Error("the workspace would not open");
       workspaceId = workspace.data.id;
       workspaceRootHandle = workspace.data.folders[0]!.rootHandle;
-    }, 30_000);
+    }, 90_000);
 
     afterAll(async () => {
       client?.close();
@@ -640,13 +641,28 @@ function startDaemon(
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const timer = setTimeout(
-      () => reject(new Error("the daemon never reported a port")),
-      15_000,
+    let settled = false;
+    let stderr = "";
+    const fail = (reason: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill("SIGKILL");
+      reject(new Error(`${reason}${stderr ? `\ndaemon stderr:\n${stderr}` : ""}`));
+    };
+    const timer = setTimeout(() => {
+      fail(
+        `the daemon never reported a port within ${DAEMON_START_TIMEOUT_MS / 1000}s`,
+      );
+    }, DAEMON_START_TIMEOUT_MS);
+    child.once("error", (error) => fail(`the daemon could not start: ${error}`));
+    child.once("exit", (code, signal) =>
+      fail(`the daemon exited before listening (code=${code}, signal=${signal})`),
     );
-    child.stderr?.on("data", (chunk) =>
-      process.stderr.write(`[daemon] ${chunk}`),
-    );
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+      process.stderr.write(`[daemon] ${chunk}`);
+    });
     child.stdout?.on("data", (chunk: Buffer) => {
       for (const line of chunk.toString().split("\n").filter(Boolean)) {
         const frame = JSON.parse(line) as {
@@ -662,6 +678,7 @@ function startDaemon(
           };
         };
         if (frame.event !== "listening") continue;
+        settled = true;
         clearTimeout(timer);
         resolve({
           process: child,
