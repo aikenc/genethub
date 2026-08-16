@@ -191,9 +191,9 @@ function Items({
           新建会话
         </Item>
         <Item
-          // Only where a folder can be browsed. In a browser the daemon is on
-          // another machine and there is nothing here to pick from, so that
-          // path is typed into the sidebar instead of guessed at from a menu.
+          // Only where a workspace folder can be browsed. In a browser the
+          // daemon is on another machine and there is nothing here to pick
+          // from, so that path is opened from the sidebar instead.
           disabled={endpoint.via !== "loopback" || !host.pickDirectory}
           onSelect={run(() => {
             if (endpoint.via !== "loopback") return;
@@ -202,7 +202,7 @@ function Items({
             });
           })}
         >
-          打开项目…
+          打开工作区…
         </Item>
         <Item
           disabled={endpoint.via !== "loopback" || !host.pickWorkspaceFile}
@@ -213,7 +213,7 @@ function Items({
             });
           })}
         >
-          打开工作区…
+          打开 .code-workspace…
         </Item>
         <Separator />
         <Item onSelect={run(() => openTab("settings"))}>设置</Item>

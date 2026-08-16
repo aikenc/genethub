@@ -1,8 +1,11 @@
 import { useEffect, useRef } from "react";
 
 import { useWorkbench } from "../session/store";
+import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import { SessionStatusIcon } from "./SessionStatusIcon";
+import { TabKindIcon } from "./TabKindIcon";
+import { tabDisplayTitle, workspaceForTab } from "./tabWorkspace";
 
 /**
  * Closable panes across the top of the workspace.
@@ -11,15 +14,15 @@ import { SessionStatusIcon } from "./SessionStatusIcon";
  * not close the chat tab, and closing a tab removes it from the strip.
  */
 export function TabBar({ onOpenTools = () => {} }: { onOpenTools?(): void }) {
-  const { tabs, sessions, activeTabId, activateTab, closeTab, workspace } = useTabBar();
+  const { tabs, sessions, activeTabId, activateTab, closeTab, workspace, workspaceCtx } =
+    useTabBar();
   const strip = useWheelPannedStrip();
 
   return (
     <div
-      // One tab on a phone is not a strip, it is a second title bar under the
-      // first: the header above already says which conversation this is, and
-      // the drawer is how you get to another. It appears once there is a
-      // choice to make.
+      // Phones switch from the header title. This strip is the desktop
+      // control, and it stays visible there even with one tab so the window
+      // still reads as a workbench rather than a blank band.
       className={`${
         tabs.length > 1 ? "flex" : "hidden"
       } h-11 shrink-0 items-stretch overflow-hidden border-b border-line bg-surface md:flex md:h-9`}
@@ -36,6 +39,8 @@ export function TabBar({ onOpenTools = () => {} }: { onOpenTools?(): void }) {
           const status = tab.sessionId
             ? sessions.find((session) => session.id === tab.sessionId)?.status
             : undefined;
+          const title = tabDisplayTitle(tab);
+          const owned = workspaceForTab(tab, workspaceCtx);
           return (
             <div
               key={tab.id}
@@ -45,21 +50,26 @@ export function TabBar({ onOpenTools = () => {} }: { onOpenTools?(): void }) {
               // out loud that the strip keeps going. The size is written out
               // rather than taken from `text-xs`, which the shared phone
               // typography lifts to 14px for body copy this strip is not.
-              className={`group flex w-[28.5%] shrink-0 grow items-center gap-1 border-r border-line pl-2 pr-0.5 text-[0.75rem] leading-4 md:w-auto md:max-w-[14rem] md:shrink md:grow-0 md:pl-3 md:pr-3 ${
+              className={`group flex w-[28.5%] shrink-0 grow items-center gap-1 border-r border-line pl-2 pr-0.5 text-[0.75rem] leading-4 md:w-auto md:max-w-[16rem] md:shrink md:grow-0 md:pl-3 md:pr-2 ${
                 active ? "bg-bg text-fg" : "text-muted hover:bg-raised hover:text-fg"
               }`}
             >
-              {tab.kind === "chat" ? <SessionStatusIcon status={status} /> : null}
+              {tab.kind === "chat" ? (
+                <SessionStatusIcon status={status} />
+              ) : (
+                <TabKindIcon kind={tab.kind} />
+              )}
               <button
                 type="button"
                 className="min-w-0 flex-1 truncate py-2 text-left !min-h-0"
                 onClick={() => activateTab(tab.id)}
               >
-                {tab.title}
+                {title}
               </button>
+              {owned ? <WorkspaceAffordance workspace={owned} className="max-w-[4.5rem]" /> : null}
               <button
                 type="button"
-                aria-label={`关闭 ${tab.title}`}
+                aria-label={`关闭 ${title}`}
                 // Hover is the one thing a phone cannot do, so on touch the
                 // close control is simply there. It opts out of the 44px square
                 // every other phone button gets: at that width three of them
@@ -86,7 +96,7 @@ export function TabBar({ onOpenTools = () => {} }: { onOpenTools?(): void }) {
       <div className="hidden shrink-0 items-center gap-1 border-l border-line px-2 md:flex">
         <button
           type="button"
-          aria-label="打开右侧工作区工具"
+          aria-label="打开右侧工具"
           className="rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-fg"
           onClick={onOpenTools}
         >
@@ -139,8 +149,10 @@ function useTabBar() {
   const closeTab = useWorkbench((state) => state.closeTab);
   const workspaces = useWorkbench((state) => state.workspaces);
   const activeWorkspaceId = useWorkbench((state) => state.activeWorkspaceId);
+  const draftWorkspaceId = useWorkbench((state) => state.draft?.workspaceId ?? null);
   const workspace =
     workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
+  const workspaceCtx = { sessions, workspaces, activeWorkspaceId, draftWorkspaceId };
   return {
     tabs,
     sessions,
@@ -148,5 +160,6 @@ function useTabBar() {
     activateTab,
     closeTab,
     workspace,
+    workspaceCtx,
   };
 }

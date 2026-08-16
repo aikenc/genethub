@@ -270,7 +270,7 @@ export function useSpeechInput({
         if (!operation.voiceStartedAt) {
           throw new Error("没有检测到语音；麦克风已释放，请检查输入音量后重试");
         }
-        if (!operation.context) throw new Error("Qwen3 Mock 缺少项目上下文");
+        if (!operation.context) throw new Error("Qwen3 Mock 缺少工作区上下文");
         completed = mockSpeechCompletion(
           operation.context,
           operation.requestId,
@@ -528,7 +528,7 @@ export function useSpeechInput({
     setElapsedMs(0);
     setLocalAudioOnly(false);
     setProblem(null);
-    setNotice("正在请求麦克风，并准备 Qwen3 项目上下文…");
+    setNotice("正在请求麦克风，并准备 Qwen3 工作区上下文…");
     emitSpeechDiagnostic({
       action: "requested",
       requestId: operation.requestId,

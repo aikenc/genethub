@@ -25,6 +25,7 @@ import { defaultAgent, useWorkbench } from "./session/store";
 import { Sidebar } from "./shell/Sidebar";
 import { DesktopToolsDrawer } from "./shell/DesktopToolsDrawer";
 import { MobileToolsDrawer } from "./shell/MobileToolsDrawer";
+import { MobileTitleSwitcher } from "./shell/MobileTitleSwitcher";
 import { TabBar } from "./shell/TabBar";
 import type { ExtraTab } from "./shell/tabs";
 import { TitleBar } from "./shell/TitleBar";
@@ -32,6 +33,7 @@ import { useTheme } from "./theme/store";
 import { TerminalPanel } from "./terminal/TerminalPanel";
 import { UpdateToast } from "./updates/UpdateToast";
 import { OpenProject } from "./workspace/OpenProject";
+import { WorkspaceAffordance } from "./workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "./workspace/WorkspaceIcon";
 import type { SpeechInputProblem } from "./speech/useSpeechInput";
 
@@ -60,7 +62,7 @@ const openConnection = (
 
 /**
  * The workbench shell: left session tree, closable tabs, chat in the middle,
- * Changes/Files optionally docked on the right. Chat stays open while the
+ * Workspace changes/files optionally docked on the right. Chat stays open while the
  * right panel is used — looking at a diff must not hide the conversation.
  */
 export function App({
@@ -71,6 +73,7 @@ export function App({
   welcome,
   mobileTools,
   desktopTools,
+  sidebarMenu,
   onReportSpeechProblem,
 }: {
   host?: Host;
@@ -101,6 +104,8 @@ export function App({
   mobileTools?: React.ReactNode;
   /** Product-specific actions shown with the workbench tools on desktop. */
   desktopTools?: React.ReactNode;
+  /** Product-specific global actions in the right-hand 全局 section. */
+  sidebarMenu?: React.ReactNode;
   /** Opens the embedding product's feedback flow with content-free speech metadata. */
   onReportSpeechProblem?(problem: SpeechInputProblem): void;
 }) {
@@ -475,6 +480,9 @@ export function App({
 
   const showChat = !activeTab || activeTab.kind === "chat";
   const kind = activeTab?.kind ?? "chat";
+  const workspace =
+    workbench.workspaces.find((entry) => entry.id === workbench.activeWorkspaceId) ??
+    workbench.workspaces[0];
 
   return (
     <div className="flex h-full max-w-full flex-col overflow-x-hidden bg-bg">
@@ -500,6 +508,7 @@ export function App({
           extraTabs={extraTabs}
           onNavigate={() => setToolsOpen(false)}
         >
+          {sidebarMenu}
           {mobileTools}
         </MobileToolsDrawer>
 
@@ -508,17 +517,17 @@ export function App({
           extraTabs={extraTabs}
           onNavigate={() => setToolsOpen(false)}
         >
+          {sidebarMenu}
           {desktopTools}
         </DesktopToolsDrawer>
 
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-          {/* The phone's only permanent chrome. Three things, each a full
-              44px target: where am I, how do I get to the list, how do I
-              start something new. Everything else — the connection, the
-              project, the panels — reads as noise at this width and lives in
-              the drawer, which is one tap away. */}
+          {/* The phone's only permanent chrome. The edges are still the
+              two 44px targets — the session list and the tools drawer.
+              The title in the middle is where the open tabs live: one
+              line while closed, a list when there is a choice to make. */}
           <header
-            className="flex shrink-0 items-center gap-1 border-b border-line bg-surface px-1 md:hidden"
+            className="relative flex shrink-0 items-center gap-1 border-b border-line bg-surface px-1 md:hidden"
             style={{ paddingTop: "env(safe-area-inset-top)" }}
           >
             <button
@@ -529,9 +538,9 @@ export function App({
             >
               <span aria-hidden>☰</span>
             </button>
-            <span className="min-w-0 flex-1 truncate text-center text-sm font-medium text-fg">
-              {session?.title ?? (draft ? "新会话" : "工作台")}
-            </span>
+            <MobileTitleSwitcher
+              fallbackTitle={session?.title ?? (draft ? "新会话" : "工作台")}
+            />
             {/* Only when it is not what it should be. A green tick on every
                 screen is one more thing to read past, and this bar has room
                 for exactly three things — but a phone that has quietly lost
@@ -550,7 +559,7 @@ export function App({
             <BackgroundBadge />
             <button
               type="button"
-              aria-label="工作区工具"
+              aria-label="工具"
               className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-xl text-muted active:bg-raised"
               onClick={() => {
                 setSessionsOpen(false);
@@ -561,7 +570,12 @@ export function App({
             </button>
           </header>
 
-          <TabBar onOpenTools={() => setToolsOpen(true)} />
+          {/* Phones switch from the header title. The strip is a desktop
+              control: at phone width it was a second title bar, and each tab
+              was too narrow to read. */}
+          <div className="hidden md:contents">
+            <TabBar onOpenTools={() => setToolsOpen(true)} />
+          </div>
 
           {workbench.notice ? (
             <p
@@ -617,10 +631,10 @@ export function App({
                     >
                       {/* A draft has no transcript to show, and the room it
                           leaves is where the two decisions a new conversation
-                          still needs — which project, which Agent — are least
+                          still needs — which workspace, which Agent — are least
                           hidden. */}
                       {starting ? (
-                        <NewSessionPanel />
+                        <NewSessionPanel host={host} endpoint={endpoint} />
                       ) : (
                         <TimelineView
                           state={workbench.timeline}
@@ -759,10 +773,11 @@ export function App({
 
             {workbench.rightPanel ? (
               <aside className="hidden w-[22rem] shrink-0 flex-col border-l border-line bg-surface md:flex lg:w-[26rem]">
-                <div className="flex h-9 items-center justify-between border-b border-line px-3">
-                  <span className="text-xs text-muted">
-                    {workbench.rightPanel === "changes" ? "Changes" : "Files"}
+                <div className="flex h-9 items-center justify-between gap-2 border-b border-line px-3">
+                  <span className="min-w-0 truncate text-xs text-muted">
+                    {workbench.rightPanel === "changes" ? "变更" : "文件"}
                   </span>
+                  {workspace ? <WorkspaceAffordance workspace={workspace} /> : null}
                   <button
                     type="button"
                     aria-label="关闭侧栏"
@@ -891,7 +906,7 @@ function FirstRun({
   const agent = defaultAgent(agents);
 
   // An empty catalog while the socket is still coming up (or already dead) is
-  // not "no project" — saying that sends people hunting for a folder when the
+  // not "no workspace" — saying that sends people hunting for a folder when the
   // real problem is they never reached the machine.
   if (connection !== "ready") {
     // A refused handshake carries its own reason, and it is never "check the
@@ -923,9 +938,9 @@ function FirstRun({
   if (!workspace) {
     return (
       <Splash>
-        <p className="text-sm">先打开一个项目文件夹。</p>
+        <p className="text-sm">先打开一个工作区。</p>
         <p className="mb-3 text-xs text-muted">
-          agent 只能在你打开的目录里读写，这一步同时决定了它的活动范围。
+          agent 只能在你打开的工作区里读写，这一步同时决定了它的活动范围。工作区可以是一个文件夹，也可以是 .code-workspace 描述的多文件夹工作区。
         </p>
         <OpenProject host={host} endpoint={endpoint} />
       </Splash>

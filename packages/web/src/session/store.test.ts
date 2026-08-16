@@ -942,7 +942,7 @@ describe("switching a runtime axis mid-conversation", () => {
 });
 
 /**
- * "每个项目都要记录上一次的模型选择。新项目就按上一次的选择走。"
+ * "每个工作区都要记录上一次的模型选择。新工作区就按上一次的选择走。"
  *
  * The choice is remembered in this browser, keyed by project, and the models
  * are kept under the Agent they belong to — Claude's `sonnet` is not an id

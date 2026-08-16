@@ -161,7 +161,7 @@ describe("the first run", () => {
     render(<App host={hostWith()} connect={() => client} />);
 
     expect(await screen.findByText("正在连这台机器…")).toBeInTheDocument();
-    expect(screen.queryByText("先打开一个项目文件夹。")).not.toBeInTheDocument();
+    expect(screen.queryByText("先打开一个工作区。")).not.toBeInTheDocument();
   });
 
   it("asks for a project before anything else, and opens the one that is picked", async () => {
@@ -178,9 +178,9 @@ describe("the first run", () => {
     const pickDirectory = vi.fn(async () => "/home/me/app");
     await start(client, hostWith({ pickDirectory }));
 
-    expect(await screen.findByText("先打开一个项目文件夹。")).toBeInTheDocument();
+    expect(await screen.findByText("先打开一个工作区。")).toBeInTheDocument();
 
-    await userEvent.click(screen.getAllByRole("button", { name: "打开项目文件夹…" })[0]!);
+    await userEvent.click(screen.getAllByRole("button", { name: "打开工作区" })[0]!);
 
     await waitFor(() => {
       const opened = calls.find((call) => call.type === "workspace.open");
@@ -216,9 +216,8 @@ describe("the first run", () => {
       }),
     );
 
-    await userEvent.click(
-      screen.getAllByRole("button", { name: "打开 .code-workspace…" })[0]!,
-    );
+    await userEvent.click(screen.getAllByRole("button", { name: "打开工作区" })[0]!);
+    await userEvent.click(screen.getByRole("button", { name: "打开 .code-workspace" }));
 
     await waitFor(() => {
       expect(calls.find((call) => call.type === "workspace.open")?.payload).toEqual({
@@ -245,9 +244,9 @@ describe("the first run", () => {
     );
 
     expect(
-      await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }),
+      await screen.findAllByRole("button", { name: "打开工作区" }),
     ).not.toHaveLength(0);
-    expect(screen.queryByRole("button", { name: "打开项目文件夹…" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开文件夹" })).not.toBeInTheDocument();
     expect(pickDirectory).not.toHaveBeenCalled();
   });
 
@@ -281,10 +280,10 @@ describe("the first run", () => {
     await start(client, hostWith());
 
     await userEvent.click(
-      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+      (await screen.findAllByRole("button", { name: "打开工作区" }))[0]!,
     );
     await userEvent.click(await screen.findByRole("button", { name: /app/ }));
-    await userEvent.click(screen.getByRole("button", { name: "选择当前文件夹" }));
+    await userEvent.click(screen.getByRole("button", { name: "打开此工作区" }));
 
     await waitFor(() => {
       expect(calls.find((call) => call.type === "workspace.open")?.payload).toEqual({
@@ -317,7 +316,7 @@ describe("the first run", () => {
     await start(client, hostWith());
 
     await userEvent.click(
-      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+      (await screen.findAllByRole("button", { name: "打开工作区" }))[0]!,
     );
 
     await waitFor(() => {
@@ -347,7 +346,7 @@ describe("the first run", () => {
     await start(client, hostWith());
 
     await userEvent.click(
-      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+      (await screen.findAllByRole("button", { name: "打开工作区" }))[0]!,
     );
 
     await waitFor(() => {
@@ -393,7 +392,7 @@ describe("the first run", () => {
     await start(client, hostWith());
 
     await userEvent.click(
-      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+      (await screen.findAllByRole("button", { name: "打开工作区" }))[0]!,
     );
     await userEvent.click(
       await screen.findByRole("button", { name: /suite\.code-workspace/ }),
@@ -443,13 +442,13 @@ describe("the first run", () => {
     await start(client, hostWith());
 
     await userEvent.click(
-      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+      (await screen.findAllByRole("button", { name: "打开工作区" }))[0]!,
     );
     expect(await screen.findByText("C:\\")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /所有磁盘/ }));
     expect(await screen.findByRole("heading", { name: "选择磁盘" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /D:/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "选择当前文件夹" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "打开此工作区" })).toBeDisabled();
     expect(calls.some((call) => call.type === "directory.list" && call.payload.path === "")).toBe(
       true,
     );
@@ -492,7 +491,7 @@ describe("the first run", () => {
     await start(client, hostWith());
 
     await userEvent.click(
-      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+      (await screen.findAllByRole("button", { name: "打开工作区" }))[0]!,
     );
     await userEvent.click(await screen.findByRole("button", { name: "新建文件夹" }));
     const input = await screen.findByLabelText("新文件夹名称");
@@ -533,9 +532,9 @@ describe("the first run", () => {
     await start(client, hostWith());
 
     await userEvent.click(
-      (await screen.findAllByRole("button", { name: "选择文件夹或 .code-workspace…" }))[0]!,
+      (await screen.findAllByRole("button", { name: "打开工作区" }))[0]!,
     );
-    await userEvent.click(await screen.findByRole("button", { name: "选择当前文件夹" }));
+    await userEvent.click(await screen.findByRole("button", { name: "打开此工作区" }));
 
     expect(await screen.findByText(/no such directory/)).toBeInTheDocument();
   });
