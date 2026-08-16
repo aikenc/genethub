@@ -81,6 +81,11 @@ describe("the app as the browser loads it", () => {
     expect(within(tools).getByRole("button", { name: "反馈问题" })).toBeInTheDocument();
     expect(within(tools).getByText("工作区")).toBeInTheDocument();
     expect(within(tools).getByText("全局")).toBeInTheDocument();
+    const scale = within(tools).getByRole("group", { name: "界面大小" });
+    expect(within(scale).getByText("界面大小")).toBeInTheDocument();
+    expect(within(tools).getByRole("button", { name: "缩小界面" })).toBeInTheDocument();
+    expect(within(tools).getByRole("button", { name: "放大界面" })).toBeInTheDocument();
+    expect(within(tools).getByText("中")).toBeInTheDocument();
 
     screen.getByRole("button", { name: "打开右侧工具" }).click();
     const desktopTools = screen.getByRole("complementary", { name: "右侧工具" });

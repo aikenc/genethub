@@ -45,6 +45,12 @@ export function applyUiScale(scale: UiScale, root?: Element | null): void {
   else (element as HTMLElement).dataset.uiScale = scale;
 }
 
+/** One notch along the five sizes. Stops at the ends instead of wrapping. */
+export function stepUiScale(scale: UiScale, delta: -1 | 1): UiScale {
+  const at = SCALES.indexOf(scale);
+  return SCALES[Math.max(0, Math.min(SCALES.length - 1, at + delta))] ?? "medium";
+}
+
 interface UiScaleState {
   scale: UiScale;
   setScale(scale: UiScale): void;

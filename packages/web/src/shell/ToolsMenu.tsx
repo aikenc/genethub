@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { useWorkbench } from "../session/store";
+import { stepUiScale, UI_SCALE_OPTIONS, useUiScale } from "../theme/scale";
 import type { ExtraTab } from "./tabs";
 
 /**
@@ -69,6 +70,7 @@ export function ToolsMenu({
           </div>
         ) : null}
       </Section>
+      <ScaleStepper phone={phone} />
     </nav>
   );
 }
@@ -92,6 +94,50 @@ function Section({
         {title}
       </p>
       <div className="flex flex-col gap-1">{children}</div>
+    </div>
+  );
+}
+
+const stepButton = (phone: boolean) =>
+  phone
+    ? "flex h-10 w-10 items-center justify-center rounded-xl text-lg text-muted active:bg-sidebar-hover active:text-fg disabled:opacity-30"
+    : "flex h-8 w-8 items-center justify-center rounded-lg text-base text-muted hover:bg-sidebar-hover hover:text-fg disabled:opacity-30";
+
+function ScaleStepper({ phone }: { phone: boolean }) {
+  const { scale, setScale } = useUiScale();
+  const label = UI_SCALE_OPTIONS.find((option) => option.value === scale)?.label ?? "中";
+  return (
+    <div
+      className={`mt-auto border-t border-line pt-2 ${
+        phone ? "pb-[max(0.25rem,env(safe-area-inset-bottom))]" : ""
+      }`}
+    >
+      <div
+        className={`flex items-center gap-1 px-3 ${phone ? "text-base" : "text-sm"}`}
+        role="group"
+        aria-label="界面大小"
+      >
+        <span className="mr-auto text-muted">界面大小</span>
+        <button
+          type="button"
+          aria-label="缩小界面"
+          disabled={scale === "xsmall"}
+          className={stepButton(phone)}
+          onClick={() => setScale(stepUiScale(scale, -1))}
+        >
+          −
+        </button>
+        <span className="min-w-[2rem] text-center text-fg">{label}</span>
+        <button
+          type="button"
+          aria-label="放大界面"
+          disabled={scale === "xlarge"}
+          className={stepButton(phone)}
+          onClick={() => setScale(stepUiScale(scale, 1))}
+        >
+          +
+        </button>
+      </div>
     </div>
   );
 }

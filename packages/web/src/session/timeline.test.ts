@@ -1,6 +1,7 @@
 import type { SessionEvent, SessionSnapshot, TimelineItem } from "@genehub/proto";
 import { describe, expect, it } from "vitest";
 
+import { idleTimelineScroll, showsReturnToBottom, trackTimelineScroll } from "./TimelineView";
 import { apply, applySequenced, assistantText, emptyTimeline, fromSnapshot } from "./timeline";
 
 function run(events: SessionEvent[]) {
@@ -221,5 +222,72 @@ describe("the session timeline", () => {
 
     expect(state.items.map((item) => item.id)).toEqual(["a1"]);
     expect(state.seq).toBe(5);
+  });
+});
+
+describe("the scroll that should tuck the composer", () => {
+  /** Well down a long transcript, with room to drag either way. */
+  const startedAt = (top: number) => ({ ...idleTimelineScroll(), top });
+
+  /** Feeds samples every 50ms, moving `pxPerFrame` towards older turns, and
+   * counts how many times the composer would have been asked to tuck away. */
+  function scrollBack(ms: number, pxPerFrame: number, from = startedAt(20_000)) {
+    let run = from;
+    let fired = 0;
+    let top = from.top;
+    for (let time = from.time + 50; time <= from.time + ms; time += 50) {
+      top -= pxPerFrame;
+      run = trackTimelineScroll(run, top, time);
+      if (run.triggered) fired += 1;
+    }
+    return { run, fired };
+  }
+
+  it("ignores a flick that decays before the hold is up", () => {
+    expect(scrollBack(300, 40).fired).toBe(0);
+  });
+
+  it("ignores a long but unhurried read", () => {
+    // 15px a frame is 0.3px/ms: a deliberate drag, and under the bar however
+    // long it is kept up.
+    expect(scrollBack(4000, 15).fired).toBe(0);
+  });
+
+  it("fires once for a sustained drag back, however long it runs", () => {
+    expect(scrollBack(400, 40).fired).toBe(1);
+    expect(scrollBack(8000, 40).fired).toBe(1);
+  });
+
+  it("leaves the composer alone when the reader is chasing new messages", () => {
+    // Same speed, same duration, towards the bottom instead of away from it:
+    // that is where the field is wanted, so it must not go anywhere.
+    expect(scrollBack(8000, -40).fired).toBe(0);
+  });
+
+  it("starts over once the scrolling stops", () => {
+    const first = scrollBack(400, 40);
+    expect(first.fired).toBe(1);
+    // A gap longer than a frame or two is a new gesture, not a continuation.
+    const resumed = trackTimelineScroll(first.run, first.run.top, first.run.time + 900);
+    expect(resumed.fastSince).toBeNull();
+    expect(scrollBack(400, 40, resumed).fired).toBe(1);
+  });
+
+  it("does not read a jump through the transcript as a drag", () => {
+    const jumped = trackTimelineScroll(startedAt(20_000), 500, 500);
+    expect(jumped.triggered).toBe(false);
+    expect(scrollBack(4000, 0, jumped).fired).toBe(0);
+  });
+});
+
+describe("the way back to the newest message", () => {
+  it("appears only once the end is well out of sight", () => {
+    expect(showsReturnToBottom(200, false)).toBe(false);
+    expect(showsReturnToBottom(400, false)).toBe(true);
+  });
+
+  it("stays put while the reader hovers around the line it appeared on", () => {
+    expect(showsReturnToBottom(200, true)).toBe(true);
+    expect(showsReturnToBottom(60, true)).toBe(false);
   });
 });

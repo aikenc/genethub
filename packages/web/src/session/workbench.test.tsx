@@ -88,7 +88,42 @@ function showRounds(state: TimelineState, layer: Partial<TimelineState>): Timeli
   return timeline;
 }
 
+/** jsdom lays nothing out, so the scrollport has to be described by hand. */
+function stubScrollport(
+  element: HTMLElement,
+  box: { scrollHeight: number; clientHeight: number; scrollTop: number },
+) {
+  for (const [name, value] of Object.entries(box)) {
+    Object.defineProperty(element, name, { value, configurable: true, writable: true });
+  }
+}
+
 describe("what the user sees in a session", () => {
+  it("offers a way back to the newest message once the end is out of sight", async () => {
+    const onReturnToBottom = vi.fn();
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "assistantMessage", id: "a1", text: "很久以前" },
+    });
+    render(<TimelineView state={state} onReturnToBottom={onReturnToBottom} />);
+
+    const scroller = screen.getByTestId("timeline");
+    const back = screen.getByRole("button", { name: "回到最新消息" });
+    expect(back).toHaveClass("opacity-0");
+
+    stubScrollport(scroller, { scrollHeight: 4000, clientHeight: 800, scrollTop: 1200 });
+    fireEvent.scroll(scroller);
+    expect(back).toHaveClass("opacity-100");
+
+    scroller.scrollTo = vi.fn();
+    await userEvent.click(back);
+    expect(scroller.scrollTo).toHaveBeenCalledWith({ top: 4000, behavior: "smooth" });
+    expect(onReturnToBottom).toHaveBeenCalled();
+    expect(back).toHaveClass("opacity-0");
+  });
+
   it("shows the reply as it streams rather than only when it finishes", () => {
     let state = emptyTimeline();
     state = apply(state, {
@@ -1283,6 +1318,28 @@ describe("the controls offered to the user", () => {
     fireEvent.blur(box);
     expect(card).toHaveClass("border-line-strong");
     geometry();
+  });
+
+  it("tucks into a tap target when minimized, and comes back on tap", async () => {
+    const onExpand = vi.fn();
+    render(<Composer {...composerProps({ minimized: true, onExpand })} />);
+
+    expect(screen.queryByLabelText("任务描述")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "展开输入框" }));
+    expect(onExpand).toHaveBeenCalled();
+  });
+
+  it("fits the draft again when it comes back from being tucked away", async () => {
+    const { rerender } = render(<Composer {...composerProps()} />);
+    await userEvent.type(screen.getByLabelText("任务描述"), "一行{Enter}两行{Enter}三行");
+
+    rerender(<Composer {...composerProps({ minimized: true })} />);
+    rerender(<Composer {...composerProps()} />);
+
+    // The field is remounted at its one-line default with a draft that has not
+    // changed since it was last measured, so only re-measuring on the way back
+    // stops three lines from coming back as one.
+    expect(screen.getByLabelText("任务描述").style.height).not.toBe("");
   });
 
   it("does not move the file button out from under an in-flight click", async () => {
