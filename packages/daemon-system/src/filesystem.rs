@@ -61,8 +61,11 @@ impl FileLocks {
                     fs2::FileExt::try_lock_shared(&file)
                 };
                 lock.map_err(|error| {
+                    let contended = fs2::lock_contended_error();
                     failure(
-                        if error.kind() == std::io::ErrorKind::WouldBlock {
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            || error.raw_os_error() == contended.raw_os_error()
+                        {
                             CapabilityFailureKind::Conflict
                         } else {
                             CapabilityFailureKind::Unavailable
@@ -752,11 +755,11 @@ fn reject_symlink_chain(path: &Path) -> Result<(), CapabilityFailure> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
-        // A Windows prefix is not absolute by itself, while the following
-        // drive, share or verbatim root cannot be queried through
-        // `symlink_metadata` on every filesystem. Neither can be a redirected
-        // entry below the volume boundary; inspect every normal descendant,
-        // where junctions and symbolic links live.
+        // A Windows prefix or root names the volume boundary. Verbatim prefixes
+        // can report as absolute before the following root component, but
+        // neither component can be a redirected entry below that boundary.
+        // Inspect every normal descendant, where junctions and symbolic links
+        // live.
         #[cfg(windows)]
         if matches!(component, Component::Prefix(_) | Component::RootDir) {
             continue;
