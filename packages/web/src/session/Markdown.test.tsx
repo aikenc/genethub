@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import mermaid from "mermaid";
 import { describe, expect, it, vi } from "vitest";
 
 import { HighlightedCode, languageForPath, Markdown } from "./Markdown";
@@ -232,7 +233,36 @@ describe("an agent's reply", () => {
     expect(svg).not.toContain("<script");
     unmount();
     expect(revoke).toHaveBeenCalledWith("blob:flowchart");
+    // The label of a node, unlike its link, survives.
+    expect(svg).toContain("流程");
     Reflect.deleteProperty(URL, "createObjectURL");
     Reflect.deleteProperty(URL, "revokeObjectURL");
+
+    // Mermaid keeps node labels in `<foreignObject>` — HTML, which an SVG
+    // loaded as an image never draws — unless this is off at the top level.
+    // Asking for it under `flowchart` alone is what shipped empty boxes.
+    expect(mermaid.initialize).toHaveBeenCalledWith(
+      expect.objectContaining({ htmlLabels: false }),
+    );
+  });
+
+  it("shows the source instead of an empty frame when a diagram carries HTML labels", async () => {
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: vi.fn(() => "blob:never"),
+    });
+    vi.mocked(mermaid.render).mockResolvedValueOnce({
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><g class="node"><foreignObject width="32" height="24"><div xmlns="http://www.w3.org/1999/xhtml">开始</div></foreignObject></g></svg>',
+    } as Awaited<ReturnType<typeof mermaid.render>>);
+
+    render(<Markdown text={"```mermaid\nflowchart LR\n  A[开始] --> B[结束]\n```"} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("无法安全渲染");
+    // Whatever went wrong, the diagram the author wrote is still readable.
+    expect(alert).toHaveTextContent("flowchart LR");
+    expect(screen.queryByRole("img", { name: "Markdown 流程图" })).toBeNull();
+
+    Reflect.deleteProperty(URL, "createObjectURL");
   });
 });
