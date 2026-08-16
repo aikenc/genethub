@@ -28,6 +28,9 @@ const DAEMON = builtBinary(
   ["genet-dev", "genet-beta", "genet-alpha", "genet"],
   process.env.GENET_E2E_DAEMON,
 );
+const LOGIC =
+  process.env.GENET_DAEMON_LOGIC_WASM?.trim() ||
+  path.join(REPO, "target", "daemon-logic.wasm");
 const AGENT = builtBinary(
   REPO,
   ["genet-agent-dev", "genet-agent-beta", "genet-agent-alpha", "genet-agent"],
@@ -51,7 +54,7 @@ const socketFactory = (url: string) =>
  * fail to add up to a usable product.
  */
 describe.skipIf(
-  missingArtifacts({ daemon: DAEMON, agent: AGENT, relay: RELAY }),
+  missingArtifacts({ daemon: DAEMON, logic: LOGIC, agent: AGENT, relay: RELAY }),
 )("reaching a machine with nothing but open-source pieces", () => {
   let relay: ChildProcess;
   let relayOrigin: string;
@@ -416,6 +419,7 @@ function startDaemon(
     const child = spawn(DAEMON, ["daemon", "run"], {
       env: {
         ...process.env,
+        GENET_DAEMON_LOGIC_WASM: LOGIC,
         // Installed side by side in production; in a test the agent is wherever
         // cargo put it.
         ...daemonEnvironment(DAEMON, {

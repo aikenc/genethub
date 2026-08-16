@@ -34,6 +34,9 @@ const DAEMON = builtBinary(
   ["genet-dev", "genet-beta", "genet-alpha", "genet"],
   process.env.GENET_E2E_DAEMON,
 );
+const LOGIC =
+  process.env.GENET_DAEMON_LOGIC_WASM?.trim() ||
+  path.join(REPO, "target", "daemon-logic.wasm");
 
 /**
  * The workbench's own client, against a real daemon and a real agent.
@@ -46,7 +49,7 @@ const DAEMON = builtBinary(
  * The model is the only thing faked, because that is the one part that costs
  * money and refuses to be deterministic.
  */
-describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
+describe.skipIf(missingArtifacts({ daemon: DAEMON, logic: LOGIC }))(
   "a session, end to end",
   () => {
     let model: MockModel;
@@ -627,6 +630,7 @@ function startDaemon(
     const child = spawn(DAEMON, ["daemon", "run"], {
       env: {
         ...process.env,
+        GENET_DAEMON_LOGIC_WASM: LOGIC,
         // Otherwise a test run leaves a folder in whoever's home ran it.
         ...daemonEnvironment(DAEMON, {
           dataDir,

@@ -303,6 +303,7 @@ jobs:
     if: >-
       needs.changes.outputs.daemon_platform == 'true'
       || needs.changes.outputs.desktop == 'true'
+      || needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -450,7 +451,7 @@ jobs:
           retention-days: 1
 
   web:
-    needs: [changes, rust, relay]
+    needs: [changes, rust, relay, daemon_platform_artifact]
     # `always()` so a skipped rust/relay job does not cancel a web-only PR.
     # Still refuse to run when a dependency that did run has failed.
     if: >-
@@ -459,11 +460,13 @@ jobs:
       && needs.changes.outputs.web == 'true'
       && (needs.rust.result == 'success' || needs.rust.result == 'skipped')
       && (needs.relay.result == 'success' || needs.relay.result == 'skipped')
+      && needs.daemon_platform_artifact.result == 'success'
     runs-on: ubuntu-latest
     env:
       GENET_E2E_REQUIRED: "1"
       GENET_E2E_DAEMON: ${{ github.workspace }}/target/debug/genet-dev
       GENET_E2E_AGENT: ${{ github.workspace }}/target/debug/genet-agent-dev
+      GENET_DAEMON_LOGIC_WASM: ${{ github.workspace }}/target/daemon-platform-fixture/daemon-logic.wasm
     defaults:
       run:
         working-directory: packages/web
@@ -499,6 +502,14 @@ jobs:
         working-directory: .
       - run: chmod +x target/debug/genet-dev target/debug/genet-agent-dev
         working-directory: .
+      # Fail-closed daemons require a verified guest before they open a
+      # listener. Reuse the exact Linux-built artifact already exercised by the
+      # five-OS matrix rather than giving web journeys a private fixture.
+      - name: Reuse the signed portable daemon application
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-platform-portable-fixture
+          path: target/daemon-platform-fixture
       # The artifact contains compiled JavaScript, not its runtime packages.
       # Keep the cheap production-only install while avoiding relay dev
       # dependencies and a duplicate TypeScript build.
@@ -525,6 +536,7 @@ jobs:
         run: |
           test -x "$GENET_E2E_DAEMON"
           test -x "$GENET_E2E_AGENT"
+          test -f "$GENET_DAEMON_LOGIC_WASM"
           test -f "$GITHUB_WORKSPACE/apps/relay/dist/main.js"
       - run: npm test
       - run: npm run build
@@ -604,7 +616,7 @@ jobs:
           WEB: ${{ needs.web.result }}
           DESKTOP: ${{ needs.desktop.result }}
           WANT_RUST: ${{ needs.changes.outputs.rust }}
-          WANT_DAEMON_ARTIFACT: ${{ needs.changes.outputs.daemon_platform == 'true' || needs.changes.outputs.desktop == 'true' }}
+          WANT_DAEMON_ARTIFACT: ${{ needs.changes.outputs.daemon_platform == 'true' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.web == 'true' }}
           WANT_DAEMON_PLATFORM: ${{ needs.changes.outputs.daemon_platform }}
           WANT_RELAY: ${{ needs.changes.outputs.relay }}
           WANT_WEB: ${{ needs.changes.outputs.web }}
