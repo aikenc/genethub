@@ -134,7 +134,6 @@ export function Composer({
   const textarea = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   const card = useRef<HTMLDivElement>(null);
-  const shell = useRef<HTMLDivElement>(null);
   const speechInput = useSpeechInput({
     target: speech,
     getDraft: () => ({
@@ -287,9 +286,9 @@ export function Composer({
   }, [speechPresentation, visibleDraft, minimized]);
 
   useLayoutEffect(() => {
-    const element = shell.current;
+    const element = card.current;
     if (!element || !onHeightChange) return;
-    const update = () => onHeightChange(element.offsetHeight);
+    const update = () => onHeightChange(Math.ceil(element.getBoundingClientRect().height));
     update();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(update);
@@ -310,16 +309,10 @@ export function Composer({
     return () => window.removeEventListener("resize", update);
   }, []);
 
-  // The shell is measured whole and turned into the transcript's bottom inset,
-  // so its top padding is the gap between the last line and the card. It has to
-  // clear the card's drop shadow, which reaches 22px above the top edge (30px
-  // of blur against an 8px downward offset): a shadow falling across live text
-  // is read as the field covering it, however much room is really there.
   return (
     <div
-      ref={shell}
       data-composer-shell=""
-      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-6 md:px-4"
+      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-8 md:px-4"
       style={{
         // Above the on-screen keyboard, and clear of the home indicator when
         // there is none. The shell is a fixed box that the keyboard covers

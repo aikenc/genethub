@@ -174,11 +174,7 @@ export function App({
   // An unstarted conversation: no session on the machine, and so nothing a
   // transcript could be drawn from.
   const starting = Boolean(draft && !workbench.activeSessionId);
-  // The composer shell already includes keyboard and home-indicator padding, and
-  // its own top padding is the only gap between the last line and the card, so
-  // its measured height is the whole inset. Adding to it would only widen the
-  // strip where the transcript is never drawn.
-  const composerSpace = `${composerHeight}px`;
+  const composerSpace = `calc(${composerHeight}px + var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)) + 0.5rem)`;
 
   // The frame the compositor paints while a window is being resized is the
   // shell's, not the page's, so it has to be told which palette is in force —
