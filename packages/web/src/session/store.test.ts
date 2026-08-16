@@ -47,6 +47,10 @@ function stubClient() {
 }
 
 beforeEach(() => {
+  // The per-project Agent and model memory lives here, and jsdom keeps one
+  // store for the whole file: without this, one test's choice is the next
+  // test's starting point.
+  localStorage.clear();
   useWorkbench.setState({
     client: null,
     agents: [],
@@ -863,6 +867,178 @@ describe("opening a new conversation", () => {
     await useWorkbench.getState().send("hello");
 
     expect(useWorkbench.getState().tabs.map((tab) => tab.id)).toEqual(["chat:s-new"]);
+  });
+});
+
+/**
+ * "选择思考强度或者权限感觉有延时，是有网络通讯吗？"
+ *
+ * There is one, and it is unavoidable — the daemon owns the value and an ACP
+ * agent may take a round trip of its own to accept it. What is avoidable is
+ * waiting for it before the radio the finger is on moves.
+ */
+describe("switching a runtime axis mid-conversation", () => {
+  function held() {
+    let settle: (() => void) | null = null;
+    const client = {
+      call: () =>
+        new Promise((resolve) => {
+          settle = () => resolve({ type: "ok" });
+        }),
+    } as unknown as Client;
+    useWorkbench.setState({ client, sessions: [SESSION], activeSessionId: "s1" });
+    return { release: () => settle?.() };
+  }
+
+  it("shows the new level before the machine has answered", async () => {
+    const { release } = held();
+
+    const sent = useWorkbench.getState().setEffort("high");
+    expect(useWorkbench.getState().timeline.effortId).toBe("high");
+
+    release();
+    await sent;
+    expect(useWorkbench.getState().timeline.effortId).toBe("high");
+  });
+
+  it("puts the old one back when the machine refuses", async () => {
+    const client = {
+      call: () => Promise.reject(new Error("agent rejected the mode")),
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      sessions: [SESSION],
+      activeSessionId: "s1",
+      timeline: { ...emptyTimeline(), modeId: "read-only" },
+    });
+
+    await useWorkbench.getState().setMode("full-access");
+
+    expect(useWorkbench.getState().timeline.modeId).toBe("read-only");
+    expect(useWorkbench.getState().notice).toBe("agent rejected the mode");
+  });
+
+  it("leaves a later choice alone when an earlier one fails", async () => {
+    const outcomes: Array<(value: unknown) => void> = [];
+    const rejects: Array<(reason: Error) => void> = [];
+    const client = {
+      call: () =>
+        new Promise((resolve, reject) => {
+          outcomes.push(resolve);
+          rejects.push(reject);
+        }),
+    } as unknown as Client;
+    useWorkbench.setState({ client, sessions: [SESSION], activeSessionId: "s1" });
+
+    const first = useWorkbench.getState().setEffort("low");
+    const second = useWorkbench.getState().setEffort("high");
+    rejects[0]!(new Error("too slow"));
+    await first;
+    outcomes[1]!({ type: "ok" });
+    await second;
+
+    expect(useWorkbench.getState().timeline.effortId).toBe("high");
+  });
+});
+
+/**
+ * "每个项目都要记录上一次的模型选择。新项目就按上一次的选择走。"
+ *
+ * The choice is remembered in this browser, keyed by project, and the models
+ * are kept under the Agent they belong to — Claude's `sonnet` is not an id
+ * Codex would accept.
+ */
+describe("what a new conversation opens with", () => {
+  const claude = {
+    id: "claude",
+    label: "Claude Code",
+    builtin: false,
+    probe: { state: "ready" },
+    capabilities: { setModel: true, setEffort: true, setMode: true },
+    catalog: {
+      models: [
+        { id: "sonnet", label: "Sonnet", reasoning: true, efforts: ["low", "high"] },
+        { id: "opus", label: "Opus", reasoning: true, efforts: [] },
+      ],
+      modes: [],
+      commands: [],
+    },
+  } as unknown as AgentInfo;
+  const codex = {
+    ...claude,
+    id: "codex",
+    label: "Codex",
+    catalog: {
+      ...claude.catalog,
+      models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", reasoning: true, efforts: [] }],
+    },
+  } as AgentInfo;
+
+  beforeEach(() => {
+    useWorkbench.setState({ agents: [claude, codex], sessions: [], workspaces: [] });
+  });
+
+  it("reopens a project with the Agent and model it was last used with", async () => {
+    useWorkbench.getState().newSession("w1", "claude");
+    await useWorkbench.getState().setModel("opus");
+
+    useWorkbench.getState().newSession("w2", "codex");
+    useWorkbench.getState().newSession("w1", null);
+
+    expect(useWorkbench.getState().draft).toMatchObject({
+      workspaceId: "w1",
+      agentId: "claude",
+      modelId: "opus",
+    });
+  });
+
+  it("keeps each Agent's model to itself when the Agent changes back and forth", async () => {
+    useWorkbench.getState().newSession("w1", "claude");
+    await useWorkbench.getState().setModel("opus");
+    useWorkbench.getState().newSession("w1", "codex");
+    expect(useWorkbench.getState().draft?.modelId).toBeNull();
+
+    await useWorkbench.getState().setModel("gpt-5.6-sol");
+    useWorkbench.getState().newSession("w1", "claude");
+    expect(useWorkbench.getState().draft?.modelId).toBe("opus");
+  });
+
+  it("starts an unvisited project from the last choice made anywhere", async () => {
+    useWorkbench.getState().newSession("w1", "claude");
+    await useWorkbench.getState().setEffort("high");
+    await useWorkbench.getState().setModel("sonnet");
+
+    useWorkbench.getState().newSession("w-fresh", null);
+
+    expect(useWorkbench.getState().draft).toMatchObject({
+      workspaceId: "w-fresh",
+      agentId: "claude",
+      modelId: "sonnet",
+      effortId: "high",
+    });
+  });
+
+  it("drops a remembered model the catalog no longer offers", async () => {
+    useWorkbench.getState().newSession("w1", "claude");
+    await useWorkbench.getState().setModel("opus");
+
+    useWorkbench.setState({
+      agents: [{ ...claude, catalog: { ...claude.catalog, models: [claude.catalog.models[0]!] } }],
+    });
+    useWorkbench.getState().newSession("w1", null);
+
+    expect(useWorkbench.getState().draft).toMatchObject({ agentId: "claude", modelId: null });
+  });
+
+  it("still follows the conversation on screen into a project it knows nothing about", () => {
+    useWorkbench.setState({
+      sessions: [{ ...SESSION, workspaceId: "w9", agentId: "codex" }],
+      activeSessionId: "s1",
+    });
+
+    useWorkbench.getState().newSession("w9", null);
+
+    expect(useWorkbench.getState().draft?.agentId).toBe("codex");
   });
 });
 

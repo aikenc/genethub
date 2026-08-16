@@ -16,6 +16,7 @@ import { Client, type ProtocolDial } from "./protocol/client";
 import { SettingsPanel } from "./settings/SettingsPanel";
 import { readRtcEnabled } from "./settings/rtc";
 import { Composer, type ComposerPhase } from "./session/Composer";
+import { NewSessionPanel } from "./session/NewSessionPanel";
 import { PermissionCard } from "./session/Permission";
 import { TimelineView } from "./session/TimelineView";
 import type { ForkController } from "./session/TimelineView";
@@ -164,6 +165,9 @@ export function App({
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
   const importedReadOnly = session?.imported?.continuation === "readOnly";
   const composing = Boolean(workbench.activeSessionId || draft);
+  // An unstarted conversation: no session on the machine, and so nothing a
+  // transcript could be drawn from.
+  const starting = Boolean(draft && !workbench.activeSessionId);
   const composerSpace = `calc(${composerHeight}px + var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)) + 0.5rem)`;
 
   // The frame the compositor paints while a window is being resized is the
@@ -611,10 +615,18 @@ export function App({
                       className="min-h-0 flex-1 overflow-hidden"
                       style={{ paddingBottom: composerSpace }}
                     >
-                      <TimelineView
-                        state={workbench.timeline}
-                        {...(forkController ? { forkController } : {})}
-                      />
+                      {/* A draft has no transcript to show, and the room it
+                          leaves is where the two decisions a new conversation
+                          still needs — which project, which Agent — are least
+                          hidden. */}
+                      {starting ? (
+                        <NewSessionPanel />
+                      ) : (
+                        <TimelineView
+                          state={workbench.timeline}
+                          {...(forkController ? { forkController } : {})}
+                        />
+                      )}
                     </div>
                     {workbench.timeline.pendingPermission ? (
                       <div

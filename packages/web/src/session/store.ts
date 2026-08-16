@@ -30,6 +30,11 @@ import type { Client, ConnectionState } from "../protocol/client";
 import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
+  recallRuntimeChoice,
+  rememberRuntimeChoice,
+  type AgentRuntimeMemory,
+} from "./runtime-memory";
+import {
   applySequenced,
   emptyTimeline,
   fromSnapshot,
@@ -123,7 +128,8 @@ const DRAFT_TAB = "chat:draft";
 
 export type ComposerDraftInsert = {
   id: string;
-  sessionId: string;
+  /** `null` is the unstarted conversation's composer. */
+  sessionId: string | null;
   text: string;
 };
 
@@ -300,8 +306,13 @@ interface WorkbenchState {
   editPending(): void;
   /** Acknowledges that the composer has taken `restoreDraft` back. */
   restoredDraft(): void;
-  /** Adds one intact line to a session's current composer draft. */
-  appendComposerDraftLine(sessionId: string, text: string): void;
+  /**
+   * Adds one intact line to a session's current composer draft.
+   *
+   * `null` addresses the composer of a conversation that has not been created
+   * yet, which is the one a suggested prompt is written into.
+   */
+  appendComposerDraftLine(sessionId: string | null, text: string): void;
   /** Acknowledges that one queued composer insertion has been applied. */
   consumedComposerDraftInsert(id: string): void;
   /** Creates an independent Agent context through one completed turn. */
@@ -714,6 +725,26 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const state = get();
     const target = workspaceId ?? currentWorkspace(state);
     if (!target) return;
+    // What this project was last worked on with, before what is on screen: a
+    // conversation open in another project is not evidence about this one, and
+    // switching projects is exactly when the Agent usually changes too. Only a
+    // project's own history outranks the conversation in front of the user;
+    // an inherited last-used choice does not.
+    const own = recallRuntimeChoice(target, state.agents);
+    const chosenAgentId =
+      agentId ??
+      (own.scoped ? own.agentId : null) ??
+      state.draft?.agentId ??
+      state.sessions.find((entry) => entry.id === state.activeSessionId)?.agentId ??
+      own.agentId ??
+      null;
+    // Scoped to the Agent actually being opened: Claude's `sonnet` would be an
+    // id Codex has never heard of, and `session.create` would refuse it.
+    const remembered =
+      chosenAgentId === own.agentId
+        ? own
+        : recallRuntimeChoice(target, state.agents, chosenAgentId);
+    if (agentId) rememberRuntimeChoice(target, agentId);
     const opened = state.tabs.some((tab) => tab.id === DRAFT_TAB)
       ? state.tabs
       : [
@@ -730,18 +761,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set({
       draft: {
         workspaceId: target,
-        // Whatever is already in front of the user, unless the caller named
-        // one. "New chat" while talking to Claude Code means another one with
-        // Claude Code — being dropped back onto the built-in agent is a
-        // surprise, and one that only shows up at the first reply.
-        agentId:
-          agentId ??
-          state.draft?.agentId ??
-          state.sessions.find((entry) => entry.id === state.activeSessionId)?.agentId ??
-          null,
-        modelId: null,
-        modeId: null,
-        effortId: null,
+        agentId: chosenAgentId,
+        modelId: remembered.modelId,
+        modeId: remembered.modeId,
+        effortId: remembered.effortId,
       },
       activeWorkspaceId: target,
       activeSessionId: null,
@@ -1182,10 +1205,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   appendComposerDraftLine(sessionId, text) {
-    if (!sessionId || !text || text.includes("\n")) return;
+    if (!text || text.includes("\n")) return;
     const insert = {
       id: `composer-insert-${Date.now().toString(36)}-${++composerDraftInsertSequence}`,
-      sessionId,
+      sessionId: sessionId || null,
       text,
     } satisfies ComposerDraftInsert;
     set((state) => ({ composerDraftInserts: [...state.composerDraftInserts, insert] }));
@@ -1248,25 +1271,28 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   // applied at `session.create`. Dropping it — which is what happened before —
   // meant picking a model in a new chat did nothing at all.
   async setModel(modelId) {
+    remember(get(), { modelId });
     const sessionId = get().activeSessionId;
     if (!sessionId) return void onDraft(get, set, { modelId });
-    await asked(set, () =>
+    await switched(get, set, sessionId, "modelId", modelId, () =>
       require_(get().client).call({ type: "session.setModel", payload: { sessionId, modelId } }),
     );
   },
 
   async setMode(modeId) {
+    remember(get(), { modeId });
     const sessionId = get().activeSessionId;
     if (!sessionId) return void onDraft(get, set, { modeId });
-    await asked(set, () =>
+    await switched(get, set, sessionId, "modeId", modeId, () =>
       require_(get().client).call({ type: "session.setMode", payload: { sessionId, modeId } }),
     );
   },
 
   async setEffort(effortId) {
+    remember(get(), { effortId });
     const sessionId = get().activeSessionId;
     if (!sessionId) return void onDraft(get, set, { effortId });
-    await asked(set, () =>
+    await switched(get, set, sessionId, "effortId", effortId, () =>
       require_(get().client).call({ type: "session.setEffort", payload: { sessionId, effortId } }),
     );
   },
@@ -1686,6 +1712,13 @@ async function start(
   );
   if (reply?.type !== "session") return null;
 
+  // The choice that actually started a conversation, not merely one that was
+  // looked at: this is what the next new chat in this project opens with.
+  rememberRuntimeChoice(draft.workspaceId, agentId, {
+    ...(draft.modelId ? { modelId: draft.modelId } : {}),
+    ...(draft.modeId ? { modeId: draft.modeId } : {}),
+    ...(draft.effortId ? { effortId: draft.effortId } : {}),
+  });
   set((current) => ({ sessions: [reply.data, ...current.sessions] }));
   // Clears the draft and turns its tab into this session's.
   await get().selectSession(reply.data.id);
@@ -1710,6 +1743,56 @@ function onDraft(get: () => WorkbenchState, set: Setter, change: Partial<Draft>)
   const draft = get().draft;
   if (!draft) return;
   set({ draft: { ...draft, ...change } });
+}
+
+/**
+ * Moves one runtime axis on screen now, and tells the machine after.
+ *
+ * These three used to show the new value only once the daemon echoed it back,
+ * which is a relay hop, an RPC and — for an ACP agent — a round trip into the
+ * CLI's own process. Picking a thinking level felt like it had been sent
+ * somewhere, because it had: the radio a finger was already on stayed on the
+ * old choice for as long as that took.
+ *
+ * Nothing is lost by leading: the daemon owns the value, and its
+ * `modelChanged` / `modeChanged` / `effortChanged` event overwrites this the
+ * moment it lands. Only a refusal has to be undone, and only if this session is
+ * still the one on screen and still showing the value we put there — a later
+ * pick, or an event, has already answered the question this one asked.
+ */
+async function switched(
+  get: () => WorkbenchState,
+  set: Setter,
+  sessionId: string,
+  axis: "modelId" | "modeId" | "effortId",
+  value: string,
+  run: () => Promise<unknown>,
+): Promise<void> {
+  const before = get().timeline[axis];
+  set((state) => ({ timeline: { ...state.timeline, [axis]: value } }));
+  try {
+    await run();
+  } catch (error) {
+    const state = get();
+    if (state.activeSessionId === sessionId && state.timeline[axis] === value) {
+      set({ timeline: { ...state.timeline, [axis]: before } });
+    }
+    reportError(set, error);
+  }
+}
+
+/**
+ * Carries a runtime choice into the next conversation in this project.
+ *
+ * Written on the way out rather than read back here: the daemon owns what the
+ * live session is doing, and this only answers "what should the next new chat
+ * in this project start as".
+ */
+function remember(state: WorkbenchState, axes: AgentRuntimeMemory): void {
+  const session = state.sessions.find((entry) => entry.id === state.activeSessionId);
+  const workspaceId = session?.workspaceId ?? state.draft?.workspaceId ?? state.activeWorkspaceId;
+  const agentId = session?.agentId ?? state.draft?.agentId ?? null;
+  rememberRuntimeChoice(workspaceId ?? null, agentId, axes);
 }
 
 /**

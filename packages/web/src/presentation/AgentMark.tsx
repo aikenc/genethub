@@ -24,14 +24,16 @@ export function AgentMark({
 
   useEffect(() => setFailed(false), [signature]);
 
-  if (presentation.kind === "text" || (failed && fallbackToText)) {
-    return (
-      <span className={`${textClassName} truncate font-medium text-fg`} title={presentation.label}>
-        {presentation.label}
-      </span>
-    );
+  if (presentation.kind === "text" || failed) {
+    if (fallbackToText) {
+      return (
+        <span className={`${textClassName} truncate font-medium text-fg`} title={presentation.label}>
+          {presentation.label}
+        </span>
+      );
+    }
+    return <Monogram label={presentation.label} className={className} />;
   }
-  if (failed) return null;
   if (presentation.kind === "glyph") {
     return (
       <span className={`${glyphClassName} leading-none text-fg`} aria-hidden>
@@ -58,6 +60,26 @@ export function AgentMark({
           onError={() => setFailed(true)}
         />
       ) : null}
+    </span>
+  );
+}
+
+/**
+ * The Agent's initial, for the ones this build has no mark for.
+ *
+ * Codex, Copilot, Gemini and every locally configured ACP Agent have no
+ * bundled icon — their vendors' marks are trademarks we do not redistribute —
+ * and in a row of tabs that showed as an empty gap where the others have a
+ * logo. A letter is not a brand and does not claim to be one; it just keeps
+ * the row aligned and gives the Agent a constant place to look.
+ */
+function Monogram({ label, className }: { label: string; className: string }) {
+  return (
+    <span
+      aria-hidden
+      className={`${className} flex shrink-0 items-center justify-center rounded bg-raised text-[10px] font-semibold uppercase leading-none text-muted`}
+    >
+      {[...label][0] ?? "?"}
     </span>
   );
 }

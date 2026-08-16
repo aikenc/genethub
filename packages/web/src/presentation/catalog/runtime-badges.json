@@ -1,15 +1,15 @@
 {
   "version": 1,
   "efforts": {
-    "default": { "shortLabel": "默认", "fullLabel": "默认" },
-    "off": { "shortLabel": "关", "fullLabel": "关闭" },
-    "minimal": { "shortLabel": "微", "fullLabel": "极低" },
-    "low": { "shortLabel": "低", "fullLabel": "低" },
-    "medium": { "shortLabel": "中", "fullLabel": "中" },
-    "high": { "shortLabel": "高", "fullLabel": "高" },
-    "xhigh": { "shortLabel": "极", "fullLabel": "极高" },
-    "max": { "shortLabel": "满", "fullLabel": "最大" },
-    "ultra": { "shortLabel": "超", "fullLabel": "超高" }
+    "default": { "shortLabel": "默认", "fullLabel": "默认", "level": "auto" },
+    "off": { "shortLabel": "关", "fullLabel": "关闭", "level": "off" },
+    "minimal": { "shortLabel": "微", "fullLabel": "极低", "level": 1 },
+    "low": { "shortLabel": "低", "fullLabel": "低", "level": 2 },
+    "medium": { "shortLabel": "中", "fullLabel": "中", "level": 3 },
+    "high": { "shortLabel": "高", "fullLabel": "高", "level": 4 },
+    "xhigh": { "shortLabel": "极", "fullLabel": "极高", "level": 5 },
+    "max": { "shortLabel": "满", "fullLabel": "最大", "level": 5 },
+    "ultra": { "shortLabel": "超", "fullLabel": "超高", "level": 5 }
   },
   "permissions": [
     {

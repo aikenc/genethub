@@ -3,7 +3,8 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { ComposerControls, resolveRuntimeSelection } from "./ComposerControls";
+import { ComposerControls } from "./ComposerControls";
+import { resolveRuntimeSelection } from "./runtime-selection";
 
 const AGENTS: AgentInfo[] = [
   {
@@ -103,27 +104,24 @@ describe("the compact runtime summary", () => {
       }),
     ).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("DeepSeek…")).toBeInTheDocument();
-    expect(screen.getByText("🤔中")).toHaveAttribute("aria-hidden");
+    expect(screen.getByText("中")).toHaveAttribute("aria-hidden");
   });
 
   it.each([
     ["low", "低"],
     ["medium", "中"],
     ["high", "高"],
-  ])("shows the %s thinking level beside its emoji", (effortId, label) => {
+  ])("names the %s thinking level beside its dial", (effortId, label) => {
     controls({ effortId });
-    expect(screen.getByText(`🤔${label}`)).toHaveAttribute("aria-hidden");
+    expect(screen.getByText(label)).toHaveAttribute("aria-hidden");
     expect(
       screen.getByRole("button", { name: new RegExp(`思考强度：${label}`) }),
     ).toBeInTheDocument();
   });
 
-  it.each([
-    [true, "text-[14px]", "md:text-[11px]"],
-    [false, "text-[18px]", "md:text-[14px]"],
-  ])("keeps a responsive Agent glyph inside the compact=%s runtime row", (compact, phoneSize, desktopSize) => {
-    controls({ agentId: "claude", compact });
-    expect(screen.getByText("✱")).toHaveClass(phoneSize, desktopSize, "leading-none");
+  it("keeps a responsive Agent glyph in the runtime row", () => {
+    controls({ agentId: "claude" });
+    expect(screen.getByText("✱")).toHaveClass("text-[18px]", "md:text-[14px]", "leading-none");
   });
 
   it("uses the scoped friendly name for a known Codex model", () => {
@@ -165,20 +163,20 @@ describe("the rich runtime settings panel", () => {
     controls();
     const { trigger, dialog } = await openSettings();
     expect(trigger).toHaveAttribute("aria-expanded", "true");
-    expect(within(dialog).getByText("128K 上下文")).toBeInTheDocument();
+    expect(within(dialog).getByRole("radio", { name: /DeepSeek V4 Long/ })).toBeChecked();
 
     await userEvent.click(within(dialog).getByRole("button", { name: "关闭运行设置" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
   });
 
-  it("gives visually hidden radio controls a visible keyboard focus ring", async () => {
+  it("opens on the current Agent's tab and rings visually hidden radios on focus", async () => {
     controls();
     const { dialog } = await openSettings();
-    const agent = within(dialog).getByRole("radio", { name: "GeneHub Agent" });
+    const agent = within(dialog).getByRole("tab", { name: "GeneHub Agent" });
     const effort = within(dialog).getByRole("radio", { name: /高/ });
     await waitFor(() => expect(agent).toHaveFocus());
-    expect(agent.closest("label")).toHaveClass("has-[:focus-visible]:outline-2");
+    expect(agent).toHaveAttribute("aria-selected", "true");
     expect(effort.closest("label")).toHaveClass("has-[:focus-visible]:outline-2");
   });
 
@@ -186,7 +184,7 @@ describe("the rich runtime settings panel", () => {
     controls({ agentLocked: true });
     const { dialog } = await openSettings();
     expect(within(dialog).getByText(/当前会话已有内容/)).toBeInTheDocument();
-    expect(within(dialog).getByRole("radio", { name: "GeneHub Agent" })).toBeDisabled();
+    expect(within(dialog).getByRole("tab", { name: "GeneHub Agent" })).toBeDisabled();
     expect(within(dialog).getByRole("radio", { name: /高/ })).toBeEnabled();
   });
 
@@ -200,11 +198,10 @@ describe("the rich runtime settings panel", () => {
     controls({ agents: [unavailable, codex], onPickAgent });
     const { dialog } = await openSettings(/Agent：GeneHub Agent（不可用：请先登录）/);
 
-    expect(
-      within(dialog).getByRole("radio", { name: "GeneHub Agent 不可用：请先登录" }),
-    ).toBeChecked();
-    expect(within(dialog).getByText("不可用：请先登录")).toBeInTheDocument();
-    await userEvent.click(within(dialog).getByRole("radio", { name: "Codex" }));
+    const bound = within(dialog).getByRole("tab", { name: "GeneHub Agent 不可用：请先登录" });
+    expect(bound).toHaveAttribute("aria-selected", "true");
+    expect(bound).toBeDisabled();
+    await userEvent.click(within(dialog).getByRole("tab", { name: "Codex" }));
     expect(onPickAgent).toHaveBeenCalledWith("codex");
   });
 
@@ -214,11 +211,11 @@ describe("the rich runtime settings panel", () => {
       /Agent：acp:retired（不可用：已从当前 Agent 配置中移除）/,
     );
     expect(
-      within(dialog).getByRole("radio", {
+      within(dialog).getByRole("tab", {
         name: "acp:retired 不可用：已从当前 Agent 配置中移除",
       }),
-    ).toBeChecked();
-    expect(within(dialog).getByRole("radio", { name: "GeneHub Agent" })).toBeEnabled();
+    ).toHaveAttribute("aria-selected", "true");
+    expect(within(dialog).getByRole("tab", { name: "GeneHub Agent" })).toBeEnabled();
   });
 
   it("selects model ids and effort ids without changing their wire values", async () => {
@@ -243,12 +240,21 @@ describe("the rich runtime settings panel", () => {
     expect(callbacks.onPickEffort).toHaveBeenCalledWith("high");
   });
 
-  it("keeps permission descriptions and maps unrestricted access to an unlock badge", async () => {
+  /**
+   * The permission axis is three short chips on one line. Each one's sentence
+   * of explanation is a click away rather than printed underneath, which is
+   * what made three choices take a third of the panel.
+   */
+  it("keeps permission descriptions one click away and maps unrestricted access to an unlock badge", async () => {
     const onPickMode = vi.fn();
     controls({ agentId: "claude", onPickMode });
     expect(screen.getByRole("button", { name: /权限：执行前确认/ })).toBeInTheDocument();
     const { dialog } = await openSettings(/Agent：Claude Code/);
+    expect(within(dialog).queryByText("Run without asking")).not.toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Bypass 说明" }));
     expect(within(dialog).getByText("Run without asking")).toBeInTheDocument();
+
     await userEvent.click(within(dialog).getByRole("radio", { name: /Bypass/ }));
     expect(onPickMode).toHaveBeenCalledWith("bypassPermissions");
   });
@@ -279,7 +285,12 @@ describe("the rich runtime settings panel", () => {
     expect(within(dialog).getAllByText("⚙️")).toHaveLength(2);
   });
 
-  it("shows all six registry Agents, including unavailable choices", async () => {
+  /**
+   * Daemon configuration order puts an uninstalled Agent wherever it happens to
+   * be declared, which used to be the row's first position — where a reader
+   * looks first for something they can actually pick.
+   */
+  it("offers the startable Agents first and folds the rest behind one button", async () => {
     const variants: AgentInfo[] = [
       AGENTS[0]!,
       { ...AGENTS[0]!, id: "opencode", label: "OpenCode", probe: { state: "notInstalled" } },
@@ -290,17 +301,86 @@ describe("the rich runtime settings panel", () => {
     ];
     controls({ agents: variants });
     const { dialog } = await openSettings();
-    const radios = within(dialog).getAllByRole("radio", { name: /GeneHub|OpenCode|Claude|Codex|Cursor|ACP/ });
-    expect(radios.map((radio) => radio.getAttribute("value"))).toEqual([
-      "genet",
-      "opencode",
-      "claude",
-      "codex",
-      "cursor",
-      "acp",
+    const labels = () =>
+      within(dialog)
+        .getAllByRole("tab")
+        .map((tab) => tab.getAttribute("aria-label"));
+    expect(labels()).toEqual(["GeneHub Agent", "Claude Code", "Codex", "Cursor"]);
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "更多 2" }));
+    expect(labels()).toEqual([
+      "GeneHub Agent",
+      "Claude Code",
+      "Codex",
+      "Cursor",
+      "OpenCode 未安装",
+      "ACP agent 未安装",
     ]);
-    expect(within(dialog).getByRole("radio", { name: "OpenCode 未安装" })).toBeDisabled();
-    expect(within(dialog).getByRole("radio", { name: "ACP agent 未安装" })).toBeDisabled();
+    expect(within(dialog).getByRole("tab", { name: "OpenCode 未安装" })).toBeDisabled();
+    expect(within(dialog).getByRole("tab", { name: "ACP agent 未安装" })).toBeDisabled();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "收起" }));
+    expect(labels()).toHaveLength(4);
+  });
+
+  /** A tab with no bundled brand mark still needs somewhere to look. */
+  it("gives an Agent without a bundled icon its initial instead of a gap", async () => {
+    controls({ agents: [{ ...AGENTS[1]!, id: "codex", label: "Codex" }], agentId: "codex" });
+    const { dialog } = await openSettings(/Agent：Codex/);
+    expect(within(dialog).getByRole("tab", { name: "Codex" })).toHaveTextContent("CCodex");
+  });
+
+  it("folds a long model catalog down to four rows, keeping the chosen one", async () => {
+    const many = Array.from({ length: 7 }, (_, index) => ({
+      id: `provider/model-${index}`,
+      label: `Model ${index}`,
+      reasoning: false,
+      efforts: [],
+    }));
+    const agents = [
+      { ...AGENTS[0]!, catalog: { ...AGENTS[0]!.catalog, models: many, defaultModel: many[6]!.id } },
+    ];
+    controls({ agents, modelId: "provider/model-6" });
+    const { dialog } = await openSettings(/模型：Model 6/);
+
+    const shown = () =>
+      within(dialog)
+        .getAllByRole("radio", { name: /^Model / })
+        .map((radio) => radio.getAttribute("value"));
+    expect(shown()).toEqual([
+      "provider/model-0",
+      "provider/model-1",
+      "provider/model-2",
+      "provider/model-6",
+    ]);
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "更多 3" }));
+    expect(shown()).toHaveLength(7);
+    await userEvent.click(within(dialog).getByRole("button", { name: "收起" }));
+    expect(shown()).toHaveLength(4);
+  });
+
+  it("marks a model's reasoning and vision on the row rather than under it", async () => {
+    const agents = [
+      {
+        ...AGENTS[0]!,
+        catalog: {
+          ...AGENTS[0]!.catalog,
+          models: [
+            { id: "anthropic/sonnet-4", label: "Sonnet 4", reasoning: true, efforts: [] },
+            { id: "deepseek/v4-chat", label: "DeepSeek V4 Chat", reasoning: false, efforts: [] },
+          ],
+          defaultModel: "anthropic/sonnet-4",
+        },
+      },
+    ];
+    controls({ agents });
+    const { dialog } = await openSettings(/模型：Sonnet 4/);
+    expect(
+      within(dialog).getByRole("radio", { name: "Sonnet 4 推理 多模态" }),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByRole("radio", { name: "DeepSeek V4 Chat" })).toBeInTheDocument();
+    expect(within(dialog).queryByText(/上下文/)).not.toBeInTheDocument();
   });
 
   it("explains an empty ready catalog instead of looking unfinished", async () => {
@@ -320,7 +400,7 @@ describe("the rich runtime settings panel", () => {
     controls({ agents: [cursor], agentId: "cursor" });
     expect(screen.getByText("Cursor")).toBeInTheDocument();
     const { dialog } = await openSettings(/Agent：Cursor/);
-    expect(within(dialog).getByText(/将使用 Agent 自身默认配置/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/将使用它自身的默认配置/)).toBeInTheDocument();
   });
 
   it("marks Genet as needing model setup when its required catalog is empty", async () => {
@@ -338,12 +418,12 @@ describe("the rich runtime settings panel", () => {
     controls({ agents: [genet] });
     const { dialog } = await openSettings(/Agent：GeneHub Agent（待配置：请先配置模型服务）/);
     expect(
-      within(dialog).getByRole("radio", {
+      within(dialog).getByRole("tab", {
         name: "GeneHub Agent 待配置：请先配置模型服务",
       }),
     ).toBeDisabled();
     expect(within(dialog).getByText(/当前没有可用模型/)).toBeInTheDocument();
-    expect(within(dialog).queryByText(/自身默认配置/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/自身的默认配置/)).not.toBeInTheDocument();
   });
 
   it("shows a vanished model as unavailable instead of replacing it with the default", async () => {
