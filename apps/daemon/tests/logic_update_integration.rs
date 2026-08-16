@@ -376,6 +376,10 @@ async fn real_guest_owns_workspace_files_pty_settings_devices_and_catalog_end_to
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("workspace");
     fs::create_dir_all(&workspace).unwrap();
+    // macOS spells temporary directories through `/var`, whose canonical
+    // filesystem identity is `/private/var`. Compare the same spelling the
+    // native capability boundary registers and returns.
+    let workspace = workspace.canonicalize().unwrap();
     let daemon = Daemon::start(Paths::new(directory.path().join("data")))
         .await
         .unwrap();

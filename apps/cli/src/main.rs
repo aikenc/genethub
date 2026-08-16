@@ -27,6 +27,14 @@ pub const EXIT_INVALID_ARGS: i32 = 2;
 pub const EXIT_UNREACHABLE: i32 = 3;
 pub const EXIT_FAILED: i32 = 4;
 
+/// Native stack budget for Wasmtime compilation and guest calls.
+///
+/// Windows executables otherwise start `main` with a stack smaller than the
+/// VM's configured Wasm stack limit. Tokio's blocking workers execute later
+/// guest calls, so the root runner and every runtime-owned thread use the same
+/// explicit budget.
+const RUNTIME_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 /// Deliberately not the async entry point, and deliberately doing one thing
 /// before the runtime exists.
 ///
@@ -46,11 +54,27 @@ fn main() {
         std::process::exit(genet_daemon::isolation::confine_and_exec(&args[1..]));
     }
 
-    run(args)
+    let runner = std::thread::Builder::new()
+        .name("genet-runtime".to_string())
+        .stack_size(RUNTIME_STACK_BYTES)
+        .spawn(move || run(args))
+        .unwrap_or_else(|error| panic!("starting CLI runtime: {error}"));
+    runner
+        .join()
+        .unwrap_or_else(|_| panic!("CLI runtime thread panicked"));
 }
 
-#[tokio::main]
-async fn run(args: Vec<String>) {
+fn run(args: Vec<String>) {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("genet-worker")
+        .thread_stack_size(RUNTIME_STACK_BYTES)
+        .build()
+        .expect("building CLI runtime")
+        .block_on(run_async(args));
+}
+
+async fn run_async(args: Vec<String>) {
     // Answered before anything touches the disk: "which build is this" is a
     // question asked of a machine that is already misbehaving, and the answer
     // should not depend on a data directory being readable. The release

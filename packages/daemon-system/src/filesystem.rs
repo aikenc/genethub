@@ -752,11 +752,16 @@ fn reject_symlink_chain(path: &Path) -> Result<(), CapabilityFailure> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
-        // A Windows drive prefix such as `D:` is not itself an absolute path
-        // and querying its metadata returns ERROR_INVALID_FUNCTION on NTFS.
-        // Once the following root component makes `D:\\` absolute, inspect it
-        // and every descendant exactly as on Unix.
+        // A Windows prefix is not absolute by itself, while the following
+        // drive, share or verbatim root cannot be queried through
+        // `symlink_metadata` on every filesystem. Neither can be a redirected
+        // entry below the volume boundary; inspect every normal descendant,
+        // where junctions and symbolic links live.
         if !current.is_absolute() {
+            continue;
+        }
+        #[cfg(windows)]
+        if matches!(component, Component::RootDir) {
             continue;
         }
         match fs::symlink_metadata(&current) {
