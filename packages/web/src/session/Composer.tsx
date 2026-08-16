@@ -76,6 +76,8 @@ export function Composer({
   onHeightChange,
   onRestoreDraft,
   onInsertDraft,
+  minimized,
+  onExpand,
 }: {
   phase: ComposerPhase;
   disabled?: boolean;
@@ -114,6 +116,9 @@ export function Composer({
   onRestoreDraft?(): void;
   /** Acknowledges that `insertDraft` has been appended to the field. */
   onInsertDraft?(id: string): void;
+  /** Fast-scroll compact bar. The full card comes back on `onExpand`. */
+  minimized?: boolean;
+  onExpand?(): void;
 }) {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -129,6 +134,7 @@ export function Composer({
   const textarea = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   const card = useRef<HTMLDivElement>(null);
+  const shell = useRef<HTMLDivElement>(null);
   const speechInput = useSpeechInput({
     target: speech,
     getDraft: () => ({
@@ -275,18 +281,26 @@ export function Composer({
       element.scrollTop = element.scrollHeight;
       setComposerScrollTop(element.scrollTop);
     }
-  }, [speechPresentation, visibleDraft]);
+    // `minimized` is in here because the field is unmounted while tucked away:
+    // it comes back at its one-line default, and the draft it comes back with
+    // has not changed, so nothing else would ask it to grow again.
+  }, [speechPresentation, visibleDraft, minimized]);
 
   useLayoutEffect(() => {
-    const element = card.current;
+    const element = shell.current;
     if (!element || !onHeightChange) return;
-    const update = () => onHeightChange(Math.ceil(element.getBoundingClientRect().height));
+    const update = () => onHeightChange(element.offsetHeight);
     update();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(update);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [onHeightChange]);
+  }, [onHeightChange, minimized]);
+
+  useEffect(() => {
+    if (!minimized) return;
+    if (focused || speechInput.phase === "recording") onExpand?.();
+  }, [minimized, focused, speechInput.phase, onExpand]);
 
   useLayoutEffect(() => {
     const update = () => {
@@ -296,9 +310,16 @@ export function Composer({
     return () => window.removeEventListener("resize", update);
   }, []);
 
+  // The shell is measured whole and turned into the transcript's bottom inset,
+  // so its top padding is the gap between the last line and the card. It has to
+  // clear the card's drop shadow, which reaches 22px above the top edge (30px
+  // of blur against an 8px downward offset): a shadow falling across live text
+  // is read as the field covering it, however much room is really there.
   return (
     <div
-      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-8 md:px-4"
+      ref={shell}
+      data-composer-shell=""
+      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-6 md:px-4"
       style={{
         // Above the on-screen keyboard, and clear of the home indicator when
         // there is none. The shell is a fixed box that the keyboard covers
@@ -308,7 +329,24 @@ export function Composer({
           "calc(var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)))",
       }}
     >
-      {open ? (
+      {minimized ? (
+        <button
+          type="button"
+          aria-expanded={false}
+          aria-label="展开输入框"
+          data-composer-minimized=""
+          className="pointer-events-auto mx-auto flex w-full max-w-chat items-center gap-2 rounded-2xl border border-line-strong bg-surface/95 px-4 py-2.5 text-left shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur"
+          onClick={() => onExpand?.()}
+        >
+          <span className="min-w-0 flex-1 truncate text-sm text-muted">
+            {draft.trim() || "描述任务…"}
+          </span>
+          <span className="shrink-0 text-faint" aria-hidden>
+            ▴
+          </span>
+        </button>
+      ) : null}
+      {!minimized && open ? (
         <div className="pointer-events-auto mx-auto mb-2 max-w-chat overflow-hidden rounded-xl border border-line-strong bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur">
           <ul id={commandMenuId} role="listbox" aria-label="命令">
             {matches.map((command, index) => (
@@ -340,11 +378,12 @@ export function Composer({
           </ul>
         </div>
       ) : null}
-      {disabledReason ? (
+      {!minimized && disabledReason ? (
         <p className="pointer-events-auto mx-auto mb-2 max-w-chat rounded-lg border border-line bg-surface/95 px-3 py-2 text-xs text-muted shadow backdrop-blur">
           {disabledReason}
         </p>
       ) : null}
+      {!minimized ? (
       <div
         ref={card}
         data-composer-card=""
@@ -700,6 +739,8 @@ export function Composer({
           </div>
         </div>
       </div>
+      ) : null}
+      {!minimized ? (
       <SpeechCandidatePopover
         active={activeSpeechSpan}
         selectedCandidateId={
@@ -711,6 +752,7 @@ export function Composer({
         controller={speechInput}
         onClose={() => setActiveSpeechSpan(null)}
       />
+      ) : null}
     </div>
   );
 }

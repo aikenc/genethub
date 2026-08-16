@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { applyUiScale, readUiScale, UI_SCALE_KEY, useUiScale } from "./scale";
+import { applyUiScale, readUiScale, stepUiScale, UI_SCALE_KEY, useUiScale } from "./scale";
 
 function storage(entries: Record<string, string> = {}) {
   return {
@@ -41,6 +41,14 @@ describe("choosing a UI scale", () => {
 
     applyUiScale("xlarge");
     expect(document.documentElement.dataset.uiScale).toBe("xlarge");
+  });
+
+  it("steps one notch and stops at the ends", () => {
+    expect(stepUiScale("medium", 1)).toBe("large");
+    expect(stepUiScale("large", 1)).toBe("xlarge");
+    expect(stepUiScale("xlarge", 1)).toBe("xlarge");
+    expect(stepUiScale("medium", -1)).toBe("small");
+    expect(stepUiScale("xsmall", -1)).toBe("xsmall");
   });
 
   it("writes the choice down and repaints in one go", () => {

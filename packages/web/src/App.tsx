@@ -126,6 +126,7 @@ export function App({
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [composerHeight, setComposerHeight] = useState(128);
+  const [composerMinimized, setComposerMinimized] = useState(false);
   // Two different questions. `sessionsOpen` is the phone's drawer, which starts
   // shut because it covers the conversation; `sidebarHidden` is someone on a
   // desktop asking for the room back, which starts false because the left
@@ -173,7 +174,11 @@ export function App({
   // An unstarted conversation: no session on the machine, and so nothing a
   // transcript could be drawn from.
   const starting = Boolean(draft && !workbench.activeSessionId);
-  const composerSpace = `calc(${composerHeight}px + var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)) + 0.5rem)`;
+  // The composer shell already includes keyboard and home-indicator padding, and
+  // its own top padding is the only gap between the last line and the card, so
+  // its measured height is the whole inset. Adding to it would only widen the
+  // strip where the transcript is never drawn.
+  const composerSpace = `${composerHeight}px`;
 
   // The frame the compositor paints while a window is being resized is the
   // shell's, not the page's, so it has to be told which palette is in force —
@@ -181,6 +186,10 @@ export function App({
   useEffect(() => {
     host.window?.setBackground(theme === "dark");
   }, [host, theme]);
+
+  useEffect(() => {
+    setComposerMinimized(false);
+  }, [workbench.activeSessionId, starting]);
 
   // Tabs stay warm while they are open, so the device limit is the memory and
   // connection budget. Keep that budget in one place and react when a window
@@ -636,10 +645,17 @@ export function App({
                       {starting ? (
                         <NewSessionPanel host={host} endpoint={endpoint} />
                       ) : (
-                        <TimelineView
-                          state={workbench.timeline}
-                          {...(forkController ? { forkController } : {})}
-                        />
+                        // Anchors the transcript's own furniture — the fade at
+                        // its cut edge, the way back to the newest message — to
+                        // the gap above the composer rather than to the window.
+                        <div className="relative h-full">
+                          <TimelineView
+                            state={workbench.timeline}
+                            {...(forkController ? { forkController } : {})}
+                            onScrollBack={() => setComposerMinimized(true)}
+                            onReturnToBottom={() => setComposerMinimized(false)}
+                          />
+                        </div>
                       )}
                     </div>
                     {workbench.timeline.pendingPermission ? (
@@ -708,6 +724,8 @@ export function App({
                       onRestoreDraft={workbench.restoredDraft}
                       onInsertDraft={workbench.consumedComposerDraftInsert}
                       onHeightChange={setComposerHeight}
+                      minimized={composerMinimized}
+                      onExpand={() => setComposerMinimized(false)}
                       onSend={(text, attachments) =>
                         void workbench.send(text, attachments)
                       }
