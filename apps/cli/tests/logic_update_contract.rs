@@ -70,7 +70,14 @@ impl DaemonGuard {
             artifact: artifact.to_path_buf(),
         };
         let output = guard.command(&["daemon", "start"]);
-        assert_success(&output);
+        assert!(
+            output.status.success(),
+            "daemon start failed\nstdout: {}\nstderr: {}\nstartup log: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            std::fs::read_to_string(guard.root.join("logs/cli-start.log"))
+                .unwrap_or_else(|error| format!("<unavailable: {error}>"))
+        );
         guard
     }
 

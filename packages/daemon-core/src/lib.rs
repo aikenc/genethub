@@ -2084,6 +2084,20 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn wait_for_spawn_count(path: &std::path::Path, expected: usize) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let count = std::fs::read_to_string(path)
+                .map(|contents| contents.lines().count())
+                .unwrap_or(0);
+            if count >= expected || std::time::Instant::now() >= deadline {
+                return count;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
     fn waiting_interaction() -> WaitingInteraction {
         use std::os::unix::fs::PermissionsExt;
 
@@ -2677,10 +2691,7 @@ done
             Reply::Ack
         ));
         assert_eq!(
-            std::fs::read_to_string(&fixture.spawns)
-                .unwrap()
-                .lines()
-                .count(),
+            wait_for_spawn_count(&fixture.spawns, 2),
             2,
             "approval must restart the stopped Agent exactly once"
         );
@@ -2844,7 +2855,7 @@ done
             Reply::Ack
         ));
         assert_eq!(
-            std::fs::read_to_string(&spawns).unwrap().lines().count(),
+            wait_for_spawn_count(&spawns, 3),
             3,
             "cold recovery performs one catalog handshake and one session resume"
         );

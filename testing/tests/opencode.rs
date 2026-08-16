@@ -50,6 +50,12 @@ async fn a_third_party_agent_reaches_the_same_timeline_as_the_built_in_one() {
         .await
         .expect("prompt accepted");
     let events = journey.client.drain_turn().await.expect("the turn ends");
+    assert!(
+        events.completed(),
+        "OpenCode turn failed after {} model request(s): {:?}",
+        journey.mock().request_count().await,
+        events.failure()
+    );
     // Some OpenCode versions echo the prompt in their JSON stream, which is
     // exactly the case this shared assertion exists to catch.
     assert_normalized_reply(&events, PROMPT);
@@ -88,12 +94,13 @@ async fn two_agents_run_side_by_side_without_leaking_into_each_other() {
         .drain_turns(&[&third_party, &built_in])
         .await
         .expect("both turns end");
+    let model_requests = journey.mock().request_count().await;
 
     for (session, events) in &turns {
         assert!(
             events.completed(),
-            "session {session} did not complete: {:?}",
-            events.failure()
+            "session {session} did not complete after {model_requests} model request(s): {:?}",
+            events.failure(),
         );
         assert_eq!(
             events

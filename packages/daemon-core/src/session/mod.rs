@@ -3282,6 +3282,8 @@ fn start_process(
             );
             args.extend([
                 "run".to_string(),
+                "--dir".to_string(),
+                native_cwd.clone(),
                 "--format".to_string(),
                 "json".to_string(),
                 "--dangerously-skip-permissions".to_string(),

@@ -18,7 +18,7 @@ use genet_daemon::lifecycle;
 use crate::{fail, ok, EXIT_FAILED, EXIT_OK, EXIT_UNREACHABLE};
 
 /// How long `start` waits for the fresh daemon to publish its endpoint.
-const START_TIMEOUT: Duration = Duration::from_secs(20);
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long `stop` lets a SIGTERM'd daemon end its sessions before insisting.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -286,7 +286,7 @@ fn start() -> i32 {
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
     }
-    let child = match command.spawn() {
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => fail(
             "internal",
@@ -305,6 +305,25 @@ fn start() -> i32 {
                 value["port"] = serde_json::json!(endpoint.port);
                 return ok(value);
             }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => fail(
+                "daemon_unreachable",
+                &format!(
+                    "the daemon exited with {status} before publishing an endpoint; see {}",
+                    paths.logs_dir().join("cli-start.log").display()
+                ),
+                EXIT_UNREACHABLE,
+            ),
+            Ok(None) => {}
+            Err(error) => fail(
+                "daemon_unreachable",
+                &format!(
+                    "could not observe daemon startup: {error}; see {}",
+                    paths.logs_dir().join("cli-start.log").display()
+                ),
+                EXIT_UNREACHABLE,
+            ),
         }
         std::thread::sleep(Duration::from_millis(100));
     }

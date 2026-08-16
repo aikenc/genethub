@@ -743,9 +743,22 @@ fn nearest_existing(path: &Path) -> Result<&Path, CapabilityFailure> {
 }
 
 fn reject_symlink_chain(path: &Path) -> Result<(), CapabilityFailure> {
+    if !path.is_absolute() {
+        return Err(failure(
+            CapabilityFailureKind::Invalid,
+            format!("path is not absolute: {}", path.display()),
+        ));
+    }
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        // A Windows drive prefix such as `D:` is not itself an absolute path
+        // and querying its metadata returns ERROR_INVALID_FUNCTION on NTFS.
+        // Once the following root component makes `D:\\` absolute, inspect it
+        // and every descendant exactly as on Unix.
+        if !current.is_absolute() {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(failure(
