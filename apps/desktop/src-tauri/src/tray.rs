@@ -63,7 +63,11 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         ],
     )?;
 
-    TrayIconBuilder::with_id(TRAY_ID)
+    // `TrayIconBuilder` defaults to Wry when its runtime cannot be inferred.
+    // Keep this helper usable with Tauri's mock runtime as well as the real
+    // desktop runtime; macOS otherwise resolves the builder to Wry before
+    // `.build(app)` sees the generic `AppHandle<R>`.
+    TrayIconBuilder::<R>::with_id(TRAY_ID)
         .tooltip(crate::channel::PRODUCT)
         .icon(app.default_window_icon().cloned().expect("bundled icon"))
         .menu(&menu)
