@@ -30,7 +30,7 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "打开主界面", true, None::<&str>)?;
     let status = MenuItem::with_id(app, "status", "本机状态：启动中", false, None::<&str>)?;
     app.manage(Status(Mutex::new(status.clone())));
@@ -63,11 +63,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         ],
     )?;
 
-    // `TrayIconBuilder` defaults to Wry when its runtime cannot be inferred.
-    // Keep this helper usable with Tauri's mock runtime as well as the real
-    // desktop runtime; macOS otherwise resolves the builder to Wry before
-    // `.build(app)` sees the generic `AppHandle<R>`.
-    TrayIconBuilder::<R>::with_id(TRAY_ID)
+    // The tray exists only in the product runner, whose AppHandle uses Tauri's
+    // concrete Wry runtime. Window/status helpers above stay runtime-generic.
+    TrayIconBuilder::with_id(TRAY_ID)
         .tooltip(crate::channel::PRODUCT)
         .icon(app.default_window_icon().cloned().expect("bundled icon"))
         .menu(&menu)
