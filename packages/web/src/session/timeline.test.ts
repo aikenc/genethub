@@ -104,11 +104,13 @@ describe("the session timeline", () => {
       { type: "modelChanged", modelId: "deepseek/v4" },
       { type: "modeChanged", modeId: "plan" },
       { type: "effortChanged", effortId: "xhigh" },
+      { type: "runtimeAxisChanged", axisId: "fast", valueId: "max" },
     ]);
 
     expect(state.modelId).toBe("deepseek/v4");
     expect(state.modeId).toBe("plan");
     expect(state.effortId).toBe("xhigh");
+    expect(state.runtimeValues).toEqual({ fast: "max" });
   });
 
   it("clears the previous failure when a new turn starts", () => {

@@ -240,6 +240,42 @@ describe("the rich runtime settings panel", () => {
     expect(callbacks.onPickEffort).toHaveBeenCalledWith("high");
   });
 
+  it("renders Agent-declared Fast as a generic multi-level axis", async () => {
+    const cursor: AgentInfo = {
+      ...AGENTS[0]!,
+      id: "cursor",
+      label: "Cursor",
+      catalog: {
+        ...AGENTS[0]!.catalog,
+        runtimeAxes: [
+          {
+            id: "fast",
+            label: "Fast",
+            values: [
+              { id: "standard", label: "标准" },
+              { id: "fast", label: "快速" },
+              { id: "max", label: "极速" },
+            ],
+            defaultValue: "standard",
+          },
+        ],
+      },
+    };
+    const onPickRuntimeAxis = vi.fn();
+    controls({
+      agents: [cursor],
+      agentId: "cursor",
+      runtimeValues: { fast: "fast" },
+      onPickRuntimeAxis,
+    });
+    expect(screen.getByRole("button", { name: /Fast：快速/ })).toBeInTheDocument();
+    const { dialog } = await openSettings(/Agent：Cursor/);
+    expect(within(dialog).getByRole("radio", { name: "快速" })).toBeChecked();
+
+    await userEvent.click(within(dialog).getByRole("radio", { name: "极速" }));
+    expect(onPickRuntimeAxis).toHaveBeenCalledWith("fast", "max");
+  });
+
   /**
    * The permission axis is three short chips on one line. Each one's sentence
    * of explanation is a click away rather than printed underneath, which is

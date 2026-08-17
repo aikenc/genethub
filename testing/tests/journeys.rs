@@ -2342,6 +2342,7 @@ async fn a_session_starts_where_it_was_told_to_and_cannot_be_told_to_leave() {
             agent_id: "genet".into(),
             model_id: Some(journey.model_id()),
             mode_id: None,
+            runtime_values: None,
             title: None,
             cwd: Some("services/api".into()),
         })
@@ -2394,6 +2395,7 @@ async fn a_session_starts_where_it_was_told_to_and_cannot_be_told_to_leave() {
             agent_id: "genet".into(),
             model_id: Some(journey.model_id()),
             mode_id: None,
+            runtime_values: None,
             title: None,
             cwd: Some("../elsewhere".into()),
         })

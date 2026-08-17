@@ -359,6 +359,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionSetModel { .. }
         | Request::SessionSetMode { .. }
         | Request::SessionSetEffort { .. }
+        | Request::SessionSetRuntimeAxis { .. }
         | Request::SessionRespondPermission { .. } => Capability::Session,
 
         Request::SpeechContextPreview { .. } | Request::SpeechFeedbackRecord { .. } => {

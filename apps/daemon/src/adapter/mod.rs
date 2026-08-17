@@ -38,6 +38,9 @@ pub struct SessionConfig {
     /// the same reason the model is: the process only starts on the first prompt,
     /// so a level chosen before that would otherwise be recorded and dropped.
     pub effort_id: Option<String>,
+    /// Agent-declared runtime dimensions. Keys and values are opaque and have
+    /// already been checked against the current catalog by the session layer.
+    pub runtime_values: std::collections::BTreeMap<String, String>,
     /// Product-owned context added without changing the user's message. Each
     /// adapter maps it to its strongest available native system/developer
     /// instruction mechanism; ACP has a documented lower-priority fallback.
@@ -175,6 +178,11 @@ pub trait AgentSession: Send + Sync {
     async fn set_effort(&self, effort_id: &str) -> Result<()> {
         Err(anyhow::anyhow!(
             "this agent has no effort levels to set ({effort_id})"
+        ))
+    }
+    async fn set_runtime_axis(&self, axis_id: &str, value_id: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "this agent has no runtime axis '{axis_id}' to set ({value_id})"
         ))
     }
     async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()>;

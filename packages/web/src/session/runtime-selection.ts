@@ -10,6 +10,7 @@ export interface RuntimeSelection {
   mode: ModeInfo | undefined;
   modeAvailable: boolean;
   effortId: string | null;
+  runtimeValues: Record<string, string>;
 }
 
 /** Resolve exactly what the footer and the settings panel describe.
@@ -24,12 +25,14 @@ export function resolveRuntimeSelection({
   modelId,
   modeId,
   effortId,
+  runtimeValues,
 }: {
   agents: AgentInfo[];
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  runtimeValues?: Record<string, string> | null;
 }): RuntimeSelection {
   const ready = agents.filter((agent) => agent.probe.state === "ready");
   const selected = agents.find((agent) => agent.id === agentId);
@@ -50,6 +53,20 @@ export function resolveRuntimeSelection({
     current?.catalog.modes[0];
   const missingMode =
     modeId && !catalogMode ? { id: modeId, label: modeId, description: undefined } : undefined;
+  const resolvedRuntimeValues = Object.fromEntries(
+    (current?.catalog.runtimeAxes ?? []).flatMap((axis) => {
+      const selectedValue = runtimeValues?.[axis.id];
+      const valueId =
+        (selectedValue && axis.values.some((value) => value.id === selectedValue)
+          ? selectedValue
+          : undefined) ??
+        (axis.defaultValue && axis.values.some((value) => value.id === axis.defaultValue)
+          ? axis.defaultValue
+          : undefined) ??
+        axis.values[0]?.id;
+      return valueId ? [[axis.id, valueId]] : [];
+    }),
+  );
 
   return {
     current,
@@ -59,6 +76,7 @@ export function resolveRuntimeSelection({
     mode: catalogMode ?? missingMode ?? fallbackMode,
     modeAvailable: Boolean(catalogMode ?? (!modeId && fallbackMode)),
     effortId: effortId ?? current?.catalog.defaultEffort ?? null,
+    runtimeValues: resolvedRuntimeValues,
   };
 }
 
@@ -85,6 +103,7 @@ function removedAgent(id: string): AgentInfo {
       models: [],
       modes: [],
       commands: [],
+      runtimeAxes: undefined,
       defaultModel: undefined,
       defaultMode: undefined,
       defaultEffort: undefined,

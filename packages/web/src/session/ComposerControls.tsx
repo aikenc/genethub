@@ -25,6 +25,7 @@ export function ComposerControls({
   modelId,
   modeId,
   effortId,
+  runtimeValues,
   disabled,
   agentLocked,
   onOpenChange,
@@ -32,12 +33,14 @@ export function ComposerControls({
   onPickModel,
   onPickMode,
   onPickEffort,
+  onPickRuntimeAxis,
 }: {
   agents: AgentInfo[];
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  runtimeValues?: Record<string, string> | null;
   disabled?: boolean;
   agentLocked?: boolean;
   onOpenChange?(open: boolean): void;
@@ -45,12 +48,20 @@ export function ComposerControls({
   onPickModel(id: string): void;
   onPickMode(id: string): void;
   onPickEffort(id: string): void;
+  onPickRuntimeAxis?(axisId: string, valueId: string): void;
 }) {
   const [open, setOpen] = useState(false);
   const generatedId = useId();
   const panelId = `runtime-settings-${generatedId}`;
   const trigger = useRef<HTMLButtonElement>(null);
-  const selection = resolveRuntimeSelection({ agents, agentId, modelId, modeId, effortId });
+  const selection = resolveRuntimeSelection({
+    agents,
+    agentId,
+    modelId,
+    modeId,
+    effortId,
+    runtimeValues,
+  });
   const agentPresentation = selection.current
     ? resolveAgentPresentation(selection.current)
     : null;
@@ -82,12 +93,17 @@ export function ComposerControls({
         modeLabel: selection.mode?.label,
       })
     : null;
+  const runtimeBadges = (selection.current?.catalog.runtimeAxes ?? []).flatMap((axis) => {
+    const value = axis.values.find((candidate) => candidate.id === selection.runtimeValues[axis.id]);
+    return value ? [{ axis, value }] : [];
+  });
   const summary = [
     selection.current
       ? `Agent：${agentPresentation?.label ?? selection.current.id}${agentAvailability ? `（${agentAvailability.fullLabel}）` : ""}`
       : "Agent：未选择",
     model ? `模型：${model.fullLabel}` : null,
     effort ? `思考强度：${effort.fullLabel}` : null,
+    ...runtimeBadges.map(({ axis, value }) => `${axis.label}：${value.label}`),
     mode
       ? `${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}`
       : null,
@@ -148,6 +164,15 @@ export function ComposerControls({
               <span aria-hidden>{effort.shortLabel}</span>
             </span>
           ) : null}
+          {runtimeBadges.map(({ axis, value }) => (
+            <span
+              key={axis.id}
+              className="shrink-0 whitespace-nowrap text-muted"
+              title={`${axis.label}：${value.label}`}
+            >
+              {value.label}
+            </span>
+          ))}
           {mode ? (
             <span
               className="shrink-0 whitespace-nowrap text-muted"
@@ -174,6 +199,7 @@ export function ComposerControls({
           onPickModel={onPickModel}
           onPickMode={onPickMode}
           onPickEffort={onPickEffort}
+          onPickRuntimeAxis={onPickRuntimeAxis ?? (() => {})}
         />
       ) : null}
     </>

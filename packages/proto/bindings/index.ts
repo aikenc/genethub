@@ -106,7 +106,12 @@ resume: boolean,
  */
 fork: boolean, attachments: boolean, };
 
-export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, commands: Array<CommandInfo>, defaultModel?: string, defaultMode?: string, defaultEffort?: string, };
+export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, commands: Array<CommandInfo>, 
+/**
+ * Additional Agent-declared runtime dimensions such as Fast. Empty for
+ * older Agents and clients; model ids remain opaque regardless.
+ */
+runtimeAxes?: Array<RuntimeAxisInfo>, defaultModel?: string, defaultMode?: string, defaultEffort?: string, };
 
 /**
  * A slash command the agent understands.
@@ -588,7 +593,7 @@ export type Request = { "type": "connection.identity" } | { "type": "subscribe",
  * Prefetches the last round's trunk index and final trunk details in
  * the subscription response.
  */
-expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, title: string | null, 
+expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, 
 /**
  * Where the agent starts, inside the workspace. Absent means the
  * workspace root, which is what every client sent before this field
@@ -623,7 +628,7 @@ continuesRound: string | null, } } | { "type": "session.artifact.begin", "payloa
  * explicit target to opt into provider-agnostic reconstruction when
  * any destination dimension changes or a native checkpoint cannot be used.
  */
-target?: ForkTarget, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+target?: ForkTarget, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.setRuntimeAxis", "payload": { sessionId: string, axisId: string, valueId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -707,6 +712,16 @@ export type RtcNegotiationRequest = { sdp: string, };
 
 export type RtcNegotiationResponse = { sdp: string, capabilityId: string, secret: string, };
 
+/**
+ * An Agent-owned runtime dimension beyond model, mode and thinking depth.
+ *
+ * Values are opaque ids returned by the Agent. Clients render and round-trip
+ * them; they never synthesize ids from labels or from another axis.
+ */
+export type RuntimeAxisInfo = { id: string, label: string, description?: string, values: Array<RuntimeAxisValue>, defaultValue?: string, };
+
+export type RuntimeAxisValue = { id: string, label: string, description?: string, };
+
 export type SearchMatch = { path: string, line?: number, preview: string, };
 
 /**
@@ -763,7 +778,7 @@ export type SessionEvent = { "type": "turnStarted", turnId: string,
  * Zero is accepted from adapters; the session boundary replaces it
  * with its own wall clock before the event reaches a client.
  */
-startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
+startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "runtimeAxisChanged", axisId: string, valueId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
 
 /**
  * One lightweight external conversation returned by the discovery pass.
@@ -858,7 +873,7 @@ export type SessionSummary = { id: string, workspaceId: string, agentId: string,
  * from the first thing they said. Clients supply their own placeholder;
  * the daemon has no business picking a word in the user's language.
  */
-title?: string, status: SessionStatus, modelId?: string, modeId?: string, effortId?: string, createdAtMs: number, updatedAtMs: number, archived: boolean, 
+title?: string, status: SessionStatus, modelId?: string, modeId?: string, effortId?: string, runtimeValues?: { [key in string]?: string }, createdAtMs: number, updatedAtMs: number, archived: boolean, 
 /**
  * Set when this session cannot be opened here. It is still listed: the
  * conversation is in the user's own project folder, and an unexplained
