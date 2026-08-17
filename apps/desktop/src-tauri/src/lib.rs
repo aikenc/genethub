@@ -222,7 +222,7 @@ fn show_boot_error(app: &tauri::AppHandle, message: &str) {
         return;
     };
     let encoded = serde_json::to_string(message).unwrap_or_else(|_| "\"启动失败\"".to_string());
-    let _ = window.eval(&format!(
+    let _ = window.eval(format!(
         "const node=document.getElementById('status');if(node)node.textContent={encoded};"
     ));
     tray::show_main_window(app);
