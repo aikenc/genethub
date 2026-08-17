@@ -100,8 +100,7 @@ impl AgentAdapter for AcpAdapter {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // Cursor expresses this as an `effort`/`reasoning` model variant.
-            set_effort: self.id == "cursor",
+            set_effort: false,
             interrupt: true,
             // Cursor exposes models through `session/new` and
             // `session/set_config_option`; other ACP agents may not, but an
@@ -192,7 +191,6 @@ impl AgentAdapter for AcpAdapter {
             resume_method: std::sync::Mutex::new(None),
             model_config_id: Mutex::new(hello.model_config_id),
             mode_config_id: Mutex::new(hello.mode_config_id),
-            model_id: Mutex::new(hello.default_model),
             additional_system_prompt: config.additional_system_prompt.clone(),
         };
 
@@ -508,7 +506,6 @@ struct AcpSession {
     resume_method: std::sync::Mutex<Option<ResumeMethod>>,
     model_config_id: Mutex<Option<String>>,
     mode_config_id: Mutex<Option<String>>,
-    model_id: Mutex<Option<String>>,
     /// ACP has no standard system/developer-instruction field. The adapter
     /// therefore carries product guidance as a clearly delimited leading text
     /// block on each prompt, while the daemon timeline retains only user text.
@@ -593,7 +590,6 @@ impl AcpSession {
             let setup = parse_session_new(&result)?;
             *self.model_config_id.lock().await = setup.model_config_id.clone();
             *self.mode_config_id.lock().await = setup.mode_config_id.clone();
-            *self.model_id.lock().await = setup.default_model.clone();
             setup.session_id
         };
         *self.acp_session.lock().await = Some(session_id.clone());
@@ -764,9 +760,7 @@ impl AgentSession for AcpSession {
             .await
             .clone()
             .unwrap_or_else(|| "model".into());
-        self.set_config_option(&config_id, model_id).await?;
-        *self.model_id.lock().await = Some(model_id.to_string());
-        Ok(())
+        self.set_config_option(&config_id, model_id).await
     }
 
     async fn set_mode(&self, mode_id: &str) -> Result<()> {
@@ -789,22 +783,6 @@ impl AgentSession for AcpSession {
                 self.set_config_option(&config_id, mode_id).await
             }
         }
-    }
-
-    async fn set_effort(&self, effort_id: &str) -> Result<()> {
-        if self.agent_id != "cursor" {
-            anyhow::bail!("this ACP agent has no effort levels to set ({effort_id})");
-        }
-        let model = self
-            .model_id
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| anyhow!("Cursor has no selected model"))?;
-        let variant = cursor_variant_with(&model, "effort", effort_id)
-            .or_else(|| cursor_variant_with(&model, "reasoning", effort_id))
-            .ok_or_else(|| anyhow!("Cursor model '{model}' has no configurable thinking depth"))?;
-        self.set_model(&variant).await
     }
 
     async fn respond_permission(
@@ -1044,10 +1022,8 @@ fn models_in(result: &Value) -> (Vec<ModelInfo>, Option<String>) {
                             .unwrap_or_default()
                             .to_string(),
                         context_window: None,
-                        reasoning: cursor_efforts(model.get("modelId").and_then(Value::as_str))
-                            .is_some(),
-                        efforts: cursor_efforts(model.get("modelId").and_then(Value::as_str))
-                            .unwrap_or_default(),
+                        reasoning: false,
+                        efforts: Vec::new(),
                     })
                     .collect();
                 return (list, current);
@@ -1148,49 +1124,6 @@ fn config_id_for_category(result: &Value, category: &str) -> Option<String> {
         .and_then(|option| option.get("id"))
         .and_then(Value::as_str)
         .map(ToString::to_string)
-}
-
-/// Cursor's ACP catalog currently carries configuration in the opaque model id,
-/// e.g. `gpt-5.5[reasoning=medium,fast=false]`. Preserve every other option
-/// byte-for-byte while changing the requested axis.
-fn cursor_variant_with(model: &str, key: &str, value: &str) -> Option<String> {
-    let (prefix, suffix) = model.rsplit_once('[')?;
-    let body = suffix.strip_suffix(']')?;
-    let mut found = false;
-    let options = body
-        .split(',')
-        .map(|option| {
-            let (name, current) = option.split_once('=').unwrap_or((option, ""));
-            if name == key {
-                found = true;
-                format!("{name}={value}")
-            } else {
-                format!("{name}={current}")
-            }
-        })
-        .collect::<Vec<_>>();
-    found.then(|| format!("{prefix}[{}]", options.join(",")))
-}
-
-fn cursor_efforts(model: Option<&str>) -> Option<Vec<String>> {
-    let model = model?;
-    if model.contains("effort=") {
-        return Some(
-            ["low", "medium", "high", "xhigh"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        );
-    }
-    if model.contains("reasoning=") {
-        return Some(
-            ["minimal", "low", "medium", "high"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        );
-    }
-    None
 }
 
 async fn answered<R>(lines: &mut tokio::io::Lines<BufReader<R>>, id: i64) -> Option<Value>
