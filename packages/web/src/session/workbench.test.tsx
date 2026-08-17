@@ -1320,6 +1320,21 @@ describe("the controls offered to the user", () => {
     geometry();
   });
 
+  it("takes its room from the layout rather than from a measured number", () => {
+    const { container, rerender } = render(<Composer {...composerProps()} />);
+    const shell = container.querySelector("[data-composer-shell]")!;
+
+    // The transcript is a flex sibling, so whatever the composer happens to be
+    // — one collapsed line, a grown draft, a command menu — is already out of
+    // the transcript's box. Floating it and reserving the gap from a measured
+    // pixel height cannot work under the UI-scale `zoom`: the reading and the
+    // padding that consumes it are in different coordinate spaces, and the
+    // collapsed bar never reports a height at all because the card unmounts.
+    expect(shell).not.toHaveClass("absolute");
+    rerender(<Composer {...composerProps({ minimized: true })} />);
+    expect(container.querySelector("[data-composer-shell]")).not.toHaveClass("absolute");
+  });
+
   it("tucks into a tap target when minimized, and comes back on tap", async () => {
     const onExpand = vi.fn();
     render(<Composer {...composerProps({ minimized: true, onExpand })} />);
