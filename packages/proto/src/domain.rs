@@ -59,6 +59,33 @@ pub struct ModeInfo {
     pub description: Option<String>,
 }
 
+/// An Agent-owned runtime dimension beyond model, mode and thinking depth.
+///
+/// Values are opaque ids returned by the Agent. Clients render and round-trip
+/// them; they never synthesize ids from labels or from another axis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RuntimeAxisInfo {
+    pub id: String,
+    pub label: String,
+    #[ts(optional)]
+    pub description: Option<String>,
+    pub values: Vec<RuntimeAxisValue>,
+    #[ts(optional)]
+    pub default_value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RuntimeAxisValue {
+    pub id: String,
+    pub label: String,
+    #[ts(optional)]
+    pub description: Option<String>,
+}
+
 /// A slash command the agent understands.
 ///
 /// Nothing about running one is special: it is sent as ordinary prompt text, and
@@ -87,6 +114,11 @@ pub struct Catalog {
     pub modes: Vec<ModeInfo>,
     #[serde(default)]
     pub commands: Vec<CommandInfo>,
+    /// Additional Agent-declared runtime dimensions such as Fast. Absent for
+    /// older Agents and clients; model ids remain opaque regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runtime_axes: Option<Vec<RuntimeAxisInfo>>,
     #[ts(optional)]
     pub default_model: Option<String>,
     #[ts(optional)]
@@ -461,6 +493,9 @@ pub struct SessionSummary {
     #[ts(optional)]
     #[serde(default)]
     pub effort_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runtime_values: Option<std::collections::BTreeMap<String, String>>,
     #[ts(type = "number")]
     pub created_at_ms: i64,
     #[ts(type = "number")]

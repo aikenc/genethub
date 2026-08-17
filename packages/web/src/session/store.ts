@@ -107,6 +107,7 @@ export interface Draft {
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  runtimeValues: Record<string, string>;
 }
 
 /**
@@ -344,6 +345,7 @@ interface WorkbenchState {
   setModel(modelId: string): Promise<void>;
   setMode(modeId: string): Promise<void>;
   setEffort(effortId: string): Promise<void>;
+  setRuntimeAxis(axisId: string, valueId: string): Promise<void>;
   answerPermission(outcome: PermissionOutcome): Promise<void>;
   refreshHub(): Promise<void>;
   pair(hubUrl: string): Promise<void>;
@@ -784,6 +786,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         modelId: remembered.modelId,
         modeId: remembered.modeId,
         effortId: remembered.effortId,
+        runtimeValues: remembered.runtimeValues,
       },
       activeWorkspaceId: target,
       activeSessionId: null,
@@ -1369,6 +1372,43 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     );
   },
 
+  async setRuntimeAxis(axisId, valueId) {
+    remember(get(), { runtimeValues: { [axisId]: valueId } });
+    const sessionId = get().activeSessionId;
+    if (!sessionId) {
+      const draft = get().draft;
+      if (!draft) return;
+      return void onDraft(get, set, {
+        runtimeValues: { ...draft.runtimeValues, [axisId]: valueId },
+      });
+    }
+    const before = get().timeline.runtimeValues[axisId];
+    set((state) => ({
+      timeline: {
+        ...state.timeline,
+        runtimeValues: { ...state.timeline.runtimeValues, [axisId]: valueId },
+      },
+    }));
+    try {
+      await require_(get().client).call({
+        type: "session.setRuntimeAxis",
+        payload: { sessionId, axisId, valueId },
+      });
+    } catch (error) {
+      const state = get();
+      if (
+        state.activeSessionId === sessionId &&
+        state.timeline.runtimeValues[axisId] === valueId
+      ) {
+        const runtimeValues = { ...state.timeline.runtimeValues };
+        if (before === undefined) delete runtimeValues[axisId];
+        else runtimeValues[axisId] = before;
+        set({ timeline: { ...state.timeline, runtimeValues } });
+      }
+      reportError(set, error);
+    }
+  },
+
   async renameSession(sessionId, title) {
     const wanted = title.trim();
     if (!wanted) return;
@@ -1859,6 +1899,7 @@ async function start(
         agentId,
         modelId: draft.modelId,
         modeId: draft.modeId,
+        runtimeValues: draft.runtimeValues,
         title: null,
         cwd: null,
       },
@@ -1872,6 +1913,9 @@ async function start(
     ...(draft.modelId ? { modelId: draft.modelId } : {}),
     ...(draft.modeId ? { modeId: draft.modeId } : {}),
     ...(draft.effortId ? { effortId: draft.effortId } : {}),
+    ...(Object.keys(draft.runtimeValues).length > 0
+      ? { runtimeValues: draft.runtimeValues }
+      : {}),
   });
   set((current) => ({ sessions: [reply.data, ...current.sessions] }));
   // Clears the draft and turns its tab into this session's.

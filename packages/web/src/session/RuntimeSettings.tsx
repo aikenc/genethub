@@ -54,6 +54,7 @@ export function RuntimeSettings({
   onPickModel,
   onPickMode,
   onPickEffort,
+  onPickRuntimeAxis,
 }: {
   selection: RuntimeSelection;
   disabled?: boolean;
@@ -63,6 +64,7 @@ export function RuntimeSettings({
   onPickModel(id: string): void;
   onPickMode(id: string): void;
   onPickEffort(id: string): void;
+  onPickRuntimeAxis(axisId: string, valueId: string): void;
 }) {
   const generatedId = useId();
   const bodyId = `runtime-axes-${generatedId}`;
@@ -77,6 +79,7 @@ export function RuntimeSettings({
   const modes = current
     ? withMissing(current.catalog.modes, selection.mode, selection.modeAvailable)
     : [];
+  const runtimeAxes = current?.catalog.runtimeAxes ?? [];
   const currentProfile = current ? resolveAgentProfile(current.id) : null;
   const permissionAxis = Boolean(
     current?.capabilities.permissions && currentProfile?.modeKind === "permission",
@@ -84,7 +87,8 @@ export function RuntimeSettings({
   const hasRuntimeChoices = Boolean(
     (current?.capabilities.setModel && models.length > 0) ||
       (current?.capabilities.setEffort && (selection.model?.efforts.length ?? 0) > 0) ||
-      (current?.capabilities.setMode && modes.length > 0),
+      (current?.capabilities.setMode && modes.length > 0) ||
+      runtimeAxes.some((axis) => axis.values.length > 0),
   );
   const settingsDisabled = Boolean(disabled);
   const visibleAgents = showAllAgents
@@ -213,6 +217,38 @@ export function RuntimeSettings({
             ) : null}
           </fieldset>
         ) : null}
+
+        {runtimeAxes.map((axis) =>
+          axis.values.length > 0 ? (
+            <fieldset key={axis.id} disabled={settingsDisabled} className="min-w-0">
+              <legend
+                className="text-[10px] font-medium uppercase tracking-wide text-faint"
+                title={axis.description}
+              >
+                {axis.label}
+              </legend>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {axis.values.map((value) => (
+                  <label
+                    key={value.id}
+                    title={value.description}
+                    className="flex h-8 cursor-pointer items-center rounded-full border border-line px-2.5 text-xs text-muted has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:checked]:text-fg has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
+                  >
+                    <input
+                      type="radio"
+                      name={`runtime-axis-${axis.id}`}
+                      value={value.id}
+                      checked={selection.runtimeValues[axis.id] === value.id}
+                      onChange={() => onPickRuntimeAxis(axis.id, value.id)}
+                      className="sr-only"
+                    />
+                    {value.label}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          ) : null,
+        )}
 
         {current?.capabilities.setMode && modes.length > 0 ? (
           <fieldset disabled={settingsDisabled} className="min-w-0">

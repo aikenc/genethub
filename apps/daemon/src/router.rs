@@ -194,6 +194,7 @@ async fn dispatch(
             agent_id,
             model_id,
             mode_id,
+            runtime_values,
             title,
             cwd,
         } => {
@@ -226,7 +227,15 @@ async fn dispatch(
             };
             match state
                 .sessions
-                .create(&workspace_id, start_in, &agent_id, model_id, mode_id, title)
+                .create(
+                    &workspace_id,
+                    start_in,
+                    &agent_id,
+                    model_id,
+                    mode_id,
+                    runtime_values.unwrap_or_default(),
+                    title,
+                )
                 .await
             {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
@@ -611,6 +620,22 @@ async fn dispatch(
             match state
                 .sessions
                 .set_effort(&session_id, &effort_id, &providers)
+                .await
+            {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionSetRuntimeAxis {
+            session_id,
+            axis_id,
+            value_id,
+        } => {
+            let providers = state.providers().await;
+            match state
+                .sessions
+                .set_runtime_axis(&session_id, &axis_id, &value_id, &providers)
                 .await
             {
                 Ok(()) => Handled::ok(Reply::Ack),

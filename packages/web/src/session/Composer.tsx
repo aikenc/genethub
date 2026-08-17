@@ -61,6 +61,7 @@ export function Composer({
   modelId,
   modeId,
   effortId,
+  runtimeValues,
   agentLocked,
   attachmentsSupported,
   commands,
@@ -73,6 +74,7 @@ export function Composer({
   onPickModel,
   onPickMode,
   onPickEffort,
+  onPickRuntimeAxis,
   onHeightChange,
   onRestoreDraft,
   onInsertDraft,
@@ -88,6 +90,7 @@ export function Composer({
   modelId: string | null;
   modeId: string | null;
   effortId?: string | null;
+  runtimeValues?: Record<string, string> | null;
   agentLocked?: boolean;
   /** Whether the current agent forwards attachments anywhere (claude, codex,
    * acp and opencode do today; genet does not — see `docs/roadmap.md`).
@@ -108,6 +111,7 @@ export function Composer({
   onPickModel(id: string): void;
   onPickMode(id: string): void;
   onPickEffort?(id: string): void;
+  onPickRuntimeAxis?(axisId: string, valueId: string): void;
   /** Reports the complete overlay height in unzoomed layout pixels. */
   onHeightChange?(height: number): void;
   /** Acknowledges that `restoreDraft` has been taken into the field. */
@@ -593,6 +597,7 @@ export function Composer({
               modelId={modelId}
               modeId={modeId}
               effortId={effortId ?? null}
+              runtimeValues={runtimeValues}
               disabled={disabled || phase !== "idle"}
               agentLocked={agentLocked}
               onOpenChange={setSettingsOpen}
@@ -600,6 +605,7 @@ export function Composer({
               onPickModel={onPickModel}
               onPickMode={onPickMode}
               onPickEffort={onPickEffort ?? (() => {})}
+              onPickRuntimeAxis={onPickRuntimeAxis ?? (() => {})}
             />
           </div>
           <div

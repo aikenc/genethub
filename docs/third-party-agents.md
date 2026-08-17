@@ -182,7 +182,7 @@ cursor-agent login
 
 登录态仍是这个 CLI 自己的事（§1）：它没有一个可以把模型后端指走的配置项，所以 mock 模式下没有它的专项测试——`testing/tests/cursor.rs` 只在真实模式、且机器上装着登录过的 `cursor-agent` 时跑，其余情况跳过并打印原因，与 Codex 的处境相同（§4）。
 
-模型和模式列表来自 ACP 的 `session/new` 握手（`availableModels`、`availableModes` 或 `configOptions`），GeneHub 在 agent picker 里展示并可通过 `session/set_config_option` / `session/set_mode` 切换；凭证和账号仍由 Cursor CLI 自己管理，不在 GeneHub 配置里出现。
+模型和模式列表来自 ACP 的 `session/new` 握手（`availableModels`、`availableModes` 或 `configOptions`）。其余 `configOptions` 会成为 Agent 声明的通用运行轴，例如 Fast；select 可以有两档或更多档，boolean 在界面里显示为开/关，切换时仍原样回传协议声明的 value ID。GeneHub 绝不解析或拼接模型 ID，也不把模型标签里的参数伪装成可切换能力；凭证和账号仍由 Cursor CLI 自己管理，不在 GeneHub 配置里出现。
 
 ---
 

@@ -46,6 +46,7 @@ export interface TimelineState {
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  runtimeValues: Record<string, string>;
   seq: number;
   /** Every round of this session, in order, unexpanded. */
   rounds: RoundSummary[];
@@ -70,6 +71,7 @@ export function emptyTimeline(): TimelineState {
     modelId: null,
     modeId: null,
     effortId: null,
+    runtimeValues: {},
     seq: 0,
     rounds: [],
     roundLayers: {},
@@ -108,6 +110,11 @@ export function fromSnapshot(
     modelId: snapshot.summary.modelId ?? null,
     modeId: snapshot.summary.modeId ?? null,
     effortId: snapshot.summary.effortId ?? null,
+    runtimeValues: Object.fromEntries(
+      Object.entries(snapshot.summary.runtimeValues ?? {}).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    ),
     seq: snapshot.seq,
     ...roundsFromSnapshot(snapshot),
   };
@@ -214,6 +221,12 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
 
     case "effortChanged":
       return { ...state, effortId: event.effortId };
+
+    case "runtimeAxisChanged":
+      return {
+        ...state,
+        runtimeValues: { ...state.runtimeValues, [event.axisId]: event.valueId },
+      };
 
     // Not part of the timeline itself; the session list and its tab title
     // are what change, handled by the store where it has access to them.

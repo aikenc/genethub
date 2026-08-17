@@ -344,7 +344,14 @@ describe("a message that has been sent and not yet confirmed", () => {
     useWorkbench.setState({
       client,
       activeSessionId: null,
-      draft: { workspaceId: "w1", agentId: "genet", modelId: null, modeId: null, effortId: null },
+      draft: {
+        workspaceId: "w1",
+        agentId: "genet",
+        modelId: null,
+        modeId: null,
+        effortId: null,
+        runtimeValues: {},
+      },
     });
 
     await useWorkbench.getState().send("开个新会话说这句");
@@ -664,7 +671,14 @@ describe("an action the user asked for that fails", () => {
     useWorkbench.setState({
       client: refusingClient("no adapter registered for 'codex'"),
       sessions: [],
-      draft: { workspaceId: "w1", agentId: "codex", modelId: null, modeId: null, effortId: null },
+      draft: {
+        workspaceId: "w1",
+        agentId: "codex",
+        modelId: null,
+        modeId: null,
+        effortId: null,
+        runtimeValues: {},
+      },
     });
 
     await useWorkbench.getState().send("hello");
@@ -838,6 +852,7 @@ describe("opening a new conversation", () => {
         agentId: "genet",
         modelId: "opus",
         modeId: null,
+        runtimeValues: {},
         title: null,
         // The workbench opens a session at the workspace root; naming a
         // directory inside it is something only the CLI does today.
@@ -939,6 +954,25 @@ describe("switching a runtime axis mid-conversation", () => {
     await second;
 
     expect(useWorkbench.getState().timeline.effortId).toBe("high");
+  });
+
+  it("switches a generic runtime axis optimistically with opaque ids", async () => {
+    const calls: unknown[] = [];
+    const client = {
+      call: async (request: unknown) => {
+        calls.push(request);
+        return { type: "ok" };
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client, sessions: [SESSION], activeSessionId: "s1" });
+
+    await useWorkbench.getState().setRuntimeAxis("fast", "max");
+
+    expect(useWorkbench.getState().timeline.runtimeValues).toEqual({ fast: "max" });
+    expect(calls).toContainEqual({
+      type: "session.setRuntimeAxis",
+      payload: { sessionId: "s1", axisId: "fast", valueId: "max" },
+    });
   });
 });
 

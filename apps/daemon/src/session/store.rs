@@ -153,6 +153,10 @@ pub struct SessionMeta {
     /// answer for them: no level was ever chosen.
     #[serde(default)]
     pub effort_id: Option<String>,
+    /// Agent-declared runtime axes. Unknown keys survive storage for history,
+    /// but are filtered against the live catalog before an Agent starts.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub runtime_values: std::collections::BTreeMap<String, String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     #[serde(default)]
@@ -222,6 +226,7 @@ impl SessionMeta {
             model_id: None,
             mode_id: None,
             effort_id: None,
+            runtime_values: Default::default(),
             created_at_ms: header.created_at_ms,
             updated_at_ms: header.updated_at_ms,
             archived: false,
@@ -248,6 +253,7 @@ impl SessionMeta {
             model_id: self.model_id.clone(),
             mode_id: self.mode_id.clone(),
             effort_id: self.effort_id.clone(),
+            runtime_values: (!self.runtime_values.is_empty()).then(|| self.runtime_values.clone()),
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
             archived: self.archived,
@@ -1529,6 +1535,7 @@ mod project_home_tests {
             model_id: None,
             mode_id: None,
             effort_id: None,
+            runtime_values: Default::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             archived: false,

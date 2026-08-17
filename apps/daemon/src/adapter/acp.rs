@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, ImportContinuation, InteractionOption, InteractionQuestion, ItemDelta,
     ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome,
-    PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent, TimelineItem,
-    ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    PermissionRequest, PermissionRequestKind, ProbeState, RuntimeAxisInfo, RuntimeAxisValue,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -53,6 +53,7 @@ struct Hello {
     default_mode: Option<String>,
     model_config_id: Option<String>,
     mode_config_id: Option<String>,
+    runtime_axes: Vec<RuntimeAxisInfo>,
 }
 
 /// Parsed `session/new` result, reused by discovery and live sessions.
@@ -64,6 +65,7 @@ struct Setup {
     default_mode: Option<String>,
     model_config_id: Option<String>,
     mode_config_id: Option<String>,
+    runtime_axes: Vec<RuntimeAxisInfo>,
 }
 
 impl AcpAdapter {
@@ -129,12 +131,15 @@ impl AgentAdapter for AcpAdapter {
         let Some(program) = self.program() else {
             return Catalog::default();
         };
-        let hello = self.hello(&program).await.unwrap_or_default();
+        let Some(hello) = self.hello(&program).await else {
+            return Catalog::default();
+        };
         Catalog {
             default_effort: None,
             // ACP does have a command list (`available_commands_update` on the
             // session), which we do not read yet.
             commands: Vec::new(),
+            runtime_axes: Some(hello.runtime_axes),
             models: hello.models,
             modes: hello.modes,
             default_model: hello.default_model,
@@ -191,6 +196,13 @@ impl AgentAdapter for AcpAdapter {
             resume_method: std::sync::Mutex::new(None),
             model_config_id: Mutex::new(hello.model_config_id),
             mode_config_id: Mutex::new(hello.mode_config_id),
+            runtime_axis_ids: Mutex::new(
+                hello
+                    .runtime_axes
+                    .iter()
+                    .map(|axis| axis.id.clone())
+                    .collect(),
+            ),
             additional_system_prompt: config.additional_system_prompt.clone(),
         };
 
@@ -506,6 +518,7 @@ struct AcpSession {
     resume_method: std::sync::Mutex<Option<ResumeMethod>>,
     model_config_id: Mutex<Option<String>>,
     mode_config_id: Mutex<Option<String>>,
+    runtime_axis_ids: Mutex<Vec<String>>,
     /// ACP has no standard system/developer-instruction field. The adapter
     /// therefore carries product guidance as a clearly delimited leading text
     /// block on each prompt, while the daemon timeline retains only user text.
@@ -590,6 +603,11 @@ impl AcpSession {
             let setup = parse_session_new(&result)?;
             *self.model_config_id.lock().await = setup.model_config_id.clone();
             *self.mode_config_id.lock().await = setup.mode_config_id.clone();
+            *self.runtime_axis_ids.lock().await = setup
+                .runtime_axes
+                .iter()
+                .map(|axis| axis.id.clone())
+                .collect();
             setup.session_id
         };
         *self.acp_session.lock().await = Some(session_id.clone());
@@ -600,6 +618,9 @@ impl AcpSession {
         }
         if let Some(mode_id) = config.mode_id.as_ref() {
             self.set_mode(mode_id).await?;
+        }
+        for (axis_id, value_id) in &config.runtime_values {
+            self.set_runtime_axis(axis_id, value_id).await?;
         }
         Ok(())
     }
@@ -612,7 +633,7 @@ impl AcpSession {
             .ok_or_else(|| anyhow!("the ACP session was never established"))
     }
 
-    async fn set_config_option(&self, config_id: &str, value: &str) -> Result<()> {
+    async fn set_config_option(&self, config_id: &str, value: Value) -> Result<()> {
         let session_id = self.session_id().await?;
         self.call(
             "session/set_config_option",
@@ -760,7 +781,7 @@ impl AgentSession for AcpSession {
             .await
             .clone()
             .unwrap_or_else(|| "model".into());
-        self.set_config_option(&config_id, model_id).await
+        self.set_config_option(&config_id, json!(model_id)).await
     }
 
     async fn set_mode(&self, mode_id: &str) -> Result<()> {
@@ -780,9 +801,22 @@ impl AgentSession for AcpSession {
                     .await
                     .clone()
                     .unwrap_or_else(|| "mode".into());
-                self.set_config_option(&config_id, mode_id).await
+                self.set_config_option(&config_id, json!(mode_id)).await
             }
         }
+    }
+
+    async fn set_runtime_axis(&self, axis_id: &str, value_id: &str) -> Result<()> {
+        if !self
+            .runtime_axis_ids
+            .lock()
+            .await
+            .iter()
+            .any(|known| known == axis_id)
+        {
+            anyhow::bail!("ACP agent did not offer runtime axis '{axis_id}'");
+        }
+        self.set_config_option(axis_id, json!(value_id)).await
     }
 
     async fn respond_permission(
@@ -884,6 +918,7 @@ fn hello_from_setup(setup: Setup) -> Hello {
         default_mode: setup.default_mode,
         model_config_id: setup.model_config_id,
         mode_config_id: setup.mode_config_id,
+        runtime_axes: setup.runtime_axes,
     }
 }
 
@@ -925,6 +960,7 @@ fn parse_session_new(result: &Value) -> Result<Setup> {
         .to_string();
     let (models, default_model) = models_in(result);
     let (modes, default_mode) = modes_in(result);
+    let runtime_axes = runtime_axes_in(result);
     Ok(Setup {
         session_id,
         models,
@@ -933,6 +969,7 @@ fn parse_session_new(result: &Value) -> Result<Setup> {
         default_mode,
         model_config_id: config_id_for_category(result, "model"),
         mode_config_id: config_id_for_category(result, "mode"),
+        runtime_axes,
     })
 }
 
@@ -1124,6 +1161,84 @@ fn config_id_for_category(result: &Value, category: &str) -> Option<String> {
         .and_then(|option| option.get("id"))
         .and_then(Value::as_str)
         .map(ToString::to_string)
+}
+
+fn runtime_axes_in(result: &Value) -> Vec<RuntimeAxisInfo> {
+    config_options_in(result)
+        .into_iter()
+        .flatten()
+        .filter(|option| {
+            !matches!(
+                option.get("category").and_then(Value::as_str),
+                Some("model" | "mode")
+            )
+        })
+        .filter_map(|option| {
+            let id = option.get("id")?.as_str()?.to_string();
+            let label = option
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&id)
+                .to_string();
+            let description = option
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let (values, default_value) = match option.get("type").and_then(Value::as_str) {
+                Some("select") => {
+                    let values = flatten_select_options(
+                        option
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]),
+                    )
+                    .into_iter()
+                    .filter(|(id, _, _)| !id.is_empty())
+                    .map(|(id, label, description)| RuntimeAxisValue {
+                        id,
+                        label,
+                        description,
+                    })
+                    .collect::<Vec<_>>();
+                    let current = option
+                        .get("currentValue")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    (values, current)
+                }
+                Some("boolean") => {
+                    let current = option
+                        .get("currentValue")
+                        .and_then(Value::as_bool)
+                        .map(|value| value.to_string());
+                    (
+                        vec![
+                            RuntimeAxisValue {
+                                id: "false".into(),
+                                label: "关闭".into(),
+                                description: None,
+                            },
+                            RuntimeAxisValue {
+                                id: "true".into(),
+                                label: "开启".into(),
+                                description: None,
+                            },
+                        ],
+                        current,
+                    )
+                }
+                _ => return None,
+            };
+            (!values.is_empty()).then_some(RuntimeAxisInfo {
+                id,
+                label,
+                description,
+                values,
+                default_value,
+            })
+        })
+        .collect()
 }
 
 async fn answered<R>(lines: &mut tokio::io::Lines<BufReader<R>>, id: i64) -> Option<Value>
@@ -2082,6 +2197,23 @@ mod tests {
                     "category": "mode",
                     "currentValue": "agent",
                     "options": [{"value": "agent", "name": "Agent"}]
+                },
+                {
+                    "type": "select",
+                    "id": "fast",
+                    "name": "Fast",
+                    "currentValue": "standard",
+                    "options": [
+                        {"value": "standard", "name": "标准"},
+                        {"value": "fast", "name": "快速"},
+                        {"value": "max", "name": "极速"}
+                    ]
+                },
+                {
+                    "type": "boolean",
+                    "id": "autoApply",
+                    "name": "自动应用",
+                    "currentValue": true
                 }
             ]
         }))
@@ -2096,6 +2228,13 @@ mod tests {
         assert_eq!(setup.modes[1].id, "plan");
         assert_eq!(setup.models.len(), 2);
         assert_eq!(setup.models[1].id, "composer-2.5[fast=true]");
+        assert_eq!(setup.runtime_axes.len(), 2);
+        assert_eq!(setup.runtime_axes[0].id, "fast");
+        assert_eq!(setup.runtime_axes[0].values.len(), 3);
+        assert_eq!(
+            setup.runtime_axes[0].default_value.as_deref(),
+            Some("standard")
+        );
     }
 
     #[test]
@@ -2122,6 +2261,27 @@ mod tests {
         .expect("fixture parses");
         assert_eq!(setup.models[0].id, "sonnet");
         assert_eq!(setup.modes[0].id, "plan");
+    }
+
+    #[test]
+    fn parameters_inside_opaque_model_ids_do_not_invent_runtime_axes() {
+        let setup = parse_session_new(&json!({
+            "sessionId": "s1",
+            "configOptions": [{
+                "type": "select",
+                "id": "model",
+                "category": "model",
+                "currentValue": "grok-4.6[effort=high,fast=true]",
+                "options": [{
+                    "value": "grok-4.6[effort=high,fast=true]",
+                    "name": "grok-4.6"
+                }]
+            }]
+        }))
+        .expect("fixture parses");
+
+        assert!(setup.runtime_axes.is_empty());
+        assert_eq!(setup.models[0].id, "grok-4.6[effort=high,fast=true]");
     }
 
     #[test]

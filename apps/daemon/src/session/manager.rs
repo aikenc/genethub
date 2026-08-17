@@ -247,6 +247,7 @@ impl SessionManager {
         agent_id: &str,
         model_id: Option<String>,
         mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
         title: Option<String>,
     ) -> Result<SessionSummary> {
         // Fail before creating anything if the agent is not real.
@@ -255,6 +256,7 @@ impl SessionManager {
         let now = now_ms();
         let meta = SessionMeta {
             effort_id: None,
+            runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
@@ -438,6 +440,7 @@ impl SessionManager {
             .as_deref()
             .and_then(|title| title_from(&format!("{title} · 分支")));
         let meta = SessionMeta {
+            runtime_values: Default::default(),
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: target.workspace_id.unwrap_or(source_meta.workspace_id),
             format: SESSION_FORMAT,
@@ -630,6 +633,7 @@ impl SessionManager {
         };
         let now = now_ms();
         let meta = SessionMeta {
+            runtime_values: Default::default(),
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
@@ -839,6 +843,7 @@ impl SessionManager {
             model_id: None,
             mode_id: None,
             effort_id: None,
+            runtime_values: Default::default(),
             created_at_ms,
             updated_at_ms,
             archived: false,
@@ -1695,8 +1700,18 @@ impl SessionManager {
         if live.agent.lock().await.is_some() {
             return Ok(());
         }
-        let meta = live.meta.lock().await.clone();
+        let mut meta = live.meta.lock().await.clone();
         let adapter = self.registry.require(&meta.agent_id)?;
+        let offered = adapter.catalog(providers).await;
+        if normalize_runtime_selection(&mut meta, &offered) {
+            tracing::warn!(
+                agent = %meta.agent_id,
+                session = %meta.id,
+                "recovered stale runtime selection against the current Agent catalog"
+            );
+            self.store.save_meta(&meta)?;
+            *live.meta.lock().await = meta.clone();
+        }
 
         // One start of this kind of agent at a time.
         //
@@ -1732,6 +1747,7 @@ impl SessionManager {
             model_id: meta.model_id.clone(),
             mode_id: mode_override.clone().or_else(|| meta.mode_id.clone()),
             effort_id: meta.effort_id.clone(),
+            runtime_values: meta.runtime_values.clone(),
             additional_system_prompt: additional_system_prompt.clone(),
             scratch_dir: scratch.clone(),
             providers: providers.clone(),
@@ -1939,6 +1955,45 @@ impl SessionManager {
         }
         live.publish(SessionEvent::EffortChanged {
             effort_id: effort_id.to_string(),
+        })
+        .await;
+        Ok(())
+    }
+
+    pub async fn set_runtime_axis(
+        &self,
+        session_id: &str,
+        axis_id: &str,
+        value_id: &str,
+        providers: &ProviderMap,
+    ) -> Result<()> {
+        let live = self.live(session_id).await?;
+        let offered = self.offered(&live, providers).await?;
+        let axis = offered
+            .runtime_axes
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|axis| axis.id == axis_id)
+            .ok_or_else(|| anyhow!("agent did not offer runtime axis '{axis_id}'"))?;
+        listed(
+            &format!("value for {}", axis.label),
+            value_id,
+            axis.values.iter().map(|value| value.id.as_str()),
+        )?;
+        if let Some(agent) = live.agent.lock().await.as_ref() {
+            agent.set_runtime_axis(axis_id, value_id).await?;
+        }
+        {
+            let mut meta = live.meta.lock().await;
+            meta.runtime_values
+                .insert(axis_id.to_string(), value_id.to_string());
+            meta.updated_at_ms = now_ms();
+            self.store.save_meta(&meta)?;
+        }
+        live.publish(SessionEvent::RuntimeAxisChanged {
+            axis_id: axis_id.to_string(),
+            value_id: value_id.to_string(),
         })
         .await;
         Ok(())
@@ -3383,6 +3438,11 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             let mut meta = live.meta.lock().await;
             meta.effort_id = Some(effort_id.clone());
         }
+        SessionEvent::RuntimeAxisChanged { axis_id, value_id } => {
+            let mut meta = live.meta.lock().await;
+            meta.runtime_values
+                .insert(axis_id.clone(), value_id.clone());
+        }
         SessionEvent::SessionStatusChanged { status } => {
             *live.status.lock().await = *status;
         }
@@ -3483,6 +3543,80 @@ fn listed<'a>(axis: &str, value: &str, offered: impl Iterator<Item = &'a str>) -
     )
 }
 
+/// Reconcile durable choices with what this Agent offers *now*.
+/// Catalog-less Agents remain opaque; declared catalogs are authoritative.
+fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> bool {
+    let before = (
+        meta.model_id.clone(),
+        meta.mode_id.clone(),
+        meta.effort_id.clone(),
+        meta.runtime_values.clone(),
+    );
+
+    if !catalog.models.is_empty()
+        && meta
+            .model_id
+            .as_ref()
+            .is_some_and(|id| !catalog.models.iter().any(|model| &model.id == id))
+    {
+        meta.model_id = catalog
+            .default_model
+            .as_ref()
+            .filter(|id| catalog.models.iter().any(|model| &model.id == *id))
+            .cloned()
+            .or_else(|| catalog.models.first().map(|model| model.id.clone()));
+    }
+    if !catalog.modes.is_empty()
+        && meta
+            .mode_id
+            .as_ref()
+            .is_some_and(|id| !catalog.modes.iter().any(|mode| &mode.id == id))
+    {
+        meta.mode_id = catalog
+            .default_mode
+            .as_ref()
+            .filter(|id| catalog.modes.iter().any(|mode| &mode.id == *id))
+            .cloned()
+            .or_else(|| catalog.modes.first().map(|mode| mode.id.clone()));
+    }
+
+    if !catalog.models.is_empty() {
+        let efforts = meta
+            .model_id
+            .as_ref()
+            .and_then(|id| catalog.models.iter().find(|model| &model.id == id))
+            .map(|model| model.efforts.as_slice())
+            .unwrap_or(&[]);
+        if meta
+            .effort_id
+            .as_ref()
+            .is_some_and(|id| !efforts.contains(id))
+        {
+            meta.effort_id = catalog
+                .default_effort
+                .as_ref()
+                .filter(|id| efforts.contains(id))
+                .cloned();
+        }
+    }
+
+    if let Some(axes) = catalog.runtime_axes.as_deref() {
+        meta.runtime_values.retain(|axis_id, value_id| {
+            axes.iter().any(|axis| {
+                &axis.id == axis_id && axis.values.iter().any(|value| &value.id == value_id)
+            })
+        });
+    }
+
+    before
+        != (
+            meta.model_id.clone(),
+            meta.mode_id.clone(),
+            meta.effort_id.clone(),
+            meta.runtime_values.clone(),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3499,6 +3633,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             model_id: None,
             mode_id: None,
+            runtime_values: Default::default(),
             created_at_ms: 0,
             updated_at_ms: 0,
             archived: false,
@@ -3662,6 +3797,7 @@ mod tests {
                 models: Vec::new(),
                 modes: Vec::new(),
                 commands: Vec::new(),
+                runtime_axes: None,
                 default_model: None,
                 default_mode: None,
                 default_effort: None,
@@ -3771,6 +3907,7 @@ mod tests {
                 }],
                 modes: Vec::new(),
                 commands: Vec::new(),
+                runtime_axes: None,
                 default_model: Some("model".into()),
                 default_mode: None,
                 default_effort: None,
@@ -3893,6 +4030,7 @@ mod tests {
                 "source",
                 None,
                 None,
+                Default::default(),
                 Some("Deploy".into()),
             )
             .await
@@ -4038,6 +4176,7 @@ mod tests {
                 "source",
                 None,
                 None,
+                Default::default(),
                 Some("Portable".into()),
             )
             .await
@@ -4168,6 +4307,7 @@ mod tests {
                 "source",
                 Some("model".into()),
                 None,
+                Default::default(),
                 None,
             )
             .await
@@ -4217,6 +4357,7 @@ mod tests {
                 "source",
                 Some("model".into()),
                 None,
+                Default::default(),
                 None,
             )
             .await
@@ -4276,6 +4417,7 @@ mod tests {
                 "source",
                 Some("model".into()),
                 None,
+                Default::default(),
                 None,
             )
             .await
@@ -6912,6 +7054,87 @@ mod tests {
             resumed = current.store.save_meta(&meta());
         }
         resumed.expect("the current build had to restart after the legacy owner exited");
+    }
+
+    #[test]
+    fn stale_runtime_choices_are_reconciled_before_agent_start() {
+        let mut session = meta();
+        session.model_id = Some("grok-4.6[effort=high,fast=false]".into());
+        session.mode_id = Some("withdrawn-mode".into());
+        session.effort_id = Some("withdrawn-effort".into());
+        session.runtime_values.insert("fast".into(), "max".into());
+        session
+            .runtime_values
+            .insert("withdrawn-axis".into(), "on".into());
+
+        let catalog = Catalog {
+            models: vec![genehub_proto::ModelInfo {
+                id: "grok-4.6".into(),
+                label: "Grok 4.6".into(),
+                context_window: None,
+                reasoning: true,
+                efforts: vec!["medium".into(), "high".into()],
+            }],
+            modes: vec![genehub_proto::ModeInfo {
+                id: "agent".into(),
+                label: "Agent".into(),
+                description: None,
+            }],
+            commands: Vec::new(),
+            runtime_axes: Some(vec![genehub_proto::RuntimeAxisInfo {
+                id: "fast".into(),
+                label: "Fast".into(),
+                description: None,
+                values: vec![
+                    genehub_proto::RuntimeAxisValue {
+                        id: "standard".into(),
+                        label: "标准".into(),
+                        description: None,
+                    },
+                    genehub_proto::RuntimeAxisValue {
+                        id: "fast".into(),
+                        label: "快速".into(),
+                        description: None,
+                    },
+                    genehub_proto::RuntimeAxisValue {
+                        id: "max".into(),
+                        label: "极速".into(),
+                        description: None,
+                    },
+                ],
+                default_value: Some("standard".into()),
+            }]),
+            default_model: Some("grok-4.6".into()),
+            default_mode: Some("agent".into()),
+            default_effort: Some("medium".into()),
+        };
+
+        assert!(normalize_runtime_selection(&mut session, &catalog));
+        assert_eq!(session.model_id.as_deref(), Some("grok-4.6"));
+        assert_eq!(session.mode_id.as_deref(), Some("agent"));
+        assert_eq!(session.effort_id.as_deref(), Some("medium"));
+        assert_eq!(
+            session.runtime_values.get("fast").map(String::as_str),
+            Some("max")
+        );
+        assert!(!session.runtime_values.contains_key("withdrawn-axis"));
+    }
+
+    #[test]
+    fn a_catalog_probe_failure_does_not_erase_opaque_runtime_choices() {
+        let mut session = meta();
+        session.model_id = Some("agent-owned-model".into());
+        session.effort_id = Some("agent-owned-effort".into());
+        session.runtime_values.insert("fast".into(), "max".into());
+        let before = session.clone();
+
+        assert!(!normalize_runtime_selection(
+            &mut session,
+            &Catalog::default()
+        ));
+        assert_eq!(session.model_id, before.model_id);
+        assert_eq!(session.effort_id, before.effort_id);
+        assert_eq!(session.runtime_values, before.runtime_values);
     }
 
     #[tokio::test]
