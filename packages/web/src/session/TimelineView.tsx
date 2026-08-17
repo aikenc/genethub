@@ -129,11 +129,14 @@ const CURRENT_MACHINE: ForkMachineOption = {
 export function TimelineView({
   state,
   forkController,
+  bottomInset = 0,
   onScrollBack,
   onReturnToBottom,
 }: {
   state: TimelineState;
   forkController?: ForkController;
+  /** Overlay clearance added to scroll content without shrinking its viewport. */
+  bottomInset?: number;
   /** Fired once a sustained drag back through history says the reader has left
    * the end of the transcript, so the composer can get out of the way. */
   onScrollBack?(): void;
@@ -169,8 +172,9 @@ export function TimelineView({
   // counts as new content: it is the one thing the sender is certainly watching
   // for.
   useEffect(() => {
-    if (pinned) bottom.current?.scrollIntoView({ block: "end" });
-  }, [state.items, state.pending, rounds, pinned]);
+    const element = scroller.current;
+    if (pinned && element) element.scrollTo?.({ top: element.scrollHeight });
+  }, [state.items, state.pending, rounds, pinned, bottomInset]);
 
   const returnToBottom = () => {
     const element = scroller.current;
@@ -189,6 +193,7 @@ export function TimelineView({
         ref={scroller}
         className="mx-auto h-full min-w-0 max-w-chat flex-1 space-y-4 overflow-x-hidden overflow-y-auto px-4 py-6"
         data-testid="timeline"
+        style={{ paddingBottom: `calc(1.5rem + ${bottomInset}px)` }}
         onScroll={(event) => {
           const element = event.currentTarget;
           const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
@@ -278,7 +283,10 @@ export function TimelineView({
         ) : null}
         <div ref={bottom} />
       </div>
-      <div className="pointer-events-none absolute inset-x-0 bottom-3 px-4">
+      <div
+        className="pointer-events-none absolute inset-x-0 px-4"
+        style={{ bottom: `calc(0.75rem + ${bottomInset}px)` }}
+      >
         <div className="mx-auto flex max-w-chat justify-end">
           <button
             type="button"

@@ -107,10 +107,16 @@ describe("what the user sees in a session", () => {
       turnId: "t1",
       item: { type: "assistantMessage", id: "a1", text: "很久以前" },
     });
-    render(<TimelineView state={state} onReturnToBottom={onReturnToBottom} />);
+    render(
+      <TimelineView state={state} bottomInset={128} onReturnToBottom={onReturnToBottom} />,
+    );
 
     const scroller = screen.getByTestId("timeline");
     const back = screen.getByRole("button", { name: "回到最新消息" });
+    expect(scroller).toHaveStyle({ paddingBottom: "calc(1.5rem + 128px)" });
+    expect(back.parentElement?.parentElement).toHaveStyle({
+      bottom: "calc(0.75rem + 128px)",
+    });
     expect(back).toHaveClass("opacity-0");
 
     stubScrollport(scroller, { scrollHeight: 4000, clientHeight: 800, scrollTop: 1200 });
@@ -1320,19 +1326,20 @@ describe("the controls offered to the user", () => {
     geometry();
   });
 
-  it("takes its room from the layout rather than from a measured number", () => {
-    const { container, rerender } = render(<Composer {...composerProps()} />);
+  it("overlays the transcript and reports its unzoomed layout height", () => {
+    const onHeightChange = vi.fn();
+    const { container, rerender } = render(
+      <Composer {...composerProps({ onHeightChange })} />,
+    );
     const shell = container.querySelector("[data-composer-shell]")!;
 
-    // The transcript is a flex sibling, so whatever the composer happens to be
-    // — one collapsed line, a grown draft, a command menu — is already out of
-    // the transcript's box. Floating it and reserving the gap from a measured
-    // pixel height cannot work under the UI-scale `zoom`: the reading and the
-    // padding that consumes it are in different coordinate spaces, and the
-    // collapsed bar never reports a height at all because the card unmounts.
-    expect(shell).not.toHaveClass("absolute");
-    rerender(<Composer {...composerProps({ minimized: true })} />);
-    expect(container.querySelector("[data-composer-shell]")).not.toHaveClass("absolute");
+    expect(shell).toHaveClass("absolute", "bottom-0");
+    expect(shell).toHaveStyle({
+      paddingBottom: "calc(var(--keyboard, 0px) + env(safe-area-inset-bottom, 0px))",
+    });
+    Object.defineProperty(shell, "offsetHeight", { value: 73, configurable: true });
+    rerender(<Composer {...composerProps({ minimized: true, onHeightChange })} />);
+    expect(onHeightChange).toHaveBeenLastCalledWith(73);
   });
 
   it("tucks into a tap target when minimized, and comes back on tap", async () => {
