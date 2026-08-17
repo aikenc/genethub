@@ -790,6 +790,11 @@ export function App({
                       effortId={
                         workbench.timeline.effortId ?? draft?.effortId ?? null
                       }
+                      runtimeValues={
+                        workbench.activeSessionId
+                          ? workbench.timeline.runtimeValues
+                          : (draft?.runtimeValues ?? {})
+                      }
                       // A message in flight locks the Agent too: switching would
                       // open a new conversation and abandon it.
                       agentLocked={
@@ -841,6 +846,9 @@ export function App({
                       onPickModel={(id) => void workbench.setModel(id)}
                       onPickMode={(id) => void workbench.setMode(id)}
                       onPickEffort={(id) => void workbench.setEffort(id)}
+                      onPickRuntimeAxis={(axisId, valueId) =>
+                        void workbench.setRuntimeAxis(axisId, valueId)
+                      }
                     />
                   </>
                 ) : (

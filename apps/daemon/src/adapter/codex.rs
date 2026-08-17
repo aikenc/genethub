@@ -293,6 +293,7 @@ impl AgentAdapter for CodexAdapter {
         };
         let hello = self.hello(&program).await.unwrap_or_default();
         Catalog {
+            runtime_axes: None,
             models: hello.models,
             modes: MODES
                 .iter()

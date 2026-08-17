@@ -58,6 +58,9 @@ pub enum Request {
         #[serde(default)]
         mode_id: Option<String>,
         #[serde(default)]
+        #[ts(optional)]
+        runtime_values: Option<std::collections::BTreeMap<String, String>>,
+        #[serde(default)]
         title: Option<String>,
         /// Where the agent starts, inside the workspace. Absent means the
         /// workspace root, which is what every client sent before this field
@@ -256,6 +259,12 @@ pub enum Request {
     SessionSetEffort {
         session_id: String,
         effort_id: String,
+    },
+    #[serde(rename = "session.setRuntimeAxis", rename_all = "camelCase")]
+    SessionSetRuntimeAxis {
+        session_id: String,
+        axis_id: String,
+        value_id: String,
     },
     #[serde(rename = "session.respondPermission", rename_all = "camelCase")]
     SessionRespondPermission {

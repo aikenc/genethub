@@ -25,6 +25,7 @@ export interface AgentRuntimeMemory {
   modelId?: string;
   modeId?: string;
   effortId?: string;
+  runtimeValues?: Record<string, string>;
 }
 
 export interface WorkspaceRuntimeMemory {
@@ -37,6 +38,7 @@ export interface RuntimeChoice {
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  runtimeValues: Record<string, string>;
   /**
    * Whether this project has been worked on before, as opposed to inheriting
    * the last choice made anywhere. Only its own history outranks the
@@ -77,7 +79,16 @@ export function recallRuntimeChoice(
   const agent = agents.find(
     (candidate) => candidate.id === wanted && canStartAgent(candidate),
   );
-  if (!agent) return { agentId: null, modelId: null, modeId: null, effortId: null, scoped };
+  if (!agent) {
+    return {
+      agentId: null,
+      modelId: null,
+      modeId: null,
+      effortId: null,
+      runtimeValues: {},
+      scoped,
+    };
+  }
 
   const axes = remembered.agents?.[agent.id] ?? {};
   // An Agent that publishes no catalog owns its own defaults, so a model id we
@@ -96,8 +107,16 @@ export function recallRuntimeChoice(
   const efforts = agent.catalog.models.find((model) => model.id === modelId)?.efforts ?? [];
   const effortId =
     axes.effortId && (opaque || efforts.includes(axes.effortId)) ? axes.effortId : null;
+  const runtimeValues = Object.fromEntries(
+    (agent.catalog.runtimeAxes ?? []).flatMap((axis) => {
+      const valueId = axes.runtimeValues?.[axis.id];
+      return valueId && axis.values.some((value) => value.id === valueId)
+        ? [[axis.id, valueId]]
+        : [];
+    }),
+  );
 
-  return { agentId: agent.id, modelId, modeId, effortId, scoped };
+  return { agentId: agent.id, modelId, modeId, effortId, runtimeValues, scoped };
 }
 
 /** Records one axis, or several, as this project's answer and as the latest one. */
@@ -113,7 +132,18 @@ export function rememberRuntimeChoice(
     agentId,
     agents: {
       ...before.agents,
-      [agentId]: { ...before.agents?.[agentId], ...axes },
+      [agentId]: {
+        ...before.agents?.[agentId],
+        ...axes,
+        ...(axes.runtimeValues
+          ? {
+              runtimeValues: {
+                ...before.agents?.[agentId]?.runtimeValues,
+                ...axes.runtimeValues,
+              },
+            }
+          : {}),
+      },
     },
   };
   write({

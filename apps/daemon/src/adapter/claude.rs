@@ -513,6 +513,7 @@ impl AgentAdapter for ClaudeAdapter {
         let commands = hello.as_ref().map(commands_in).unwrap_or_default();
         let modes = self.modes(&program).await;
         Catalog {
+            runtime_axes: None,
             // Which level it is on right now is not in anything it tells us, and
             // guessing would put a wrong answer on screen — the picker offers
             // "default" for exactly this reason.
@@ -2602,6 +2603,7 @@ mod tests {
                 cwd: dir.path().to_path_buf(),
                 model_id: None,
                 mode_id: None,
+                runtime_values: Default::default(),
                 scratch_dir: dir.path().to_path_buf(),
                 providers: Default::default(),
                 resume: None,

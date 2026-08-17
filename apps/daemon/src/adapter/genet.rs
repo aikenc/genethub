@@ -148,6 +148,7 @@ impl AgentAdapter for GenetAdapter {
             })
             .collect();
         Catalog {
+            runtime_axes: None,
             commands: vec![
                 CommandInfo {
                     name: "skill:genehub-session-history".into(),

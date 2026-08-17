@@ -16,6 +16,7 @@ export function RuntimeSettingsPanel({
   onPickModel,
   onPickMode,
   onPickEffort,
+  onPickRuntimeAxis,
 }: {
   id: string;
   selection: RuntimeSelection;
@@ -27,6 +28,7 @@ export function RuntimeSettingsPanel({
   onPickModel(id: string): void;
   onPickMode(id: string): void;
   onPickEffort(id: string): void;
+  onPickRuntimeAxis(axisId: string, valueId: string): void;
 }) {
   const panel = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
@@ -100,6 +102,7 @@ export function RuntimeSettingsPanel({
             onPickModel={onPickModel}
             onPickMode={onPickMode}
             onPickEffort={onPickEffort}
+            onPickRuntimeAxis={onPickRuntimeAxis}
           />
         </div>
       </section>
