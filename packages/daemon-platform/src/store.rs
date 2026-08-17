@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempPath};
 
 use crate::artifact::{ArtifactVerifier, SignedArtifact, VerifiedArtifact};
 use crate::error::{PlatformError, Result};
@@ -189,10 +189,7 @@ fn replace_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     temporary.as_file_mut().write_all(bytes)?;
     temporary.as_file_mut().sync_all()?;
     let temporary = temporary.into_temp_path();
-    atomic_replace(&temporary, path)?;
-    // The rename consumed the temporary path. `keep` would try to persist it
-    // again, so prevent TempPath's Drop from unlinking the now-missing name.
-    let _ = temporary.keep();
+    temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -231,41 +228,15 @@ fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-#[cfg(unix)]
 fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
-    fs::rename(source, destination)?;
+    // TempPath provides the same overwrite-by-rename operation on Unix and
+    // Windows without putting platform FFI in the trust kernel. This path is
+    // an already durable staged candidate, not a disposable tempfile, so a
+    // failed persist must leave it available for the next recovery attempt.
+    let mut source = TempPath::try_from_path(source.to_path_buf())?;
+    source.disable_cleanup(true);
+    source.persist(destination).map_err(|error| error.error)?;
     Ok(())
-}
-
-#[cfg(windows)]
-fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt as _;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
-    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) } == 0 {
-        return Err(PlatformError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn atomic_replace(_source: &Path, _destination: &Path) -> Result<()> {
-    Err(PlatformError::State(
-        "atomic update-file replacement is unsupported on this platform".to_string(),
-    ))
 }
 
 #[cfg(unix)]
