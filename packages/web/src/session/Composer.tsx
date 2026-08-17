@@ -73,6 +73,7 @@ export function Composer({
   onPickModel,
   onPickMode,
   onPickEffort,
+  onHeightChange,
   onRestoreDraft,
   onInsertDraft,
   minimized,
@@ -107,6 +108,8 @@ export function Composer({
   onPickModel(id: string): void;
   onPickMode(id: string): void;
   onPickEffort?(id: string): void;
+  /** Reports the complete overlay height in unzoomed layout pixels. */
+  onHeightChange?(height: number): void;
   /** Acknowledges that `restoreDraft` has been taken into the field. */
   onRestoreDraft?(): void;
   /** Acknowledges that `insertDraft` has been appended to the field. */
@@ -128,6 +131,7 @@ export function Composer({
   const commandMenuId = `composer-commands-${useId()}`;
   const textarea = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
+  const shell = useRef<HTMLDivElement>(null);
   const speechInput = useSpeechInput({
     target: speech,
     getDraft: () => ({
@@ -292,24 +296,36 @@ export function Composer({
     return () => window.removeEventListener("resize", update);
   }, []);
 
+  useLayoutEffect(() => {
+    const element = shell.current;
+    if (!element || !onHeightChange) return;
+    // `offsetHeight` and the padding that consumes this value are both layout
+    // pixels. A visual `getBoundingClientRect()` height already contains the
+    // document's UI `zoom`, so feeding it back into a declaration inside that
+    // same zoomed document scales it twice.
+    const update = () => onHeightChange(element.offsetHeight);
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [minimized, onHeightChange]);
+
   return (
     <div
+      ref={shell}
       data-composer-shell=""
-      // In the transcript's flow, not floating over it. The room the composer
-      // needs is whatever it happens to be — one collapsed line, a command
-      // menu, four lines of draft — and a flex row sized `auto` reserves
-      // exactly that. Measuring the card in JS and feeding the number back as
-      // the transcript's bottom padding could not: `zoom` puts the reading and
-      // the declaration in different coordinate spaces, so every UI size but
-      // the unzoomed one reserved the wrong gap.
-      className="pointer-events-none z-10 shrink-0 px-3 pt-2 md:px-4"
+      // The transparent shell overlays the full-height transcript. Only its
+      // interactive children catch taps; TimelineView reserves this measured
+      // height at the end of its scroll *content*, not from its viewport.
+      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-2 md:px-4"
       style={{
-        // Above the on-screen keyboard, and clear of the home indicator when
-        // there is none. The shell is a fixed box that the keyboard covers
-        // rather than shrinks (`shell/viewport.ts`), so without this the field
-        // being typed into would be behind it.
+        // Sit on the window edge. Lift only for the on-screen keyboard
+        // (`shell/viewport.ts`: the shell is covered, not shrunk) and a real
+        // home-indicator inset. A minimum 0.75rem here left a half-line gap
+        // on every screen that has no safe area.
         paddingBottom:
-          "calc(var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)))",
+          "calc(var(--keyboard, 0px) + env(safe-area-inset-bottom, 0px))",
       }}
     >
       {minimized ? (

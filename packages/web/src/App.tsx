@@ -125,6 +125,7 @@ export function App({
   >(() => (host.pendingPairing?.() ? "working" : "idle"));
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [composerHeight, setComposerHeight] = useState(128);
   const [composerMinimized, setComposerMinimized] = useState(false);
   // Two different questions. `sessionsOpen` is the phone's drawer, which starts
   // shut because it covers the conversation; `sidebarHidden` is someone on a
@@ -643,6 +644,7 @@ export function App({
                           <TimelineView
                             state={workbench.timeline}
                             {...(forkController ? { forkController } : {})}
+                            bottomInset={composerHeight}
                             onScrollBack={() => setComposerMinimized(true)}
                             onReturnToBottom={() => setComposerMinimized(false)}
                           />
@@ -711,6 +713,7 @@ export function App({
                       }
                       onRestoreDraft={workbench.restoredDraft}
                       onInsertDraft={workbench.consumedComposerDraftInsert}
+                      onHeightChange={setComposerHeight}
                       minimized={composerMinimized}
                       onExpand={() => setComposerMinimized(false)}
                       onSend={(text, attachments) =>
