@@ -1489,10 +1489,17 @@ describe("the controls offered to the user", () => {
     );
     const shell = container.querySelector("[data-composer-shell]")!;
 
-    expect(shell).toHaveClass("absolute", "bottom-0");
+    expect(shell).toHaveClass("absolute", "bottom-0", "max-md:px-0");
     expect(shell).toHaveStyle({
-      paddingBottom: "calc(var(--keyboard, 0px) + env(safe-area-inset-bottom, 0px))",
+      paddingBottom: "var(--keyboard, 0px)",
     });
+    const card = container.querySelector("[data-composer-card]");
+    expect(card).toHaveClass(
+      "max-md:rounded-b-none",
+      "max-md:border-x-0",
+      "max-md:border-b-0",
+      "max-md:pb-[env(safe-area-inset-bottom,0px)]",
+    );
     Object.defineProperty(shell, "offsetHeight", { value: 73, configurable: true });
     rerender(<Composer {...composerProps({ minimized: true, onHeightChange })} />);
     expect(onHeightChange).toHaveBeenLastCalledWith(73);
@@ -1503,7 +1510,12 @@ describe("the controls offered to the user", () => {
     render(<Composer {...composerProps({ minimized: true, onExpand })} />);
 
     expect(screen.queryByLabelText("任务描述")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "展开输入框" }));
+    const compact = screen.getByRole("button", { name: "展开输入框" });
+    expect(compact).toHaveClass(
+      "max-md:rounded-b-none",
+      "max-md:pb-[env(safe-area-inset-bottom,0px)]",
+    );
+    await userEvent.click(compact);
     expect(onExpand).toHaveBeenCalled();
   });
 

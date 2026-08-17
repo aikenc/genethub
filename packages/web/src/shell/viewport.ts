@@ -19,10 +19,10 @@ export function watchViewport(): () => void {
   if (!viewport || !root) return () => {};
 
   const apply = () => {
-    // Negative on the frames where the two disagree mid-animation, and a
-    // negative inset would lift the composer off the bottom of the screen.
-    const covered = Math.max(0, globalThis.innerHeight - viewport.height);
-    root.style.setProperty("--keyboard", `${Math.round(covered)}px`);
+    root.style.setProperty(
+      "--keyboard",
+      `${keyboardCoveredPx(globalThis.innerHeight, viewport)}px`,
+    );
   };
 
   apply();
@@ -35,4 +35,19 @@ export function watchViewport(): () => void {
     viewport.removeEventListener("scroll", apply);
     root.style.removeProperty("--keyboard");
   };
+}
+
+/**
+ * Gap between the layout viewport's bottom edge and the visual viewport's.
+ *
+ * Safari's collapsing URL bar shrinks `height` from the top and grows
+ * `offsetTop` by the same amount. That is not keyboard coverage; treating it
+ * as one lifts the composer off the screen and leaves a strip of transcript
+ * showing under the card. Negative values happen mid-animation.
+ */
+export function keyboardCoveredPx(
+  innerHeight: number,
+  viewport: Pick<VisualViewport, "height" | "offsetTop">,
+): number {
+  return Math.max(0, Math.round(innerHeight - viewport.height - viewport.offsetTop));
 }
