@@ -50,7 +50,12 @@ fn the_bundle_contains_only_a_boot_surface_then_opens_fixed_web() {
         serde_json::json!("../boot")
     );
     assert!(config["build"].get("beforeBuildCommand").is_none());
-    assert!(!config.to_string().contains("packages/web"));
+    // `beforeDevCommand` may start the Web dev server for `tauri dev`; it is
+    // not an installer input. Only frontendDist and bundle resources decide
+    // what ships in the App.
+    assert!(!config["bundle"]["resources"]
+        .to_string()
+        .contains("packages/web"));
 
     let boot = read(repo().join("apps/desktop/boot/index.html"));
     assert!(boot.contains("GeneHub 正在启动"));
@@ -504,7 +509,7 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
         ),
         (
             "packages/web/src/channel.ts",
-            "export const CHANNEL: \"dev\" | \"official\" | \"beta\" | \"alpha\" = \"dev\";",
+            "const STAMPED_CHANNEL: ReleaseChannel = \"dev\";",
         ),
     ];
     for (path, marker) in modules {
