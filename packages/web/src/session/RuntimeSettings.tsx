@@ -214,6 +214,23 @@ export function RuntimeSettings({
           </fieldset>
         ) : null}
 
+        {current?.id === "cursor" && selection.model && /(?:^|,)fast=(true|false)(?:,|\])/.test(selection.model.id) ? (
+          <fieldset disabled={settingsDisabled} className="min-w-0">
+            <legend className="text-[10px] font-medium uppercase tracking-wide text-faint">
+              Fast 模式
+            </legend>
+            <label className="mt-1 flex h-8 w-fit cursor-pointer items-center gap-2 rounded-full border border-line px-2.5 text-xs text-muted has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:checked]:text-fg">
+              <input
+                type="checkbox"
+                checked={/fast=true(?:,|\])/.test(selection.model.id)}
+                onChange={(event) => onPickModel(cursorVariantWith(selection.model!.id, "fast", String(event.target.checked)))}
+                className="sr-only"
+              />
+              { /fast=true(?:,|\])/.test(selection.model.id) ? "已开启" : "已关闭" }
+            </label>
+          </fieldset>
+        ) : null}
+
         {current?.capabilities.setMode && modes.length > 0 ? (
           <fieldset disabled={settingsDisabled} className="min-w-0">
             <legend className="text-[10px] font-medium uppercase tracking-wide text-faint">
@@ -276,6 +293,10 @@ export function RuntimeSettings({
       </div>
     </div>
   );
+}
+
+function cursorVariantWith(model: string, key: string, value: string) {
+  return model.replace(new RegExp(`(${key}=)(true|false)`), `$1${value}`);
 }
 
 /**
