@@ -32,8 +32,17 @@ import type { ComposerDraftInsert } from "./store";
  */
 export type ComposerPhase = "idle" | "sending" | "running";
 
+/** Phone: the card reaches the window edge. Safe-area padding is inside that
+ * opaque surface so a transcript row cannot show through underneath. */
+const COMPOSER_PHONE_DOCK =
+  "max-md:rounded-b-none max-md:border-x-0 max-md:border-b-0 max-md:bg-surface max-md:pb-[env(safe-area-inset-bottom,0px)] max-md:shadow-[0_-6px_20px_rgb(0_0_0_/0.28)] max-md:backdrop-blur-none";
+
 /**
  * Floating input at the bottom of the chat pane.
+ *
+ * On a phone it docks: the card's own background reaches the window edge and
+ * the home-indicator inset is padding *inside* that surface, so a transcript
+ * row cannot show through underneath. Desktop keeps the floating rounded card.
  *
  * The card has one size. It used to shrink to a single 28px line whenever focus
  * left it and grow back on click, which meant every control under it — the
@@ -322,14 +331,14 @@ export function Composer({
       // The transparent shell overlays the full-height transcript. Only its
       // interactive children catch taps; TimelineView reserves this measured
       // height at the end of its scroll *content*, not from its viewport.
-      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-2 md:px-4"
+      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-2 md:px-4 max-md:px-0"
       style={{
-        // Sit on the window edge. Lift only for the on-screen keyboard
-        // (`shell/viewport.ts`: the shell is covered, not shrunk) and a real
-        // home-indicator inset. A minimum 0.75rem here left a half-line gap
-        // on every screen that has no safe area.
-        paddingBottom:
-          "calc(var(--keyboard, 0px) + env(safe-area-inset-bottom, 0px))",
+        // Lift only for the on-screen keyboard (`shell/viewport.ts`: the
+        // shell is covered, not shrunk). The home-indicator inset lives
+        // *inside* the card so the opaque surface reaches the window edge
+        // on a phone; putting it on this transparent shell left a strip of
+        // transcript showing under the rounded card.
+        paddingBottom: "var(--keyboard, 0px)",
       }}
     >
       {minimized ? (
@@ -338,7 +347,7 @@ export function Composer({
           aria-expanded={false}
           aria-label="展开输入框"
           data-composer-minimized=""
-          className="pointer-events-auto mx-auto flex w-full max-w-chat items-center gap-2 rounded-2xl border border-line-strong bg-surface/95 px-4 py-2.5 text-left shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur"
+          className={`pointer-events-auto mx-auto flex w-full max-w-chat items-center gap-2 rounded-2xl border border-line-strong bg-surface/95 px-4 py-2.5 text-left shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur ${COMPOSER_PHONE_DOCK}`}
           onClick={() => onExpand?.()}
         >
           <span className="min-w-0 flex-1 truncate text-sm text-muted">
@@ -389,7 +398,7 @@ export function Composer({
       {!minimized ? (
       <div
         data-composer-card=""
-        className={`pointer-events-auto mx-auto max-w-chat rounded-2xl border bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur transition-colors ${
+        className={`pointer-events-auto mx-auto max-w-chat rounded-2xl border bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur transition-colors ${COMPOSER_PHONE_DOCK} ${
           focused ? "border-muted/50" : "border-line-strong"
         }`}
       >
