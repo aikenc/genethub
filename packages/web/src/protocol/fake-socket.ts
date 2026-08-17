@@ -249,6 +249,28 @@ export class FakeSocket implements WebSocketLike {
 
     const body = await collectBody(stream.body(), 4 * 1024 * 1024);
     const id = String(stream.id);
+    if (method === "platform.logic.identity") {
+      this.sent.push({ id, type: method });
+      this.streams.set(id, stream);
+      await this.respond(
+        id,
+        { status: 200, metadata: null },
+        new TextEncoder().encode(
+          JSON.stringify({
+            channel: "dev",
+            logicRevision: 1,
+            platformAbi: 19,
+            protocolVersion:
+              identity.protocolVersion ??
+              this.options.identity?.protocolVersion ??
+              DATA_PLANE_VERSION,
+            digest: "0".repeat(64),
+            origin: "bundled",
+          }),
+        ),
+      );
+      return;
+    }
     if (method === "rpc") {
       const request = JSON.parse(new TextDecoder().decode(body)) as Request;
       this.sent.push({
@@ -276,6 +298,13 @@ export class FakeSocket implements WebSocketLike {
           },
         });
       }
+      return;
+    }
+
+    if (method === "platform.patch") {
+      const request = JSON.parse(new TextDecoder().decode(body)) as Record<string, unknown>;
+      this.sent.push({ id, type: method, payload: request });
+      this.streams.set(id, stream);
       return;
     }
 

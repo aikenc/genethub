@@ -13,7 +13,7 @@
 一个 agent 能不能用、接的是哪个模型、密钥存在哪，都是那个 CLI 自己的事，由用户按那个 CLI 自己的文档配置（环境变量、它自己的配置文件、或登录态）。daemon 该做的只有两件事：
 
 1. 探测这个 CLI 在不在（`probe`），在就把它列进选择器。
-2. 拉起子进程，按它公开的协议（stdio JSONL / ACP / HTTP+SSE）收发帧，翻译成本项目统一的时间线事件。
+2. 拉起子进程，按它公开的协议（stdio JSONL / ACP / 原生 JSON-RPC）收发帧，翻译成本项目统一的时间线事件。
 
 daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或者在中间做协议转换。做了就等于把它的实现细节焊进了我们的抽象层，下一个版本它一改内部协议，我们就得跟着改——这正是 [architecture.md](./architecture.md) 反复强调不能做的事。
 
@@ -26,20 +26,20 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | id | 传输 | 说明 |
 |----|------|------|
 | `genet` | 子进程 + stdio JSONL | 我们自己写的兜底 agent，见 [builtin-agent.md](./builtin-agent.md) |
-| `opencode` | 本地 HTTP + SSE | 探测 `opencode` 二进制；模型/密钥全在它自己的 `opencode.json` |
+| `opencode` | 每回合一个 `opencode run --format json` 子进程 | 持久化它返回的 session id，下一回合用 `--session` 恢复；模型/密钥仍全在它自己的配置中 |
 | `claude` | 子进程 + 原生 `stream-json` stdio | 探测 `claude` 二进制本身（`@anthropic-ai/claude-code`），daemon 直接说它的原生协议，见 §3 |
 | `codex` | 子进程 + 原生 `app-server` JSON-RPC | 探测 `codex` 二进制本身，daemon 直接说它的 `app-server` 协议，见 §4 |
 | `cursor` | 子进程 + ACP over stdio | 探测 `cursor-agent` 二进制本身，说它自己发布的 ACP（`cursor-agent acp`），见 §5 |
 | `acp` | 子进程 + ACP over stdio | 兜底条目，探测一个叫 `acp-agent` 的二进制；真正常用的是下面的自定义声明 |
 
-`claude` 在代码里是 `adapter::claude::ClaudeAdapter`——直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。原生协议让我们保留模型、思考档位、模式、真实提问与权限请求的完整语义；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `apps/daemon/src/adapter/claude.rs` 顶部的模块文档。
+`claude` 由 portable session driver 直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。原生协议让我们保留模型、思考档位、模式、真实提问与权限请求的完整语义；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `packages/daemon-core/src/session/claude.rs` 顶部的模块文档。
 
 ### 2.1 默认放权矩阵
 
 | Agent | daemon 启动时的默认放权 |
 |-------|-------------------------|
 | Genet | 不做工作区目录限制；文件工具接受绝对路径，命令继承 daemon 用户权限 |
-| OpenCode | `OPENCODE_PERMISSION` 注入全工具、外部目录与网络全允许策略 |
+| OpenCode | `--dangerously-skip-permissions` + `OPENCODE_PERMISSION` 全允许策略 |
 | Claude Code | `bypassPermissions` + `--allow-dangerously-skip-permissions`，并关闭 CLI sandbox |
 | Codex | `approval_policy="never"` + `sandbox_mode="danger-full-access"`，新会话默认 `full-access` |
 | Cursor | `--force --sandbox disabled --trust --approve-mcps acp` |
@@ -67,7 +67,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | Genet | CLI `--add-system-prompt` |
 | Claude Code | CLI `--append-system-prompt` |
 | Codex | app-server `thread/start` / `thread/resume` 的 `developerInstructions` |
-| OpenCode | message API 的 `system` |
+| OpenCode | `OPENCODE_CONFIG_CONTENT` 中专用 `genehub` agent 的 `prompt` |
 | Cursor / 自定义 ACP | 标准 ACP 没有 system 字段；每个 `session/prompt` 的首个 text block 是明确标记的 GeneHub context，下一 block 才是原样 user request |
 
 这不是允许 Web 客户端提交任意 system prompt 的接口。RPC 仍可传 `artifactPreviewBaseUrl` 以兼容旧客户端，但 daemon 忽略部署前缀，只注入自有的路径链接指引（工作区相对文件路径、禁止目录、HTML 入口与支持类型）；用户消息在 GeneHub 时间线中保持原样。新增产品上下文先扩展 `SessionConfig`，再由各 adapter 映射，禁止在 session manager 里按 agent id 分支。
@@ -131,17 +131,17 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 
 在显式较低权限模式下，`can_use_tool` 的选项仍会被归一化成暂停卡片；但 daemon 不再维持一个等待回复的 Claude 进程，批准后恢复同一个原生会话继续。
 
-粘贴图片现在会作为附件随消息一起发：`claude`（Anthropic 内容块）、`codex`（先落到 scratch 再发 `localImage` 路径）、`opencode`（`file` part + data URL）、经 `acp` 声明的 agent（ACP `image` 内容块）都会转发；`genet` 自己的 provider 层还不接受图片，见 [roadmap.md](./roadmap.md)「明确不做」。
+粘贴图片现在会作为附件随消息一起发：`claude`（Anthropic 内容块）、`codex`（先落到 scratch 再发 `localImage` 路径）、`opencode`（落到会话 scratch 后以 `--file` 传入）、经 `acp` 声明的 agent（ACP `image` 内容块）都会转发；`genet` 自己的 provider 层还不接受图片，见 [roadmap.md](./roadmap.md)「明确不做」。
 
 ---
 
 ## 4. Codex：直接说它自己的 `app-server` 协议
 
-`codex` 在代码里是 `adapter::codex::CodexAdapter`——拉起 `codex app-server`，说它自己的 JSON-RPC（stdio、双向），不经过任何 wrapper。这样能完整保留 thread 恢复、模型、思考档位、沙箱模式，以及权限请求和真实用户问题的区别。顺带还去掉了一个没人猜得到的安装步骤——之前注册的是 `codex-acp` 桥接包，于是装了 `codex` 的人被告知「Codex 未安装」。
+`codex` 的 portable driver 在 `packages/daemon-core/src/session/codex.rs`——拉起 `codex app-server`，说它自己的 JSON-RPC（stdio、双向），不经过任何 wrapper。这样能完整保留 thread 恢复、模型、思考档位、沙箱模式，以及权限请求和真实用户问题的区别。顺带还去掉了一个没人猜得到的安装步骤——之前注册的是 `codex-acp` 桥接包，于是装了 `codex` 的人被告知「Codex 未安装」。
 
-协议细节（版本漂移从此归我们跟：以下是对着 codex-cli 0.145.0 实测的）见 `apps/daemon/src/adapter/codex.rs` 顶部的模块文档。挑几条影响用户能看见什么的：
+协议细节（版本漂移从此归我们跟：以下是对着 codex-cli 0.145.0 实测的）见 `packages/daemon-core/src/session/codex.rs` 顶部的模块文档。挑几条影响用户能看见什么的：
 
-- **三个选择器都是真的，而且一个 RPC 都不用额外发。** 这个 CLI 的 `turn/start` 参数里同时带着 model、`effort`、`approvalPolicy` 和 `sandboxPolicy`，所以「切模型」「切档位」「切模式」在我们这边只是记下来，下一回合原样带过去。首个 prompt 之前进程还没起（`session::manager::ensure_started`），这也是唯一能让那时的选择不被丢掉的接法。
+- **三个选择器都是真的，而且一个 RPC 都不用额外发。** 这个 CLI 的 `turn/start` 参数里同时带着 model、`effort`、`approvalPolicy` 和 `sandboxPolicy`，所以「切模型」「切档位」「切模式」在我们这边只是记下来，下一回合原样带过去。首个 prompt 之前进程还没起（`packages/daemon-core/src/session/mod.rs` 的统一启动路径），这也是唯一能让那时的选择不被丢掉的接法。
 - **模型表和档位问它要。** `model/list` 回的每个模型都带自己的 `supportedReasoningEfforts`（这台机器上是 `low/medium/high/xhigh/max/ultra`）和一个默认档位，原样进选择器。校验在我们这边：它不会替我们拒绝一个不存在的模型名，只会在下一回合安静地用回原来那个。
 - **模式是两个设置的组合，不是一个开关。** 它自己的词汇是 `approvalPolicy`（`on-request` / `never`）加 `sandbox`（`read-only` / `workspace-write` / `danger-full-access`）。界面仍可显式选择较低档位，但默认是完全放行：不询问、全盘可写并允许联网。启动 `app-server` 本身也带同样的最高权限配置，避免“会话选了 full-access，宿主进程却仍被另一层沙箱拦住”。
 - **审批按对象分成三条请求**，都是它反过来问我们：命令执行、文件改动（都回 `{"decision":"accept"|"decline"|"cancel"}`），以及一条「问用户」的选择题（回 `{"answers":{...}}`）。它问什么我们都得回——一条不回，它就一直等。所以渲染不了的（多个问题一次问、要自由文本、MCP 的表单）也照样回，回的是「没人回答」而不是替用户选一个。
@@ -171,7 +171,7 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 
 ## 5. Cursor：走它自己发布的 ACP
 
-`cursor` 在代码里是 `adapter::acp::AcpAdapter` 的一个默认条目——拉起 `cursor-agent acp`，说 [ACP](https://agentclientprotocol.com/)，这个 CLI 自己发布的嵌入协议。没有像 Claude 和 Codex 那样写原生适配器，因为 Cursor 没有一份公开的、值得跟进维护的原生协议，而 ACP 已经把我们需要的暴露出来了：权限请求（`session/request_permission`）、模式切换和图片附件都在协议里。
+`cursor` 复用 `packages/daemon-core/src/session/acp.rs` 的 portable driver——拉起 `cursor-agent acp`，说 [ACP](https://agentclientprotocol.com/)，这个 CLI 自己发布的嵌入协议。没有像 Claude 和 Codex 那样写另一份私有协议驱动，因为 Cursor 已经通过 ACP 暴露了权限请求（`session/request_permission`）、模式切换和图片附件。
 
 实际启动命令会附带 `--force --sandbox disabled --trust --approve-mcps`，因此 Cursor 自己的 CLI 层也默认放权；若仍收到 ACP 权限请求，就进入 §2.2 的持久化暂停/恢复流程。
 
@@ -212,7 +212,7 @@ cursor-agent login
 
 外部 CLI 退出的原因只有它自己知道，而它说这句话的地方是 stderr。以前那些行走 `tracing::debug!`（默认级别 `info`，即被丢弃），用户看到的是一句「Claude Code stopped unexpectedly.」——凭据没配、CLI 版本不认识我们传的参数、Windows 上的 shim 找不到 node，三种情况长得一模一样，而且没有一种能据此往下走。
 
-现在每个适配器都留着子进程的最后二十行（`adapter::Chatter`），并且：
+现在统一 session driver 为每个 Agent 进程保留最多 32 KiB stderr，并且：
 
 | 情形 | 用户看到的 |
 |------|-----------|
@@ -246,6 +246,4 @@ Allowed choices are acceptEdits, auto, bypassPermissions, default, dontAsk, plan
 
 ### 超时是我们自己定的，就得由我们自己解释
 
-OpenCode 的 HTTP 客户端曾经带着 300 秒总超时，而那个 POST 是**整轮对话**：一个跑得久一点的编码任务会被我们掐断，然后报成「超时」——agent 那边其实还在干活。现在只对「连上 loopback」设上限（10 秒，连不上就是连不上），对话本身不设。
-
-事件流断掉也会记一行：流没了之后，回合不再是流式的，答案只在这一轮结束时整段出现——「没有流式」和「卡住了」在屏幕上长得一模一样。
+OpenCode 以前走本地 HTTP/SSE，曾经把 HTTP 客户端的 300 秒总超时错误地套在**整轮对话**上。portable driver 已改用官方 CLI 的 `run --format json` 流：每回合一个由 daemon 追踪的子进程，不再启动本地 HTTP server，也没有由 GeneHub 猜测的整轮超时。输出仍按 JSON 行流式进入统一时间线；进程异常退出时保留有界 stderr，并按可操作的错误类别结束回合。

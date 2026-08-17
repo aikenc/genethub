@@ -9,22 +9,22 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
 ## 1. 一句话架构
 
 ```
-     浏览器 / 桌面 / 手机  ← 同一份工作台前端
+     官网 / Desktop WebView / 手机浏览器  ← 同一份工作台前端
               │
               │  protocol-v3 DataEndpoint（本仓 packages/proto 定义）：
-              │   ① 同机 127.0.0.1 WebSocket
-              │   ② 跨设备 /fabric/v2 E2EE baseline
-              │   ③ 网络允许时 WebRTC DataChannel direct
+              │   ① 官网 /fabric/v2 E2EE baseline
+              │   ② 网络允许时 WebRTC DataChannel direct
+              │   ③ CLI、自建直连与运维可用 loopback WebSocket
               ▼
         ┌──────────┐         出站 WS        ┌───────────┐
         │  daemon  │ ─── /fabric/v2 ──────► │   relay   │
         │ （你的机器）│                        │ 只搬字节   │
         └────┬─────┘                        └─────┬─────┘
-             │  Adapter 层（每种 agent 一个）        │ 四个 Fabric authority 操作
-             ├─ genet    自研内置 agent              ▼
-             ├─ acp      一份适配覆盖一批 CLI    ┌──────────────┐
-             ├─ opencode 本地 HTTP + SSE        │  控制面       │
-             └─ …                              │ 本仓之外的服务 │
+             │  signed Rust/Wasm application       │ 四个 Fabric authority 操作
+             │   ├─ genet / claude / codex drivers  ▼
+             │   ├─ ACP（Cursor / custom agents）┌──────────────┐
+             │   └─ opencode JSON run stream     │  控制面       │
+             └─ policy-free OS capabilities      │ 本仓之外的服务 │
                                                └──────────────┘
 ```
 
@@ -36,9 +36,12 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
 
 后面所有取舍都从这四条推导。
 
-### B1. Agent 是插件，内核不认识任何具体 agent
+### B1. Agent 是 portable driver，native platform 不认识任何具体 agent
 
-daemon 业务代码里不允许出现 `if agent == "genet"`。具体 agent 的知识只能存在于它自己的 adapter 文件里。
+具体 Agent 的命令、握手和事件知识只存在于签名 Wasm 应用的 registry、driver
+模块及统一 session dispatcher。native platform/system 只认识有界的进程、文件、
+PTY 等 capability，不允许按 `genet` / `codex` / `opencode` 分支，也不存在第二套
+native Agent 实现。
 
 ### B2. 客户端协议是产品资产，不是某个 agent 的协议
 
@@ -46,9 +49,12 @@ daemon 业务代码里不允许出现 `if agent == "genet"`。具体 agent 的�
 
 所以 daemon 内部定义一套与任何 agent 无关的 `TimelineItem` / `SessionEvent`，每个 adapter 负责翻译。前端只认这一套。
 
-### B3. 一个 adapter 的抽象等于没有抽象
+### B3. 一个 driver 的抽象等于没有抽象
 
-只接自研 agent 时写出来的"抽象层"必然是自研 agent 的形状。因此 MVP 就必须跑通**两种形状截然不同**的 agent（stdio JSONL + 本地 HTTP/SSE），抽象才算被证伪过一次。这条决定了排期，不是可以往后挪的锦上添花。
+只接自研 Agent 时写出来的归一化层必然是自研协议的形状。因此产品同时覆盖
+Genet JSONL、Claude stream-json、Codex app-server、ACP，以及 OpenCode 的
+每回合 JSON run stream。它们共享一个可序列化 session/process 状态机，但保留
+各自 driver；这样 VM 热替换和 daemon 冷重启都不依赖一个活着的协议对象。
 
 ### B4. relay 不理解它搬运的东西
 
@@ -56,35 +62,37 @@ relay 只认 Fabric 帧头与 opaque endpoint/route admission，不 parse E2EE p
 
 ---
 
-## 3. Adapter 层
+## 3. Portable Agent 层
 
 ### 3.1 三段式
 
 ```
-Registry        ── 有哪些 agent、装没装、有哪些模型和模式
+Registry        ── 有哪些 Agent、装没装、有哪些模型和模式
    ↓
-Transport       ── 怎么跟它说话（子进程 stdio / JSON-RPC / HTTP）
+Serializable driver ── 协议握手、恢复句柄、逐帧解析与响应
    ↓
-Normalizer      ── 把它的事件翻成 GeneHub 的 TimelineItem
+Process capability  ── policy-free native stdin/stdout/stderr/kill-tree
+   ↓
+Normalizer          ── 把事件翻成 GeneHub 的 TimelineItem
 ```
 
-### 3.2 Adapter 契约
+### 3.2 Driver 契约
 
 ```rust
-#[async_trait]
-pub trait AgentAdapter: Send + Sync {
-    fn id(&self) -> &str;                       // "genet" / "acp:cursor" / "opencode"
-    fn capabilities(&self) -> Capabilities;     // 支不支持中断、切模型、审批、恢复
-
-    async fn probe(&self) -> Probe;             // 二进制在不在、能不能握手
-    async fn catalog(&self) -> Result<Catalog>; // 模型与模式清单
-
-    async fn start(&self, cfg: SessionConfig) -> Result<Box<dyn AgentSession>>;
-    async fn resume(&self, handle: PersistHandle) -> Result<Box<dyn AgentSession>>;
+#[derive(Serialize, Deserialize)]
+enum Driver {
+    Genet(genet::Driver),
+    Claude(claude::Driver),
+    Codex(codex::Driver),
+    OpenCode(opencode::Driver),
+    Acp(acp::Driver),
 }
 ```
 
-能力差异用 `Capabilities` 声明，**不用返回 `Unsupported` 错误来试探**：前端要在按钮渲染前就知道这个 agent 能不能切模型，而不是点了才报错。
+registry 仍显式声明 `Capabilities`，前端在渲染按钮前就知道能否中断、切模型、
+切模式或恢复。driver 只解释协议；启动、stdin/stdout、退出、持久暂停与恢复由
+`packages/daemon-core/src/session/mod.rs` 的统一状态机执行。完整 driver 状态与原生
+session id 都进入业务域自己的耐久 session 数据；Wasm 冷更新时不搬运运行时内存。
 
 模型、**思考强度**、**模式**是三条独立的轴，不要混用。思考强度是「想多久」（`ModelInfo.efforts` 里由模型自己报出档位，`session.setEffort` 切换）；模式是「动手前问不问」（`Catalog.modes`，`session.setMode`）。这两件事曾经共用一个 `modeId` 字段——内置 agent 拿它当思考档位，Claude 拿它当工具审批策略——于是同一个控件在不同 agent 下是两个毫不相干的意思，唯一的区分办法是去读另一个能力位。一条轴一件事之后，前端不需要知道是哪个 agent 就能把控件画对。
 
@@ -93,12 +101,14 @@ pub trait AgentAdapter: Send + Sync {
 | adapter | 传输 | 覆盖 | 阶段 |
 |---------|------|------|------|
 | `genet` | 子进程 + stdio JSONL | 自研内置 agent，装完即可跑 | MVP |
-| `opencode` | 本地 HTTP + SSE | OpenCode | MVP |
+| `opencode` | 每回合 `run --format json` 子进程 | OpenCode | MVP |
 | `claude` | 子进程 + 原生 `stream-json` stdio | Claude Code，直接拉起 `claude` 二进制 | MVP |
 | `codex` | 子进程 + 原生 `app-server` JSON-RPC | Codex，直接拉起 `codex app-server` | MVP |
 | `acp` | 子进程 + ACP over stdio | 一份代码覆盖 Cursor / Gemini / goose 等一批 CLI | MVP |
 
-五个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一批 agent**，`opencode` 是**形状差异最大的那个**——它不是 stdio 而是本地 HTTP + SSE，`claude` 和 `codex` 是**我们绕开 ACP、直接说其原生协议的两个**。
+五个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一批 Agent**，
+`opencode` 验证每回合新进程 + 原生 session id 的恢复模型，`claude` 和 `codex`
+是**绕开 ACP、直接说其原生协议的两个**。
 
 这两个为什么值得自己写一份：ACP 是一份公开、双方都维护的契约，代价小；原生协议翻译要我们自己跟着对方的版本走。当前 ACP 已有 `session/request_permission` 和标准 `session/resume`，足够覆盖 Cursor 等通用接入；Claude 和 Codex 的原生协议仍提供更完整的模型、思考档位、模式、提问语义与会话恢复能力。`codex` 的 `model/list` 会报出每个模型自己的思考档位，而 `turn/start` 每回合都带 model / effort / 审批策略，所以三个选择器都是真的。两个都曾经挂在额外 ACP 桥接包上，也都因此让只装了官方 CLI 的人被告知「未安装」。详见 [third-party-agents.md](./third-party-agents.md)。
 
@@ -235,22 +245,26 @@ interface FabricAuthority {
 
 ### 6.6 baseline 与 direct
 
-桌面壳内的 WebView 直连同一台机器的 `127.0.0.1`。跨设备先走 `/fabric/v2` baseline，再通过加密的 `rtc.negotiate` Exchange 协商 ordered reliable DataChannel。RTC connected 后新 logical streams 优先 direct；RTC 失败或关闭时 baseline 继续承载同一 v3 协议。没有 TURN、live migration 或自动重放。
+官网、桌面 WebView 和手机浏览器都先走 `/fabric/v2` baseline，再通过加密的 `rtc.negotiate` Exchange
+协商 ordered reliable DataChannel。同机连接应优先拿到 host candidate；RTC connected 后新 logical
+streams 优先 direct，失败或关闭时 baseline 继续承载同一 v3 协议。没有 TURN、live migration 或自动
+重放。loopback 只保留给 CLI、Desktop 原生监督和运维，不向官网产品页开放。
 
 完整数据面见 [e2ee-data-plane.md](./e2ee-data-plane.md)，Relay 实现边界见 [relay.md](./relay.md)。
 
 ---
 
-## 7. 前端：一份代码，四个宿主
+## 7. 前端：一份代码，四个入口
 
 | 宿主 | 怎么来的 | 连哪里 |
 |------|---------|--------|
-| 浏览器 | 直接访问 | relay 票据 |
-| 桌面（Tauri） | 系统 WebView 加载同一份产物 | 本机 daemon |
-| 手机（Tauri Mobile） | 同上 | relay |
-| 自建部署 | 静态文件 | 同浏览器 |
+| 浏览器 | 直接访问官网 | Fabric ticket，随后可升级 WebRTC |
+| 桌面（Tauri） | 系统 WebView 打开固定 channel 官网 | 与浏览器相同；同机优先 WebRTC direct |
+| 手机浏览器 | 直接访问同一官网 | 与浏览器相同 |
+| 自建部署 | 自托管同一静态工作台 | 与浏览器相同 |
 
-宿主差异收敛在 `packages/web/src/host/` 一个模块里，业务组件不允许出现 `if (isTauri)`。范围与移动端约束见 [web-workbench.md](./web-workbench.md)。
+`packages/web/src/host/` 只封装浏览器差异与连接入口；远程页面没有 Tauri bridge，业务组件不允许出现
+`if (isTauri)`。范围与移动端约束见 [web-workbench.md](./web-workbench.md)。
 
 **本仓前端的范围是：会话、项目、文件、终端、以及你自己的设备管理。** 账号体系的界面不在本仓——它属于运营控制面的人，跟"用哪个 agent 干活"是两件事。
 
@@ -262,8 +276,8 @@ interface FabricAuthority {
 apps/daemon      ← Rust：会话内核 + adapter 层 + 本地 WS + 出站长连接
 apps/agent       ← Rust：内置 Genet Agent（众多 adapter 中的一个后端）
 apps/relay       ← Node：转发层。无数据库、无业务、可自建
-apps/desktop     ← 仅 Windows/macOS 的 Tauri 2 壳；复用 Web 工作台
-packages/web     ← 工作台前端（四个宿主同一份产物）
+apps/desktop     ← 仅 Windows/macOS 的最小 Tauri 2 壳；监督 daemon、鉴权并打开官网
+packages/web     ← 官网/浏览器工作台；Desktop WebView 直接消费已部署版本
 packages/proto   ← 会话协议的唯一定义处，生成 TS 类型与 Rust 结构
 skills/          ← 教 Agent 怎么用 genet CLI 的 Agent Skills
 testing/         ← 跨部件旅程测试（daemon + agent + mock 模型）

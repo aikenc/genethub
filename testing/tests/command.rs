@@ -354,13 +354,17 @@ async fn every_folder_of_a_multi_root_workspace_is_inside_the_confinement() {
         r#"{ "folders": [{ "path": "product" }, { "path": "docs" }] }"#,
     )
     .expect("a workspace file");
-    let suite = journey
-        .daemon()
-        .state
-        .workspaces
-        .open(&definition, None)
+    let suite = match journey
+        .client
+        .call(Request::WorkspaceOpen {
+            root: definition.display().to_string(),
+        })
         .await
-        .expect("the machine opens the multi-root workspace");
+        .expect("the machine opens the multi-root workspace")
+    {
+        Reply::Workspace(workspace) => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
     assert_eq!(suite.folders.len(), 2, "the fixture is not multi-root");
 
     let credential = pair_granting(&journey, &["read", "pty"]).await;

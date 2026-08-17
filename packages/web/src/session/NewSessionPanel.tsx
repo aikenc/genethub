@@ -2,7 +2,7 @@ import type { SessionSummary, WorkspaceInfo } from "@genehub/proto";
 import { RefreshCw } from "lucide-react";
 import { useState } from "react";
 
-import type { Endpoint, Host } from "../host";
+import type { Endpoint } from "../host";
 import { OpenProject } from "../workspace/OpenProject";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import { pickPromptSuggestions } from "./prompt-suggestions";
@@ -37,10 +37,8 @@ export const NEW_SESSION_PROJECT_PREVIEW_LIMIT = NEW_SESSION_WORKSPACE_PREVIEW_L
  * first message turns it into a session (`store.start`).
  */
 export function NewSessionPanel({
-  host,
   endpoint,
 }: {
-  host?: Host;
   endpoint?: Endpoint | null;
 } = {}) {
   const workspaces = useWorkbench((state) => state.workspaces);
@@ -71,8 +69,8 @@ export function NewSessionPanel({
           <h3 id="new-session-workspace" className="text-sm font-medium text-fg">
             工作区
           </h3>
-          {host && endpoint ? (
-            <OpenProject host={host} endpoint={endpoint} variant="inline" />
+          {endpoint ? (
+            <OpenProject endpoint={endpoint} variant="inline" />
           ) : null}
         </div>
         <ul className="mt-1 grid grid-cols-2 gap-x-1">

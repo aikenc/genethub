@@ -1,6 +1,6 @@
 # 技术栈选型
 
-> 约束：所有客户端基于**同一套 Web UI**；PC 安装包尽量小；内置 daemon 与默认 agent；PC 端不依赖 Node 运行时。  
+> 约束：所有客户端访问**同一套官网 Web UI**；PC 安装包尽量小；内置 daemon 与默认 agent；PC 端不依赖 Node 运行时。
 > 分层与边界以 [architecture.md](./architecture.md) 为准，本文只讲选型和理由。
 
 ---
@@ -9,7 +9,7 @@
 
 ```
 packages/proto        ← 会话协议唯一定义处，生成 TS 类型与 Rust 结构
-packages/web          ← 工作台（浏览器 / 桌面 / 手机同一份产物）
+packages/web          ← 官网工作台（浏览器 / 桌面 WebView / 手机浏览器）
 apps/daemon           ← Rust：会话内核 + agent adapter 层 + 三种接入通道
 apps/agent            ← Rust：内置 agent（adapter 的一个后端）
 apps/desktop          ← Windows/macOS Tauri 2 壳 + sidecar（daemon）
@@ -37,14 +37,16 @@ testing/              ← 跨部件旅程测试
 
 ```
 安装包（Windows NSIS · macOS dmg；Linux 不生成桌面包）
-├── Tauri WebView → 工作台
+├── Tauri WebView → 固定 channel 官网（包内只有无脚本 boot/error 页）
 ├── sidecar: genet daemon run（CLI 与 daemon 同一二进制；关窗后仍运行）
 ├── genet-agent（由 daemon 的 genet adapter 按需拉起）
 ├── 系统托盘：打开主界面 / 状态 / 退出
-└── 默认配置：本机直连，无需任何服务端
+└── auth-first：官网确认机器绑定后进入对应工作台
 ```
 
-**PC 端零 Node 运行时是硬约束**，但它禁的是运行时进程，不是技术栈：窗口内容依然是 `packages/web` 那套 H5，只是跑在系统 WebView 而不是 Node 上。Node 只允许出现在构建期（前端打包、tauri-cli）与服务端（relay）。约束细则与验收方式见 [desktop-client.md](./desktop-client.md) §4.1–4.2。
+**PC 端零 Node 运行时是硬约束**，但它禁的是运行时进程，不是技术栈：窗口内容依然是官网部署的
+`packages/web` H5，只是跑在系统 WebView 而不是 Node 上。Node 只允许出现在构建期（前端打包、
+tauri-cli）与服务端（relay）。约束细则与验收方式见 [desktop-client.md](./desktop-client.md)。
 
 ---
 
@@ -56,7 +58,7 @@ testing/              ← 跨部件旅程测试
 | daemon ↔ 前端 | 只走归一化会话协议；agent 的线格式不外泄 |
 | relay ↔ 控制面 | 版本化 Fabric HTTP 契约，只定义在 `apps/relay/src/contract/fabric-wire.ts` 并由 Cloud 镜像 |
 | 桌面壳 ↔ daemon | 进程分离，本地 WS 通信，不做进程内链接 |
-| 前端 ↔ 宿主 | 只经 `packages/web/src/host/`，业务组件不出现 `if (isTauri)` |
+| 官网前端 ↔ App 壳 | 无 JS bridge；原生壳只监督/鉴权并导航固定 HTTPS 页面 |
 | 协议定义 | 只在 `packages/proto`，前后端都从这里生成 |
 
 共同点：**每一条都对应一次可能的替换**——换 agent、换前端、换中转、换壳。边界守住了，替换就是替换；守不住就是重写。
@@ -67,11 +69,14 @@ testing/              ← 跨部件旅程测试
 
 | 路径 | 何时用 | 代价 |
 |------|--------|------|
-| loopback WebSocket | 桌面壳内 | 无公网依赖 |
+| loopback WebSocket | CLI、Desktop 原生监督与本机运维 | owner-only，不向官网页面暴露 |
 | `/fabric/v2` WSS baseline | 任何跨设备访问，包括同一个 Wi-Fi | 多一跳；托管模式需要 Control admission |
 | WebRTC DataChannel direct | baseline 已认证、双方启用且 ICE 可达 | 少一跳；MVP 无 TURN，不能保证成功 |
 
-三者承载同一 protocol-v3 E2EE record、logical streams 和 Exchange。跨设备始终先有 Fabric baseline，再通过加密 signaling 建立 RTC；RTC 失败时 baseline 继续可用。没有 live stream migration 或请求自动重放。断网时仍可在运行 daemon 的同一台电脑上使用桌面端。
+三者承载同一 protocol-v3 E2EE record、logical streams 和 Exchange。官网、桌面 WebView 与手机浏览器
+始终先有 Fabric baseline，再通过加密 signaling 建立 RTC；RTC 失败时 baseline 继续可用。没有 live
+stream migration 或请求自动重放。CLI 在断网时仍可通过 loopback 使用 resident daemon；官网 App 壳不
+承诺离线产品页面。
 
 ---
 
@@ -79,7 +84,8 @@ testing/              ← 跨部件旅程测试
 
 | 形态 | 需要跑什么 |
 |------|-----------|
-| 只在自己电脑上用 | 桌面端。没有服务端 |
+| 官方桌面体验 | Desktop + 官方 Hub/Fabric/官网 |
+| 只在自己电脑上离线用 | daemon + CLI |
 | 家里几台机器互访 | 桌面端 + relay（即使在同一局域网） |
 | 在外面访问家里 | 加一个 relay + 一个控制面，见 [self-hosting.md](./self-hosting.md) |
 

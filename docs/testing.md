@@ -122,7 +122,7 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 
 | 旅程 | 要验证的事 |
 |------|------------|
-| 跳过登录直接用 | 不登录也能跑完一条任务 |
+| 安装即鉴权 | 安装完成启动 App，官网登录/确认后保留 `desktopMachine` 并进入本机 |
 | 临时用户升级为正式账号 | 机器归属、设备会话、审计一并迁移，不丢机器 |
 | 一次性链接的四种结局 | 核销一次成功；第二次失败；过期失败；撤销后失败 |
 | 撤销设备 | 撤销后该设备立即失效 |
@@ -302,7 +302,7 @@ Windows/macOS **装包之后**的首启仍要每次发版手动过一遍主旅�
 
 全栈旅程这一条是分量最重的：其他前端测试都把 socket 假掉了，而"事件发到了一个没人监听的 topic"在假 socket 下和"没有事件"长得一模一样。它上线的第一天就抓到了这个 bug。
 
-两条专项测试同样不能省。OpenCode 是唯一形状不同的 adapter——HTTP 服务加独立事件流，而不是 stdio 子进程；只有让它真的跑起来，才知道归一化层是抽象而不是内置 agent 的别名。它接的模型后端与内置 agent 完全一致（mock 模式下配置文件里指向 mock 服务，真实模式下指向 DeepSeek），因此两种模式共用同一份用例。Claude Code 那条只能在真实模式跑：它说的是 Anthropic Messages 协议而不是 OpenAI 兼容协议，mock 服务没有实现那一套，硬跑只会验证出「mock 也不认识这个协议」这种没意义的失败。它连的是 DeepSeek 官方的 Anthropic 兼容端点，环境变量的配法与限制见 [third-party-agents.md](./third-party-agents.md)。Claude 的专项测试负责证明原生模式与中断控制真的生效；持久化暂停/恢复的跨 Agent 状态机由 daemon 测试覆盖。Codex 现在也是原生适配器（`adapter::codex`），但它还欠一条对称的真实专项测试：它没有可用的第三方后端可指（Codex 只认 Responses API，DeepSeek 只有 Chat Completions，见 [third-party-agents.md](./third-party-agents.md) §4.1），所以要跑在一个真登录了的 OpenAI 账号上。眼下协议翻译、最高权限启动参数、权限与问题分类、状态映射和计费统计由 `adapter::codex` 单元测试守住；端到端仍应在有登录态的机器上补齐。
+两条专项测试同样不能省。OpenCode 使用每回合 `run --format json` 新进程并靠原生 session id 恢复；只有让真实 CLI 跑起来，才能覆盖这条不同于 Genet 长连接 JSONL 的生命周期。它接的模型后端与内置 Agent 完全一致（mock 模式下配置文件指向 mock 服务，真实模式下指向 DeepSeek），因此两种模式共用同一份用例。Claude Code 那条只能在真实模式跑：它说的是 Anthropic Messages 协议而不是 OpenAI 兼容协议，mock 服务没有实现那一套，硬跑只会验证出「mock 也不认识这个协议」这种没意义的失败。它连的是 DeepSeek 官方的 Anthropic 兼容端点，环境变量的配法与限制见 [third-party-agents.md](./third-party-agents.md)。Claude 的专项测试负责证明原生模式与中断控制真的生效；持久化暂停/恢复的跨 Agent 状态机由 daemon 测试覆盖。Codex 也是原生 portable driver（`packages/daemon-core/src/session/codex.rs`），但它还欠一条对称的真实专项测试：它没有可用的第三方后端可指（Codex 只认 Responses API，DeepSeek 只有 Chat Completions，见 [third-party-agents.md](./third-party-agents.md) §4.1），所以要跑在一个真登录了的 OpenAI 账号上。眼下协议翻译、最高权限启动参数、权限与问题分类、状态映射和计费统计由 driver contract tests 守住；端到端仍应在有登录态的机器上补齐。
 
 ---
 

@@ -14,16 +14,14 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use genehub_proto::ServerFrame;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 use super::admission::Admission;
 use super::auth;
 use crate::dataplane::{endpoint, handshake};
-use crate::pty::PtyMessage;
 use crate::router;
 use crate::state::Shared;
 
@@ -42,24 +40,12 @@ pub struct Listener {
 ///
 /// A terminal is shared across a user's devices on purpose: picking up a
 /// running command on your phone is the point of the product.
-pub type PtyFanout = broadcast::Sender<ServerFrame>;
+pub type PtyFanout = broadcast::Sender<crate::logic::RoutedEvent>;
 
-/// Starts the pump that turns terminal output into client frames.
-pub fn pty_fanout(mut pty_rx: mpsc::Receiver<PtyMessage>) -> PtyFanout {
-    let (pty_tx, _) = broadcast::channel::<ServerFrame>(1024);
-    let fanout = pty_tx.clone();
-    tokio::spawn(async move {
-        while let Some(message) = pty_rx.recv().await {
-            let frame = match message {
-                PtyMessage::Output { pty_id, data } => ServerFrame::PtyOutput { pty_id, data },
-                PtyMessage::Closed { pty_id, exit_code } => {
-                    ServerFrame::PtyClosed { pty_id, exit_code }
-                }
-            };
-            let _ = fanout.send(frame);
-        }
-    });
-    pty_tx
+/// Creates the process-wide event bus. Native PTY/process bytes pass through
+/// the Wasm application before they are published here.
+pub fn pty_fanout() -> PtyFanout {
+    broadcast::channel::<crate::logic::RoutedEvent>(1024).0
 }
 
 pub async fn serve(state: Shared, pty_tx: PtyFanout) -> Result<Listener> {
@@ -474,7 +460,9 @@ async fn connection(
         &hello,
         None,
         None,
-    ) {
+    )
+    .await
+    {
         Ok(accepted) => accepted,
         Err(error) => {
             tracing::debug!(%error, "local data-plane handshake rejected");
@@ -564,7 +552,7 @@ pub fn websocket_admission(
     machine_id: &str,
     fingerprint: &str,
 ) -> LocalWebSocketAdmission {
-    let challenge = crate::devices::random_token();
+    let challenge = crate::channel_auth::random_token();
     let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
     let proof = websocket_proof(token, &challenge, pid, machine_id, fingerprint, expires_at);
     let server_proof =
@@ -649,10 +637,10 @@ mod tests {
     #[tokio::test]
     async fn websocket_admissions_are_single_use_short_lived_and_domain_separated() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+        let state = crate::AppState::build(crate::config::Paths::new(dir.path()))
             .await
             .unwrap();
-        let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
+        let listener = serve(state.clone(), pty_fanout()).await.unwrap();
         let admission = websocket_admission(
             listener.port,
             &state.token,
@@ -712,7 +700,7 @@ mod tests {
         let (socket, _) = tokio_tungstenite::connect_async(&fresh).await.unwrap();
         drop(socket);
 
-        let challenge = crate::devices::random_token();
+        let challenge = crate::channel_auth::random_token();
         let expired_at = unix_seconds().saturating_sub(1);
         let expired = websocket_proof(
             &state.token,
@@ -729,7 +717,7 @@ mod tests {
         );
         assert!(tokio_tungstenite::connect_async(expired_url).await.is_err());
 
-        let challenge = crate::devices::random_token();
+        let challenge = crate::channel_auth::random_token();
         let far_future = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS + 1);
         let far_future_proof = websocket_proof(
             &state.token,
@@ -748,7 +736,7 @@ mod tests {
             .await
             .is_err());
 
-        let challenge = crate::devices::random_token();
+        let challenge = crate::channel_auth::random_token();
         let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
         let wrong_domain = shutdown_proof(
             &state.token,
@@ -779,10 +767,10 @@ mod tests {
     #[tokio::test]
     async fn a_stop_asked_for_before_anyone_is_waiting_still_arrives() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+        let state = crate::AppState::build(crate::config::Paths::new(dir.path()))
             .await
             .unwrap();
-        let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
+        let listener = serve(state.clone(), pty_fanout()).await.unwrap();
 
         let challenge = "fresh-shutdown-challenge";
         let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
@@ -820,10 +808,10 @@ mod tests {
     #[tokio::test]
     async fn a_wrong_shutdown_proof_is_unauthorized_and_cannot_control_the_websocket() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+        let state = crate::AppState::build(crate::config::Paths::new(dir.path()))
             .await
             .unwrap();
-        let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
+        let listener = serve(state.clone(), pty_fanout()).await.unwrap();
         let challenge = "attacker-challenge";
         let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
         let health_mac = health_proof(
@@ -928,12 +916,12 @@ mod tests {
     #[tokio::test]
     async fn plaintext_lan_mode_fails_closed_instead_of_exposing_the_machine_bearer() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+        let state = crate::AppState::build(crate::config::Paths::new(dir.path()))
             .await
             .unwrap();
         state.config.write().await.lan_enabled = true;
 
-        let error = match serve(state, pty_fanout(pty_rx)).await {
+        let error = match serve(state, pty_fanout()).await {
             Ok(_) => panic!("plaintext LAN mode unexpectedly started"),
             Err(error) => error,
         };
@@ -943,10 +931,10 @@ mod tests {
     #[tokio::test]
     async fn health_proves_the_exact_private_endpoint_without_returning_its_bearer() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+        let state = crate::AppState::build(crate::config::Paths::new(dir.path()))
             .await
             .unwrap();
-        let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
+        let listener = serve(state.clone(), pty_fanout()).await.unwrap();
         let challenge = "fresh-health-challenge";
         let response = reqwest::get(format!(
             "http://127.0.0.1:{}/health?challenge={challenge}",

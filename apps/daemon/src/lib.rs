@@ -3,34 +3,27 @@
 //! Exposed as a library as well as a binary so integration tests can start a
 //! real daemon in-process instead of asserting against a mock of one.
 
-pub mod adapter;
 pub mod authz;
 pub mod channel;
 pub mod channel_auth;
 pub mod config;
 pub mod dataplane;
-pub mod devices;
 pub mod diagnostics;
 pub mod files;
-pub mod git;
 pub mod hub;
-pub mod isolation;
+pub use genet_daemon_system::isolation;
 pub mod lifecycle;
 pub mod link;
+pub mod logic;
 pub mod logs;
+pub mod patch;
 pub mod process;
-pub mod processes;
-pub mod provider;
-pub mod pty;
 pub mod remote;
 pub mod router;
 pub mod run;
-pub mod session;
 pub mod speech;
 pub mod state;
 pub mod transport;
-pub mod updates;
-pub mod workspace;
 
 use anyhow::Result;
 
@@ -45,16 +38,19 @@ pub struct Daemon {
 
 impl Daemon {
     pub async fn start(paths: config::Paths) -> Result<Self> {
-        let (state, pty_rx) = AppState::build(paths).await?;
-        state
-            .diagnostics
-            .record("daemon", "lifecycle", "started", None);
-        let pty = transport::local::pty_fanout(pty_rx);
+        let state = AppState::build(paths).await?;
+        if state.logic.is_none() {
+            #[cfg(not(test))]
+            anyhow::bail!("no verified daemon logic artifact is active");
+        }
+        let pty = transport::local::pty_fanout();
         // The same channel every client already listens on, handed to the state
         // so anything the machine wants to volunteer — download progress, for
         // one — reaches them without a second bus to subscribe to.
         let _ = state.fanout.set(pty.clone());
-        state.processes.announce_to(pty.clone());
+        if let Some(logic) = state.logic.as_ref() {
+            logic.start_event_pump(pty.clone()).await?;
+        }
         let listener = transport::local::serve(state.clone(), pty.clone()).await?;
         state.publish_endpoint(listener.port)?;
 
@@ -92,13 +88,14 @@ impl Daemon {
     /// Ordering matters: sessions first, so agents get their shutdown before
     /// the runtime goes away and leaves them orphaned.
     pub async fn shutdown(self) {
-        self.state.sessions.shutdown().await;
-        self.state.terminals.close_all().await;
         if let Some(link) = self.state.link.get() {
             link.stop().await;
         }
         if let Some(remote) = self.state.remote.get() {
             remote.stop().await;
+        }
+        if let Some(logic) = self.state.logic.as_ref() {
+            logic.shutdown().await;
         }
         self.listener.abort();
         let _ = std::fs::remove_file(self.state.paths.endpoint_file());

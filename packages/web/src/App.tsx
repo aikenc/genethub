@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { HistoryCoverage } from "@genehub/proto";
 
 import { ChangesPanel } from "./changes/ChangesPanel";
@@ -28,8 +28,6 @@ import { MobileToolsDrawer } from "./shell/MobileToolsDrawer";
 import { MobileTitleSwitcher } from "./shell/MobileTitleSwitcher";
 import { TabBar } from "./shell/TabBar";
 import type { ExtraTab } from "./shell/tabs";
-import { TitleBar } from "./shell/TitleBar";
-import { useTheme } from "./theme/store";
 import { TerminalPanel } from "./terminal/TerminalPanel";
 import { UpdateToast } from "./updates/UpdateToast";
 import { OpenProject } from "./workspace/OpenProject";
@@ -78,7 +76,7 @@ export function App({
 }: {
   host?: Host;
   /**
-   * `redial` asks the shell where to connect *now*, and is used for retries.
+   * `redial` asks the browser host where to connect *now*, and is used for retries.
    * Some addresses cannot be used twice — a forwarding ticket is spent by the
    * connection that used it — so a client that kept redialling the first one
    * would give up for good at the first dropped socket.
@@ -112,10 +110,8 @@ export function App({
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">(
     "loading",
   );
-  // Null means "wherever the shell points by default", which on the desktop is
-  // this computer and in a browser is the address it was opened with. It only
-  // becomes an id when someone picks a *remote* machine, because from then on
-  // the shell's default is the wrong answer and has to stop being consulted.
+  // Null means the browser host's default route. It becomes an id when someone
+  // picks a machine so reconnect can ask that host for a fresh one-use ticket.
   const [target, setTarget] = useState<string | null>(null);
   // Decided during the first render, not in an effect. An effect would run
   // after the one below it has already resolved an endpoint, and the page
@@ -127,14 +123,10 @@ export function App({
   const [toolsOpen, setToolsOpen] = useState(false);
   const [composerHeight, setComposerHeight] = useState(128);
   const [composerMinimized, setComposerMinimized] = useState(false);
-  // Two different questions. `sessionsOpen` is the phone's drawer, which starts
-  // shut because it covers the conversation; `sidebarHidden` is someone on a
-  // desktop asking for the room back, which starts false because the left
-  // column is how the workbench is read.
-  const [sidebarHidden, setSidebarHidden] = useState(false);
+  // The phone drawer starts closed; the wide-layout sidebar stays visible.
+  const sidebarHidden = false;
   const [pendingForkSession, setPendingForkSession] = useState<string | null>(null);
   const workbench = useWorkbench();
-  const theme = useTheme((state) => state.resolved);
   const pairing = workbench.hub?.state === "pairing";
   const activeTab = workbench.tabs.find(
     (tab) => tab.id === workbench.activeTabId,
@@ -176,17 +168,9 @@ export function App({
   const starting = Boolean(draft && !workbench.activeSessionId);
   const composerSpace = `calc(${composerHeight}px + var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)) + 0.5rem)`;
 
-  // The frame the compositor paints while a window is being resized is the
-  // shell's, not the page's, so it has to be told which palette is in force —
-  // otherwise a dark edge chases the pointer around a light workbench.
-  useEffect(() => {
-    host.window?.setBackground(theme === "dark");
-  }, [host, theme]);
-
   useEffect(() => {
     setComposerMinimized(false);
   }, [workbench.activeSessionId, starting]);
-
   // Tabs stay warm while they are open, so the device limit is the memory and
   // connection budget. Keep that budget in one place and react when a window
   // crosses the phone/desktop breakpoint.
@@ -232,66 +216,13 @@ export function App({
     };
   }, [host, claim]);
 
-  // Read inside the listener below rather than closed over, because
-  // unsubscribing from the shell is not instant — Tauri's `unlisten` arrives a
-  // promise later — and an announcement already in flight would otherwise land
-  // after the user has moved to another machine.
-  const following = useRef(true);
-  following.current = target === null;
-
   useEffect(() => {
     if (claiming !== "idle") return;
-    // A restarted daemon comes back on a new port, and following that is only
-    // right while we are on the machine it belongs to. Someone working on a
-    // remote machine must not be yanked home because the local daemon bounced.
+    // A selected target already supplied its endpoint through `openTarget`.
+    // Re-reading the host default here would immediately jump back home.
     if (target !== null) return;
-    const look = () =>
-      void host.endpoint().then((found) => {
-        if (following.current) setEndpoint(found);
-      });
-    look();
-    return host.onEndpointChange?.(look);
+    void host.endpoint().then(setEndpoint);
   }, [host, claiming, target]);
-
-  useEffect(
-    () =>
-      host.onPairRequested?.(() => useWorkbench.getState().openTab("settings")),
-    [host],
-  );
-
-  useEffect(
-    () =>
-      host.onClaimRequested?.(() => {
-        // Minted first, shown second: the tray asks for this when someone has
-        // lost their way in, and landing on settings with nothing new on it
-        // would look like the menu item did nothing. A machine that was never
-        // connected to a Hub has no identity to hand out, and saying that is the
-        // difference between a menu item that failed and one that is broken.
-        void useWorkbench
-          .getState()
-          .claimLink()
-          .catch((error: unknown) =>
-            useWorkbench.setState({
-              notice: error instanceof Error ? error.message : String(error),
-            }),
-          );
-        useWorkbench.getState().openTab("settings");
-      }),
-    [host],
-  );
-
-  useEffect(
-    () =>
-      host.onUpdateRequested?.(() => {
-        // Asked first and shown second, for the same reason as the claim link
-        // above: arriving on settings with nothing happening reads as a menu item
-        // that did nothing. Every outcome, including 已是最新, lands in the
-        // version section.
-        void useWorkbench.getState().checkUpdates(host);
-        useWorkbench.getState().openTab("settings");
-      }),
-    [host],
-  );
 
   useEffect(() => {
     if (claiming !== "idle") return;
@@ -326,8 +257,7 @@ export function App({
   }, [pendingForkSession, workbench.connection, workbench.sessions]);
 
   const pickTarget = (picked: Target, next: Endpoint) => {
-    // The local machine goes back to following the shell, which is the only
-    // thing that knows where its daemon moved to.
+    // The browser host owns how its default/local roster entry is reopened.
     setTarget(picked.kind === "local" ? null : picked.id);
     // Keeping the object when the address did not move, so that picking the
     // machine you are already on does not tear the connection down and build
@@ -343,7 +273,7 @@ export function App({
     routeId: target ?? sourceMachineId,
     label:
       endpoint !== "loading" && endpoint !== null ? endpoint.label : "当前机器",
-    kind: target === null && host.kind === "desktop" ? "local" : "remote",
+    kind: "remote",
     online: workbench.connection === "ready",
   };
   const forkController: ForkController | undefined =
@@ -468,11 +398,6 @@ export function App({
   if (endpoint === "loading") return <Splash>正在查找这台机器…</Splash>;
   if (!endpoint) {
     if (welcome) return <>{welcome()}</>;
-    // Inside the desktop app there is nothing for the user to choose: this
-    // machine is the machine, and its absence means the daemon did not start.
-    // Telling someone to "点桌面端「连接」" while they are looking at the
-    // desktop app is how a broken install reads as a missing step.
-    if (host.kind === "desktop") return <DaemonTrouble host={host} />;
     return (
       <Splash>
         <p>没有可连接的机器。</p>
@@ -491,13 +416,6 @@ export function App({
 
   return (
     <div className="flex h-full max-w-full flex-col overflow-x-hidden bg-bg">
-      <TitleBar
-        host={host}
-        endpoint={endpoint}
-        sidebarHidden={sidebarHidden}
-        onToggleSidebar={() => setSidebarHidden((hidden) => !hidden)}
-      />
-
       <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
         <Sidebar
           host={host}
@@ -639,7 +557,7 @@ export function App({
                           still needs — which workspace, which Agent — are least
                           hidden. */}
                       {starting ? (
-                        <NewSessionPanel host={host} endpoint={endpoint} />
+                        <NewSessionPanel endpoint={endpoint} />
                       ) : (
                         // Anchors the transcript's own furniture — the fade at
                         // its cut edge, the way back to the newest message — to
@@ -739,7 +657,6 @@ export function App({
                   </>
                 ) : (
                   <FirstRun
-                    host={host}
                     endpoint={endpoint}
                     onOpenSettings={() => workbench.openTab("settings")}
                   />
@@ -763,7 +680,7 @@ export function App({
               ) : null}
               {kind === "logs" ? (
                 <div className="flex min-h-0 flex-1 flex-col">
-                  <LogsPanel onOpenDirectory={host.openLogs} />
+                  <LogsPanel />
                 </div>
               ) : null}
               {kind === "devices" ? (
@@ -899,11 +816,9 @@ function dialOf(endpoint: Endpoint): ProtocolDial {
  * What a new install shows instead of a workbench with everything greyed out.
  */
 function FirstRun({
-  host,
   endpoint,
   onOpenSettings,
 }: {
-  host: Host;
   endpoint: Endpoint;
   onOpenSettings(): void;
 }) {
@@ -956,7 +871,7 @@ function FirstRun({
         <p className="mb-3 text-xs text-muted">
           agent 只能在你打开的工作区里读写，这一步同时决定了它的活动范围。工作区可以是一个文件夹，也可以是 .code-workspace 描述的多文件夹工作区。
         </p>
-        <OpenProject host={host} endpoint={endpoint} />
+        <OpenProject endpoint={endpoint} />
       </Splash>
     );
   }
@@ -1029,64 +944,5 @@ function Splash({ children }: { children: React.ReactNode }) {
     <div className="flex h-full flex-col items-center justify-center gap-1 p-6 text-center">
       {children}
     </div>
-  );
-}
-
-/**
- * The desktop app when its daemon is not there.
- *
- * Everything this app does runs through that process, so this screen is the
- * whole product being down. It says what went wrong in the shell's own words —
- * a path, a port, a permission — because the person reading it is the only one
- * who can see that machine.
- */
-function DaemonTrouble({ host }: { host: Host }) {
-  const [why, setWhy] = useState<string | null>(null);
-  const [retrying, setRetrying] = useState(false);
-
-  useEffect(() => {
-    void host.problem?.().then(setWhy);
-  }, [host]);
-
-  return (
-    <Splash>
-      <p>本机的 daemon 没有起来。</p>
-      {why ? (
-        <p className="max-w-lg text-xs text-muted [overflow-wrap:anywhere]">{why}</p>
-      ) : null}
-      <div className="mt-2 flex gap-2">
-        {host.retry ? (
-          <button
-            type="button"
-            disabled={retrying}
-            onClick={() => {
-              setRetrying(true);
-              void host
-                .retry?.()
-                .then(() => host.problem?.().then(setWhy))
-                .finally(() => setRetrying(false));
-            }}
-            className="rounded-md border border-line px-3 py-1.5 text-xs text-fg hover:border-accent disabled:opacity-50"
-          >
-            {retrying ? "正在重启…" : "重试"}
-          </button>
-        ) : null}
-        {/* The one screen where the workbench cannot fetch a log for you: there
-            is no daemon to ask. Opening the directory is the only way left, and
-            this is the screen where someone most needs it. */}
-        {host.openLogs ? (
-          <button
-            type="button"
-            onClick={() => host.openLogs?.()}
-            className="rounded-md border border-line px-3 py-1.5 text-xs text-fg hover:border-accent"
-          >
-            打开日志目录
-          </button>
-        ) : null}
-      </div>
-      <p className="pt-2 text-xs text-faint">
-        重启这个 App 也可以。一直是这样的话，日志目录里的 shell.log 与 daemon.log 说得出原因。
-      </p>
-    </Splash>
   );
 }

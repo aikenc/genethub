@@ -1,0 +1,198 @@
+mod support;
+
+use genet_daemon_platform::{LogicVm, PlatformError, VmLimits, VmPolicy, LOGIC_ABI_VERSION};
+use support::{component, healthy_component, ComponentSpec};
+
+#[test]
+fn real_core_wasm_module_loads_and_calls_through_typed_contract() {
+    let vm = LogicVm::new(VmPolicy::new(LOGIC_ABI_VERSION)).unwrap();
+    let first = vm.instantiate(&healthy_component(1)).unwrap();
+    let second = vm.instantiate(&healthy_component(10)).unwrap();
+
+    assert_eq!(first.probe(41).unwrap(), 42);
+    assert_eq!(second.probe(41).unwrap(), 51);
+    assert_eq!(first.probe(-2).unwrap(), -1);
+}
+
+#[test]
+fn malformed_missing_importing_and_incompatible_modules_are_rejected() {
+    let vm = LogicVm::new(VmPolicy::new(LOGIC_ABI_VERSION)).unwrap();
+
+    assert!(matches!(
+        vm.instantiate(b"not wasm"),
+        Err(PlatformError::Vm(_))
+    ));
+    let incompatible = match vm.instantiate(&component(ComponentSpec {
+        abi: LOGIC_ABI_VERSION as i32 + 1,
+        ..ComponentSpec::default()
+    })) {
+        Ok(_) => panic!("incompatible ABI unexpectedly loaded"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        incompatible,
+        PlatformError::Vm(message)
+            if message.contains(&format!("reports ABI {}", LOGIC_ABI_VERSION + 1))
+    ));
+    assert!(matches!(
+        vm.instantiate(&component(ComponentSpec {
+            include_probe: false,
+            ..ComponentSpec::default()
+        })),
+        Err(PlatformError::Vm(message)) if message.contains("genehub-probe")
+    ));
+    assert!(matches!(
+        vm.instantiate(&component(ComponentSpec {
+            module_import: "(import \"forbidden\" \"call\" (func $forbidden))".to_string(),
+            ..ComponentSpec::default()
+        })),
+        Err(PlatformError::Vm(message)) if message.contains("unexpected imports: forbidden")
+    ));
+    assert!(matches!(
+        vm.instantiate(&component(ComponentSpec {
+            probe_signature: "(param i32) (result i32)".to_string(),
+            probe_body: "local.get 0".to_string(),
+            ..ComponentSpec::default()
+        })),
+        Err(PlatformError::Vm(_))
+    ));
+}
+
+#[test]
+fn wasi_imports_require_an_explicit_preopen_policy_and_no_ambient_authority() {
+    let wasi_import =
+        "(import \"wasi_snapshot_preview1\" \"clock_time_get\" (func (param i32 i64 i32) (result i32)))";
+    let module = component(ComponentSpec {
+        module_import: wasi_import.to_string(),
+        ..ComponentSpec::default()
+    });
+
+    let closed = LogicVm::new(VmPolicy::new(LOGIC_ABI_VERSION)).unwrap();
+    assert!(matches!(
+        closed.instantiate(&module),
+        Err(PlatformError::Vm(message)) if message.contains("wasi_snapshot_preview1")
+    ));
+
+    let directory = tempfile::tempdir().unwrap();
+    let policy =
+        VmPolicy::new(LOGIC_ABI_VERSION).with_wasi_preopen(directory.path(), "/genehub-data", true);
+    let wasi = LogicVm::new(policy).unwrap();
+    assert_eq!(wasi.instantiate(&module).unwrap().probe(7).unwrap(), 7);
+
+    let invalid =
+        VmPolicy::new(LOGIC_ABI_VERSION).with_wasi_preopen(directory.path(), "../ambient", true);
+    assert!(matches!(
+        LogicVm::new(invalid).unwrap().instantiate(&healthy_component(1)),
+        Err(PlatformError::Vm(message)) if message.contains("invalid WASI guest preopen")
+    ));
+}
+
+#[test]
+fn self_check_traps_and_bad_health_are_rejected_before_activation() {
+    let mut policy = VmPolicy::new(LOGIC_ABI_VERSION);
+    policy.limits.fuel_per_call = 10_000;
+    let vm = LogicVm::new(policy).unwrap();
+
+    assert!(matches!(
+        vm.instantiate(&component(ComponentSpec {
+            self_check_body: "unreachable".to_string(),
+            ..ComponentSpec::default()
+        })),
+        Err(PlatformError::Vm(message)) if message.contains("genehub-self-check")
+    ));
+    assert!(matches!(
+        vm.instantiate(&component(ComponentSpec {
+            self_check_body: "i32.const 0".to_string(),
+            ..ComponentSpec::default()
+        })),
+        Err(PlatformError::Vm(message)) if message.contains("returned 0")
+    ));
+    assert!(matches!(
+        vm.instantiate(&component(ComponentSpec {
+            self_check_body: "(loop $forever br $forever) i32.const 1".to_string(),
+            ..ComponentSpec::default()
+        })),
+        Err(PlatformError::Vm(message)) if message.contains("fuel")
+            || message.contains("genehub-self-check")
+    ));
+}
+
+#[test]
+fn fuel_and_memory_limits_trap_and_poison_the_instance() {
+    let mut policy = VmPolicy::new(LOGIC_ABI_VERSION);
+    policy.limits = VmLimits {
+        max_memory_bytes: 64 * 1024,
+        fuel_per_call: 10_000,
+        ..VmLimits::default()
+    };
+    let vm = LogicVm::new(policy).unwrap();
+
+    assert!(matches!(
+        vm.instantiate(&component(ComponentSpec {
+            core_prelude: "(memory 2)".to_string(),
+            ..ComponentSpec::default()
+        })),
+        Err(PlatformError::Vm(message)) if message.contains("memory")
+            || message.contains("limit")
+    ));
+
+    let grower = vm
+        .instantiate(&component(ComponentSpec {
+            core_prelude: "(memory 1)".to_string(),
+            probe_body: "i32.const 1 memory.grow drop local.get 0".to_string(),
+            ..ComponentSpec::default()
+        }))
+        .unwrap();
+    assert!(matches!(grower.probe(1), Err(PlatformError::Vm(_))));
+    assert!(matches!(
+        grower.probe(1),
+        Err(PlatformError::InstancePoisoned)
+    ));
+
+    let spinner = vm
+        .instantiate(&component(ComponentSpec {
+            probe_body: "(loop $forever br $forever) local.get 0".to_string(),
+            ..ComponentSpec::default()
+        }))
+        .unwrap();
+    assert!(matches!(spinner.probe(1), Err(PlatformError::Vm(_))));
+    assert!(matches!(
+        spinner.probe(1),
+        Err(PlatformError::InstancePoisoned)
+    ));
+}
+
+#[test]
+fn initialization_is_fuel_limited_before_guest_code_can_become_active() {
+    let mut policy = VmPolicy::new(LOGIC_ABI_VERSION);
+    policy.limits.fuel_per_call = 10_000;
+    let vm = LogicVm::new(policy).unwrap();
+    let result = vm.instantiate(&component(ComponentSpec {
+        core_prelude: "(func $start (loop $forever br $forever)) (start $start)".to_string(),
+        ..ComponentSpec::default()
+    }));
+
+    assert!(
+        matches!(result, Err(PlatformError::Vm(message)) if message.contains("fuel")
+            || message.contains("instantiating"))
+    );
+}
+
+#[test]
+fn zero_resource_limits_are_rejected_at_engine_construction() {
+    for clear_limit in 0..8 {
+        let mut policy = VmPolicy::new(LOGIC_ABI_VERSION);
+        match clear_limit {
+            0 => policy.limits.max_memory_bytes = 0,
+            1 => policy.limits.max_table_elements = 0,
+            2 => policy.limits.max_instances = 0,
+            3 => policy.limits.max_memories = 0,
+            4 => policy.limits.max_tables = 0,
+            5 => policy.limits.max_wasm_stack_bytes = 0,
+            6 => policy.limits.fuel_per_call = 0,
+            7 => policy.limits.max_message_bytes = 0,
+            _ => unreachable!(),
+        }
+        assert!(matches!(LogicVm::new(policy), Err(PlatformError::Vm(_))));
+    }
+}

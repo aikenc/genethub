@@ -19,7 +19,9 @@
 
 ## MVP
 
-**成功标准：** 新用户安装后跳过登录就能在本机**真的跑起一条 agent 任务**（不必先装任何外部 CLI）；同一个工作台也能驱动一个外部 agent；关掉主窗口后托盘与 daemon 仍在；配对之后能在另一台设备的浏览器里打开同一台机器。
+**成功标准：** 新用户完成安装后 App 立即启动，在同一 WebView 完成官网登录/机器确认并自动进入本机，
+随后能**真的跑起一条 agent 任务**（不必先装任何外部 CLI）；同一个工作台也能驱动一个外部 agent；关掉
+主窗口后托盘与 daemon 仍在；之后能在另一台设备的浏览器里打开同一台机器。
 
 第二条是刻意加的：**只接一种 agent 的抽象等于没有抽象**（[architecture.md](./architecture.md) §2 B3）。
 
@@ -33,7 +35,7 @@
 | Adapter | `genet` ✅ · `acp` ✅ · `opencode` ✅ · `claude` ✅ · `codex` ✅ | ✅ |
 | Relay | `apps/relay`：帧转发、契约、限额、撤销订阅 | ✅ |
 | Web | `packages/web`：会话、工作区文件、工作区变更、工作区终端、设置、打开工作区、开箱即用的首个会话 | ✅ |
-| Desktop | Tauri 壳：托盘、关窗驻留、单实例、sidecar daemon、看门狗与接管遗留进程 | ✅ |
+| Desktop | 最小 Tauri 壳：托盘、关窗驻留、单实例、daemon 看门狗与遗留进程接管、auth-first、固定 channel 官网且无远程 native bridge | ✅ |
 | 测试 | 跨部件集成 + 全栈旅程（浏览器客户端 → daemon → agent → 脚本化模型） | ✅ |
 | 打包 | 安装包体积实测与自动校验 | ✅ |
 | 真实模型 E2E | 用真实 API key 跑完整旅程（含外部 agent） | ✅ |
@@ -41,9 +43,9 @@
 ### 明确不做
 
 - 手机原生 App（M2；MVP 用手机浏览器，界面已按小屏适配）
-- Codex 的 skills 菜单、子 agent 内部步骤：原生 `app-server` 适配器已经落地（`adapter::codex`），`thread/resume` 和贴图也已接上；这两项是它明确还没接的部分，理由见 [third-party-agents.md](./third-party-agents.md) §4 末尾；对应能力位不申报，界面上因此没有对应控件，而不是点了不生效
+- Codex 的 skills 菜单、子 agent 内部步骤：原生 `app-server` driver 已落地（`packages/daemon-core/src/session/codex.rs`），`thread/resume` 和贴图也已接上；这两项是它明确还没接的部分，理由见 [third-party-agents.md](./third-party-agents.md) §4 末尾；对应能力位不申报，界面上因此没有对应控件，而不是点了不生效
 - Codex 接 DeepSeek：不是我们的待办，是 Codex（只认 Responses API）与 DeepSeek（只有 Chat Completions）两个上游之间的协议缺口，见 [third-party-agents.md](./third-party-agents.md) §4；换成原生 `app-server` 传输不会让这个缺口消失
-- 应用内自动更新（手动重装）
+- App 安装包自动执行（手动下载/运行；同 ABI Wasm 补丁可在官网内更新）
 - 平台级零知识与前向保密（M4；当前转发业务帧已对 Relay 加密，但托管 Control 生成对称会话 secret，见 [security-model.md](./security-model.md) §1.1）
 - 前端长尾能力：实时语音对话 / TTS、定时任务、分屏、fork / rewind 等，清单见 [web-workbench.md](./web-workbench.md) §4；离线 Qwen3 语音转文本 UI、N-best、项目上下文和无 GPU Mock 已实现，真实模型由社区 runtime 接入，见[语音输入提案](./speech-input-proposal.md)
 - Agent 的 subagents / MCP / 真压缩（见 [builtin-agent.md](./builtin-agent.md) §8）；`genet` 自身的图片输入也在此列——贴图现在能发给 claude / acp / opencode（它们各自把图片转给自己的模型），但 `genet` 的 provider 层（Anthropic / OpenAI / DeepSeek 请求构造）还不接受图片内容块
@@ -72,8 +74,8 @@
 - [x] daemon 内核代码中不存在按 agent 名字分支的逻辑
 - [x] 未知工具类型走 `Unknown` 兜底渲染，不白屏、不丢事件
 - [x] 同一段前端代码分别驱动内置 agent 与一个真实外部 agent，渲染结果形状一致
-- [x] Claude Code（原生 `stream-json`，`adapter::claude`）接 DeepSeek 官方 Anthropic 兼容端点，真实模型端到端跑通并固化为四条回归测试（`testing/tests/claude.rs`）：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具确实没有落盘
-- [x] Codex（原生 `app-server`，`adapter::codex`）默认注册、探测（含未登录时报出那一行命令而不是让首个 prompt 挂住）与三个选择器展示正常；接 DeepSeek 的已知限制记录在案，不在本项目范围内解决
+- [x] Claude Code（原生 `stream-json` portable driver）接 DeepSeek 官方 Anthropic 兼容端点，真实模型端到端跑通并固化为四条回归测试（`testing/tests/claude.rs`）：基本对话、`acceptEdits` 免打扰放行工具调用、daemon 中断请求真的打断生成、拒绝权限请求后工具确实没有落盘
+- [x] Codex（原生 `app-server` portable driver）默认注册、探测（含未登录时报出那一行命令而不是让首个 prompt 挂住）与三个选择器展示正常；接 DeepSeek 的已知限制记录在案，不在本项目范围内解决
 
 **接入与安全**
 
@@ -123,7 +125,7 @@
 
 ## M2 — 能带走 · 能多选
 
-- Tauri Mobile 手机 App：扫码 + 已登录设备确认
+- 手机浏览器：扫码 + 已登录设备确认
 - 已登录设备列表、撤销、「信任此设备」
 - 深链 `genehub://`；桌面端开机自启
 - 工作台分屏；工具调用折叠视图

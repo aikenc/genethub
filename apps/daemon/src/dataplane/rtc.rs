@@ -74,8 +74,8 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
         .try_acquire_owned()
         .map_err(|_| anyhow!("RTC peer limit reached"))?;
 
-    let capability_id = format!("rtc_{}", crate::devices::random_token());
-    let secret = crate::devices::random_token();
+    let capability_id = format!("rtc_{}", crate::channel_auth::random_token());
+    let secret = crate::channel_auth::random_token();
     let admission = Admission::Rtc {
         capability_id: capability_id.clone(),
         secret: secret.clone(),
@@ -267,7 +267,8 @@ async fn serve_channel(
         &hello,
         inherited.workspace_id.clone(),
         inherited.workspace_handle.clone(),
-    )?;
+    )
+    .await?;
     // The short-lived RTC secret is a transport upgrade, not new authority.
     // Preserve the authenticated base peer's device and workspace scope.
     accepted.access = PeerAccess {

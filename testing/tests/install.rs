@@ -6,9 +6,9 @@
 //! `sha256sum` and target directory. A curl shim records and enforces the
 //! transport flags without weakening production code to permit `file://`.
 //!
-//! The two properties worth pinning are the ones whose failure is expensive:
-//! the binaries land runnable, and a download that does not match its checksum
-//! is refused rather than installed.
+//! The properties worth pinning are the ones whose failure is expensive: both
+//! binaries land runnable, their signed Wasm application lands beside them,
+//! and a download that does not match its checksum is refused.
 //!
 //! Unix only, which is also all the script claims to cover: Windows gets the
 //! installer from `release.yml`.
@@ -22,7 +22,7 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 #[test]
-fn installing_puts_both_binaries_where_the_path_can_find_them() {
+fn installing_puts_binaries_and_logic_where_the_path_can_find_them() {
     if skip() {
         return;
     }
@@ -49,6 +49,10 @@ fn installing_puts_both_binaries_where_the_path_can_find_them() {
             .expect("run the installed binary");
         assert!(ran.status.success(), "{binary} did not run");
     }
+    assert_eq!(
+        fs::read(bin.join("daemon-logic.wasm")).expect("installed logic artifact"),
+        b"signed-wasm-fixture"
+    );
 
     let said = String::from_utf8_lossy(&output.stdout);
     // The installer cannot edit someone's shell profile behind their back, so
@@ -226,6 +230,8 @@ fn fake_release() -> TempDir {
         fs::write(&path, body).expect("write a stand-in");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
     }
+    fs::write(staged.join("daemon-logic.wasm"), b"signed-wasm-fixture")
+        .expect("write logic stand-in");
 
     let asset = dir.path().join(asset_name());
     let tar = Command::new("tar")
@@ -235,6 +241,7 @@ fn fake_release() -> TempDir {
         .arg(&staged)
         .arg("genet-dev")
         .arg("genet-agent-dev")
+        .arg("daemon-logic.wasm")
         .status()
         .expect("run tar");
     assert!(tar.success(), "tar failed");

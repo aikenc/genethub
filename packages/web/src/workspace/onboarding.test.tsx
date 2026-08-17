@@ -1,7 +1,7 @@
 import type { AgentInfo, Reply, Request, WorkspaceInfo } from "@genehub/proto";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { App } from "../App";
 import type { Host } from "../host";
@@ -54,7 +54,6 @@ function stubClient(answers: Partial<Record<Request["type"], (payload: never) =>
     unsubscribe: async () => {},
     onPty: () => () => {},
     onNotice: () => () => {},
-    onUpdateDownload: () => () => {},
     onBackgroundProcesses: () => () => {},
     onStateChange: (listener: (state: string) => void) => {
       onState = listener;
@@ -162,92 +161,6 @@ describe("the first run", () => {
 
     expect(await screen.findByText("正在连这台机器…")).toBeInTheDocument();
     expect(screen.queryByText("先打开一个工作区。")).not.toBeInTheDocument();
-  });
-
-  it("asks for a project before anything else, and opens the one that is picked", async () => {
-    const { client, calls } = stubClient({
-      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
-      "workspace.list": () => ({ type: "workspaces", data: [] }),
-      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
-      "workspace.open": () => ({
-        type: "workspace",
-        data: workspace("w1", "app", "/home/me/app", true),
-      }),
-      "session.list": () => ({ type: "sessions", data: [] }),
-    });
-    const pickDirectory = vi.fn(async () => "/home/me/app");
-    await start(client, hostWith({ pickDirectory }));
-
-    expect(await screen.findByText("先打开一个工作区。")).toBeInTheDocument();
-
-    await userEvent.click(screen.getAllByRole("button", { name: "打开工作区" })[0]!);
-
-    await waitFor(() => {
-      const opened = calls.find((call) => call.type === "workspace.open");
-      expect(opened?.payload).toEqual({ root: "/home/me/app" });
-    });
-    expect(pickDirectory).toHaveBeenCalled();
-  });
-
-  it("uses the native .code-workspace picker when the desktop offers it", async () => {
-    const { client, calls } = stubClient({
-      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
-      "workspace.list": () => ({ type: "workspaces", data: [] }),
-      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
-      "workspace.open": () => ({
-        type: "workspace",
-        data: {
-          ...workspace("w1", "suite", "/home/me/product", true),
-          workspaceFile: "/home/me/suite.code-workspace",
-          folders: [
-            { name: "Product", root: "/home/me/product", rootHandle: "r_product" },
-            { name: "Docs", root: "/home/me/docs", rootHandle: "r_docs" },
-          ],
-        },
-      }),
-      "session.list": () => ({ type: "sessions", data: [] }),
-    });
-    const pickWorkspaceFile = vi.fn(async () => "/home/me/suite.code-workspace");
-    await start(
-      client,
-      hostWith({
-        pickDirectory: async () => null,
-        pickWorkspaceFile,
-      }),
-    );
-
-    await userEvent.click(screen.getAllByRole("button", { name: "打开工作区" })[0]!);
-    await userEvent.click(screen.getByRole("button", { name: "打开 .code-workspace" }));
-
-    await waitFor(() => {
-      expect(calls.find((call) => call.type === "workspace.open")?.payload).toEqual({
-        root: "/home/me/suite.code-workspace",
-      });
-    });
-    expect(pickWorkspaceFile).toHaveBeenCalled();
-  });
-
-  it("does not browse this device when the desktop shell is connected to a remote machine", async () => {
-    const { client } = stubClient({
-      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
-      "workspace.list": () => ({ type: "workspaces", data: [] }),
-      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
-    });
-    const pickDirectory = vi.fn(async () => "/local/path");
-    await start(
-      client,
-      hostWith({
-        kind: "desktop",
-        endpoint: async () => ({ url: "wss://relay.test", via: "relay", label: "工作电脑" }),
-        pickDirectory,
-      }),
-    );
-
-    expect(
-      await screen.findAllByRole("button", { name: "打开工作区" }),
-    ).not.toHaveLength(0);
-    expect(screen.queryByRole("button", { name: "打开文件夹" })).not.toBeInTheDocument();
-    expect(pickDirectory).not.toHaveBeenCalled();
   });
 
   /**

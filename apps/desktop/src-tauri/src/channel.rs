@@ -25,3 +25,9 @@ pub const CLI_BINARY: &str = "genet-dev";
 /// adopting the other channel's daemon through a stale endpoint file.
 pub const ENV_DATA_DIR: &str = "GENEHUB_DEV_DATA_DIR";
 pub const TRAY_ID: &str = "genethub-tray-dev";
+/// Fixed Hub used only by native first-run enrollment.
+pub const HUB_URL: &str = "";
+/// Fixed product Web loaded by the Desktop shell.
+pub const WEB_APP_URL: &str = "http://127.0.0.1:5173/app";
+/// Human-facing, channel-local App installation page.
+pub const APP_DOWNLOAD_URL: &str = "https://genethub.com/download";

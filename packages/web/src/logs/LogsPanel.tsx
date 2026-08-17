@@ -13,7 +13,7 @@ import { useWorkbench } from "../session/store";
  * The end of the file, not the file. These reach megabytes and the useful part is
  * always what just happened.
  */
-export function LogsPanel({ onOpenDirectory }: { onOpenDirectory?: () => void }) {
+export function LogsPanel() {
   const log = useWorkbench((state) => state.log);
   const loadLog = useWorkbench((state) => state.loadLog);
   const client = useWorkbench((state) => state.client);
@@ -56,17 +56,6 @@ export function LogsPanel({ onOpenDirectory }: { onOpenDirectory?: () => void })
           >
             复制
           </button>
-          {/* Only where there is a desktop to open it in. In a browser this
-              button would do nothing, and a dead control is worse than none. */}
-          {onOpenDirectory ? (
-            <button
-              type="button"
-              className="rounded border border-line px-2 py-1 text-xs hover:border-accent"
-              onClick={onOpenDirectory}
-            >
-              打开日志目录
-            </button>
-          ) : null}
         </div>
       </div>
 

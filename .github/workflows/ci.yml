@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      daemon_platform: ${{ steps.filter.outputs.daemon_platform }}
       relay: ${{ steps.filter.outputs.relay }}
       web: ${{ steps.filter.outputs.web }}
       desktop: ${{ steps.filter.outputs.desktop }}
@@ -49,6 +50,7 @@ jobs:
           # something is about to ship. main and PR stay on the path filter.
           if [ "${{ inputs.force_full }}" = "true" ]; then
             echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "daemon_platform=true" >> "$GITHUB_OUTPUT"
             echo "relay=true" >> "$GITHUB_OUTPUT"
             echo "web=true" >> "$GITHUB_OUTPUT"
             echo "desktop=true" >> "$GITHUB_OUTPUT"
@@ -64,6 +66,7 @@ jobs:
             head="${{ github.sha }}"
             if [ "$base" = "0000000000000000000000000000000000000000" ] || [ -z "$base" ]; then
               echo "rust=true" >> "$GITHUB_OUTPUT"
+              echo "daemon_platform=true" >> "$GITHUB_OUTPUT"
               echo "relay=true" >> "$GITHUB_OUTPUT"
               echo "web=true" >> "$GITHUB_OUTPUT"
               echo "desktop=true" >> "$GITHUB_OUTPUT"
@@ -77,6 +80,7 @@ jobs:
           printf '  %s\n' "${files[@]}"
 
           rust=false
+          daemon_platform=false
           relay=false
           web=false
           desktop=false
@@ -88,8 +92,21 @@ jobs:
               .github/workflows/*|.github/agent-clis/*)
                 force=true
                 ;;
-              Cargo.toml|Cargo.lock|apps/daemon/*|apps/cli/*|apps/agent/*|apps/proto/*|testing/*)
+              Cargo.toml|Cargo.lock)
                 rust=true
+                daemon_platform=true
+                ;;
+              packages/daemon-platform/*|packages/daemon-system/*|packages/daemon-logic/*|packages/daemon-logic-api/*|packages/daemon-common/*|packages/daemon-core/*|packages/daemon-artifact/*)
+                rust=true
+                daemon_platform=true
+                ;;
+              apps/daemon/*|apps/cli/*|apps/agent/*|packages/proto/*|testing/*)
+                rust=true
+                daemon_platform=true
+                ;;
+              scripts/*)
+                rust=true
+                daemon_platform=true
                 ;;
               apps/relay/*)
                 relay=true
@@ -105,6 +122,7 @@ jobs:
 
           if [ "$force" = true ]; then
             rust=true
+            daemon_platform=true
             relay=true
             web=true
             desktop=true
@@ -121,7 +139,7 @@ jobs:
           if [ "$rust" = true ]; then
             for f in "${files[@]}"; do
               case "$f" in
-                apps/daemon/*|apps/cli/*|Cargo.toml|Cargo.lock)
+                apps/daemon/*|apps/cli/*|packages/daemon-platform/*|packages/daemon-system/*|packages/daemon-logic/*|packages/daemon-logic-api/*|packages/daemon-common/*|packages/daemon-core/*|packages/daemon-artifact/*|packages/proto/*|Cargo.toml|Cargo.lock)
                   desktop=true
                   break
                   ;;
@@ -131,11 +149,12 @@ jobs:
 
           {
             echo "rust=$rust"
+            echo "daemon_platform=$daemon_platform"
             echo "relay=$relay"
             echo "web=$web"
             echo "desktop=$desktop"
           } >> "$GITHUB_OUTPUT"
-          echo "filter: rust=$rust relay=$relay web=$web desktop=$desktop"
+          echo "filter: rust=$rust daemon_platform=$daemon_platform relay=$relay web=$web desktop=$desktop"
 
   # A lock file records where each tarball came from. Written on a machine with a
   # company mirror in its npm config, it records that mirror — and then every
@@ -204,6 +223,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -215,7 +235,7 @@ jobs:
       # costs nothing since the Claude Code one only actually runs when
       # JOURNEY_LLM=real. `claude` itself, not `claude-agent-acp`: the
       # daemon speaks its native stream-json protocol directly
-      # (apps/daemon/src/adapter/claude.rs).
+      # (packages/daemon-core/src/session/claude.rs).
       # These are test fixtures, not product dependencies. Keep them in their
       # own lockfile so `npm ci` verifies exact tarball integrity without
       # coupling Rust CI to one of the shipped JavaScript packages. Codex uses
@@ -225,6 +245,7 @@ jobs:
           npm ci --prefix .github/agent-clis
           echo "$GITHUB_WORKSPACE/.github/agent-clis/node_modules/.bin" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
+      - run: node --test scripts/beta-promotion.test.mjs
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The journeys start real daemon and agent processes, and `cargo test` does
       # not build another package's executables — it only compiles them as test
@@ -232,6 +253,13 @@ jobs:
       # they did on every cold cache while a warm one kept the job green: a false
       # pass that survived until a release tag.
       - run: cargo build --workspace --bins
+      # The product daemon has no native business fallback. Journeys therefore
+      # run against the same signed Rust/Wasm application used by the dedicated
+      # cross-platform matrix instead of silently exercising deleted code.
+      - name: Build the signed portable daemon application for journeys
+        run: |
+          node scripts/daemon-logic.mjs
+          echo "GENET_DAEMON_LOGIC_WASM=$GITHUB_WORKSPACE/target/daemon-logic.wasm" >> "$GITHUB_ENV"
       # Journeys default to the mock model, so this stays offline and free.
       #
       # The failure list is repeated as annotations because reading a job's log
@@ -272,6 +300,130 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # Compile the real Rust guest exactly once on Linux. The matrix below consumes
+  # this signed artifact verbatim; rebuilding a fixture per OS would not prove
+  # the product requirement that one published Wasm works everywhere.
+  daemon_platform_artifact:
+    needs: changes
+    if: >-
+      needs.changes.outputs.daemon_platform == 'true'
+      || needs.changes.outputs.desktop == 'true'
+      || needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: daemon-platform-portable-artifact
+      - name: Compile the portable Rust guest on Linux
+        env:
+          GENET_PORTABLE_FIXTURE_DIR: ${{ runner.temp }}/daemon-platform-fixture
+        run: |
+          set -euo pipefail
+          mkdir -p "$GENET_PORTABLE_FIXTURE_DIR"
+          cargo build -p genet-daemon-logic \
+            --target wasm32-wasip1 \
+            --profile daemon-logic-release
+          cargo run --quiet -p genet-daemon-artifact -- pack-dev \
+            target/wasm32-wasip1/daemon-logic-release/genet_daemon_logic.wasm \
+            "$GENET_PORTABLE_FIXTURE_DIR/daemon-logic.wasm" \
+            77
+          cargo test -p genet-daemon-platform \
+            --test portable_artifact_handoff \
+            write_linux_portable_fixture \
+            -- --ignored --exact
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: daemon-platform-portable-fixture
+          path: ${{ runner.temp }}/daemon-platform-fixture/
+          if-no-files-found: error
+          retention-days: 1
+
+  # The platform kernel is deliberately exercised on all supported desktop
+  # operating systems. These tests execute real Wasmtime modules and the
+  # baseline/active/candidate store, including each OS's rename/fsync path.
+  daemon-platform:
+    needs: [changes, daemon_platform_artifact]
+    if: >-
+      always()
+      && needs.changes.result == 'success'
+      && needs.changes.outputs.daemon_platform == 'true'
+      && needs.daemon_platform_artifact.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux-x64
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
+          - runner: windows-latest
+            platform: windows-x64
+          - runner: macos-latest
+            platform: macos-arm64
+          - runner: macos-15-intel
+            platform: macos-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: daemon-platform-${{ matrix.platform }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-platform-portable-fixture
+          path: ${{ runner.temp }}/daemon-platform-fixture
+      - run: cargo test -p genet-daemon-platform --all-targets
+      # The OS driver layer moved out of `apps/daemon` into these crates during
+      # the Wasm migration. `cargo test -p genet-daemon --lib` in the desktop
+      # job used to execute those file-lock, process, PTY and socket assertions
+      # on Windows and macOS; after the move nothing did, and this crate is
+      # precisely the one with per-OS implementations behind `cfg(windows)`.
+      - run: cargo test -p genet-daemon-system --all-targets
+      # The portable half is compiled to Wasm for delivery, but it is ordinary
+      # Rust and its tests are the only executable description of request
+      # policy, session state and persistence. Running them natively per OS
+      # catches host-dependent assumptions (path spelling, line endings, clock
+      # and filesystem behaviour) before the artifact reaches a consumer.
+      - run: cargo test -p genet-daemon-core --all-targets
+      - name: Run the real application ABI and cold-replacement tests
+        env:
+          GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-platform-fixture/daemon-logic.wasm
+        run: >-
+          cargo test -p genet-daemon-platform
+          --test application_integration
+          -- --ignored
+      - name: Start the product daemon and replace its logic without Platform restart
+        env:
+          GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-platform-fixture/daemon-logic.wasm
+        run: >-
+          cargo test -p genet-daemon
+          --test logic_update_integration
+          -- --ignored
+      - name: Drive the resident daemon through the public logic-update CLI
+        env:
+          GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-platform-fixture/daemon-logic.wasm
+        run: >-
+          cargo test -p genet-cli
+          --test logic_update_contract
+          -- --ignored
+      - name: Install the exact Linux-built artifact, call it, and reopen it
+        env:
+          GENET_PORTABLE_FIXTURE_DIR: ${{ runner.temp }}/daemon-platform-fixture
+        run: >-
+          cargo test -p genet-daemon-platform
+          --test portable_artifact_handoff
+          consume_linux_built_fixture_through_update_and_restart
+          -- --ignored --exact
+
   relay:
     needs: changes
     if: needs.changes.outputs.relay == 'true'
@@ -304,7 +456,7 @@ jobs:
           retention-days: 1
 
   web:
-    needs: [changes, rust, relay]
+    needs: [changes, rust, relay, daemon_platform_artifact]
     # `always()` so a skipped rust/relay job does not cancel a web-only PR.
     # Still refuse to run when a dependency that did run has failed.
     if: >-
@@ -313,11 +465,13 @@ jobs:
       && needs.changes.outputs.web == 'true'
       && (needs.rust.result == 'success' || needs.rust.result == 'skipped')
       && (needs.relay.result == 'success' || needs.relay.result == 'skipped')
+      && needs.daemon_platform_artifact.result == 'success'
     runs-on: ubuntu-latest
     env:
       GENET_E2E_REQUIRED: "1"
       GENET_E2E_DAEMON: ${{ github.workspace }}/target/debug/genet-dev
       GENET_E2E_AGENT: ${{ github.workspace }}/target/debug/genet-agent-dev
+      GENET_DAEMON_LOGIC_WASM: ${{ github.workspace }}/target/daemon-platform-fixture/daemon-logic.wasm
     defaults:
       run:
         working-directory: packages/web
@@ -353,6 +507,14 @@ jobs:
         working-directory: .
       - run: chmod +x target/debug/genet-dev target/debug/genet-agent-dev
         working-directory: .
+      # Fail-closed daemons require a verified guest before they open a
+      # listener. Reuse the exact Linux-built artifact already exercised by the
+      # five-OS matrix rather than giving web journeys a private fixture.
+      - name: Reuse the signed portable daemon application
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-platform-portable-fixture
+          path: target/daemon-platform-fixture
       # The artifact contains compiled JavaScript, not its runtime packages.
       # Keep the cheap production-only install while avoiding relay dev
       # dependencies and a duplicate TypeScript build.
@@ -379,24 +541,37 @@ jobs:
         run: |
           test -x "$GENET_E2E_DAEMON"
           test -x "$GENET_E2E_AGENT"
+          test -f "$GENET_DAEMON_LOGIC_WASM"
           test -f "$GITHUB_WORKSPACE/apps/relay/dist/main.js"
       - run: npm test
       - run: npm run build
 
   desktop:
-    needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    needs: [changes, daemon_platform_artifact]
+    if: >-
+      always()
+      && needs.changes.result == 'success'
+      && needs.changes.outputs.desktop == 'true'
+      && needs.daemon_platform_artifact.result == 'success'
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      GENET_DAEMON_LOGIC_WASM: ${{ github.workspace }}/target/daemon-platform-fixture/daemon-logic.wasm
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # Supervision starts the real fail-closed daemon, so it consumes the same
+      # signed Linux-built guest that the five-OS platform matrix verifies.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-platform-portable-fixture
+          path: target/daemon-platform-fixture
       - run: cargo build -p genet-cli
       # Daemon persistence is shared by the CLI and desktop shell. In
       # particular, the owner-only Windows DACL assertions must execute on a
@@ -422,7 +597,15 @@ jobs:
   # Single required check for branch protection. Skipped path-filtered jobs are
   # fine; a failed or cancelled job that was supposed to run is not.
   gate:
-    needs: [changes, lockfiles, rust, relay, web, desktop]
+    needs:
+      - changes
+      - lockfiles
+      - rust
+      - daemon_platform_artifact
+      - daemon-platform
+      - relay
+      - web
+      - desktop
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -432,10 +615,14 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           LOCKFILES: ${{ needs.lockfiles.result }}
           RUST: ${{ needs.rust.result }}
+          DAEMON_PLATFORM_ARTIFACT: ${{ needs.daemon_platform_artifact.result }}
+          DAEMON_PLATFORM: ${{ needs['daemon-platform'].result }}
           RELAY: ${{ needs.relay.result }}
           WEB: ${{ needs.web.result }}
           DESKTOP: ${{ needs.desktop.result }}
           WANT_RUST: ${{ needs.changes.outputs.rust }}
+          WANT_DAEMON_ARTIFACT: ${{ needs.changes.outputs.daemon_platform == 'true' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.web == 'true' }}
+          WANT_DAEMON_PLATFORM: ${{ needs.changes.outputs.daemon_platform }}
           WANT_RELAY: ${{ needs.changes.outputs.relay }}
           WANT_WEB: ${{ needs.changes.outputs.web }}
           WANT_DESKTOP: ${{ needs.changes.outputs.desktop }}
@@ -459,6 +646,8 @@ jobs:
           check changes "$CHANGES" true
           check lockfiles "$LOCKFILES" true
           check rust "$RUST" "$WANT_RUST"
+          check daemon_platform_artifact "$DAEMON_PLATFORM_ARTIFACT" "$WANT_DAEMON_ARTIFACT"
+          check daemon-platform "$DAEMON_PLATFORM" "$WANT_DAEMON_PLATFORM"
           check relay "$RELAY" "$WANT_RELAY"
           check web "$WEB" "$WANT_WEB"
           check desktop "$DESKTOP" "$WANT_DESKTOP"

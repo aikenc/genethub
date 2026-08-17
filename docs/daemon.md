@@ -116,7 +116,7 @@ DataEndpoint method 只有四个：
 | Git | `git.status` / `git.diff` / `git.commit` |
 | 终端 | `pty.open` / `write` / `resize` / `close`（输出走推送） |
 | 后台进程 | `process.list` / `process.kill` / `process.killAll`；回合结束时 daemon 主动推 `BackgroundProcesses`（见 §5.1） |
-| 更新 | `update.check` / `update.download` / `update.downloadState` / `update.dismiss`（见 §7） |
+| Platform 控制 | `platform.logic.identity` / `platform.patch`（check/apply；不属于业务 `Request/Reply`） |
 
 **断线重连**：客户端带上最后收到的事件序号，`subscribe` 时 daemon 回补缺口；补不齐（超出保留窗口）就回全量快照并明确告知，不做静默半量。回合进行中掉线也一样：回合不会因为没人看着就停，重连时缺的那段照样补得回来。
 
@@ -238,7 +238,7 @@ Agent 就是跑命令的东西,一个回合下来往往起过几十条。有些�
 
 **归属靠操作系统推断,不在启动时记账**——命令不是我们跑的,是 agent CLI 在它自己的进程里跑的。两条规则互相补位:
 
-- 仍在 agent 的**进程组**里(agent 由 `adapter::owned_child` 起在自己的组里,子进程继承)。这条能抓到父进程已死、被 init 收养的进程。
+- 仍在 Agent 的**进程组**里（由 `daemon-system` 的 process capability 建立独立组，子进程继承）。这条能抓到父进程已死、被 init 收养的进程。
 - 仍是 agent 的**后代**。这条能抓到自己 `setsid` 出去的进程,而那正是一个规矩的命令执行器会对它的子进程做的事。
 
 两条都逃掉的进程已经脱离了两次,那是 POSIX 范围内能表达的最清楚的"我打算活过起我的人"。
@@ -272,11 +272,15 @@ daemon 只跟两个外部对象打交道，而且必须当成两件完全不同�
 
 理由与守则见 [architecture.md](./architecture.md) §6 与 [relay.md](./relay.md)。
 
-发布流程仍生成 `latest*.json` 与 `SHA256SUMS`，但它们只用于人工发现版本和检测下载损坏。清单、二进制与摘要来自同一个发布权限边界；发布主机或流水线若被攻破，攻击者可以一起替换三者，所以这不是独立签名根。
+Wasm 补丁使用独立 channel 签名根与 `genehub.logic-manifest.v1`。native 只接受编译时固定 manifest/source，
+交叉验证 channel、revision、ABI、protocol、digest、size 与签名；`platformAbi` 不匹配时要求更新 App。
+网页只能触发 check/apply，不能提供 URL、路径、key 或 revision。补丁状态只有 embedded baseline、单个
+active、临时 candidate 与反重放高水位；没有 slot、previous 或 rollback。
 
-在引入可独立固定、公钥可审计的签名机制前，daemon 的 `update.check` 和 `update.download` 都以 `unsupported` 失败关闭；`update.status` 不返回 `downloadUrl`。旧版本留下的下载状态可以查看或清除，但不会形成新的可执行入口。用户应从固定的官方发布页手动下载，并通过独立可信渠道核对 `SHA256SUMS`。
-
-Linux 的 `genet update` 同样失败关闭。`scripts/install.sh` 只保留为用户明确执行的首次安装入口，下载基址和所有重定向均被限制为 HTTPS，并强制校验 `SHA256SUMS`；它不能被解释成安全的自动升级器。
+App 安装包仍由用户从固定 channel 下载页明确下载并运行。`genehub.app-manifest.v1` 同时记录 installer 与
+`bundledLogic` 身份；Official 在 GitHub 归档 exact bytes，并由官网提供国内优先镜像，Beta 只走官网。
+Linux 的 `scripts/install.sh` 保留为用户明确执行的安装入口，下载基址和重定向限制为 HTTPS，并校验
+`SHA256SUMS`；远程页面不能让 native 执行它。
 
 ---
 

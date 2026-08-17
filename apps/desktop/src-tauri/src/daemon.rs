@@ -23,9 +23,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 const MAX_LOOPBACK_HTTP_RESPONSE_BYTES: usize = 64 * 1024;
+/// A cold daemon must compile and initialize the signed Wasm application
+/// before it can publish its listener. Shared release runners can take longer
+/// than twenty seconds when several supervision cases start concurrently.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What the daemon prints once it is listening. The port is chosen by the OS,
 /// so reading it back is the only way to know where to connect.
@@ -36,57 +40,6 @@ pub struct Endpoint {
     pub token: String,
     pub machine_id: String,
     pub fingerprint: String,
-}
-
-impl Endpoint {
-    fn admission(&self, pid: u32) -> DialEndpoint {
-        let challenge = health_challenge(&self.token);
-        let expires_at = unix_seconds().saturating_add(15);
-        let proof = websocket_proof(
-            &self.token,
-            &challenge,
-            pid,
-            &self.machine_id,
-            &self.fingerprint,
-            expires_at,
-        );
-        DialEndpoint {
-            port: self.port,
-            url: format!(
-                "ws://127.0.0.1:{}/ws?challenge={challenge}&pid={pid}&expiresAt={expires_at}&proof={proof}",
-                self.port
-            ),
-            machine_id: self.machine_id.clone(),
-            fingerprint: self.fingerprint.clone(),
-            pid,
-            challenge: challenge.clone(),
-            expires_at,
-            server_proof: websocket_server_proof(
-                &self.token,
-                &challenge,
-                pid,
-                &self.machine_id,
-                &self.fingerprint,
-                expires_at,
-            ),
-        }
-    }
-}
-
-/// What may cross the Tauri IPC boundary. The long-lived endpoint token never
-/// does; every call mints a fresh, one-use WS admission instead.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DialEndpoint {
-    pub port: u16,
-    pub url: String,
-    pub machine_id: String,
-    pub fingerprint: String,
-    pub pid: u32,
-    pub challenge: String,
-    pub expires_at: u64,
-    /// Domain-separated listener proof delivered through Tauri IPC, never URL.
-    pub server_proof: String,
 }
 
 /// The same thing as `Endpoint`, plus the pid, as written to `endpoint.json`.
@@ -151,18 +104,6 @@ impl Daemon {
 
     pub fn endpoint(&self) -> Option<Endpoint> {
         self.endpoint.lock().expect("endpoint lock").clone()
-    }
-
-    pub fn dial_endpoint(&self) -> Option<DialEndpoint> {
-        let pid = self
-            .child
-            .lock()
-            .expect("daemon lock")
-            .as_ref()
-            .map(std::process::Child::id)
-            .or_else(|| *self.adopted_pid.lock().expect("pid lock"))?;
-        let endpoint = self.endpoint()?;
-        health(&endpoint, pid).then(|| endpoint.admission(pid))
     }
 
     /// Why there is no daemon, in words a user can pass on.
@@ -255,7 +196,7 @@ impl Daemon {
             }
         });
 
-        match rx.recv_timeout(Duration::from_secs(20)) {
+        match rx.recv_timeout(START_TIMEOUT) {
             Ok(()) => {
                 let (endpoint, published_pid) = self
                     .published()
@@ -396,10 +337,9 @@ impl Daemon {
         *self.adopted_pid.lock().expect("pid lock") = None;
     }
 
-    /// Brings the daemon back after a crash, returning the new endpoint.
-    ///
-    /// The port and private key both change, so whoever calls this has to tell
-    /// the workbench to request a new one-use admission.
+    /// Brings the daemon back after a crash, returning the new endpoint. The
+    /// daemon restores its outbound Hub connection; website clients reconnect
+    /// through their normal Relay/WebRTC route and never receive this endpoint.
     pub fn restart(&self) -> Result<Endpoint, String> {
         self.stop();
         self.start()
@@ -651,44 +591,6 @@ fn shutdown_proof(
     )
 }
 
-fn websocket_proof(
-    token: &str,
-    challenge: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-    expires_at: u64,
-) -> String {
-    expiring_control_proof(
-        token,
-        b"websocket",
-        challenge,
-        pid,
-        machine_id,
-        fingerprint,
-        expires_at,
-    )
-}
-
-fn websocket_server_proof(
-    token: &str,
-    challenge: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-    expires_at: u64,
-) -> String {
-    expiring_control_proof(
-        token,
-        b"websocket-server",
-        challenge,
-        pid,
-        machine_id,
-        fingerprint,
-        expires_at,
-    )
-}
-
 fn expiring_control_proof(
     token: &str,
     action: &[u8],
@@ -864,54 +766,6 @@ mod tests {
     fn other_output_is_ignored_rather_than_mistaken_for_an_endpoint() {
         assert!(!is_listening("starting up"));
         assert!(!is_listening(r#"{"event":"something-else","port":1}"#));
-    }
-
-    #[test]
-    fn a_desktop_admission_never_exposes_the_private_token() {
-        let endpoint = endpoint(42123);
-        let dial = endpoint.admission(99);
-        assert_eq!(dial.port, 42123);
-        assert!(dial.url.contains("/ws?challenge="));
-        assert!(dial.url.contains("&pid=99&expiresAt="));
-        assert!(dial.url.contains("&proof="));
-        assert!(!dial.url.contains(&endpoint.token));
-        assert!(!dial.url.contains("token="));
-        assert!(!dial.url.contains(&dial.server_proof));
-        assert_eq!(dial.pid, 99);
-        assert_eq!(dial.machine_id, "machine-expected");
-        assert_eq!(dial.fingerprint, "fingerprint-expected");
-        assert!(dial.expires_at > unix_seconds());
-        assert_eq!(dial.challenge.len(), 64);
-        assert_eq!(dial.server_proof.len(), 64);
-        let ipc = serde_json::to_string(&dial).unwrap();
-        assert!(!ipc.contains(&endpoint.token));
-        assert!(!ipc.contains("\"token\""));
-    }
-
-    #[test]
-    fn websocket_proof_matches_the_daemon_contract() {
-        assert_eq!(
-            websocket_proof(
-                "token-1",
-                "challenge-1",
-                42,
-                "machine-1",
-                "fingerprint-1",
-                1_234_567_890,
-            ),
-            "cb10c4c41a54062a453ddd359fd970815064e19ac5a5e2c511103a924129c3c7"
-        );
-        assert_eq!(
-            websocket_server_proof(
-                "token-1",
-                "challenge-1",
-                42,
-                "machine-1",
-                "fingerprint-1",
-                1_234_567_890,
-            ),
-            "6b02a83a6c67e128a762565b92b7184874e9eb806269581b35c8c05f13e3e5c2",
-        );
     }
 
     #[test]

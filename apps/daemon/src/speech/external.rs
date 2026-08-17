@@ -13,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::config::{SpeechConfig, SpeechRuntimeConfig};
+use genet_daemon_logic_api::{SpeechConfig, SpeechRuntimeConfig};
 
 use super::{
     failure, speech_correlation_id, validate_runtime_capabilities, RuntimeCommand, RuntimeEvent,
@@ -222,7 +222,7 @@ async fn probe_registration(
     let status = match tokio::time::timeout(PROBE_TIMEOUT, child.wait()).await {
         Ok(Ok(status)) => status,
         Ok(Err(error)) => {
-            crate::adapter::kill_tree(&mut child).await;
+            crate::process::kill_child_tree(&mut child).await;
             let status = child.wait().await.ok();
             let stdout = join_read(stdout_task, "stdout").await?;
             let stderr = join_read(stderr_task, "stderr").await?;
@@ -234,7 +234,7 @@ async fn probe_registration(
             ));
         }
         Err(_) => {
-            crate::adapter::kill_tree(&mut child).await;
+            crate::process::kill_child_tree(&mut child).await;
             let status = child.wait().await.ok();
             let stdout = join_read(stdout_task, "stdout").await?;
             let stderr = join_read(stderr_task, "stderr").await?;
@@ -359,7 +359,7 @@ async fn supervise(
                 true,
             )));
         }
-        crate::adapter::kill_tree(&mut child).await;
+        crate::process::kill_child_tree(&mut child).await;
         let status = child.wait().await.ok();
         let stderr = join_runtime_stderr(stderr_task).await;
         log_runtime_process_end(
@@ -545,7 +545,7 @@ async fn supervise(
     let status = child.try_wait().ok().flatten();
     let forced = status.is_none();
     if forced {
-        crate::adapter::kill_tree(&mut child).await;
+        crate::process::kill_child_tree(&mut child).await;
     }
     let status = match status {
         Some(status) => Some(status),
@@ -581,7 +581,7 @@ fn adapter_command(registration: &SpeechRuntimeConfig, mode: &str) -> Command {
     if let Some(parent) = PathBuf::from(&registration.command).parent() {
         command.current_dir(parent);
     }
-    crate::adapter::without_a_window(&mut command);
+    crate::process::without_a_window(&mut command);
     command
 }
 

@@ -504,7 +504,8 @@ async fn serve_peer_inner(
         &frame.payload,
         admitted.local_workspace_id,
         admitted.workspace_handle,
-    )?;
+    )
+    .await?;
     let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
     let credit = Credit::new(frame.value)?;
     peers.lock().await.insert(

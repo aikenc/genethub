@@ -4,12 +4,10 @@ name: Release
 # cross-build a Tauri bundle: the installer embeds the system WebView glue and
 # the packaging tool of the platform it targets.
 #
-# Three lines ship from this one workflow (`docs/dual-channel-release.md` in
-# genethub-cloud): a plain `v0.22.2` tag builds the official line, a
-# `v0.23.0-beta.4` tag the beta line, a `v0.23.0-alpha.4` tag the alpha
-# (intranet) line. The tag decides everything — the names the binaries carry,
-# the Hub the build points at, the release it publishes to — because a channel
-# chosen by a dropdown in the Actions tab is a channel somebody picks wrong.
+# This is only the App-installation path: native Platform, matching signed Wasm,
+# CLI and shell move together. Web-only and same-ABI Wasm patches do not trigger
+# this workflow. A plain tag archives Official on GitHub and mirrors it to the
+# website; prerelease tags publish their artifacts only to their website channel.
 on:
   push:
     tags: ["v*"]
@@ -42,6 +40,8 @@ jobs:
       manifest: ${{ steps.detect.outputs.manifest }}
       hub_url: ${{ steps.detect.outputs.hub_url }}
       prerelease: ${{ steps.detect.outputs.prerelease }}
+      cloud_repository: ${{ steps.detect.outputs.cloud_repository }}
+      cloud_sha: ${{ steps.detect.outputs.cloud_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -81,6 +81,7 @@ jobs:
           BETA_HUB_URL: ${{ vars.GENEHUB_BETA_HUB_URL || 'https://relay-beta.genethub.com' }}
           ALPHA_HUB_URL: ${{ vars.GENEHUB_ALPHA_HUB_URL || 'https://relay-alpha.genethub.com' }}
           OFFICIAL_HUB_URL: ${{ vars.GENEHUB_HUB_URL || 'https://relay.genethub.com' }}
+          CLOUD_REPOSITORY: ${{ vars.CLOUD_REPO || format('{0}/genethub-cloud', github.repository_owner) }}
         run: |
           set -euo pipefail
           # The tag's shape, and only that: `v1.2.3` is official,
@@ -99,6 +100,20 @@ jobs:
           channel="$(node scripts/channel.mjs --detect)"
           if [[ "$tag" == v* && "${want:-}" != "$channel" ]]; then
             echo "::error::tag says ${want:-?} but scripts/channel.mjs says $channel — the two rules drifted"
+            exit 1
+          fi
+
+          if [[ ! "$CLOUD_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::CLOUD_REPO must be an owner/repository name"
+            exit 1
+          fi
+          cloud_ref="$(git ls-remote --exit-code --refs \
+            "https://github.com/$CLOUD_REPOSITORY.git" refs/heads/main)"
+          read -r cloud_sha advertised extra <<<"$cloud_ref"
+          if [[ ! "$cloud_sha" =~ ^[0-9a-f]{40}$ ]] \
+            || [ "$advertised" != refs/heads/main ] \
+            || [ -n "${extra:-}" ]; then
+            echo "::error::could not resolve one immutable Cloud main commit"
             exit 1
           fi
 
@@ -165,7 +180,148 @@ jobs:
               '
             fi
             printf 'hub_url=%s\n' "$hub_url"
+            printf 'cloud_repository=%s\n' "$CLOUD_REPOSITORY"
+            printf 'cloud_sha=%s\n' "$cloud_sha"
           } >> "$GITHUB_OUTPUT"
+
+  # The portable application is built once on Linux and signed once. Every
+  # native package below downloads this exact file; no Windows/macOS compiler
+  # participates in logic publication.
+  daemon_logic:
+    needs: [channel, verify]
+    runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.logic.outputs.revision }}
+      promoted_from_beta: ${{ steps.logic.outputs.promoted_from_beta }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: release-daemon-logic
+      - name: Build and sign the one cross-platform logic artifact
+        id: logic
+        shell: bash
+        env:
+          CHANNEL: ${{ needs.channel.outputs.name }}
+          HUB_URL: ${{ needs.channel.outputs.hub_url }}
+          BETA_SIGNING_KEY: ${{ secrets.GENEHUB_BETA_LOGIC_SIGNING_KEY }}
+          BETA_KEY_ID: ${{ vars.GENEHUB_BETA_LOGIC_KEY_ID }}
+          ALPHA_SIGNING_KEY: ${{ secrets.GENEHUB_ALPHA_LOGIC_SIGNING_KEY }}
+          ALPHA_KEY_ID: ${{ vars.GENEHUB_ALPHA_LOGIC_KEY_ID }}
+          OFFICIAL_SIGNING_KEY: ${{ secrets.GENEHUB_OFFICIAL_LOGIC_SIGNING_KEY }}
+          OFFICIAL_KEY_ID: ${{ vars.GENEHUB_OFFICIAL_LOGIC_KEY_ID }}
+          BETA_HUB_URL: ${{ vars.GENEHUB_BETA_HUB_URL || 'https://relay-beta.genethub.com' }}
+          UNPROMOTED_OFFICIAL: ${{ vars.GENEHUB_UNPROMOTED_OFFICIAL_REASON }}
+        run: |
+          set -euo pipefail
+          node scripts/version.mjs --from-tag
+          node scripts/channel.mjs --from-tag
+          cargo build -p genet-daemon-logic \
+            --target wasm32-wasip1 \
+            --profile daemon-logic-release
+          mkdir -p dist
+          raw=target/wasm32-wasip1/daemon-logic-release/genet_daemon_logic.wasm
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            case "$CHANNEL" in
+              beta) signing_key="$BETA_SIGNING_KEY"; key_id="$BETA_KEY_ID"; manifest=latest-beta.json ;;
+              alpha) signing_key="$ALPHA_SIGNING_KEY"; key_id="$ALPHA_KEY_ID"; manifest=latest-alpha.json ;;
+              official) signing_key="$OFFICIAL_SIGNING_KEY"; key_id="$OFFICIAL_KEY_ID"; manifest=latest.json ;;
+              *) echo "::error::tag build has non-release channel $CHANNEL"; exit 1 ;;
+            esac
+            test -n "$signing_key" || {
+              echo "::error::$CHANNEL logic signing key is required for an App release"
+              exit 1
+            }
+            [[ "$key_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || {
+              echo "::error::$CHANNEL logic key id must be a safe non-empty identifier"
+              exit 1
+            }
+            revision="$(CHANNEL="$CHANNEL" MANIFEST_URL="$HUB_URL/artifacts/manifests/logic/$manifest" node --input-type=module -e '
+              const response = await fetch(process.env.MANIFEST_URL, {
+                cache: "no-store",
+                redirect: "error",
+                signal: AbortSignal.timeout(30_000),
+              });
+              let current = 0;
+              if (response.status !== 404) {
+                if (!response.ok) throw new Error(`logic manifest returned ${response.status}`);
+                const body = await response.json();
+                if (body.schema !== "genehub.logic-manifest.v1" || body.channel !== process.env.CHANNEL ||
+                    !Number.isSafeInteger(body.logicRevision) || body.logicRevision <= 0) {
+                  throw new Error("current logic manifest has an invalid identity");
+                }
+                current = body.logicRevision;
+              }
+              // Sparse future revisions let a long cross-platform App build coexist
+              // with same-ABI logic patches without reserving mutable publication state.
+              process.stdout.write(String(Math.max(current + 1, Date.now())));
+            ')"
+            export GENET_DAEMON_LOGIC_SIGNING_KEY="$signing_key"
+            cargo run --quiet -p genet-daemon-artifact -- \
+              pack "$raw" dist/daemon-logic.wasm "$CHANNEL" "$revision" "$key_id"
+            public_key="$(cargo run --quiet -p genet-daemon-artifact -- public-key)"
+          else
+            cargo run --quiet -p genet-daemon-artifact -- \
+              pack-dev "$raw" dist/daemon-logic.wasm 1
+            public_key="$(cargo run --quiet -p genet-daemon-artifact -- dev-public-key)"
+            key_id=dev-local
+            revision=1
+          fi
+          cargo run --quiet -p genet-daemon-artifact -- inspect \
+            dist/daemon-logic.wasm > dist/logic-identity.json
+          REVISION="$revision" node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const identity = JSON.parse(readFileSync("dist/logic-identity.json", "utf8"));
+            if (identity.logicRevision !== Number(process.env.REVISION)) throw new Error("signed revision drifted");
+          '
+          promoted_from_beta=
+          if [ "$CHANNEL" = official ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            if promoted_from_beta="$(node scripts/beta-promotion.mjs \
+              --app "$BETA_HUB_URL/artifacts/manifests/app/latest-beta.json" \
+              --logic "$BETA_HUB_URL/artifacts/manifests/logic/latest-beta.json" \
+              --identity dist/logic-identity.json \
+              --open-sha "$GITHUB_SHA" \
+              --release "${GITHUB_REF_NAME#v}")"; then
+              echo "::notice::Official is promoted from $promoted_from_beta"
+            else
+              prefix="$GITHUB_REF_NAME:"
+              if [[ "$UNPROMOTED_OFFICIAL" != "$prefix"* ]]; then
+                echo "::error::Official must match the current Beta App and Logic. An emergency exception must be tag-bound as '$prefix<reason>'."
+                exit 1
+              fi
+              reason="${UNPROMOTED_OFFICIAL#"$prefix"}"
+              REASON="$reason" node -e '
+                const value = process.env.REASON ?? "";
+                if (value.length < 8 || value.length > 160 || /[\u0000-\u001f\u007f]/u.test(value)) {
+                  throw new Error("emergency release reason must be 8..160 printable characters");
+                }
+              '
+              promoted_from_beta="emergency:$GITHUB_REF_NAME:$reason"
+              echo "::warning::using the tag-bound unpromoted Official exception: $reason"
+            fi
+          fi
+          {
+            printf 'GENET_DAEMON_LOGIC_KEY_ID=%s\n' "$key_id"
+            printf 'GENET_DAEMON_LOGIC_PUBLIC_KEY=%s\n' "$public_key"
+          } > dist/trust.env
+          printf 'revision=%s\n' "$revision" >> "$GITHUB_OUTPUT"
+          printf 'promoted_from_beta=%s\n' "$promoted_from_beta" >> "$GITHUB_OUTPUT"
+          test "$(od -An -tx1 -N4 dist/daemon-logic.wasm | tr -d ' \n')" = 0061736d
+          sha256sum dist/daemon-logic.wasm
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: daemon-logic-release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
 
   # Windows is the only platform that gets an installer in this version.
   #
@@ -176,7 +332,7 @@ jobs:
   # dependency. macOS waits for signing and notarisation, without which the
   # download is a security warning with an app behind it.
   installers:
-    needs: [channel, verify]
+    needs: [channel, verify, daemon_logic]
     strategy:
       fail-fast: false
       matrix:
@@ -195,9 +351,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-logic-release
+          path: ${{ runner.temp }}/daemon-logic
 
-      - run: npm ci
-        working-directory: packages/web
       - run: npm ci
         working-directory: apps/desktop
 
@@ -223,17 +381,12 @@ jobs:
         shell: bash
         env:
           BUNDLES: ${{ matrix.bundles }}
-          # The Hub this build suggests, per channel. Only published builds get
-          # one: a copy someone compiles from this repository has no business
-          # defaulting to somebody else's service, and the field stays empty
-          # there.
-          #
-          # Without it, a first run asks the person to type an address they have
-          # no way of knowing, and "先体验" — the one click that is supposed to
-          # make a phone able to reach this machine — cannot even be pressed.
-          VITE_GENEHUB_HUB_URL: ${{ needs.channel.outputs.hub_url }}
+          GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-logic/daemon-logic.wasm
         run: |
           set -uo pipefail
+          set -a
+          . "${{ runner.temp }}/daemon-logic/trust.env"
+          set +a
           # The runner's shell already has `-e`, which would end this script at
           # the failing pipeline and skip the reporting below entirely.
           set +e
@@ -244,6 +397,11 @@ jobs:
               | tail -15 | while IFS= read -r line; do echo "::error::$line"; done
             exit "$status"
           fi
+          cmp "${{ runner.temp }}/daemon-logic/daemon-logic.wasm" \
+            apps/desktop/src-tauri/bin/daemon-logic.wasm || {
+              echo "::error::desktop bundle did not embed the signed logic artifact byte-for-byte"
+              exit 1
+            }
 
       # An upgrade has to stop what it is about to overwrite, and a `taskkill` on
       # a name nothing is called stops nothing — silently, with the same "Error
@@ -310,6 +468,8 @@ jobs:
       # nobody notices until a user hits it (`docs/roadmap.md` MVP 验收清单).
       - name: Smoke the daemon on this platform
         shell: bash
+        env:
+          GENET_DAEMON_LOGIC_WASM: ${{ runner.temp }}/daemon-logic/daemon-logic.wasm
         run: |
           set -uo pipefail
           . scripts/channel.env
@@ -320,6 +480,14 @@ jobs:
           # job that lost its stamping step would ship a daemon calling itself
           # 0.0.0 — which tells every user they run an unreleased build, silently.
           node scripts/version.mjs --verify "target/release/$CLI_BINARY$exe" || exit 1
+          test -f "apps/desktop/src-tauri/bin/daemon-logic.wasm" || {
+            echo "FAIL: installer resources lost daemon-logic.wasm" >&2
+            exit 1
+          }
+          cmp "$GENET_DAEMON_LOGIC_WASM" apps/desktop/src-tauri/bin/daemon-logic.wasm || {
+            echo "FAIL: installer resource is not the signed release logic artifact" >&2
+            exit 1
+          }
           env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
             "target/release/$CLI_BINARY$exe" daemon run >"$root/out.json" 2>"$root/err.log" &
           pid=$!
@@ -339,9 +507,9 @@ jobs:
 
       # Two names for one file, on purpose:
       #
-      # The version-free one is what a link can point at forever
-      # (`releases/latest/download/<name>` for official; the rolling `beta`
-      # release for beta), which is what the install script and the docs use.
+      # Official keeps a version-free GitHub convenience name. Every website
+      # manifest points at the immutable versioned name; prereleases never use a
+      # rolling GitHub release.
       #
       # The versioned one is what a person downloads. A browser that has seen
       # `GeneHub-windows-x64-setup.exe` before saves the next one as `(1)`, and
@@ -388,7 +556,7 @@ jobs:
   # on ubuntu-22.04 was requiring GLIBC_2.34 and failing on those machines with
   # a wall of `version 'GLIBC_…' not found` — exactly what `curl | sh` users hit.
   binaries:
-    needs: [channel, verify]
+    needs: [channel, verify, daemon_logic]
     strategy:
       fail-fast: false
       matrix:
@@ -408,13 +576,24 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.target }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-logic-release
+          path: ${{ runner.temp }}/daemon-logic
       # As in the installer job: the tag is where the version and the channel
       # come from.
       - run: |
           node scripts/version.mjs --from-tag
           node scripts/channel.mjs --from-tag
         shell: bash
-      - run: cargo build --release -p genet-cli -p genet-agent --target ${{ matrix.target }}
+      - name: Build native binaries with the artifact's pinned public key
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          . "${{ runner.temp }}/daemon-logic/trust.env"
+          set +a
+          cargo build --release -p genet-cli -p genet-agent --target ${{ matrix.target }}
       - name: Pack
         shell: bash
         env:
@@ -423,8 +602,16 @@ jobs:
           set -euo pipefail
           . scripts/channel.env
           mkdir -p dist
+          cp "${{ runner.temp }}/daemon-logic/daemon-logic.wasm" \
+            "target/${{ matrix.target }}/release/daemon-logic.wasm"
           tar -czf "dist/$TARBALL_PREFIX-linux-x64.tar.gz" \
-            -C "target/${{ matrix.target }}/release" "$CLI_BINARY" "$AGENT_BINARY"
+            -C "target/${{ matrix.target }}/release" \
+            "$CLI_BINARY" "$AGENT_BINARY" daemon-logic.wasm
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z]+\.[0-9]+)?$ ]]; then
+            cp "dist/$TARBALL_PREFIX-linux-x64.tar.gz" \
+              "dist/$TARBALL_PREFIX-$version-linux-x64.tar.gz"
+          fi
           ls -la dist
       # What the tarball promises: two binaries that start on a machine with no
       # graphical session and nothing else installed — including no particular
@@ -439,6 +626,10 @@ jobs:
           . scripts/channel.env
           root="$(mktemp -d)"
           tar -xzf "dist/$TARBALL_PREFIX-linux-x64.tar.gz" -C "$root"
+          cmp "${{ runner.temp }}/daemon-logic/daemon-logic.wasm" "$root/daemon-logic.wasm" || {
+            echo "FAIL: Linux installation does not contain the signed release logic artifact" >&2
+            exit 1
+          }
           # The unpacked copy, so this is a claim about what is in the tarball
           # rather than about what was left in the build directory.
           node scripts/version.mjs --verify "$root/$CLI_BINARY"
@@ -468,17 +659,15 @@ jobs:
           name: linux-tarball
           path: dist/*
 
-  publish:
-    needs: [channel, installers, binaries]
-    if: startsWith(github.ref, 'refs/tags/v')
+  # Only Official is archived on GitHub. No prerelease job has write access to
+  # repository contents and there is no rolling beta/alpha release.
+  publish_official_github:
+    needs: [channel, daemon_logic, installers, binaries]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.channel.outputs.name == 'official'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      # Only this run's release outputs belong in the release. The `verify`
-      # reusable CI runs in the same run id and uploads open-ci-bins /
-      # open-ci-relay-dist; an unfiltered merge-multiple download pulled those
-      # in too, and sha256sum then failed on their directories.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-setup
@@ -487,86 +676,126 @@ jobs:
         with:
           name: linux-tarball
           path: dist
-      - run: ls -la dist
-      # A fixed address for "what is the newest version", so the app's 检查更新
-      # has something to ask that is not the GitHub API: 60 requests an hour is
-      # counted per address, and everyone behind one office router shares it.
-      #
-      # One manifest per channel — `latest.json`, `latest-beta.json`,
-      # `latest-alpha.json` — and
-      # never one measuring the other: the two lines version independently,
-      # and a beta that compared itself against the official number would
-      # announce a downgrade as an upgrade. `channel` is written into the file
-      # so a reader can refuse a manifest that is not its own.
-      #
-      # This is discovery metadata for a human-led manual update, not a signed
-      # updater manifest. SHA-256 detects corruption only when its source is
-      # independently trusted; it does not authenticate a release delivered
-      # beside the digest. Daemon, CLI and desktop automatic install paths stay
-      # fail-closed until the project has an independent signing root.
-      - name: Say what the newest version is, at an address that never moves
-        env:
-          CHANNEL: ${{ needs.channel.outputs.name }}
-          MANIFEST: ${{ needs.channel.outputs.manifest }}
-          ASSET_PREFIX: ${{ needs.channel.outputs.asset_prefix }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-logic-release
+          path: logic
+      - name: Record exact Official bytes
         run: |
           set -euo pipefail
-          node -e '
-            const tag = process.env.GITHUB_REF_NAME;
-            const repo = process.env.GITHUB_REPOSITORY;
-            const version = tag.replace(/^v/, "");
-            const release = `https://github.com/${repo}/releases`;
-            const asset = `${process.env.ASSET_PREFIX}-${version}-windows-x64-setup.exe`;
-            const bytes = require("node:fs").readFileSync(`dist/${asset}`);
-            const sha256 = require("node:crypto").createHash("sha256").update(bytes).digest("hex");
-            require("node:fs").writeFileSync(
-              `dist/${process.env.MANIFEST}`,
-              JSON.stringify(
-                {
-                  channel: process.env.CHANNEL,
-                  version,
-                  pub_date: new Date().toISOString(),
-                  // Where a person goes. The installer URL is for a machine; a
-                  // human wants the notes and the checksums next to it.
-                  page: `${release}/tag/${tag}`,
-                  platforms: {
-                    "windows-x86_64": {
-                      url: `${release}/download/${tag}/${asset}`,
-                      sha256,
-                      size: bytes.length,
-                    },
-                  },
-                },
-                null,
-                2,
-              ) + "\n",
-            );
-          '
-          cat "dist/$MANIFEST"
-      # Checksums, because a download that arrives corrupted should be provable
-      # rather than argued about.
-      - run: |
-          cd dist
-          sha256sum * > SHA256SUMS
-          cat SHA256SUMS
-      # The tag's own release: official goes out as a normal release and may be
-      # `latest`; beta is always a prerelease and must never become `latest`,
-      # because `releases/latest` is the official line's fixed address.
+          cp logic/daemon-logic.wasm dist/daemon-logic.wasm
+          (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/*
-          prerelease: ${{ needs.channel.outputs.prerelease }}
+          prerelease: false
           generate_release_notes: true
-      # A prerelease additionally publishes to a rolling release named after
-      # its channel. GitHub's `latest` never names a prerelease, so without
-      # this there is no fixed address a beta or alpha daemon or install
-      # script can ask for the newest one — this is the address
-      # `latest-beta.json` / `latest-alpha.json` and the download bases point
-      # at, and it is what makes them stay put.
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        if: needs.channel.outputs.prerelease == 'true'
+
+  # Beta/Alpha App tags are uncommon native releases. They publish only to the
+  # website store on its dedicated least-privilege runner.
+  publish_fast_website:
+    needs: [channel, daemon_logic, installers, binaries]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.channel.outputs.name != 'official'
+    runs-on: [self-hosted, linux, genehub-publisher]
+    concurrency:
+      group: genehub-app-${{ needs.channel.outputs.name }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      BETA_STAGE: ${{ vars.GENEHUB_BETA_STAGE }}
+      ALPHA_STAGE: ${{ vars.GENEHUB_ALPHA_STAGE }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          tag_name: ${{ needs.channel.outputs.name }}
-          name: ${{ needs.channel.outputs.name }}
-          prerelease: true
-          files: dist/*
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: genethub
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          repository: ${{ needs.channel.outputs.cloud_repository }}
+          ref: ${{ needs.channel.outputs.cloud_sha }}
+          token: ${{ secrets.GENEHUB_CLOUD_READ_TOKEN }}
+          path: genethub-cloud
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-setup
+          path: release-input/windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-tarball
+          path: release-input/linux
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-logic-release
+          path: release-input/logic
+      - name: Publish website-only App and matching logic manifests
+        env:
+          RELEASE_CHANNEL: ${{ needs.channel.outputs.name }}
+          RELEASE_ORIGIN: ${{ needs.channel.outputs.hub_url }}
+          CLOUD_SHA: ${{ needs.channel.outputs.cloud_sha }}
+        run: |
+          set -euo pipefail
+          case "$RELEASE_CHANNEL" in
+            beta) release_stage="$BETA_STAGE" ;;
+            alpha) release_stage="$ALPHA_STAGE" ;;
+            *) echo "unexpected fast channel $RELEASE_CHANNEL" >&2; exit 1 ;;
+          esac
+          CHANNEL="$RELEASE_CHANNEL" RELEASE="${GITHUB_REF_NAME#v}" \
+          STAGE="$release_stage" PUBLIC_ORIGIN="$RELEASE_ORIGIN" \
+          OPEN_ROOT="$GITHUB_WORKSPACE/genethub" CLOUD_ROOT="$GITHUB_WORKSPACE/genethub-cloud" \
+          INPUT_ROOT="$GITHUB_WORKSPACE/release-input" OPEN_SHA="$GITHUB_SHA" CLOUD_SHA="$CLOUD_SHA" \
+            "$GITHUB_WORKSPACE/genethub-cloud/deploy/publish-app-release.sh"
+
+  # Official website publication runs only after GitHub has the exact bytes;
+  # the publisher reads both back before moving either manifest.
+  publish_official_website:
+    needs: [channel, daemon_logic, installers, binaries, publish_official_github]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.channel.outputs.name == 'official'
+    runs-on: [self-hosted, linux, genehub-publisher]
+    concurrency:
+      group: genehub-app-official
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      OFFICIAL_STAGE: ${{ vars.GENEHUB_OFFICIAL_STAGE }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: genethub
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          repository: ${{ needs.channel.outputs.cloud_repository }}
+          ref: ${{ needs.channel.outputs.cloud_sha }}
+          token: ${{ secrets.GENEHUB_CLOUD_READ_TOKEN }}
+          path: genethub-cloud
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-setup
+          path: release-input/windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-tarball
+          path: release-input/linux
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daemon-logic-release
+          path: release-input/logic
+      - name: Mirror Official and activate App before its new-ABI logic
+        env:
+          RELEASE_ORIGIN: ${{ needs.channel.outputs.hub_url }}
+          CLOUD_SHA: ${{ needs.channel.outputs.cloud_sha }}
+          PROMOTED_FROM_BETA: ${{ needs.daemon_logic.outputs.promoted_from_beta }}
+        run: |
+          set -euo pipefail
+          CHANNEL=official RELEASE="${GITHUB_REF_NAME#v}" \
+          STAGE="$OFFICIAL_STAGE" PUBLIC_ORIGIN="$RELEASE_ORIGIN" \
+          OPEN_ROOT="$GITHUB_WORKSPACE/genethub" CLOUD_ROOT="$GITHUB_WORKSPACE/genethub-cloud" \
+          INPUT_ROOT="$GITHUB_WORKSPACE/release-input" OPEN_SHA="$GITHUB_SHA" CLOUD_SHA="$CLOUD_SHA" \
+          GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_TAG="$GITHUB_REF_NAME" \
+            "$GITHUB_WORKSPACE/genethub-cloud/deploy/publish-app-release.sh"

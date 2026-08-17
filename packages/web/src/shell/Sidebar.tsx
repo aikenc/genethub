@@ -381,7 +381,6 @@ export function Sidebar({
       {endpoint ? (
         <OpenProject
           ref={openWorkspaceRef}
-          host={host}
           endpoint={endpoint}
           variant="none"
           onOpened={onNavigate}

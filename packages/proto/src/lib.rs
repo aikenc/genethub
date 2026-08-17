@@ -8,6 +8,7 @@
 pub mod data;
 pub mod domain;
 pub mod event;
+pub mod platform;
 pub mod rpc;
 pub mod speech;
 pub mod timeline;
@@ -15,6 +16,7 @@ pub mod timeline;
 pub use data::*;
 pub use domain::*;
 pub use event::*;
+pub use platform::*;
 pub use rpc::*;
 pub use speech::*;
 pub use timeline::*;

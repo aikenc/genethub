@@ -1,122 +1,115 @@
+import { useEffect, useState } from "react";
+
 import type { Host } from "../host";
 import { useWorkbench } from "../session/store";
+import { appDownloadPage } from "./links";
 
-const OFFICIAL_RELEASES = "https://github.com/aikenc/genethub/releases";
-
-/**
- * The corner of the screen where a finished download says so.
- *
- * A corner rather than the settings page, because by the time the file has
- * landed the person who pressed 下载 has gone back to work — and an installer
- * sitting on disk that nobody is told about is a download that did not happen.
- * It is also why this is not a modal: installing stops the daemon and every
- * agent mid-turn, so interrupting someone to ask would be the one moment they
- * are guaranteed to say no.
- *
- * Rendered from the machine's state and nothing else. Two windows open on the
- * same machine show the same box, and closing one does not lose the other's.
- */
+/** A non-modal signed-Wasm action surfaced from the stable Platform control. */
 export function UpdateToast({ host }: { host: Host }) {
-  const { download, dismissUpdate } = useWorkbench();
+  const { patch, patching, applyPatch, clearPatch } = useWorkbench();
+  const [confirmingTermination, setConfirmingTermination] = useState(false);
 
-  if (download.state === "idle") return null;
+  useEffect(() => setConfirmingTermination(false), [patch]);
 
+  if (!patch) return null;
+
+  if (patch.type === "status") {
+    const availability = patch.availability;
+    if (availability.type === "current" || availability.type === "unconfigured") return null;
+    if (availability.type === "available") {
+      return (
+        <Toast>
+          <p className="font-medium">Wasm 补丁 r{availability.artifact.logicRevision} 可用</p>
+          <p className="mt-1 text-muted">验证签名后冷启动新实例；有活动任务时不会更新。</p>
+          <Actions>
+            <Secondary onClick={clearPatch}>稍后</Secondary>
+            <Primary disabled={patching} onClick={() => void applyPatch(false)}>
+              {patching ? "更新中…" : "立即更新"}
+            </Primary>
+          </Actions>
+        </Toast>
+      );
+    }
+    if (availability.type === "requiresApp") {
+      return (
+        <Toast>
+          <p className="font-medium">需要更新 App 安装包</p>
+          <p className="mt-1 text-muted">
+            此补丁需要 Platform ABI {availability.requiredPlatformAbi}，当前 App 无法直接应用。
+          </p>
+          <Actions>
+            <Secondary onClick={clearPatch}>稍后</Secondary>
+            <Primary onClick={() => host.openExternal(appDownloadPage(availability.appManifestUrls))}>
+              查看安装包
+            </Primary>
+          </Actions>
+        </Toast>
+      );
+    }
+    return (
+      <Toast>
+        <p className="font-medium">补丁发布已暂停</p>
+        <p className="mt-1 text-muted">{availability.reason}</p>
+        <Actions><Secondary onClick={clearPatch}>知道了</Secondary></Actions>
+      </Toast>
+    );
+  }
+
+  if (patch.type === "busy") {
+    const count =
+      patch.blockers.activeSessions + patch.blockers.terminals + patch.blockers.nativeResources;
+    return (
+      <Toast>
+        {confirmingTermination ? (
+          <>
+            <p className="font-medium">确认终止活动任务？</p>
+            <p className="mt-1 text-muted">
+              这会关闭 {count} 项活动工作，然后冷启动新的 Wasm 实例。未完成的任务不会继续运行。
+            </p>
+            <Actions>
+              <Secondary onClick={() => setConfirmingTermination(false)}>取消</Secondary>
+              <Primary disabled={patching} onClick={() => void applyPatch(true)}>
+                {patching ? "终止中…" : "确认终止并更新"}
+              </Primary>
+            </Actions>
+          </>
+        ) : (
+          <>
+            <p className="font-medium">有活动任务，补丁尚未应用</p>
+            <p className="mt-1 text-muted">
+              共 {count} 项活动工作。可以等待任务结束，或明确终止后更新。
+            </p>
+            <Actions>
+              <Secondary onClick={clearPatch}>等待</Secondary>
+              <Primary disabled={patching} onClick={() => setConfirmingTermination(true)}>
+                终止任务并更新
+              </Primary>
+            </Actions>
+          </>
+        )}
+      </Toast>
+    );
+  }
+
+  return (
+    <Toast>
+      <p className="font-medium">Wasm 已更新到 r{patch.active.logicRevision}</p>
+      <p className="mt-1 text-muted">daemon 进程未重启，后续请求已切换到新实例。</p>
+      <Actions><Secondary onClick={clearPatch}>完成</Secondary></Actions>
+    </Toast>
+  );
+}
+
+function Toast({ children }: { children: React.ReactNode }) {
   return (
     <div
       role="status"
       data-testid="update-toast"
       className="fixed bottom-4 right-4 z-50 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-line bg-surface p-3 text-xs shadow-lg"
     >
-      {download.state === "fetching" ? (
-        <Fetching version={download.version} received={download.received} total={download.total} />
-      ) : null}
-
-      {download.state === "failed" ? (
-        <>
-          <p className="text-danger" role="alert">
-            下载 {download.version} 失败
-          </p>
-          <p className="mt-1 break-words text-muted">{download.message}</p>
-          <Actions>
-            <Secondary onClick={() => void dismissUpdate()}>关闭</Secondary>
-          </Actions>
-        </>
-      ) : null}
-
-      {download.state === "ready" ? (
-        <>
-          <p className="font-medium">旧版留下了 {download.version} 的下载记录</p>
-          <p className="mt-1 text-muted">
-            自动安装已禁用，不会执行这个文件。请从官方发布页重新手动下载，并通过独立可信渠道核对
-            SHA256SUMS。
-          </p>
-          <p className="mt-1 break-all text-faint">{download.path}</p>
-          <Actions>
-            <Secondary onClick={() => void dismissUpdate()}>关闭</Secondary>
-            <button
-              type="button"
-              data-testid="manual-update-link"
-              className="rounded bg-accent px-3 py-1 text-white"
-              onClick={() => host.openExternal(OFFICIAL_RELEASES)}
-            >
-              官方发布页
-            </button>
-          </Actions>
-        </>
-      ) : null}
+      {children}
     </div>
   );
-}
-
-/**
- * Progress, and no buttons.
- *
- * Nothing here can be pressed because there is nothing useful to press: the
- * fetch cannot be cancelled meaningfully — it is a file on this machine's own
- * disk, and interrupting it saves nobody anything — and installing is not yet
- * possible. It resolves itself, which is the honest reason to show it at all:
- * a download nobody can see is a download people start twice.
- */
-function Fetching({
-  version,
-  received,
-  total,
-}: {
-  version: string;
-  received: number;
-  total?: number;
-}) {
-  // No total means the release host sent no length. A bar that guessed one
-  // would be a lie that moves; the byte count is the truth that does.
-  const share = total && total > 0 ? Math.min(1, received / total) : null;
-
-  return (
-    <>
-      <p className="font-medium">正在下载 {version}…</p>
-      <div className="mt-2 h-1 overflow-hidden rounded bg-bg">
-        {/* With no total, a full bar would read as "done" and a bar at zero as
-            "stuck". Neither is true, so it pulses instead of measuring. */}
-        <div
-          data-testid="update-progress"
-          className={
-            share === null
-              ? "h-full w-1/3 animate-pulse bg-accent"
-              : "h-full bg-accent transition-[width] duration-200"
-          }
-          style={share === null ? undefined : { width: `${Math.round(share * 100)}%` }}
-        />
-      </div>
-      <p className="mt-1 text-muted">
-        {share === null
-          ? megabytes(received)
-          : `${Math.round(share * 100)}% · ${megabytes(received)} / ${megabytes(total!)}`}
-      </p>
-    </>
-  );
-}
-
-function megabytes(bytes: number): string {
-  return `${(bytes / 1_048_576).toFixed(1)} MB`;
 }
 
 function Actions({ children }: { children: React.ReactNode }) {
@@ -129,6 +122,27 @@ function Secondary({ children, onClick }: { children: React.ReactNode; onClick()
       type="button"
       data-testid="dismiss-update"
       className="rounded border border-line px-2 py-1 hover:border-accent"
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Primary({
+  children,
+  disabled = false,
+  onClick,
+}: {
+  children: React.ReactNode;
+  disabled?: boolean;
+  onClick(): void;
+}) {
+  return (
+    <button
+      type="button"
+      className="rounded bg-accent px-3 py-1 text-white disabled:opacity-40"
+      disabled={disabled}
       onClick={onClick}
     >
       {children}

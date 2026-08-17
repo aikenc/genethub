@@ -3,7 +3,7 @@
 //! The machine dials a relay and waits at a rendezvous slot. The relay matches
 //! whoever asks for that slot with this connection and stops there — it is not
 //! asked whether the client should be allowed in, because it could not answer:
-//! the authorized-devices list is on this machine (`crate::devices`).
+//! the authorization policy is in this machine's signed Wasm application.
 //!
 //! This is the whole of what a self-hosted deployment needs. No control plane,
 //! no database, no account.
@@ -11,17 +11,27 @@
 use std::sync::{Arc, Weak};
 
 use anyhow::{anyhow, Context, Result};
-use genehub_proto::{RemoteAccess, ServerFrame};
+use genehub_proto::RemoteAccess;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::config::{MachineState, Paths, Rendezvous};
-use crate::devices::rendezvous_id;
 use crate::state::AppState;
 use crate::transport::fabric::FabricUplink;
 
+fn rendezvous_id(machine_id: &str, machine_secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest =
+        Sha256::digest(format!("genehub-rendezvous:{machine_id}:{machine_secret}").as_bytes());
+    digest
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 pub struct Remote {
     attached: Mutex<Option<Attached>>,
-    pty: broadcast::Sender<ServerFrame>,
+    pty: broadcast::Sender<crate::logic::RoutedEvent>,
     /// Weak for the same reason the Hub link's is: the state owns this.
     state: Weak<AppState>,
 }
@@ -34,7 +44,7 @@ struct Attached {
 pub type SharedRemote = Arc<Remote>;
 
 impl Remote {
-    pub fn new(_paths: Paths, pty: broadcast::Sender<ServerFrame>) -> SharedRemote {
+    pub fn new(_paths: Paths, pty: broadcast::Sender<crate::logic::RoutedEvent>) -> SharedRemote {
         Arc::new(Remote {
             attached: Mutex::new(None),
             pty,
@@ -149,7 +159,7 @@ impl Remote {
 
 fn dial(
     state: &Arc<AppState>,
-    pty: &broadcast::Sender<ServerFrame>,
+    pty: &broadcast::Sender<crate::logic::RoutedEvent>,
     config: &Rendezvous,
     machine: &MachineState,
 ) -> FabricUplink {
@@ -314,7 +324,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = crate::config::Paths::new(dir.path());
         let state_path = paths.state_file();
-        let (state, _pty_rx) = crate::AppState::build(paths).await.unwrap();
+        let state = crate::AppState::build(paths).await.unwrap();
         let (pty, _) = broadcast::channel(1);
         let mut remote = Remote::new(crate::config::Paths::new(dir.path()), pty);
         remote.attach(&state).await;

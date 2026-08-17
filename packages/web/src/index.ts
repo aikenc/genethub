@@ -13,7 +13,7 @@ import "./boot";
 
 export { App } from "./App";
 export { BUILD } from "./build";
-export { detectHost, browserHost, desktopHost, LOCAL_TARGET } from "./host";
+export { detectHost, browserHost, LOCAL_TARGET } from "./host";
 export type { Endpoint, Host, Notification, Target } from "./host";
 export { Client } from "./protocol/client";
 export { AssetPreviewPage } from "./preview/AssetPreviewPage";

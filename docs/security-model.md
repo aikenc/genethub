@@ -24,7 +24,8 @@
 | relay | **按不可信设计** | IP、时序、包大小、opaque endpoint/route/outer-stream id、初始 peer hello | 没有 peer secret；Exchange method/metadata/body 是密文且不落库 |
 | 控制面 | **托管形态需信任** | 账号、连接元数据、它生成的临时 channel secret | 业务帧不经过它，但它技术上可持密钥仿冒客户端；不是零知识 |
 | daemon | 可信（你自己的机器） | 全部 | — |
-| 托管 Web 前端/桌面壳 | 可信 | 浏览器或本机持有的凭证与明文 | — |
+| 托管 Web 前端 | 可信 | 浏览器持有的短期凭证与会话明文 | — |
+| Desktop 原生壳 | 可信但不在业务数据面 | daemon 进程状态、短期 enrollment URL 与 machine id | 网站 cookie、peer secret 与 Exchange 明文 |
 
 **自建部署里根本没有控制面**：relay + 静态工作台两个东西就够，授权全靠配对（[self-hosting.md](./self-hosting.md)）。托管部署为了账号设备、撤销和租约引入 Control，并明确把它和托管前端列入信任边界，不能把 Relay 的无内容密钥性质扩大到整个平台。
 
@@ -70,7 +71,7 @@ relay 与控制面是两个进程、两个仓库，这不是部署细节而是�
 | hosted peer secret | 浏览器短期持有；daemon 兑换；Control 在待兑换窗口内存明文 | 短期，兑换、撤销或过期后清除 | 在窗口内可认证或仿冒对应 peer | ✓（撤销/到期） |
 | RTC 临时 secret | 只在已认证 E2EE signaling stream 与 daemon 内存中 | ≤ 30 秒完成认证 | 在窗口内可尝试接入该 RTC PeerConnection，但不扩大继承权限 | 过期/连接关闭 |
 | 本机密钥 | daemon 启动时生成，仅写入当前用户可读的 `endpoint.json` | 进程生命周期 | 可签发本机 daemon 的准入与控制 proof | 重启即换 |
-| 本机 WebSocket 准入 | stdout / CLI / Tauri IPC 中的一次性 URL | ≤ 15 秒且单次核销 | 一次本机连接机会 | 用即失效 |
+| 本机 WebSocket 准入 | stdout / CLI / 原生监督中的一次性 URL；不交给官网页面 | ≤ 15 秒且单次核销 | 一次本机连接机会 | 用即失效 |
 
 Fabric endpoint ticket 走查询串是不得已：浏览器发起 WebSocket 握手时无法设置请求头。代价用两条约束抵消——一次性、短期，并且核销与校验在同一事务中完成，两个并发接入不可能都成功。route ticket 与 peer capability 分域，拿到 endpoint admission 不等于获得 daemon 业务权限。
 
@@ -156,7 +157,7 @@ Relay 维护 Control 签发的 endpoint presence lease，并订阅 endpoint/rout
 | 转移链接泄露 | 撤销链接 + 撤销由它创建的设备会话 |
 | 控制面数据库泄露 | 长期 credential verifier/token 主要存哈希，但活跃 channel secret、未消费 enrollment token 等可能在短期窗口内以明文存在。立即撤销活跃通道与待消费登记、强制设备会话下线、轮换 Control↔Relay token，并按暴露时间窗审计；daemon 自签设备凭证不因数据库副本本身自动泄露 |
 | 某台机器被入侵 | 机主在那台机器上清空授权列表并轮换身份；无法登录该机器时，在控制面撤销登记以断掉上行 |
-| daemon 本机密钥泄露 | 重启 daemon 即更换；同时检查谁能读取当前用户的数据目录。stdout、CLI 输出和 Tauri IPC 都不应出现该密钥 |
+| daemon 本机密钥泄露 | 重启 daemon 即更换；同时检查谁能读取当前用户的数据目录。stdout、CLI 输出和远程页面都不应出现该密钥 |
 | relay 被滥用 | 收紧限额；必要时轮换控制面与 relay 之间的 token |
 
 ---

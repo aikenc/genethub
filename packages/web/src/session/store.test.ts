@@ -1277,7 +1277,6 @@ describe("returning after a disconnection", () => {
         listener = fn;
       },
       onNotice: () => {},
-      onUpdateDownload: () => {},
       onBackgroundProcesses: () => {},
       call: async () => undefined,
       lastCloseReason: close,

@@ -3,13 +3,11 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Endpoint, Host, WindowControls } from "../host";
+import type { Endpoint, Host } from "../host";
 import { useWorkbench } from "../session/store";
-import { useTheme } from "../theme/store";
 import { countTabSet, MobileTitleSwitcher } from "./MobileTitleSwitcher";
 import { Sidebar } from "./Sidebar";
 import { TabBar } from "./TabBar";
-import { TitleBar } from "./TitleBar";
 
 /**
  * The two pieces of chrome around the workbench.
@@ -53,18 +51,8 @@ const localEndpoint: Endpoint = {
   label: "本机",
 };
 
-const controls = (): WindowControls => ({
-  minimize: vi.fn(),
-  toggleMaximize: vi.fn(async () => true),
-  isMaximized: vi.fn(async () => false),
-  close: vi.fn(),
-  setBackground: vi.fn(),
-});
-
 beforeEach(() => {
   localStorage.clear();
-  document.documentElement.className = "dark";
-  useTheme.setState({ preference: "system", resolved: "dark" });
   useWorkbench.setState({
     connection: "ready",
     workspaces: [workspace("w1", "genethub"), workspace("w2", "paseo"), workspace("w3", "demo")],
@@ -546,7 +534,6 @@ describe("what can be done to one conversation", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 });
-
 /**
  * "移动端比例下的 tab 栏体验很差，空间太小了".
  *
@@ -664,102 +651,5 @@ describe("switching tabs from the phone title", () => {
         ],
       ),
     ).toEqual({ running: 1, completed: 2 });
-  });
-});
-
-describe("the strip along the top", () => {
-  it("is not drawn where the window belongs to a browser", () => {
-    render(
-      <TitleBar
-        host={host()}
-        endpoint={localEndpoint}
-        sidebarHidden={false}
-        onToggleSidebar={() => {}}
-      />,
-    );
-
-    expect(screen.queryByRole("menubar")).not.toBeInTheDocument();
-  });
-
-  it("minimises, maximises and closes through the shell", async () => {
-    const window = controls();
-    render(
-      <TitleBar
-        host={host({ window })}
-        endpoint={localEndpoint}
-        sidebarHidden={false}
-        onToggleSidebar={() => {}}
-      />,
-    );
-
-    await userEvent.click(screen.getByLabelText("最小化"));
-    await userEvent.click(screen.getByLabelText("最大化"));
-    await userEvent.click(screen.getByLabelText("关闭"));
-
-    expect(window.minimize).toHaveBeenCalled();
-    expect(window.toggleMaximize).toHaveBeenCalled();
-    // Closing is the shell's decision, not ours: on the desktop it hides the
-    // window and leaves the daemon running, which is what the tray is for.
-    expect(window.close).toHaveBeenCalled();
-  });
-
-  it("switches the palette from the 视图 menu", async () => {
-    render(
-      <TitleBar
-        host={host({ window: controls() })}
-        endpoint={localEndpoint}
-        sidebarHidden={false}
-        onToggleSidebar={() => {}}
-      />,
-    );
-
-    await userEvent.click(screen.getByRole("menuitem", { name: "视图" }));
-    await userEvent.click(screen.getByRole("menuitemradio", { name: "亮色" }));
-
-    expect(document.documentElement.classList.contains("light")).toBe(true);
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-  });
-
-  it("does not offer the local folder picker while connected to a remote machine", async () => {
-    const pickDirectory = vi.fn(async () => "/local/path");
-    render(
-      <TitleBar
-        host={host({ window: controls(), pickDirectory })}
-        endpoint={{ url: "wss://relay.test", via: "relay", label: "工作电脑" }}
-        sidebarHidden={false}
-        onToggleSidebar={() => {}}
-      />,
-    );
-
-    await userEvent.click(screen.getByRole("menuitem", { name: "文件" }));
-    expect(screen.getByRole("menuitem", { name: "打开工作区…" })).toBeDisabled();
-    expect(pickDirectory).not.toHaveBeenCalled();
-  });
-
-  it("offers to give the left column's room back, and says which way round it is", async () => {
-    const onToggleSidebar = vi.fn();
-    const { rerender } = render(
-      <TitleBar
-        host={host({ window: controls() })}
-        endpoint={localEndpoint}
-        sidebarHidden={false}
-        onToggleSidebar={onToggleSidebar}
-      />,
-    );
-
-    await userEvent.click(screen.getByRole("menuitem", { name: "视图" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "隐藏左栏" }));
-    expect(onToggleSidebar).toHaveBeenCalled();
-
-    rerender(
-      <TitleBar
-        host={host({ window: controls() })}
-        endpoint={localEndpoint}
-        sidebarHidden
-        onToggleSidebar={onToggleSidebar}
-      />,
-    );
-    await userEvent.click(screen.getByRole("menuitem", { name: "视图" }));
-    expect(screen.getByRole("menuitem", { name: "显示左栏" })).toBeInTheDocument();
   });
 });
