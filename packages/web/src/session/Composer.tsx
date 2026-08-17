@@ -73,7 +73,6 @@ export function Composer({
   onPickModel,
   onPickMode,
   onPickEffort,
-  onHeightChange,
   onRestoreDraft,
   onInsertDraft,
   minimized,
@@ -108,10 +107,6 @@ export function Composer({
   onPickModel(id: string): void;
   onPickMode(id: string): void;
   onPickEffort?(id: string): void;
-  /** The card grows with text and attachments while floating over the
-   * timeline. Its owner uses this to keep the last message and permission
-   * prompt above the real card instead of a guessed fixed offset. */
-  onHeightChange?(height: number): void;
   /** Acknowledges that `restoreDraft` has been taken into the field. */
   onRestoreDraft?(): void;
   /** Acknowledges that `insertDraft` has been appended to the field. */
@@ -133,7 +128,6 @@ export function Composer({
   const commandMenuId = `composer-commands-${useId()}`;
   const textarea = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
-  const card = useRef<HTMLDivElement>(null);
   const speechInput = useSpeechInput({
     target: speech,
     getDraft: () => ({
@@ -285,17 +279,6 @@ export function Composer({
     // has not changed, so nothing else would ask it to grow again.
   }, [speechPresentation, visibleDraft, minimized]);
 
-  useLayoutEffect(() => {
-    const element = card.current;
-    if (!element || !onHeightChange) return;
-    const update = () => onHeightChange(Math.ceil(element.getBoundingClientRect().height));
-    update();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(update);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [onHeightChange, minimized]);
-
   useEffect(() => {
     if (!minimized) return;
     if (focused || speechInput.phase === "recording") onExpand?.();
@@ -312,7 +295,14 @@ export function Composer({
   return (
     <div
       data-composer-shell=""
-      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-8 md:px-4"
+      // In the transcript's flow, not floating over it. The room the composer
+      // needs is whatever it happens to be — one collapsed line, a command
+      // menu, four lines of draft — and a flex row sized `auto` reserves
+      // exactly that. Measuring the card in JS and feeding the number back as
+      // the transcript's bottom padding could not: `zoom` puts the reading and
+      // the declaration in different coordinate spaces, so every UI size but
+      // the unzoomed one reserved the wrong gap.
+      className="pointer-events-none z-10 shrink-0 px-3 pt-2 md:px-4"
       style={{
         // Above the on-screen keyboard, and clear of the home indicator when
         // there is none. The shell is a fixed box that the keyboard covers
@@ -378,7 +368,6 @@ export function Composer({
       ) : null}
       {!minimized ? (
       <div
-        ref={card}
         data-composer-card=""
         className={`pointer-events-auto mx-auto max-w-chat rounded-2xl border bg-surface/95 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur transition-colors ${
           focused ? "border-muted/50" : "border-line-strong"

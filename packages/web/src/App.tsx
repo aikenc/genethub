@@ -125,7 +125,6 @@ export function App({
   >(() => (host.pendingPairing?.() ? "working" : "idle"));
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
-  const [composerHeight, setComposerHeight] = useState(128);
   const [composerMinimized, setComposerMinimized] = useState(false);
   // Two different questions. `sessionsOpen` is the phone's drawer, which starts
   // shut because it covers the conversation; `sidebarHidden` is someone on a
@@ -174,7 +173,6 @@ export function App({
   // An unstarted conversation: no session on the machine, and so nothing a
   // transcript could be drawn from.
   const starting = Boolean(draft && !workbench.activeSessionId);
-  const composerSpace = `calc(${composerHeight}px + var(--keyboard, 0px) + max(0.75rem, env(safe-area-inset-bottom)) + 0.5rem)`;
 
   // The frame the compositor paints while a window is being resized is the
   // shell's, not the page's, so it has to be told which palette is in force —
@@ -630,10 +628,7 @@ export function App({
                         endpoint={endpoint}
                       />
                     </div>
-                    <div
-                      className="min-h-0 flex-1 overflow-hidden"
-                      style={{ paddingBottom: composerSpace }}
-                    >
+                    <div className="min-h-0 flex-1 overflow-hidden">
                       {/* A draft has no transcript to show, and the room it
                           leaves is where the two decisions a new conversation
                           still needs — which workspace, which Agent — are least
@@ -655,10 +650,7 @@ export function App({
                       )}
                     </div>
                     {workbench.timeline.pendingPermission ? (
-                      <div
-                        className="absolute inset-x-0 z-20 px-4"
-                        style={{ bottom: composerSpace }}
-                      >
+                      <div className="z-20 shrink-0 px-4">
                         <div className="mx-auto max-w-chat">
                           <PermissionCard
                             request={workbench.timeline.pendingPermission}
@@ -719,7 +711,6 @@ export function App({
                       }
                       onRestoreDraft={workbench.restoredDraft}
                       onInsertDraft={workbench.consumedComposerDraftInsert}
-                      onHeightChange={setComposerHeight}
                       minimized={composerMinimized}
                       onExpand={() => setComposerMinimized(false)}
                       onSend={(text, attachments) =>
