@@ -144,8 +144,10 @@ export function TimelineView({
   onReturnToBottom?(): void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const scrollRun = useRef(idleTimelineScroll());
+  const pinnedRef = useRef(true);
   const [pinned, setPinned] = useState(true);
   const [adrift, setAdrift] = useState(false);
   const [forkRequest, setForkRequest] = useState<{
@@ -154,6 +156,7 @@ export function TimelineView({
   } | null>(null);
   const forkSession = useWorkbench((workbench) => workbench.forkSession);
   const rounds = useWorkbench((workbench) => workbench.timeline.rounds);
+  const roundLayers = useWorkbench((workbench) => workbench.timeline.roundLayers);
   const activeSessionId = useWorkbench((workbench) => workbench.activeSessionId);
   const sessions = useWorkbench((workbench) => workbench.sessions);
   const agents = useWorkbench((workbench) => workbench.agents);
@@ -167,14 +170,27 @@ export function TimelineView({
   const turns = turnBlocks(state.items);
   const contextualTurns = contextualizeTurns(turns, rounds, state.items);
 
-  // Stay at the bottom while new content arrives, unless the user scrolled up
-  // to read something — then leave them where they are. A message of one's own
-  // counts as new content: it is the one thing the sender is certainly watching
-  // for.
+  pinnedRef.current = pinned;
+
+  // Stick to the end when the painted tree grows or shrinks, not when the
+  // underlying arrays are replaced. Token events used to call scrollIntoView
+  // even when the visible process cards had not changed, which made the
+  // scrollbar jump independently of the content.
+  useEffect(() => {
+    const root = content.current;
+    if (!root || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const element = scroller.current;
+      if (pinnedRef.current && element) element.scrollTo?.({ top: element.scrollHeight });
+    });
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     const element = scroller.current;
     if (pinned && element) element.scrollTo?.({ top: element.scrollHeight });
-  }, [state.items, state.pending, rounds, pinned, bottomInset]);
+  }, [pinned, bottomInset]);
 
   const returnToBottom = () => {
     const element = scroller.current;
@@ -191,7 +207,7 @@ export function TimelineView({
     <>
       <div
         ref={scroller}
-        className="mx-auto h-full min-w-0 max-w-chat flex-1 space-y-4 overflow-x-hidden overflow-y-auto px-4 py-6"
+        className="mx-auto h-full min-w-0 max-w-chat flex-1 overflow-x-hidden overflow-y-auto px-4 py-6"
         data-testid="timeline"
         style={{ paddingBottom: `calc(1.5rem + ${bottomInset}px)` }}
         onScroll={(event) => {
@@ -210,11 +226,13 @@ export function TimelineView({
           if (run.triggered) onScrollBack?.();
         }}
       >
+        <div ref={content} className="space-y-4">
         {contextualTurns.map(
           ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
             const hasRound = Boolean(round);
+            const layerReady = Boolean(round && roundLayers[round.roundId]);
             const narrative =
-              rounds.length === 0
+              !layerReady
                 ? turn.items
                 : turn.items.filter(
                     (item) =>
@@ -223,7 +241,7 @@ export function TimelineView({
                       (!hasRound || item.type !== "assistantMessage"),
                   );
             return (
-              <section key={turn.stats?.turnId ?? `loose-${index}`} className="space-y-4">
+              <section key={turnSectionKey(turn, index)} className="space-y-4">
                 {narrative.map((item) => <Item key={item.id} item={item} />)}
                 {startedRounds.map((startedRound) => (
                   <RoundProgress
@@ -282,6 +300,7 @@ export function TimelineView({
           </div>
         ) : null}
         <div ref={bottom} />
+        </div>
       </div>
       <div
         className="pointer-events-none absolute inset-x-0 px-4"
@@ -494,6 +513,25 @@ interface TurnBlock {
   stats: TurnStats | null;
 }
 
+function turnSectionKey(turn: TurnBlock, index: number): string {
+  if (turn.stats?.turnId) return turn.stats.turnId;
+  const user = turn.items.find((item) => item.type === "userMessage");
+  return user?.id ?? turn.items[0]?.id ?? `loose-${index}`;
+}
+
+/** How many one-line blobs the live window keeps in view. */
+const LIVE_TAIL_ROWS = 5;
+
+/** Manual toggle wins; otherwise the card follows the default for this moment. */
+function useCardOpen(defaultOpen: boolean): {
+  open: boolean;
+  toggle(): void;
+} {
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = manualOpen ?? defaultOpen;
+  return { open, toggle: () => setManualOpen(!open) };
+}
+
 function turnBlocks(items: TimelineItem[]): TurnBlock[] {
   const turns: TurnBlock[] = [];
   let current: TimelineItem[] = [];
@@ -547,7 +585,15 @@ function contextualizeTurns(
     const startedRounds = rounds.filter(
       (round) => round.userItemId && itemIds.has(round.userItemId),
     );
-    if (startedRounds.length > 0) currentRound = startedRounds[startedRounds.length - 1];
+    const opensNewRequest = turn.items.some((item) => item.type === "userMessage");
+    if (startedRounds.length > 0) {
+      currentRound = startedRounds[startedRounds.length - 1];
+    } else if (opensNewRequest) {
+      // A new user bubble is a new request. Inheriting the previous round
+      // would hide this turn's streaming reply until the next layer refresh
+      // names it.
+      currentRound = undefined;
+    }
     const roundFinal = currentRound ? finals.get(currentRound.roundId) : undefined;
     // The turn summary and the round layer arrive over different paths. A fast
     // completion can therefore leave this turn completed while the last round
@@ -634,12 +680,8 @@ function TrunkCard({
     (state) => state.timeline.roundTrunks[`${round.roundId}:${summary.index}`],
   );
   const loadTrunk = useWorkbench((state) => state.loadTrunk);
-  // Which trunk is the live tail changes as the round advances, so the default
-  // has to be read on every render rather than captured once. A null override
-  // follows that default; clicking detaches this trunk from it, so the work the
-  // user opened to read does not collapse under them when the tail moves on.
-  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
-  const open = manualOpen ?? active;
+  const live = round.outcome === "running";
+  const { open, toggle } = useCardOpen(active);
 
   useEffect(() => {
     if (open && !detail) void loadTrunk(round.roundId, summary.index);
@@ -648,9 +690,11 @@ function TrunkCard({
   const batches = detail?.batches.filter(
     (batch) => !finalSummaryText || !isFinalSummaryBatch(batch.summary, finalSummaryText),
   );
-  const singleBatch = batches?.length === 1 ? batches[0] : undefined;
-  const singleBatchTitle = splitMonologue(singleBatch?.monologue ?? "").first;
+  const firstBatch = batches?.[0];
+  const flattenCompleted = !live && batches?.length === 1 ? firstBatch : undefined;
+  const singleBatchTitle = splitMonologue((firstBatch ?? flattenCompleted)?.monologue ?? "").first;
   const trunkTitle = singleBatchTitle || progressTitle(summary.title);
+  const liveBlobs = live ? (batches?.flatMap((batch) => batch.blobs) ?? []) : [];
 
   return (
     <div className="overflow-hidden rounded-lg border border-line bg-bg" data-testid="round-trunk">
@@ -658,17 +702,12 @@ function TrunkCard({
         type="button"
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
         aria-expanded={open}
-        onClick={() => setManualOpen(!open)}
+        onClick={toggle}
       >
         <span className="shrink-0" aria-hidden="true">
           🧭
         </span>
-        <span
-          className={`min-w-0 flex-1 text-sm font-medium ${
-            open ? "whitespace-pre-wrap break-words" : "truncate"
-          }`}
-          title={trunkTitle}
-        >
+        <span className="min-w-0 flex-1 truncate text-sm font-medium" title={trunkTitle}>
           {trunkTitle}
         </span>
         <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>
@@ -679,29 +718,27 @@ function TrunkCard({
       {open ? (
         <div className="space-y-2 px-2 pb-2">
           {!detail ? <p className="px-2 py-1 text-xs text-muted">正在加载…</p> : null}
-          {singleBatch ? (
+          {flattenCompleted ? (
             <BatchContent
-              batch={singleBatch}
-              monologue={monologueAfterTitle(singleBatch.monologue ?? "", summary.title)}
+              batch={flattenCompleted}
+              monologue={monologueAfterTitle(flattenCompleted.monologue ?? "", summary.title)}
             />
           ) : (
-            batches?.map((batch, index) => (
-              <BatchCard
-                key={batch.summary.index}
-                batch={batch}
-                active={active && index === batches.length - 1}
-              />
-            ))
+            batches?.map((batch) => <BatchCard key={batch.summary.index} batch={batch} />)
           )}
+          {live && active ? <LiveTail blobs={liveBlobs} /> : null}
         </div>
       ) : null}
     </div>
   );
 }
 
-function BatchCard({ batch, active }: { batch: RoundBatch; active: boolean }) {
-  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
-  const open = manualOpen ?? active;
+function BatchCard({
+  batch,
+}: {
+  batch: RoundBatch;
+}) {
+  const { open, toggle } = useCardOpen(false);
   const monologue = splitMonologue(batch.monologue ?? "");
   return (
     <div
@@ -712,15 +749,13 @@ function BatchCard({ batch, active }: { batch: RoundBatch; active: boolean }) {
         type="button"
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
         aria-expanded={open}
-        onClick={() => setManualOpen(!open)}
+        onClick={toggle}
       >
         <span className="shrink-0" aria-hidden="true">
           💭
         </span>
         <span
-          className={`min-w-0 flex-1 text-xs ${
-            open ? "whitespace-pre-wrap break-words" : "truncate"
-          }`}
+          className="min-w-0 flex-1 truncate text-xs"
           title={monologue.first || batch.summary.text}
         >
           {monologue.first || batch.summary.text}
@@ -750,6 +785,28 @@ function BatchContent({
         </div>
       ) : null}
       {batch.blobs.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
+    </div>
+  );
+}
+
+function LiveTail({ blobs }: { blobs: BlobOverview[] }) {
+  const tail = blobs.slice(-LIVE_TAIL_ROWS);
+  return (
+    <div className="overflow-hidden rounded-md border border-line bg-bg" data-testid="live-tail">
+      {tail.length === 0 ? (
+        <p className="px-2 py-1.5 text-xs text-muted">进行中</p>
+      ) : (
+        tail.map((blob) => (
+          <div
+            key={blob.itemId}
+            className="flex items-center gap-2 px-2 py-1.5 text-xs"
+            data-testid="live-blob-row"
+          >
+            <span className="text-muted">{blob.kind === "reasoning" ? "思考" : "工具"}</span>
+            <span className="min-w-0 flex-1 truncate">{blob.overview}</span>
+          </div>
+        ))
+      )}
     </div>
   );
 }
