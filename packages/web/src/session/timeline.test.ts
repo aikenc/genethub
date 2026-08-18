@@ -207,6 +207,67 @@ describe("the session timeline", () => {
     expect(state.seq).toBe(42);
   });
 
+  it("keeps process cards already on screen when a reset snapshot has no expanded round", () => {
+    const previous = emptyTimeline();
+    previous.roundLayers = {
+      r1: {
+        round: {
+          roundId: "r1",
+          userItemId: "u1",
+          startedAtMs: 1,
+          endedAtMs: 0,
+          outcome: "running",
+          trunkCount: 1,
+        },
+        trunks: [{ index: 0, firstItemId: "a1", blobCount: 2, title: "在做", batches: [] }],
+      },
+    };
+    previous.roundTrunks = {
+      "r1:0": {
+        summary: { index: 0, firstItemId: "a1", blobCount: 2, title: "在做", batches: [] },
+        batches: [],
+      },
+    };
+    previous.blobs = {
+      blob1: { id: "blob1", value: { text: "kept" } },
+    };
+
+    const state = fromSnapshot(
+      {
+        summary: {
+          id: "s1",
+          title: "t",
+          agentId: "claude",
+          workspaceId: "w1",
+          status: "running",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          modelId: null,
+          modeId: null,
+        },
+        items: [{ type: "userMessage", id: "u1", text: "继续", attachments: [] }],
+        seq: 99,
+        rounds: [
+          {
+            roundId: "r1",
+            userItemId: "u1",
+            startedAtMs: 1,
+            endedAtMs: 0,
+            outcome: "running",
+            trunkCount: 1,
+          },
+        ],
+      } as unknown as SessionSnapshot,
+      null,
+      previous,
+    );
+
+    expect(state.roundLayers.r1?.trunks).toHaveLength(1);
+    expect(state.roundTrunks["r1:0"]?.summary.title).toBe("在做");
+    expect(state.blobs.blob1?.value).toEqual({ text: "kept" });
+    expect(state.items).toHaveLength(1);
+  });
+
   it("refuses to go backwards when a replayed event is older than what it has", () => {
     let state = emptyTimeline();
     state = applySequenced(state, {

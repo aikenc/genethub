@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import mermaid from "mermaid";
 import { describe, expect, it, vi } from "vitest";
 
-import { HighlightedCode, languageForPath, Markdown } from "./Markdown";
+import { HighlightedCode, languageForPath, Markdown, splitStreamingMarkdown } from "./Markdown";
 import { useWorkbench } from "./store";
 
 vi.mock("mermaid", () => ({
@@ -24,6 +24,20 @@ vi.mock("mermaid", () => ({
  * it is not trusted input.
  */
 describe("an agent's reply", () => {
+  it("does not let an unclosed fence swallow the rest of a streaming reply", () => {
+    expect(
+      splitStreamingMarkdown(["先看这段", "", "```ts", "const x ="].join("\n")),
+    ).toEqual({
+      stable: "先看这段\n",
+      tail: "```ts\nconst x =",
+    });
+
+    render(<Markdown text={"先看这段\n\n```ts\nconst x ="} />);
+    expect(screen.getByText("先看这段")).toBeInTheDocument();
+    expect(screen.getByTestId("markdown-stream-tail")).toHaveTextContent("const x =");
+    expect(screen.getByTestId("markdown").querySelector(".gh-code-block")).toBeNull();
+  });
+
   it("renders the structure it was written with", () => {
     render(
       <Markdown
