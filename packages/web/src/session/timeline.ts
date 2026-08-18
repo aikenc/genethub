@@ -84,12 +84,18 @@ export function emptyTimeline(): TimelineState {
  * A snapshot replaces the timeline, but it cannot speak for a message this
  * client is still holding: `pending` is ours, the daemon has never heard of it,
  * and dropping it on a resync would take the bubble away again mid-wait.
+ *
+ * Process cards already on screen are kept unless the snapshot itself expands
+ * the same round or trunk. A reset that starts from `emptyTimeline()` would
+ * otherwise blank the only view a running turn has.
  */
 export function fromSnapshot(
   snapshot: SessionSnapshot,
   pending: PendingMessage | null = null,
+  previous: TimelineState | null = null,
 ): TimelineState {
   const pendingPermission = snapshot.pendingPermissions?.[0] ?? null;
+  const rounds = roundsFromSnapshot(snapshot);
   return {
     ...emptyTimeline(),
     pending,
@@ -116,7 +122,14 @@ export function fromSnapshot(
       ),
     ),
     seq: snapshot.seq,
-    ...roundsFromSnapshot(snapshot),
+    rounds: rounds.rounds,
+    roundLayers: previous
+      ? { ...previous.roundLayers, ...rounds.roundLayers }
+      : rounds.roundLayers,
+    roundTrunks: previous
+      ? { ...previous.roundTrunks, ...rounds.roundTrunks }
+      : rounds.roundTrunks,
+    blobs: previous ? previous.blobs : {},
   };
 }
 

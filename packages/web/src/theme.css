@@ -413,6 +413,19 @@ input:focus-visible {
   background: rgb(var(--sidebar));
 }
 
+.gh-markdown-stream-tail {
+  margin: 0.75em 0;
+  padding: 0.8rem 0.9rem;
+  overflow: auto;
+  border: 1px dashed rgb(var(--line));
+  border-radius: 0.55rem;
+  background: rgb(var(--sidebar));
+  color: rgb(var(--fg));
+  font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .gh-code-header {
   display: flex;
   align-items: center;

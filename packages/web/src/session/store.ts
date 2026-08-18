@@ -883,9 +883,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           }
         },
         onResync: (resnapshot, events, reset) => {
+        const previous = timelineOf(get(), sessionId);
         const base = reset
-          ? fromSnapshot(resnapshot as SessionSnapshot, timelineOf(get(), sessionId).pending)
-          : get().sessionTimelines[sessionId] ?? emptyTimeline();
+          ? fromSnapshot(resnapshot as SessionSnapshot, previous.pending, previous)
+          : previous;
         for (const event of events) {
           if (event.event.type === "titleChanged") applyTitle(sessionId, event.event.title, set);
           applySessionStatus(sessionId, event.event, set);
@@ -901,7 +902,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     );
 
     const typedSnapshot = snapshot as SessionSnapshot;
-    const base = fromSnapshot(typedSnapshot, timelineOf(get(), sessionId).pending);
+    const previous = timelineOf(get(), sessionId);
+    const base = fromSnapshot(typedSnapshot, previous.pending, previous);
     // A slower subscription must not repaint whichever session the user opened
     // next. This is easy to hit when switching pages over a relay: both replies
     // are valid, but only the currently selected session owns the timeline.

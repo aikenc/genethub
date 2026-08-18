@@ -251,6 +251,35 @@ export type MarkdownArtifactProps = ArtifactResolveContext & {
   ) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
 };
 
+/**
+ * An unclosed fence at the end of a streaming reply would otherwise swallow
+ * every later line as one code block, then collapse when the closer arrives.
+ * Freeze the closed prefix; keep the open fence as plain text until it closes.
+ */
+export function splitStreamingMarkdown(text: string): { stable: string; tail: string } {
+  const lines = text.replace(/\r\n/gu, "\n").split("\n");
+  let fence: { marker: string; length: number; start: number } | null = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^( {0,3})(`{3,}|~{3,})(.*)$/u.exec(lines[index] ?? "");
+    if (!match) continue;
+    const marker = match[2]![0]!;
+    const length = match[2]!.length;
+    const info = match[3] ?? "";
+    if (!fence) {
+      if (marker === "`" && info.includes("`")) continue;
+      fence = { marker, length, start: index };
+      continue;
+    }
+    if (marker !== fence.marker || length < fence.length || info.trim() !== "") continue;
+    fence = null;
+  }
+  if (!fence) return { stable: text, tail: "" };
+  return {
+    stable: lines.slice(0, fence.start).join("\n"),
+    tail: lines.slice(fence.start).join("\n"),
+  };
+}
+
 /** Safe, styled GFM used by both conversations and standalone documents. */
 export const Markdown = memo(function Markdown({
   text,
@@ -262,11 +291,14 @@ export const Markdown = memo(function Markdown({
   artifact?: MarkdownArtifactProps | null;
 }) {
   const openPreviewFloat = useWorkbench((state) => state.openPreviewFloat);
+  const { stable, tail } =
+    variant === "chat" ? splitStreamingMarkdown(text) : { stable: text, tail: "" };
   return (
     <div
       className={`gh-markdown gh-markdown-${variant} break-words text-fg`}
       data-testid="markdown"
     >
+      {stable ? (
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -351,8 +383,14 @@ export const Markdown = memo(function Markdown({
           ),
         }}
       >
-        {text}
+        {stable}
       </ReactMarkdown>
+      ) : null}
+      {tail ? (
+        <pre className="gh-markdown-stream-tail" data-testid="markdown-stream-tail">
+          {tail}
+        </pre>
+      ) : null}
     </div>
   );
 });
