@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
 import { PRODUCT } from "./channel";
-import { parsePreviewPopout } from "./preview/popout";
+import { parsePortablePreviewTicket, parsePreviewPopout } from "./preview/popout";
 import { PreviewPopoutPage } from "./preview/PreviewPopoutPage";
 import { parseAssetPreviewPath } from "./preview/url";
 import { watchViewport } from "./shell/viewport";
@@ -41,9 +41,20 @@ const preview = parseAssetPreviewPath(window.location.pathname);
 const previewPopout = preview
   ? parsePreviewPopout(window.location.search, window.location.hash)
   : null;
+const previewTicket = preview
+  ? parsePortablePreviewTicket(window.location.search, window.location.hash)
+  : null;
 
 createRoot(root).render(
   <StrictMode>
-    {preview ? <PreviewPopoutPage source={preview} context={previewPopout} /> : <App />}
+    {preview ? (
+      <PreviewPopoutPage
+        source={preview}
+        context={previewPopout}
+        portableTicket={previewTicket}
+      />
+    ) : (
+      <App />
+    )}
   </StrictMode>,
 );

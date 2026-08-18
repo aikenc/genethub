@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import type { Client } from "../protocol/client";
 import {
+  createPortablePreviewUrl,
   createPreviewPopoutUrl,
+  parsePortablePreviewTicket,
   parsePreviewPopout,
   previewPopoutArtifact,
   previewPopoutReady,
@@ -67,5 +69,60 @@ describe("Preview popout context", () => {
     // React StrictMode may initialize the popout component twice; the child
     // keeps the already-consumed reference in its own realm.
     expect(takePreviewPopoutClient(context, source, child)).toBe(client);
+  });
+});
+
+describe("portable Preview ticket link", () => {
+  const ticket = {
+    url: "wss://relay.example.test/fabric/v2",
+    fabricRouteTicket: "route-ticket_demo.123",
+    channelCapability: "capability-demo",
+    channelSecret: "channel+secret/demo=",
+  };
+
+  it("round-trips every ticket part through the fragment", () => {
+    const url = new URL(
+      createPortablePreviewUrl(
+        "https://example.test/assets/preview/v2/m/w/r/clip.mp4",
+        ticket,
+        "s_demo",
+      ),
+    );
+
+    expect(parsePortablePreviewTicket(url.search, url.hash)).toEqual(ticket);
+    expect(parsePreviewPopout(url.search, url.hash)).toBeNull();
+    // The session rides along so runtime artifacts can still be saved.
+    expect(new URLSearchParams(url.search).get("genehubPreviewSession")).toBe("s_demo");
+  });
+
+  it("keeps every secret out of the query string that servers log", () => {
+    const url = new URL(
+      createPortablePreviewUrl(
+        "https://example.test/assets/preview/v2/m/w/r/clip.mp4",
+        ticket,
+        null,
+      ),
+    );
+
+    expect(url.search).not.toContain("genehubPreviewRoute");
+    expect(url.search).not.toContain("genehubPreviewCapability");
+    expect(url.search).not.toContain("genehubPreviewSecret");
+    expect(url.search).not.toContain("endpoint=");
+    // ...and secrets pasted into the query by hand are not accepted either.
+    const forged = `?endpoint=${encodeURIComponent(ticket.url)}&genehubPreviewRoute=${ticket.fabricRouteTicket}&genehubPreviewCapability=${ticket.channelCapability}&genehubPreviewSecret=${encodeURIComponent(ticket.channelSecret)}`;
+    expect(parsePortablePreviewTicket(forged, "")).toBeNull();
+  });
+
+  it("rejects partial or malformed tickets", () => {
+    expect(parsePortablePreviewTicket("", "")).toBeNull();
+    expect(
+      parsePortablePreviewTicket("", "#endpoint=wss://relay.example.test/fabric/v2"),
+    ).toBeNull();
+    expect(
+      parsePortablePreviewTicket(
+        "",
+        `#endpoint=wss://relay.example.test/fabric/v2&genehubPreviewRoute=${ticket.fabricRouteTicket}&genehubPreviewCapability=${ticket.channelCapability}&genehubPreviewSecret=bad secret with spaces`,
+      ),
+    ).toBeNull();
   });
 });

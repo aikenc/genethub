@@ -9,9 +9,12 @@ import {
 import { flushSync } from "react-dom";
 
 import type { Host } from "../host";
+import type { Client } from "../protocol/client";
 import { useWorkbench, type PreviewFloatTarget } from "../session/store";
+import { isIosStandalonePwa } from "../shell/platform";
 import { AssetPreviewPage, type PreviewMeta } from "./AssetPreviewPage";
 import {
+  createPortablePreviewUrl,
   createPreviewPopoutChannel,
   createPreviewPopoutUrl,
   registerPreviewPopoutClient,
@@ -69,6 +72,13 @@ export function PreviewFloat({
   const popouts = useRef(new Map<string, string | null>());
   const popoutBridges = useRef(new Map<string, () => void>());
   const linkedBundles = useRef(new Set<string>());
+  // iOS home-screen web apps cannot open a real browser window; there the
+  // external-open button mints a one-time ticket link and copies it instead.
+  const copyLinkMode = useMemo(() => isIosStandalonePwa(), []);
+  const [copyState, setCopyState] = useState<"idle" | "minting" | "copied" | "failed">(
+    "idle",
+  );
+  const copyResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const externalUrl = assetPreviewUrl(
     source.deviceHandle,
@@ -287,6 +297,27 @@ export function PreviewFloat({
     [source.sessionId],
   );
 
+  const copyPortableLink = useCallback(async () => {
+    if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
+    if (!client) {
+      setCopyState("failed");
+      return;
+    }
+    setCopyState("minting");
+    try {
+      const url = await mintPortablePreviewUrl(client, externalUrl, source.sessionId);
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(url);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    copyResetTimer.current = setTimeout(() => {
+      copyResetTimer.current = null;
+      setCopyState("idle");
+    }, 4_000);
+  }, [client, externalUrl, source.sessionId]);
+
   const preview = client ? (
     <AssetPreviewPage
       source={source}
@@ -365,7 +396,13 @@ export function PreviewFloat({
               <InfoIcon />
             </button>
             <span className="min-w-0 flex-1 truncate text-[12px] leading-none text-fg">
-              {title}
+              {copyState === "copied"
+                ? "链接已复制，粘贴到浏览器打开"
+                : copyState === "failed"
+                  ? "复制失败，请重试"
+                  : copyState === "minting"
+                    ? "正在生成预览链接…"
+                    : title}
             </span>
             <button
               type="button"
@@ -378,10 +415,19 @@ export function PreviewFloat({
             </button>
             <button
               type="button"
-              aria-label="新窗口打开"
-              title="新窗口打开"
+              aria-label={copyLinkMode ? "复制预览链接" : "新窗口打开"}
+              title={
+                copyLinkMode
+                  ? "复制预览链接，粘贴到浏览器打开"
+                  : "新窗口打开"
+              }
               className={`${expandedIconBtn} text-accent`}
+              disabled={copyLinkMode && copyState === "minting"}
               onClick={() => {
+                if (copyLinkMode) {
+                  void copyPortableLink();
+                  return;
+                }
                 const popout = createPreviewPopoutUrl(externalUrl, source.sessionId);
                 popouts.current.set(popout.id, source.sessionId);
                 if (client) {
@@ -420,7 +466,7 @@ export function PreviewFloat({
                 }
               }}
             >
-              <ExternalLinkIcon />
+              {copyLinkMode ? <LinkIcon /> : <ExternalLinkIcon />}
             </button>
             <button
               type="button"
@@ -651,8 +697,52 @@ function MinimizeIcon() {
   );
 }
 
-function ExternalLinkIcon() {
+/**
+ * Mints a one-time Hub ticket for the connected machine and packs it into a
+ * copyable Preview link. Requires Hub pairing: without it there is no
+ * forwarding layer for the ticket to ride on.
+ */
+async function mintPortablePreviewUrl(
+  client: Client,
+  externalUrl: string,
+  sessionId: string | null,
+): Promise<string> {
+  const status = await client.call({ type: "hub.status" });
+  if (status?.type !== "hubStatus" || status.data.state !== "paired") {
+    throw new Error("设备尚未加入账号，生成不了预览链接");
+  }
+  const ticket = await client.call({
+    type: "hub.connect",
+    payload: { machineId: status.data.machineId },
+  });
+  if (ticket?.type !== "hubTicket") throw new Error("设备暂时无法生成预览链接");
+  return createPortablePreviewUrl(
+    externalUrl,
+    {
+      url: ticket.data.url,
+      fabricRouteTicket: ticket.data.fabricRouteTicket,
+      channelCapability: ticket.data.channelCapability,
+      channelSecret: ticket.data.channelSecret,
+    },
+    sessionId,
+  );
+}
+
+function LinkIcon() {
   return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <path
+        d="M6 8 8 6M5 9.5 3.75 10.75a1.77 1.77 0 0 1-2.5-2.5l2-2A1.77 1.77 0 0 1 5.75 5.5M9 4.5l1.25-1.25a1.77 1.77 0 0 1 2.5 2.5l-2 2A1.77 1.77 0 0 1 8.25 8.5"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ExternalLinkIcon() {  return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
       <path
         d="M5.5 3.5H3.75A1.25 1.25 0 0 0 2.5 4.75v5.5A1.25 1.25 0 0 0 3.75 11.5h5.5A1.25 1.25 0 0 0 10.5 10.25V8.5"

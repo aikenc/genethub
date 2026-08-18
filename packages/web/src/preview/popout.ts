@@ -7,6 +7,10 @@ const CHANNEL_NAME = "genehub-preview-popout-v1";
 const STORAGE_KEY = "__genehub_preview_popout_v1__";
 const MESSAGE_SOURCE = "genehub-preview-popout-v1";
 const OPENER_BRIDGE_KEY = "__genehub_preview_popout_clients_v1__";
+const PORTABLE_ENDPOINT_PARAM = "endpoint";
+const PORTABLE_ROUTE_PARAM = "genehubPreviewRoute";
+const PORTABLE_CAPABILITY_PARAM = "genehubPreviewCapability";
+const PORTABLE_SECRET_PARAM = "genehubPreviewSecret";
 
 export type PreviewPopoutContext = {
   id: string;
@@ -84,6 +88,67 @@ export function parsePreviewPopout(
   const sessionId = rawSessionId === null ? null : safeToken(rawSessionId);
   if (rawSessionId !== null && !sessionId) return null;
   return { id, sessionId };
+}
+
+/**
+ * Connection material for a Preview link that must work with no opener at
+ * all — copied from an iOS PWA (where window.open cannot leave the app) and
+ * pasted into a fresh browser.
+ *
+ * The material is a one-time, short-lived Hub ticket: it dies with its
+ * expiry whether or not it leaks, unlike the device pairing credential. It
+ * rides only in the fragment, which never reaches the HTTP server or access
+ * log. This is a deliberate, scoped exception to the "channel secret never
+ * enters a URL" rule — the ticket exists precisely to be carried somewhere
+ * the workbench cannot see, and a copied link is only ever as exposed as
+ * wherever the user pastes it before it expires.
+ */
+export type PortablePreviewTicket = {
+  url: string;
+  fabricRouteTicket: string;
+  channelCapability: string;
+  channelSecret: string;
+};
+
+export function createPortablePreviewUrl(
+  previewUrl: string,
+  ticket: PortablePreviewTicket,
+  sessionId: string | null,
+): string {
+  const url = new URL(previewUrl, window.location.href);
+  if (sessionId) url.searchParams.set(SESSION_PARAM, sessionId);
+  else url.searchParams.delete(SESSION_PARAM);
+  const fragment = new URLSearchParams();
+  fragment.set(PORTABLE_ENDPOINT_PARAM, ticket.url);
+  fragment.set(PORTABLE_ROUTE_PARAM, ticket.fabricRouteTicket);
+  fragment.set(PORTABLE_CAPABILITY_PARAM, ticket.channelCapability);
+  fragment.set(PORTABLE_SECRET_PARAM, ticket.channelSecret);
+  if (sessionId) fragment.set(SESSION_PARAM, sessionId);
+  url.hash = fragment.toString();
+  return url.toString();
+}
+
+/** All four parts must survive the round trip; a partial ticket dials nothing. */
+export function parsePortablePreviewTicket(
+  _search: string,
+  hash = "",
+): PortablePreviewTicket | null {
+  // Fragment-only on purpose: the query string reaches the HTTP server and its
+  // access log, the fragment never does. Nothing sensitive is read from it.
+  const fragment = new URLSearchParams(hash.replace(/^#/, ""));
+  const endpoint = safeSecret(fragment.get(PORTABLE_ENDPOINT_PARAM));
+  const fabricRouteTicket = safeSecret(fragment.get(PORTABLE_ROUTE_PARAM));
+  const channelCapability = safeSecret(fragment.get(PORTABLE_CAPABILITY_PARAM));
+  const channelSecret = safeSecret(fragment.get(PORTABLE_SECRET_PARAM));
+  if (!endpoint || !fabricRouteTicket || !channelCapability || !channelSecret) {
+    return null;
+  }
+  return {
+    url: endpoint,
+    fabricRouteTicket,
+    channelCapability,
+    channelSecret,
+  };
 }
 
 /**
@@ -252,6 +317,18 @@ function validMessage(value: unknown): PreviewPopoutMessage | null {
 
 function safeToken(value: unknown): string | null {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,160}$/.test(value)) return null;
+  return value;
+}
+
+/**
+ * Tickets and secrets use whatever alphabet the issuer picked (base64,
+ * base64url, hex); reject only what cannot be one of those, plus a bound so
+ * a bloated fragment fails fast instead of after a dial attempt.
+ */
+function safeSecret(value: unknown): string | null {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_~+/.:=-]{8,4096}$/.test(value)) {
+    return null;
+  }
   return value;
 }
 

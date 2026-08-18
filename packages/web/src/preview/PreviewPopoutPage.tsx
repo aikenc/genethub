@@ -2,13 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { SessionArtifactBundle } from "@genehub/proto";
 
+import { emitClientDiagnostic, registerDiagnosticClient } from "../diagnostics";
 import type { Host } from "../host";
+import { Client } from "../protocol/client";
+import { readRtcEnabled } from "../settings/rtc";
 import { AssetPreviewPage } from "./AssetPreviewPage";
 import {
   createPreviewPopoutChannel,
   previewPopoutArtifact,
   previewPopoutReady,
   takePreviewPopoutBridge,
+  type PortablePreviewTicket,
   type PreviewPopoutContext,
 } from "./popout";
 import { runtimeArtifactDraftLine } from "./sessionArtifactUpload";
@@ -17,10 +21,12 @@ import type { AssetPreviewLocation } from "./url";
 export function PreviewPopoutPage({
   source,
   context,
+  portableTicket = null,
   host,
 }: {
   source: AssetPreviewLocation;
   context: PreviewPopoutContext | null;
+  portableTicket?: PortablePreviewTicket | null;
   host?: Host;
 }) {
   const channelRef = useRef<ReturnType<typeof createPreviewPopoutChannel> | null>(null);
@@ -31,6 +37,71 @@ export function PreviewPopoutPage({
   );
   const effectiveContext = inherited?.context ?? context;
   const sharedClient = inherited?.client ?? null;
+
+  // A copied link opened in a fresh browser has no opener to inherit from;
+  // the fragment-carried one-time Hub ticket is its whole credential. The
+  // ticket is spent by this dial, so reconnect after a drop is impossible —
+  // the page then says the link expired instead of silently retrying.
+  const [portable, setPortable] = useState<
+    | { kind: "connecting" }
+    | { kind: "ready"; client: Client }
+    | { kind: "failed"; message: string }
+    | null
+  >(null);
+  useEffect(() => {
+    if (!portableTicket || sharedClient) {
+      setPortable(null);
+      return;
+    }
+    let cancelled = false;
+    let owned: Client | null = null;
+    let unregisterDiagnosticClient: (() => void) | null = null;
+    setPortable({ kind: "connecting" });
+    void (async () => {
+      try {
+        owned = new Client({
+          url: portableTicket.url,
+          fabricRouteTicket: portableTicket.fabricRouteTicket,
+          channelCredential: {
+            capabilityId: portableTicket.channelCapability,
+            secret: portableTicket.channelSecret,
+          },
+          rtcEnabled: readRtcEnabled(),
+          onDiagnostic: emitClientDiagnostic,
+        });
+        unregisterDiagnosticClient = registerDiagnosticClient(owned);
+        owned.connect();
+        await untilReady(owned);
+        if (owned.identity?.machineId !== source.deviceHandle) {
+          throw new Error("链接指向的设备与当前连接不一致");
+        }
+        if (cancelled) {
+          owned.close();
+          return;
+        }
+        setPortable({ kind: "ready", client: owned });
+      } catch (error) {
+        unregisterDiagnosticClient?.();
+        owned?.close();
+        if (!cancelled) {
+          const message = error instanceof Error ? error.message : "";
+          setPortable({
+            kind: "failed",
+            message: `预览链接已失效，请回到原设备重新复制。${message}`.trim(),
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unregisterDiagnosticClient?.();
+      owned?.close();
+    };
+  }, [
+    portableTicket,
+    sharedClient,
+    source.deviceHandle,
+  ]);
 
   useEffect(() => {
     if (!effectiveContext) return;
@@ -61,12 +132,22 @@ export function PreviewPopoutPage({
     [effectiveContext],
   );
 
+  const portableClient = portable?.kind === "ready" ? portable.client : null;
+
+  if (portableTicket && !sharedClient && portable?.kind !== "ready") {
+    return (
+      <p role="status" className="m-auto p-6 text-center text-sm text-muted">
+        {portable?.kind === "failed" ? portable.message : "正在连接资源所在的设备…"}
+      </p>
+    );
+  }
+
   return (
     <>
       <AssetPreviewPage
         source={source}
         host={host}
-        client={sharedClient}
+        client={sharedClient ?? portableClient}
         runtimeSessionId={effectiveContext?.sessionId ?? null}
         onRuntimeArtifactSaved={effectiveContext?.sessionId ? reportSaved : undefined}
         onRuntimeReady={effectiveContext ? reportReady : undefined}
@@ -80,6 +161,28 @@ export function PreviewPopoutPage({
       ) : null}
     </>
   );
+}
+
+function untilReady(client: Client): Promise<void> {
+  if (client.connectionState === "ready") return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let stop = () => {};
+    const timer = setTimeout(() => {
+      stop();
+      reject(new Error("连接超时"));
+    }, 15_000);
+    stop = client.onStateChange((state) => {
+      if (state === "ready") {
+        clearTimeout(timer);
+        stop();
+        resolve();
+      } else if (state === "closed") {
+        clearTimeout(timer);
+        stop();
+        reject(new Error(client.failure?.message ?? "设备拒绝了连接"));
+      }
+    });
+  });
 }
 
 function RuntimeArtifactReceipt({
