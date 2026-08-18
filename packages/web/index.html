@@ -22,6 +22,24 @@
       first, because dark is what `:root` falls back to.
     -->
     <meta name="color-scheme" content="dark light" />
+    <!--
+      Home-screen (PWA) declaration. Without it iOS wraps a bookmarked
+      deployment in Safari chrome — domain bar up top, toolbar at the bottom —
+      once in-app navigation starts rewriting the address, which is exactly
+      what the bookmarkable locator URLs do on every workspace/session switch
+      (beta.5 report fb_3Z5GAqGwZmDY, 2026-08-18). iOS decides standalone at
+      Add to Home Screen time: bookmarks made before this change keep the
+      chrome until they are re-added. The cloud console ships its own copy of
+      this block plus a per-deployment branded manifest; keep them in step.
+    -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="GeneHub" />
+    <meta name="theme-color" content="#181b1a" />
+    <link rel="manifest" href="%BASE_URL%manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="%BASE_URL%icons/icon-256.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="%BASE_URL%icons/icon-32.png" />
     <title>GeneHub</title>
   </head>
   <body>
