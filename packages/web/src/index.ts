@@ -22,6 +22,27 @@ export { PreviewPopoutPage } from "./preview/PreviewPopoutPage";
 export { parsePreviewPopout } from "./preview/popout";
 export type { PreviewPopoutContext } from "./preview/popout";
 export { assetPreviewUrl, parseAssetPreviewPath } from "./preview/url";
+export {
+  formatWorkbenchHref,
+  formatWorkbenchPath,
+  parseWorkbenchHref,
+  parseWorkbenchPath,
+  NEW_SESSION_ID,
+} from "./location/workbench";
+export type { WorkbenchDialog, WorkbenchLocation } from "./location/workbench";
+export {
+  expandLocator,
+  expandPreviewPath,
+  locatorsMatch,
+  TABS_QUERY_BUDGET,
+  TABS_URL_LIMIT,
+} from "./location/locator";
+export { currentAppHref, goApp, LOCATION_MOVED } from "./location/history";
+export {
+  patchWorkbenchLocation,
+  readWorkbenchDialog,
+  readWorkbenchLocation,
+} from "./location/sync";
 export { useWorkbench } from "./session/store";
 export type { SpeechInputProblem } from "./speech/useSpeechInput";
 export {

@@ -384,6 +384,7 @@ export function Sidebar({
           host={host}
           endpoint={endpoint}
           variant="none"
+          driveUrl
           onOpened={onNavigate}
         />
       ) : null}

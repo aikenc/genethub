@@ -11,6 +11,9 @@ import type { HubMachine } from "@genehub/proto";
 import type { UpdateStatus } from "@genehub/proto";
 
 import { MANIFEST_URL } from "../channel";
+import { locatorsMatch } from "../location/locator";
+import { formatWorkbenchPath, parseWorkbenchPath } from "../location/workbench";
+import { goApp, readAppHref } from "../location/history";
 import {
   findMachine,
   listMachines,
@@ -280,8 +283,15 @@ export function browserHost(
     async endpoint() {
       const fragment = new URLSearchParams(location.hash.replace(/^#/, ""));
       const url = fragment.get("endpoint");
-      if (!url) return null;
-      return reach(findMachine(url), url);
+      if (url) return reach(findMachine(url), url);
+      const { pathname, search } = readAppHref();
+      const workbench = parseWorkbenchPath(pathname, search);
+      if (!workbench) return null;
+      const machine = listMachines().find((entry) =>
+        locatorsMatch(entry.machineId, workbench.deviceHandle),
+      );
+      if (!machine) return null;
+      return reach(machine, machine.endpoint);
     },
     async targets() {
       // Every paired machine is remote here. The browser is not running on any
@@ -302,6 +312,24 @@ export function browserHost(
       // the user is looking at rather than jumping back to the one they
       // arrived on.
       if (options?.remember !== false) {
+        const { pathname, search } = readAppHref();
+        const current = parseWorkbenchPath(pathname, search);
+        const next = current
+          ? {
+              ...current,
+              deviceHandle: machine.machineId,
+              ...(locatorsMatch(current.deviceHandle, machine.machineId)
+                ? {}
+                : { workspaceId: null, sessionId: null, preview: null, tabs: [] }),
+            }
+          : {
+              deviceHandle: machine.machineId,
+              workspaceId: null,
+              sessionId: null,
+              preview: null,
+              dialog: null,
+            };
+        goApp(formatWorkbenchPath(next), "replace");
         window.location.hash = `endpoint=${encodeURIComponent(machine.endpoint)}`;
       }
       return reach(machine, machine.endpoint);
@@ -324,9 +352,17 @@ export function browserHost(
     rememberPairing(machine) {
       rememberMachine(machine);
       // Drops the one-time code from the address bar so a reload does not try
-      // to spend it twice, and so it stays out of the browser's history.
-      const clean = `${window.location.pathname}${window.location.search}#endpoint=${encodeURIComponent(machine.endpoint)}`;
-      window.history.replaceState(window.history.state, "", clean);
+      // to spend it twice. The path is the bookmarkable identity; the fragment
+      // keeps a self-hosted rendezvous that must not hit access logs.
+      const path = formatWorkbenchPath({
+        deviceHandle: machine.machineId,
+        workspaceId: null,
+        sessionId: null,
+        preview: null,
+        dialog: null,
+      });
+      goApp(path, "replace");
+      window.location.hash = `endpoint=${encodeURIComponent(machine.endpoint)}`;
     },
   };
 }

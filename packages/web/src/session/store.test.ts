@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Client } from "../protocol/client";
 import { ConnectionOutcomeUnknownError } from "../protocol/client";
+import { setLandingIntent } from "../location/landing";
 import { defaultAgent, useWorkbench } from "./store";
 import { emptyTimeline } from "./timeline";
 
@@ -1410,5 +1411,165 @@ describe("removing a workspace registration", () => {
     expect(useWorkbench.getState().tabs.map((tab) => tab.id)).toEqual(["chat:s2"]);
     expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
     expect(unsubscribe).toHaveBeenCalledWith("s1");
+  });
+});
+
+describe("landing from a bookmark", () => {
+  it("opens the session named in the address instead of the newest one", async () => {
+    const older = { ...SESSION, id: "s_old", updatedAtMs: 1 };
+    const newer = { ...SESSION, id: "s_new", updatedAtMs: 9 };
+    setLandingIntent({ workspaceId: "w1", sessionId: "s_old", previewPath: null });
+    const client = {
+      identity: { machineId: "dev_7k2" },
+      onStateChange: () => () => {},
+      onNotice: () => {},
+      onUpdateDownload: () => {},
+      onBackgroundProcesses: () => {},
+      call: async (request: { type: string }) => {
+        if (request.type === "workspace.list") {
+          return {
+            type: "workspaces",
+            data: [
+              {
+                id: "w1",
+                name: "docs",
+                root: "/tmp/docs",
+                isGitRepo: false,
+                folders: [{ name: "docs", root: "/tmp/docs", rootHandle: "r_docs" }],
+              },
+            ],
+          };
+        }
+        if (request.type === "session.list") {
+          return { type: "sessions", data: [older, newer] };
+        }
+        if (request.type === "update.downloadState") {
+          return { type: "updateDownload", data: { state: "idle" } };
+        }
+        return undefined;
+      },
+      subscribe: async () => ({
+        snapshot: { seq: 0, items: [], pendingPermission: undefined, summary: older },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+
+    await useWorkbench.getState().attach(client);
+
+    expect(useWorkbench.getState().activeSessionId).toBe("s_old");
+  });
+
+  it("expands an 8-hex session token and restores tabs without stealing focus", async () => {
+    const talk = {
+      ...SESSION,
+      id: "s_a1b2c3d4e5f6789012345678abcdef01",
+      title: "短码会话",
+      updatedAtMs: 1,
+    };
+    setLandingIntent({
+      workspaceId: "w1",
+      sessionId: "s-a1b2c3d4",
+      previewPath: null,
+      tabs: ["s-a1b2c3d4", "term"],
+    });
+    const client = {
+      identity: { machineId: "m_17ef85c530554af9bb7de6c19116aff0" },
+      onStateChange: () => () => {},
+      onNotice: () => {},
+      onUpdateDownload: () => {},
+      onBackgroundProcesses: () => {},
+      call: async (request: { type: string }) => {
+        if (request.type === "workspace.list") {
+          return {
+            type: "workspaces",
+            data: [
+              {
+                id: "w1",
+                name: "docs",
+                root: "/tmp/docs",
+                isGitRepo: false,
+                folders: [{ name: "docs", root: "/tmp/docs", rootHandle: "r_docs" }],
+              },
+            ],
+          };
+        }
+        if (request.type === "session.list") {
+          return { type: "sessions", data: [talk] };
+        }
+        if (request.type === "update.downloadState") {
+          return { type: "updateDownload", data: { state: "idle" } };
+        }
+        return undefined;
+      },
+      subscribe: async () => ({
+        snapshot: { seq: 0, items: [], pendingPermission: undefined, summary: talk },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+
+    await useWorkbench.getState().attach(client);
+
+    expect(useWorkbench.getState().activeSessionId).toBe(talk.id);
+    expect(useWorkbench.getState().activeTabId).toBe(`chat:${talk.id}`);
+    expect(useWorkbench.getState().tabs.map((tab) => tab.kind)).toEqual(["chat", "terminal"]);
+  });
+
+  it("refuses to guess when two sessions share an 8-hex prefix", async () => {
+    const first = {
+      ...SESSION,
+      id: "s_a1b2c3d4e5f6789012345678abcdef01",
+      updatedAtMs: 1,
+    };
+    const second = {
+      ...SESSION,
+      id: "s_a1b2c3d4ffffffffffffffffffffffff",
+      updatedAtMs: 2,
+    };
+    setLandingIntent({ workspaceId: "w1", sessionId: "s-a1b2c3d4", previewPath: null });
+    const client = {
+      identity: { machineId: "m_17ef85c530554af9bb7de6c19116aff0" },
+      onStateChange: () => () => {},
+      onNotice: () => {},
+      onUpdateDownload: () => {},
+      onBackgroundProcesses: () => {},
+      call: async (request: { type: string }) => {
+        if (request.type === "workspace.list") {
+          return {
+            type: "workspaces",
+            data: [
+              {
+                id: "w1",
+                name: "docs",
+                root: "/tmp/docs",
+                isGitRepo: false,
+                folders: [{ name: "docs", root: "/tmp/docs", rootHandle: "r_docs" }],
+              },
+            ],
+          };
+        }
+        if (request.type === "session.list") {
+          return { type: "sessions", data: [first, second] };
+        }
+        if (request.type === "update.downloadState") {
+          return { type: "updateDownload", data: { state: "idle" } };
+        }
+        return undefined;
+      },
+      subscribe: async () => ({
+        snapshot: { seq: 0, items: [], pendingPermission: undefined, summary: second },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+
+    await useWorkbench.getState().attach(client);
+
+    expect(useWorkbench.getState().notice).toBe("这个会话已经不在了。");
+    expect(useWorkbench.getState().activeSessionId).not.toBe(first.id);
   });
 });

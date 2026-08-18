@@ -1,8 +1,10 @@
 import type { DirectoryListing } from "@genehub/proto";
-import { useImperativeHandle, useRef, useState, forwardRef } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
 import { createPortal } from "react-dom";
 
 import type { Endpoint, Host } from "../host";
+import { LOCATION_MOVED } from "../location/history";
+import { patchWorkbenchLocation, readWorkbenchDialog } from "../location/sync";
 import { warnOp } from "../session/op-log";
 import { useWorkbench } from "../session/store";
 import { WorkspaceKindIcon } from "./WorkspaceIcon";
@@ -30,9 +32,14 @@ export const OpenProject = forwardRef<
     /** How the trigger is drawn. `none` keeps the picker mounted with no button. */
     variant?: "button" | "menuitem" | "inline" | "none";
     onPickStart?: () => void;
+    /**
+     * This instance owns the picker for `?dialog=open-workspace`. Other
+     * triggers only write the address; this one opens it.
+     */
+    driveUrl?: boolean;
   }
 >(function OpenProject(
-  { host, endpoint, onOpened, compact = false, variant = "button", onPickStart },
+  { host, endpoint, onOpened, compact = false, variant = "button", onPickStart, driveUrl = false },
   ref,
 ) {
   const openWorkspace = useWorkbench((state) => state.openWorkspace);
@@ -50,6 +57,32 @@ export const OpenProject = forwardRef<
     workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null;
   const rememberedDirectory = () => recallPickerDirectory(endpoint);
   const startingDirectory = () => activeWorkspace?.root ?? rememberedDirectory();
+  const opening = useRef(false);
+  const [urlDialog, setUrlDialog] = useState(() => readWorkbenchDialog());
+
+  useEffect(() => {
+    const sync = () => setUrlDialog(readWorkbenchDialog());
+    window.addEventListener("popstate", sync);
+    window.addEventListener(LOCATION_MOVED, sync);
+    return () => {
+      window.removeEventListener("popstate", sync);
+      window.removeEventListener(LOCATION_MOVED, sync);
+    };
+  }, []);
+
+  const writeDialog = () => {
+    if (host.kind !== "browser") return;
+    patchWorkbenchLocation({ dialog: "open-workspace" });
+  };
+
+  const closePicker = () => {
+    opening.current = false;
+    setPicker(null);
+    setNativeChoice(false);
+    if (host.kind === "browser" && readWorkbenchDialog() === "open-workspace") {
+      patchWorkbenchLocation({ dialog: null }, "replace");
+    }
+  };
 
   const open = async (root: string) => {
     if (!root.trim()) return;
@@ -61,9 +94,8 @@ export const OpenProject = forwardRef<
         endpoint,
         isWorkspaceFile(root) ? (picker?.path ?? parentDirectory(root)) : root,
       );
-      setPicker(null);
+      closePicker();
       setCreating(false);
-      setNativeChoice(false);
       onOpened?.();
     } catch (failure) {
       setError(warnOp("workspace.open", failure));
@@ -143,6 +175,13 @@ export const OpenProject = forwardRef<
 
   const startOpen = () => {
     onPickStart?.();
+    if (host.kind === "browser" && !driveUrl) {
+      writeDialog();
+      return;
+    }
+    writeDialog();
+    if (!canBrowseThisMachine && !client) return;
+    opening.current = true;
     if (canBrowseThisMachine) {
       if (host.pickDirectory && host.pickWorkspaceFile) {
         setNativeChoice(true);
@@ -159,6 +198,18 @@ export const OpenProject = forwardRef<
   const startOpenRef = useRef(startOpen);
   startOpenRef.current = startOpen;
   useImperativeHandle(ref, () => ({ open: () => startOpenRef.current() }), []);
+
+  useEffect(() => {
+    if (!driveUrl || host.kind !== "browser") return;
+    if (urlDialog === "open-workspace") {
+      if (!picker && !nativeChoice && !pickerBusy && !busy && !opening.current) {
+        startOpenRef.current();
+      }
+      return;
+    }
+    if (opening.current) return;
+    if (picker || nativeChoice) closePicker();
+  }, [busy, client, driveUrl, host.kind, nativeChoice, picker, pickerBusy, urlDialog]);
 
   const createFolder = async () => {
     if (!client || !picker || picker.roots) return;
@@ -232,7 +283,7 @@ export const OpenProject = forwardRef<
               aria-label="打开工作区"
               className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-3"
               onKeyDown={(event) => {
-                if (event.key === "Escape") setNativeChoice(false);
+                if (event.key === "Escape") closePicker();
               }}
             >
               <div className="w-full max-w-sm rounded-xl border border-line-strong bg-surface p-4 shadow-2xl">
@@ -260,7 +311,7 @@ export const OpenProject = forwardRef<
                   <button
                     type="button"
                     className="rounded px-3 py-1.5 text-xs text-muted hover:bg-raised"
-                    onClick={() => setNativeChoice(false)}
+                    onClick={() => closePicker()}
                   >
                     取消
                   </button>
@@ -285,7 +336,7 @@ export const OpenProject = forwardRef<
               onKeyDown={(event) => {
                 if (event.key === "Escape") {
                   if (creating) setCreating(false);
-                  else setPicker(null);
+                  else closePicker();
                 }
               }}
             >
@@ -303,7 +354,7 @@ export const OpenProject = forwardRef<
                     type="button"
                     aria-label="关闭工作区选择器"
                     className="rounded px-2 py-1 text-muted hover:bg-raised"
-                    onClick={() => setPicker(null)}
+                    onClick={() => closePicker()}
                   >
                     ×
                   </button>
@@ -403,7 +454,7 @@ export const OpenProject = forwardRef<
                     <button
                       type="button"
                       className="rounded px-3 py-1.5 text-xs text-muted hover:bg-raised"
-                      onClick={() => setPicker(null)}
+                      onClick={() => closePicker()}
                     >
                       取消
                     </button>

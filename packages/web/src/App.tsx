@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { HistoryCoverage } from "@genehub/proto";
 
 import { ChangesPanel } from "./changes/ChangesPanel";
@@ -9,6 +9,10 @@ import { FilesPanel } from "./files/FilesPanel";
 import { BackgroundBadge } from "./processes/BackgroundBadge";
 import { ProcessesPanel } from "./processes/ProcessesPanel";
 import { detectHost, type Endpoint, type Host } from "./host";
+import { setLandingIntent } from "./location/landing";
+import { encodeTabToken, expandLocator, expandPreviewPath, locatorsMatch } from "./location/locator";
+import { readWorkbenchDialog, readWorkbenchLocation, useWorkbenchHrefSync } from "./location/sync";
+import { NEW_SESSION_ID } from "./location/workbench";
 import type { Target } from "./host";
 import { LogsPanel } from "./logs/LogsPanel";
 import { PreviewFloat } from "./preview/PreviewFloat";
@@ -174,6 +178,114 @@ export function App({
   // An unstarted conversation: no session on the machine, and so nothing a
   // transcript could be drawn from.
   const starting = Boolean(draft && !workbench.activeSessionId);
+  const deviceHandle =
+    workbench.client?.identity?.machineId ?? readWorkbenchLocation()?.deviceHandle ?? null;
+  const hrefLocation = useMemo(() => {
+    if (!deviceHandle) return null;
+    const current = readWorkbenchLocation();
+    return {
+      deviceHandle,
+      workspaceId: workbench.draft?.workspaceId ?? workbench.activeWorkspaceId,
+      sessionId: workbench.draft ? NEW_SESSION_ID : workbench.activeSessionId,
+      preview: workbench.previewFloat?.path ?? null,
+      dialog: current?.dialog ?? readWorkbenchDialog(),
+      tabs: workbench.tabs
+        .map((tab) => encodeTabToken(tab))
+        .filter((token): token is string => token !== null),
+    };
+  }, [
+    deviceHandle,
+    workbench.activeSessionId,
+    workbench.activeWorkspaceId,
+    workbench.draft,
+    workbench.previewFloat?.path,
+    workbench.tabs,
+  ]);
+  useWorkbenchHrefSync(
+    host.kind === "browser" &&
+      deviceHandle !== null &&
+      workbench.connection === "ready",
+    hrefLocation,
+  );
+
+  useEffect(() => {
+    if (host.kind !== "browser") return;
+    const loc = readWorkbenchLocation();
+    setLandingIntent(
+      loc
+        ? {
+            workspaceId: loc.workspaceId,
+            sessionId: loc.sessionId,
+            previewPath: loc.preview,
+            tabs: loc.tabs,
+          }
+        : null,
+    );
+  }, [host, target, endpoint]);
+
+  useEffect(() => {
+    if (host.kind !== "browser") return;
+    const apply = () => {
+      const loc = readWorkbenchLocation();
+      if (!loc) return;
+      const state = useWorkbench.getState();
+      const workspaceId = loc.workspaceId
+        ? expandLocator(
+            loc.workspaceId,
+            state.workspaces.map((workspace) => workspace.id),
+          )
+        : null;
+      const sessionId =
+        loc.sessionId === NEW_SESSION_ID
+          ? NEW_SESSION_ID
+          : loc.sessionId
+            ? expandLocator(
+                loc.sessionId,
+                state.sessions.map((session) => session.id),
+              )
+            : null;
+      if (loc.sessionId === NEW_SESSION_ID) {
+        if (workspaceId) state.newSession(workspaceId, null);
+        else if (loc.workspaceId) {
+          useWorkbench.setState({ notice: "这个地址对不上。" });
+        }
+      } else if (loc.sessionId) {
+        if (!sessionId) {
+          useWorkbench.setState({ notice: "这个会话已经不在了。" });
+        } else if (!locatorsMatch(sessionId, state.activeSessionId)) {
+          void state.selectSession(sessionId).catch(() => {
+            useWorkbench.setState({ notice: "这个会话已经不在了。" });
+          });
+        }
+      } else if (loc.workspaceId && !workspaceId) {
+        useWorkbench.setState({ notice: "这个地址对不上。" });
+      } else if (workspaceId && !locatorsMatch(workspaceId, state.activeWorkspaceId)) {
+        void state.selectWorkspace(workspaceId);
+      }
+      if (loc.tabs?.length) state.restoreStrip(loc.tabs);
+      if (loc.preview) {
+        const device = state.client?.identity?.machineId ?? loc.deviceHandle;
+        const workspace = workspaceId ?? state.activeWorkspaceId;
+        const roots =
+          state.workspaces
+            .find((entry) => entry.id === workspace)
+            ?.folders.map((folder) => folder.rootHandle) ?? [];
+        const path = expandPreviewPath(loc.preview, roots) ?? loc.preview;
+        if (device && workspace) {
+          state.openPreviewFloat({
+            deviceHandle: device,
+            workspaceHandle: workspace,
+            path,
+            sessionId: sessionId === NEW_SESSION_ID ? null : sessionId,
+          });
+        }
+      } else if (state.previewFloat) {
+        state.closePreviewFloat();
+      }
+    };
+    window.addEventListener("popstate", apply);
+    return () => window.removeEventListener("popstate", apply);
+  }, [host]);
 
   // The frame the compositor paints while a window is being resized is the
   // shell's, not the page's, so it has to be told which palette is in force —
