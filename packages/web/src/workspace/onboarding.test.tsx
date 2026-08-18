@@ -133,6 +133,7 @@ async function start(client: Client, host: Host) {
 }
 
 beforeEach(() => {
+  window.history.replaceState(null, "", "/");
   localStorage.clear();
   useWorkbench.setState({
     client: null,

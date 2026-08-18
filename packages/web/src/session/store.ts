@@ -26,6 +26,13 @@ import type {
 import { create } from "zustand";
 
 import type { Host } from "../host";
+import { takeLandingIntent, type LandingIntent } from "../location/landing";
+import {
+  decodeTabToken,
+  expandLocator,
+  expandPreviewPath,
+  NEW_SESSION_ID,
+} from "../location/locator";
 import type { Client, ConnectionState } from "../protocol/client";
 import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
@@ -125,6 +132,16 @@ export function defaultAgent(agents: AgentInfo[]): AgentInfo | undefined {
 
 /** The tab an unstarted conversation lives in. There is only ever one. */
 const DRAFT_TAB = "chat:draft";
+
+const TAB_TITLES: Record<string, string> = {
+  chat: "新会话",
+  files: "文件",
+  terminal: "终端",
+  settings: "设置",
+  devices: "设备",
+  logs: "日志",
+  processes: "后台进程",
+};
 
 export type ComposerDraftInsert = {
   id: string;
@@ -293,6 +310,8 @@ interface WorkbenchState {
   /** Erases a session. There is no undo; the caller does the asking. */
   deleteSession(sessionId: string): Promise<void>;
   openTab(kind: TabKind, title?: string): void;
+  /** Adds URL strip tokens without changing which tab is focused. */
+  restoreStrip(tokens: string[]): void;
   activateTab(tabId: string): void;
   closeTab(tabId: string): void;
   setTabLimit(limit: number): void;
@@ -992,17 +1011,70 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }));
   },
 
+  restoreStrip(tokens) {
+    if (tokens.length === 0) return;
+    set((state) => {
+      const existing = new Map(state.tabs.map((tab) => [tab.id, tab]));
+      const next: WorkbenchTab[] = [];
+      for (const raw of tokens) {
+        const decoded = decodeTabToken(raw);
+        if (!decoded) continue;
+        if (decoded.kind === "chat") {
+          if (decoded.sessionToken === NEW_SESSION_ID) {
+            const draft =
+              existing.get(DRAFT_TAB) ??
+              (state.draft
+                ? { id: DRAFT_TAB, kind: "chat" as const, title: "新会话" }
+                : null);
+            if (draft && !next.some((tab) => tab.id === draft.id)) next.push(draft);
+            continue;
+          }
+          const sessionId = expandLocator(
+            decoded.sessionToken ?? "",
+            state.sessions.map((session) => session.id),
+          );
+          if (!sessionId) continue;
+          const id = `chat:${sessionId}`;
+          if (next.some((tab) => tab.id === id)) continue;
+          const prior = existing.get(id);
+          const session = state.sessions.find((entry) => entry.id === sessionId);
+          next.push(
+            prior ?? {
+              id,
+              kind: "chat",
+              title: session?.title || "会话",
+              sessionId,
+            },
+          );
+          continue;
+        }
+        const id = decoded.kind;
+        if (next.some((tab) => tab.id === id)) continue;
+        next.push(
+          existing.get(id) ?? {
+            id,
+            kind: decoded.kind,
+            title: TAB_TITLES[decoded.kind] ?? decoded.kind,
+          },
+        );
+      }
+      for (const tab of state.tabs) {
+        if (!next.some((entry) => entry.id === tab.id)) next.push(tab);
+      }
+      const limited = limitTabs(next, state.activeTabId, state.tabLimit, state.sessions);
+      discardSubscriptions(state.client, limited.evicted);
+      return {
+        tabs: limited.tabs,
+        sessionTimelines: omitMany(state.sessionTimelines, tabSessionIds(limited.evicted)),
+        subscribedSessionIds: state.subscribedSessionIds.filter(
+          (sessionId) => !tabSessionIds(limited.evicted).includes(sessionId),
+        ),
+      };
+    });
+  },
+
   openTab(kind, title) {
     const id = kind === "chat" ? `chat:${get().activeSessionId ?? "draft"}` : kind;
-    const defaults: Record<string, string> = {
-      chat: "新会话",
-      files: "文件",
-      terminal: "终端",
-      settings: "设置",
-      devices: "设备",
-      logs: "日志",
-      processes: "后台进程",
-    };
     set((state) => {
       if (state.tabs.some((tab) => tab.id === id)) {
         return {
@@ -1015,7 +1087,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       const limited = limitTabs(
         [
           ...state.tabs,
-          { id, kind, title: title ?? defaults[kind] ?? kind, lastActivatedAt: Date.now() },
+          { id, kind, title: title ?? TAB_TITLES[kind] ?? kind, lastActivatedAt: Date.now() },
         ],
         id,
         state.tabLimit,
@@ -1652,8 +1724,30 @@ async function refreshCatalog(client: Client, set: Setter): Promise<void> {
  * paste in.
  */
 async function land(get: () => WorkbenchState): Promise<void> {
+  const intent = takeLandingIntent();
+  if (intent && (await applyLanding(get, intent))) {
+    finishLanding(get, intent);
+    return;
+  }
+  if (intent?.workspaceId) {
+    const workspaceId = expandLocator(
+      intent.workspaceId,
+      get().workspaces.map((entry) => entry.id),
+    );
+    if (!workspaceId) {
+      useWorkbench.setState({ notice: "这个地址对不上。" });
+    } else if (get().activeWorkspaceId !== workspaceId) {
+      await get().selectWorkspace(workspaceId);
+      finishLanding(get, intent);
+      return;
+    }
+  }
+
   const state = get();
-  if (state.activeSessionId) return;
+  if (state.activeSessionId) {
+    finishLanding(get, intent);
+    return;
+  }
   const workspaceId = state.activeWorkspaceId;
   if (!workspaceId) return;
 
@@ -1662,6 +1756,7 @@ async function land(get: () => WorkbenchState): Promise<void> {
   );
   if (latest) {
     await get().selectSession(latest.id);
+    finishLanding(get, intent);
     return;
   }
 
@@ -1671,6 +1766,65 @@ async function land(get: () => WorkbenchState): Promise<void> {
   // session on every first visit to a project, whether or not anything was ever
   // said in it.
   get().newSession(workspaceId, agent.id);
+  finishLanding(get, intent);
+}
+
+async function applyLanding(
+  get: () => WorkbenchState,
+  intent: LandingIntent,
+): Promise<boolean> {
+  if (intent.sessionId && intent.sessionId !== NEW_SESSION_ID) {
+    const sessionId = expandLocator(
+      intent.sessionId,
+      get().sessions.map((session) => session.id),
+    );
+    if (sessionId) {
+      await get().selectSession(sessionId);
+      return true;
+    }
+    useWorkbench.setState({ notice: "这个会话已经不在了。" });
+    return false;
+  }
+  if (intent.sessionId !== NEW_SESSION_ID) return false;
+  const workspaceId = intent.workspaceId
+    ? expandLocator(
+        intent.workspaceId,
+        get().workspaces.map((entry) => entry.id),
+      )
+    : currentWorkspace(get()) ?? get().activeWorkspaceId;
+  if (intent.workspaceId && !workspaceId) {
+    useWorkbench.setState({ notice: "这个地址对不上。" });
+    return false;
+  }
+  if (!workspaceId) return false;
+  get().newSession(workspaceId, null);
+  return true;
+}
+
+function finishLanding(get: () => WorkbenchState, intent: LandingIntent | null): void {
+  if (intent?.tabs?.length) get().restoreStrip(intent.tabs);
+  openLandingPreview(get, intent);
+}
+
+function openLandingPreview(get: () => WorkbenchState, intent: LandingIntent | null): void {
+  if (!intent?.previewPath) return;
+  const device = get().client?.identity?.machineId;
+  const workspace = get().activeWorkspaceId ?? get().draft?.workspaceId;
+  if (!device || !workspace) return;
+  const roots =
+    get()
+      .workspaces.find((entry) => entry.id === workspace)
+      ?.folders.map((folder) => folder.rootHandle) ?? [];
+  const path = expandPreviewPath(intent.previewPath, roots);
+  if (!path) {
+    useWorkbench.setState({ notice: "这个地址对不上。" });
+    return;
+  }
+  get().openPreviewFloat({
+    deviceHandle: device,
+    workspaceHandle: workspace,
+    path,
+  });
 }
 
 /**

@@ -141,6 +141,7 @@ describe("what a shell says it can drive", () => {
     });
     // The address bar follows, so a reload stays where the user is looking.
     expect(decodeURIComponent(window.location.hash)).toContain(REMOTE);
+    expect(window.location.pathname).toBe("/d/m_far");
   });
 
   it("can inspect a fork destination without moving the browser there", async () => {
