@@ -1861,6 +1861,7 @@ mod tests {
             model_id: None,
             mode_id: None,
             effort_id: None,
+            runtime_values: None,
             created_at_ms: 1,
             updated_at_ms: 1,
             archived: false,
