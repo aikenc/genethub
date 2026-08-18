@@ -240,6 +240,7 @@ impl SessionManager {
         self.processes.clone()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         workspace_id: &str,
