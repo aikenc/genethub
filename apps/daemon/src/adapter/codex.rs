@@ -233,10 +233,16 @@ impl CodexAdapter {
     }
 
     async fn hello(&self, program: &Path) -> Option<Hello> {
-        self.hello
-            .get_or_init(|| async { discover(program).await })
-            .await
-            .clone()
+        // A timeout or refused `model/list` must not hide the picker for the
+        // rest of this daemon run. A later catalog refresh gets another try.
+        if let Some(cached) = self.hello.get() {
+            return cached.clone();
+        }
+        let found = discover(program).await;
+        if let Some(hello) = found.clone() {
+            let _ = self.hello.set(Some(hello));
+        }
+        found
     }
 }
 

@@ -34,6 +34,8 @@ const EVENT_CAPACITY: usize = 1024;
 const PROTOCOL_VERSION: i64 = 1;
 /// How long a throwaway handshake may take. Cursor's first answer can be slow.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
+/// `cursor-agent --list-models` is a file/network read, not a session.
+const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct AcpAdapter {
     id: String,
@@ -81,10 +83,18 @@ impl AcpAdapter {
     }
 
     async fn hello(&self, program: &Path) -> Option<Hello> {
-        self.hello
-            .get_or_init(|| async { discover(program, &self.command).await })
-            .await
-            .clone()
+        // A failed handshake must not be remembered for the rest of the
+        // daemon's life: Cursor's ACP model table is sometimes empty on the
+        // first try, and a timeout while the CLI is updating used to hide the
+        // picker until someone restarted us.
+        if let Some(cached) = self.hello.get() {
+            return cached.clone();
+        }
+        let found = discover(program, &self.command).await;
+        if let Some(hello) = found.clone() {
+            let _ = self.hello.set(Some(hello));
+        }
+        found
     }
 }
 
@@ -102,9 +112,9 @@ impl AgentAdapter for AcpAdapter {
         Capabilities {
             set_effort: false,
             interrupt: true,
-            // Cursor exposes models through `session/new` and
-            // `session/set_config_option`; other ACP agents may not, but an
-            // empty catalog still hides the picker when discovery fails.
+            // Cursor exposes models through `session/new`,
+            // `session/set_config_option`, and — when those come back empty —
+            // `cursor-agent --list-models` plus a launch `--model` pin.
             set_model: true,
             set_mode: true,
             permissions: true,
@@ -150,7 +160,7 @@ impl AgentAdapter for AcpAdapter {
 
         let mut command = Command::new(&program);
         command
-            .args(&self.command[1..])
+            .args(spawn_args(&self.command, config.model_id.as_deref()))
             .current_dir(&config.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -543,15 +553,19 @@ impl AcpSession {
     }
 
     async fn initialize(&self, config: &SessionConfig) -> Result<()> {
-        let initialized = self
-            .call(
-                "initialize",
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "clientCapabilities": client_capabilities(),
-                }),
-            )
-            .await?;
+        let initialized = self.call("initialize", initialize_params()).await?;
+        if let Some(method_id) = first_auth_method(&initialized) {
+            // Official Cursor ACP flow is initialize → authenticate →
+            // session/new. A missing login must not abort the session: the
+            // CLI still answers session/new, and the picker already said
+            // whether this install is usable.
+            if let Err(error) = self
+                .call("authenticate", json!({ "methodId": method_id }))
+                .await
+            {
+                tracing::warn!("ACP authenticate ({method_id}) failed: {error}");
+            }
+        }
         let resume_method = resume_method_in(&initialized);
         *self.resume_method.lock().unwrap() = resume_method;
 
@@ -596,7 +610,17 @@ impl AcpSession {
         *self.persisted_session.lock().unwrap() = Some(session_id);
 
         if let Some(model_id) = config.model_id.as_ref() {
-            self.set_model(model_id).await?;
+            if let Err(error) = self.set_model(model_id).await {
+                // Cursor's published workaround when ACP cannot switch
+                // models at runtime is `--model` on the launch line, which
+                // `start` already passed. Failing the session here would
+                // throw away a pin that is already in force.
+                if self.agent_id == "cursor" || self.agent_id.contains("cursor") {
+                    tracing::warn!("ACP runtime model switch failed after launch pin: {error}");
+                } else {
+                    return Err(error);
+                }
+            }
         }
         if let Some(mode_id) = config.mode_id.as_ref() {
             self.set_mode(mode_id).await?;
@@ -838,41 +862,65 @@ async fn discover(program: &Path, command: &[String]) -> Option<Hello> {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
-                "params": {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "clientCapabilities": client_capabilities(),
-                },
+                "params": initialize_params(),
             }),
         )
         .await
         .ok()?;
-        answered(&mut lines, 1).await?;
+        let initialized = answered(&mut lines, 1).await?;
+        let mut next_id = 2;
+        if let Some(method_id) = first_auth_method(&initialized) {
+            write_json_line(
+                &mut stdin,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": next_id,
+                    "method": "authenticate",
+                    "params": { "methodId": method_id },
+                }),
+            )
+            .await
+            .ok()?;
+            let _ = answered(&mut lines, next_id).await;
+            next_id += 1;
+        }
 
         write_json_line(
             &mut stdin,
             &json!({
                 "jsonrpc": "2.0",
-                "id": 2,
+                "id": next_id,
                 "method": "session/new",
                 "params": { "cwd": std::env::temp_dir(), "mcpServers": [] },
             }),
         )
         .await
         .ok()?;
-        let created = answered(&mut lines, 2).await?;
+        let created = answered(&mut lines, next_id).await?;
         Some(hello_from_setup(parse_session_new(&created).ok()?))
     })
     .await;
 
     super::kill_tree(&mut child).await;
 
-    match answer {
+    let handshake = match answer {
         Ok(Some(hello)) => Some(hello),
         Ok(None) => None,
         Err(_) => {
             tracing::warn!("an ACP agent did not answer a handshake in time");
             None
         }
+    };
+    let mut hello = handshake.clone().unwrap_or_default();
+    if hello.models.is_empty() && speaks_cursor_acp(command) {
+        if let Some(listed) = list_models_from_cli(program).await {
+            merge_cli_models(&mut hello, listed);
+        }
+    }
+    if handshake.is_some() || !hello.models.is_empty() {
+        Some(hello)
+    } else {
+        None
     }
 }
 
@@ -887,6 +935,18 @@ fn hello_from_setup(setup: Setup) -> Hello {
     }
 }
 
+fn initialize_params() -> Value {
+    json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "clientCapabilities": client_capabilities(),
+        "clientInfo": {
+            "name": "genehub",
+            "title": crate::channel::PRODUCT,
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+    })
+}
+
 fn client_capabilities() -> Value {
     json!({
         "fs": { "readTextFile": false, "writeTextFile": false },
@@ -896,6 +956,119 @@ fn client_capabilities() -> Value {
             }
         }
     })
+}
+
+fn first_auth_method(initialized: &Value) -> Option<String> {
+    initialized
+        .get("authMethods")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(|method| method.get("id").and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn speaks_cursor_acp(command: &[String]) -> bool {
+    command.first().is_some_and(|name| {
+        let base = Path::new(name)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(name);
+        base == "cursor-agent" || base == "agent"
+    }) && command.iter().any(|arg| arg == "acp")
+}
+
+/// Launch flags Cursor documents when ACP will not switch models at runtime.
+fn spawn_args(command: &[String], model_id: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = command.get(1..).unwrap_or(&[]).to_vec();
+    let Some(model) = model_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return args;
+    };
+    if !speaks_cursor_acp(command) {
+        return args;
+    }
+    if args.windows(2).any(|pair| pair[0] == "--model") {
+        return args;
+    }
+    let Some(idx) = args.iter().position(|arg| arg == "acp") else {
+        return args;
+    };
+    args.splice(idx..idx, ["--model".to_string(), model.to_string()]);
+    args
+}
+
+fn models_from_cli_list(text: &str) -> (Vec<ModelInfo>, Option<String>) {
+    let mut models = Vec::new();
+    let mut default_model = None;
+    for line in text.lines() {
+        let line = line.trim();
+        let Some((id, rest)) = line.split_once(" - ") else {
+            continue;
+        };
+        let id = id.trim();
+        if id.is_empty() || id.contains(char::is_whitespace) {
+            continue;
+        }
+        let default = rest.contains("(default)");
+        let label = rest.replace("(default)", "").trim().to_string();
+        if default {
+            default_model = Some(id.to_string());
+        }
+        models.push(ModelInfo {
+            id: id.to_string(),
+            label: if label.is_empty() {
+                id.to_string()
+            } else {
+                label
+            },
+            context_window: None,
+            reasoning: false,
+            efforts: Vec::new(),
+        });
+    }
+    if default_model.is_none() {
+        default_model = models
+            .iter()
+            .find(|model| model.id == "auto")
+            .map(|model| model.id.clone());
+    }
+    (models, default_model)
+}
+
+fn merge_cli_models(hello: &mut Hello, listed: (Vec<ModelInfo>, Option<String>)) {
+    if !hello.models.is_empty() {
+        return;
+    }
+    hello.models = listed.0;
+    if hello.default_model.is_none() {
+        hello.default_model = listed.1;
+    }
+}
+
+async fn list_models_from_cli(program: &Path) -> Option<(Vec<ModelInfo>, Option<String>)> {
+    for args in [["--list-models"].as_slice(), ["models"].as_slice()] {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        super::owned_child(&mut command);
+        let output = match tokio::time::timeout(LIST_MODELS_TIMEOUT, command.output()).await {
+            Ok(Ok(output)) => output,
+            _ => continue,
+        };
+        let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+        if text.trim().is_empty() {
+            text = String::from_utf8_lossy(&output.stderr).to_string();
+        }
+        let listed = models_from_cli_list(&text);
+        if !listed.0.is_empty() {
+            return Some(listed);
+        }
+    }
+    None
 }
 
 fn resume_method_in(initialized: &Value) -> Option<ResumeMethod> {
@@ -2159,6 +2332,97 @@ mod tests {
             &tx,
         );
         assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn spawn_args_pins_the_model_before_the_acp_subcommand() {
+        let command = vec!["cursor-agent".into(), "--force".into(), "acp".into()];
+        assert_eq!(
+            spawn_args(&command, Some("composer-2.5")),
+            vec!["--force", "--model", "composer-2.5", "acp"]
+        );
+        assert_eq!(
+            spawn_args(&command, None),
+            vec!["--force", "acp"],
+            "no model, no extra flag"
+        );
+        assert_eq!(
+            spawn_args(&["acp-agent".into(), "acp".into()], Some("sonnet")),
+            vec!["acp"],
+            "only Cursor's binary gets --model"
+        );
+        assert_eq!(
+            spawn_args(
+                &[
+                    "cursor-agent".into(),
+                    "--model".into(),
+                    "auto".into(),
+                    "acp".into()
+                ],
+                Some("composer-2.5")
+            ),
+            vec!["--model", "auto", "acp"],
+            "an existing pin is left alone"
+        );
+    }
+
+    #[test]
+    fn cursor_cli_model_list_parses_ids_and_the_default_marker() {
+        let (models, default) = models_from_cli_list(
+            "Available models\n\n\
+             auto - Auto (default)\n\
+             composer-2.5 - Composer 2.5\n\
+             composer-2.5-fast - Composer 2.5 Fast\n",
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["auto", "composer-2.5", "composer-2.5-fast"]
+        );
+        assert_eq!(models[1].label, "Composer 2.5");
+        assert_eq!(default.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn cli_models_fill_an_empty_acp_catalog_only() {
+        let listed = models_from_cli_list("auto - Auto (default)\ncomposer-2.5 - Composer 2.5\n");
+        let mut empty = Hello::default();
+        merge_cli_models(&mut empty, listed.clone());
+        assert_eq!(empty.models.len(), 2);
+        assert_eq!(empty.default_model.as_deref(), Some("auto"));
+
+        let mut present = Hello {
+            models: vec![ModelInfo {
+                id: "composer-2.5[fast=true]".into(),
+                label: "Composer 2.5 Fast".into(),
+                context_window: None,
+                reasoning: false,
+                efforts: Vec::new(),
+            }],
+            default_model: Some("composer-2.5[fast=true]".into()),
+            ..Hello::default()
+        };
+        merge_cli_models(&mut present, listed);
+        assert_eq!(present.models[0].id, "composer-2.5[fast=true]");
+    }
+
+    #[test]
+    fn first_auth_method_reads_cursor_login() {
+        assert_eq!(
+            first_auth_method(&json!({
+                "authMethods": [
+                    {
+                        "id": "cursor_login",
+                        "name": "Cursor Login"
+                    }
+                ]
+            }))
+            .as_deref(),
+            Some("cursor_login")
+        );
+        assert_eq!(first_auth_method(&json!({})), None);
     }
 
     /// When cursor-agent is on PATH, discovery should return real modes.
