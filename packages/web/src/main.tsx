@@ -11,8 +11,8 @@ import "./theme.css";
 import { applyUiScale, useUiScale } from "./theme/scale";
 import { applyTheme, useTheme, watchSystemTheme } from "./theme/store";
 
-// The tab title is the one place a browser build still names the product;
-// the desktop window takes its title from tauri.conf.json instead.
+// Fallback until the workbench knows which machine / workspace / session is
+// on screen. The desktop window takes its chrome title from tauri.conf.json.
 document.title = PRODUCT;
 
 const root = document.getElementById("root");

@@ -27,9 +27,11 @@ export {
   formatWorkbenchPath,
   parseWorkbenchHref,
   parseWorkbenchPath,
+  scopedWorkbenchLocation,
   NEW_SESSION_ID,
 } from "./location/workbench";
-export type { WorkbenchDialog, WorkbenchLocation } from "./location/workbench";
+export type { AddressScope, WorkbenchDialog, WorkbenchLocation } from "./location/workbench";
+export { workbenchDocumentTitle } from "./location/title";
 export {
   expandLocator,
   expandPreviewPath,

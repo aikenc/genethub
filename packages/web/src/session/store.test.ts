@@ -60,6 +60,7 @@ beforeEach(() => {
     activeSessionId: null,
     activeWorkspaceId: null,
     draft: null,
+    addressScope: "machine",
     tabs: [],
     activeTabId: null,
     notice: null,
@@ -1630,4 +1631,91 @@ describe("landing from a bookmark", () => {
     expect(useWorkbench.getState().notice).toBe("这个会话已经不在了。");
     expect(useWorkbench.getState().activeSessionId).not.toBe(first.id);
   });
+
+  it("keeps a machine homepage as a new conversation in the most recent workspace", async () => {
+    const older = { ...SESSION, id: "s_old", updatedAtMs: 1, workspaceId: "w1" };
+    const newer = { ...SESSION, id: "s_new", updatedAtMs: 9, workspaceId: "w2" };
+    setLandingIntent({ workspaceId: null, sessionId: null, previewPath: null });
+    await useWorkbench.getState().attach(catalogClient([older, newer], [docsWorkspace(), docsWorkspace("w2", "app")]));
+
+    expect(useWorkbench.getState().addressScope).toBe("machine");
+    expect(useWorkbench.getState().draft?.workspaceId).toBe("w2");
+    expect(useWorkbench.getState().activeSessionId).toBeNull();
+  });
+
+  it("keeps a workspace homepage as a new conversation instead of the newest session", async () => {
+    const older = { ...SESSION, id: "s_old", updatedAtMs: 1 };
+    const newer = { ...SESSION, id: "s_new", updatedAtMs: 9 };
+    setLandingIntent({ workspaceId: "w1", sessionId: null, previewPath: null });
+    await useWorkbench.getState().attach(catalogClient([older, newer]));
+
+    expect(useWorkbench.getState().addressScope).toBe("workspace");
+    expect(useWorkbench.getState().draft?.workspaceId).toBe("w1");
+    expect(useWorkbench.getState().activeSessionId).toBeNull();
+  });
+
+  it("opens the workspace homepage when the sidebar picks a project", async () => {
+    const newer = { ...SESSION, id: "s_new", updatedAtMs: 9 };
+    useWorkbench.setState({
+      client: catalogClient([SESSION, newer]),
+      agents: [],
+      workspaces: [docsWorkspace()],
+      sessions: [SESSION, newer],
+      activeWorkspaceId: "w1",
+      activeSessionId: "s_new",
+      addressScope: "session",
+    });
+
+    await useWorkbench.getState().selectWorkspace("w1");
+
+    expect(useWorkbench.getState().addressScope).toBe("workspace");
+    expect(useWorkbench.getState().draft?.workspaceId).toBe("w1");
+    expect(useWorkbench.getState().activeSessionId).toBeNull();
+  });
 });
+
+function docsWorkspace(id = "w1", name = "docs") {
+  return {
+    id,
+    name,
+    root: `/tmp/${name}`,
+    isGitRepo: false,
+    folders: [{ name, root: `/tmp/${name}`, rootHandle: `r_${name}` }],
+  };
+}
+
+function catalogClient(
+  sessions: SessionSummary[],
+  workspaces: ReturnType<typeof docsWorkspace>[] = [docsWorkspace()],
+) {
+  return {
+    identity: { machineId: "m_17ef85c530554af9bb7de6c19116aff0" },
+    onStateChange: () => () => {},
+    onNotice: () => {},
+    onUpdateDownload: () => {},
+    onBackgroundProcesses: () => {},
+    call: async (request: { type: string }) => {
+      if (request.type === "workspace.list") {
+        return { type: "workspaces", data: workspaces };
+      }
+      if (request.type === "session.list") {
+        return { type: "sessions", data: sessions };
+      }
+      if (request.type === "update.downloadState") {
+        return { type: "updateDownload", data: { state: "idle" } };
+      }
+      return undefined;
+    },
+    subscribe: async () => ({
+      snapshot: {
+        seq: 0,
+        items: [],
+        pendingPermission: undefined,
+        summary: sessions[0] ?? SESSION,
+      },
+      replayed: [],
+      reset: false,
+    }),
+    unsubscribe: async () => {},
+  } as unknown as Client;
+}

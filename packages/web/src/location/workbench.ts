@@ -15,6 +15,14 @@ export const WORKBENCH_DIALOGS = ["open-workspace", "feedback", "new-session"] a
 export type WorkbenchDialog = (typeof WORKBENCH_DIALOGS)[number];
 
 /**
+ * How much of the workbench the address names.
+ *
+ * Machine and workspace homes stay at `/m-…` and `/m-…/w-…` even while a draft
+ * is on screen. A stored conversation is the only thing that adds `/s-…`.
+ */
+export type AddressScope = "machine" | "workspace" | "session";
+
+/**
  * Bookmarkable workbench address.
  *
  * Compact form: `/m-17ef85c5/w-cb37e25b/s-a1b2c3d4`.
@@ -85,6 +93,25 @@ export function formatWorkbenchPath(location: WorkbenchLocation): string {
 
 export function formatWorkbenchHref(location: WorkbenchLocation, basePath?: string): string {
   return withSiteBase(formatWorkbenchPath(location), basePath);
+}
+
+/**
+ * Drops the parts of a location that this address level does not name.
+ *
+ * A draft still has a default workspace; the machine homepage must not write
+ * it into the bar, or a bookmarked `/m-…` is rewritten on every visit.
+ */
+export function scopedWorkbenchLocation(
+  scope: AddressScope,
+  location: WorkbenchLocation,
+): WorkbenchLocation {
+  if (scope === "machine") {
+    return { ...location, workspaceId: null, sessionId: null };
+  }
+  if (scope === "workspace") {
+    return { ...location, sessionId: null };
+  }
+  return location;
 }
 
 export function workbenchLocationsEqual(
