@@ -4,8 +4,10 @@ export type SiteAssetFetch = (
   path: string,
 ) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
 
-const DEFAULT_MAX_FILES = 32;
-const DEFAULT_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_FILES = 256;
+const DEFAULT_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+const PREVIEW_ORIGIN = "https://preview.invalid/";
+const IMPORT_SPECIFIER = /(?:\bfrom\s+|import\s*\(\s*)(['"])([^'"]+)\1/g;
 
 type CachedAsset =
   | { kind: "css"; text: string }
@@ -13,12 +15,10 @@ type CachedAsset =
   | { kind: "data"; url: string };
 
 /**
- * Rewrite static relative assets in an HTML document for sandboxed srcdoc.
- *
- * Parent-created blob: URLs are unusable inside an opaque-origin iframe
- * (`sandbox="allow-scripts"` without allow-same-origin). Inline CSS/JS and
- * data: URLs for media instead. Dynamic fetch/import and root-absolute paths
- * stay unresolved.
+ * Rewrite static relative and site-root assets in an HTML document for
+ * sandboxed srcdoc. Parent-created blob: URLs are unusable inside an
+ * opaque-origin iframe, so CSS/JS are inlined and media uses data: URLs.
+ * Runtime fetch/import of remaining assets goes through the iframe bridge.
  */
 export async function remapHtmlSite(options: {
   entryPath: string;
@@ -33,6 +33,7 @@ export async function remapHtmlSite(options: {
   const document_ = new DOMParser().parseFromString(options.html, "text/html");
   const warnings: string[] = [];
   const cache = new Map<string, CachedAsset>();
+  const jsRewriteCache = new Map<string, string>();
   let files = 0;
   let totalBytes = 0;
 
@@ -60,11 +61,7 @@ export async function remapHtmlSite(options: {
       const cssText = new TextDecoder("utf-8", { fatal: false }).decode(loaded.bytes);
       const rewritten = await rewriteCssUrls(cssText, target, resolveDataUrl);
       asset = { kind: "css", text: rewritten };
-    } else if (
-      mediaType === "text/javascript" ||
-      target.toLowerCase().endsWith(".js") ||
-      target.toLowerCase().endsWith(".mjs")
-    ) {
+    } else if (isJavaScriptPath(target, mediaType)) {
       asset = {
         kind: "js",
         text: new TextDecoder("utf-8", { fatal: false }).decode(loaded.bytes),
@@ -80,7 +77,7 @@ export async function remapHtmlSite(options: {
     raw: string | null,
     basePath: string,
   ): Promise<string | null> => {
-    const target = resolveTarget(raw, basePath, warnings);
+    const target = resolveTarget(raw, basePath, entry, warnings);
     if (!target) return null;
     const asset = await loadAsset(target);
     if (!asset) return null;
@@ -91,11 +88,32 @@ export async function remapHtmlSite(options: {
     return toDataUrl(new TextEncoder().encode(asset.text), "text/javascript");
   };
 
+  const rewriteJs = async (filePath: string, text: string): Promise<string> => {
+    const cached = jsRewriteCache.get(filePath);
+    if (cached !== undefined) return cached;
+    jsRewriteCache.set(filePath, text);
+    let out = text.replaceAll("import.meta.url", JSON.stringify(virtualAssetUrl(filePath, entry)));
+    const specs = new Set<string>();
+    for (const match of out.matchAll(IMPORT_SPECIFIER)) {
+      if (match[2]) specs.add(match[2]);
+    }
+    for (const spec of specs) {
+      const target = resolveTarget(spec, filePath, entry, warnings);
+      if (!target) continue;
+      const asset = await loadAsset(target);
+      if (!asset || asset.kind !== "js") continue;
+      const rewritten = await rewriteJs(target, asset.text);
+      out = replaceSpecifiers(out, spec, toDataUrl(new TextEncoder().encode(rewritten), "text/javascript"));
+    }
+    jsRewriteCache.set(filePath, out);
+    return out;
+  };
+
   for (const node of Array.from(document_.querySelectorAll("link[href]"))) {
     const rel = (node.getAttribute("rel") ?? "").toLowerCase();
     const href = node.getAttribute("href");
     if (rel.includes("stylesheet")) {
-      const target = resolveTarget(href, entry, warnings);
+      const target = resolveTarget(href, entry, entry, warnings);
       if (!target) continue;
       const asset = await loadAsset(target);
       if (!asset || asset.kind !== "css") {
@@ -107,17 +125,12 @@ export async function remapHtmlSite(options: {
       node.replaceWith(style);
       continue;
     }
-    // Icons / prefetch: best-effort data URL rewrite.
     const next = await resolveDataUrl(href, entry);
     if (next) node.setAttribute("href", next);
   }
 
   for (const node of Array.from(document_.querySelectorAll("script[src]"))) {
-    if (node.getAttribute("type")?.toLowerCase() === "module") {
-      warnings.push(`module script left unresolved: ${node.getAttribute("src") ?? ""}`);
-      continue;
-    }
-    const target = resolveTarget(node.getAttribute("src"), entry, warnings);
+    const target = resolveTarget(node.getAttribute("src"), entry, entry, warnings);
     if (!target) continue;
     const asset = await loadAsset(target);
     if (!asset || asset.kind !== "js") {
@@ -129,8 +142,13 @@ export async function remapHtmlSite(options: {
       if (name.name === "src") continue;
       script.setAttribute(name.name, name.value);
     }
-    script.textContent = asset.text;
+    script.textContent = await rewriteJs(target, asset.text);
     node.replaceWith(script);
+  }
+
+  for (const node of Array.from(document_.querySelectorAll("script:not([src])"))) {
+    if (node.getAttribute("type")?.toLowerCase() !== "module") continue;
+    node.textContent = await rewriteJs(`${entry}#inline`, node.textContent ?? "");
   }
 
   for (const { selector, attr } of [
@@ -160,9 +178,22 @@ export async function remapHtmlSite(options: {
   };
 }
 
+export function resolveRuntimeAssetPath(entryPath: string, rawUrl: string): string | null {
+  try {
+    const parsed = new URL(rawUrl, PREVIEW_ORIGIN);
+    if (parsed.protocol !== "https:" || parsed.hostname !== "preview.invalid") return null;
+    const relative = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+    if (!relative) return null;
+    return joinAgainstEntry(previewPath(entryPath), relative);
+  } catch {
+    return null;
+  }
+}
+
 function resolveTarget(
   raw: string | null,
   basePath: string,
+  entryPath: string,
   warnings: string[],
 ): string | null {
   if (!raw) return null;
@@ -171,12 +202,13 @@ function resolveTarget(
     !trimmed ||
     trimmed.startsWith("#") ||
     /^(https?:|data:|blob:|javascript:|mailto:)/i.test(trimmed) ||
-    trimmed.startsWith("//") ||
-    trimmed.startsWith("/")
+    trimmed.startsWith("//")
   ) {
     return null;
   }
-  const target = joinAgainstEntry(basePath, trimmed);
+  const target = trimmed.startsWith("/")
+    ? joinAgainstEntry(entryPath, trimmed.replace(/^\/+/, ""))
+    : joinAgainstEntry(basePath, trimmed);
   if (!target) {
     warnings.push(`skipped ${trimmed}`);
     return null;
@@ -226,6 +258,33 @@ function joinAgainstEntry(entryPath: string, relative: string): string | null {
   }
 }
 
+function virtualAssetUrl(filePath: string, entryPath: string): string {
+  const root = entryPath.split("/").slice(0, -1).join("/");
+  const prefix = `${root}/`;
+  const rel = filePath.startsWith(prefix)
+    ? filePath.slice(prefix.length)
+    : filePath.split("/").slice(1).join("/");
+  return `${PREVIEW_ORIGIN}${rel.split("#")[0]}`;
+}
+
+function replaceSpecifiers(source: string, spec: string, next: string): string {
+  let out = source;
+  for (const quote of [`'${spec}'`, `"${spec}"`]) {
+    out = out.split(quote).join(JSON.stringify(next));
+  }
+  return out;
+}
+
+function isJavaScriptPath(path: string, mediaType: string): boolean {
+  const lower = path.toLowerCase();
+  return (
+    mediaType === "text/javascript" ||
+    mediaType === "application/javascript" ||
+    lower.endsWith(".js") ||
+    lower.endsWith(".mjs")
+  );
+}
+
 function resolveMediaType(path: string, reported: string | undefined): string {
   const byExt = mimeFor(path);
   if (byExt !== "application/octet-stream") return byExt;
@@ -237,6 +296,7 @@ function mimeFor(path: string): string {
   const lower = path.toLowerCase();
   if (lower.endsWith(".css")) return "text/css";
   if (lower.endsWith(".js") || lower.endsWith(".mjs")) return "text/javascript";
+  if (lower.endsWith(".wasm")) return "application/wasm";
   if (lower.endsWith(".svg")) return "image/svg+xml";
   if (lower.endsWith(".png")) return "image/png";
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";

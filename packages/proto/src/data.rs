@@ -21,10 +21,11 @@ pub const MAX_DATA_FRAME_BYTES: usize = 16 * 1024;
 pub const MAX_EXCHANGE_HEAD_BYTES: usize = 8 * 1024;
 pub const INITIAL_STREAM_WINDOW_BYTES: u32 = 256 * 1024;
 pub const MAX_ACTIVE_DATA_STREAMS: usize = 256;
-/// A finite exchange is deliberately small; indefinite event streams omit a
+/// Finite exchange bodies share the Preview source cap so a WASM/H5 game
+/// asset can arrive in one exact response. Indefinite event streams omit a
 /// body length and remain bounded by stream credit instead.
-pub const MAX_FINITE_EXCHANGE_BODY_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_PREVIEW_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_FINITE_EXCHANGE_BODY_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_PREVIEW_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const _: () = assert!(MAX_EXCHANGE_HEAD_BYTES < MAX_DATA_FRAME_BYTES);
 
 /// How a peer proves possession of an end-to-end secret during carrier setup.
@@ -275,6 +276,8 @@ pub enum AssetPreviewKind {
     Text,
     Html,
     Video,
+    Wasm,
+    Binary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -321,9 +324,9 @@ mod tests {
     }
 
     #[test]
-    fn the_wire_limits_stay_small_and_preview_stays_exact() {
+    fn the_wire_limits_allow_wasm_game_assets() {
         assert_eq!(MAX_DATA_FRAME_BYTES, 16_384);
-        assert_eq!(MAX_FINITE_EXCHANGE_BODY_BYTES, 4_194_304);
-        assert_eq!(MAX_PREVIEW_SOURCE_BYTES, 4_194_304);
+        assert_eq!(MAX_FINITE_EXCHANGE_BODY_BYTES, 67_108_864);
+        assert_eq!(MAX_PREVIEW_SOURCE_BYTES, 67_108_864);
     }
 }

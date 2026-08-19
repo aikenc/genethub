@@ -55,7 +55,7 @@ export async function openFabricDataLink(options: {
       role: "client",
       carrier,
       key,
-      maxReceiveBytesPerStream: 4 * 1024 * 1024,
+      maxReceiveBytesPerStream: 64 * 1024 * 1024,
       ...(options.onError ? { onError: options.onError } : {}),
     });
     return {

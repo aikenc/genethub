@@ -10,7 +10,7 @@ use super::endpoint::{PeerServices, ServerStream};
 use crate::files::{PreviewFailure, PreviewFile};
 
 static PREVIEW_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-const PREVIEW_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+const PREVIEW_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     if !stream.read_body(0).await?.is_empty() {

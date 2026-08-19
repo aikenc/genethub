@@ -33,7 +33,7 @@ import type { BinaryWebSocketLike } from "../dataplane/websocket";
 
 export const PROTOCOL_VERSION = DATA_PLANE_VERSION;
 export const MAX_RPC_BODY_BYTES = 2_900_000;
-const MAX_PREVIEW_BYTES = 4 * 1024 * 1024;
+const MAX_PREVIEW_BYTES = 64 * 1024 * 1024;
 const MAX_EVENT_BYTES = 3 * 1024 * 1024;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -463,7 +463,7 @@ export class Client {
         diagnosticId: requestId,
       },
       bodyLength: 0,
-      timeoutMs: 15_000,
+      timeoutMs: 60_000,
     });
     const operation = (async () => {
       await stream.finish();
@@ -496,7 +496,7 @@ export class Client {
       return { metadata, bytes };
     })();
     try {
-      const result = await withTimeout(operation, 15_000, "asset preview timed out", () =>
+      const result = await withTimeout(operation, 60_000, "asset preview timed out", () =>
         stream.reset(DataReset.Timeout),
       );
       this.diagnostic("operation", {
@@ -726,7 +726,7 @@ export class Client {
       role: "client",
       carrier,
       key,
-      maxReceiveBytesPerStream: 4 * 1024 * 1024,
+      maxReceiveBytesPerStream: 64 * 1024 * 1024,
       onError: (error) => this.report(error),
     });
     this.endpoint = endpoint;
@@ -1679,7 +1679,9 @@ function previewMetadata(value: unknown): AssetPreviewMetadata {
       metadata.kind !== "markdown" &&
       metadata.kind !== "text" &&
       metadata.kind !== "html" &&
-      metadata.kind !== "video") ||
+      metadata.kind !== "video" &&
+      metadata.kind !== "wasm" &&
+      metadata.kind !== "binary") ||
     typeof metadata.mediaType !== "string" ||
     typeof metadata.sourceBytes !== "number" ||
     !Number.isSafeInteger(metadata.sourceBytes) ||
@@ -1707,6 +1709,10 @@ function previewMediaMatches(kind: unknown, mediaType: unknown): boolean {
       return mediaType === "text/html";
     case "video":
       return mediaType === "video/mp4" || mediaType === "video/webm";
+    case "wasm":
+      return mediaType === "application/wasm";
+    case "binary":
+      return mediaType === "application/octet-stream";
     default:
       return false;
   }
@@ -1721,7 +1727,7 @@ function previewErrorMessage(error: AssetPreviewError, sourceBytes?: number): st
     case "unsupported":
       return "这种文件暂不支持预览";
     case "tooLarge":
-      return `文件超过 4 MiB，暂不支持预览${sourceBytes ? `（${sourceBytes} bytes）` : ""}`;
+      return `文件超过 64 MiB，暂不支持预览${sourceBytes ? `（${sourceBytes} bytes）` : ""}`;
     case "sourceChanged":
       return "读取时文件发生了变化，请重试";
   }

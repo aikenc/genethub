@@ -32,7 +32,7 @@ apps/daemon/src/
 │   ├── handshake.rs  protocol-v3 PSK 双向证明
 │   ├── frame.rs      16 KiB record 内的 logical-stream frame
 │   ├── endpoint.rs   Exchange、流控、公平 writer、handler 隔离
-│   ├── preview.rs    ≤4 MiB workspace 文件 Preview
+│   ├── preview.rs    ≤64 MiB workspace 文件 Preview
 │   ├── rtc.rs        E2EE signaling + WebRTC DataChannel
 │   └── client.rs     daemon/CLI 使用的 v3 client endpoint
 ├── session/
@@ -96,7 +96,7 @@ DataEndpoint method 只有四个：
 |---|---|
 | `rpc` | 现有版本化 `Request/Reply` 业务 schema，作为 body；不再是 connection envelope |
 | `events` | 长期 response stream；`u32be length + ServerFrame JSON` |
-| `asset.preview` | workspace-relative、完整或失败、≤4 MiB 的文件 Preview |
+| `asset.preview` | workspace-relative、完整或失败、≤64 MiB 的文件 Preview |
 | `shell.run` | 在 workspace 内跑一条命令；metadata 带 argv 数组、cwd、env 与可选 `timeoutMs`，**request body 即命令的 stdin**（≤1 MiB，一次给全；需要一问一答的交互输入用 `pty.open`）。response 是 `u32be length + ShellFrame JSON`，stdout/stderr 分开、末帧带退出码与 `timedOut`。与 `pty.*` 同属 `pty` 能力，隔离决策也共用一处 |
 | `rtc.negotiate` | 在已认证基线连接内交换非 trickle SDP |
 

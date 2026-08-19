@@ -377,7 +377,7 @@ export function FilesPanel() {
         <p className="shrink-0 border-b border-line px-3 py-1 text-[11px] text-muted">
           {selecting
             ? `勾选后点确认${intentLabel}；点左侧三角仍可展开文件夹。`
-            : "点击预览文件；复制/剪切/删除先选再确认。单个预览上限 4 MiB。"}
+            : "点击预览文件；复制/剪切/删除先选再确认。单个预览上限 64 MiB。"}
         </p>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto p-1">

@@ -223,7 +223,7 @@ export class FakeSocket implements WebSocketLike {
       role: "server",
       carrier,
       key,
-      maxReceiveBytesPerStream: 4 * 1024 * 1024,
+      maxReceiveBytesPerStream: 64 * 1024 * 1024,
     });
     this.endpoint.onIncoming((stream) => {
       void this.handle(stream, identity).catch(() => {});

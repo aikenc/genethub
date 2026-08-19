@@ -111,7 +111,7 @@ export async function openRtcDataLink(
       role: "client",
       carrier,
       key,
-      maxReceiveBytesPerStream: 4 * 1024 * 1024,
+      maxReceiveBytesPerStream: 64 * 1024 * 1024,
     });
     return {
       endpoint,

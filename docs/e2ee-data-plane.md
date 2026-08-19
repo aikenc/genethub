@@ -143,8 +143,8 @@ version:u8 | kind:u8 | flags:u16 | streamId:u32 | value:u32 | length:u32 | paylo
 | Exchange head | 8 KiB |
 | 初始 stream credit | 256 KiB |
 | endpoint active streams | 256 |
-| 通用 finite response body | 4 MiB |
-| Preview source/body | 4 MiB |
+| 通用 finite response body | 64 MiB |
+| Preview source/body | 64 MiB |
 
 client-opened stream 使用奇数 id，server-opened stream 预留偶数 id，0 只用于 endpoint control。所有已知长度的 request/response 都在 FIN 时核对精确长度；无 head 的 response DATA、序号跳跃、credit 溢出和非法状态转换都会被拒绝。
 

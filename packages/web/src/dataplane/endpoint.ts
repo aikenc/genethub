@@ -374,7 +374,7 @@ export class DataEndpoint {
       options.maxReceiveBytesPerStream ?? INITIAL_STREAM_WINDOW_BYTES;
     if (
       this.maxReceiveBytesPerStream < MAX_DATA_PAYLOAD_BYTES ||
-      this.maxReceiveBytesPerStream > 4 * 1024 * 1024
+      this.maxReceiveBytesPerStream > 64 * 1024 * 1024
     ) {
       throw new RangeError("invalid per-stream receive budget");
     }

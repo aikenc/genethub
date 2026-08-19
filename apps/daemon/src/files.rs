@@ -290,25 +290,25 @@ fn preview_type(
         "webm" if bytes.starts_with(b"\x1a\x45\xdf\xa3") => {
             Some((AssetPreviewKind::Video, "video/webm"))
         }
+        "wasm" if bytes.starts_with(b"\0asm") => {
+            Some((AssetPreviewKind::Wasm, "application/wasm"))
+        }
         _ => None,
     };
     if let Some(found) = exact {
         return Ok(found);
     }
 
-    let text = std::str::from_utf8(bytes).map_err(|_| PreviewFailure::Unsupported)?;
-    if text.contains('\0') {
-        return Err(PreviewFailure::Unsupported);
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        if !text.contains('\0') {
+            return match extension.as_str() {
+                "md" | "markdown" | "mdown" => Ok((AssetPreviewKind::Markdown, "text/markdown")),
+                "html" | "htm" => Ok((AssetPreviewKind::Html, "text/html")),
+                _ => Ok((AssetPreviewKind::Text, "text/plain")),
+            };
+        }
     }
-    match extension.as_str() {
-        "md" | "markdown" | "mdown" => Ok((AssetPreviewKind::Markdown, "text/markdown")),
-        "html" | "htm" => Ok((AssetPreviewKind::Html, "text/html")),
-        // A text document is a property of its bytes, not of whether this
-        // release happened to know its suffix. The browser infers a language
-        // when it can and safely falls back to escaped plain text when it
-        // cannot; valid UTF-8 without NUL is therefore always previewable.
-        _ => Ok((AssetPreviewKind::Text, "text/plain")),
-    }
+    Ok((AssetPreviewKind::Binary, "application/octet-stream"))
 }
 
 pub fn write(root: &Path, path: &Path, content: &str) -> Result<()> {
@@ -589,7 +589,10 @@ mod tests {
         let shown = preview(dir.path(), "exact.txt").unwrap();
         assert_eq!(shown.bytes, bytes);
         assert_eq!(shown.metadata.kind, AssetPreviewKind::Text);
-        assert_eq!(shown.metadata.source_bytes, 4_194_304);
+        assert_eq!(
+            shown.metadata.source_bytes,
+            genehub_proto::MAX_PREVIEW_SOURCE_BYTES as u64
+        );
 
         std::fs::write(
             dir.path().join("large.txt"),
@@ -599,7 +602,7 @@ mod tests {
         assert_eq!(
             preview(dir.path(), "large.txt").unwrap_err(),
             PreviewFailure::TooLarge {
-                source_bytes: 4_194_305
+                source_bytes: (genehub_proto::MAX_PREVIEW_SOURCE_BYTES + 1) as u64
             }
         );
     }
@@ -641,15 +644,20 @@ mod tests {
         );
         std::fs::write(dir.path().join("binary.custom"), b"prefix\0suffix").unwrap();
         assert_eq!(
-            preview(dir.path(), "binary.custom").unwrap_err(),
-            PreviewFailure::Unsupported
+            preview(dir.path(), "binary.custom").unwrap().metadata.kind,
+            AssetPreviewKind::Binary
+        );
+        std::fs::write(dir.path().join("game.wasm"), b"\0asm\x01\x00\x00\x00").unwrap();
+        assert_eq!(
+            preview(dir.path(), "game.wasm").unwrap().metadata.media_type,
+            "application/wasm"
         );
         let mut late_nul = vec![b'a'; 9_000];
         late_nul.push(0);
         std::fs::write(dir.path().join("late-nul.custom"), late_nul).unwrap();
         assert_eq!(
-            preview(dir.path(), "late-nul.custom").unwrap_err(),
-            PreviewFailure::Unsupported
+            preview(dir.path(), "late-nul.custom").unwrap().metadata.kind,
+            AssetPreviewKind::Binary
         );
     }
 

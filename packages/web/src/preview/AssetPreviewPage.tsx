@@ -8,7 +8,7 @@ import { detectHost, type Endpoint, type Host } from "../host";
 import { Client, type AssetPreviewResult, type ProtocolDial } from "../protocol/client";
 import { HighlightedCode, languageForPath, Markdown } from "../session/Markdown";
 import { readRtcEnabled } from "../settings/rtc";
-import { remapHtmlSite } from "./htmlSite";
+import { remapHtmlSite, resolveRuntimeAssetPath } from "./htmlSite";
 import {
   PreviewRuntimeControls,
   type PreviewDomSnapshot,
@@ -317,6 +317,13 @@ function PreviewDocument({
       />
     );
   }
+  if (metadata.kind === "wasm" || metadata.kind === "binary") {
+    return (
+      <p className="m-auto max-w-lg px-6 text-center text-sm text-muted">
+        二进制资源（{metadata.mediaType}，{metadata.sourceBytes} bytes）。请从入口 HTML 打开以运行游戏或站点。
+      </p>
+    );
+  }
   return <BlobDocument bytes={bytes} metadata={metadata} />;
 }
 
@@ -465,6 +472,26 @@ export function HtmlDocument({
         }
         return;
       }
+      if (data.source === PREVIEW_ASSET_SOURCE && typeof data.requestId === "string") {
+        void (async () => {
+          const path = resolveRuntimeAssetPath(entryPath, String((data as { url?: string }).url ?? ""));
+          const loaded = path ? await fetchAsset(path) : null;
+          const body = loaded ? loaded.bytes.slice().buffer : null;
+          frameRef.current?.contentWindow?.postMessage(
+            {
+              source: PREVIEW_ASSET_SOURCE,
+              requestId: data.requestId,
+              ok: Boolean(loaded),
+              mediaType: loaded?.mediaType ?? "",
+              body,
+              message: loaded ? "" : "not found",
+            },
+            "*",
+            body ? [body] : [],
+          );
+        })();
+        return;
+      }
       if (data.source === PREVIEW_DIAG_SOURCE && isPreviewDiagnosticKind(data.kind)) {
         const detail = isPreviewDiagnosticDetail(data.detail) ? data.detail : {};
         if (
@@ -500,7 +527,7 @@ export function HtmlDocument({
       }
       renderRequestsRef.current.clear();
     };
-  }, []);
+  }, [entryPath, fetchAsset]);
 
   useEffect(() => {
     eventsRef.current = [];
@@ -538,8 +565,9 @@ export function HtmlDocument({
           return;
         }
         const infoLines = [
-          "模式：静态多文件（内联 CSS/JS，媒体 data:）",
-          "动态加载（fetch / import）不可用",
+          "模式：多文件站点（内联 CSS/JS/module，媒体 data:）",
+          "运行时 fetch / import 已转发到工作区",
+          "WASM / Worker：已开启",
           "网络：已开启（https / wss）",
           `源文件大小：${metadata.sourceBytes} bytes`,
           remapped.warnings.length > 0
@@ -730,15 +758,15 @@ export function isolatedHtml(source: string): string {
   policy.httpEquiv = "Content-Security-Policy";
   policy.content = [
     "default-src 'none'",
-    "script-src 'unsafe-inline' https: data:",
+    "script-src 'unsafe-inline' 'wasm-unsafe-eval' https: data: blob:",
     "style-src 'unsafe-inline' https: data:",
     "img-src data: https:",
     "media-src data: https:",
     "font-src data: https:",
-    "connect-src https: wss:",
+    "connect-src https: wss: blob: data:",
     "object-src 'none'",
     "frame-src 'none'",
-    "worker-src 'none'",
+    "worker-src blob: data:",
     "form-action 'none'",
     "base-uri https://preview.invalid",
     "navigate-to 'none'",
@@ -759,6 +787,7 @@ export function isolatedHtml(source: string): string {
 const PREVIEW_DIAG_SOURCE = "genehub-preview-diag";
 const PREVIEW_RUNTIME_SOURCE = "genehub-preview-runtime";
 const PREVIEW_RUNTIME_COMMAND_SOURCE = "genehub-preview-runtime-command";
+const PREVIEW_ASSET_SOURCE = "genehub-preview-asset";
 
 function isPreviewDiagnosticKind(kind: string | undefined): kind is string {
   return kind === "console" || kind === "error" || kind === "resource" || kind === "csp" || kind === "log";
@@ -1052,6 +1081,38 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       return original.apply(console, arguments);
     };
   });
+  function shouldInterceptAsset(url){
+    try {
+      return new URL(String(url || ""), document.baseURI).hostname === "preview.invalid";
+    } catch (e) {
+      return false;
+    }
+  }
+  function requestPreviewAsset(url){
+    var requestId = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random();
+    return new Promise(function(resolve, reject){
+      function onMessage(event){
+        if (event.source !== parent) return;
+        var data = event.data;
+        if (!data || data.source !== ${JSON.stringify(PREVIEW_ASSET_SOURCE)} || data.requestId !== requestId) return;
+        window.removeEventListener("message", onMessage);
+        if (!data.ok || !data.body) {
+          reject(new Error(data.message || "asset load failed"));
+          return;
+        }
+        resolve(new Response(data.body, {
+          status: 200,
+          headers: { "Content-Type": data.mediaType || "application/octet-stream" }
+        }));
+      }
+      window.addEventListener("message", onMessage);
+      parent.postMessage({ source: ${JSON.stringify(PREVIEW_ASSET_SOURCE)}, requestId: requestId, url: String(url || "") }, "*");
+      setTimeout(function(){
+        window.removeEventListener("message", onMessage);
+        reject(new Error("asset load timed out"));
+      }, 60000);
+    });
+  }
   if (window.fetch) {
     var originalFetch = window.fetch;
     window.fetch = function(){
@@ -1059,8 +1120,10 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       var started = Date.now();
       var input = args[0];
       var method = text((args[1] && args[1].method) || (input && input.method) || "GET", 20).toUpperCase();
-      var url = safeUrl((input && input.url) || input);
-      return originalFetch.apply(window, args).then(function(response){
+      var rawUrl = (input && input.url) || input;
+      var url = safeUrl(rawUrl);
+      var pending = shouldInterceptAsset(rawUrl) ? requestPreviewAsset(rawUrl) : originalFetch.apply(window, args);
+      return pending.then(function(response){
         send("log", { topic: "network", transport: "fetch", method: method, url: url, status: response.status || 0, durationMs: Date.now() - started });
         return response;
       }, function(error){

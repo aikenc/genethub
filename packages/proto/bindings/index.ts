@@ -10,7 +10,7 @@ builtin: boolean, };
 
 export type AssetPreviewError = "notFound" | "forbidden" | "unsupported" | "tooLarge" | "sourceChanged";
 
-export type AssetPreviewKind = "image" | "markdown" | "text" | "html" | "video";
+export type AssetPreviewKind = "image" | "markdown" | "text" | "html" | "video" | "wasm" | "binary";
 
 export type AssetPreviewMetadata = { kind: AssetPreviewKind, mediaType: string, sourceBytes: number, 
 /**

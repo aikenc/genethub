@@ -23,8 +23,9 @@ describe("active single-file HTML Preview", () => {
     const policy = parsed
       .querySelector('meta[http-equiv="Content-Security-Policy"]')
       ?.getAttribute("content");
-    expect(policy).toContain("connect-src https: wss:");
-    expect(policy).toContain("script-src 'unsafe-inline' https: data:");
+    expect(policy).toContain("connect-src https: wss: blob: data:");
+    expect(policy).toContain("script-src 'unsafe-inline' 'wasm-unsafe-eval' https: data: blob:");
+    expect(policy).toContain("worker-src blob: data:");
     expect(policy).toContain("style-src 'unsafe-inline' https: data:");
     expect(policy).toContain("font-src data: https:");
     expect(policy).toContain("object-src 'none'");

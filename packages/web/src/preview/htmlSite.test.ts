@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { remapHtmlSite } from "./htmlSite";
+import { remapHtmlSite, resolveRuntimeAssetPath } from "./htmlSite";
 
 describe("remapHtmlSite", () => {
   beforeEach(() => {
@@ -52,15 +52,51 @@ describe("remapHtmlSite", () => {
     expect(result.blobUrls).toHaveLength(0);
   });
 
-  it("does not rewrite root-absolute or remote assets", async () => {
-    const fetchAsset = vi.fn(async () => null);
+  it("rewrites site-root paths and leaves remote assets alone", async () => {
+    const fetchAsset = vi.fn(async (path: string) => {
+      if (path === "r_demo/cdn.css") {
+        return { bytes: new TextEncoder().encode("body{color:blue}"), mediaType: "text/css" };
+      }
+      return null;
+    });
     const result = await remapHtmlSite({
       entryPath: "r_demo/index.html",
-      html: `<link href="/cdn.css"><script src="https://cdn.example/a.js"></script>`,
+      html: `<link rel="stylesheet" href="/cdn.css"><script src="https://cdn.example/a.js"></script>`,
       fetchAsset,
     });
-    expect(fetchAsset).not.toHaveBeenCalled();
-    expect(result.html).toContain('href="/cdn.css"');
+    expect(fetchAsset).toHaveBeenCalledWith("r_demo/cdn.css");
+    expect(result.html).toContain("<style>body{color:blue}</style>");
     expect(result.html).toContain("https://cdn.example/a.js");
+  });
+
+  it("inlines module scripts and rewrites import.meta.url", async () => {
+    const fetchAsset = vi.fn(async (path: string) => {
+      if (path === "r_demo/app.js") {
+        return {
+          bytes: new TextEncoder().encode(
+            "export default function init(){ return import.meta.url }",
+          ),
+          mediaType: "text/javascript",
+        };
+      }
+      return null;
+    });
+    const result = await remapHtmlSite({
+      entryPath: "r_demo/index.html",
+      html: `<script type="module" src="./app.js"></script>`,
+      fetchAsset,
+    });
+    expect(result.html).toContain("type=\"module\"");
+    expect(result.html).toContain("https://preview.invalid/app.js");
+    expect(result.html).not.toContain("import.meta.url");
+  });
+});
+
+describe("resolveRuntimeAssetPath", () => {
+  it("maps preview.invalid URLs onto the HTML site root", () => {
+    expect(resolveRuntimeAssetPath("r_demo/index.html", "https://preview.invalid/pkg/game.wasm")).toBe(
+      "r_demo/pkg/game.wasm",
+    );
+    expect(resolveRuntimeAssetPath("r_demo/index.html", "https://cdn.example/x.wasm")).toBeNull();
   });
 });

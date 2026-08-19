@@ -433,7 +433,7 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
     await waitFor(() => socket.lastOf("asset.preview").id !== exchange.id);
     socket.respondExchange(socket.lastOf("asset.preview").id, 404, {
       error: "notFound",
-      limitBytes: 4 * 1024 * 1024,
+      limitBytes: 64 * 1024 * 1024,
     });
     await expect(missing).rejects.toBeInstanceOf(AssetPreviewError_);
     client.close();

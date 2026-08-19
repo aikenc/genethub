@@ -18,7 +18,7 @@ use crate::dataplane::frame::{Frame, Kind, MAX_PAYLOAD_BYTES};
 const COMMAND_QUEUE: usize = 256;
 const STREAM_QUEUE: usize = 32;
 const MAX_REQUEST_BODY_BYTES: usize = 3 * 1024 * 1024;
-const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct ExchangeResponse {

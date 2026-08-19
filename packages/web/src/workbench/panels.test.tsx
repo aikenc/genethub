@@ -306,7 +306,7 @@ describe("the files panel", () => {
       type: "file.tree",
       payload: { workspaceId: "w1", path: "r_demo/docs", depth: 1 },
     });
-    expect(screen.getByText(/单个预览上限 4 MiB/)).toBeInTheDocument();
+    expect(screen.getByText(/单个预览上限 64 MiB/)).toBeInTheDocument();
   });
 
   it("refreshes the root without requiring a page reload", async () => {
