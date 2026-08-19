@@ -19,6 +19,7 @@ import {
   COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT,
   COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT,
   Composer,
+  resolveComposerPhase,
   resizeComposerTextarea,
 } from "./Composer";
 import { ComposerControls } from "./ComposerControls";
@@ -1317,6 +1318,47 @@ describe("the controls offered to the user", () => {
     expect(screen.queryByLabelText("发送中")).not.toBeInTheDocument();
     await userEvent.click(screen.getByLabelText("停止"));
     expect(onInterrupt).toHaveBeenCalled();
+  });
+
+  it("keeps the send control busy after the echo and when switching onto a running tab", () => {
+    const pending = { text: "改这里", attachments: [], sentAtMs: 1, error: null };
+    expect(
+      resolveComposerPhase({
+        pending,
+        timelineStatus: "idle",
+        activeTurn: null,
+      }),
+    ).toBe("sending");
+    expect(
+      resolveComposerPhase({
+        pending: null,
+        timelineStatus: "idle",
+        activeTurn: null,
+        sessionStatus: "running",
+      }),
+    ).toBe("running");
+    expect(
+      resolveComposerPhase({
+        pending: null,
+        timelineStatus: "running",
+        activeTurn: null,
+      }),
+    ).toBe("running");
+    expect(
+      resolveComposerPhase({
+        pending: null,
+        timelineStatus: "idle",
+        activeTurn: null,
+        sessionStatus: "waiting",
+      }),
+    ).toBe("running");
+    expect(
+      resolveComposerPhase({
+        pending: { ...pending, error: "失败" },
+        timelineStatus: "idle",
+        activeTurn: null,
+      }),
+    ).toBe("idle");
   });
 
   /**

@@ -22,7 +22,7 @@ export function SessionStatusIcon({
 
   return (
     <span
-      className={`inline-flex w-4 shrink-0 items-center justify-center text-[11px] leading-none ${state.tone}`}
+      className={`inline-flex w-3.5 shrink-0 items-center justify-center text-[11px] leading-none ${state.tone}`}
       role="img"
       aria-label={state.label}
       title={state.label}

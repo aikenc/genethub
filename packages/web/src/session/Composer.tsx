@@ -1,4 +1,4 @@
-import type { AgentInfo, Attachment, CommandInfo } from "@genehub/proto";
+import type { AgentInfo, Attachment, CommandInfo, SessionStatus } from "@genehub/proto";
 import { Loader2, Mic, Paperclip, Square, X } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
@@ -31,6 +31,36 @@ import type { ComposerDraftInsert } from "./store";
  * only produces the daemon's refusal.
  */
 export type ComposerPhase = "idle" | "sending" | "running";
+
+function sessionBusy(status: SessionStatus | null | undefined): boolean {
+  return status === "running" || status === "waiting";
+}
+
+/**
+ * The send control's phase from timeline plus the session list.
+ *
+ * The echo of our own message clears `pending` (so the bubble is not drawn
+ * twice) before `turnStarted` lands. Using only `pending` then puts Send back
+ * on a turn that has already left the composer. The session row already knows
+ * the durable status, so a tab switch onto a running/waiting chat can show
+ * Stop before the snapshot arrives.
+ */
+export function resolveComposerPhase({
+  pending,
+  timelineStatus,
+  activeTurn,
+  sessionStatus,
+}: {
+  pending: { error: string | null } | null | undefined;
+  timelineStatus: SessionStatus;
+  activeTurn: string | null;
+  sessionStatus?: SessionStatus | null;
+}): ComposerPhase {
+  const busy = sessionBusy(timelineStatus) || sessionBusy(sessionStatus);
+  if (pending && !pending.error && !activeTurn && !busy) return "sending";
+  if (busy) return "running";
+  return "idle";
+}
 
 /** Phone: the card reaches the window edge. Safe-area padding is inside that
  * opaque surface so a transcript row cannot show through underneath. */

@@ -242,6 +242,7 @@ describe("a message that has been sent and not yet confirmed", () => {
     } as unknown as SequencedEvent);
     expect(useWorkbench.getState().timeline.pending).toBeNull();
     expect(useWorkbench.getState().timeline.items).toHaveLength(1);
+    expect(useWorkbench.getState().timeline.status).toBe("running");
 
     sends()[0]!.settle.resolve({ type: "ok" });
     await inFlight;
@@ -259,6 +260,28 @@ describe("a message that has been sent and not yet confirmed", () => {
     await inFlight;
 
     expect(useWorkbench.getState().timeline.pending).toBeNull();
+    expect(useWorkbench.getState().timeline.status).toBe("running");
+  });
+
+  it("parks the placeholder on a draft before the session exists", () => {
+    const { client } = sendingClient();
+    useWorkbench.setState({
+      client,
+      activeSessionId: null,
+      draft: {
+        workspaceId: "w1",
+        agentId: "genet",
+        modelId: null,
+        modeId: null,
+        effortId: null,
+        runtimeValues: {},
+      },
+    });
+
+    void useWorkbench.getState().send("新开一场");
+
+    expect(useWorkbench.getState().timeline.pending?.text).toBe("新开一场");
+    expect(useWorkbench.getState().timeline.pending?.error).toBeNull();
   });
 
   it("refuses a second send instead of earning the daemon's refusal", async () => {
@@ -360,6 +383,7 @@ describe("a message that has been sent and not yet confirmed", () => {
       text: "开个新会话说这句",
       attachments: [],
     });
+    expect(useWorkbench.getState().timeline.pending).toBeNull();
   });
 
   it("hands a failed message back to the composer when it is to be edited", async () => {

@@ -186,8 +186,14 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         // for. Keeping both would show the message twice. The daemon runs one
         // turn per session, so a user message arriving while we are waiting on
         // ours is ours; the reply to `session.send` clears it too, and whichever
-        // arrives first is enough.
+        // arrives first is enough. Clearing pending used to put Send back on
+        // the composer until `turnStarted`; the turn has already left, so the
+        // durable status becomes running here.
         pending: event.item.type === "userMessage" ? null : state.pending,
+        status:
+          event.item.type === "userMessage" && state.status === "idle"
+            ? "running"
+            : state.status,
       };
 
     case "itemDelta":
