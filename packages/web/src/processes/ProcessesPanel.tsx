@@ -15,7 +15,7 @@ import { useWorkbench } from "../session/store";
  * conversation to answer for it is one nobody can judge: "is this still needed"
  * is a question about what somebody was doing, not about a command line.
  */
-export function ProcessesPanel() {
+export function ProcessesPanel({ sessionId }: { sessionId?: string }) {
   const {
     backgroundProcesses,
     refreshBackgroundProcesses,
@@ -31,7 +31,10 @@ export function ProcessesPanel() {
     if (client) void refreshBackgroundProcesses();
   }, [client, refreshBackgroundProcesses]);
 
-  const chosen = backgroundProcesses.find((process) => process.pid === selected) ?? null;
+  const processes = sessionId
+    ? backgroundProcesses.filter((process) => process.sessionId === sessionId)
+    : backgroundProcesses;
+  const chosen = processes.find((process) => process.pid === selected) ?? null;
   const titleOf = (sessionId: string) =>
     sessions.find((session) => session.id === sessionId)?.title ?? sessionId;
 
@@ -40,7 +43,11 @@ export function ProcessesPanel() {
       <div className="flex max-h-56 shrink-0 flex-col border-b border-line md:max-h-none md:w-72 md:border-b-0 md:border-r">
         <div className="flex items-center gap-2 border-b border-line px-3 py-1.5 text-xs">
           <span className="truncate text-muted">
-            {backgroundProcesses.length > 0 ? `${backgroundProcesses.length} 个在运行` : "后台进程"}
+            {processes.length > 0
+              ? `${processes.length} 个在运行`
+              : sessionId
+                ? "此会话的后台进程"
+                : "此电脑的后台进程"}
           </span>
           <button
             type="button"
@@ -52,7 +59,7 @@ export function ProcessesPanel() {
         </div>
 
         <ul className="flex-1 overflow-y-auto p-1 text-sm">
-          {backgroundProcesses.map((process) => (
+          {processes.map((process) => (
             <li key={process.pid}>
               <button
                 type="button"
@@ -64,12 +71,12 @@ export function ProcessesPanel() {
               >
                 <span className="truncate font-mono text-xs">{process.command}</span>
                 <span className="truncate text-[10px] text-muted">
-                  {titleOf(process.sessionId)} · 已运行 {duration(process.runningForSeconds)}
+                  {sessionId ? "" : `${titleOf(process.sessionId)} · `}已运行 {duration(process.runningForSeconds)}
                 </span>
               </button>
             </li>
           ))}
-          {backgroundProcesses.length === 0 ? (
+          {processes.length === 0 ? (
             <li className="p-2 text-xs text-muted">没有留下运行中的进程</li>
           ) : null}
         </ul>
@@ -80,7 +87,7 @@ export function ProcessesPanel() {
           <>
             <p className="mb-3 break-all font-mono text-xs">{chosen.command}</p>
             <dl className="mb-4 grid grid-cols-[6rem_1fr] gap-y-1 text-xs">
-              <Fact name="所属会话" value={titleOf(chosen.sessionId)} />
+              {sessionId ? null : <Fact name="所属会话" value={titleOf(chosen.sessionId)} />}
               <Fact name="进程号" value={String(chosen.pid)} />
               <Fact name="父进程号" value={String(chosen.parentPid)} />
               <Fact name="已运行" value={duration(chosen.runningForSeconds)} />

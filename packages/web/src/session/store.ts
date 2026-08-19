@@ -141,7 +141,7 @@ const TAB_TITLES: Record<string, string> = {
   settings: "设置",
   devices: "设备",
   logs: "日志",
-  processes: "后台进程",
+  processes: "此电脑的后台进程",
 };
 
 export type ComposerDraftInsert = {

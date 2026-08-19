@@ -38,6 +38,7 @@ beforeEach(() => {
     client: null,
     backgroundProcesses: [],
     sessions: [],
+    activeSessionId: null,
     tabs: [],
     activeTabId: null,
   });
@@ -121,14 +122,19 @@ describe("the badge on the chat panel", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 
-  it("counts what is running and opens the panel when pressed", async () => {
-    useWorkbench.setState({ backgroundProcesses: [server, { ...server, pid: 4243 }] });
+  it("only counts the current conversation and opens its process dialog", async () => {
+    useWorkbench.setState({
+      activeSessionId: "s_one",
+      sessions: [{ id: "s_one", title: "把首页跑起来" }] as never,
+      backgroundProcesses: [server, { ...server, sessionId: "s_other", pid: 4243 }],
+    });
 
     render(<BackgroundBadge />);
-    const badge = screen.getByRole("button", { name: "2 个后台进程" });
-    expect(badge).toHaveTextContent("2");
+    const badge = screen.getByRole("button", { name: "当前会话有 1 个后台进程" });
+    expect(badge).toHaveTextContent("1");
 
     await userEvent.click(badge);
-    expect(useWorkbench.getState().tabs.some((tab) => tab.kind === "processes")).toBe(true);
+    expect(screen.getByRole("dialog", { name: "会话的后台进程" })).toBeInTheDocument();
+    expect(screen.getByText("node server.js --port 3000")).toBeInTheDocument();
   });
 });

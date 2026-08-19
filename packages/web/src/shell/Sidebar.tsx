@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Endpoint, Host, Target } from "../host";
 import { useWorkbench } from "../session/store";
 import { ImportSessionsDialog } from "../session/ImportSessionsDialog";
+import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
 import { OpenProject, type OpenWorkspaceHandle } from "../workspace/OpenProject";
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
@@ -813,6 +814,7 @@ function SessionRow({
 } & RowActions) {
   const [menu, setMenu] = useState<"shut" | "open" | "confirming">("shut");
   const [editing, setEditing] = useState(false);
+  const [processesOpen, setProcessesOpen] = useState(false);
   // Written by a newer build into this project's folder. Listed, so the
   // conversation does not appear to have vanished, but not openable here.
   const unsupported = session.unsupported;
@@ -876,6 +878,10 @@ function SessionRow({
             setMenu("shut");
             setEditing(true);
           }}
+          onOpenProcesses={() => {
+            setMenu("shut");
+            setProcessesOpen(true);
+          }}
           onAskDelete={() => setMenu("confirming")}
           onDelete={() => {
             setMenu("shut");
@@ -884,6 +890,9 @@ function SessionRow({
           onDismiss={() => setMenu("shut")}
         />
       )}
+      {processesOpen ? (
+        <SessionProcessesDialog sessionId={session.id} onClose={() => setProcessesOpen(false)} />
+      ) : null}
     </li>
   );
 }
@@ -899,12 +908,14 @@ function SessionRow({
 function Menu({
   confirming,
   onRename,
+  onOpenProcesses,
   onAskDelete,
   onDelete,
   onDismiss,
 }: {
   confirming: boolean;
   onRename(): void;
+  onOpenProcesses(): void;
   onAskDelete(): void;
   onDelete(): void;
   onDismiss(): void;
@@ -952,6 +963,14 @@ function Menu({
               onClick={onRename}
             >
               重命名
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+              onClick={onOpenProcesses}
+            >
+              后台进程
             </button>
             <button
               type="button"
