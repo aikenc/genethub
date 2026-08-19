@@ -106,7 +106,11 @@ export interface ClientOptions {
   inviteCredential?: InviteChannelCredential;
   rtcEnabled?: boolean;
   /** Test/embedding seam; production uses the browser WebRTC implementation. */
-  rtcFactory?: (base: DataEndpoint, diagnosticId?: string) => Promise<RtcDataLink>;
+  rtcFactory?: (
+    base: DataEndpoint,
+    diagnosticId?: string,
+    onDiagnostic?: (detail: ClientDiagnosticDetail) => void,
+  ) => Promise<RtcDataLink>;
   socketFactory?: (url: string) => WebSocketLike;
   backoffMs?: (attempt: number) => number;
   connectTimeoutMs?: number;
@@ -1304,7 +1308,11 @@ export class Client {
       transport: this.carrier,
     });
     try {
-      const link = await (this.options.rtcFactory ?? openRtcDataLink)(base, requestId);
+      const link = await (this.options.rtcFactory ?? openRtcDataLink)(
+        base,
+        requestId,
+        (detail) => this.diagnostic("rtc", detail),
+      );
       if (
         generation !== this.rtcGeneration ||
         this.stopped ||

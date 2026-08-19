@@ -473,4 +473,55 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
     expect(client.rtcState).toBe("disabled");
     client.close();
   });
+
+  it("forwards RTC peer lifecycle details as rtc diagnostics", async () => {
+    vi.stubGlobal("RTCPeerConnection", class {});
+    const secret = "r".repeat(64);
+    const queue = socketQueue({
+      secret,
+      identity: {
+        machineId: "m_remote",
+        fingerprint: "FP-REMOTE",
+        transport: "forwarded",
+        rtcSupported: true,
+      },
+    });
+    const diagnostics: Array<{ kind: string; detail: Record<string, unknown> }> = [];
+    let peerDiagnostic: ((detail: Record<string, unknown>) => void) | undefined;
+    const rtcFactory = vi.fn(
+      async (
+        base: unknown,
+        _diagnosticId?: string,
+        onDiagnostic?: (detail: Record<string, unknown>) => void,
+      ) => {
+        peerDiagnostic = onDiagnostic;
+        return {
+          endpoint: base,
+          peer: {} as RTCPeerConnection,
+          close() {},
+        };
+      },
+    );
+    const client = new Client({
+      url: "wss://relay.example/fabric/v2",
+      channelCredential: { capabilityId: "cap-1", secret },
+      socketFactory: queue.factory,
+      rtcFactory,
+      rtcEnabled: true,
+      onDiagnostic: (event) => diagnostics.push(event),
+    });
+    client.connect();
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.length === 1);
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.rtcState === "connected");
+
+    expect(peerDiagnostic).toBeTypeOf("function");
+    peerDiagnostic!({ diagnosticId: "rtc_1", iceConnectionState: "checking" });
+    const rtc = diagnostics.find(
+      (event) => event.kind === "rtc" && "iceConnectionState" in event.detail,
+    );
+    expect(rtc?.detail.iceConnectionState).toBe("checking");
+    client.close();
+  });
 });

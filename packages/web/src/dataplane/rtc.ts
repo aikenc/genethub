@@ -21,10 +21,18 @@ export interface RtcDataLink {
   close(): void;
 }
 
+/**
+ * Coarse RTC lifecycle facts for the feedback recorder. Enums and candidate
+ * type counts only — a candidate string itself carries IP addresses and never
+ * leaves this function.
+ */
+export type RtcDiagnostic = Record<string, string | number | boolean | null>;
+
 /** Negotiates one reliable ordered DataChannel through the base E2EE link. */
 export async function openRtcDataLink(
   base: DataEndpoint,
   diagnosticId?: string,
+  onDiagnostic?: (detail: RtcDiagnostic) => void,
 ): Promise<RtcDataLink> {
   if (typeof RTCPeerConnection !== "function") {
     throw new Error("this browser does not support WebRTC");
@@ -32,6 +40,7 @@ export async function openRtcDataLink(
   const peer = new RTCPeerConnection({
     iceServers: [{ urls: ["stun:stun.cloudflare.com:3478"] }],
   });
+  if (onDiagnostic) watchPeer(peer, diagnosticId ?? null, onDiagnostic);
   const channel = peer.createDataChannel("genehub-data-v3", { ordered: true });
   channel.binaryType = "arraybuffer";
   try {
@@ -214,8 +223,53 @@ class RtcRecordCarrier implements RecordCarrier {
   }
 }
 
-function dataChannelOpened(
-  channel: RTCDataChannel,
+/**
+ * Reports the peer's state machine to the feedback recorder. Listeners are
+ * added, never assigned — `dataChannelOpened` and the carrier each own the
+ * `onconnectionstatechange` property at different times, and diagnostics must
+ * not clobber either.
+ *
+ * @internal Exported for tests; the client wires this through `openRtcDataLink`.
+ */
+export function watchPeer(
+  peer: RTCPeerConnection,
+  diagnosticId: string | null,
+  onDiagnostic: (detail: RtcDiagnostic) => void,
+): void {
+  const emit = (detail: RtcDiagnostic) =>
+    onDiagnostic({ diagnosticId, ...detail });
+  peer.addEventListener("iceconnectionstatechange", () =>
+    emit({ iceConnectionState: peer.iceConnectionState }),
+  );
+  peer.addEventListener("connectionstatechange", () =>
+    emit({ connectionState: peer.connectionState }),
+  );
+  peer.addEventListener("signalingstatechange", () =>
+    emit({ signalingState: peer.signalingState }),
+  );
+  // Candidate strings carry IP addresses; only their types are counted, and
+  // the tally goes out once gathering finishes.
+  const candidates = { host: 0, srflx: 0, prflx: 0, relay: 0 };
+  peer.addEventListener("icecandidate", (event) => {
+    const type = / typ (host|srflx|prflx|relay)( |$)/.exec(
+      event.candidate?.candidate ?? "",
+    )?.[1] as keyof typeof candidates | undefined;
+    if (type) candidates[type] += 1;
+  });
+  peer.addEventListener("icegatheringstatechange", () => {
+    emit({ iceGatheringState: peer.iceGatheringState });
+    if (peer.iceGatheringState === "complete") {
+      emit({
+        candidateHost: candidates.host,
+        candidateSrflx: candidates.srflx,
+        candidatePrflx: candidates.prflx,
+        candidateRelay: candidates.relay,
+      });
+    }
+  });
+}
+
+function dataChannelOpened(  channel: RTCDataChannel,
   peer: RTCPeerConnection,
 ): Promise<void> {
   if (channel.readyState === "open") return Promise.resolve();
