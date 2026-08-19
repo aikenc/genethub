@@ -12,7 +12,8 @@ import { detectHost, type Endpoint, type Host } from "./host";
 import { setLandingIntent } from "./location/landing";
 import { encodeTabToken, expandLocator, expandPreviewPath, locatorsMatch } from "./location/locator";
 import { readWorkbenchDialog, readWorkbenchLocation, useWorkbenchHrefSync } from "./location/sync";
-import { NEW_SESSION_ID } from "./location/workbench";
+import { useWorkbenchDocumentTitle } from "./location/title";
+import { NEW_SESSION_ID, scopedWorkbenchLocation } from "./location/workbench";
 import type { Target } from "./host";
 import { LogsPanel } from "./logs/LogsPanel";
 import { PreviewFloat } from "./preview/PreviewFloat";
@@ -181,7 +182,7 @@ export function App({
   const hrefLocation = useMemo(() => {
     if (!deviceHandle) return null;
     const current = readWorkbenchLocation();
-    return {
+    return scopedWorkbenchLocation(workbench.addressScope, {
       deviceHandle,
       workspaceId: workbench.draft?.workspaceId ?? workbench.activeWorkspaceId,
       sessionId: workbench.draft ? NEW_SESSION_ID : workbench.activeSessionId,
@@ -190,15 +191,19 @@ export function App({
       tabs: workbench.tabs
         .map((tab) => encodeTabToken(tab))
         .filter((token): token is string => token !== null),
-    };
+    });
   }, [
     deviceHandle,
+    workbench.addressScope,
     workbench.activeSessionId,
     workbench.activeWorkspaceId,
     workbench.draft,
     workbench.previewFloat?.path,
     workbench.tabs,
   ]);
+  useWorkbenchDocumentTitle(
+    endpoint !== "loading" && endpoint !== null ? endpoint.label : null,
+  );
   useWorkbenchHrefSync(
     host.kind === "browser" &&
       deviceHandle !== null &&
@@ -243,9 +248,12 @@ export function App({
               )
             : null;
       if (loc.sessionId === NEW_SESSION_ID) {
-        if (workspaceId) state.newSession(workspaceId, null);
+        if (workspaceId) state.newSession(workspaceId, null, { addressScope: "workspace" });
         else if (loc.workspaceId) {
           useWorkbench.setState({ notice: "这个地址对不上。" });
+        } else {
+          const home = state.activeWorkspaceId ?? state.workspaces[0]?.id;
+          if (home) state.newSession(home, null, { addressScope: "machine" });
         }
       } else if (loc.sessionId) {
         if (!sessionId) {
@@ -257,8 +265,11 @@ export function App({
         }
       } else if (loc.workspaceId && !workspaceId) {
         useWorkbench.setState({ notice: "这个地址对不上。" });
-      } else if (workspaceId && !locatorsMatch(workspaceId, state.activeWorkspaceId)) {
-        void state.selectWorkspace(workspaceId);
+      } else if (workspaceId) {
+        state.newSession(workspaceId, null, { addressScope: "workspace" });
+      } else {
+        const home = state.activeWorkspaceId ?? state.workspaces[0]?.id;
+        if (home) state.newSession(home, null, { addressScope: "machine" });
       }
       if (loc.tabs?.length) state.restoreStrip(loc.tabs);
       if (loc.preview) {

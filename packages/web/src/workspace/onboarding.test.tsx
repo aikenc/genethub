@@ -142,6 +142,7 @@ beforeEach(() => {
     sessions: [],
     activeSessionId: null,
     draft: null,
+    addressScope: "machine",
     tabs: [],
     activeTabId: null,
     rightPanel: null,
@@ -705,6 +706,39 @@ describe("the first run", () => {
 
     await waitFor(() => expect(subscribed).toEqual(["newest"]));
     expect(calls.some((call) => call.type === "session.create")).toBe(false);
+  });
+
+  it("keeps a bookmarked machine home on a new conversation and titles the tab after the machine", async () => {
+    window.history.replaceState(null, "", "/m-17ef85c5");
+    const subscribed: string[] = [];
+    const { client } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({
+        type: "workspaces",
+        data: [workspace("w1", "app", "/home/me/app", true)],
+      }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+      "session.list": () => ({
+        type: "sessions",
+        data: [session("older", 10), session("newest", 99)],
+      }),
+    });
+    Object.assign(client, { identity: { machineId: "m_17ef85c530554af9bb7de6c19116aff0" } });
+    (client as unknown as { subscribe: (id: string) => Promise<unknown> }).subscribe = async (
+      id,
+    ) => {
+      subscribed.push(id);
+      return { snapshot: { seq: 0, items: [], summary: session(id, 0) }, replayed: [], reset: false };
+    };
+    await start(client, hostWith());
+
+    await waitFor(() => expect(useWorkbench.getState().draft?.workspaceId).toBe("w1"));
+    expect(useWorkbench.getState().activeSessionId).toBeNull();
+    expect(useWorkbench.getState().addressScope).toBe("machine");
+    expect(subscribed).toEqual([]);
+    await waitFor(() => expect(window.location.pathname).toBe("/m-17ef85c5"));
+    await waitFor(() => expect(document.title).toBe("本机"));
+    expect(screen.getByRole("heading", { name: "新会话" })).toBeInTheDocument();
   });
 });
 

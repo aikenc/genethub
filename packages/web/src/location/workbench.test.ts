@@ -7,6 +7,7 @@ import {
   NEW_SESSION_ID,
   parseWorkbenchHref,
   parseWorkbenchPath,
+  scopedWorkbenchLocation,
 } from "./workbench";
 
 const DEVICE = "dev_7k2";
@@ -159,6 +160,23 @@ describe("workbench locators", () => {
       tabs: [],
     });
     expect(formatWorkbenchPath(parsed!)).toBe(`/m-17ef85c5/w-cb37e25b/s-a1b2c3d4`);
+  });
+
+  it("keeps a machine or workspace home from growing a draft session segment", () => {
+    const draft = {
+      deviceHandle: MACHINE,
+      workspaceId: PROJECT,
+      sessionId: NEW_SESSION_ID,
+      preview: null,
+      dialog: null,
+    };
+    expect(formatWorkbenchPath(scopedWorkbenchLocation("machine", draft))).toBe("/m-17ef85c5");
+    expect(formatWorkbenchPath(scopedWorkbenchLocation("workspace", draft))).toBe(
+      "/m-17ef85c5/w-cb37e25b",
+    );
+    expect(formatWorkbenchPath(scopedWorkbenchLocation("session", { ...draft, sessionId: TALK }))).toBe(
+      "/m-17ef85c5/w-cb37e25b/s-a1b2c3d4",
+    );
   });
 
   it("rejects a ticket-shaped query and other non-canonical spellings", () => {

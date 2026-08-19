@@ -33,6 +33,7 @@ import {
   expandPreviewPath,
   NEW_SESSION_ID,
 } from "../location/locator";
+import type { AddressScope } from "../location/workbench";
 import type { Client, ConnectionState } from "../protocol/client";
 import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
@@ -163,6 +164,13 @@ interface WorkbenchState {
   activeSessionId: string | null;
   /** Set while an unstarted conversation is on screen. See `Draft`. */
   draft: Draft | null;
+  /**
+   * How much of the current draft or conversation the address should name.
+   *
+   * A machine or workspace home keeps a draft on screen without rewriting a
+   * bookmarked `/m-…` or `/m-…/w-…` into a session.
+   */
+  addressScope: AddressScope;
   tabs: WorkbenchTab[];
   activeTabId: string | null;
   rightPanel: RightPanel;
@@ -300,7 +308,11 @@ interface WorkbenchState {
    * Both arguments default to what is already on screen, so the "+" in the
    * header needs to know nothing about projects or agents.
    */
-  newSession(workspaceId?: string | null, agentId?: string | null): void;
+  newSession(
+    workspaceId?: string | null,
+    agentId?: string | null,
+    options?: { addressScope?: AddressScope },
+  ): void;
   selectSession(sessionId: string): Promise<void>;
   loadRound(roundId: string): Promise<void>;
   loadOlderTrunks(roundId: string): Promise<void>;
@@ -551,6 +563,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   draft: null,
+  addressScope: "machine",
   tabs: [],
   activeTabId: null,
   rightPanel: null,
@@ -663,16 +676,14 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       timeline: emptyTimeline(),
     }));
     await loadSessions(client, set);
-    await land(get);
+    get().newSession(reply.data.id, null, { addressScope: "workspace" });
   },
 
   async selectWorkspace(workspaceId) {
-    // No refetch: the list already holds every workspace's sessions, so
-    // switching projects is a change of which ones are on screen, not a
-    // question for the daemon.
+    // The workspace address is its homepage: a new conversation, not the last
+    // one that happened to run here. That last one stays in the list.
     require_(get().client);
-    set({ activeWorkspaceId: workspaceId, activeSessionId: null, timeline: emptyTimeline() });
-    await land(get);
+    get().newSession(workspaceId, null, { addressScope: "workspace" });
   },
 
   async renameWorkspace(workspaceId, name) {
@@ -739,10 +750,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       };
     });
     await loadSessions(client, set);
-    if (removedWasActive && nextWorkspaceId) await land(get);
+    if (removedWasActive && nextWorkspaceId) {
+      get().newSession(nextWorkspaceId, null, { addressScope: "workspace" });
+    }
   },
 
-  newSession(workspaceId, agentId) {
+  newSession(workspaceId, agentId, options) {
     const state = get();
     const target = workspaceId ?? currentWorkspace(state);
     if (!target) return;
@@ -790,6 +803,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       },
       activeWorkspaceId: target,
       activeSessionId: null,
+      addressScope:
+        options?.addressScope ?? (state.addressScope === "machine" ? "machine" : "workspace"),
       timeline: emptyTimeline(),
       tabs: limited.tabs,
       sessionTimelines: omitMany(state.sessionTimelines, evictedSessionIds),
@@ -841,6 +856,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         // terminal and the diff all read `activeWorkspaceId`. Without this they
         // would go on showing the project the user just navigated away from.
         activeWorkspaceId: summary?.workspaceId ?? state.activeWorkspaceId,
+        addressScope: "session",
         timeline: state.sessionTimelines[sessionId] ?? emptyTimeline(),
         tabs: limited.tabs,
         sessionTimelines: omitMany(state.sessionTimelines, tabSessionIds(limited.evicted)),
@@ -1777,13 +1793,13 @@ async function refreshCatalog(client: Client, set: Setter): Promise<void> {
 }
 
 /**
- * Puts the user in a conversation instead of in front of a button.
+ * Puts the user on the page the address named, or continues the last thing
+ * when there is no address (desktop, or a bare `/`).
  *
- * Coming back nearly always means continuing the last thing, and a machine
- * that has never been used should still be able to take a first message. The
- * one case that still gets a splash screen is the one nothing here can act
- * on: no model to run the turn with, which is a key the user has to go and
- * paste in.
+ * `/m-…` and `/m-…/w-…` are homes: a new conversation, with the most recent
+ * workspace as the default on a machine home. A stored session is only opened
+ * when the address names one. The splash screen remains the one case nothing
+ * here can act on: no model to run the turn with.
  */
 async function land(get: () => WorkbenchState): Promise<void> {
   const intent = takeLandingIntent();
@@ -1827,7 +1843,7 @@ async function land(get: () => WorkbenchState): Promise<void> {
   // An empty conversation, not a stored one. Landing somewhere used to write a
   // session on every first visit to a project, whether or not anything was ever
   // said in it.
-  get().newSession(workspaceId, agent.id);
+  get().newSession(workspaceId, agent.id, { addressScope: "machine" });
   finishLanding(get, intent);
 }
 
@@ -1847,7 +1863,6 @@ async function applyLanding(
     useWorkbench.setState({ notice: "这个会话已经不在了。" });
     return false;
   }
-  if (intent.sessionId !== NEW_SESSION_ID) return false;
   const workspaceId = intent.workspaceId
     ? expandLocator(
         intent.workspaceId,
@@ -1859,7 +1874,9 @@ async function applyLanding(
     return false;
   }
   if (!workspaceId) return false;
-  get().newSession(workspaceId, null);
+  get().newSession(workspaceId, null, {
+    addressScope: intent.workspaceId ? "workspace" : "machine",
+  });
   return true;
 }
 
