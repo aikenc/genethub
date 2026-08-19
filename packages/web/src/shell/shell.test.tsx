@@ -573,6 +573,15 @@ describe("what can be done to one conversation", () => {
     expect(screen.getByText("更新流程")).toBeInTheDocument();
   });
 
+  it("opens one conversation's process dialog from its own menu", async () => {
+    sidebar();
+    await openMenu("更新流程");
+    await userEvent.click(screen.getByRole("menuitem", { name: "后台进程" }));
+
+    expect(screen.getByRole("dialog", { name: "会话的后台进程" })).toBeInTheDocument();
+    expect(screen.getByText(/更新流程 · 只显示这个会话/)).toBeInTheDocument();
+  });
+
   it("asks once before deleting, because there is no way back", async () => {
     sidebar();
     await openMenu("更新流程");

@@ -44,7 +44,6 @@ export function ToolsMenu({
         <Entry phone={phone} label="变更" onClick={openChanges} />
         <Entry phone={phone} label="文件" onClick={openFiles} />
         <Entry phone={phone} label="终端" onClick={() => go("terminal")} />
-        <Entry phone={phone} label="后台进程" onClick={() => go("processes")} />
         {extraTabs.map((tab) => (
           <Entry
             key={tab.id}
@@ -55,6 +54,7 @@ export function ToolsMenu({
         ))}
       </Section>
       <Section title="全局" phone={phone}>
+        <Entry phone={phone} label="此电脑的后台进程" onClick={() => go("processes")} />
         <Entry phone={phone} label="设备" onClick={() => go("devices")} />
         <Entry phone={phone} label="设置" onClick={() => go("settings")} />
         {children ? (
