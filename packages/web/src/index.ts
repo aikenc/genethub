@@ -51,5 +51,11 @@ export {
   registerDiagnosticClient,
 } from "./diagnostics";
 export type { ClientDiagnosticEvent, ClientDiagnosticKind } from "./protocol/client";
-export type { SupportDiagnostics } from "@genehub/proto";
+export type {
+  SessionInspection,
+  SessionNarrativePage,
+  SessionRoundPage,
+  SessionSummary,
+  SupportDiagnostics,
+} from "@genehub/proto";
 export type { ExtraTab } from "./shell/tabs";

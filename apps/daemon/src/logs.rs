@@ -26,7 +26,7 @@ const MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// How much of the file `tail` returns by default. A screenful of context, not
 /// the whole history: what matters is nearly always the end.
-pub const DEFAULT_TAIL_BYTES: usize = 64 * 1024;
+pub const DEFAULT_TAIL_BYTES: usize = 256 * 1024;
 
 /// A log file that stays a bounded size.
 #[derive(Clone)]
