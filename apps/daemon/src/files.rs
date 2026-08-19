@@ -290,9 +290,7 @@ fn preview_type(
         "webm" if bytes.starts_with(b"\x1a\x45\xdf\xa3") => {
             Some((AssetPreviewKind::Video, "video/webm"))
         }
-        "wasm" if bytes.starts_with(b"\0asm") => {
-            Some((AssetPreviewKind::Wasm, "application/wasm"))
-        }
+        "wasm" if bytes.starts_with(b"\0asm") => Some((AssetPreviewKind::Wasm, "application/wasm")),
         _ => None,
     };
     if let Some(found) = exact {
@@ -649,14 +647,20 @@ mod tests {
         );
         std::fs::write(dir.path().join("game.wasm"), b"\0asm\x01\x00\x00\x00").unwrap();
         assert_eq!(
-            preview(dir.path(), "game.wasm").unwrap().metadata.media_type,
+            preview(dir.path(), "game.wasm")
+                .unwrap()
+                .metadata
+                .media_type,
             "application/wasm"
         );
         let mut late_nul = vec![b'a'; 9_000];
         late_nul.push(0);
         std::fs::write(dir.path().join("late-nul.custom"), late_nul).unwrap();
         assert_eq!(
-            preview(dir.path(), "late-nul.custom").unwrap().metadata.kind,
+            preview(dir.path(), "late-nul.custom")
+                .unwrap()
+                .metadata
+                .kind,
             AssetPreviewKind::Binary
         );
     }
