@@ -1,7 +1,7 @@
 import type { SessionSummary, WorkspaceInfo } from "@genehub/proto";
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Endpoint, Host, WindowControls } from "../host";
 import { useWorkbench } from "../session/store";
@@ -88,6 +88,10 @@ beforeEach(() => {
     removeWorkspace: vi.fn(async () => {}),
     deleteSession: vi.fn(async () => {}),
   });
+});
+
+afterEach(() => {
+  cleanup();
 });
 
 function sidebar() {
@@ -366,8 +370,52 @@ describe("chat tab state", () => {
 
     expect(screen.getByRole("button", { name: "改进UI体验" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "文件" })).toBeInTheDocument();
-    expect(screen.getAllByTitle("genethub")).toHaveLength(2);
+    const marks = screen.getAllByTitle("genethub");
+    expect(marks).toHaveLength(2);
+    for (const mark of marks) {
+      expect(mark.tagName).toBe("SPAN");
+      expect(mark).toHaveClass("pointer-events-none");
+      expect(mark.closest("button")).toHaveAccessibleName(/改进UI体验|文件/);
+    }
     expect(screen.queryByTitle("paseo")).not.toBeInTheDocument();
+  });
+
+  it("activates the tab when the pointer lands on the workspace name", () => {
+    const activateTab = vi.fn();
+    useWorkbench.setState({
+      activateTab,
+      tabs: [{ id: "chat:s1", kind: "chat", title: "改进UI体验", sessionId: "s1" }],
+      activeTabId: "chat:s1",
+      sessions: [{ ...session("s1", "w1", "改进UI体验"), status: "idle" }],
+    });
+
+    render(<TabBar />);
+    fireEvent.click(screen.getByTitle("genethub"));
+
+    expect(activateTab).toHaveBeenCalledWith("chat:s1");
+  });
+
+  it("gives the session title the leftover room and stamps a compact age", () => {
+    useWorkbench.setState({
+      tabs: [
+        { id: "chat:s1", kind: "chat", title: "改进UI体验", sessionId: "s1" },
+        { id: "files", kind: "files", title: "文件" },
+      ],
+      activeTabId: "chat:s1",
+      sessions: [
+        {
+          ...session("s1", "w1", "改进UI体验"),
+          updatedAtMs: Date.now() - 3 * 60_000,
+        },
+      ],
+    });
+
+    render(<TabBar />);
+
+    const tab = screen.getByRole("button", { name: "改进UI体验" }).closest("div")!;
+    expect(tab).toHaveClass("gap-0.5", "md:max-w-[22rem]", "md:pl-2", "md:pr-0.5");
+    expect(screen.getByText("3m")).toHaveClass("hidden", "md:inline");
+    expect(screen.getByText("3m").closest("button")).toHaveAccessibleName("改进UI体验");
   });
 });
 
@@ -424,8 +472,8 @@ describe("the tab strip when the tabs outrun the room", () => {
     // Three whole tabs and half of the next: enough of the fourth is visible to
     // say the strip continues, which is the part two full-width tabs never did.
     expect(tab).toHaveClass("w-[28.5%]", "shrink-0", "grow");
-    // A desktop keeps its title-shaped tabs.
-    expect(tab).toHaveClass("md:w-auto", "md:max-w-[16rem]", "md:shrink", "md:grow-0");
+    // A desktop keeps its title-shaped tabs, with room for the session name.
+    expect(tab).toHaveClass("md:w-auto", "md:max-w-[22rem]", "md:shrink", "md:grow-0");
   });
 
   it("never grows a vertical scrollbar beside the strip", () => {
@@ -444,7 +492,7 @@ describe("the tab strip when the tabs outrun the room", () => {
     // keeps this hittable.
     expect(screen.getByRole("button", { name: "关闭 会话 0" })).toHaveClass(
       "h-11",
-      "w-7",
+      "w-6",
       "!min-h-0",
       "!min-w-0",
     );
@@ -602,6 +650,7 @@ describe("switching tabs from the phone title", () => {
     });
     expect(switcher).toHaveClass("h-11", "flex-1");
     expect(switcher.querySelector(".truncate")).toHaveTextContent("修复移动端横向拖动");
+    expect(switcher.querySelector("[data-workspace-affordance]")).not.toBeNull();
     expect(switcher).toHaveTextContent("1");
     expect(switcher).toHaveTextContent("✓1");
   });
@@ -646,6 +695,28 @@ describe("switching tabs from the phone title", () => {
 
     expect(closeTab).toHaveBeenCalledWith("files");
     expect(screen.getByRole("listbox")).toBeInTheDocument();
+  });
+
+  it("hides the compact age until the title list is open", async () => {
+    openTabs({
+      sessions: [
+        {
+          ...session("s1", "w1", "修复移动端横向拖动"),
+          status: "running",
+          updatedAtMs: Date.now() - 3 * 60_000,
+        },
+        { ...session("s2", "w1", "更新流程"), updatedAtMs: Date.now() - 2 * 60 * 60_000 },
+      ],
+    });
+    render(<MobileTitleSwitcher fallbackTitle="工作台" />);
+
+    expect(screen.queryByText("3m")).not.toBeInTheDocument();
+    expect(screen.queryByText("2h")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTitle("genethub"));
+
+    expect(screen.getByRole("listbox", { name: "已打开的标签" })).toBeInTheDocument();
+    expect(screen.getByText("3m")).toBeInTheDocument();
+    expect(screen.getByText("2h")).toBeInTheDocument();
   });
 
   it("counts only chat tabs, and treats waiting as still in flight", () => {

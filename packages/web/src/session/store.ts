@@ -1194,7 +1194,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // A failed message is not in flight: it is waiting for a decision, and
     // typing a new one is a decision. It gives up its place here rather than
     // silently swallowing the next thing the user says.
-    const inFlight = active ? timelineOf(get(), active).pending : null;
+    const inFlight = active ? timelineOf(get(), active).pending : get().timeline.pending;
     if (inFlight && !inFlight.error) return;
 
     // On screen before anything leaves this machine, and before the round trips
@@ -1205,7 +1205,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       sentAtMs: Date.now(),
       error: null,
     };
-    if (active) patchTimeline(active, set, () => ({ pending }));
+    // Park it on whatever timeline is on screen, including a draft that has
+    // no session id yet. Otherwise the send control stays Send for the whole
+    // of `session.create`.
+    set((state) => {
+      const sessionId = state.activeSessionId;
+      const current = sessionId ? timelineOf(state, sessionId) : state.timeline;
+      const timeline = { ...current, pending };
+      return {
+        timeline,
+        ...(sessionId
+          ? { sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline } }
+          : {}),
+      };
+    });
 
     // This is where a draft becomes a conversation: the machine hears about it
     // at the first message, not when the button was pressed.
@@ -1216,7 +1229,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       // created has nowhere to put one, so the text goes back to the composer
       // rather than nowhere — it only exists here.
       if (active) failPending(active, set, get().notice ?? "无法开始会话");
-      else set({ restoreDraft: { text, attachments } });
+      else
+        set((state) => ({
+          restoreDraft: { text, attachments },
+          timeline: { ...state.timeline, pending: null },
+        }));
       return;
     }
 
@@ -1242,7 +1259,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       // is already here. This is the second of the two ways the placeholder
       // goes away, and it costs nothing to keep both (`timeline.apply` has the
       // other): a reply that never comes must not leave a bubble behind.
-      patchTimeline(sessionId, set, () => ({ pending: null }));
+      patchTimeline(sessionId, set, (timeline) => ({
+        pending: null,
+        status: timeline.status === "idle" ? "running" : timeline.status,
+      }));
     } catch (error) {
       // A lost connection is not a failed send. The prompt may well have been
       // taken — `ConnectionOutcomeUnknownError` exists to say exactly that —
@@ -1919,7 +1939,20 @@ async function start(
       ? { runtimeValues: draft.runtimeValues }
       : {}),
   });
-  set((current) => ({ sessions: [reply.data, ...current.sessions] }));
+  set((current) => ({
+    sessions: [reply.data, ...current.sessions],
+    // Seed before `selectSession` so the first paint of the new session still
+    // holds the message that is in flight; otherwise subscribe's empty
+    // timeline puts Send back until this function patches pending afterwards.
+    ...(pending
+      ? {
+          sessionTimelines: {
+            ...current.sessionTimelines,
+            [reply.data.id]: { ...(current.sessionTimelines[reply.data.id] ?? emptyTimeline()), pending },
+          },
+        }
+      : {}),
+  }));
   // Clears the draft and turns its tab into this session's.
   await get().selectSession(reply.data.id);
   // Before `setEffort`, which is another round trip: the first message of a new

@@ -6,6 +6,7 @@ import { useWorkbench, type WorkbenchTab } from "../session/store";
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 import { TabKindIcon } from "./TabKindIcon";
+import { compactAge, useNow } from "./tabAge";
 import { tabDisplayTitle, workspaceForTab } from "./tabWorkspace";
 
 /**
@@ -25,6 +26,7 @@ export function MobileTitleSwitcher({ fallbackTitle }: { fallbackTitle: string }
   const [open, setOpen] = useState(false);
   const [panelTop, setPanelTop] = useState(0);
   const root = useRef<HTMLDivElement>(null);
+  const now = useNow();
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const title = activeTab ? tabDisplayTitle(activeTab) : fallbackTitle;
   const owned = activeTab ? workspaceForTab(activeTab, workspaceCtx) : undefined;
@@ -64,7 +66,7 @@ export function MobileTitleSwitcher({ fallbackTitle }: { fallbackTitle: string }
 
   if (!switchable) {
     return (
-      <span className="flex min-w-0 flex-1 items-center justify-center gap-1 text-sm font-medium text-fg">
+      <span className="flex min-w-0 flex-1 items-center justify-center gap-0.5 text-sm font-medium text-fg">
         <TabKindIcon kind={activeTab?.kind} />
         <span className="min-w-0 truncate">{title}</span>
         {owned ? <WorkspaceAffordance workspace={owned} /> : null}
@@ -79,12 +81,12 @@ export function MobileTitleSwitcher({ fallbackTitle }: { fallbackTitle: string }
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={switcherLabel(title, counts, tabs.length)}
-        className="flex h-11 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg px-1 text-sm font-medium text-fg active:bg-raised"
+        className="flex h-11 min-w-0 flex-1 items-center justify-center gap-0.5 rounded-lg px-1 text-sm font-medium text-fg active:bg-raised"
         onClick={() => setOpen((current) => !current)}
       >
         <TabKindIcon kind={activeTab?.kind} />
         <span className="min-w-0 truncate">{title}</span>
-        {owned ? <WorkspaceAffordance workspace={owned} /> : null}
+        {owned ? <WorkspaceAffordance workspace={owned} className="max-w-[4.5rem]" /> : null}
         <ChevronDown
           aria-hidden
           className={`h-3.5 w-3.5 shrink-0 text-muted transition-transform ${
@@ -115,11 +117,12 @@ export function MobileTitleSwitcher({ fallbackTitle }: { fallbackTitle: string }
           </p>
           {tabs.map((tab) => {
             const active = tab.id === activeTabId;
-            const status = tab.sessionId
-              ? sessions.find((session) => session.id === tab.sessionId)?.status
+            const summary = tab.sessionId
+              ? sessions.find((session) => session.id === tab.sessionId)
               : undefined;
             const rowTitle = tabDisplayTitle(tab);
             const rowOwned = workspaceForTab(tab, workspaceCtx);
+            const age = compactAge(summary?.updatedAtMs, now);
             return (
               <div
                 key={tab.id}
@@ -131,19 +134,27 @@ export function MobileTitleSwitcher({ fallbackTitle }: { fallbackTitle: string }
                   type="button"
                   role="option"
                   aria-selected={active}
-                  className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2.5 text-left text-sm !min-h-11"
+                  className="flex min-w-0 flex-1 items-center gap-1.5 px-3 py-2.5 text-left text-sm !min-h-11"
                   onClick={() => {
                     activateTab(tab.id);
                     setOpen(false);
                   }}
                 >
                   {tab.kind === "chat" ? (
-                    <SessionStatusIcon status={status} />
+                    <SessionStatusIcon status={summary?.status} />
                   ) : (
                     <TabKindIcon kind={tab.kind} />
                   )}
                   <span className="min-w-0 flex-1 truncate">{rowTitle}</span>
                   {rowOwned ? <WorkspaceAffordance workspace={rowOwned} /> : null}
+                  {age ? (
+                    <span
+                      className="shrink-0 text-[10px] leading-none text-faint tabular-nums"
+                      aria-hidden
+                    >
+                      {age}
+                    </span>
+                  ) : null}
                 </button>
                 <button
                   type="button"

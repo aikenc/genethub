@@ -61,6 +61,22 @@ describe("the session timeline", () => {
     expect(item.type === "toolCall" && item.detail.kind === "shell" && item.detail.command).toBe("ls");
   });
 
+  it("keeps the turn running when the user's own message echo clears the placeholder", () => {
+    const waiting = {
+      ...emptyTimeline(),
+      pending: { text: "改这里", attachments: [], sentAtMs: 1, error: null },
+    };
+    const echoed = apply(waiting, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "改这里", attachments: [] },
+    });
+
+    expect(echoed.pending).toBeNull();
+    expect(echoed.status).toBe("running");
+    expect(echoed.items).toHaveLength(1);
+  });
+
   it("takes the fuller detail when a status delta carries one", () => {
     const call: TimelineItem = {
       type: "toolCall",

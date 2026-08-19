@@ -5,6 +5,7 @@ import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 import { TabKindIcon } from "./TabKindIcon";
+import { compactAge, useNow } from "./tabAge";
 import { tabDisplayTitle, workspaceForTab } from "./tabWorkspace";
 
 /**
@@ -17,6 +18,7 @@ export function TabBar({ onOpenTools = () => {} }: { onOpenTools?(): void }) {
   const { tabs, sessions, activeTabId, activateTab, closeTab, workspace, workspaceCtx } =
     useTabBar();
   const strip = useWheelPannedStrip();
+  const now = useNow();
 
   return (
     <div
@@ -36,11 +38,12 @@ export function TabBar({ onOpenTools = () => {} }: { onOpenTools?(): void }) {
       >
         {tabs.map((tab) => {
           const active = tab.id === activeTabId;
-          const status = tab.sessionId
-            ? sessions.find((session) => session.id === tab.sessionId)?.status
+          const summary = tab.sessionId
+            ? sessions.find((session) => session.id === tab.sessionId)
             : undefined;
           const title = tabDisplayTitle(tab);
           const owned = workspaceForTab(tab, workspaceCtx);
+          const age = compactAge(summary?.updatedAtMs, now);
           return (
             <div
               key={tab.id}
@@ -50,23 +53,33 @@ export function TabBar({ onOpenTools = () => {} }: { onOpenTools?(): void }) {
               // out loud that the strip keeps going. The size is written out
               // rather than taken from `text-xs`, which the shared phone
               // typography lifts to 14px for body copy this strip is not.
-              className={`group flex w-[28.5%] shrink-0 grow items-center gap-1 border-r border-line pl-2 pr-0.5 text-[0.75rem] leading-4 md:w-auto md:max-w-[16rem] md:shrink md:grow-0 md:pl-3 md:pr-2 ${
+              className={`group flex w-[28.5%] shrink-0 grow items-center gap-0.5 border-r border-line pl-1.5 pr-0 text-[0.75rem] leading-4 md:w-auto md:max-w-[22rem] md:shrink md:grow-0 md:pl-2 md:pr-0.5 ${
                 active ? "bg-bg text-fg" : "text-muted hover:bg-raised hover:text-fg"
               }`}
             >
-              {tab.kind === "chat" ? (
-                <SessionStatusIcon status={status} />
-              ) : (
-                <TabKindIcon kind={tab.kind} />
-              )}
               <button
                 type="button"
-                className="min-w-0 flex-1 truncate py-2 text-left !min-h-0"
+                aria-label={title}
+                className="flex min-w-0 flex-1 items-center gap-0.5 py-2 text-left !min-h-0"
                 onClick={() => activateTab(tab.id)}
               >
-                {title}
+                {tab.kind === "chat" ? (
+                  <SessionStatusIcon status={summary?.status} />
+                ) : (
+                  <TabKindIcon kind={tab.kind} />
+                )}
+                <span className="min-w-0 flex-1 truncate">{title}</span>
+                {owned ? <WorkspaceAffordance workspace={owned} className="max-w-[4.5rem]" /> : null}
+                {age ? (
+                  <span
+                    className="hidden shrink-0 text-[10px] leading-none text-faint tabular-nums md:inline"
+                    title={age}
+                    aria-hidden
+                  >
+                    {age}
+                  </span>
+                ) : null}
               </button>
-              {owned ? <WorkspaceAffordance workspace={owned} className="max-w-[4.5rem]" /> : null}
               <button
                 type="button"
                 aria-label={`关闭 ${title}`}
@@ -75,7 +88,7 @@ export function TabBar({ onOpenTools = () => {} }: { onOpenTools?(): void }) {
                 // every other phone button gets: at that width three of them
                 // fill the strip, and the row is already 44px tall, so the
                 // thumb keeps the travel it actually aims along.
-                className="flex h-11 w-7 shrink-0 items-center justify-center rounded text-faint !min-h-0 !min-w-0 hover:bg-line hover:text-fg md:h-auto md:w-auto md:px-1 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
+                className="flex h-11 w-6 shrink-0 items-center justify-center rounded text-faint !min-h-0 !min-w-0 hover:bg-line hover:text-fg md:h-auto md:w-auto md:px-0 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
                 onClick={() => closeTab(tab.id)}
               >
                 <span aria-hidden>×</span>
