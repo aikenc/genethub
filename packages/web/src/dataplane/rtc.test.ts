@@ -1,16 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { watchPeer, type RtcDiagnostic } from "./rtc";
 
 /** Minimal RTCPeerConnection stand-in: addEventListener plus settable state. */
 function fakePeer() {
-  const listeners = new Map<string, Array<() => void>>();
+  const listeners = new Map<string, Array<(event?: unknown) => void>>();
   const peer = {
     iceConnectionState: "new",
     iceGatheringState: "new",
     connectionState: "new",
     signalingState: "stable",
-    addEventListener(type: string, listener: () => void) {
+    addEventListener(type: string, listener: (event?: unknown) => void) {
       listeners.set(type, [...(listeners.get(type) ?? []), listener]);
     },
     fire(type: string, event?: unknown) {

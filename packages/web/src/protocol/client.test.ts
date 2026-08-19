@@ -7,6 +7,7 @@ import {
   ClientQueueFullError,
   ClientRequestTimeoutError,
   ConnectionOutcomeUnknownError,
+  type ClientDiagnosticDetail,
   type ClientOptions,
   type LocalServerProof,
 } from "./client";
@@ -487,12 +488,12 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
       },
     });
     const diagnostics: Array<{ kind: string; detail: Record<string, unknown> }> = [];
-    let peerDiagnostic: ((detail: Record<string, unknown>) => void) | undefined;
+    let peerDiagnostic: ((detail: ClientDiagnosticDetail) => void) | undefined;
     const rtcFactory = vi.fn(
       async (
-        base: unknown,
+        base,
         _diagnosticId?: string,
-        onDiagnostic?: (detail: Record<string, unknown>) => void,
+        onDiagnostic?: (detail: ClientDiagnosticDetail) => void,
       ) => {
         peerDiagnostic = onDiagnostic;
         return {
