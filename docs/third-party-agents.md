@@ -29,7 +29,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | `opencode` | 本地 HTTP + SSE | 探测 `opencode` 二进制；模型/密钥全在它自己的 `opencode.json` |
 | `claude` | 子进程 + 原生 `stream-json` stdio | 探测 `claude` 二进制本身（`@anthropic-ai/claude-code`），daemon 直接说它的原生协议，见 §3 |
 | `codex` | 子进程 + 原生 `app-server` JSON-RPC | 探测 `codex` 二进制本身，daemon 直接说它的 `app-server` 协议，见 §4 |
-| `cursor` | 子进程 + ACP over stdio | 探测 `cursor-agent` 二进制本身，说它自己发布的 ACP（`cursor-agent acp`），见 §5 |
+| `cursor` | 子进程 + ACP over stdio | 探测 PATH 与官方安装目录上的 `cursor-agent`（Windows 走 `PATHEXT`，不写死后缀），再用 `cursor-agent status` 看登录；说它自己发布的 ACP（`cursor-agent acp`），见 §5 |
 | `acp` | 子进程 + ACP over stdio | 兜底条目，探测一个叫 `acp-agent` 的二进制；真正常用的是下面的自定义声明 |
 
 `claude` 在代码里是 `adapter::claude::ClaudeAdapter`——直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。原生协议让我们保留模型、思考档位、模式、真实提问与权限请求的完整语义；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `apps/daemon/src/adapter/claude.rs` 顶部的模块文档。
@@ -83,7 +83,7 @@ npm install -g @openai/codex
 codex login
 ```
 
-装好、能在 PATH 上找到，就会出现在 agent 选择器里；没装就不出现，不影响其他 agent（同 [testing.md](./testing.md) §4.2 的「未安装即隐藏」行为）。`codex` 多一种中间状态：装了但没登录时它会出现、但标成不可用，理由里就是上面那行 `codex login`——因为这个 CLI 在未登录时不会拒绝一个回合，只会不回话（§4）。
+装好、能在 PATH 上找到，就会出现在 agent 选择器里；没装就不出现，不影响其他 agent（同 [testing.md](./testing.md) §4.2 的「未安装即隐藏」行为）。`codex` 和 `cursor` 多一种中间状态：装了但没登录时它会出现、但标成不可用，理由里分别是 `codex login` 和 `cursor-agent login`。Codex 未登录时不会拒绝一个回合，只会不回话（§4）；Cursor 还多搜官方安装目录，因为 Windows 桌面从开始菜单启动时，进程 `PATH` 常常还没有 `%LOCALAPPDATA%\cursor-agent`。
 
 ---
 
@@ -180,7 +180,7 @@ curl https://cursor.com/install -fsS | bash
 cursor-agent login
 ```
 
-登录态仍是这个 CLI 自己的事（§1）：它没有一个可以把模型后端指走的配置项，所以 mock 模式下没有它的专项测试——`testing/tests/cursor.rs` 只在真实模式、且机器上装着登录过的 `cursor-agent` 时跑，其余情况跳过并打印原因，与 Codex 的处境相同（§4）。
+探测先在 PATH 上找 `cursor-agent`，没有再到官方安装目录（Windows 的 `%LOCALAPPDATA%\cursor-agent`，以及 `~/.local/bin`）按系统 `PATHEXT` 查找，不写死 `.exe` / `.cmd` / `.bat`。找到后再跑 `cursor-agent status`（优先 `--format json`）；明确未登录才标不可用。登录态仍是这个 CLI 自己的事（§1）：它没有一个可以把模型后端指走的配置项，所以 mock 模式下没有它的专项测试——`testing/tests/cursor.rs` 只在真实模式、且机器上装着登录过的 `cursor-agent` 时跑，其余情况跳过并打印原因，与 Codex 的处境相同（§4）。
 
 模型和模式列表来自 ACP 的 `session/new` 握手（`availableModels`、`availableModes` 或 `configOptions`）。其余 `configOptions` 会成为 Agent 声明的通用运行轴，例如 Fast；select 可以有两档或更多档，boolean 在界面里显示为开/关，切换时仍原样回传协议声明的 value ID。GeneHub 绝不解析或拼接模型 ID，也不把模型标签里的参数伪装成可切换能力；凭证和账号仍由 Cursor CLI 自己管理，不在 GeneHub 配置里出现。
 

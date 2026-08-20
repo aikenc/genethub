@@ -26,7 +26,7 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
 use super::{
-    find_executable, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
+    find_executable_in, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
 };
 
@@ -34,11 +34,16 @@ const EVENT_CAPACITY: usize = 1024;
 const PROTOCOL_VERSION: i64 = 1;
 /// How long a throwaway handshake may take. Cursor's first answer can be slow.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Asking whether this install is logged in. Short: it reads a file.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct AcpAdapter {
     id: String,
     label: String,
     command: Vec<String>,
+    extra_dirs: Vec<PathBuf>,
+    /// When set, probe also asks this CLI whether it is logged in.
+    login_status: bool,
     /// What `session/new` told us about models and modes, read once per daemon
     /// run so the picker can be drawn before anyone opens a session.
     hello: tokio::sync::OnceCell<Option<Hello>>,
@@ -74,12 +79,24 @@ impl AcpAdapter {
             id: id.into(),
             label: label.into(),
             command,
+            extra_dirs: Vec::new(),
+            login_status: false,
             hello: tokio::sync::OnceCell::new(),
         }
     }
 
+    pub fn with_extra_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.extra_dirs = dirs;
+        self
+    }
+
+    pub fn checking_login(mut self) -> Self {
+        self.login_status = true;
+        self
+    }
+
     fn program(&self) -> Option<PathBuf> {
-        find_executable(self.command.first()?)
+        find_executable_in(self.command.first()?, &self.extra_dirs)
     }
 
     async fn hello(&self, program: &Path) -> Option<Hello> {
@@ -117,13 +134,28 @@ impl AgentAdapter for AcpAdapter {
     }
 
     async fn probe(&self) -> ProbeState {
-        match self.program() {
-            Some(_) => ProbeState::Ready,
+        let Some(program) = self.program() else {
             // Every entry on this adapter now names the program it runs, so a
             // missing one is simply not installed. The one case that needed
             // more explaining than that — `codex` present but a bridge package
             // missing — went away when Codex got its own adapter.
-            None => ProbeState::NotInstalled,
+            return ProbeState::NotInstalled;
+        };
+        if !self.login_status {
+            return ProbeState::Ready;
+        }
+        // An API key is a documented alternative to `cursor-agent login`.
+        if std::env::var_os("CURSOR_API_KEY").is_some() {
+            return ProbeState::Ready;
+        }
+        match logged_in(&program).await {
+            Some(false) => ProbeState::Unavailable {
+                reason: "找到了 Cursor，但它还没登录：先跑 cursor-agent login".into(),
+            },
+            // Logged in, or the question could not be asked at all. A slow or
+            // unusual `cursor-agent status` is not a reason to hide a CLI that
+            // is sitting right there.
+            _ => ProbeState::Ready,
         }
     }
 
@@ -837,6 +869,73 @@ impl AgentSession for AcpSession {
             value: json!({ "sessionId": session_id }),
         })
     }
+}
+
+async fn logged_in(program: &Path) -> Option<bool> {
+    if let Some(answer) = run_status(program, &["status", "--format", "json"]).await {
+        return Some(answer);
+    }
+    run_status(program, &["status"]).await
+}
+
+async fn run_status(program: &Path, args: &[&str]) -> Option<bool> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    super::owned_child(&mut command);
+
+    let output = tokio::time::timeout(LOGIN_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    login_from_status_output(&output.stdout, &output.stderr)
+}
+
+/// Phrased as "is it logged in", because that is the only sentence worth
+/// acting on. Unknown wording — which account, which method, a new JSON
+/// shape — means the CLI is usable, and a check that guessed at those would
+/// hide working installs.
+fn login_from_status_output(stdout: &[u8], stderr: &[u8]) -> Option<bool> {
+    let mut said = String::from_utf8_lossy(stdout).to_string();
+    said.push_str(&String::from_utf8_lossy(stderr));
+    if let Some(value) = json_object_in(&said) {
+        if let Some(flag) = json_logged_in(&value) {
+            return Some(flag);
+        }
+    }
+    let lower = said.to_ascii_lowercase();
+    if lower.contains("not authenticated") || lower.contains("not logged in") {
+        return Some(false);
+    }
+    if lower.contains("logged in") {
+        return Some(true);
+    }
+    None
+}
+
+fn json_object_in(text: &str) -> Option<Value> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    serde_json::from_str(&text[start..=end]).ok()
+}
+
+fn json_logged_in(value: &Value) -> Option<bool> {
+    for key in [
+        "loggedIn",
+        "logged_in",
+        "authenticated",
+        "isAuthenticated",
+        "is_authenticated",
+    ] {
+        if let Some(flag) = value.get(key).and_then(Value::as_bool) {
+            return Some(flag);
+        }
+    }
+    None
 }
 
 /// Runs one handshake against a throwaway process and takes its answers away.
@@ -2324,7 +2423,7 @@ mod tests {
     /// When cursor-agent is on PATH, discovery should return real modes.
     #[tokio::test]
     async fn discover_cursor_when_installed() {
-        let Some(program) = find_executable("cursor-agent") else {
+        let Some(program) = crate::adapter::find_executable("cursor-agent") else {
             eprintln!("skipping discover_cursor_when_installed: cursor-agent not on PATH");
             return;
         };
@@ -2350,5 +2449,37 @@ mod tests {
             hello.model_config_id.is_some() || !hello.models.is_empty(),
             "Cursor should expose model selection"
         );
+    }
+
+    #[tokio::test]
+    async fn extra_install_dir_is_enough_for_probe_when_path_misses() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "genehub-test-acp-extra-agent";
+        std::fs::write(dir.path().join(name), b"").unwrap();
+        let adapter = AcpAdapter::new("t", "T", vec![name.into()])
+            .with_extra_dirs(vec![dir.path().to_path_buf()]);
+        assert_eq!(adapter.probe().await, ProbeState::Ready);
+    }
+
+    #[test]
+    fn status_json_and_text_agree_on_login() {
+        assert_eq!(
+            login_from_status_output(br#"{"loggedIn":false}"#, b""),
+            Some(false)
+        );
+        assert_eq!(
+            login_from_status_output(br#"{"authenticated":true}"#, b""),
+            Some(true)
+        );
+        assert_eq!(
+            login_from_status_output(b"Not authenticated", b""),
+            Some(false)
+        );
+        assert_eq!(login_from_status_output(b"Not logged in", b""), Some(false));
+        assert_eq!(
+            login_from_status_output(b"Logged in as user@example.com", b""),
+            Some(true)
+        );
+        assert_eq!(login_from_status_output(b"usage: cursor-agent", b""), None);
     }
 }

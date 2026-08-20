@@ -397,12 +397,31 @@ pub async fn kill_tree(child: &mut tokio::process::Child) {
 
 /// Finds an executable on `PATH`, honouring `PATHEXT` on Windows.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
+    find_executable_in(name, &[])
+}
+
+/// PATH first, then extra directories. Extra dirs use the same `PATHEXT` walk
+/// as `PATH` — we do not guess `.exe` vs `.cmd` vs `.bat`.
+pub fn find_executable_in(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
     if name.contains(std::path::MAIN_SEPARATOR) {
         let direct = PathBuf::from(name);
         return direct.is_file().then_some(direct);
     }
-    let path = std::env::var_os("PATH")?;
-    let extensions: Vec<String> = if cfg!(windows) {
+    let extensions = executable_extensions();
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if let Some(found) = look_in_dir(&dir, name, &extensions) {
+                return Some(found);
+            }
+        }
+    }
+    extra_dirs
+        .iter()
+        .find_map(|dir| look_in_dir(dir, name, &extensions))
+}
+
+fn executable_extensions() -> Vec<String> {
+    if cfg!(windows) {
         std::env::var("PATHEXT")
             .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
             .split(';')
@@ -410,13 +429,14 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
             .collect()
     } else {
         vec![String::new()]
-    };
-    for dir in std::env::split_paths(&path) {
-        for extension in &extensions {
-            let candidate = dir.join(format!("{name}{extension}"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+    }
+}
+
+fn look_in_dir(dir: &std::path::Path, name: &str, extensions: &[String]) -> Option<PathBuf> {
+    for extension in extensions {
+        let candidate = dir.join(format!("{name}{extension}"));
+        if candidate.is_file() {
+            return Some(candidate);
         }
     }
     None
@@ -514,6 +534,40 @@ mod tests {
     #[test]
     fn a_binary_that_is_not_installed_resolves_to_none() {
         assert!(find_executable("genehub-definitely-not-installed").is_none());
+    }
+
+    #[test]
+    fn extra_dirs_are_searched_after_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "genehub-test-extra-dir-agent";
+        let present = dir.path().join(name);
+        std::fs::write(&present, b"").unwrap();
+        assert!(find_executable(name).is_none());
+        assert_eq!(
+            find_executable_in(name, &[dir.path().to_path_buf()]),
+            Some(present)
+        );
+    }
+
+    #[test]
+    fn extra_dirs_honour_pathext_instead_of_a_guessed_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let bat = dir.path().join("genehub-test-pathext-agent.bat");
+        std::fs::write(&bat, b"").unwrap();
+        assert_eq!(
+            look_in_dir(
+                dir.path(),
+                "genehub-test-pathext-agent",
+                &[".exe".into(), ".cmd".into(), ".bat".into()],
+            ),
+            Some(bat)
+        );
+        assert!(look_in_dir(
+            dir.path(),
+            "genehub-test-pathext-agent",
+            &[".exe".into(), ".cmd".into()],
+        )
+        .is_none());
     }
 
     #[test]
