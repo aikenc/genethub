@@ -2455,7 +2455,8 @@ mod tests {
     async fn extra_install_dir_is_enough_for_probe_when_path_misses() {
         let dir = tempfile::tempdir().unwrap();
         let name = "genehub-test-acp-extra-agent";
-        std::fs::write(dir.path().join(name), b"").unwrap();
+        let suffix = if cfg!(windows) { ".bat" } else { "" };
+        std::fs::write(dir.path().join(format!("{name}{suffix}")), b"").unwrap();
         let adapter = AcpAdapter::new("t", "T", vec![name.into()])
             .with_extra_dirs(vec![dir.path().to_path_buf()]);
         assert_eq!(adapter.probe().await, ProbeState::Ready);

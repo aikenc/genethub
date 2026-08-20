@@ -540,13 +540,21 @@ mod tests {
     fn extra_dirs_are_searched_after_path() {
         let dir = tempfile::tempdir().unwrap();
         let name = "genehub-test-extra-dir-agent";
-        let present = dir.path().join(name);
-        std::fs::write(&present, b"").unwrap();
+        let present = write_searchable(dir.path(), name);
         assert!(find_executable(name).is_none());
         assert_eq!(
             find_executable_in(name, &[dir.path().to_path_buf()]),
             Some(present)
         );
+    }
+
+    /// Windows `PATHEXT` does not include the empty suffix, so a test file
+    /// without `.exe`/`.cmd`/`.bat` would hide the lookup this is proving.
+    fn write_searchable(dir: &std::path::Path, name: &str) -> PathBuf {
+        let suffix = if cfg!(windows) { ".bat" } else { "" };
+        let present = dir.join(format!("{name}{suffix}"));
+        std::fs::write(&present, b"").unwrap();
+        present
     }
 
     #[test]
