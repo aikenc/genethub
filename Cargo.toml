@@ -1,8 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["apps/agent", "apps/cli", "apps/daemon", "packages/proto", "testing/deprecated/rust"]
+members = [
+    "apps/agent",
+    "apps/cli",
+    "apps/daemon",
+    "apps/guest-probe",
+    "apps/host",
+    "packages/proto",
+    "testing/deprecated/rust",
+]
 # Frozen integration crate stays a member so `cargo test -p genehub-testing` still
 # works by hand. It is not a default member: ordinary `cargo test` does not run it.
+# genehub-host pulls Wasmtime; keep it off the default `cargo test` graph.
 default-members = ["apps/agent", "apps/cli", "apps/daemon", "packages/proto"]
 # The Tauri shell stays out of the workspace on purpose: it drags in a large,
 # slow-to-build native dependency tree that would otherwise be rebuilt whenever

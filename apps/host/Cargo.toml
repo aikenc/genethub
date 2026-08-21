@@ -1,0 +1,17 @@
+[package]
+name = "genehub-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Thin native shell: from_binary load, WASI preopen, guest run-loop"
+publish = false
+
+[[bin]]
+name = "genehub-host-dev"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+wasmtime = { version = "36", default-features = false, features = ["async", "component-model", "cranelift"] }
+wasmtime-wasi = "36"

@@ -1,0 +1,52 @@
+package genehub:host@0.23.0;
+
+/// Spawn a native OS process. WASI has no general exec (WASI#899). Permanent.
+interface process {
+  record spawn-error {
+    message: string,
+  }
+
+  resource child {
+    write-stdin: func(data: list<u8>) -> result<_, string>;
+    read-stdout: func(max: u32) -> result<list<u8>, string>;
+    read-stderr: func(max: u32) -> result<list<u8>, string>;
+    kill: func() -> result<_, string>;
+    wait: func() -> result<u32, string>;
+  }
+
+  spawn: func(argv: list<string>, env: list<tuple<string, string>>) -> result<child, spawn-error>;
+}
+
+/// Unix PTY / Windows ConPTY. WASI has no PTY. Permanent.
+interface pty {
+  resource session {
+    write: func(data: list<u8>) -> result<_, string>;
+    read: func(max: u32) -> result<list<u8>, string>;
+    resize: func(cols: u16, rows: u16) -> result<_, string>;
+    close: func() -> result<_, string>;
+  }
+
+  open: func(cols: u16, rows: u16) -> result<session, string>;
+}
+
+/// Kernel flock. WASI 0.2 filesystem types have no lock-*. Drop must unlock.
+/// Delete when Wasmtime ships stable filesystem locks.
+interface file-lock {
+  resource handle {
+    try-lock-shared: func() -> result<bool, string>;
+    try-lock-exclusive: func() -> result<bool, string>;
+    unlock: func() -> result<_, string>;
+  }
+
+  open: func(path: string) -> result<handle, string>;
+}
+
+world daemon {
+  import process;
+  import pty;
+  import file-lock;
+  /// Resident daemon. Returns "reload" or "shutdown".
+  export run: func() -> result<string, string>;
+  /// Independent OS process: same artifact, agent entry.
+  export agent-run: func() -> result<u32, string>;
+}

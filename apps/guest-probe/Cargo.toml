@@ -1,0 +1,16 @@
+[package]
+name = "genehub-guest-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal wasip2 guest that binds loopback and serves /health"
+publish = false
+
+[[bin]]
+name = "genehub-guest-probe"
+path = "src/main.rs"
+
+[dependencies]
+# Host-target workspace tokio pulls threads. This crate must also compile for
+# wasm32-wasip2, where only current_thread + net work.
+tokio = { version = "1.53", default-features = false, features = ["rt", "macros", "net", "io-util"] }
