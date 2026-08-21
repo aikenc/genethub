@@ -1,0 +1,34 @@
+{
+  "schema": "genehub.rust-probe-class.v1",
+  "notes": "Internal probes are not production interfaces. L16 forbids exporting them for TS parity.",
+  "probes": [
+    {
+      "name": "native_resource_count",
+      "source": "testing/src/harness.rs and concurrency tests",
+      "class": "internal-helper",
+      "disposition": "do-not-export",
+      "reason": "harness counter, not a product support diagnostic"
+    },
+    {
+      "name": "Daemon::start",
+      "source": "testing harness in-process start",
+      "class": "internal-helper",
+      "disposition": "do-not-export",
+      "reason": "TS must use genet daemon start/endpoint and the public protocol"
+    },
+    {
+      "name": "PeerClient / client_v3.rs",
+      "source": "testing/src/client_v3.rs",
+      "class": "legacy-test-client",
+      "disposition": "freeze",
+      "reason": "not the canonical TypeScript Client"
+    },
+    {
+      "name": "diagnostics.snapshot",
+      "source": "production protocol",
+      "class": "production-support",
+      "disposition": "use-as-is",
+      "gap": "guest events are empty and droppedEvents is 0; do not treat as concurrency proof"
+    }
+  ]
+}

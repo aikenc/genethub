@@ -1,0 +1,9 @@
+{
+  "schema": "genehub.governance-digest.v1",
+  "digest": "a708bab064c2125465a90ec25d517dda41fce7a425412042b5cae1e2e4bfba29",
+  "files": [
+    "docs/testing/engineering-principles.md",
+    "docs/testing/engineering-laws.md"
+  ],
+  "recordedFor": "test-eng-first-round-20260818"
+}

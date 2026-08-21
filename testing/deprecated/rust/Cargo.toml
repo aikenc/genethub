@@ -7,8 +7,8 @@ description = "Journey test harness: one set of cases, mock or real model behind
 publish = false
 
 [dependencies]
-genehub-proto = { path = "../packages/proto" }
-genet-daemon = { path = "../apps/daemon" }
+genehub-proto = { path = "../../../packages/proto" }
+genet-daemon = { path = "../../../apps/daemon" }
 
 anyhow.workspace = true
 axum = { version = "0.8", features = ["ws"] }

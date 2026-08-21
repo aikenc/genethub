@@ -245,7 +245,7 @@ jobs:
           # The runner's shell already has `-e`, which would end this script at
           # the failing pipeline and skip the reporting below entirely.
           set +e
-          cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/tests.log
+          cargo test --workspace --exclude genehub-testing --no-fail-fast 2>&1 | tee /tmp/tests.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             # Indented single words in a `failures:` block are the case names.

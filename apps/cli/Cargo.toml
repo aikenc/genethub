@@ -27,5 +27,5 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 uuid.workspace = true
 
 [dev-dependencies]
-genehub-testing = { path = "../../testing" }
+genehub-testing = { path = "../../testing/deprecated/rust" }
 tempfile = "3"
