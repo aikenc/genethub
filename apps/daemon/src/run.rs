@@ -37,7 +37,7 @@ pub async fn run() -> Result<()> {
         channel = crate::channel::PRODUCT,
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
-        pid = std::process::id(),
+        pid = crate::host_pid::current(),
         "daemon diagnostic context"
     );
     let _lock = SingleInstance::acquire(&paths)?;
@@ -73,7 +73,7 @@ fn listening_payload(daemon: &Daemon) -> serde_json::Value {
             "fingerprint": admission.fingerprint,
             "expiresAt": admission.expires_at,
         },
-        "pid": std::process::id(),
+        "pid": crate::host_pid::current(),
         "machineId": daemon.state.machine.machine_id,
         "fingerprint": daemon.state.machine.fingerprint(),
     })
@@ -131,7 +131,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Tee {
 }
 
 async fn wait_for_signal() {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_family = "wasm")))]
     {
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
@@ -141,9 +141,13 @@ async fn wait_for_signal() {
             _ = int.recv() => {}
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(all(not(unix), not(target_family = "wasm")))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        std::future::pending::<()>().await;
     }
 }
 
@@ -153,6 +157,7 @@ async fn wait_for_signal() {
 /// publish an endpoint, leaving clients connecting to whichever won the race.
 struct SingleInstance {
     file: Option<std::fs::File>,
+    path: std::path::PathBuf,
 }
 
 impl SingleInstance {
@@ -169,7 +174,7 @@ impl SingleInstance {
             .open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
         crate::config::restrict_to_owner(&path)?;
-        if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
+        if let Err(error) = crate::fs_lock::try_lock_exclusive(&file, &path) {
             let owner = crate::lifecycle::lock_pid(paths)
                 .map(|pid| format!(" (pid {pid})"))
                 .unwrap_or_default();
@@ -183,16 +188,19 @@ impl SingleInstance {
         // reuse or the check-then-write race of the former pid probe.
         file.set_len(0)?;
         file.rewind()?;
-        write!(file, "{}", std::process::id())?;
+        write!(file, "{}", crate::host_pid::current())?;
         file.sync_all()?;
-        Ok(SingleInstance { file: Some(file) })
+        Ok(SingleInstance {
+            file: Some(file),
+            path,
+        })
     }
 }
 
 impl Drop for SingleInstance {
     fn drop(&mut self) {
         if let Some(file) = self.file.take() {
-            let _ = fs2::FileExt::unlock(&file);
+            let _ = crate::fs_lock::unlock(&file, &self.path);
             drop(file);
         }
         // Keep the inode permanently. Unlinking after unlock lets another
@@ -224,7 +232,7 @@ mod instance_tests {
         // A crash can leave text behind, and that pid may now name an entirely
         // different live process. With the kernel lock released, it must not
         // block recovery or authorize killing that process.
-        std::fs::write(paths.lock_file(), std::process::id().to_string()).unwrap();
+        std::fs::write(paths.lock_file(), crate::host_pid::current().to_string()).unwrap();
         let recovered = SingleInstance::acquire(&paths).unwrap();
         assert!(SingleInstance::acquire(&paths).is_err());
         #[cfg(unix)]

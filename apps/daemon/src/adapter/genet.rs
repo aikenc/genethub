@@ -17,7 +17,7 @@ use genehub_proto::{
 };
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use crate::os_process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, Mutex};
 
 use super::stdio::write_json_line;
@@ -397,7 +397,7 @@ impl AgentSession for GenetSession {
 }
 
 async fn translate_stream(
-    stdout: tokio::process::ChildStdout,
+    stdout: crate::os_process::ChildStdout,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
     child: Arc<Mutex<Option<Child>>>,

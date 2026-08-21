@@ -818,7 +818,15 @@ pub(crate) fn replace_private(source: &Path, destination: &Path) -> Result<()> {
     windows_acl::replace_file(source, destination)
 }
 
-#[cfg(not(any(unix, windows)))]
+/// `wasi:filesystem` has rename but no permission bits. The shell owns the data
+/// directory's owner-only hardening; see the v2 proposal §5.1.6.
+#[cfg(target_family = "wasm")]
+pub(crate) fn replace_private(source: &Path, destination: &Path) -> Result<()> {
+    fs::rename(source, destination)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows, target_family = "wasm")))]
 pub(crate) fn replace_private(_source: &Path, _destination: &Path) -> Result<()> {
     anyhow::bail!("atomic private-file replacement is unsupported on this platform")
 }
@@ -905,12 +913,28 @@ fn restrict_existing_sensitive_tree(_root: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(unix, windows)))]
+/// WASI exposes no permission bits, so the shell performs what the guest names.
+/// Which paths are sensitive stays a guest decision — it is the side that knows
+/// what is in them. See the v2 proposal §6.9.
+#[cfg(target_family = "wasm")]
+pub fn restrict_to_owner(path: &Path) -> Result<()> {
+    genet_wasi::wit::genehub::host::fs_perms::restrict_to_owner(&path.to_string_lossy())
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+/// The shell reads the path's own type, so a directory gets `0o700` and a file
+/// `0o600` without the guest having to say which it is.
+#[cfg(target_family = "wasm")]
+pub(crate) fn restrict_dir_to_owner(path: &Path) -> Result<()> {
+    restrict_to_owner(path)
+}
+
+#[cfg(not(any(unix, windows, target_family = "wasm")))]
 pub fn restrict_to_owner(_path: &Path) -> Result<()> {
     anyhow::bail!("owner-only file permissions are unsupported on this platform")
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(any(unix, windows, target_family = "wasm")))]
 pub(crate) fn restrict_dir_to_owner(_path: &Path) -> Result<()> {
     anyhow::bail!("owner-only directory permissions are unsupported on this platform")
 }

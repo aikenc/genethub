@@ -128,7 +128,7 @@ pub(super) async fn record(
     };
     let root = workspace.root.clone();
     let learned = learned_terms.clone();
-    tokio::task::spawn_blocking(move || store(&root, &record, &learned))
+    crate::blocking::run(move || store(&root, &record, &learned))
         .await
         .context("joining Qwen3 preference write")??;
     Ok(SpeechFeedbackReceipt {

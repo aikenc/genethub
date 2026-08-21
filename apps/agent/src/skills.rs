@@ -94,7 +94,7 @@ fn materialize_builtins(agent_dir: &Path) -> Option<PathBuf> {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("builtin");
-        let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+        let temporary = parent.join(format!(".{file_name}.{}.tmp", crate::os::pid()));
         let installed = std::fs::write(&temporary, file.contents).and_then(|_| {
             std::fs::rename(&temporary, &target).or_else(|first_error| {
                 // Windows does not replace an existing destination with rename.

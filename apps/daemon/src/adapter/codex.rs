@@ -86,7 +86,7 @@ use genehub_proto::{
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use crate::os_process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
@@ -1379,7 +1379,7 @@ fn allow_or_deny() -> Vec<PermissionOption> {
 /// Everything the read loop needs, bundled because a function with eight
 /// positional arguments is a function whose call site cannot be read.
 struct Reader {
-    stdout: tokio::process::ChildStdout,
+    stdout: crate::os_process::ChildStdout,
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,

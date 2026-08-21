@@ -1,0 +1,24 @@
+[package]
+name = "genet-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# One outbound HTTP surface for the daemon and the agent. Native is `reqwest`.
+# The WASI guest gets the same shape over `wasi:http`, where the host owns TLS,
+# DNS and the socket (see the v2 proposal §6.5).
+[dependencies]
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+reqwest.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+bytes = "1"
+futures-util.workspace = true
+http = "1"
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded = "0.7"
+tokio = { version = "1", default-features = false, features = ["time"] }
+url = "2"
+wasi = "0.14"

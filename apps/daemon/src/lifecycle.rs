@@ -29,7 +29,7 @@ pub fn lock_pid(paths: &Paths) -> Option<u32> {
 pub fn lock_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock
         || (error.raw_os_error().is_some()
-            && error.raw_os_error() == fs2::lock_contended_error().raw_os_error())
+            && error.raw_os_error() == crate::fs_lock::lock_contended_error().raw_os_error())
 }
 
 /// Whether another process currently holds the daemon's kernel lock.
@@ -46,9 +46,9 @@ pub fn instance_locked(paths: &Paths) -> std::io::Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    match fs2::FileExt::try_lock_exclusive(&file) {
+    match crate::fs_lock::try_lock_exclusive(&file, paths.lock_file().as_path()) {
         Ok(()) => {
-            let _ = fs2::FileExt::unlock(&file);
+            let _ = crate::fs_lock::unlock(&file, paths.lock_file().as_path());
             Ok(false)
         }
         Err(error) if lock_contended(&error) => Ok(true),

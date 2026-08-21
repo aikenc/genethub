@@ -21,7 +21,7 @@ use genehub_proto::{
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use crate::os_process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
@@ -355,7 +355,7 @@ impl AgentAdapter for AcpAdapter {
 struct AcpImportProbe {
     child: Child,
     stdin: ChildStdin,
-    lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    lines: tokio::io::Lines<BufReader<crate::os_process::ChildStdout>>,
     next_id: i64,
 }
 
@@ -1361,7 +1361,7 @@ where
 }
 
 async fn read_loop(
-    stdout: tokio::process::ChildStdout,
+    stdout: crate::os_process::ChildStdout,
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,

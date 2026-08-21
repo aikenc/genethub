@@ -44,7 +44,7 @@ pub async fn stream(
         })?;
     let body = build_body(model, &request);
 
-    let response = reqwest::Client::new()
+    let response = genet_http::Client::new()
         .post(format!("{}/chat/completions", base.trim_end_matches('/')))
         .bearer_auth(key)
         .header("content-type", "application/json")

@@ -15,10 +15,10 @@ use genet_daemon::channel;
 use genet_daemon::config::Paths;
 use genet_daemon::lifecycle;
 
-use crate::{fail, ok, EXIT_FAILED, EXIT_OK, EXIT_UNREACHABLE};
+use crate::{fail, ok, EXIT_FAILED, EXIT_UNREACHABLE};
 
 /// How long `start` waits for the fresh daemon to publish its endpoint.
-const START_TIMEOUT: Duration = Duration::from_secs(20);
+const START_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long `stop` lets a SIGTERM'd daemon end its sessions before insisting.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -64,14 +64,7 @@ pub async fn daemon(args: &[String]) -> i32 {
             if !rest.is_empty() {
                 return crate::usage();
             }
-            match genet_daemon::run::run().await {
-                Ok(()) => EXIT_OK,
-                Err(error) => fail(
-                    "internal",
-                    &format!("the daemon stopped: {error:#}"),
-                    EXIT_FAILED,
-                ),
-            }
+            crate::wasm::become_daemon()
         }
         "status" => no_extra(rest, daemon_report),
         "endpoint" => no_extra(rest, endpoint),
@@ -213,8 +206,8 @@ fn start() -> i32 {
         return ok(value);
     }
 
-    // The daemon is this same file in its other shape. stdout and stderr go
-    // to a log beside the daemon's own: the listening line is how the shell
+    // The daemon is the wasm guest under genehub-host-dev. stdout and stderr
+    // go to a log beside the daemon's own: the listening line is how the shell
     // learns the endpoint when it spawns, but the CLI learns it from
     // `endpoint.json`, and a pipe nobody drains is a future hang.
     let log = start_log(&paths);
@@ -226,17 +219,11 @@ fn start() -> i32 {
             EXIT_FAILED,
         ),
     };
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(error) => fail(
-            "internal",
-            &format!("could not locate our own binary: {error}"),
-            EXIT_FAILED,
-        ),
+    let mut command = match crate::wasm::spawn_command() {
+        Ok(command) => command,
+        Err(error) => fail("internal", &error, EXIT_FAILED),
     };
-    let mut command = std::process::Command::new(exe);
     command
-        .args(["daemon", "run"])
         .stdin(std::process::Stdio::null())
         .stdout(out)
         .stderr(err);
@@ -247,7 +234,7 @@ fn start() -> i32 {
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
     }
-    let child = match command.spawn() {
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => fail(
             "internal",
@@ -258,6 +245,22 @@ fn start() -> i32 {
 
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => fail(
+                "daemon_unreachable",
+                &format!(
+                    "the daemon host exited {status} before publishing an endpoint; see {}",
+                    paths.logs_dir().join("cli-start.log").display()
+                ),
+                EXIT_UNREACHABLE,
+            ),
+            Ok(None) => {}
+            Err(error) => fail(
+                "internal",
+                &format!("could not wait for the daemon host: {error}"),
+                EXIT_FAILED,
+            ),
+        }
         if let Some(endpoint) = read_endpoint(&paths) {
             if lifecycle::pid_alive(endpoint.pid) && health(&endpoint) {
                 let mut value = facts(&paths);
@@ -270,11 +273,13 @@ fn start() -> i32 {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    let pid = child.id();
+    let _ = child.kill();
+    let _ = child.wait();
     fail(
         "daemon_unreachable",
         &format!(
-            "the daemon (pid {}) did not publish an endpoint within {}s; see {}",
-            child.id(),
+            "the daemon (pid {pid}) did not publish an endpoint within {}s; see {}",
             START_TIMEOUT.as_secs(),
             paths.logs_dir().join("cli-start.log").display()
         ),
@@ -348,25 +353,25 @@ fn stop_verified(paths: &Paths) -> Result<bool, String> {
 
     ask_to_stop(&endpoint);
     if wait_unhealthy(&endpoint, STOP_TIMEOUT) {
-        return wait_lock_released(paths);
+        return wait_stopped(paths, lock);
     }
 
     // Re-prove the identity immediately before every signal. Once the daemon's
     // listener is gone we deliberately stop touching the pid: it may already
     // have exited and been reused by an unrelated process.
     if !health(&endpoint) {
-        return wait_lock_released(paths);
+        return wait_stopped(paths, lock);
     }
     lifecycle::terminate(endpoint.pid);
     if wait_unhealthy(&endpoint, Duration::from_secs(3)) {
-        return wait_lock_released(paths);
+        return wait_stopped(paths, lock);
     }
     if !health(&endpoint) {
-        return wait_lock_released(paths);
+        return wait_stopped(paths, lock);
     }
     lifecycle::force_kill(endpoint.pid);
     if wait_unhealthy(&endpoint, Duration::from_secs(3)) {
-        wait_lock_released(paths)?;
+        wait_stopped(paths, lock)?;
         return Ok(true);
     }
     Err(format!("the daemon (pid {}) would not stop", endpoint.pid))
@@ -374,17 +379,28 @@ fn stop_verified(paths: &Paths) -> Result<bool, String> {
 
 /// `/shutdown` can drop the listener while the process still holds `daemon.lock`
 /// while it drains sessions. `start` would then adopt that dying process.
-fn wait_lock_released(paths: &Paths) -> Result<bool, String> {
+/// Waits until the daemon has both let go of the lock and left.
+///
+/// Those are one event when the daemon is a process; they are two when it is a
+/// guest inside one. The guest releases the lock as it shuts down and the shell
+/// around it exits a moment later, so a `stop` that returned on the lock alone
+/// would be followed by a `status` that still finds a live pid — true, and not
+/// what "stopped" is supposed to mean.
+fn wait_stopped(paths: &Paths, pid: u32) -> Result<bool, String> {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         match lifecycle::instance_locked(paths) {
-            Ok(false) => return Ok(false),
-            Ok(true) => std::thread::sleep(Duration::from_millis(50)),
+            Ok(false) if !lifecycle::pid_alive(pid) => return Ok(false),
+            Ok(_) => std::thread::sleep(Duration::from_millis(50)),
             Err(error) => return Err(format!("could not inspect daemon.lock: {error}")),
         }
     }
     if lifecycle::instance_locked(paths).unwrap_or(true) {
         Err("the daemon listener is gone but it still holds daemon.lock".into())
+    } else if lifecycle::pid_alive(pid) {
+        Err(format!(
+            "the daemon released daemon.lock but pid {pid} is still running"
+        ))
     } else {
         Ok(false)
     }

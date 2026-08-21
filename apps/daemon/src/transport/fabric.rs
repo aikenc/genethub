@@ -686,7 +686,7 @@ fn decode(bytes: &[u8]) -> Option<Frame> {
 /// browsers cannot set an Authorization header. Accept exactly one `ticket`
 /// query value and keep every other URL authority rule fail-closed.
 pub(crate) fn validate_fabric_url(value: &str) -> Result<()> {
-    let url = reqwest::Url::parse(value).context("parsing the Fabric endpoint URL")?;
+    let url = crate::http::Url::parse(value).context("parsing the Fabric endpoint URL")?;
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         anyhow::bail!("Fabric endpoint URLs cannot contain credentials or fragments");
     }

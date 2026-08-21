@@ -7,6 +7,9 @@ mod agent;
 mod channel;
 mod cli;
 mod config;
+mod os;
+mod os_io;
+mod os_process;
 mod prompt;
 mod protocol;
 mod provider;
@@ -30,7 +33,10 @@ use state::State;
 
 const SKILL_COMMAND_PREFIX: &str = "/skill:";
 
-#[tokio::main]
+// The guest has one thread and no way to make another, so the runtime it
+// asks for has to say so.
+#[cfg_attr(not(target_family = "wasm"), tokio::main)]
+#[cfg_attr(target_family = "wasm", tokio::main(flavor = "current_thread"))]
 async fn main() {
     let args = match cli::parse(std::env::args().skip(1)) {
         Ok(args) => args,
@@ -56,7 +62,7 @@ async fn main() {
         eprintln!("genet-agent: ignoring unsupported argument: {ignored}");
     }
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = crate::os::cwd();
     let data_dir = config::data_dir();
     let models = config::load_models();
     let current_model = select_model(&models, args.model.as_deref());
@@ -396,7 +402,7 @@ async fn fetch_context_material(session_id: &str) -> Result<ContextMaterial, Str
     let binary = std::env::var_os("GENEHUB_CLI")
         .map(PathBuf::from)
         .ok_or_else(|| "GENEHUB_CLI is unavailable".to_string())?;
-    let output = tokio::process::Command::new(binary)
+    let output = crate::os_process::Command::new(binary)
         .args(["session", "context", session_id, "--budget-tokens", "24000"])
         .output()
         .await

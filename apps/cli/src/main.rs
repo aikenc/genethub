@@ -8,6 +8,7 @@
 
 mod control;
 mod converse;
+mod wasm;
 mod hub;
 mod machine;
 mod machines;

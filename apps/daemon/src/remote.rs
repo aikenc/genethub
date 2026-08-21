@@ -179,7 +179,7 @@ fn fabric_url(relay_url: &str, ticket: &str, route: Option<&str>) -> Result<Stri
     if ticket.is_empty() || ticket.len() > 1024 || route.is_some_and(|value| value.is_empty()) {
         return Err(anyhow!("invalid rendezvous Fabric ticket"));
     }
-    let mut url = reqwest::Url::parse(&format!("{}/fabric/v2", websocket_base(relay_url)?))?;
+    let mut url = crate::http::Url::parse(&format!("{}/fabric/v2", websocket_base(relay_url)?))?;
     {
         let mut query = url.query_pairs_mut();
         query.append_pair("ticket", ticket);
@@ -203,7 +203,7 @@ fn websocket_base(relay_url: &str) -> Result<String> {
     } else {
         format!("wss://{trimmed}")
     };
-    let mut parsed = reqwest::Url::parse(&address).context("reading the relay address")?;
+    let mut parsed = crate::http::Url::parse(&address).context("reading the relay address")?;
     if !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.query().is_some()

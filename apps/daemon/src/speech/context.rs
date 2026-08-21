@@ -72,7 +72,7 @@ pub async fn compile(
             .iter()
             .map(|folder| folder.name.clone())
             .collect::<Vec<_>>();
-        let discovered = tokio::task::spawn_blocking(move || {
+        let discovered = crate::blocking::run(move || {
             discover_project_context(&workspace_name, &folder_names, &roots)
         })
         .await

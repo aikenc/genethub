@@ -10,7 +10,7 @@ use genehub_proto::{
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
+use crate::os_process::Command;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{SpeechConfig, SpeechRuntimeConfig};
@@ -586,7 +586,7 @@ fn adapter_command(registration: &SpeechRuntimeConfig, mode: &str) -> Command {
 }
 
 async fn write_wire(
-    stdin: &mut tokio::process::ChildStdin,
+    stdin: &mut crate::os_process::ChildStdin,
     wire: Result<Vec<u8>, genehub_proto::SpeechCodecError>,
 ) -> std::io::Result<()> {
     let wire = wire.map_err(std::io::Error::other)?;
@@ -755,15 +755,15 @@ fn sanitize_runtime_failure(mut error: SpeechFailure) -> SpeechFailure {
 
 fn log_probe_failure(
     reason: &'static str,
-    status: Option<&std::process::ExitStatus>,
+    status: Option<&crate::os_process::ExitStatus>,
     stdout: &BoundedOutput,
     stderr: &BoundedOutput,
 ) {
     tracing::warn!(
         event = "speech_runtime_probe_failed",
         reason,
-        exit_code = status.and_then(std::process::ExitStatus::code),
-        exit_success = status.is_some_and(std::process::ExitStatus::success),
+        exit_code = status.and_then(crate::os_process::ExitStatus::code),
+        exit_success = status.is_some_and(crate::os_process::ExitStatus::success),
         stdout_bytes = stdout.total_bytes,
         stdout_truncated = stdout.truncated,
         stdout_fingerprint = %output_fingerprint(&stdout.bytes),
@@ -779,7 +779,7 @@ fn log_runtime_process_end(
     start: &SpeechStart,
     runtime: &genehub_proto::SpeechRuntimeDescriptor,
     reason: &'static str,
-    status: Option<&std::process::ExitStatus>,
+    status: Option<&crate::os_process::ExitStatus>,
     forced: bool,
     stderr: &BoundedOutput,
 ) {
@@ -791,8 +791,8 @@ fn log_runtime_process_end(
         model_id = %runtime.model,
         implementation = %runtime.implementation,
         reason,
-        exit_code = status.and_then(std::process::ExitStatus::code),
-        exit_success = status.is_some_and(std::process::ExitStatus::success),
+        exit_code = status.and_then(crate::os_process::ExitStatus::code),
+        exit_success = status.is_some_and(crate::os_process::ExitStatus::success),
         forced,
         stderr_bytes = stderr.total_bytes,
         stderr_truncated = stderr.truncated,

@@ -304,7 +304,7 @@ async fn pump<R>(
 /// The last word on a command. `None` where the operating system could not be
 /// asked how it ended, which happens only after it has already been stopped —
 /// so there is still an answer to give, just a less specific one.
-fn exit_frame(status: Option<&std::process::ExitStatus>, timed_out: bool) -> ShellFrame {
+fn exit_frame(status: Option<&crate::os_process::ExitStatus>, timed_out: bool) -> ShellFrame {
     #[cfg(unix)]
     let signal = {
         use std::os::unix::process::ExitStatusExt;

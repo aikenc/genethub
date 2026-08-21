@@ -281,7 +281,7 @@ impl Chatter {
 /// separate them, and both are already in hand here.
 pub async fn stopped(
     label: &str,
-    child: &Mutex<Option<tokio::process::Child>>,
+    child: &Mutex<Option<crate::os_process::Child>>,
     said: &Chatter,
 ) -> String {
     said.settle().await;
@@ -303,7 +303,7 @@ pub async fn stopped(
 /// Polled rather than awaited, and briefly: stdout closing is not quite the same
 /// as the process being gone, and a child that closed its pipes but kept running
 /// must not hold this lock — `stop()` needs it to kill the thing.
-async fn exit_code(child: &Mutex<Option<tokio::process::Child>>) -> Option<i32> {
+async fn exit_code(child: &Mutex<Option<crate::os_process::Child>>) -> Option<i32> {
     for _ in 0..20 {
         {
             let mut held = child.lock().await;
@@ -328,7 +328,7 @@ async fn exit_code(child: &Mutex<Option<tokio::process::Child>>) -> Option<i32> 
 /// no console window; everywhere it means a process group of our own, so that
 /// ending the agent ends what the agent started rather than orphaning a
 /// language server or a dev server onto init (`crate::process`).
-pub fn owned_child(command: &mut tokio::process::Command) {
+pub fn owned_child(command: &mut crate::os_process::Command) {
     without_a_window(command);
     crate::process::own_group(command);
 }
@@ -341,7 +341,7 @@ pub fn owned_child(command: &mut tokio::process::Command) {
 /// this for the daemon; the daemon has to do it for what it starts.
 ///
 /// A no-op everywhere else, so callers do not need a `cfg`.
-pub fn without_a_window(command: &mut tokio::process::Command) {
+pub fn without_a_window(command: &mut crate::os_process::Command) {
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -355,7 +355,7 @@ pub fn without_a_window(command: &mut tokio::process::Command) {
 /// Claude and the built-in Agent use different native flag names but share the
 /// same argument boundary and multiline-value safety.
 pub(super) fn append_system_prompt_arg(
-    command: &mut tokio::process::Command,
+    command: &mut crate::os_process::Command,
     flag: &str,
     prompt: Option<&str>,
 ) {
@@ -375,7 +375,7 @@ pub(super) fn append_system_prompt_arg(
 /// agent is a thing that runs commands, so the interesting processes are never
 /// the one we hold. They are reachable because the agent was started in a
 /// process group of its own (`crate::process::own_group`).
-pub async fn kill_tree(child: &mut tokio::process::Child) {
+pub async fn kill_tree(child: &mut crate::os_process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         crate::process::stop_tree(pid);
@@ -384,7 +384,7 @@ pub async fn kill_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         // `/T` is the whole point: the tree, not the shim. Failure is not worth
         // reporting — the direct kill below is still coming.
-        let _ = tokio::process::Command::new("taskkill")
+        let _ = crate::os_process::Command::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -408,6 +408,10 @@ pub fn find_executable_in(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf>
         return direct.is_file().then_some(direct);
     }
     let extensions = executable_extensions();
+    // Skipped in the guest: it cannot exec anything (`os_process`), and
+    // `std::env::split_paths` is `panic!("unsupported")` on WASI. Finding native
+    // binaries is the shell's job.
+    #[cfg(not(target_family = "wasm"))]
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
             if let Some(found) = look_in_dir(&dir, name, &extensions) {
@@ -453,7 +457,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_child_that_stops_is_described_with_its_code_and_its_last_words() {
-        let mut child = tokio::process::Command::new("sh")
+        let mut child = crate::os_process::Command::new("sh")
             .arg("-c")
             .arg("echo 'Invalid API key · Please run /login' >&2; exit 1")
             .stderr(std::process::Stdio::piped())
@@ -479,7 +483,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_child_that_says_nothing_still_points_at_the_log() {
-        let mut child = tokio::process::Command::new("sh")
+        let mut child = crate::os_process::Command::new("sh")
             .arg("-c")
             .arg("exit 7")
             .stderr(std::process::Stdio::piped())
@@ -580,7 +584,7 @@ mod tests {
 
     #[test]
     fn multiline_system_context_is_one_literal_cli_argument() {
-        let mut command = tokio::process::Command::new("agent");
+        let mut command = crate::os_process::Command::new("agent");
         append_system_prompt_arg(
             &mut command,
             "--append-system-prompt",

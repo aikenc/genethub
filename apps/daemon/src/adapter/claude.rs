@@ -71,7 +71,7 @@ use genehub_proto::{
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use crate::os_process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, Mutex};
 
 use super::stdio::write_json_line;
@@ -721,7 +721,7 @@ impl AgentAdapter for ClaudeAdapter {
         limit: usize,
     ) -> Result<Option<Vec<ImportCandidate>>> {
         let cwd = cwd.to_path_buf();
-        let candidates = tokio::task::spawn_blocking(move || claude_candidates(&cwd, limit))
+        let candidates = crate::blocking::run(move || claude_candidates(&cwd, limit))
             .await
             .map_err(|error| anyhow!("Claude import discovery stopped: {error}"))??;
         Ok(Some(candidates))
@@ -730,7 +730,7 @@ impl AgentAdapter for ClaudeAdapter {
     async fn import_history(&self, cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
         let cwd = cwd.to_path_buf();
         let source_id = source_id.to_string();
-        tokio::task::spawn_blocking(move || claude_history(&cwd, &source_id))
+        crate::blocking::run(move || claude_history(&cwd, &source_id))
             .await
             .map_err(|error| anyhow!("Claude history import stopped: {error}"))?
     }
@@ -1334,7 +1334,7 @@ impl AgentSession for ClaudeSession {
 
 #[allow(clippy::too_many_arguments)]
 async fn read_loop(
-    stdout: tokio::process::ChildStdout,
+    stdout: crate::os_process::ChildStdout,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
     native_session_id: Arc<std::sync::Mutex<Option<String>>>,

@@ -67,7 +67,7 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     };
     let root = resolved.root;
     let path = resolved.relative.to_string_lossy().replace('\\', "/");
-    let read = tokio::task::spawn_blocking(move || {
+    let read = crate::blocking::run(move || {
         let _slot = slot;
         crate::files::preview(&root, &path)
     });

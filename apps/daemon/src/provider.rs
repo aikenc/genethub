@@ -122,7 +122,7 @@ pub fn resolve(id: &str, config: &ProviderConfig) -> Resolved {
 /// A provider credential may cross the network only under TLS, except for an
 /// exact IP loopback endpoint used by local model servers and tests.
 pub fn validate_credential_url(value: &str) -> Result<()> {
-    let parsed = reqwest::Url::parse(value).context("读取模型接口地址")?;
+    let parsed = crate::http::Url::parse(value).context("读取模型接口地址")?;
     if !credential_url_allowed(&parsed) {
         return Err(anyhow!(
             "带 API Key 的模型接口必须使用 https；明文 http 只允许 127.0.0.1 或 [::1]，且地址不能包含凭证、query 或 fragment"
@@ -131,7 +131,7 @@ pub fn validate_credential_url(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn credential_url_allowed(parsed: &reqwest::Url) -> bool {
+fn credential_url_allowed(parsed: &crate::http::Url) -> bool {
     if !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.query().is_some()
@@ -151,8 +151,8 @@ fn credential_url_allowed(parsed: &reqwest::Url) -> bool {
     parsed.scheme() == "https" || (parsed.scheme() == "http" && loopback)
 }
 
-fn credential_redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
+fn credential_redirect_policy() -> crate::http::redirect::Policy {
+    crate::http::redirect::Policy::custom(|attempt| {
         let same_origin = attempt.previous().first().is_some_and(|original| {
             credential_origin(original) == credential_origin(attempt.url())
         });
@@ -164,7 +164,7 @@ fn credential_redirect_policy() -> reqwest::redirect::Policy {
     })
 }
 
-fn credential_origin(url: &reqwest::Url) -> (&str, Option<&str>, Option<u16>) {
+fn credential_origin(url: &crate::http::Url) -> (&str, Option<&str>, Option<u16>) {
     (url.scheme(), url.host_str(), url.port_or_known_default())
 }
 
@@ -191,7 +191,7 @@ pub async fn list_models(id: &str, config: &ProviderConfig) -> Result<Vec<String
     validate_credential_url(&base)?;
     let base = base.trim_end_matches('/');
 
-    let client = reqwest::Client::builder()
+    let client = crate::http::Client::builder()
         .timeout(LIST_TIMEOUT)
         .redirect(credential_redirect_policy())
         .build()?;

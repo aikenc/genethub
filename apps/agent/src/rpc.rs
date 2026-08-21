@@ -63,7 +63,7 @@ impl Emitter {
 pub fn start_writer() -> Emitter {
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
     tokio::spawn(async move {
-        let mut stdout = tokio::io::stdout();
+        let mut stdout = crate::os_io::stdout();
         while let Some(frame) = rx.recv().await {
             match frame {
                 Frame::Json(value) => {
@@ -88,7 +88,7 @@ pub fn start_writer() -> Emitter {
 pub fn start_reader() -> mpsc::UnboundedReceiver<String> {
     let (tx, rx) = mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
-        let mut lines = BufReader::new(tokio::io::stdin()).split(b'\n');
+        let mut lines = BufReader::new(crate::os_io::stdin()).split(b'\n');
         while let Ok(Some(chunk)) = lines.next_segment().await {
             let mut text = String::from_utf8_lossy(&chunk).into_owned();
             if text.ends_with('\r') {

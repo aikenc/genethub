@@ -292,9 +292,9 @@ fn tree_exists(_pid: u32) -> bool {
 /// none of them can be added afterwards: a process cannot be put into its own
 /// session once it has children, and a death signal armed late is a death
 /// signal that was not armed during the window it was for.
-pub fn command(argv: &[PathBuf], arguments: &[String], cwd: &Path) -> tokio::process::Command {
+pub fn command(argv: &[PathBuf], arguments: &[String], cwd: &Path) -> crate::os_process::Command {
     let (program, wrapper) = argv.split_first().expect("an argv always has a program");
-    let mut command = tokio::process::Command::new(program);
+    let mut command = crate::os_process::Command::new(program);
     command.args(wrapper).args(arguments).current_dir(cwd);
     own_group(&mut command);
     command
@@ -306,7 +306,7 @@ pub fn command(argv: &[PathBuf], arguments: &[String], cwd: &Path) -> tokio::pro
 /// The callers that assemble their own command — the agent adapters, which
 /// have environment, working directory and platform quirks of their own to
 /// arrange — need this one thing and nothing else from this module.
-pub fn own_group(command: &mut tokio::process::Command) {
+pub fn own_group(command: &mut crate::os_process::Command) {
     #[cfg(unix)]
     {
         let parent = current_pid();
@@ -326,18 +326,18 @@ pub fn own_group(command: &mut tokio::process::Command) {
 /// below it, which for `bash -lc "npm run dev"` means it stops bash and
 /// leaves the server. This stops the group.
 pub struct Group {
-    child: tokio::process::Child,
+    child: crate::os_process::Child,
     /// Captured at spawn: after the child is reaped its pid is no longer
     /// available, and by then we would be asking too late anyway.
     pid: Option<u32>,
     /// Remembered so that a process is waited for once however many times it
     /// is asked about. Both the normal path and the teardown path want the
     /// exit status, and only the first of them can be the one that reaps it.
-    status: Option<std::process::ExitStatus>,
+    status: Option<crate::os_process::ExitStatus>,
 }
 
 impl Group {
-    pub fn spawn(command: &mut tokio::process::Command) -> std::io::Result<Self> {
+    pub fn spawn(command: &mut crate::os_process::Command) -> std::io::Result<Self> {
         // Still asked for, so that a child which somehow escapes the group
         // kill is at least reaped rather than left as a zombie.
         let child = command.kill_on_drop(true).spawn()?;
@@ -357,19 +357,19 @@ impl Group {
         self.pid
     }
 
-    pub fn stdin(&mut self) -> Option<tokio::process::ChildStdin> {
+    pub fn stdin(&mut self) -> Option<crate::os_process::ChildStdin> {
         self.child.stdin.take()
     }
 
-    pub fn stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+    pub fn stdout(&mut self) -> Option<crate::os_process::ChildStdout> {
         self.child.stdout.take()
     }
 
-    pub fn stderr(&mut self) -> Option<tokio::process::ChildStderr> {
+    pub fn stderr(&mut self) -> Option<crate::os_process::ChildStderr> {
         self.child.stderr.take()
     }
 
-    pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+    pub async fn wait(&mut self) -> std::io::Result<crate::os_process::ExitStatus> {
         if let Some(status) = self.status {
             return Ok(status);
         }
@@ -387,7 +387,8 @@ impl Group {
     ///
     /// The exit status comes back where there is one. A command stopped this
     /// way still finished, and what it finished with is the caller's answer.
-    pub async fn end(&mut self) -> Option<std::process::ExitStatus> {
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn end(&mut self) -> Option<crate::os_process::ExitStatus> {
         let Some(pid) = self.pid else {
             return self.status;
         };
@@ -416,12 +417,36 @@ impl Group {
         wait_for_tree_exit(pid, tokio::time::Instant::now() + GRACE).await;
         self.status
     }
+
+    /// The same sequence, asked of the shell instead of the kernel.
+    ///
+    /// A guest holds no pid it may signal, so the group lives behind the
+    /// `process` import. The waiting stays here rather than moving into the
+    /// import: an import that waited would suspend the whole instance, not one
+    /// task (v2 proposal §6.10).
+    #[cfg(target_family = "wasm")]
+    pub async fn end(&mut self) -> Option<crate::os_process::ExitStatus> {
+        if self.status.is_some() {
+            return self.status;
+        }
+        let _ = self.child.terminate();
+        let deadline = tokio::time::Instant::now() + GRACE;
+        let _ = tokio::time::timeout_at(deadline, self.wait()).await;
+        while tokio::time::Instant::now() < deadline && self.child.group_alive() {
+            tokio::time::sleep(GRACE_POLL).await;
+        }
+        let _ = self.child.start_kill();
+        let _ = self.wait().await;
+        self.status
+    }
 }
 
 impl Drop for Group {
     fn drop(&mut self) {
         // Before the inner child drops: `tokio` would kill the one pid and
-        // reap it, and a reaped pid can no longer be asked for its group.
+        // reap it, and a reaped pid can no longer be asked for its group. In
+        // the guest the same ordering holds one level out — letting go of the
+        // `child` resource is what makes the shell stop the group.
         if let Some(pid) = self.pid {
             stop_tree(pid);
         }

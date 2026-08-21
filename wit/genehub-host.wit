@@ -1,32 +1,93 @@
 package genehub:host@0.23.0;
 
 /// Spawn a native OS process. WASI has no general exec (WASI#899). Permanent.
+///
+/// Every operation here is non-blocking, and that is the whole design. A host
+/// import that awaits suspends the entire guest instance — Wasmtime runs the
+/// guest on one fiber — so a blocking read on one child would stall every other
+/// session the daemon is serving. The guest polls instead, backing off on a
+/// timer. Reads and waits therefore have to distinguish "nothing yet" from
+/// "finished", which is why they return `option`.
 interface process {
   record spawn-error {
     message: string,
   }
 
   resource child {
-    write-stdin: func(data: list<u8>) -> result<_, string>;
-    read-stdout: func(max: u32) -> result<list<u8>, string>;
-    read-stderr: func(max: u32) -> result<list<u8>, string>;
+    /// The native pid, for diagnostics only. The guest must not signal it.
+    id: func() -> option<u32>;
+    /// `none` at EOF. `some` of an empty list means nothing is buffered yet.
+    read-stdout: func(max: u32) -> result<option<list<u8>>, string>;
+    read-stderr: func(max: u32) -> result<option<list<u8>>, string>;
+    /// Returns how many bytes were accepted, which may be fewer than offered.
+    write-stdin: func(data: list<u8>) -> result<u32, string>;
+    /// Closes the child's stdin so it can see EOF.
+    close-stdin: func() -> result<_, string>;
+    /// Asks the whole group to finish. Returns at once — a program that
+    /// honours `SIGTERM` needs time to, and waiting for it here would park
+    /// every other session. Poll `group-alive` for the answer.
+    terminate: func() -> result<_, string>;
+    /// Stops the whole group outright.
     kill: func() -> result<_, string>;
-    wait: func() -> result<u32, string>;
+    /// Whether anything in the group is still running. A group outlives its
+    /// leader as long as one member does, which is the thing being waited out.
+    group-alive: func() -> bool;
+    /// `none` while the child is still running.
+    try-wait: func() -> result<option<u32>, string>;
   }
 
-  spawn: func(argv: list<string>, env: list<tuple<string, string>>) -> result<child, spawn-error>;
+  /// `env` is applied on top of the shell's own environment.
+  ///
+  /// Every child leads a session of its own, so that "it and everything it
+  /// started" has a name later. Killing a pid reaches that pid alone, and a
+  /// dev server forked from a shell that was stopped would otherwise hold its
+  /// port until the machine was rebooted. The guest cannot arrange this — it
+  /// has no fork to run code between — so the shell does it at spawn, and
+  /// `terminate` / `kill` address the group rather than the child.
+  spawn: func(
+    argv: list<string>,
+    env: list<tuple<string, string>>,
+    cwd: option<string>,
+  ) -> result<child, spawn-error>;
 }
 
 /// Unix PTY / Windows ConPTY. WASI has no PTY. Permanent.
+///
+/// Non-blocking throughout, for the same reason as `process`: the guest runs on
+/// one fiber, so an import that waited would stall every other session.
 interface pty {
   resource session {
-    write: func(data: list<u8>) -> result<_, string>;
-    read: func(max: u32) -> result<list<u8>, string>;
+    /// `none` once the shell has exited and the master has drained. `some` of
+    /// an empty list means nothing has arrived yet.
+    read: func(max: u32) -> result<option<list<u8>>, string>;
+    /// Bytes accepted, which may be fewer than offered when the terminal is
+    /// not keeping up. That is the backpressure signal.
+    write: func(data: list<u8>) -> result<u32, string>;
     resize: func(cols: u16, rows: u16) -> result<_, string>;
-    close: func() -> result<_, string>;
+    /// `none` while the shell is still running.
+    exit-code: func() -> option<s32>;
   }
 
-  open: func(cols: u16, rows: u16) -> result<session, string>;
+  /// Dropping the session hangs it up, and deliberately no harder than that. A
+  /// command is owned by whoever asked for it; a terminal is not, and somebody
+  /// who typed `nohup make &` into one meant it to outlive the window.
+  open: func(
+    argv: list<string>,
+    cwd: string,
+    env: list<tuple<string, string>>,
+    cols: u16,
+    rows: u16,
+  ) -> result<session, string>;
+}
+
+/// Owner-only permissions. WASI 0.2 filesystem has no permission bits at all,
+/// so this is not a gap the guest can work around — a rule the interface cannot
+/// express is a rule the guest cannot enforce. Permanent while that holds.
+interface fs-perms {
+  /// `0o600` for a file, `0o700` for a directory; on Windows, an ACL naming
+  /// only the current user. Applied to paths that already exist, because
+  /// tightening one somebody else loosened is half of what this is for.
+  restrict-to-owner: func(path: string) -> result<_, string>;
 }
 
 /// Kernel flock. WASI 0.2 filesystem types have no lock-*. Drop must unlock.
@@ -41,10 +102,20 @@ interface file-lock {
   open: func(path: string) -> result<handle, string>;
 }
 
+/// Bring-up shape: the guest is still a `wasi:cli/run` command and only adds the
+/// imports WASI cannot provide. Delete once the shell drives `daemon` below.
+world daemon-command {
+  import process;
+  import pty;
+  import file-lock;
+  import fs-perms;
+}
+
 world daemon {
   import process;
   import pty;
   import file-lock;
+  import fs-perms;
   /// Resident daemon. Returns "reload" or "shutdown".
   export run: func() -> result<string, string>;
   /// Independent OS process: same artifact, agent entry.

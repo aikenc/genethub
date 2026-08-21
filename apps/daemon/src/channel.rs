@@ -25,8 +25,14 @@ pub const AGENT_HOME_DIR: &str = ".genet-agent-dev";
 pub const ENV_DATA_DIR: &str = "GENEHUB_DEV_DATA_DIR";
 pub const ENV_WORKSPACE_DIR: &str = "GENEHUB_DEV_WORKSPACE_DIR";
 pub const ENV_LOG: &str = "GENEHUB_DEV_LOG";
+/// The shell's pid, handed to the WASI guest which has none of its own.
+pub const ENV_HOST_PID: &str = "GENEHUB_DEV_HOST_PID";
 pub const ENV_MACHINE_NAME: &str = "GENEHUB_DEV_MACHINE_NAME";
 pub const ENV_AGENT_COMMAND: &str = "GENET_AGENT_DEV_COMMAND";
+/// Runs the daemon instead of `genet daemon run`, for pointing the product at
+/// the wasm guest under its shell. Mirrors `ENV_AGENT_COMMAND`: a binary that
+/// already knows what it is, so no argv is appended.
+pub const ENV_DAEMON_COMMAND: &str = "GENEHUB_DEV_DAEMON_COMMAND";
 pub const ENV_AGENT_HOME: &str = "GENET_AGENT_DEV_HOME";
 /// What the owner sees this machine called before they name it.
 pub const DEFAULT_MACHINE_NAME: &str = "GeneHub Dev machine";

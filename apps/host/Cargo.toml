@@ -12,6 +12,14 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
-wasmtime = { version = "36", default-features = false, features = ["async", "component-model", "cranelift"] }
-wasmtime-wasi = "36"
+fs2.workspace = true
+http = "1"
+http-body-util = "0.1"
+portable-pty = "0.9"
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "process", "io-util", "sync", "time"] }
+wasmtime = { version = "48", default-features = false, features = ["anyhow", "async", "component-model", "cranelift", "parallel-compilation"] }
+wasmtime-wasi = "48"
+wasmtime-wasi-http = "48"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

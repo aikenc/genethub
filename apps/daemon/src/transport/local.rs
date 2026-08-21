@@ -146,7 +146,7 @@ async fn health(
     if !valid_control_challenge(&query.challenge) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::Value::Null)).into_response();
     }
-    let pid = std::process::id();
+    let pid = crate::host_pid::current();
     let machine_id = context.state.machine.machine_id.clone();
     let fingerprint = context.state.machine.fingerprint();
     let proof = health_proof(
@@ -327,7 +327,7 @@ async fn shutdown(
     if !remote.ip().is_loopback() {
         return (StatusCode::FORBIDDEN, "shutdown is loopback only");
     }
-    if !valid_control_challenge(&params.challenge) || params.pid != std::process::id() {
+    if !valid_control_challenge(&params.challenge) || params.pid != crate::host_pid::current() {
         return (StatusCode::UNAUTHORIZED, "invalid shutdown proof");
     }
     let expected = shutdown_proof(
@@ -376,7 +376,7 @@ async fn upgrade(
 ) -> impl IntoResponse {
     if !remote.ip().is_loopback()
         || !valid_control_challenge(&params.challenge)
-        || params.pid != std::process::id()
+        || params.pid != crate::host_pid::current()
     {
         return (StatusCode::UNAUTHORIZED, "invalid websocket admission").into_response();
     }
@@ -656,7 +656,7 @@ mod tests {
         let admission = websocket_admission(
             listener.port,
             &state.token,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
         );
@@ -705,7 +705,7 @@ mod tests {
         let fresh = websocket_url(
             listener.port,
             &state.token,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
         );
@@ -717,7 +717,7 @@ mod tests {
         let expired = websocket_proof(
             &state.token,
             &challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
             expired_at,
@@ -725,7 +725,7 @@ mod tests {
         let expired_url = format!(
             "ws://127.0.0.1:{}/ws?challenge={challenge}&pid={}&expiresAt={expired_at}&proof={expired}",
             listener.port,
-            std::process::id(),
+            crate::host_pid::current(),
         );
         assert!(tokio_tungstenite::connect_async(expired_url).await.is_err());
 
@@ -734,7 +734,7 @@ mod tests {
         let far_future_proof = websocket_proof(
             &state.token,
             &challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
             far_future,
@@ -742,7 +742,7 @@ mod tests {
         let far_future_url = format!(
             "ws://127.0.0.1:{}/ws?challenge={challenge}&pid={}&expiresAt={far_future}&proof={far_future_proof}",
             listener.port,
-            std::process::id(),
+            crate::host_pid::current(),
         );
         assert!(tokio_tungstenite::connect_async(far_future_url)
             .await
@@ -753,7 +753,7 @@ mod tests {
         let wrong_domain = shutdown_proof(
             &state.token,
             &challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
             expires_at,
@@ -761,7 +761,7 @@ mod tests {
         let wrong_url = format!(
             "ws://127.0.0.1:{}/ws?challenge={challenge}&pid={}&expiresAt={expires_at}&proof={wrong_domain}",
             listener.port,
-            std::process::id(),
+            crate::host_pid::current(),
         );
         assert!(tokio_tungstenite::connect_async(wrong_url).await.is_err());
 
@@ -789,7 +789,7 @@ mod tests {
         let proof = shutdown_proof(
             &state.token,
             challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
             expires_at,
@@ -797,16 +797,16 @@ mod tests {
         let url = format!(
             "http://127.0.0.1:{}/shutdown?challenge={challenge}&pid={}&expiresAt={expires_at}&proof={proof}",
             listener.port,
-            std::process::id(),
+            crate::host_pid::current(),
         );
         assert!(!url.contains(&state.token));
-        let answer = reqwest::Client::new()
+        let answer = crate::http::Client::new()
             .post(&url)
             .send()
             .await
             .expect("the request reaches the daemon");
         assert_eq!(answer.status(), 202);
-        let replay = reqwest::Client::new().post(url).send().await.unwrap();
+        let replay = crate::http::Client::new().post(url).send().await.unwrap();
         assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
 
         // Only now does the main loop begin waiting.
@@ -829,7 +829,7 @@ mod tests {
         let health_mac = health_proof(
             &state.token,
             challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
         );
@@ -838,7 +838,7 @@ mod tests {
             shutdown_proof(
                 &state.token,
                 challenge,
-                std::process::id(),
+                crate::host_pid::current(),
                 &state.machine.machine_id,
                 &state.machine.fingerprint(),
                 expires_at,
@@ -847,11 +847,11 @@ mod tests {
         );
         assert!(!auth::token_matches(&state.token, &health_mac));
 
-        let response = reqwest::Client::new()
+        let response = crate::http::Client::new()
             .post(format!(
                 "http://127.0.0.1:{}/shutdown?challenge={challenge}&pid={}&expiresAt={expires_at}&proof={health_mac}",
                 listener.port,
-                std::process::id(),
+                crate::host_pid::current(),
             ))
             .send()
             .await
@@ -862,16 +862,16 @@ mod tests {
         let expired_proof = shutdown_proof(
             &state.token,
             challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
             expired_at,
         );
-        let expired = reqwest::Client::new()
+        let expired = crate::http::Client::new()
             .post(format!(
                 "http://127.0.0.1:{}/shutdown?challenge={challenge}&pid={}&expiresAt={expired_at}&proof={expired_proof}",
                 listener.port,
-                std::process::id(),
+                crate::host_pid::current(),
             ))
             .send()
             .await
@@ -948,7 +948,7 @@ mod tests {
             .unwrap();
         let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
         let challenge = "fresh-health-challenge";
-        let response = reqwest::get(format!(
+        let response = crate::http::get(format!(
             "http://127.0.0.1:{}/health?challenge={challenge}",
             listener.port
         ))
@@ -956,7 +956,7 @@ mod tests {
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["pid"], std::process::id());
+        assert_eq!(body["pid"], crate::host_pid::current());
         assert_eq!(body["machineId"], state.machine.machine_id);
         assert_eq!(body["fingerprint"], state.machine.fingerprint());
         assert_eq!(
@@ -964,7 +964,7 @@ mod tests {
             health_proof(
                 &state.token,
                 challenge,
-                std::process::id(),
+                crate::host_pid::current(),
                 &state.machine.machine_id,
                 &state.machine.fingerprint(),
             )

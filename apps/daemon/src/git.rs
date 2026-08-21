@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{GitChange, GitChangeKind, GitStatus};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
+use crate::os_process::Command;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_STDOUT_BYTES: usize = 2 * 1024 * 1024;

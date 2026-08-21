@@ -4,12 +4,11 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-#[cfg(not(unix))]
-use cap_std::ambient_authority;
-use cap_std::fs::Dir;
 use genehub_proto::FileNode;
 use genehub_proto::{AssetPreviewKind, AssetPreviewMetadata};
 use sha2::{Digest, Sha256};
+
+use crate::fs_cap::Dir;
 
 const MAX_ENTRIES_PER_DIR: usize = 2000;
 const MAX_TREE_NODES: usize = 10_000;
@@ -35,7 +34,7 @@ pub fn tree_with_prefix(
     path_prefix: &str,
     root_name: Option<&str>,
 ) -> Result<FileNode> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let relative = workspace_relative(root, path)?;
     let mut remaining = MAX_TREE_NODES;
     tree_in(
@@ -310,7 +309,7 @@ fn preview_type(
 }
 
 pub fn write(root: &Path, path: &Path, content: &str) -> Result<()> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let relative = workspace_relative(root, path)?;
     if let Some(parent) = relative.parent() {
         directory.create_dir_all(parent)?;
@@ -334,7 +333,7 @@ pub fn write(root: &Path, path: &Path, content: &str) -> Result<()> {
 
 /// Creates a directory (and missing parents) inside the workspace capability.
 pub fn mkdir(root: &Path, path: &Path) -> Result<()> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let relative = workspace_relative(root, path)?;
     if relative.as_os_str().is_empty() {
         anyhow::bail!("cannot create the workspace root");
@@ -349,7 +348,7 @@ pub fn mkdir(root: &Path, path: &Path) -> Result<()> {
 
 /// Deletes a file or directory tree inside the workspace capability.
 pub fn delete_path(root: &Path, path: &Path) -> Result<()> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let relative = workspace_relative(root, path)?;
     if relative.as_os_str().is_empty() {
         anyhow::bail!("cannot delete the workspace root");
@@ -370,7 +369,7 @@ pub fn delete_path(root: &Path, path: &Path) -> Result<()> {
 
 /// Moves or renames a path inside the same workspace root.
 pub fn move_path(root: &Path, from: &Path, to: &Path) -> Result<()> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let from_rel = workspace_relative(root, from)?;
     let to_rel = workspace_relative(root, to)?;
     validate_transfer(&from_rel, &to_rel)?;
@@ -389,7 +388,7 @@ pub fn move_path(root: &Path, from: &Path, to: &Path) -> Result<()> {
 
 /// Copies a file or directory tree inside the same workspace root.
 pub fn copy_path(root: &Path, from: &Path, to: &Path) -> Result<()> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let from_rel = workspace_relative(root, from)?;
     let to_rel = workspace_relative(root, to)?;
     validate_transfer(&from_rel, &to_rel)?;
@@ -452,36 +451,8 @@ fn copy_recursive(directory: &Dir, from: &Path, to: &Path) -> Result<()> {
     anyhow::bail!("unsupported file type: {}", from.display())
 }
 
-/// Opens the registered workspace as a directory capability.
-///
-/// All later lookups are relative to the opened handle. `cap-std` resolves
-/// every component without ever leaving that handle, including when another
-/// process swaps a checked parent directory for a symlink between lookup and
-/// open. A workspace root which is itself currently a symlink is rejected: a
-/// saved root cannot silently be retargeted after registration.
-fn workspace_dir(root: &Path) -> Result<Dir> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(root)
-            .with_context(|| format!("opening workspace root {}", root.display()))?;
-        Ok(Dir::from_std_file(file))
-    }
-
-    #[cfg(not(unix))]
-    {
-        let metadata = std::fs::symlink_metadata(root)
-            .with_context(|| format!("reading workspace root {}", root.display()))?;
-        if metadata.file_type().is_symlink() {
-            anyhow::bail!("workspace root is a symbolic link");
-        }
-        Dir::open_ambient_dir(root, ambient_authority())
-            .with_context(|| format!("opening workspace root {}", root.display()))
-    }
+fn workspace_dir(root: &Path) -> Result<crate::fs_cap::Dir> {
+    crate::fs_cap::open_workspace_root(root)
 }
 
 fn workspace_relative(root: &Path, path: &Path) -> Result<PathBuf> {

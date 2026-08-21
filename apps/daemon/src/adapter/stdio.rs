@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
-use tokio::process::ChildStdin;
+use crate::os_process::ChildStdin;
 
 /// Serializes `value` and writes it as one line to `stdin`, flushing after.
 pub async fn write_json_line(stdin: &mut ChildStdin, value: &Value) -> Result<()> {
