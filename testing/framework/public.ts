@@ -14,9 +14,15 @@ export {
   runGenet,
   runGenetAsync,
   tryLocateAgent,
+  tryLocateAgentComponent,
+  tryLocateDaemonComponent,
   tryLocateGuestProbe,
   tryLocateHost,
   tryLocateWasm,
+  procCmdline,
+  procEnviron,
+  processesMatching,
+  agentHostProcesses,
 } from "./drivers/cli.ts";
 
 export type { CaseContext } from "./context.ts";

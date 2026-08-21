@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { BlockedError } from "../../infrastructure/public.ts";
@@ -85,6 +85,67 @@ export function tryLocateHost(openRoot: string): string | undefined {
   ]);
 }
 
+export function tryLocateDaemonComponent(openRoot: string): string | undefined {
+  const override = process.env.GENEHUB_DEV_DAEMON_COMPONENT?.trim();
+  if (override) {
+    return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
+  }
+  return firstExistingFile([
+    path.resolve(openRoot, "target", "wasm32-wasip2", "release", "genehub-daemon.wasm"),
+    path.resolve(openRoot, "target", "wasm32-wasip2", "debug", "genehub-daemon.wasm"),
+  ]);
+}
+
+export function tryLocateAgentComponent(openRoot: string): string | undefined {
+  const override = process.env.GENEHUB_DEV_AGENT_COMPONENT?.trim();
+  if (override) {
+    return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
+  }
+  return firstExistingFile([
+    path.resolve(openRoot, "target", "wasm32-wasip2", "release", "genet-agent-dev.wasm"),
+    path.resolve(openRoot, "target", "wasm32-wasip2", "debug", "genet-agent-dev.wasm"),
+  ]);
+}
+
+export function procCmdline(pid: number): string {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
+  } catch {
+    return "";
+  }
+}
+
+export function procEnviron(pid: number): string {
+  try {
+    return readFileSync(`/proc/${pid}/environ`, "utf8").replaceAll("\0", "\n");
+  } catch {
+    return "";
+  }
+}
+
+export function agentHostProcesses(): Array<{ pid: number; cmd: string; environ: string }> {
+  return processesMatching("genehub-host-dev")
+    .filter((row) => row.cmd.includes("--mode"))
+    .map((row) => ({ ...row, environ: procEnviron(row.pid) }));
+}
+
+export function processesMatching(needle: string): Array<{ pid: number; cmd: string }> {
+  const found: Array<{ pid: number; cmd: string }> = [];
+  let entries: string[] = [];
+  try {
+    entries = readdirSync("/proc");
+  } catch {
+    return found;
+  }
+  for (const name of entries) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    const cmd = procCmdline(pid);
+    if (cmd.includes(needle)) found.push({ pid, cmd });
+  }
+  return found;
+}
+
 export function tryLocateGuestProbe(openRoot: string): string | undefined {
   const override = process.env.GENEHUB_GUEST_PROBE?.trim();
   if (override) {
@@ -106,12 +167,10 @@ export function locateWasm(openRoot: string): string {
 
 export function genetEnv(openRoot: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const wasm = tryLocateWasm(openRoot);
-  const agent = tryLocateAgent(openRoot);
   return {
     ...process.env,
     ...extra,
     ...(wasm ? { GENET_APP_WASM: wasm } : {}),
-    ...(agent ? { GENET_AGENT_DEV_COMMAND: agent } : {}),
   };
 }
 

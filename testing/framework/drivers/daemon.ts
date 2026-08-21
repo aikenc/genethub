@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 
 import { BlockedError } from "../../infrastructure/public.ts";
 import type { EnvironmentLease } from "../../infrastructure/public.ts";
-import { parseJson, runGenet, tryLocateAgentBeside } from "./cli.ts";
+import { parseJson, runGenet } from "./cli.ts";
 
 export interface DaemonHandle {
   genet: string;
@@ -27,12 +27,10 @@ export function startDaemon(input: {
   wasm?: string;
   lease: EnvironmentLease;
 }): DaemonHandle {
-  const agent = process.env.GENET_AGENT_DEV_COMMAND?.trim() || tryLocateAgentBeside(input.genet);
   const env = {
     ...process.env,
     ...input.lease.env,
     ...(input.wasm ? { GENET_APP_WASM: input.wasm } : {}),
-    ...(agent ? { GENET_AGENT_DEV_COMMAND: agent } : {}),
   };
   const started = runGenet(input.genet, ["daemon", "start"], env);
   if (started.code !== 0) {

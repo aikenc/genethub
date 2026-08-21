@@ -12,6 +12,7 @@ export interface ScriptedTurn {
 export interface MockLlmHandle {
   origin: string;
   requests: unknown[];
+  inboundHeaders: Array<Record<string, string>>;
   script(...turns: ScriptedTurn[]): void;
   stop(): Promise<void>;
 }
@@ -109,8 +110,19 @@ function redact(value: unknown): unknown {
 export async function startMockLlm(): Promise<MockLlmHandle> {
   const queue: ScriptedTurn[] = [];
   const requests: unknown[] = [];
+  const inboundHeaders: Array<Record<string, string>> = [];
   const server: Server = createServer(async (request, response) => {
     const url = request.url ?? "";
+    const headers: Record<string, string> = {};
+    for (const [key, value] of Object.entries(request.headers)) {
+      if (typeof value !== "string") continue;
+      const lower = key.toLowerCase();
+      if (lower.includes("authorization") || lower.includes("token") || lower.includes("key")) {
+        continue;
+      }
+      headers[lower] = value;
+    }
+    inboundHeaders.push(headers);
     if (url.endsWith("/models")) {
       request.resume();
       response.writeHead(200, { "content-type": "application/json" }).end(
@@ -157,6 +169,7 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
   return {
     origin: `http://127.0.0.1:${port}`,
     requests,
+    inboundHeaders,
     script: (...turns) => {
       queue.push(...turns);
     },
