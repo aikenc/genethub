@@ -6,6 +6,7 @@
   "description": "GeneHub workbench: one build for the browser, the desktop shell and the phone shell",
   "exports": {
     ".": "./src/index.ts",
+    "./client": "./src/client.ts",
     "./theme.css": "./src/theme.css",
     "./tailwind": "./tailwind.config.js",
     "./build-stamp": "./build-stamp.js"

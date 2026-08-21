@@ -348,27 +348,46 @@ fn stop_verified(paths: &Paths) -> Result<bool, String> {
 
     ask_to_stop(&endpoint);
     if wait_unhealthy(&endpoint, STOP_TIMEOUT) {
-        return Ok(false);
+        return wait_lock_released(paths);
     }
 
     // Re-prove the identity immediately before every signal. Once the daemon's
     // listener is gone we deliberately stop touching the pid: it may already
     // have exited and been reused by an unrelated process.
     if !health(&endpoint) {
-        return Ok(false);
+        return wait_lock_released(paths);
     }
     lifecycle::terminate(endpoint.pid);
     if wait_unhealthy(&endpoint, Duration::from_secs(3)) {
-        return Ok(false);
+        return wait_lock_released(paths);
     }
     if !health(&endpoint) {
-        return Ok(false);
+        return wait_lock_released(paths);
     }
     lifecycle::force_kill(endpoint.pid);
     if wait_unhealthy(&endpoint, Duration::from_secs(3)) {
+        wait_lock_released(paths)?;
         return Ok(true);
     }
     Err(format!("the daemon (pid {}) would not stop", endpoint.pid))
+}
+
+/// `/shutdown` can drop the listener while the process still holds `daemon.lock`
+/// while it drains sessions. `start` would then adopt that dying process.
+fn wait_lock_released(paths: &Paths) -> Result<bool, String> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        match lifecycle::instance_locked(paths) {
+            Ok(false) => return Ok(false),
+            Ok(true) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(format!("could not inspect daemon.lock: {error}")),
+        }
+    }
+    if lifecycle::instance_locked(paths).unwrap_or(true) {
+        Err("the daemon listener is gone but it still holds daemon.lock".into())
+    } else {
+        Ok(false)
+    }
 }
 
 fn wait_unhealthy(endpoint: &Endpoint, within: Duration) -> bool {

@@ -315,9 +315,21 @@ pub fn write(root: &Path, path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = relative.parent() {
         directory.create_dir_all(parent)?;
     }
+    // Last complete writer wins. A sibling temp + rename keeps concurrent
+    // writes from interleaving two payloads in the same inode.
+    let tmp_name = format!(".{}.tmp", uuid::Uuid::new_v4().simple());
+    let tmp = match relative.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(&tmp_name),
+        _ => PathBuf::from(&tmp_name),
+    };
     directory
-        .write(&relative, content)
-        .with_context(|| format!("writing {}", relative.display()))
+        .write(&tmp, content)
+        .with_context(|| format!("writing {}", relative.display()))?;
+    if let Err(error) = directory.rename(&tmp, &directory, &relative) {
+        let _ = directory.remove_file(&tmp);
+        return Err(error).with_context(|| format!("writing {}", relative.display()));
+    }
+    Ok(())
 }
 
 /// Creates a directory (and missing parents) inside the workspace capability.

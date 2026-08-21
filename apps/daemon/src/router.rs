@@ -86,6 +86,10 @@ fn failed(error: anyhow::Error) -> Handled {
         || message.contains("workspace folder")
         || message.contains(".code-workspace")
         || message.contains("not a directory")
+        || message.contains("是内置的")
+        || message.contains("只能清空")
+        || message.contains("this agent offers")
+        || message.contains("unknown thinking level")
     {
         ErrorCode::BadRequest
     } else if message.contains("does not") || message.contains("not supported") {
