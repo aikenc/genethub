@@ -73,6 +73,29 @@ export function tryLocateWasm(openRoot: string): string | undefined {
   return candidate;
 }
 
+export function tryLocateHost(openRoot: string): string | undefined {
+  const override = process.env.GENEHUB_HOST?.trim();
+  if (override) {
+    return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
+  }
+  const suffix = process.platform === "win32" ? ".exe" : "";
+  return firstExistingFile([
+    path.resolve(openRoot, "target", "debug", `genehub-host-dev${suffix}`),
+    path.resolve(openRoot, "target", "release", `genehub-host-dev${suffix}`),
+  ]);
+}
+
+export function tryLocateGuestProbe(openRoot: string): string | undefined {
+  const override = process.env.GENEHUB_GUEST_PROBE?.trim();
+  if (override) {
+    return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
+  }
+  return firstExistingFile([
+    path.resolve(openRoot, "target", "wasm32-wasip2", "debug", "genehub-guest-probe.wasm"),
+    path.resolve(openRoot, "target", "wasm32-wasip2", "release", "genehub-guest-probe.wasm"),
+  ]);
+}
+
 export function locateWasm(openRoot: string): string {
   const found = tryLocateWasm(openRoot);
   if (!found) {

@@ -6,7 +6,18 @@ import {
 } from "../infrastructure/public.ts";
 import type { CaseContext } from "./context.ts";
 
-export { genetEnv, locateGenet, locateWasm, parseJson, runGenet, runGenetAsync, tryLocateAgent, tryLocateWasm } from "./drivers/cli.ts";
+export {
+  genetEnv,
+  locateGenet,
+  locateWasm,
+  parseJson,
+  runGenet,
+  runGenetAsync,
+  tryLocateAgent,
+  tryLocateGuestProbe,
+  tryLocateHost,
+  tryLocateWasm,
+} from "./drivers/cli.ts";
 
 export type { CaseContext } from "./context.ts";
 export { assertions } from "./assertions/index.ts";
