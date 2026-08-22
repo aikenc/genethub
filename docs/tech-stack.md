@@ -12,7 +12,9 @@ packages/proto        ← 会话协议唯一定义处，生成 TS 类型与 Rust
 packages/web          ← 工作台（浏览器 / 桌面 / 手机同一份产物）
 apps/daemon           ← Rust：会话内核 + agent adapter 层 + 三种接入通道
 apps/agent            ← Rust：内置 agent（adapter 的一个后端）
-apps/desktop          ← Windows/macOS Tauri 2 壳 + sidecar（daemon）
+apps/guest            ← wasm32-wasip2 Component：daemon/agent 双入口
+apps/host             ← 原生 Wasmtime/WASI 壳 + typed OS/RTC 连接资源
+apps/desktop          ← Windows/macOS Tauri 2 壳 + host/guest sidecar
 apps/relay            ← Node：转发层，可独立部署
 testing/              ← 跨部件旅程测试
 ```
@@ -22,8 +24,8 @@ testing/              ← 跨部件旅程测试
 | **桌面** | [Tauri 2](https://tauri.app/) | **UI 仍是 H5**，但走系统 WebView：拿到 Electron 的开发体验，不用背 Chromium + Node 的体积。壳本身几 MB，预算留给 sidecar |
 | **手机** | 浏览器工作台 | 同一份 Web 产物直接使用，不在当前范围内维护 iOS / Android 原生壳 |
 | **浏览器** | 同一 `packages/web` 直出 | 链接打开即用 |
-| **daemon** | Rust | 单文件二进制，无运行时依赖 |
-| **内置 agent** | Rust | 与 daemon 同栈；协议自实现 |
+| **daemon / 内置 agent** | Rust → WASM Component | 同一份 `genehub_guest.wasm` 的两个入口；业务变化不要求重编 host |
+| **native host / CLI** | Rust + Wasmtime 48 | 装载 Component，提供 WASI 与 OS/RTC 连接边界；CLI 只转发产品 argv |
 | **relay** | Node（TypeScript） | **仅服务端**；逻辑极薄（帧头 + 转发），换语言的收益要等到连接数受内存限制才出现 |
 | **前端** | React + Vite + TS | 见 §1.1 与 [web-workbench.md](./web-workbench.md) §5 |
 
@@ -38,8 +40,9 @@ testing/              ← 跨部件旅程测试
 ```
 安装包（Windows NSIS · macOS dmg；Linux 不生成桌面包）
 ├── Tauri WebView → 工作台
-├── sidecar: genet daemon run（CLI 与 daemon 同一二进制；关窗后仍运行）
-├── genet-agent（由 daemon 的 genet adapter 按需拉起）
+├── sidecar: genehub-host + genehub_guest.wasm（daemon 入口；关窗后仍运行）
+├── genet（生命周期与 /cli 薄转发器）
+├── 内置 agent：新 host 进程装载同一 guest 的 agent 入口
 ├── 系统托盘：打开主界面 / 状态 / 退出
 └── 默认配置：本机直连，无需任何服务端
 ```
@@ -71,7 +74,7 @@ testing/              ← 跨部件旅程测试
 | `/fabric/v2` WSS baseline | 任何跨设备访问，包括同一个 Wi-Fi | 多一跳；托管模式需要 Control admission |
 | WebRTC DataChannel direct | baseline 已认证、双方启用且 ICE 可达 | 少一跳；MVP 无 TURN，不能保证成功 |
 
-daemon 跑在 wasm component 里时，前两条不变——guest 自己开 socket，`wasi:tls` 在壳里做握手，见 [wasm-guest-network.md](./wasm-guest-network.md)。第三条在该形态下暂缺：`connection.identity` 会如实回 `rtcSupported: false`，对端因此停在 baseline，而不是先协商再失败。
+daemon 跑在 wasm component 里时，前两条由 guest 自己开 socket，`wasi:tls` 在壳里做 WSS 握手。RTC 也已按层落地：host 只做 ICE/DTLS/SCTP 连接与有界二进制收发，guest 保留 admission、权限、超时和 Fabric baseline 回落策略。见 [wasm-guest-network.md](./wasm-guest-network.md)。
 
 三者承载同一 protocol-v3 E2EE record、logical streams 和 Exchange。跨设备始终先有 Fabric baseline，再通过加密 signaling 建立 RTC；RTC 失败时 baseline 继续可用。没有 live stream migration 或请求自动重放。断网时仍可在运行 daemon 的同一台电脑上使用桌面端。
 

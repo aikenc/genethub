@@ -1,13 +1,14 @@
 # 桌面端规格
 
-> 参考实现：[ref-repos/cc-switch](../../ref-repos/cc-switch)（Tauri 2：托盘、关窗驻留、轻量模式、开机自启、安装包）。  
+> 参考实现：工作区 `ref-repos/cc-switch`（Tauri 2：托盘、关窗驻留、轻量模式、开机自启、安装包；不属于本仓发布内容）。
 > 目标：有**安装过程**、能**后台常驻**、托盘可**唤醒主界面**；daemon 与默认 agent 随客户端存活。
 
 ## 0. 这一版发到哪些平台
 
 **桌面壳只支持 Windows 与 macOS。** 当前公开流水线产出 Windows 安装包；macOS 代码与真实进程监督测试同样是发布门禁，但正式下载要等签名与公证就绪。下面的生命周期约束同时适用于这两个平台。
 
-**Linux 这一版只有命令行**：`scripts/install.sh` 装 `genet`（CLI 与 daemon 同一二进制）与 `genet-agent`，
+**Linux 这一版只有命令行**：`scripts/install.sh` 装薄 CLI `genet`、原生 `genehub-host` 与
+`genehub_guest.wasm`；daemon/内置 agent 是同一 component 的两个入口，不再发布独立 agent 二进制。
 daemon 启动后打印不含长期密钥、15 秒有效且只能使用一次的连接地址，浏览器指过去就是同一个工作台——同一份
 `packages/web`，不少一个功能。
 
@@ -41,7 +42,7 @@ macOS 正式发布必须先完成签名与公证：没有公证的下载是一�
 
 **升级时安装器先停「看护进程」,再停 daemon,然后等文件真的可写。** 顺序不是风格问题:App 会在 daemon 死后一秒左右重新拉起一个(`daemon.rs` 的 `watch`,这正是"关窗后机器仍可达"的实现)。所以先杀 daemon 的安装器,一秒后会撞上一个**全新的** daemon 正握着它要写的那个文件——和它本来要修的那个错误一模一样。第一版钩子就是这么写的,于是同一个报错又出现了一次。要停的那个进程叫 `genethub-desktop.exe`(Cargo 二进制名),不是 `GeneHub.exe`——后者只是开始菜单里显示的名字。v0.1.7 杀的是后者,即等于什么都没杀,升级照旧失败;流水线现在拿真产物核对钩子里的每个进程名确实存在。等待也不是睡一个猜出来的时长:句柄多久释放、杀软多久放手、重启多久完成,在这里都不可知,所以直接问那个文件能不能写。
 
-**当前不存在应用内「立即安装」。** 外壳的 `install_update` 命令无条件失败关闭，不启动任何子进程；用户从官方发布页手动下载安装包。安装器自己的升级钩子仍需精确停止 App、daemon 与 agent，以便替换正在使用的文件，但这不再是一条能从页面或 Relay 消息触发的执行路径。
+**当前不存在应用内「立即安装」。** 外壳的 `install_update` 命令无条件失败关闭，不启动任何子进程；用户从官方发布页手动下载安装包。安装器自己的升级钩子仍需先停 App，再停所有正在装载 daemon/agent entry 的 host 进程，以便替换正在使用的文件，但这不再是一条能从页面或 Relay 消息触发的执行路径。组件后台验签、safe-point 切换与自动回滚是 [architecture.md](./architecture.md) B5 的未完成项。
 
 **托盘在等 daemon 之前就建好。** 启动 daemon 会等它报端口,最长二十秒,而第一次运行这个等待是真花掉的:两个全新的、没签名的可执行文件要被杀软扫,防火墙可能还在问其中一个。把托盘放在这之后建,意味着人生第一次启动在那段时间里**根本没有托盘**——而那正是有人想确认"它到底跑起来了没有"的时刻。状态行写着「启动中」,就是为这段时间准备的。
 
@@ -74,13 +75,13 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 ```
 安装
   └─ 写入 Program Files / Applications + 快捷方式
-       + sidecar 资源（genet、genet-agent，两个静态二进制）
+       + sidecar 资源（genet、genehub-host、genehub_guest.wasm）
 
 启动（或开机自启）
   ├─ 单实例锁
   ├─ 创建托盘
-  ├─ 启动 sidecar：genet daemon run（本机直连，无需任何服务端）
-  ├─ 校验内置 agent 二进制存在且可执行
+  ├─ 启动 sidecar：genehub-host 装载 guest daemon entry（由 genet 生命周期入口选择）
+  ├─ 校验 host 与 guest；内置 agent 按会话由新 host 进程装载同一 guest 的 agent entry
   └─ 显示主窗口（或仅托盘）
 
 关主窗口
@@ -123,9 +124,10 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 
 | 项 | 实测（未压缩） | 说明 |
 |----|----------------|------|
-| Tauri 壳（含工作台静态产物） | 5.3 MB | 用系统 WebView，不带 Chromium；前端资源编译进二进制 |
-| `genet` | 4.4 MB | Rust 二进制 |
-| `genet-agent` | 3.9 MB | 同上 |
+| Tauri 壳（含工作台静态产物） | 5.3 MB（重构前记录） | 用系统 WebView，不带 Chromium；须在下一次真实 installer 重测 |
+| `genet-dev` | 2.35 MB | 2026-08-22 本槽位 release launcher |
+| `genehub-host-dev` | 11.17 MB | 2026-08-22 本槽位 release Wasmtime/OS 壳 |
+| `genehub_guest.wasm` | 6.83 MB | 2026-08-22 单制品 daemon/agent 双入口 |
 | 图标与桌面项 | < 10 KB | |
 
 这些分项只用于定位增长来源，最终门禁以 Windows NSIS 与 macOS dmg 的真实产物为准。
@@ -144,7 +146,7 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 
 | 位置 | 是否允许 | 说明 |
 |------|----------|------|
-| **随包分发、开机跟着跑** | **禁止** | 两个 sidecar 都是 Rust 静态二进制，UI 走系统 WebView |
+| **随包分发、开机跟着跑** | **禁止** | launcher/host 是 Rust 原生程序，业务 guest 是 WASM Component，UI 走系统 WebView；都不带 Node |
 | 构建期工具链（Vite / tsc / tauri-cli） | 允许 | 只在开发机和 CI 上跑，产物是纯静态文件，不进安装包 |
 | 用户自己装的外部 agent | 不归我们管 | 某些 agent 自带运行时，那是它自己的安装，我们既不打包也不代劳 |
 
@@ -152,7 +154,7 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 
 **这条约束的顺带好处**：桌面端 UI 和浏览器工作台是**同一套前端代码**（`packages/web`），一次实现两处运行，差异只有一层薄薄的能力适配（见 §4.2）。
 
-验收方式：桌面配置只允许把两个 Rust sidecar 与静态 Web 产物放进 bundle；Windows/macOS CI 都编译外壳并运行真实 daemon 的 start/adopt/stop 监督测试。发布流水线还会直接启动将要随包发布的 daemon，确认它能报出端口——装得上但跑不起来的包，不能等用户安装后才发现。
+验收方式：桌面配置只允许把 launcher、host、guest 与静态 Web 产物放进 bundle；Windows/macOS CI 都应编译外壳并运行真实 daemon 的 start/adopt/stop 监督测试。发布流水线还必须直接启动将要随包发布的三件套，确认 guest 真能报出端口——装得上但跑不起来的包，不能等用户安装后才发现。当前 Windows host 的 `fs-perms` 仍返回 `Unsupported`，而 guest 首启强制收紧数据目录；修好 Windows ACL 并跑过三件套首启前，Windows WASM 包不能视为可发布。
 
 ### 4.2 同一套前端，两种宿主
 
@@ -168,6 +170,8 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 
 约束：**这层适配必须收敛在一个模块里**（`packages/web/src/host/`），业务组件不允许直接判断"我是不是在 Tauri 里"。否则两个宿主的分支会长满全项目，最后变成事实上的两套前端。
 
+**交付状态：** 当前 Tauri `frontendDist` 仍把 Web 产物固化进 installer；官网更新或浏览器刷新不会更新 desktop WebView。若要把 UI 变化计入 95% 高频端到端交付，必须增加签名、内容寻址、可离线启动且可回滚的热 Web bundle，或让壳从受控远程 origin 加载并重新完成 CSP/离线/信任模型评审。未完成前，涉及 desktop UI 的 change set 走完整模式。
+
 执行策略：按平台构建只带该平台二进制；release profile 开 `opt-level="z"` + LTO + strip；安装包压缩（NSIS LZMA / dmg 压缩）。
 
 现在的风险已经不是体积超标，而是**别让它慢慢长回去**：每次发版记录一次三个二进制的大小，涨幅异常就查。
@@ -176,7 +180,7 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 
 ## 5. 内置 Genet Agent（保证「装完就能跑」）
 
-桌面端随包内置 `genet-agent`（Rust，规格见 [builtin-agent.md](./builtin-agent.md)），解决的是**新用户第一分钟就得能跑起一条任务**，不能卡在"请先安装并登录某个 CLI"。
+桌面端随包的 `genehub_guest.wasm` 内置 Genet Agent（Rust 源码，规格见 [builtin-agent.md](./builtin-agent.md)），解决的是**新用户第一分钟就得能跑起一条任务**，不能卡在"请先安装并登录某个 CLI"。daemon 的 adapter 通过 `genet agent-serve` 再起一个 host OS 进程并选择同一制品的 `agent-run` 入口。
 
 - daemon 的 `genet` adapter 按需拉起它，用户不需要装任何外部 CLI。
 - 首启默认选中它，新用户的第一条任务就跑在它上面。

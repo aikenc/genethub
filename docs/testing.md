@@ -1,6 +1,6 @@
 # 测试规格
 
-> MVP 全面落地后执行。  
+> 状态（2026-08-22）：业务质量主干已迁到 `testing/` 的 TypeScript `testctl`、journeys、specialties 与 E2E；默认产物是 `genet-dev + genehub-host-dev + genehub_guest.wasm`。本页早期的 L1/J-mock/J-real 设计背景仍可读，但执行、产物与资格合同以 `testing/README.md` 及 Cloud `docs/testing/engineering-{principles,laws}.md` 为准。当前 331/331 qualified 是 Linux 本地 WASM parity 证据，既不能复用为 Windows 安装后首启证据，也不能复用为尚未存在的 official/高频发布资格。
 > 核心原则：**一套用例，两种模式。** 全链路集成与真实模型 E2E 跑的是**同一份测试代码**，唯一区别是 LLM 后端接的是 mock 还是真实模型。  
 > 用例全部**基于用户旅程**设计，不按模块切。  
 > 上位文档：[architecture.md](./architecture.md)。
@@ -280,7 +280,8 @@ Windows/macOS **装包之后**的首启仍要每次发版手动过一遍主旅�
 
 | 套件 | 位置 | 跑的是什么 | 需要什么 |
 |------|------|-----------|---------|
-| Rust 单元与集成 | `cargo test --workspace` | 协议、daemon 各模块、agent、旅程（daemon + agent + mock 模型） | **先 `cargo build --workspace --bins`**：旅程要真的拉起 daemon 与 agent 进程，而 `cargo test` 只会把别的包编成测试壳，不会产出可执行文件 |
+| testctl 业务主干 | `testing/{journeys,specialties,e2e}` | TypeScript 经公开 Client/CLI 驱动真实 launcher、host、WASM guest、agent、relay 与磁盘；run 绑定双仓 SHA/dirty/artifact | 按 `testing/README.md` 用 `testctl` 选择 policy；required 前置缺失必须 blocked，不得用旧 run 顶替 |
+| Rust 单元与 legacy | `cargo test --workspace`、`testing/deprecated/rust` | 性质/原生内在事实与冻结 parity；不是默认业务测试层 | 原生 `cargo build -p genet-cli -p genehub-host`；需要真实默认 daemon 时另构建 `cargo build --release -p genehub-guest --target wasm32-wasip2` |
 | 专项测试（OpenCode） | `testing/tests/opencode.rs` | **真实 OpenCode 进程**接同一个模型后端，事件归一化后进同一条时间线 | PATH 上有 `opencode`，否则跳过并打印原因 |
 | 专项测试（Claude Code） | `testing/tests/claude.rs` | **真实 `claude` 进程**（原生 `stream-json`，非 ACP wrapper）接 DeepSeek 的 Anthropic 兼容端点：基本对话、默认 bypass 放行、显式低权限模式下产生可持久化暂停点、daemon 中断请求真的打断生成 | `JOURNEY_LLM=real` + PATH 上有 `claude`，否则跳过并打印原因；只在真实模式跑（mock 不实现 Anthropic 协议） |
 | 专项测试（Cursor） | `testing/tests/cursor.rs` | **真实 `cursor-agent` 进程**（ACP over stdio）跑主旅程：探测的二进制真能起、ACP 握手真有应答、一个回合经归一化事件层进同一条时间线 | `JOURNEY_LLM=real` + PATH 上有登录过的 `cursor-agent`，否则跳过并打印原因；mock 模式不跑（它没有可指向 mock 的后端配置，同 Codex 的处境） |
@@ -289,8 +290,8 @@ Windows/macOS **装包之后**的首启仍要每次发版手动过一遍主旅�
 | 设备准入 | `testing/tests/devices.rs` | **真实 daemon + 进程内汇合 relay**：新设备经 relay 配对、换到凭证后重连、陌生人被拒、邀请码只能用一次、握手不能重放、撤销当场断连、重启后仍然可达且仍然认得旧设备 | 无 |
 | relay | `apps/relay && npm test` | 帧转发、契约、边界检查、wire 摘要 | 无 |
 | 工作台 | `packages/web && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |
-| **全栈旅程** | `packages/web/src/e2e/journey.test.ts` | **真实 daemon + 真实 agent + 脚本化模型**，用的是工作台自己的客户端 | `cargo build -p genet-cli` |
-| **自建全栈** | `packages/web/src/e2e/selfhosted.test.ts` | 只用开源件：**真实 relay（汇合模式）+ 真实 daemon + 真实 agent + 工作台自己的配对与客户端代码**。新设备配对进来能用整套工作台并**经转发跑完一轮流式对话**，历史留在机器上（第二台设备订阅同一会话就看得到），relay 被 kill 后 daemon 自己回来，没配对的连不上，撤销当场断 | `cargo build -p genet-cli -p genet-agent` + `apps/relay && npm run build` |
+| **全栈旅程** | `packages/web/src/e2e/journey.test.ts` | **真实 launcher + host + WASM daemon/agent + 脚本化模型**，用工作台自己的客户端 | 三件套 artifact + `testctl` 环境 |
+| **自建全栈** | `packages/web/src/e2e/selfhosted.test.ts` | 只用开源件：**真实 relay（汇合模式）+ 真实 WASM daemon + 独立 agent host + 工作台自己的配对与客户端代码**。新设备配对进来能经转发跑完一轮流式对话，历史留在机器上，relay 重启后自动恢复，撤销当场断 | 三件套 artifact + `apps/relay` build；由 `testctl` 隔离进程和证据 |
 | 跨栈配对 | 控制面仓库的 `test/pairing.test.ts`、`test/relay.test.ts` | daemon 自己走设备码配对，浏览器经 relay 连回来 | 同上 |
 | 跨栈首启 | 控制面仓库的 `test/first-run.test.ts` | 全程没有账号、没有 cookie、没人批准任何东西：daemon 自己拿到临时身份，另一个浏览器扫链接进来，经转发层连上这台机器 | 同上 |
 

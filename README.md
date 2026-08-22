@@ -36,13 +36,14 @@ GeneHub Agent 随安装包提供，配置 Anthropic 或 OpenAI-compatible 模型
 我们希望 coding agent 像 Git 和 SSH 一样，成为开发者**可以拥有、可以替换、可以自建**的基础设施，
 而不是被锁在某个终端、编辑器或云平台里的一次性对话。
 
-GeneHub 的设计遵循五条原则：
+GeneHub 的设计遵循六条原则：
 
 1. **机器是事实来源。** 工作区、密钥、进程和会话记录由你的机器持有；远端设备只是经过授权的操作界面。
 2. **Agent 是插件。** daemon 和前端只认统一协议，不把任何一家 agent 的私有事件格式变成产品协议。
 3. **会话应当跟着人，而不是跟着窗口。** 关掉页面、网络切换或换一台设备，都不该终止正在机器上执行的任务。
 4. **官方托管是便利，不是绑定。** 想省心，可以直接使用官方 Hub；需要自主控制时，也可以自行部署远程入口，不必迁移工作区或会话。
 5. **信任来自可核对的边界。** 数据保存在哪里、远程连接经过什么组件、设备如何获得授权，都应当在代码和文档中说清楚。
+6. **业务更新不应变成用户的安装任务。** 目标是 95% 的产品 change set 只更新 WASM guest 与工作台：official 分钟级，beta/alpha/dev 秒级，后台验签、切换和失败回滚；浏览器 UI 变化最多要求刷新。当前 Linux/dev 运行时底座已验证，Windows owner-only ACL 和自动交付链仍在 [roadmap](./docs/roadmap.md) 推进。
 
 ## 快速开始
 
@@ -83,9 +84,10 @@ genet hub link        # 为另一台设备生成一次性连接链接
 genet daemon stop     # 停止后台 daemon
 ```
 
-安装脚本会同时安装 `genet`（CLI 与 daemon 是同一个二进制）和 `genet-agent`，并在下载后强制校验
-`SHA256SUMS`。升级时请从 [GitHub Releases](https://github.com/aikenc/genethub/releases/latest)
-下载新版本并核对摘要。
+安装脚本会安装薄 CLI `genet`、原生装载壳 `genehub-host` 和同时承载 daemon/agent 两个入口的
+`genehub_guest.wasm`，并在下载后强制校验 `SHA256SUMS`。**当前**升级仍需从
+[GitHub Releases](https://github.com/aikenc/genethub/releases/latest) 下载新版本并核对摘要；独立签名根、
+组件自动更新与回滚落地前，不会把摘要校验描述成安全的无感更新。
 
 ### macOS
 
@@ -96,7 +98,7 @@ macOS 桌面端代码和进程监督测试已经存在，但公开安装包要�
 
 ```mermaid
 flowchart LR
-    desktop[桌面工作台] -->|loopback| daemon[GeneHub daemon]
+    desktop[桌面工作台] -->|loopback| daemon[genehub-host + WASM daemon guest]
     remote[浏览器 / 手机] <-->|加密连接| relay[Relay]
     relay <-->|转发| daemon
     daemon --> kernel[会话 · 文件 · Git · 终端]
@@ -107,7 +109,8 @@ flowchart LR
 
 | 部件 | 职责 |
 | --- | --- |
-| **daemon**（Rust） | 机器上的唯一常驻进程；管理工作区、会话、文件、Git、终端、设备授权，并按需拉起 agent |
+| **daemon guest**（Rust → WASM Component） | 机器上的常驻业务运行时；管理工作区、会话、文件、Git、终端、设备授权，并按需拉起 agent |
+| **native host / CLI**（Rust） | Wasmtime/WASI 与 OS/连接资源、daemon 生命周期、薄 argv 转发；不解释产品动词 |
 | **adapter**（Rust） | 探测不同 agent，把它们的协议、事件和能力翻译成 GeneHub 的统一模型 |
 | **Relay**（Node.js） | 为跨设备连接转发加密数据；不解析业务内容，也不保存 GeneHub 会话 |
 | **workbench**（React） | 同一份前端运行在桌面 WebView、浏览器和手机上 |
@@ -154,8 +157,9 @@ GeneHub 的开源形态不依赖官方账号系统。最小远程部署由三部
 git clone https://github.com/aikenc/genethub.git
 cd genethub
 
-# Rust：CLI/daemon、内置 agent、协议与测试工具
-cargo build --workspace --bins
+# 原生 launcher/host，以及单平台 WASM guest
+cargo build -p genet-cli -p genehub-host
+cargo build --release -p genehub-guest --target wasm32-wasip2
 
 # Web workbench 与 Relay
 npm ci --prefix packages/web
@@ -164,8 +168,9 @@ npm --prefix packages/web run build
 npm --prefix apps/relay run build
 ```
 
-源码树始终使用隔离的 `dev` channel：构建出的二进制名是 `genet-dev` / `genet-agent-dev`，版本为
-`0.0.0`，并且**没有默认 Hub 地址**。这是为了避免本地开发意外读写正式版的数据或连到正式服务。
+源码树始终使用隔离的 `dev` channel：构建出的原生入口是 `genet-dev` / `genehub-host-dev`，业务制品是
+`genehub_guest.wasm`，版本为 `0.0.0`，并且**没有默认 Hub 地址**。这是为了避免本地开发意外读写
+正式版的数据或连到正式服务。
 
 ```bash
 ./target/debug/genet-dev daemon start
@@ -181,8 +186,9 @@ npm --prefix apps/relay run build
 ### 测试
 
 ```bash
-# 旅程测试会拉起真实 daemon/agent 二进制，所以先 build
-cargo build --workspace --bins
+# 旅程测试会拉起真实 launcher/host/guest，所以先构建三件套
+cargo build -p genet-cli -p genehub-host
+cargo build --release -p genehub-guest --target wasm32-wasip2
 cargo test --workspace --no-fail-fast
 
 npm --prefix apps/relay run typecheck
@@ -206,9 +212,11 @@ node apps/desktop/scripts/bundle.mjs
 
 | 路径 | 内容 |
 | --- | --- |
-| `apps/cli` | `genet` CLI，以及启动/管理 daemon 的入口 |
-| `apps/daemon` | 会话内核、adapter、工作区能力和本地/远端传输 |
-| `apps/agent` | 随包提供的 GeneHub Agent |
+| `apps/cli` | `genet` 薄 CLI，以及启动/管理 daemon 的原生入口 |
+| `apps/host` | Wasmtime/WASI 壳与 typed OS/RTC 连接资源 |
+| `apps/guest` | `genehub_guest.wasm` 的 daemon/agent 双入口 |
+| `apps/daemon` | 编入 guest 的会话内核、adapter、工作区能力和本地/远端传输 |
+| `apps/agent` | 编入同一 guest 的 GeneHub Agent |
 | `apps/relay` | 无状态 Fabric Relay |
 | `apps/desktop` | Windows/macOS Tauri 2 桌面壳 |
 | `packages/proto` | Rust 协议定义及生成的 TypeScript bindings |
