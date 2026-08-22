@@ -12,7 +12,6 @@ mod place;
 mod process;
 mod query;
 mod rpc;
-#[cfg(not(target_family = "wasm"))]
 mod rpc_wire;
 mod shell;
 mod speech;

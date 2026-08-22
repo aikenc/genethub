@@ -98,7 +98,7 @@ stdin 只用于 `genet shell` 的管道输入，上限仍是 1 MiB。更大的�
 远程（`--machine` / Hub ticket）：
 
 - 本机 daemon 作为 peer 去拨对端（原 `Rpc::connect_remote` / `connect_hosted`）
-- **v1 缺口**：guest 里 fabric 仍是诚实不可用（`transport/fabric_wasm.rs`）。`--machine` 在 wasm 默认路径上会得到明确失败，而不是静默降级成本地。补上 guest fabric 之后，这条路自动接通，CLI 不用再改。
+- guest 自己开 Fabric socket（`wasi:sockets` + `wasi:tls`，见 [wasm-guest-network.md](./wasm-guest-network.md)），这条路在默认 wasm 形态上是通的。`cli_front/rpc*.rs` 因此不再有 wasm 分支
 
 ## 6. 和发布模式的关系
 
@@ -116,12 +116,12 @@ CLI crate 若仍 `depend` `genet-daemon`（为 Paths / lifecycle / isolation / �
 - `genet session list`（本机、daemon 已起）stdout 合同与改前相同，且原生 CLI 源码不再含 `Request::SessionList`
 - `genet daemon stop` 在 daemon 无响应时仍能按 lock-file pid 停掉它
 - `genet` 无参数、daemon 没起，仍打印 usage、exit 2
-- `--machine` 在 guest fabric 未接通时失败信息含「fabric」或等价诚实不可用，不得假装在本机执行
+- `--machine` 在默认 wasm 路径上真的连到对端；连不上时报连接失败，不得假装在本机执行
 - 既有 CLI journey / specialty 在默认 wasm 路径上通过
 
 ## 8. 非目标
 
 - 不把 CLI 装进 wasm 再 exec 一次（那是更慢的同一重量）
-- 不在本变更接通 guest fabric / RTC
+- 不在本变更接通 guest RTC
 - 不改桌面壳；桌面继续走 `/ws` 数据面
 - 不把 `/cli` 暴露到 loopback 以外

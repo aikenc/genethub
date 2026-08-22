@@ -111,9 +111,12 @@ impl Rpc {
             &endpoint_file.fingerprint,
         );
 
-        let (mut socket, _) = tokio_tungstenite::connect_async(&admission.url)
-            .await
-            .map_err(|_| ConnectError::Unavailable(dial_failure(endpoint_file.port)))?;
+        let mut socket = crate::transport::ws::connect(
+            &admission.url,
+            tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default(),
+        )
+        .await
+        .map_err(|_| ConnectError::Unavailable(dial_failure(endpoint_file.port)))?;
         let nonce = crate::devices::random_token();
         let context = "loopback";
         let hello = PeerHello {

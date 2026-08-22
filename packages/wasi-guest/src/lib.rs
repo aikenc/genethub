@@ -12,6 +12,9 @@
 pub mod wit;
 
 #[cfg(target_family = "wasm")]
+pub mod net;
+
+#[cfg(target_family = "wasm")]
 pub mod poll;
 
 #[cfg(target_family = "wasm")]
@@ -22,3 +25,6 @@ pub mod pty;
 
 #[cfg(target_family = "wasm")]
 pub mod stdio;
+
+#[cfg(target_family = "wasm")]
+pub mod tls;

@@ -71,6 +71,8 @@ testing/              ← 跨部件旅程测试
 | `/fabric/v2` WSS baseline | 任何跨设备访问，包括同一个 Wi-Fi | 多一跳；托管模式需要 Control admission |
 | WebRTC DataChannel direct | baseline 已认证、双方启用且 ICE 可达 | 少一跳；MVP 无 TURN，不能保证成功 |
 
+daemon 跑在 wasm component 里时，前两条不变——guest 自己开 socket，`wasi:tls` 在壳里做握手，见 [wasm-guest-network.md](./wasm-guest-network.md)。第三条在该形态下暂缺：`connection.identity` 会如实回 `rtcSupported: false`，对端因此停在 baseline，而不是先协商再失败。
+
 三者承载同一 protocol-v3 E2EE record、logical streams 和 Exchange。跨设备始终先有 Fabric baseline，再通过加密 signaling 建立 RTC；RTC 失败时 baseline 继续可用。没有 live stream migration 或请求自动重放。断网时仍可在运行 daemon 的同一台电脑上使用桌面端。
 
 ---

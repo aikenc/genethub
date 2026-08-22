@@ -11,6 +11,7 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::p2::bindings::Command;
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
+use wasmtime_wasi_tls::{WasiTlsCtx, WasiTlsCtxBuilder, WasiTlsCtxView, WasiTlsView};
 
 /// `wasmtime::Error` deliberately does not implement `std::error::Error` — it
 /// would collide with `anyhow`'s blanket conversion — so `anyhow::Context` does
@@ -35,6 +36,7 @@ pub struct Host {
     pub wasi: WasiCtx,
     pub http: WasiHttpCtx,
     pub http_hooks: crate::http_hooks::Hooks,
+    pub tls: WasiTlsCtx,
 }
 
 impl WasiView for Host {
@@ -52,6 +54,15 @@ impl WasiHttpView for Host {
             ctx: &mut self.http,
             table: &mut self.table,
             hooks: &mut self.http_hooks,
+        }
+    }
+}
+
+impl WasiTlsView for Host {
+    fn tls(&mut self) -> WasiTlsCtxView<'_> {
+        WasiTlsCtxView {
+            ctx: &mut self.tls,
+            table: &mut self.table,
         }
     }
 }
@@ -267,6 +278,7 @@ fn build_instance(
             wasi: wasi.build(),
             http: WasiHttpCtx::new(),
             http_hooks: crate::http_hooks::Hooks::default(),
+            tls: WasiTlsCtxBuilder::new().build(),
         },
     );
     let mut linker = Linker::new(engine);
@@ -278,6 +290,16 @@ fn build_instance(
     wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)
         .anyhow()
         .context("wasi:http linker")?;
+    // Same split one layer down, for the wire `wasi:http` does not cover:
+    // WebSocket has no upgrade in `wasi:http` 0.2, so Fabric's `wss://` is a
+    // socket the guest opens and a handshake the host performs. `wasi:tls` is
+    // still gated as an unstable proposal, so the feature has to be asked for
+    // by name.
+    let mut tls = wasmtime_wasi_tls::p2::LinkOptions::default();
+    tls.tls(true);
+    wasmtime_wasi_tls::p2::add_to_linker(&mut linker, &mut tls)
+        .anyhow()
+        .context("wasi:tls linker")?;
     crate::bindings::genehub::host::process::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
         .anyhow()
         .context("process linker")?;
@@ -390,3 +412,4 @@ fn debug_log(message: &str) {
         eprintln!("genehub-host: {message}");
     }
 }
+

@@ -50,6 +50,7 @@ webrtc = "0.17.2"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 genet-wasi = { path = "../../packages/wasi-guest" }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 tokio = { version = "1", default-features = false, features = [
   "rt",
   "macros",

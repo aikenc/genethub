@@ -2,8 +2,9 @@
 //!
 //! Local calls go through `router::handle` on this daemon. They never open a
 //! second loopback WebSocket. Remote calls (`--machine`, Hub ticket, pairing)
-//! stay on the native fabric client; the wasm guest reports that fabric is
-//! unavailable instead of silently running the command here.
+//! leave this machine as Fabric peer links — the same client on a native build
+//! and inside the component, because the guest opens its own `wss://` now
+//! (`transport/ws.rs`). The CLI process is not an endpoint on either path.
 
 use genehub_proto::{
     Confinement, HelloResult, HubTicket, ProtocolError, Reply, Request, SequencedEvent, ShellFrame,
@@ -16,13 +17,8 @@ use crate::router::{self, SideEffect};
 use crate::state::Shared;
 
 use super::machines::PairedMachine;
-use super::{fail, EXIT_UNREACHABLE};
-
-#[cfg(not(target_family = "wasm"))]
 use super::rpc_wire;
-
-const FABRIC_UNAVAILABLE: &str =
-    "guest fabric is not available in this build; --machine cannot reach another host until the wasm fabric uplink is connected";
+use super::{fail, EXIT_UNREACHABLE};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RpcError {
@@ -80,10 +76,6 @@ impl std::fmt::Display for ConnectError {
 
 impl std::error::Error for ConnectError {}
 
-fn fabric_unavailable() -> ConnectError {
-    ConnectError::Unavailable(FABRIC_UNAVAILABLE.into())
-}
-
 /// What arrives on the event stream that a conversation cares about.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Payload {
@@ -97,7 +89,6 @@ pub struct Rpc {
 
 enum Inner {
     Local(Local),
-    #[cfg(not(target_family = "wasm"))]
     Remote(rpc_wire::Rpc),
 }
 
@@ -160,51 +151,34 @@ impl Rpc {
     }
 
     pub async fn connect_remote(machine: &PairedMachine) -> Result<Self, ConnectError> {
-        #[cfg(target_family = "wasm")]
-        {
-            let _ = machine;
-            return Err(fabric_unavailable());
-        }
-        #[cfg(not(target_family = "wasm"))]
-        {
-            let machine = machine.clone();
-            match tokio::spawn(async move { rpc_wire::Rpc::connect_remote(&machine).await }).await {
-                Ok(Ok(remote)) => Ok(Self {
-                    inner: Inner::Remote(remote),
-                }),
-                Ok(Err(error)) => Err(error.into()),
-                Err(join) => Err(ConnectError::Unavailable(format!(
-                    "remote connect task failed: {join}"
-                ))),
-            }
+        let machine = machine.clone();
+        match tokio::spawn(async move { rpc_wire::Rpc::connect_remote(&machine).await }).await {
+            Ok(Ok(remote)) => Ok(Self {
+                inner: Inner::Remote(remote),
+            }),
+            Ok(Err(error)) => Err(error.into()),
+            Err(join) => Err(ConnectError::Unavailable(format!(
+                "remote connect task failed: {join}"
+            ))),
         }
     }
 
     pub async fn connect_hosted(ticket: &HubTicket) -> Result<Self, ConnectError> {
-        #[cfg(target_family = "wasm")]
-        {
-            let _ = ticket;
-            return Err(fabric_unavailable());
-        }
-        #[cfg(not(target_family = "wasm"))]
-        {
-            let ticket = ticket.clone();
-            match tokio::spawn(async move { rpc_wire::Rpc::connect_hosted(&ticket).await }).await {
-                Ok(Ok(remote)) => Ok(Self {
-                    inner: Inner::Remote(remote),
-                }),
-                Ok(Err(error)) => Err(error.into()),
-                Err(join) => Err(ConnectError::Unavailable(format!(
-                    "remote connect task failed: {join}"
-                ))),
-            }
+        let ticket = ticket.clone();
+        match tokio::spawn(async move { rpc_wire::Rpc::connect_hosted(&ticket).await }).await {
+            Ok(Ok(remote)) => Ok(Self {
+                inner: Inner::Remote(remote),
+            }),
+            Ok(Err(error)) => Err(error.into()),
+            Err(join) => Err(ConnectError::Unavailable(format!(
+                "remote connect task failed: {join}"
+            ))),
         }
     }
 
     pub fn hello(&self) -> &HelloResult {
         match &self.inner {
             Inner::Local(local) => &local.hello,
-            #[cfg(not(target_family = "wasm"))]
             Inner::Remote(remote) => remote.hello(),
         }
     }
@@ -233,7 +207,6 @@ impl Rpc {
                 }
                 handled.reply.map_err(RpcError::Remote)
             }
-            #[cfg(not(target_family = "wasm"))]
             Inner::Remote(remote) => Ok(remote.call(request).await?),
         }
     }
@@ -241,7 +214,6 @@ impl Rpc {
     pub async fn watch_events(&self) -> Result<(), RpcError> {
         match &self.inner {
             Inner::Local(_) => Ok(()),
-            #[cfg(not(target_family = "wasm"))]
             Inner::Remote(remote) => Ok(remote.watch_events().await?),
         }
     }
@@ -249,7 +221,6 @@ impl Rpc {
     pub async fn next_event(&self) -> Option<Payload> {
         match &self.inner {
             Inner::Local(local) => local.events.lock().await.recv().await,
-            #[cfg(not(target_family = "wasm"))]
             Inner::Remote(remote) => remote.next_event().await.map(wire_payload),
         }
     }
@@ -276,7 +247,6 @@ impl Rpc {
                     },
                 })
             }
-            #[cfg(not(target_family = "wasm"))]
             Inner::Remote(remote) => {
                 let running = remote.run_command(request, stdin).await?;
                 Ok(Running {
@@ -327,7 +297,6 @@ enum RunningInner {
     Local {
         frames: mpsc::Receiver<ShellFrame>,
     },
-    #[cfg(not(target_family = "wasm"))]
     Remote(rpc_wire::Running),
 }
 
@@ -335,30 +304,20 @@ impl Running {
     pub async fn next(&mut self) -> Option<ShellFrame> {
         match &mut self.inner {
             RunningInner::Local { frames } => frames.recv().await,
-            #[cfg(not(target_family = "wasm"))]
             RunningInner::Remote(running) => running.next().await,
         }
     }
 }
 
 pub struct Pairing {
-    #[cfg(not(target_family = "wasm"))]
     inner: rpc_wire::Pairing,
 }
 
 impl Pairing {
     pub async fn open(endpoint: &str, invite_id: &str, secret: &str) -> Result<Self, ConnectError> {
-        #[cfg(target_family = "wasm")]
-        {
-            let _ = (endpoint, invite_id, secret);
-            return Err(fabric_unavailable());
-        }
-        #[cfg(not(target_family = "wasm"))]
-        {
-            Ok(Self {
-                inner: rpc_wire::Pairing::open(endpoint, invite_id, secret).await?,
-            })
-        }
+        Ok(Self {
+            inner: rpc_wire::Pairing::open(endpoint, invite_id, secret).await?,
+        })
     }
 
     pub async fn claim(
@@ -366,19 +325,10 @@ impl Pairing {
         invite_id: &str,
         device_name: &str,
     ) -> Result<genehub_proto::DeviceCredential, RpcError> {
-        #[cfg(target_family = "wasm")]
-        {
-            let _ = (self, invite_id, device_name);
-            Err(RpcError::Transport(FABRIC_UNAVAILABLE.into()))
-        }
-        #[cfg(not(target_family = "wasm"))]
-        {
-            Ok(self.inner.claim(invite_id, device_name).await?)
-        }
+        Ok(self.inner.claim(invite_id, device_name).await?)
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn wire_payload(payload: rpc_wire::Payload) -> Payload {
     match payload {
         rpc_wire::Payload::Event(event) => Payload::Event(event),
@@ -386,7 +336,6 @@ fn wire_payload(payload: rpc_wire::Payload) -> Payload {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 impl From<rpc_wire::ConnectError> for ConnectError {
     fn from(error: rpc_wire::ConnectError) -> Self {
         match error {
@@ -406,7 +355,6 @@ impl From<rpc_wire::ConnectError> for ConnectError {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 impl From<rpc_wire::RpcError> for RpcError {
     fn from(error: rpc_wire::RpcError) -> Self {
         match error {
@@ -435,12 +383,42 @@ fn error_code_name(code: genehub_proto::ErrorCode) -> &'static str {
 mod tests {
     use super::*;
 
+    /// `--machine` used to be answered by a build-shaped excuse on wasm. The
+    /// guest dials for itself now, so a refusal has to come back carrying the
+    /// dialer's own distinction between "not now" and "not you" — a caller
+    /// deciding whether waiting is worth anything reads exactly that.
     #[test]
-    fn remote_failure_names_fabric() {
-        let message = fabric_unavailable().to_string();
-        assert!(
-            message.contains("fabric"),
-            "honest unavailability must name fabric: {message}"
+    fn a_refusal_keeps_its_reason_across_the_wire_boundary() {
+        for (wire, expected) in [
+            (rpc_wire::Refusal::Offline, Refusal::Offline),
+            (rpc_wire::Refusal::Credential, Refusal::Credential),
+            (rpc_wire::Refusal::Busy, Refusal::Busy),
+            (rpc_wire::Refusal::Other, Refusal::Other),
+        ] {
+            let converted: ConnectError = rpc_wire::ConnectError::Refused {
+                reason: wire,
+                message: "that machine is not answering".into(),
+            }
+            .into();
+            let ConnectError::Refused { reason, message } = converted else {
+                panic!("a refusal must stay a refusal, not become {converted:?}");
+            };
+            assert_eq!(reason, expected);
+            assert_eq!(message, "that machine is not answering");
+        }
+    }
+
+    /// The one thing this layer must never do is answer a request meant for
+    /// another machine by running it here.
+    #[test]
+    fn remote_failures_are_never_silently_local() {
+        let unavailable: ConnectError =
+            rpc_wire::ConnectError::Unavailable("the relay did not answer in time".into()).into();
+        assert!(matches!(unavailable, ConnectError::Unavailable(_)));
+        assert_eq!(
+            unavailable.to_string(),
+            "the relay did not answer in time",
+            "the reason a remote call failed is the caller's, not this layer's to rewrite"
         );
     }
 }

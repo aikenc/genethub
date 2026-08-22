@@ -27,6 +27,7 @@ apps/daemon/src/
 ├── transport/
 │   ├── local.rs      本地 HTTP + WebSocket（127.0.0.1，回环）
 │   ├── fabric.rs     endpoint-neutral /fabric/v2 出站 uplink
+│   ├── ws.rs         WebSocket 客户端；原生直连，guest 经 wasi:sockets + wasi:tls
 │   └── admission.rs  loopback/device/hosted/RTC peer admission
 ├── dataplane/
 │   ├── handshake.rs  protocol-v3 PSK 双向证明
@@ -64,7 +65,7 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 |---|---|
 | `ws://127.0.0.1:<port>/ws` | 同机 client；loopback 一次性 admission |
 | daemon 出站 `wss://<relay>/fabric/v2` | 所有跨设备连接的 E2EE baseline；一条 uplink 接收多条 routed peer carrier |
-| ordered reliable WebRTC DataChannel | 远端 peer 的可选 direct carrier；通过 baseline 内的 E2EE Exchange 协商 |
+| ordered reliable WebRTC DataChannel | 远端 peer 的可选 direct carrier；通过 baseline 内的 E2EE Exchange 协商。daemon 跑在 wasm component 里时没有这一条，`connection.identity` 会如实回 `rtcSupported: false`，见 [wasm-guest-network.md](./wasm-guest-network.md) |
 
 三个 carrier 都承载同一套 protocol-v3 E2EE record、`DataEndpoint` 和 Exchange。daemon 永远不在公网或局域网监听特权协议；旧 `lanEnabled: true` 会明确失败。同 Wi-Fi 也先走 WSS Fabric，RTC 成功后新请求才 direct；只有 literal loopback 可使用明文 WS。
 

@@ -203,6 +203,19 @@ pub(crate) async fn start(
                     );
                     break child.end().await;
                 }
+                // The caller went away: the peer reset the stream, or its
+                // carrier died and the handler holding this receiver was
+                // aborted. A command that produces no output would otherwise
+                // learn about it only when it next wrote something — that is,
+                // never — and outlive the request that asked for it.
+                () = out.closed() => {
+                    tracing::debug!(
+                        argv = ?argv_log,
+                        "the caller went away and the command was ended with it",
+                    );
+                    child.end().await;
+                    return;
+                }
             }
         };
         while let Ok(Some(frame)) = tokio::time::timeout(SETTLE, frames.recv()).await {
