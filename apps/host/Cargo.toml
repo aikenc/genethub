@@ -11,7 +11,11 @@ name = "genehub-host-dev"
 path = "src/main.rs"
 
 [dependencies]
+genehub-proto = { path = "../../packages/proto" }
+genet-native = { path = "../../packages/native" }
+
 anyhow.workspace = true
+bytes = "1"
 fs2.workspace = true
 http = "1"
 http-body-util = "0.1"
@@ -22,6 +26,10 @@ wasmtime = { version = "48", default-features = false, features = ["anyhow", "as
 wasmtime-wasi = "48"
 wasmtime-wasi-http = "48"
 wasmtime-wasi-tls = "48"
+# The connection half of `genehub:host/rtc`. Native by nature: ICE opens raw
+# UDP sockets and DTLS and SCTP run their own clocks, none of which a component
+# can do (`src/rtc.rs`).
+webrtc = "0.17.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

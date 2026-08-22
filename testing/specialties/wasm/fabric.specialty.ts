@@ -155,13 +155,13 @@ defineSpecialty(
 
 defineSpecialty(
   fabricMeta(
-    "specialty.wasm.fabric.rtc-is-answered-honestly",
-    "The component daemon says it has no direct RTC rather than letting a peer negotiate one",
-    "connection.identity from the wasm daemon reports rtcSupported false, so a viewer stays on the Fabric baseline instead of spending a doomed negotiation",
+    "specialty.wasm.fabric.rtc-is-offered-by-the-component-too",
+    "The component daemon offers the direct RTC upgrade the native one does",
+    "connection.identity from the wasm daemon reports rtcSupported true, so a viewer that can reach this machine directly is not held on the relay by which build answered it",
     [
-      "the guest advertises RTC it cannot establish, and every viewer pays a failed negotiation",
-      "rtc_supported is hard-coded true regardless of what the build can carry",
-      "the native daemon quietly loses RTC along with the guest",
+      "the guest silently loses the RTC upgrade and every viewer stays on the slower relay path",
+      "rtc_supported is answered per build rather than by what the shell can carry",
+      "the wasm daemon advertises RTC without a shell import behind it",
     ],
   ),
   async (t) => {
@@ -169,8 +169,8 @@ defineSpecialty(
       const identity = await opened.client.call({ type: "connection.identity" });
       if (identity?.type !== "hello") throw new Error("connection.identity failed");
       t.assertions.assert(
-        identity.data.rtcSupported === false,
-        `the component daemon advertised RTC: ${JSON.stringify(identity.data)}`,
+        identity.data.rtcSupported === true,
+        `the component daemon disclaimed RTC: ${JSON.stringify(identity.data)}`,
       );
     });
   },

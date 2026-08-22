@@ -943,10 +943,13 @@ fn json_logged_in(value: &Value) -> Option<bool> {
 /// A process of its own because the model and mode tables are wanted for the
 /// agent picker, which is drawn long before any session exists.
 async fn discover(program: &Path, command: &[String]) -> Option<Hello> {
+    // Somewhere that exists and says nothing about any of the user's projects:
+    // this answer is cached for every workspace.
+    let scratch = crate::os_process::scratch_dir();
     let mut spawn = Command::new(program);
     spawn
         .args(&command[1..])
-        .current_dir(std::env::temp_dir())
+        .current_dir(&scratch)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -987,7 +990,7 @@ async fn discover(program: &Path, command: &[String]) -> Option<Hello> {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "session/new",
-                "params": { "cwd": std::env::temp_dir(), "mcpServers": [] },
+                "params": { "cwd": scratch, "mcpServers": [] },
             }),
         )
         .await
@@ -2420,13 +2423,24 @@ mod tests {
         assert!(drain(&mut rx).is_empty());
     }
 
-    /// When cursor-agent is on PATH, discovery should return real modes.
+    /// When cursor-agent is on PATH and signed in, discovery should return real
+    /// modes.
+    ///
+    /// A CLI that is installed but signed out answers `initialize` and then
+    /// refuses to open a session, which is the adapter working correctly — the
+    /// picker reports it as unavailable and says why. So this skips on the same
+    /// answer the adapter itself acts on, rather than reporting the machine's
+    /// login state as a defect in this code.
     #[tokio::test]
     async fn discover_cursor_when_installed() {
         let Some(program) = crate::adapter::find_executable("cursor-agent") else {
             eprintln!("skipping discover_cursor_when_installed: cursor-agent not on PATH");
             return;
         };
+        if logged_in(&program).await == Some(false) {
+            eprintln!("skipping discover_cursor_when_installed: cursor-agent is not signed in");
+            return;
+        }
         let hello = discover(
             &program,
             &[

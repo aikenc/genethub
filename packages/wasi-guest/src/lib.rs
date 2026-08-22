@@ -24,6 +24,9 @@ pub mod process;
 pub mod pty;
 
 #[cfg(target_family = "wasm")]
+pub mod rtc;
+
+#[cfg(target_family = "wasm")]
 pub mod stdio;
 
 #[cfg(target_family = "wasm")]

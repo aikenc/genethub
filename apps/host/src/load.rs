@@ -312,6 +312,12 @@ fn build_instance(
     crate::bindings::genehub::host::pty::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
         .anyhow()
         .context("pty linker")?;
+    crate::bindings::genehub::host::isolation::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+        .anyhow()
+        .context("isolation linker")?;
+    crate::bindings::genehub::host::rtc::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+        .anyhow()
+        .context("rtc linker")?;
     Ok((store, linker))
 }
 

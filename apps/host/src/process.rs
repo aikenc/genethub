@@ -220,6 +220,16 @@ impl wit::Host for crate::load::Host {
                 message: error.to_string(),
             })
     }
+
+    async fn locate(&mut self, name: String, extra: Vec<String>) -> Option<String> {
+        let extra: Vec<std::path::PathBuf> = extra.into_iter().map(Into::into).collect();
+        genet_native::locate::find_executable_in(&name, &extra)
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    async fn scratch_dir(&mut self) -> String {
+        std::env::temp_dir().to_string_lossy().into_owned()
+    }
 }
 
 #[cfg(unix)]

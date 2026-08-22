@@ -656,7 +656,7 @@ async fn discover(program: &Path) -> Option<Hello> {
         .args(app_server_args())
         // Somewhere that exists and says nothing about any of the user's
         // projects: this answer is cached for every workspace.
-        .current_dir(std::env::temp_dir())
+        .current_dir(crate::os_process::scratch_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

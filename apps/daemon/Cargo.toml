@@ -14,6 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 genehub-proto = { path = "../../packages/proto" }
+genet-native = { path = "../../packages/native" }
 
 anyhow.workspace = true
 aes-gcm.workspace = true
@@ -71,9 +72,6 @@ windows-sys = { version = "0.61", features = [
   "Win32_Storage_FileSystem",
   "Win32_System_Threading",
 ] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-landlock = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

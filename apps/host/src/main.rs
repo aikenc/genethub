@@ -8,9 +8,11 @@ mod channel;
 mod file_lock;
 mod fs_perms;
 mod http_hooks;
+mod isolation;
 mod load;
 mod process;
 mod pty;
+mod rtc;
 
 use std::env;
 use std::path::PathBuf;
@@ -18,6 +20,18 @@ use std::path::PathBuf;
 fn main() {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
+        // Before anything else, and deliberately before the tokio runtime the
+        // guest needs: a process that has started a thread can no longer
+        // create a user namespace, so the confinement wrapper has to be the
+        // first thing this binary can become
+        // (`packages/native/src/confine.rs`).
+        //
+        // The guest names whichever native front door the shell told it about,
+        // and that may be this one, so this one has to answer to it too.
+        Some(genet_native::confine::CONFINE_ARG) => {
+            let rest: Vec<String> = args.collect();
+            std::process::exit(genet_native::confine::confine_and_exec(&rest));
+        }
         Some("run") => {
             let (component, entry, guest_args) = parse_run(args).unwrap_or_else(|error| {
                 eprintln!("{error}");

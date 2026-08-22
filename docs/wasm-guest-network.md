@@ -48,22 +48,35 @@ pub async fn connect(url: &str, config: WebSocketConfig) -> Result<Socket, Error
 
 `genet-wasi` 全 crate 的规矩在这里一样成立：任何 import 都不许阻塞整个 instance。WASI socket 按契约是非阻塞的，就绪用 `pollable` 表示，而 `pollable.ready()` 立即返回——所以每一次等待都是「探一下 + 共享定时器退避」，与 `stdio.rs` 用的是同一个 `Backoff`。`poll_read` / `poll_write` 里没有 `pollable.block()`。
 
-## 4. RTC
+## 4. RTC：连接归壳，策略归 guest
 
-RTC direct 在这个形态下暂缺。`webrtc-rs` 是原生栈：ICE 要裸 UDP、要自己的定时器，component 托不住它。
+`webrtc-rs` 确实托不进 component——ICE 要裸 UDP，DTLS 与 SCTP 各自带时钟。但托不住的只是**连接**，不是这条通道的产品含义。所以这里的切法和 §2 同构，只是换了一层：
 
-处理方式是**如实回答**而不是静默失败：`connection.identity` 的 `rtcSupported` 现在来自 `dataplane::rtc::SUPPORTED`，在 wasm 上是 `false`。对端因此停在 baseline，`rtcState` 是 `unavailable`，而不是先花一轮协商再报一次失败。
+```
+daemon（guest）              哪个 offer 值得答、谁准进来、
+  │                          一个陌生人能占多久 slot
+  ├─ dataplane/rtc_guest.rs  ← 与 rtc_host.rs 共用同一份策略常量
+  └─ genehub:host/rtc        ← offer 进、answer 出、有序二进制消息双向
+       └─ genehub-host（webrtc-rs）  ICE / DTLS / SCTP
+```
 
-能力上这不是缺口而是慢一跳：`DataEndpoint` 把 baseline 当正式 transport，RTC 只是升级项（[e2ee-data-plane.md](./e2ee-data-plane.md) §2.3）。原生构建不受影响，`rtc_host.rs` 一行未动。
+`genehub:host/rtc` 里没有一点产品知识：它不认识 admission、不认识 handshake、不知道 label 为什么叫 `genehub-data-v3`（label 是 guest 传进去的），也不知道消息里是什么。它给的是「一条按标签认下来的有序数据通道」，与 `process` 给「一个子进程」是同一类事。判定仍在 guest：slot 上限、capability 的有效期、hello 超时、以及「RTC secret 是 transport 升级而不是新权限」这条——`rtc_guest.rs` 与 `rtc_host.rs` 逐条相同，因为它们本来就是同一份策略的两种载法。
+
+`connection.identity` 的 `rtcSupported` 仍然来自 `dataplane::rtc::SUPPORTED`，只是两个构建现在都答 `true`：对端不必再根据 daemon 是哪种构建来决定要不要升级。
+
+不阻塞的规矩在这里也一样：`session.answer()` / `receive()` 立即返回，等待是探一下加共享定时器；两个方向由一个任务搬运，忙的时候不等待，两头都安静了才退避。
 
 ## 5. 完成门
 
 - `specialty.wasm.fabric.guest-opens-its-own-uplink`：站在 relay 的位置上，收到的是 daemon 发来的 `GET /fabric/v2?ticket=…` WebSocket upgrade，随后 `device.list` 的 `remote.online` 才为 true
 - `specialty.wasm.fabric.wss-is-encrypted-before-it-is-http`：对 `wss://` 端点写下的第一批字节是 TLS record（`0x16 0x03 …`），明文 upgrade 行不出现；握手无法验证时 `remote.online` 保持 false
+- `specialty.wasm.fabric.rtc-is-offered-by-the-component-too`：component daemon 的 `connection.identity` 报 `rtcSupported: true`
+- `apps/host/src/rtc.rs` 的两条 test：一个真实 WebRTC 对端发来的 offer 被答复、约定 label 的通道双向过字节；label 不对的通道被关掉且一个字节都进不了队列
 - `--machine` 在默认 wasm 路径上走通本机 daemon → relay → 对端 daemon，不再返回「fabric 不可用」
 
 ## 6. 非目标
 
 - 不在 guest 里放 crypto provider（那等于把根信任和 CVE 跟进搬进 component）
 - 不为 WebSocket 造私有 host ABI（`wasi:tls` 是标准 import，能随提案毕业而稳定）
-- 不在本变更接通 guest RTC
+- 不把 RTC 的策略搬进壳（壳只管连接；谁准进来仍由 guest 判）
+- 不加 TURN：中继化的 RTC 就是 baseline 再慢一跳

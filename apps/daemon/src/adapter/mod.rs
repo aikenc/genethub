@@ -402,48 +402,24 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
 
 /// PATH first, then extra directories. Extra dirs use the same `PATHEXT` walk
 /// as `PATH` — we do not guess `.exe` vs `.cmd` vs `.bat`.
+#[cfg(not(target_family = "wasm"))]
 pub fn find_executable_in(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
-    if name.contains(std::path::MAIN_SEPARATOR) {
-        let direct = PathBuf::from(name);
-        return direct.is_file().then_some(direct);
-    }
-    let extensions = executable_extensions();
-    // Skipped in the guest: it cannot exec anything (`os_process`), and
-    // `std::env::split_paths` is `panic!("unsupported")` on WASI. Finding native
-    // binaries is the shell's job.
-    #[cfg(not(target_family = "wasm"))]
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            if let Some(found) = look_in_dir(&dir, name, &extensions) {
-                return Some(found);
-            }
-        }
-    }
-    extra_dirs
+    genet_native::locate::find_executable_in(name, extra_dirs)
+}
+
+/// The same question, asked of the shell.
+///
+/// The guest cannot answer it: `PATH` is the host's list written with the
+/// host's separator, and WASI will not even split it. Nor is it the guest's
+/// question — the shell is what will run the program (`os_process`), so it is
+/// the one that has to find it.
+#[cfg(target_family = "wasm")]
+pub fn find_executable_in(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let extra: Vec<String> = extra_dirs
         .iter()
-        .find_map(|dir| look_in_dir(dir, name, &extensions))
-}
-
-fn executable_extensions() -> Vec<String> {
-    if cfg!(windows) {
-        std::env::var("PATHEXT")
-            .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
-            .split(';')
-            .map(|e| e.to_lowercase())
-            .collect()
-    } else {
-        vec![String::new()]
-    }
-}
-
-fn look_in_dir(dir: &std::path::Path, name: &str, extensions: &[String]) -> Option<PathBuf> {
-    for extension in extensions {
-        let candidate = dir.join(format!("{name}{extension}"));
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .collect();
+    genet_wasi::wit::genehub::host::process::locate(name, &extra).map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -559,27 +535,6 @@ mod tests {
         let present = dir.join(format!("{name}{suffix}"));
         std::fs::write(&present, b"").unwrap();
         present
-    }
-
-    #[test]
-    fn extra_dirs_honour_pathext_instead_of_a_guessed_suffix() {
-        let dir = tempfile::tempdir().unwrap();
-        let bat = dir.path().join("genehub-test-pathext-agent.bat");
-        std::fs::write(&bat, b"").unwrap();
-        assert_eq!(
-            look_in_dir(
-                dir.path(),
-                "genehub-test-pathext-agent",
-                &[".exe".into(), ".cmd".into(), ".bat".into()],
-            ),
-            Some(bat)
-        );
-        assert!(look_in_dir(
-            dir.path(),
-            "genehub-test-pathext-agent",
-            &[".exe".into(), ".cmd".into()],
-        )
-        .is_none());
     }
 
     #[test]

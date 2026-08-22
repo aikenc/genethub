@@ -1,3 +1,8 @@
+//! The native carrier for `rtc`: `webrtc-rs` in this process.
+//!
+//! Only the connection differs from `rtc_guest.rs`; the policy above it is the
+//! same and lives in the parent module.
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -22,12 +27,10 @@ use crate::dataplane::endpoint::{self, PeerAccess, PeerServices, ServerStream};
 use crate::dataplane::handshake;
 use crate::transport::admission::Admission;
 
-const RTC_SIGNAL_BYTES: usize = 64 * 1024;
-const RTC_ADMISSION_LIFETIME: Duration = Duration::from_secs(30);
-const RTC_GATHER_TIMEOUT: Duration = Duration::from_secs(12);
-const RTC_CHANNEL_QUEUE: usize = 16;
-const MAX_RTC_PEERS: usize = 32;
-const DATA_CHANNEL_LABEL: &str = "genehub-data-v3";
+use super::{
+    DATA_CHANNEL_LABEL, MAX_RTC_PEERS, RTC_ADMISSION_LIFETIME, RTC_CHANNEL_QUEUE,
+    RTC_GATHER_TIMEOUT, RTC_HELLO_TIMEOUT, RTC_SIGNAL_BYTES, STUN_SERVER,
+};
 
 struct RtcPeer {
     _connection: Arc<RTCPeerConnection>,
@@ -88,7 +91,7 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
     let connection = Arc::new(
         api.new_peer_connection(RTCConfiguration {
             ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.cloudflare.com:3478".to_string()],
+                urls: vec![STUN_SERVER.to_string()],
                 ..Default::default()
             }],
             ..Default::default()
@@ -254,7 +257,7 @@ async fn serve_channel(
     authenticated: Arc<AtomicBool>,
 ) -> Result<()> {
     let hello = tokio::select! {
-        hello = tokio::time::timeout(Duration::from_secs(10), messages.recv()) => {
+        hello = tokio::time::timeout(RTC_HELLO_TIMEOUT, messages.recv()) => {
             hello.map_err(|_| anyhow!("RTC peer hello timed out"))?
                 .ok_or_else(|| anyhow!("RTC data channel closed before hello"))?
         }

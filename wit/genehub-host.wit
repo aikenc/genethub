@@ -49,6 +49,117 @@ interface process {
     env: list<tuple<string, string>>,
     cwd: option<string>,
   ) -> result<child, spawn-error>;
+
+  /// Where `name` is installed on this machine, or nothing.
+  ///
+  /// The same gap as `spawn`, one question earlier. The daemon offers whichever
+  /// agent CLIs are present, so it has to ask; and only the shell can answer,
+  /// because `PATH` is a native concept end to end — its separator is the
+  /// host's, `PATHEXT` decides what counts as a program on Windows, and WASI
+  /// will not even split the list (`std::env::split_paths` is
+  /// `panic!("unsupported")` there).
+  ///
+  /// `extra` is searched after `PATH`, in the order given, for the install
+  /// locations the guest knows about and the machine's `PATH` may not mention.
+  /// A name that is already a path is answered as itself if it exists.
+  locate: func(name: string, extra: list<string>) -> option<string>;
+
+  /// A directory that exists and says nothing about any of the user's
+  /// projects: the working directory for a child that must not look like it
+  /// was started inside somebody's work.
+  ///
+  /// Whatever this machine calls "temp", answered by the process that will
+  /// actually start the child. WASI has no such notion — `std::env::temp_dir`
+  /// aborts the instance there — and the guest cannot guess it either, since
+  /// the fallback is `/tmp` on one platform and an environment variable read
+  /// through Win32 on another.
+  scratch-dir: func() -> string;
+}
+
+/// What the kernel will hold a started process to, when the daemon runs
+/// something for somebody who is not sitting at this machine.
+///
+/// WASI cannot ask. The answer is an LSM version syscall and a fork that tries
+/// to unshare, and a component has neither — so a guest left to itself must
+/// report "nothing is enforced here" on every machine, and refuse every remote
+/// terminal on the machines that could in fact have confined it. Permanent
+/// while confinement is a native mechanism applied by the process being
+/// confined (`packages/native/src/confine.rs`).
+interface isolation {
+  enum mechanism {
+    /// Nothing is in force. Callers that need confinement are refused.
+    absent,
+    landlock,
+    namespaces,
+  }
+
+  record report {
+    backend: mechanism,
+    /// Whether a confined process would really be confined.
+    enforced: bool,
+    /// Why, in a sentence a person can act on, whether or not it worked.
+    detail: string,
+  }
+
+  /// A property of the machine, so the shell probes once and every caller gets
+  /// that same answer. Two callers must never be told two different stories.
+  machine: func() -> report;
+}
+
+/// One direct WebRTC data channel, for a peer that can reach this machine
+/// better than the relay can carry it.
+///
+/// WebRTC is ICE over raw UDP, DTLS and SCTP, each with timers of its own, and
+/// a component has neither the sockets nor the clock to drive them. So the
+/// shell owns the *connection* and nothing else: an offer in, an answer out,
+/// and ordered binary messages both ways. Which offer is worth answering, which
+/// peer is allowed through, what a message means and how long a stranger may
+/// hold a slot all stay in the guest, where the rest of that policy already is.
+///
+/// Non-blocking throughout, like `process` and `pty`.
+interface rtc {
+  record config {
+    /// STUN/TURN URLs, tried in the order given.
+    ice-servers: list<string>,
+    /// The one data-channel label this answer accepts. A peer that opens
+    /// anything else gets it closed unread, which is cheaper than reading it.
+    channel-label: string,
+    /// How long to gather candidates before answering with what there is.
+    gather-timeout-ms: u32,
+    /// Messages larger than this are dropped rather than queued. The guest's
+    /// frame limit, restated here so the queue cannot be used to grow the
+    /// shell's memory past it.
+    max-message-bytes: u32,
+    /// How many received messages may wait before the peer is made to wait
+    /// too — backpressure, so a peer that talks faster than the guest reads
+    /// cannot fill this process up.
+    queue-depth: u32,
+  }
+
+  enum state {
+    /// Still gathering, or still waiting for the peer's channel.
+    connecting,
+    /// The agreed channel is open.
+    open,
+    /// Ended, for any reason, including a failure to answer at all. Terminal.
+    closed,
+  }
+
+  resource session {
+    /// The SDP answer, once gathering has finished or run out of time. `none`
+    /// until then; `closed` state means there will not be one.
+    answer: func() -> option<string>;
+    current: func() -> state;
+    /// The oldest message the peer sent, or `none` when nothing has arrived.
+    /// The end of the connection is `current`, not an empty read.
+    receive: func() -> option<list<u8>>;
+    /// Queues one binary message. Fails when the channel is not open.
+    send: func(data: list<u8>) -> result<_, string>;
+  }
+
+  /// Starts answering `offer`. Returns at once; poll `answer` for the SDP.
+  /// Dropping the session closes the connection.
+  accept: func(offer: string, config: config) -> result<session, string>;
 }
 
 /// Unix PTY / Windows ConPTY. WASI has no PTY. Permanent.
@@ -107,8 +218,10 @@ interface file-lock {
 world daemon {
   import process;
   import pty;
+  import rtc;
   import file-lock;
   import fs-perms;
+  import isolation;
   /// Resident daemon. Returns "reload" or "shutdown".
   export run: func() -> result<string, string>;
   /// Independent OS process: same artifact, agent entry.

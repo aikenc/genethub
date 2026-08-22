@@ -1180,7 +1180,10 @@ name = "genehub-host"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "fs2",
+ "genehub-proto",
+ "genet-native",
  "http",
  "http-body-util",
  "libc",
@@ -1191,6 +1194,7 @@ dependencies = [
  "wasmtime-wasi",
  "wasmtime-wasi-http",
  "wasmtime-wasi-tls",
+ "webrtc",
 ]
 
 [[package]]
@@ -1283,11 +1287,11 @@ dependencies = [
  "futures-util",
  "genehub-proto",
  "genet-http",
+ "genet-native",
  "genet-wasi",
  "hmac",
  "ignore",
  "json5",
- "landlock",
  "libc",
  "portable-pty",
  "reqwest",
@@ -1321,6 +1325,16 @@ dependencies = [
  "tokio",
  "url",
  "wasi 0.14.7+wasi-0.2.4",
+]
+
+[[package]]
+name = "genet-native"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "genehub-proto",
+ "landlock",
+ "libc",
 ]
 
 [[package]]

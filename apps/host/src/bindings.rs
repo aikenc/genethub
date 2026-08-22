@@ -9,6 +9,7 @@ wasmtime::component::bindgen!({
     with: {
         "genehub:host/process.child": crate::process::ChildHandle,
         "genehub:host/pty.session": crate::pty::PtySession,
+        "genehub:host/rtc.session": crate::rtc::RtcSession,
         "genehub:host/file-lock.handle": crate::file_lock::LockHandle,
     },
 });
