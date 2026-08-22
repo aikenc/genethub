@@ -204,6 +204,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -232,6 +233,10 @@ jobs:
       # they did on every cold cache while a warm one kept the job green: a false
       # pass that survived until a release tag.
       - run: cargo build --workspace --bins
+      - name: Build the paired guest component
+        run: |
+          cargo build --release -p genehub-guest --target wasm32-wasip2
+          cp target/wasm32-wasip2/release/genehub_guest.wasm target/debug/genehub_guest.wasm
       # Journeys default to the mock model, so this stays offline and free.
       #
       # The failure list is repeated as annotations because reading a job's log
@@ -269,6 +274,8 @@ jobs:
           path: |
             target/debug/genet-dev
             target/debug/genet-agent-dev
+            target/debug/genehub-host-dev
+            target/debug/genehub_guest.wasm
           if-no-files-found: error
           retention-days: 1
 
@@ -334,6 +341,8 @@ jobs:
             apps/relay/package-lock.json
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         if: needs.rust.result != 'success'
+        with:
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         if: needs.rust.result != 'success'
       # Prefer the bins the rust job already produced. Rebuild only when that job
@@ -349,9 +358,12 @@ jobs:
           path: target/debug
       - name: Build daemon and agent bins
         if: needs.rust.result != 'success'
-        run: cargo build -p genet-cli -p genet-agent
+        run: |
+          cargo build -p genet-cli -p genet-agent -p genehub-host
+          cargo build --release -p genehub-guest --target wasm32-wasip2
+          cp target/wasm32-wasip2/release/genehub_guest.wasm target/debug/genehub_guest.wasm
         working-directory: .
-      - run: chmod +x target/debug/genet-dev target/debug/genet-agent-dev
+      - run: chmod +x target/debug/genet-dev target/debug/genet-agent-dev target/debug/genehub-host-dev
         working-directory: .
       # The artifact contains compiled JavaScript, not its runtime packages.
       # Keep the cheap production-only install while avoiding relay dev
@@ -414,8 +426,8 @@ jobs:
       - name: Build the paired guest for supervision journeys
         shell: bash
         run: |
-          cargo build -p genehub-guest --target wasm32-wasip2
-          cp target/wasm32-wasip2/debug/genehub_guest.wasm target/debug/genehub_guest.wasm
+          cargo build --release -p genehub-guest --target wasm32-wasip2
+          cp target/wasm32-wasip2/release/genehub_guest.wasm target/debug/genehub_guest.wasm
       - name: Refuse to skip real daemon supervision
         shell: bash
         run: |
