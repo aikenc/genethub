@@ -201,8 +201,13 @@ mod tests {
     fn a_remote_directory_is_read_as_the_other_machine_wrote_it() {
         // No canonicalization and no local existence check: the path belongs to
         // a filesystem this process cannot see.
-        let workspaces = vec![workspace("w_remote", &[Path::new("/srv/app")])];
-        let absolute = absolute_cwd("/srv/app/services", false).unwrap();
+        let (root, child) = if cfg!(windows) {
+            (r"C:\srv\app", r"C:\srv\app\services")
+        } else {
+            ("/srv/app", "/srv/app/services")
+        };
+        let workspaces = vec![workspace("w_remote", &[Path::new(root)])];
+        let absolute = absolute_cwd(child, false).unwrap();
         assert_eq!(
             deepest_containing(&workspaces, &absolute, false)
                 .unwrap()
