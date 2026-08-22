@@ -1190,12 +1190,14 @@ dependencies = [
  "libc",
  "portable-pty",
  "sha2",
+ "tempfile",
  "tokio",
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
  "wasmtime-wasi-tls",
  "webrtc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
