@@ -9,10 +9,10 @@
 use genehub_proto::{InviteScope, Reply, Request};
 use serde_json::json;
 
-use crate::machines::{self, PairedMachine};
-use crate::output::{self, CliFailure};
-use crate::rpc::{Pairing, Rpc};
-use crate::target::Selection;
+use super::machines::{self, PairedMachine};
+use super::output::{self, CliFailure};
+use super::rpc::{Pairing, Rpc};
+use super::target::Selection;
 
 /// Machines this installation can reach. Never routed: pairing and the local
 /// credential store are properties of the machine the command runs on.
@@ -256,9 +256,9 @@ async fn connect(selection: &Selection) -> Result<Rpc, CliFailure> {
             let machine = machines::find(machine_id)?;
             Rpc::connect_remote(&machine)
                 .await
-                .map_err(crate::query::connect_error)
+                .map_err(super::query::connect_error)
         }
-        None => Rpc::connect().await.map_err(crate::query::connect_error),
+        None => Rpc::connect().await.map_err(super::query::connect_error),
     }
 }
 
@@ -266,8 +266,8 @@ fn unexpected(reply: Reply) -> CliFailure {
     CliFailure::protocol(format!("unexpected reply: {reply:?}"))
 }
 
-fn remote_failure(error: crate::rpc::RpcError) -> CliFailure {
-    crate::query::rpc_error(error)
+fn remote_failure(error: super::rpc::RpcError) -> CliFailure {
+    super::query::rpc_error(error)
 }
 
 fn value_after(args: &[String], index: &mut usize, flag: &str) -> Result<String, CliFailure> {

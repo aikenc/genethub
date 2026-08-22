@@ -6,7 +6,7 @@
 
 use serde_json::{json, Value};
 
-use crate::{EXIT_FAILED, EXIT_INVALID_ARGS, EXIT_UNREACHABLE};
+use super::{EXIT_FAILED, EXIT_INVALID_ARGS, EXIT_UNREACHABLE};
 
 pub const CLI_SCHEMA: &str = "genet.cli/v1";
 
@@ -113,13 +113,13 @@ pub fn generic_error_envelope(code: &str, message: &str) -> Value {
 }
 
 pub fn succeed(kind: &str, data: Value) -> i32 {
-    println!("{}", envelope(kind, data));
-    crate::EXIT_OK
+    super::emit_stdout(envelope(kind, data).to_string());
+    super::EXIT_OK
 }
 
 pub fn fail(error: CliFailure) -> i32 {
-    eprintln!("error: {}", error.message);
-    println!("{}", error_envelope(&error));
+    super::emit_stderr(format!("error: {}", error.message));
+    super::emit_stdout(error_envelope(&error).to_string());
     error.exit
 }
 

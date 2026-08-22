@@ -30,6 +30,8 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
 
 你的机器上只有一个常驻进程（daemon），它按需拉起 agent 子进程。所有客户端说同一套协议，**看不见背后是哪种 agent，也看不见走的是哪条通道**。
 
+原生 `genet` 不再解析产品动词，也不再作为 E2EE 端点：它只做 confine、daemon 启停、`agent-serve` 和把 argv 经 loopback `POST /cli` 交给本机 daemon。业务语义与 `--machine` 拨号都在 daemon（guest）里。合同见 [cli-thin-forwarder.md](./cli-thin-forwarder.md)。
+
 ---
 
 ## 2. 四条不可让步的边界

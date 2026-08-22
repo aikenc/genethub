@@ -1,0 +1,226 @@
+//! Forwards product verbs to the running daemon over loopback `POST /cli`.
+
+use std::io::{IsTerminal, Read};
+use std::time::Duration;
+
+use genet_daemon::config::Paths;
+use genet_daemon::lifecycle;
+use genet_http::Client;
+use serde::Deserialize;
+use serde_json::Value;
+
+use genet_daemon::cli_front::output::{self, CliFailure};
+
+use crate::{fail, EXIT_FAILED};
+
+const MAX_STDIN_BYTES: usize = 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Endpoint {
+    port: u16,
+    token: String,
+    machine_id: String,
+    fingerprint: String,
+    pid: u32,
+}
+
+#[derive(Deserialize)]
+struct CliRecord {
+    #[serde(default)]
+    stream: Option<String>,
+    #[serde(default)]
+    line: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    exit: Option<i32>,
+}
+
+pub async fn forward(argv: Vec<String>) -> i32 {
+    match stream(argv, piped_stdin(), caller_cwd()).await {
+        Ok(code) => code,
+        Err(message) => output::fail(CliFailure::daemon_unavailable(message)),
+    }
+}
+
+/// `genet status` asks the daemon for a hub summary without knowing Hub types.
+pub async fn hub_status() -> Option<Value> {
+    let records = collect(vec!["hub".into(), "status".into()]).await.ok()?;
+    records.into_iter().find_map(|record| {
+        let line = record.line?;
+        serde_json::from_str(&line).ok()
+    })
+}
+
+async fn collect(argv: Vec<String>) -> Result<Vec<CliRecord>, String> {
+    let (url, _) = admission()?;
+    let cwd = caller_cwd();
+    let response = Client::new()
+        .post(&url)
+        .timeout(Duration::from_secs(15))
+        .json(&serde_json::json!({
+            "argv": argv,
+            "cwd": cwd,
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("the local daemon did not accept /cli: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "the local daemon refused /cli ({})",
+            response.status()
+        ));
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("read /cli: {error}"))?;
+    let mut records = Vec::new();
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        records.push(
+            serde_json::from_str(line).map_err(|error| format!("decode /cli record: {error}"))?,
+        );
+    }
+    Ok(records)
+}
+
+async fn stream(argv: Vec<String>, stdin: Vec<u8>, cwd: String) -> Result<i32, String> {
+    let (url, _) = admission()?;
+    let mut body = serde_json::json!({
+        "argv": argv,
+        "cwd": cwd,
+    });
+    if !stdin.is_empty() {
+        use base64::Engine;
+        body["stdin"] = serde_json::json!(base64::engine::general_purpose::STANDARD.encode(stdin));
+    }
+    let response = Client::builder()
+        .build()
+        .map_err(|error| format!("build http client: {error}"))?
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| {
+            format!("{error}; run `{} daemon start`", genet_daemon::channel::CLI_BINARY)
+        })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "the local daemon refused /cli ({}); run `{} daemon start`",
+            response.status(),
+            genet_daemon::channel::CLI_BINARY
+        ));
+    }
+
+    let mut exit = None;
+    let mut leftover = String::new();
+    let mut bytes = response.bytes_stream();
+    use futures_util::StreamExt;
+    while let Some(chunk) = bytes.next().await {
+        let chunk = chunk.map_err(|error| format!("read /cli: {error}"))?;
+        leftover.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(at) = leftover.find('\n') {
+            let line = leftover[..at].to_string();
+            leftover = leftover[at + 1..].to_string();
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: CliRecord = serde_json::from_str(&line)
+                .map_err(|error| format!("decode /cli record: {error}"))?;
+            apply(&record, &mut exit);
+        }
+    }
+    if !leftover.trim().is_empty() {
+        let record: CliRecord = serde_json::from_str(&leftover)
+            .map_err(|error| format!("decode /cli record: {error}"))?;
+        apply(&record, &mut exit);
+    }
+    exit.ok_or_else(|| "the daemon closed /cli without an exit record".to_string())
+}
+
+fn apply(record: &CliRecord, exit: &mut Option<i32>) {
+    if let Some(code) = record.exit {
+        *exit = Some(code);
+        return;
+    }
+    match record.stream.as_deref() {
+        Some("stdout") => {
+            if let Some(line) = &record.line {
+                println!("{line}");
+            }
+        }
+        Some("stderr") => {
+            if let Some(text) = &record.text {
+                eprint!("{text}");
+                if !text.ends_with('\n') {
+                    eprintln!();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn admission() -> Result<(String, Endpoint), String> {
+    let paths = Paths::discover().map_err(|error| format!("locate the data directory: {error:#}"))?;
+    let endpoint = read_endpoint(&paths).ok_or_else(|| {
+        format!(
+            "the daemon is not running; run `{} daemon start`",
+            genet_daemon::channel::CLI_BINARY
+        )
+    })?;
+    if !lifecycle::pid_alive(endpoint.pid) {
+        return Err(format!(
+            "the daemon is not running; run `{} daemon start`",
+            genet_daemon::channel::CLI_BINARY
+        ));
+    }
+    let url = genet_daemon::transport::local::cli_url(
+        endpoint.port,
+        &endpoint.token,
+        endpoint.pid,
+        &endpoint.machine_id,
+        &endpoint.fingerprint,
+    );
+    Ok((url, endpoint))
+}
+
+fn read_endpoint(paths: &Paths) -> Option<Endpoint> {
+    let raw = std::fs::read_to_string(paths.endpoint_file()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn caller_cwd() -> String {
+    std::env::current_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into())
+}
+
+fn piped_stdin() -> Vec<u8> {
+    if std::io::stdin().is_terminal() {
+        return Vec::new();
+    }
+    let mut buffer = Vec::new();
+    if std::io::stdin().read_to_end(&mut buffer).is_err() {
+        fail(
+            "invalid_args",
+            "could not read standard input",
+            EXIT_FAILED,
+        );
+    }
+    if buffer.len() > MAX_STDIN_BYTES {
+        fail(
+            "invalid_args",
+            &format!(
+                "too much standard input: at most {MAX_STDIN_BYTES} bytes can be sent with a command, \
+                 so write it to a file in the workspace and have the command read that"
+            ),
+            EXIT_FAILED,
+        );
+    }
+    buffer
+}

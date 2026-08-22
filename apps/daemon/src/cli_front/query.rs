@@ -12,9 +12,9 @@ use genehub_proto::{
 };
 use serde_json::{json, Value};
 
-use crate::output::{self, CliFailure, CLI_SCHEMA};
-use crate::rpc::{ConnectError, Refusal, Rpc, RpcError};
-use crate::target::{self, Routing, Selection};
+use super::output::{self, CliFailure, CLI_SCHEMA};
+use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
+use super::target::{self, Routing, Selection};
 
 const COMMAND_NAMES: [&str; 35] = [
     "schema",
@@ -681,7 +681,7 @@ pub fn connect_error(error: ConnectError) -> CliFailure {
         ConnectError::Unavailable(message) | ConnectError::Refused { message, .. } => {
             CliFailure::daemon_unavailable(format!(
                 "could not reach the local daemon: {message}; run `{} daemon start`",
-                genet_daemon::channel::CLI_BINARY
+                crate::channel::CLI_BINARY
             ))
         }
     }
@@ -712,7 +712,7 @@ pub fn remote_connect_error(machine_id: &str, error: ConnectError) -> CliFailure
             ),
             retryable: false,
             details,
-            exit: crate::EXIT_FAILED,
+            exit: super::EXIT_FAILED,
         },
         ConnectError::Rejected(error) => rpc_error(RpcError::Remote(error)),
         // Nothing was consumed finding out that nobody was home, which is
@@ -726,7 +726,7 @@ pub fn remote_connect_error(machine_id: &str, error: ConnectError) -> CliFailure
             message: format!("{machine_id} is not currently connected to its relay"),
             retryable: true,
             details,
-            exit: crate::EXIT_UNREACHABLE,
+            exit: super::EXIT_UNREACHABLE,
         },
         ConnectError::Refused {
             reason: Refusal::Credential,
@@ -739,21 +739,21 @@ pub fn remote_connect_error(machine_id: &str, error: ConnectError) -> CliFailure
             ),
             retryable: false,
             details,
-            exit: crate::EXIT_FAILED,
+            exit: super::EXIT_FAILED,
         },
         ConnectError::Refused { message, .. } => CliFailure {
             code: "relayUnavailable",
             message: format!("the relay in front of {machine_id} refused this call: {message}"),
             retryable: true,
             details,
-            exit: crate::EXIT_UNREACHABLE,
+            exit: super::EXIT_UNREACHABLE,
         },
         ConnectError::Unavailable(message) => CliFailure {
             code: "relayUnavailable",
             message: format!("could not reach {machine_id}: {message}"),
             retryable: true,
             details,
-            exit: crate::EXIT_UNREACHABLE,
+            exit: super::EXIT_UNREACHABLE,
         },
     }
 }
@@ -771,7 +771,7 @@ pub async fn connect_selected(selection: &Selection) -> Result<Rpc, CliFailure> 
     // A machine paired directly with this installation wins. Its credential is
     // this installation's own, so reaching it does not depend on a daemon
     // running here or on a Hub being up.
-    if let Some(machine) = crate::machines::lookup(machine_id)? {
+    if let Some(machine) = super::machines::lookup(machine_id)? {
         return Rpc::connect_remote(&machine)
             .await
             .map_err(|error| remote_connect_error(machine_id, error));
@@ -879,7 +879,7 @@ fn capabilities_data() -> Value {
         "agentConversation": {
             "sugar": "genet <agentId> \"<prompt>\"",
             "canonical": "agent.run",
-            "reserved": crate::target::RESERVED,
+            "reserved": super::target::RESERVED,
             "sessionBacked": true,
             "resume": ["--session", "--since-seq", "session.respond"],
             "permissionsWithoutAPerson": "denied unless --auto-approve; questions always stop",
@@ -1044,7 +1044,7 @@ fn command_schema(name: &str) -> Value {
                     "maxOutput": {
                         "type": "integer",
                         "minimum": 0,
-                        "default": crate::shell::DEFAULT_MAX_OUTPUT_BYTES,
+                        "default": super::shell::DEFAULT_MAX_OUTPUT_BYTES,
                         "$comment": "bytes of output to repeat; past it the middle is dropped and \
                                      a shell.truncated record says how much, 0 means all of it",
                     },
@@ -1890,7 +1890,7 @@ mod tests {
             message: "wrong version".into(),
         }));
         assert_eq!(version.code, "protocolIncompatible");
-        assert_eq!(version.exit, crate::EXIT_UNREACHABLE);
+        assert_eq!(version.exit, crate::cli_front::EXIT_UNREACHABLE);
 
         let handshake = connect_error(ConnectError::Rejected(ProtocolError {
             code: ErrorCode::ProtocolVersion,

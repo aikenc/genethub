@@ -149,7 +149,7 @@ async fn overview() -> i32 {
     let paths = paths();
     let mut value = facts(&paths);
     value["hub"] = if value["running"].as_bool() == Some(true) {
-        crate::hub::status_value()
+        crate::invoke::hub_status()
             .await
             .unwrap_or(serde_json::Value::Null)
     } else {

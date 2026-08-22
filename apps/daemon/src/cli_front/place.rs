@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 use genehub_proto::WorkspaceInfo;
 
-use crate::output::CliFailure;
-use crate::query;
-use crate::rpc::Rpc;
+use super::output::CliFailure;
+use super::query;
+use super::rpc::Rpc;
 
 /// What a named directory turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +77,13 @@ pub async fn locate(
 /// there", so it is refused instead of resolved against the wrong filesystem.
 pub fn absolute_cwd(cwd: &str, here: bool) -> Result<PathBuf, CliFailure> {
     if here {
-        return std::fs::canonicalize(cwd)
+        let path = std::path::Path::new(cwd);
+        let full = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            super::caller_cwd().join(path)
+        };
+        return std::fs::canonicalize(&full)
             .map_err(|error| CliFailure::invalid_args(format!("--cwd {cwd}: {error}")));
     }
     let path = PathBuf::from(cwd);

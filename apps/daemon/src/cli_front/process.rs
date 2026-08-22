@@ -17,10 +17,10 @@
 use genehub_proto::{Reply, Request};
 use serde_json::json;
 
-use crate::output::{self, CliFailure};
-use crate::query;
-use crate::rpc::Rpc;
-use crate::target::Selection;
+use super::output::{self, CliFailure};
+use super::query;
+use super::rpc::Rpc;
+use super::target::Selection;
 
 pub async fn process(args: &[String], selection: &Selection) -> i32 {
     let verb = args.first().cloned().unwrap_or_else(|| "list".into());

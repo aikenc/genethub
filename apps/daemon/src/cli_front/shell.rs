@@ -26,11 +26,11 @@ use std::collections::{BTreeMap, VecDeque};
 use genehub_proto::{ShellFrame, ShellRunRequest};
 use serde_json::json;
 
-use crate::output::{self, CliFailure};
-use crate::query;
-use crate::rpc::Rpc;
-use crate::target::Selection;
-use crate::{EXIT_FAILED, EXIT_OK};
+use super::output::{self, CliFailure};
+use super::query;
+use super::rpc::Rpc;
+use super::target::Selection;
+use super::{EXIT_FAILED, EXIT_OK};
 
 /// How much of a command's output is repeated here by default.
 ///
@@ -172,24 +172,7 @@ fn parse(args: &[String]) -> Result<Ask, CliFailure> {
 /// give it. Everything else — a pipe, a redirected file, an agent's captured
 /// handle — is input that was meant.
 fn piped_stdin() -> Result<Vec<u8>, CliFailure> {
-    use std::io::{IsTerminal, Read};
-
-    let mut input = std::io::stdin();
-    if input.is_terminal() {
-        return Ok(Vec::new());
-    }
-    // One byte past the limit, so that "exactly at the limit" is not reported
-    // as too much.
-    let mut buffer = Vec::new();
-    let read = input
-        .by_ref()
-        .take(MAX_STDIN_BYTES as u64 + 1)
-        .read_to_end(&mut buffer);
-    if let Err(error) = read {
-        return Err(CliFailure::invalid_args(format!(
-            "could not read the input to send: {error}"
-        )));
-    }
+    let buffer = super::caller_stdin();
     if buffer.len() > MAX_STDIN_BYTES {
         return Err(CliFailure::invalid_args(format!(
             "too much standard input: at most {MAX_STDIN_BYTES} bytes can be sent with a command, \
@@ -202,13 +185,13 @@ fn piped_stdin() -> Result<Vec<u8>, CliFailure> {
 async fn run(rpc: &Rpc, ask: Ask, selection: &Selection) -> Result<i32, CliFailure> {
     let here = selection.machine.is_none();
     let located =
-        crate::place::locate(rpc, ask.workspace_id, selection.cwd.as_deref(), here).await?;
+        super::place::locate(rpc, ask.workspace_id, selection.cwd.as_deref(), here).await?;
     let (workspace_id, cwd) = match located {
-        crate::place::Located::In { workspace_id, cwd } => (workspace_id, cwd),
+        super::place::Located::In { workspace_id, cwd } => (workspace_id, cwd),
         // Deliberately not opening one on the caller's behalf. Registering a
         // workspace is a lasting change to that machine, and it should not be
         // a side effect of running `ls` in the wrong directory.
-        crate::place::Located::Uncovered(path) => {
+        super::place::Located::Uncovered(path) => {
             return Err(CliFailure::business(
                 "targetNotFound",
                 format!(
@@ -523,7 +506,7 @@ mod tests {
         for args in [words(&[]), words(&["--workspace", "w_1"])] {
             let error = parse(&args).unwrap_err();
             assert_eq!(error.code, "invalidArgs");
-            assert_eq!(error.exit, crate::EXIT_INVALID_ARGS);
+            assert_eq!(error.exit, crate::cli_front::EXIT_INVALID_ARGS);
         }
         assert_eq!(
             parse(&words(&["--workspace"])).unwrap_err().code,

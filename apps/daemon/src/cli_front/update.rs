@@ -5,11 +5,11 @@
 //! it cannot authenticate code after a host or workflow compromise. Keep this
 //! command fail-closed until a public signing root and verification policy ship.
 
-use crate::{fail, EXIT_FAILED};
+use super::{fail, EXIT_FAILED};
 
 pub fn update(args: &[String]) -> i32 {
     if !args.is_empty() {
-        return crate::usage();
+        return super::usage();
     }
     fail(
         "unsupported",

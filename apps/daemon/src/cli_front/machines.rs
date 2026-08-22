@@ -11,10 +11,10 @@
 
 use std::path::PathBuf;
 
-use genet_daemon::config::Paths;
+use crate::config::Paths;
 use serde::{Deserialize, Serialize};
 
-use crate::output::CliFailure;
+use super::output::CliFailure;
 
 /// How many machines one installation will remember. Generous next to the
 /// handful anyone actually pairs with, and bounded so a corrupt or hostile
@@ -166,7 +166,7 @@ fn save(machines: &[PairedMachine]) -> Result<(), CliFailure> {
     })
     .map_err(|error| CliFailure::business("storeUnavailable", format!("encode: {error}"), None))?;
     // 0600, the same as every other file that holds a secret.
-    genet_daemon::config::save_private(&path, body.as_bytes()).map_err(|error| {
+    crate::config::save_private(&path, body.as_bytes()).map_err(|error| {
         CliFailure::business(
             "storeUnavailable",
             format!("write {}: {error:#}", path.display()),

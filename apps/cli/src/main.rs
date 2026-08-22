@@ -1,32 +1,36 @@
-//! genet — the GeneHub CLI, and the daemon it controls.
+//! genet — the GeneHub CLI.
 //!
-//! One binary, two shapes (`genethub-cli.md` §2): with no subcommand it is
-//! the client; `genet daemon run` is the resident daemon. The client is how
-//! an agent inside a session reaches its own machine — query workspaces,
-//! drive sessions, manage the daemon — so stdout speaks JSON Lines first and
-//! human words go to stderr (`genethub-cli.md` §3.2).
+//! The native binary keeps only what cannot live in the guest: version,
+//! confine, daemon lifecycle, `agent-serve`, and update of this binary.
+//! Every product verb is forwarded to the running daemon over loopback
+//! `POST /cli`. See `docs/cli-thin-forwarder.md`.
 
 mod control;
-mod converse;
+mod invoke;
 mod wasm;
-mod hub;
-mod machine;
-mod machines;
-mod output;
-mod place;
-mod process;
-mod query;
-mod rpc;
-mod shell;
-mod speech;
-mod target;
-mod update;
+
+use genet_daemon::cli_front::{output, target};
 
 /// Exit codes, frozen for scripts and agents (`genethub-cli.md` §3.2).
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_INVALID_ARGS: i32 = 2;
 pub const EXIT_UNREACHABLE: i32 = 3;
 pub const EXIT_FAILED: i32 = 4;
+
+const FORWARDED: &[&str] = &[
+    "schema",
+    "context",
+    "capabilities",
+    "workspace",
+    "session",
+    "agent",
+    "shell",
+    "speech",
+    "process",
+    "machine",
+    "device",
+    "hub",
+];
 
 /// Deliberately not the async entry point, and deliberately doing one thing
 /// before the runtime exists.
@@ -39,10 +43,6 @@ pub const EXIT_FAILED: i32 = 4;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // Not a subcommand anybody is meant to type: this is the daemon re-running
-    // itself to put a process inside an operating system sandbox before
-    // becoming it. It parses its own arguments, restricts itself and execs;
-    // nothing below this line runs.
     if args.first().map(String::as_str) == Some(genet_daemon::isolation::CONFINE_ARG) {
         std::process::exit(genet_daemon::isolation::confine_and_exec(&args[1..]));
     }
@@ -52,10 +52,6 @@ fn main() {
 
 #[tokio::main]
 async fn run(args: Vec<String>) {
-    // Answered before anything touches the disk: "which build is this" is a
-    // question asked of a machine that is already misbehaving, and the answer
-    // should not depend on a data directory being readable. The release
-    // workflow asks it too (`scripts/version.mjs --verify`).
     if args
         .iter()
         .any(|argument| argument == "--version" || argument == "-V")
@@ -64,56 +60,63 @@ async fn run(args: Vec<String>) {
         return;
     }
 
-    // The global selectors come off first, so every command sees the same
-    // rules about which machine and which directory it runs in, and so a
-    // command that has no answer for one of them says so instead of ignoring
-    // it (`genet-remote-execution.md` §5.1).
-    let (selection, args) = match target::split(&args) {
-        Ok(split) => split,
-        Err(error) => std::process::exit(output::fail(error)),
-    };
-    if let Err(error) = target::enforce(&selection, target::canonical(&args).as_deref()) {
-        std::process::exit(output::fail(error));
-    }
-
     let code = match args.first().map(String::as_str) {
-        Some("schema" | "context" | "capabilities" | "workspace") => {
-            query::run(&args, &selection).await
+        Some("daemon") => {
+            let rest = match native_rest(&args) {
+                Ok(rest) => rest,
+                Err(code) => std::process::exit(code),
+            };
+            control::daemon(&rest[1..]).await
         }
-        // Reading and writing the same resource split here, so `query.rs` can
-        // keep guaranteeing it never mutates anything.
-        Some("session") => match args.get(1).map(String::as_str) {
-            Some(
-                "list" | "get" | "inspect" | "narrative" | "rounds" | "trunks" | "trunk" | "blob"
-                | "context",
-            )
-            | None => query::run(&args, &selection).await,
-            Some(_) => converse::session(&args[1..], &selection).await,
-        },
-        Some("agent") => converse::agent(&args[1..], &selection).await,
-        // Not a user verb: the daemon's adapter spawns the agent through the
-        // front door (`$GENEHUB_CLI agent-serve --mode rpc ...`), and this is
-        // where that becomes the component's agent entry. `genet agent` stays
-        // the client verb it already was.
-        Some("agent-serve") => crate::wasm::become_agent(&args[1..]),
-        Some("shell") => shell::shell(&args[1..], &selection).await,
-        Some("speech") => speech::speech(&args[1..], &selection).await,
-        Some("process") => process::process(&args[1..], &selection).await,
-        Some("machine") => machine::machine(&args[1..]).await,
-        Some("device") => machine::device(&args[1..], &selection).await,
-        Some("daemon") => control::daemon(&args[1..]).await,
-        Some("status") => control::status(&args[1..]).await,
-        Some("hub") => hub::hub(&args[1..]).await,
-        Some("update") => update::update(&args[1..]),
-        // Not a subcommand, so it names an agent — but only with something to
-        // say, which keeps a plain typo reporting the usage error rather than
-        // dialling a daemon (`genet-remote-execution.md` §6.1).
-        Some(head) if !head.starts_with('-') && args.len() > 1 => {
-            converse::sugar(head, &args[1..], &selection).await
+        Some("status") => {
+            let rest = match native_rest(&args) {
+                Ok(rest) => rest,
+                Err(code) => std::process::exit(code),
+            };
+            control::status(&rest[1..]).await
         }
+        Some("agent-serve") => {
+            let rest = match native_rest(&args) {
+                Ok(rest) => rest,
+                Err(code) => std::process::exit(code),
+            };
+            crate::wasm::become_agent(&rest[1..])
+        }
+        Some("update") => {
+            let rest = match native_rest(&args) {
+                Ok(rest) => rest,
+                Err(code) => std::process::exit(code),
+            };
+            update(&rest[1..])
+        }
+        Some(head) if should_forward(head, &args) => invoke::forward(args).await,
         _ => usage(),
     };
     std::process::exit(code);
+}
+
+fn should_forward(head: &str, args: &[String]) -> bool {
+    head == "--machine"
+        || head == "--cwd"
+        || FORWARDED.contains(&head)
+        || (!head.starts_with('-') && args.len() > 1)
+}
+
+fn native_rest(args: &[String]) -> Result<Vec<String>, i32> {
+    let (selection, rest) = target::split(args).map_err(output::fail)?;
+    target::enforce(&selection, target::canonical(&rest).as_deref()).map_err(output::fail)?;
+    Ok(rest)
+}
+
+fn update(args: &[String]) -> i32 {
+    if !args.is_empty() {
+        return usage();
+    }
+    fail(
+        "unsupported",
+        "automatic update is disabled until releases have an independent signing key; download manually from https://github.com/aikenc/genethub/releases and verify SHA256SUMS",
+        EXIT_FAILED,
+    );
 }
 
 pub fn usage() -> i32 {
@@ -198,7 +201,19 @@ pub fn usage() -> i32 {
 /// error on stdout, and an exit code from the frozen set.
 pub fn fail(code: &str, message: &str, exit: i32) -> ! {
     eprintln!("error: {message}");
-    println!("{}", output::generic_error_envelope(code, message));
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema": "genet.cli/v1",
+            "type": "error",
+            "error": {
+                "code": code,
+                "message": message,
+                "retryable": false,
+                "details": null,
+            }
+        })
+    );
     std::process::exit(exit);
 }
 

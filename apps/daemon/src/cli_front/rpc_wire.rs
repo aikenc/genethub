@@ -11,16 +11,15 @@ use genehub_proto::{
     Confinement, HelloResult, HubTicket, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply,
     Request, SequencedEvent, ServerFrame, ShellFrame, ShellRunRequest,
 };
-use genet_daemon::config::Paths;
-use genet_daemon::dataplane::client::ClientEndpoint;
+use crate::config::Paths;
+use crate::dataplane::client::ClientEndpoint;
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
-pub use genet_daemon::transport::fabric::Refusal;
+pub use crate::transport::fabric::Refusal;
 
-use crate::machines::PairedMachine;
-use crate::{fail, EXIT_UNREACHABLE};
+use super::machines::PairedMachine;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// One event frame. Generous next to any single session event and bounded so a
@@ -92,20 +91,6 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    pub async fn connect_or_exit() -> Self {
-        match Self::connect().await {
-            Ok(rpc) => rpc,
-            Err(error) => fail(
-                "daemon_unreachable",
-                &format!(
-                    "{error}; run `{} daemon start`",
-                    genet_daemon::channel::CLI_BINARY
-                ),
-                EXIT_UNREACHABLE,
-            ),
-        }
-    }
-
     pub async fn connect() -> Result<Self, ConnectError> {
         let paths = Paths::discover().map_err(|error| {
             ConnectError::Unavailable(format!("locate the data directory: {error:#}"))
@@ -118,7 +103,7 @@ impl Rpc {
         })?;
         let endpoint_file: EndpointFile = serde_json::from_str(&raw)
             .map_err(|error| ConnectError::Unavailable(format!("parse endpoint.json: {error}")))?;
-        let admission = genet_daemon::transport::local::websocket_admission(
+        let admission = crate::transport::local::websocket_admission(
             endpoint_file.port,
             &endpoint_file.token,
             endpoint_file.pid,
@@ -129,15 +114,15 @@ impl Rpc {
         let (mut socket, _) = tokio_tungstenite::connect_async(&admission.url)
             .await
             .map_err(|_| ConnectError::Unavailable(dial_failure(endpoint_file.port)))?;
-        let nonce = genet_daemon::devices::random_token();
+        let nonce = crate::devices::random_token();
         let context = "loopback";
         let hello = PeerHello {
             version: genehub_proto::DATA_PLANE_VERSION,
-            client_name: format!("{}-cli", genet_daemon::channel::CLI_BINARY),
+            client_name: format!("{}-cli", crate::channel::CLI_BINARY),
             auth: PeerAuth::Loopback {
                 context: context.into(),
                 nonce: nonce.clone(),
-                proof: genet_daemon::channel_auth::client_proof(
+                proof: crate::channel_auth::client_proof(
                     &admission.server_proof,
                     context,
                     &nonce,
@@ -172,16 +157,16 @@ impl Rpc {
                 "daemon uses a different data-plane version".into(),
             ));
         }
-        let expected = genet_daemon::channel_auth::server_proof(
+        let expected = crate::channel_auth::server_proof(
             &admission.server_proof,
             context,
             &nonce,
             &welcome.server_nonce,
         );
-        genet_daemon::channel_auth::verify_proof(&expected, &welcome.proof).map_err(|_| {
+        crate::channel_auth::verify_proof(&expected, &welcome.proof).map_err(|_| {
             ConnectError::Protocol("daemon did not prove the expected loopback identity".into())
         })?;
-        let key = genet_daemon::channel_auth::derive_key(
+        let key = crate::channel_auth::derive_key(
             &admission.server_proof,
             context,
             &nonce,
@@ -190,7 +175,7 @@ impl Rpc {
 
         let (mut sink, mut stream) = socket.split();
         let (inbound, mut outbound, carrier) =
-            genet_daemon::dataplane::endpoint::carrier_channels();
+            crate::dataplane::endpoint::carrier_channels();
         let writer = tokio::spawn(async move {
             while let Some(record) = outbound.recv().await {
                 if sink.send(Message::Binary(record)).await.is_err() {
@@ -247,11 +232,11 @@ impl Rpc {
     /// the authorized-device list lives on the machine being called.
     pub async fn connect_remote(machine: &PairedMachine) -> Result<Self, ConnectError> {
         let nonce = fresh_nonce();
-        let context = genet_daemon::channel_auth::device_context(&machine.device_id);
+        let context = crate::channel_auth::device_context(&machine.device_id);
         let auth = PeerAuth::Device {
             device_id: machine.device_id.clone(),
             nonce: nonce.clone(),
-            proof: genet_daemon::channel_auth::client_proof(&machine.secret, &context, &nonce),
+            proof: crate::channel_auth::client_proof(&machine.secret, &context, &nonce),
         };
         let rpc = Self::over_fabric(
             &machine.endpoint,
@@ -269,11 +254,11 @@ impl Rpc {
     /// Connects with a capability a Hub issued for this machine.
     pub async fn connect_hosted(ticket: &HubTicket) -> Result<Self, ConnectError> {
         let nonce = fresh_nonce();
-        let context = genet_daemon::channel_auth::hosted_context(&ticket.channel_capability);
+        let context = crate::channel_auth::hosted_context(&ticket.channel_capability);
         let auth = PeerAuth::Hosted {
             capability_id: ticket.channel_capability.clone(),
             nonce: nonce.clone(),
-            proof: genet_daemon::channel_auth::client_proof(
+            proof: crate::channel_auth::client_proof(
                 &ticket.channel_secret,
                 &context,
                 &nonce,
@@ -447,7 +432,7 @@ pub struct Running {
     /// the first line of output, which is the only time it is useful: it is
     /// the rule the output has to be read in light of.
     pub confinement: Option<Confinement>,
-    stream: genet_daemon::dataplane::client::ClientStream,
+    stream: crate::dataplane::client::ClientStream,
     buffered: Vec<u8>,
 }
 
@@ -523,7 +508,7 @@ impl Pairing {
         let auth = PeerAuth::Invite {
             invite_id: invite_id.to_string(),
             nonce: nonce.clone(),
-            proof: genet_daemon::channel_auth::client_proof(secret, &context, &nonce),
+            proof: crate::channel_auth::client_proof(secret, &context, &nonce),
         };
         let (endpoint, link) = link_up(
             endpoint,
@@ -579,11 +564,11 @@ async fn link_up(
 ) -> Result<(ClientEndpoint, tokio::task::JoinHandle<()>), ConnectError> {
     let hello = PeerHello {
         version: genehub_proto::DATA_PLANE_VERSION,
-        client_name: format!("{}-cli", genet_daemon::channel::CLI_BINARY),
+        client_name: format!("{}-cli", crate::channel::CLI_BINARY),
         auth,
         rtc_supported: false,
     };
-    let link = genet_daemon::transport::fabric::dial(endpoint, route_ticket, &hello)
+    let link = crate::transport::fabric::dial(endpoint, route_ticket, &hello)
         .await
         .map_err(dial_refusal)?;
     if link.welcome.version != genehub_proto::DATA_PLANE_VERSION {
@@ -594,20 +579,20 @@ async fn link_up(
     // The proof is what makes the relay uninteresting: whoever is holding the
     // other end of this route either knows the secret or does not, and
     // occupying the slot in front of the machine proves nothing.
-    let expected = genet_daemon::channel_auth::server_proof(
+    let expected = crate::channel_auth::server_proof(
         secret,
         context,
         nonce,
         &link.welcome.server_nonce,
     );
-    genet_daemon::channel_auth::verify_proof(&expected, &link.welcome.proof).map_err(|_| {
+    crate::channel_auth::verify_proof(&expected, &link.welcome.proof).map_err(|_| {
         ConnectError::Protocol(
             "whoever answered at that address could not prove the expected secret".into(),
         )
     })?;
     let key =
-        genet_daemon::channel_auth::derive_key(secret, context, nonce, &link.welcome.server_nonce);
-    let genet_daemon::transport::fabric::FabricLink { carrier, pump, .. } = link;
+        crate::channel_auth::derive_key(secret, context, nonce, &link.welcome.server_nonce);
+    let crate::transport::fabric::FabricLink { carrier, pump, .. } = link;
     let (data, endpoint_task) = ClientEndpoint::start(key, carrier);
     let monitor = tokio::spawn(async move {
         let _ = endpoint_task.await;
@@ -617,8 +602,8 @@ async fn link_up(
 }
 
 /// Keeps the dialer's distinction between "not now" and "not you".
-fn dial_refusal(error: genet_daemon::transport::fabric::DialError) -> ConnectError {
-    use genet_daemon::transport::fabric::DialError;
+fn dial_refusal(error: crate::transport::fabric::DialError) -> ConnectError {
+    use crate::transport::fabric::DialError;
     match error {
         DialError::Refused { reason, message } => ConnectError::Refused { reason, message },
         DialError::Unavailable(message) => ConnectError::Unavailable(message),
@@ -725,7 +710,7 @@ where
 
 fn verify_local_identity(
     hello: &HelloResult,
-    admission: &genet_daemon::transport::local::LocalWebSocketAdmission,
+    admission: &crate::transport::local::LocalWebSocketAdmission,
 ) -> Result<(), ConnectError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -789,7 +774,7 @@ mod tests {
     use genehub_proto::{ErrorCode, TransportKind};
 
     fn local_contract() -> (
-        genet_daemon::transport::local::LocalWebSocketAdmission,
+        crate::transport::local::LocalWebSocketAdmission,
         HelloResult,
     ) {
         let expires_at = std::time::SystemTime::now()
@@ -797,7 +782,7 @@ mod tests {
             .unwrap()
             .as_secs()
             + 10;
-        let admission = genet_daemon::transport::local::LocalWebSocketAdmission {
+        let admission = crate::transport::local::LocalWebSocketAdmission {
             url: "ws://127.0.0.1:1/ws".into(),
             server_proof: "a".repeat(64),
             challenge: "b".repeat(64),

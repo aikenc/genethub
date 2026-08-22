@@ -17,11 +17,11 @@ use genehub_proto::{
 };
 use serde_json::{json, Value};
 
-use crate::output::{self, CliFailure};
-use crate::query;
-use crate::rpc::{Payload, Rpc};
-use crate::target::Selection;
-use crate::{EXIT_FAILED, EXIT_OK, EXIT_UNREACHABLE};
+use super::output::{self, CliFailure};
+use super::query;
+use super::rpc::{Payload, Rpc};
+use super::target::Selection;
+use super::{EXIT_FAILED, EXIT_OK, EXIT_UNREACHABLE};
 
 /// How a wait ended. Only `Completed` is a success; everything else leaves
 /// something for the caller to do, and the exit code has to say so.
@@ -544,10 +544,10 @@ async fn resolve_workspace(
     here: bool,
 ) -> Result<(String, Option<String>), CliFailure> {
     let located =
-        crate::place::locate(rpc, run.workspace_id.clone(), run.cwd.as_deref(), here).await?;
+        super::place::locate(rpc, run.workspace_id.clone(), run.cwd.as_deref(), here).await?;
     let uncovered = match located {
-        crate::place::Located::In { workspace_id, cwd } => return Ok((workspace_id, cwd)),
-        crate::place::Located::Uncovered(path) => path,
+        super::place::Located::In { workspace_id, cwd } => return Ok((workspace_id, cwd)),
+        super::place::Located::Uncovered(path) => path,
     };
     if !run.open_workspace {
         return Err(CliFailure::business(
@@ -587,14 +587,14 @@ async fn pump(
     loop {
         let event = tokio::select! {
             event = rpc.next_event() => event,
-            _ = tokio::signal::ctrl_c() => {
+            _ = wait_interrupt() => {
                 interrupts += 1;
                 // The session runs in the daemon, so quitting here would leave
                 // an agent editing files with nobody watching. The first Ctrl-C
                 // asks it to stop and keeps waiting for the turn to wind down.
                 if interrupts == 1 {
-                    eprintln!(
-                        "interrupting; press Ctrl-C again to leave the session running in the daemon"
+                    super::emit_stderr(
+                        "interrupting; press Ctrl-C again to leave the session running in the daemon",
                     );
                     let _ = rpc
                         .call(Request::SessionInterrupt { session_id: session_id.to_string() })
@@ -738,6 +738,19 @@ fn report(session_id: &str, outcome: Outcome) -> i32 {
     exit
 }
 
+async fn wait_interrupt() {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        // The native CLI owns the tty. Closing /cli is how a user walks away;
+        // the guest has no signal stream of its own.
+        std::future::pending::<()>().await;
+    }
+}
+
 fn emit_event(event: &SequencedEvent) {
     emit(
         "session.event",
@@ -746,7 +759,7 @@ fn emit_event(event: &SequencedEvent) {
 }
 
 fn emit(kind: &str, data: Value) {
-    println!("{}", output::envelope(kind, data));
+    let _ = output::succeed(kind, data);
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@
 //! directory — an agent that typed a command in `/tmp` must not have it
 //! mysteriously act on `/tmp`.
 
-use crate::output::CliFailure;
+use super::output::CliFailure;
 
 /// Whether a command means the same thing when aimed at another machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,7 +245,7 @@ fn not_routable(command: &str, why: &str) -> CliFailure {
         message: format!("{command} cannot run on another machine: {why}"),
         retryable: false,
         details: Some(serde_json::json!({"command": command})),
-        exit: crate::EXIT_INVALID_ARGS,
+        exit: super::EXIT_INVALID_ARGS,
     }
 }
 
@@ -354,7 +354,7 @@ mod tests {
         for command in ["daemon.stop", "update", "status"] {
             let error = enforce(&selection, Some(command)).unwrap_err();
             assert_eq!(error.code, "commandNotRoutable");
-            assert_eq!(error.exit, crate::EXIT_INVALID_ARGS);
+            assert_eq!(error.exit, crate::cli_front::EXIT_INVALID_ARGS);
             assert_eq!(error.details.unwrap()["command"], command);
         }
         let statically_answered = enforce(&selection, Some("schema")).unwrap_err();

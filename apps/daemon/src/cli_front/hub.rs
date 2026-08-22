@@ -7,10 +7,10 @@
 use std::time::{Duration, Instant};
 
 use genehub_proto::{HubClaim, HubStatus, Reply, Request};
-use genet_daemon::channel;
+use crate::channel;
 
-use crate::rpc::Rpc;
-use crate::{fail, ok, EXIT_FAILED, EXIT_INVALID_ARGS};
+use super::rpc::Rpc;
+use super::{fail, ok, EXIT_FAILED, EXIT_INVALID_ARGS};
 
 const WAIT_POLL: Duration = Duration::from_secs(2);
 /// Pairing codes expire on the Hub side in minutes; this is how long the CLI
@@ -19,34 +19,37 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub async fn hub(args: &[String]) -> i32 {
     let Some(verb) = args.first().map(String::as_str) else {
-        return crate::usage();
+        return super::usage();
     };
     match verb {
         "status" => {
             if args.len() != 1 {
-                return crate::usage();
+                return super::usage();
             }
             status().await
         }
         "login" => login(&args[1..]).await,
         "link" => {
             if args.len() != 1 {
-                return crate::usage();
+                return super::usage();
             }
             link().await
         }
         "unpair" => {
             if args.len() != 1 {
-                return crate::usage();
+                return super::usage();
             }
             unpair().await
         }
-        _ => crate::usage(),
+        _ => super::usage(),
     }
 }
 
 async fn status() -> i32 {
-    let rpc = Rpc::connect_or_exit().await;
+    let rpc = match Rpc::connect_or_exit().await {
+        Ok(rpc) => rpc,
+        Err(code) => return code,
+    };
     match rpc.call(Request::HubStatus).await {
         Ok(Reply::HubStatus(status)) => ok(serde_json::to_value(status).unwrap_or_default()),
         Ok(other) => fail(
@@ -65,26 +68,29 @@ async fn status() -> i32 {
 async fn login(args: &[String]) -> i32 {
     let options = match LoginOptions::parse(args) {
         Ok(options) => options,
-        Err(message) => fail("invalid_args", &message, EXIT_INVALID_ARGS),
+        Err(message) => return fail("invalid_args", &message, EXIT_INVALID_ARGS),
     };
     warn_if_cross_channel(&options.hub_url);
 
-    let rpc = Rpc::connect_or_exit().await;
+    let rpc = match Rpc::connect_or_exit().await {
+        Ok(rpc) => rpc,
+        Err(code) => return code,
+    };
     let current = match fetch_status(&rpc).await {
         Ok(status) => status,
-        Err(error) => fail("internal", &error, EXIT_FAILED),
+        Err(error) => return fail("internal", &error, EXIT_FAILED),
     };
 
     // Already paired: no-op that returns the current status, so a script can
     // re-run login safely (`genethub-cli.md` §4.1).
     if let HubStatus::Paired { .. } = &current {
-        eprintln!("already paired; nothing to do");
+        super::emit_stderr("already paired; nothing to do");
         return ok(login_payload(&current, None));
     }
 
     let status = match &current {
         HubStatus::Pairing { .. } => {
-            eprintln!("pairing already in progress; reusing the open code");
+            super::emit_stderr("pairing already in progress; reusing the open code");
             current
         }
         _ => match rpc
@@ -95,28 +101,30 @@ async fn login(args: &[String]) -> i32 {
             .await
         {
             Ok(Reply::HubStatus(status)) => status,
-            Ok(other) => fail(
-                "internal",
-                &format!("unexpected reply for hub.pair: {other:?}"),
-                EXIT_FAILED,
-            ),
+            Ok(other) => {
+                return fail(
+                    "internal",
+                    &format!("unexpected reply for hub.pair: {other:?}"),
+                    EXIT_FAILED,
+                )
+            }
             Err(error) => {
                 let message = error.to_string();
                 if message.contains("already paired") {
                     match fetch_status(&rpc).await {
                         Ok(status) => return ok(login_payload(&status, None)),
-                        Err(error) => fail("internal", &error, EXIT_FAILED),
+                        Err(error) => return fail("internal", &error, EXIT_FAILED),
                     }
                 }
                 let message = bare(&message);
-                fail(map_hub_error(message), message, EXIT_FAILED)
+                return fail(map_hub_error(message), message, EXIT_FAILED);
             }
         },
     };
 
     let payload = login_payload(&status, None);
     if let Some(url) = payload.get("url").and_then(|value| value.as_str()) {
-        eprintln!("open this URL in a browser to approve the machine:\n{url}");
+        super::emit_stderr(format!("open this URL in a browser to approve the machine:\n{url}"));
     }
 
     if !options.wait {
@@ -127,12 +135,15 @@ async fn login(args: &[String]) -> i32 {
 }
 
 async fn link() -> i32 {
-    let rpc = Rpc::connect_or_exit().await;
+    let rpc = match Rpc::connect_or_exit().await {
+        Ok(rpc) => rpc,
+        Err(code) => return code,
+    };
     match rpc.call(Request::HubClaimLink).await {
         Ok(Reply::HubClaim { status, claim }) => {
             let payload = login_payload(&status, Some(&claim));
             if let Some(url) = payload.get("url").and_then(|value| value.as_str()) {
-                eprintln!("open this URL on another device:\n{url}");
+                super::emit_stderr(format!("open this URL on another device:\n{url}"));
             }
             ok(payload)
         }
@@ -169,7 +180,10 @@ fn bare(message: &str) -> &str {
 }
 
 async fn unpair() -> i32 {
-    let rpc = Rpc::connect_or_exit().await;
+    let rpc = match Rpc::connect_or_exit().await {
+        Ok(rpc) => rpc,
+        Err(code) => return code,
+    };
     match rpc.call(Request::HubUnpair).await {
         Ok(Reply::HubStatus(status)) => ok(serde_json::to_value(status).unwrap_or_default()),
         Ok(other) => fail(
@@ -183,6 +197,7 @@ async fn unpair() -> i32 {
 
 /// Shared by `genet status` so the overview can attach a hub summary without
 /// inventing a second code path.
+#[allow(dead_code)]
 pub async fn status_value() -> Option<serde_json::Value> {
     let rpc = Rpc::connect().await.ok()?;
     match rpc.call(Request::HubStatus).await.ok()? {
@@ -255,10 +270,14 @@ fn warn_if_cross_channel(hub_url: &str) {
     let looks_beta = lower.contains("relay-beta") || lower.contains("beta.");
     match channel::CHANNEL {
         "official" if looks_beta => {
-            eprintln!("warning: official build pointing at a beta/self-built Hub ({hub_url})");
+            super::emit_stderr(format!(
+                "warning: official build pointing at a beta/self-built Hub ({hub_url})"
+            ));
         }
         "beta" if lower.contains("relay.genethub.com") && !looks_beta => {
-            eprintln!("warning: beta build pointing at the official Hub ({hub_url})");
+            super::emit_stderr(format!(
+                "warning: beta build pointing at the official Hub ({hub_url})"
+            ));
         }
         _ => {}
     }
@@ -358,10 +377,12 @@ async fn wait_until_settled(rpc: &Rpc, initial: serde_json::Value) -> i32 {
             Ok(status @ HubStatus::Paired { .. }) => {
                 return ok(login_payload(&status, None));
             }
-            Ok(HubStatus::Failed { message, .. }) => fail("hub_unreachable", &message, EXIT_FAILED),
+            Ok(HubStatus::Failed { message, .. }) => {
+                return fail("hub_unreachable", &message, EXIT_FAILED)
+            }
             Ok(HubStatus::Pairing { expires_at, .. }) => {
                 if Instant::now() >= deadline {
-                    fail(
+                    return fail(
                         "hub_unreachable",
                         &format!("pairing timed out (code expires at {expires_at})"),
                         EXIT_FAILED,
@@ -375,7 +396,9 @@ async fn wait_until_settled(rpc: &Rpc, initial: serde_json::Value) -> i32 {
                     return ok(initial);
                 }
             }
-            Err(error) => fail("daemon_unreachable", &error, crate::EXIT_UNREACHABLE),
+            Err(error) => {
+                return fail("daemon_unreachable", &error, super::EXIT_UNREACHABLE)
+            }
         }
         tokio::time::sleep(WAIT_POLL).await;
     }

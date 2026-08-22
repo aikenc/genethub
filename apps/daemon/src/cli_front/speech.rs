@@ -4,8 +4,8 @@
 
 use genehub_proto::{Reply, Request};
 
-use crate::output::{self, CliFailure};
-use crate::target::Selection;
+use super::output::{self, CliFailure};
+use super::target::Selection;
 
 pub async fn speech(args: &[String], selection: &Selection) -> i32 {
     let outcome = execute(args, selection).await;
@@ -20,26 +20,26 @@ async fn execute(
     selection: &Selection,
 ) -> Result<(&'static str, serde_json::Value), CliFailure> {
     let command = parse(args)?;
-    let rpc = crate::query::connect_selected(selection).await?;
+    let rpc = super::query::connect_selected(selection).await?;
     match command {
         SpeechCommand::Status => {
             let reply = rpc
                 .call(Request::SpeechCapabilities)
                 .await
-                .map_err(crate::query::rpc_error)?;
+                .map_err(super::query::rpc_error)?;
             capabilities(reply).map(|value| ("speech.runtime.status", value))
         }
         SpeechCommand::Probe => {
             let reply = rpc
                 .call(Request::SpeechRuntimeProbe)
                 .await
-                .map_err(crate::query::rpc_error)?;
+                .map_err(super::query::rpc_error)?;
             match reply {
                 Reply::SpeechRuntimeStatus(status) => Ok((
                     "speech.runtime.probe",
                     serde_json::to_value(status).expect("serializable speech status"),
                 )),
-                other => Err(crate::query::unexpected_reply(
+                other => Err(super::query::unexpected_reply(
                     "speech runtime status",
                     &other,
                 )),
@@ -52,7 +52,7 @@ async fn execute(
                     args: Vec::new(),
                 })
                 .await
-                .map_err(crate::query::rpc_error)?;
+                .map_err(super::query::rpc_error)?;
             capabilities(reply).map(|value| ("speech.runtime.unregister", value))
         }
         SpeechCommand::Register {
@@ -65,7 +65,7 @@ async fn execute(
                     args: runtime_args,
                 })
                 .await
-                .map_err(crate::query::rpc_error)?;
+                .map_err(super::query::rpc_error)?;
             capabilities(reply).map(|value| ("speech.runtime.register", value))
         }
     }
@@ -136,7 +136,7 @@ fn capabilities(reply: Reply) -> Result<serde_json::Value, CliFailure> {
         Reply::SpeechCapabilities(capabilities) => {
             Ok(serde_json::to_value(capabilities).expect("serializable speech capabilities"))
         }
-        other => Err(crate::query::unexpected_reply(
+        other => Err(super::query::unexpected_reply(
             "speech capabilities",
             &other,
         )),
