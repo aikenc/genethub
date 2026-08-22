@@ -88,7 +88,7 @@ jobs:
               .github/workflows/*|.github/agent-clis/*)
                 force=true
                 ;;
-              Cargo.toml|Cargo.lock|apps/daemon/*|apps/cli/*|apps/agent/*|apps/proto/*|testing/*)
+              Cargo.toml|Cargo.lock|apps/daemon/*|apps/cli/*|apps/agent/*|apps/host/*|apps/proto/*|testing/*)
                 rust=true
                 ;;
               apps/relay/*)
@@ -121,7 +121,7 @@ jobs:
           if [ "$rust" = true ]; then
             for f in "${files[@]}"; do
               case "$f" in
-                apps/daemon/*|apps/cli/*|Cargo.toml|Cargo.lock)
+                apps/daemon/*|apps/cli/*|apps/host/*|Cargo.toml|Cargo.lock)
                   desktop=true
                   break
                   ;;
@@ -402,6 +402,10 @@ jobs:
       # particular, the owner-only Windows DACL assertions must execute on a
       # real Windows filesystem; a Linux cross-check can only compile them.
       - run: cargo test -p genet-daemon --lib
+      # The WASM guest delegates chmod-equivalent hardening to the native host.
+      # Its Windows implementation must be exercised on NTFS, not merely
+      # cross-compiled from Linux.
+      - run: cargo test -p genehub-host --bin genehub-host-dev fs_perms::tests
       - name: Refuse to skip real daemon supervision
         shell: bash
         run: |
