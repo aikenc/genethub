@@ -500,7 +500,7 @@ impl AppState {
             "token": self.token,
             "machineId": self.machine.machine_id,
             "fingerprint": self.machine.fingerprint(),
-            "pid": std::process::id(),
+            "pid": crate::host_pid::current(),
         });
         crate::config::save_private(&path, serde_json::to_string_pretty(&body)?.as_bytes())?;
         Ok(path)

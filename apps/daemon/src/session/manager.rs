@@ -2981,6 +2981,7 @@ async fn pump_events(
     // `Live` for the trunk writer to pick up; a `Flush` is awaited before any
     // turn ends, so a work row is never written before its payload's address
     // is known.
+    #[cfg(not(target_family = "wasm"))]
     let blob_writer = tokio::task::spawn_blocking(move || {
         while let Some(write) = blob_receiver.blocking_recv() {
             match write {
@@ -2988,6 +2989,26 @@ async fn pump_events(
                     match blob_store.put_blob(&blob_workspace_id, &blob_session_id, value) {
                         Ok(blob) => {
                             blob_live.blob_refs.blocking_lock().insert(item_id, blob);
+                        }
+                        Err(error) => {
+                            tracing::warn!("could not preserve blob {item_id}: {error}")
+                        }
+                    }
+                }
+                BlobWrite::Flush(done) => {
+                    let _ = done.send(());
+                }
+            }
+        }
+    });
+    #[cfg(target_family = "wasm")]
+    let blob_writer = tokio::spawn(async move {
+        while let Some(write) = blob_receiver.recv().await {
+            match write {
+                BlobWrite::Put { item_id, value } => {
+                    match blob_store.put_blob(&blob_workspace_id, &blob_session_id, value) {
+                        Ok(blob) => {
+                            blob_live.blob_refs.lock().await.insert(item_id, blob);
                         }
                         Err(error) => {
                             tracing::warn!("could not preserve blob {item_id}: {error}")
@@ -4793,7 +4814,10 @@ mod tests {
         // take over, so exercise the real retry boundary instead of racing it.
         let mut locked = false;
         for _ in 0..40 {
-            match fs2::FileExt::try_lock_exclusive(&legacy) {
+            match crate::fs_lock::try_lock_exclusive(
+                &legacy,
+                &dir.path().join(".genethub/owner.lock"),
+            ) {
                 Ok(()) => {
                     locked = true;
                     break;
@@ -7038,7 +7062,7 @@ mod tests {
             .truncate(false)
             .open(home.join("owner.lock"))
             .unwrap();
-        fs2::FileExt::try_lock_exclusive(&legacy).unwrap();
+        crate::fs_lock::try_lock_exclusive(&legacy, &home.join("owner.lock")).unwrap();
 
         let current = manager(workspace.path());
         let refused = current.store.save_meta(&meta()).unwrap_err().to_string();

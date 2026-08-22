@@ -852,7 +852,18 @@ async fn refuse(stream: &mut ServerStream, needed: Capability) -> Result<()> {
 
 async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     let body = stream.read_body(MAX_RPC_BODY_BYTES).await?;
-    let request: Request = serde_json::from_slice(&body).context("invalid RPC operation body")?;
+    let request: Request = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return send_error(
+                stream,
+                400,
+                ErrorCode::BadRequest,
+                format!("invalid RPC operation body: {error}"),
+            )
+            .await;
+        }
+    };
     stream.diagnostic_operation = diagnostic_operation(&stream.head.metadata);
     if let Some(scope) = &services.access.workspace_id {
         if let Some(requested) = request_workspace(&request) {

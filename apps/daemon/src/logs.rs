@@ -15,7 +15,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(target_family = "wasm"))]
 use cap_std::ambient_authority;
+#[cfg(not(target_family = "wasm"))]
 use cap_std::fs::Dir;
 
 /// Rotate at four megabytes, keep one old file.
@@ -74,14 +76,7 @@ impl LogFile {
 }
 
 fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(path)?;
+    let file = crate::config::open_append(path)?;
     // Correct legacy files too: creation mode does not change an existing
     // world-readable log left by an older build or permissive umask.
     crate::config::restrict_to_owner(path).map_err(|error| {
@@ -122,33 +117,61 @@ impl Write for LogFile {
 /// daemon said before it could log anything), so this lists what is there rather
 /// than only what we wrote.
 pub fn list(dir: &Path) -> Vec<(String, u64)> {
-    let Ok(directory) = Dir::open_ambient_dir(dir, ambient_authority()) else {
-        return Vec::new();
-    };
-    let Ok(entries) = directory.read_dir(".") else {
-        return Vec::new();
-    };
-    let mut found: Vec<(String, u64, cap_std::time::SystemTime)> = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let meta = entry.metadata().ok()?;
-            if !meta.is_file() {
-                return None;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            Some((
-                name,
-                meta.len(),
-                meta.modified()
-                    .unwrap_or(cap_std::time::SystemClock::UNIX_EPOCH),
-            ))
-        })
-        .collect();
-    found.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
-    found
-        .into_iter()
-        .map(|(name, size, _)| (name, size))
-        .collect()
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let Ok(directory) = Dir::open_ambient_dir(dir, ambient_authority()) else {
+            return Vec::new();
+        };
+        let Ok(entries) = directory.read_dir(".") else {
+            return Vec::new();
+        };
+        let mut found: Vec<(String, u64, cap_std::time::SystemTime)> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let meta = entry.metadata().ok()?;
+                if !meta.is_file() {
+                    return None;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                Some((
+                    name,
+                    meta.len(),
+                    meta.modified()
+                        .unwrap_or(cap_std::time::SystemClock::UNIX_EPOCH),
+                ))
+            })
+            .collect();
+        found.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
+        found
+            .into_iter()
+            .map(|(name, size, _)| (name, size))
+            .collect()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(String, u64, std::time::SystemTime)> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let meta = entry.metadata().ok()?;
+                if !meta.is_file() {
+                    return None;
+                }
+                Some((
+                    entry.file_name().to_string_lossy().to_string(),
+                    meta.len(),
+                    meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                ))
+            })
+            .collect();
+        found.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
+        found
+            .into_iter()
+            .map(|(name, size, _)| (name, size))
+            .collect()
+    }
 }
 
 /// The end of one log file.
@@ -162,13 +185,27 @@ pub fn tail(dir: &Path, name: &str, bytes: usize) -> anyhow::Result<String> {
     if name.is_empty() || Path::new(name).components().count() != 1 {
         anyhow::bail!("{name} 不是一个日志文件名");
     }
-    let directory = Dir::open_ambient_dir(dir, ambient_authority())?;
-    // Capability-relative open keeps a log-directory symlink from becoming a
-    // read of an arbitrary host file, without a check/open race.
-    let mut file = directory
-        .open(name)
-        .map(cap_std::fs::File::into_std)
-        .map_err(|error| anyhow::anyhow!("打不开 {name}：{error}"))?;
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let directory = Dir::open_ambient_dir(dir, ambient_authority())?;
+        // Capability-relative open keeps a log-directory symlink from becoming a
+        // read of an arbitrary host file, without a check/open race.
+        let mut file = directory
+            .open(name)
+            .map(cap_std::fs::File::into_std)
+            .map_err(|error| anyhow::anyhow!("打不开 {name}：{error}"))?;
+        tail_from_file(&mut file, bytes)
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let path = dir.join(name);
+        let mut file = std::fs::File::open(&path)
+            .map_err(|error| anyhow::anyhow!("打不开 {name}：{error}"))?;
+        tail_from_file(&mut file, bytes)
+    }
+}
+
+fn tail_from_file(file: &mut std::fs::File, bytes: usize) -> anyhow::Result<String> {
     let size = file.metadata()?.len();
     let from = size.saturating_sub(bytes as u64);
     file.seek(SeekFrom::Start(from))?;

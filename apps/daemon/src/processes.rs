@@ -278,7 +278,7 @@ fn claimed_by(census: &[Row], agent: Agent, watched_for: u64) -> Vec<&Row> {
 /// that contains spaces.
 #[cfg(unix)]
 async fn census() -> Option<Vec<Row>> {
-    let mut command = tokio::process::Command::new("ps");
+    let mut command = crate::os_process::Command::new("ps");
     command
         .args(["-eo", "pid=,ppid=,pgid=,etime=,args="])
         .stdin(std::process::Stdio::null())

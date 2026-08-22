@@ -9,11 +9,44 @@
 
 | 阶段 | 名称 | 用户能得到什么 | 状态 |
 |------|------|----------------|------|
+| **WASM 持续交付** | 95% 高频变化不重发原生程序 | official 分钟级、beta/alpha/dev 秒级，后台更新且自动回滚 | Linux/dev 底座已验证；Windows parity 与交付链未完成 |
 | **MVP** | 能装、能挂、能跑、能接力 | 安装 → 托盘后台 → 真跑起一条任务 → 换设备继续 | 进行中 |
 | **自成闭环** | 不依赖任何外部服务 | 只部署 relay + 静态工作台，就能远程用自己的电脑 | ✅ |
 | **M2** | 能带走 · 能多选 | 手机 App、设备管理、分屏 | 计划 |
 | **M3** | 能协作 | 正式账号、多人共用一台机器、会话 fork / rewind | 计划 |
 | **M4** | 能不信任整个平台 | 独立公钥握手、前向保密、可验证客户端；Control 也不知道会话密钥 | 计划 |
+
+---
+
+## WASM 持续交付
+
+愿景与不可让步边界见 [architecture.md](./architecture.md) B5。这里记录当前交付状态，避免把“默认 WASM 跑测通过”误写成“自动更新已完成”。
+
+### 已达成的 Linux/dev 运行时底座
+
+- `genehub_guest.wasm` 同时提供 daemon/agent 两个入口。这是**唯一**业务运行时：缺 host/guest 或 WIT 不匹配即失败。产品不保留原生 daemon/agent 模式，也不允许任何回退。
+- 原生 `genet` 是 `/cli` 薄转发器；会话、工作区、agent adapter、CLI 动词、Fabric 与 RTC policy 都在 guest。
+- host 只提供 Wasmtime/WASI 与 typed OS/连接资源；RTC 的 ICE/DTLS/SCTP 连接机制在 host，admission、名额、超时与 Fabric 回落在 guest。
+- dev-2 Linux 本地 change gate 331/331 qualified，重建工件后的 WASM specialty 35/35 qualified；同 PID 重实例化已有测试。这不是 Windows 安装后首启证据。
+
+### 尚未完成的交付系统
+
+| 工作项 | 当前状态 | 完成门 |
+|---|---|---|
+| Windows 能力 parity | host 的非 Unix `fs-perms` 固定返回 `Unsupported`，而 guest 首启必做 owner-only 收紧，当前 Windows 默认 WASM daemon 因此不能完成首启 | 实现 Windows ACL；待发布三件套在 Windows runner 与安装后主旅程通过 |
+| CI 影响分类 | Rust path filter 漏 host/guest/WIT/proto 等目录；没有 90 天 change-set 指标 | 自动分类完整/高频模式，漏标 fail closed，热路径实测 ≥95% |
+| 测试工程基线 | `testing` 的 TypeScript typecheck 有 4 个 HEAD 既有错误（一个可空值、三个未使用 import）；testctl lint/governance 通过不能替代它 | 修到 `npm --prefix testing run typecheck` 0 error，并纳入候选机械门 |
+| guest 构建 | release 各平台重复编；当前 release profile 为 fat LTO 单 codegen unit，热重编实测 71.66 秒 | guest 每 candidate 只编一次；iterate profile 的 build+upload P95 支撑 ≤60 秒端到端 |
+| 完整/高频 workflow | 只有 tag/full release，没有 guest+website workflow，当前 SHA 没有远端发布演练 | 两模式分别有 rehearsal、真实耗时、失败门与可晋升的 immutable artifact |
+| 供应链与兼容 | official/beta 未验签；无 host/world/proto 兼容清单、反回滚 | 签名 release set 每次装载验证；不兼容候选拒绝并回 known-good |
+| 客户端更新 | 只有用户点击检查/下载 installer；自动路径 fail-closed | 后台发现/下载/预热/safe-point/健康确认/回滚，无提示与人工重启 |
+| 切换连续性 | 当前 reload 销毁 Store、断控制面并杀 process/PTY，活动 turn 会丢 | drain 或可验证恢复；更新失败不影响正在工作的 known-good 实例 |
+| Web/desktop | Cloud 只有完整人工 deploy；desktop WebView 固化在 installer | website-only 原子部署；desktop 有签名热 Web bundle 或不计入 95% 分子 |
+| 混合版本 | Web/daemon 严格要求 data-plane v3 相等 | 至少一个明确兼容窗口和可证明的 guest/Web 切换顺序 |
+| SLO telemetry | 不存在 | promotion→site/manifest→online active/rollback 全链记录 P50/P95；official ≤10 分钟，高频 ≤60 秒 |
+| 运行时债务 | guest readiness 仍为 4 ms timer poll；host 读写 preopen 根目录 | 真 `wasi:io/poll` reactor、可审计最小 preopen/能力边界 |
+
+顺序：先修 Windows ACL 并完成跨平台默认 WASM 首启门；同时清掉测试工程 typecheck 基线错误，再修 CI 覆盖与双 binding 生成，建立可信构建基线；继而做签名 release-set、双槽位与回滚、safe-point、website-only/desktop UI 更新和混合版本；最后以远端演练和 90 天指标关闭愿景门。速度门永远不能替代下面 MVP 与能力回归门。
 
 ---
 
@@ -49,7 +82,7 @@
 - Agent 的 subagents / MCP / 真压缩（见 [builtin-agent.md](./builtin-agent.md) §8）；`genet` 自身的图片输入也在此列——贴图现在能发给 claude / acp / opencode（它们各自把图片转给自己的模型），但 `genet` 的 provider 层（Anthropic / OpenAI / DeepSeek 请求构造）还不接受图片内容块
 - 会话中途动态切换 agent：`claude`、`opencode` 各自维护一份进程私有的会话状态（CLI 自己的 `--resume` id、HTTP session），把 `TimelineItem` 转存到另一个 agent 不等于真的迁移了上下文，效果只会更糟；有对话内容后前端直接锁定 agent 选择器（`ComposerControls.tsx`），而不是假装能无缝换
 - OpenCode 的真实模型目录（当前 `catalog.models` 恒为空，选择器因此不出现）、各 adapter 的速度 / 质量档位、权限的历史面板
-- 「/」命令的其余半边：Claude Code 的命令表已经透传（`initialize` 握手拿到，composer 里输入 `/` 就是这份表），但 `genet-agent` 自己的 `get_commands` / skill 展开仍然没接上，OpenCode 的命令表也还没读
+- 「/」命令的其余半边：Claude Code 的命令表已经透传（`initialize` 握手拿到，composer 里输入 `/` 就是这份表），但内置 Genet Agent 的 `get_commands` / skill 展开仍然没接上，OpenCode 的命令表也还没读
 
 ### 验收清单
 

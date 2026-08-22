@@ -88,6 +88,7 @@ pub async fn serve(state: Shared, pty_tx: PtyFanout) -> Result<Listener> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/shutdown", axum::routing::post(shutdown))
+        .route("/cli", axum::routing::post(cli))
         .route("/ws", get(upgrade))
         .with_state(Context_ {
             state: state.clone(),
@@ -146,7 +147,7 @@ async fn health(
     if !valid_control_challenge(&query.challenge) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::Value::Null)).into_response();
     }
-    let pid = std::process::id();
+    let pid = crate::host_pid::current();
     let machine_id = context.state.machine.machine_id.clone();
     let fingerprint = context.state.machine.fingerprint();
     let proof = health_proof(
@@ -195,6 +196,26 @@ pub fn shutdown_proof(
     expiring_control_proof(
         token,
         b"shutdown",
+        challenge,
+        pid,
+        machine_id,
+        fingerprint,
+        expires_at,
+    )
+}
+
+/// One-use proof for forwarding a native CLI invocation into this daemon.
+pub fn cli_proof(
+    token: &str,
+    challenge: &str,
+    pid: u32,
+    machine_id: &str,
+    fingerprint: &str,
+    expires_at: u64,
+) -> String {
+    expiring_control_proof(
+        token,
+        b"cli",
         challenge,
         pid,
         machine_id,
@@ -327,7 +348,7 @@ async fn shutdown(
     if !remote.ip().is_loopback() {
         return (StatusCode::FORBIDDEN, "shutdown is loopback only");
     }
-    if !valid_control_challenge(&params.challenge) || params.pid != std::process::id() {
+    if !valid_control_challenge(&params.challenge) || params.pid != crate::host_pid::current() {
         return (StatusCode::UNAUTHORIZED, "invalid shutdown proof");
     }
     let expected = shutdown_proof(
@@ -368,6 +389,118 @@ struct ShutdownQuery {
     proof: String,
 }
 
+#[derive(Deserialize)]
+struct CliQuery {
+    challenge: String,
+    pid: u32,
+    #[serde(rename = "expiresAt")]
+    expires_at: u64,
+    proof: String,
+}
+
+#[derive(Deserialize)]
+struct CliBody {
+    argv: Vec<String>,
+    cwd: String,
+    stdin: Option<String>,
+}
+
+const MAX_CLI_STDIN_BYTES: usize = 1024 * 1024;
+
+/// Forwards one native `genet` invocation into the guest verb front.
+///
+/// Loopback plus a `cli`-domain proof. The body is argv/cwd/stdin; the
+/// response is NDJSON records as the verb prints, then `{"exit":N}`.
+async fn cli(
+    State(context): State<Context_>,
+    Query(params): Query<CliQuery>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    Json(body): Json<CliBody>,
+) -> impl IntoResponse {
+    if !remote.ip().is_loopback() {
+        return (StatusCode::FORBIDDEN, "cli is loopback only").into_response();
+    }
+    if !valid_control_challenge(&params.challenge) || params.pid != crate::host_pid::current() {
+        return (StatusCode::UNAUTHORIZED, "invalid cli proof").into_response();
+    }
+    let expected = cli_proof(
+        &context.state.token,
+        &params.challenge,
+        params.pid,
+        &context.state.machine.machine_id,
+        &context.state.machine.fingerprint(),
+        params.expires_at,
+    );
+    if !auth::token_matches(&expected, &params.proof)
+        || !consume_control_admission(
+            &context.used_control_admissions,
+            "cli",
+            &params.challenge,
+            params.expires_at,
+        )
+    {
+        return (StatusCode::UNAUTHORIZED, "invalid cli proof").into_response();
+    }
+
+    let stdin = match decode_cli_stdin(body.stdin.as_deref()) {
+        Ok(stdin) => stdin,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    let cwd = std::path::PathBuf::from(body.cwd);
+    let (tx, rx) = mpsc::unbounded_channel();
+    let state = context.state.clone();
+    tokio::spawn(crate::cli_front::invoke(
+        state,
+        crate::cli_front::Invocation {
+            argv: body.argv,
+            cwd,
+            stdin,
+        },
+        tx,
+    ));
+
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        let record = rx.recv().await?;
+        let line = format!("{}\n", cli_record_json(&record));
+        Some((Ok::<_, std::io::Error>(bytes::Bytes::from(line)), rx))
+    });
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/x-ndjson; charset=utf-8",
+        )],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
+}
+
+fn decode_cli_stdin(encoded: Option<&str>) -> Result<Vec<u8>, &'static str> {
+    let Some(encoded) = encoded.filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| "stdin is not valid standard base64")?;
+    if bytes.len() > MAX_CLI_STDIN_BYTES {
+        return Err("stdin exceeds 1 MiB");
+    }
+    Ok(bytes)
+}
+
+fn cli_record_json(record: &crate::cli_front::CliRecord) -> serde_json::Value {
+    match record {
+        crate::cli_front::CliRecord::Stdout { line } => {
+            serde_json::json!({"stream": "stdout", "line": line})
+        }
+        crate::cli_front::CliRecord::Stderr { text } => {
+            serde_json::json!({"stream": "stderr", "text": text})
+        }
+        crate::cli_front::CliRecord::Exit { code } => serde_json::json!({"exit": code}),
+    }
+}
+
 async fn upgrade(
     State(context): State<Context_>,
     Query(params): Query<WebSocketAdmission>,
@@ -376,7 +509,7 @@ async fn upgrade(
 ) -> impl IntoResponse {
     if !remote.ip().is_loopback()
         || !valid_control_challenge(&params.challenge)
-        || params.pid != std::process::id()
+        || params.pid != crate::host_pid::current()
     {
         return (StatusCode::UNAUTHORIZED, "invalid websocket admission").into_response();
     }
@@ -582,6 +715,17 @@ pub fn websocket_admission(
     }
 }
 
+/// Mints a one-use loopback URL for `POST /cli`. The reusable bearer stays in
+/// endpoint.json; only this short-lived proof crosses the socket.
+pub fn cli_url(port: u16, token: &str, pid: u32, machine_id: &str, fingerprint: &str) -> String {
+    let challenge = crate::devices::random_token();
+    let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
+    let proof = cli_proof(token, &challenge, pid, machine_id, fingerprint, expires_at);
+    format!(
+        "http://127.0.0.1:{port}/cli?challenge={challenge}&pid={pid}&expiresAt={expires_at}&proof={proof}"
+    )
+}
+
 pub fn websocket_url(
     port: u16,
     token: &str,
@@ -656,7 +800,7 @@ mod tests {
         let admission = websocket_admission(
             listener.port,
             &state.token,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
         );
@@ -705,7 +849,7 @@ mod tests {
         let fresh = websocket_url(
             listener.port,
             &state.token,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
         );
@@ -717,7 +861,7 @@ mod tests {
         let expired = websocket_proof(
             &state.token,
             &challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
             expired_at,
@@ -725,7 +869,7 @@ mod tests {
         let expired_url = format!(
             "ws://127.0.0.1:{}/ws?challenge={challenge}&pid={}&expiresAt={expired_at}&proof={expired}",
             listener.port,
-            std::process::id(),
+            crate::host_pid::current(),
         );
         assert!(tokio_tungstenite::connect_async(expired_url).await.is_err());
 
@@ -734,7 +878,7 @@ mod tests {
         let far_future_proof = websocket_proof(
             &state.token,
             &challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
             far_future,
@@ -742,7 +886,7 @@ mod tests {
         let far_future_url = format!(
             "ws://127.0.0.1:{}/ws?challenge={challenge}&pid={}&expiresAt={far_future}&proof={far_future_proof}",
             listener.port,
-            std::process::id(),
+            crate::host_pid::current(),
         );
         assert!(tokio_tungstenite::connect_async(far_future_url)
             .await
@@ -753,7 +897,7 @@ mod tests {
         let wrong_domain = shutdown_proof(
             &state.token,
             &challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
             expires_at,
@@ -761,7 +905,7 @@ mod tests {
         let wrong_url = format!(
             "ws://127.0.0.1:{}/ws?challenge={challenge}&pid={}&expiresAt={expires_at}&proof={wrong_domain}",
             listener.port,
-            std::process::id(),
+            crate::host_pid::current(),
         );
         assert!(tokio_tungstenite::connect_async(wrong_url).await.is_err());
 
@@ -789,7 +933,7 @@ mod tests {
         let proof = shutdown_proof(
             &state.token,
             challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
             expires_at,
@@ -797,16 +941,16 @@ mod tests {
         let url = format!(
             "http://127.0.0.1:{}/shutdown?challenge={challenge}&pid={}&expiresAt={expires_at}&proof={proof}",
             listener.port,
-            std::process::id(),
+            crate::host_pid::current(),
         );
         assert!(!url.contains(&state.token));
-        let answer = reqwest::Client::new()
+        let answer = crate::http::Client::new()
             .post(&url)
             .send()
             .await
             .expect("the request reaches the daemon");
         assert_eq!(answer.status(), 202);
-        let replay = reqwest::Client::new().post(url).send().await.unwrap();
+        let replay = crate::http::Client::new().post(url).send().await.unwrap();
         assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
 
         // Only now does the main loop begin waiting.
@@ -829,7 +973,7 @@ mod tests {
         let health_mac = health_proof(
             &state.token,
             challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
         );
@@ -838,7 +982,7 @@ mod tests {
             shutdown_proof(
                 &state.token,
                 challenge,
-                std::process::id(),
+                crate::host_pid::current(),
                 &state.machine.machine_id,
                 &state.machine.fingerprint(),
                 expires_at,
@@ -847,11 +991,11 @@ mod tests {
         );
         assert!(!auth::token_matches(&state.token, &health_mac));
 
-        let response = reqwest::Client::new()
+        let response = crate::http::Client::new()
             .post(format!(
                 "http://127.0.0.1:{}/shutdown?challenge={challenge}&pid={}&expiresAt={expires_at}&proof={health_mac}",
                 listener.port,
-                std::process::id(),
+                crate::host_pid::current(),
             ))
             .send()
             .await
@@ -862,16 +1006,16 @@ mod tests {
         let expired_proof = shutdown_proof(
             &state.token,
             challenge,
-            std::process::id(),
+            crate::host_pid::current(),
             &state.machine.machine_id,
             &state.machine.fingerprint(),
             expired_at,
         );
-        let expired = reqwest::Client::new()
+        let expired = crate::http::Client::new()
             .post(format!(
                 "http://127.0.0.1:{}/shutdown?challenge={challenge}&pid={}&expiresAt={expired_at}&proof={expired_proof}",
                 listener.port,
-                std::process::id(),
+                crate::host_pid::current(),
             ))
             .send()
             .await
@@ -948,7 +1092,7 @@ mod tests {
             .unwrap();
         let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
         let challenge = "fresh-health-challenge";
-        let response = reqwest::get(format!(
+        let response = crate::http::get(format!(
             "http://127.0.0.1:{}/health?challenge={challenge}",
             listener.port
         ))
@@ -956,7 +1100,7 @@ mod tests {
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["pid"], std::process::id());
+        assert_eq!(body["pid"], crate::host_pid::current());
         assert_eq!(body["machineId"], state.machine.machine_id);
         assert_eq!(body["fingerprint"], state.machine.fingerprint());
         assert_eq!(
@@ -964,12 +1108,155 @@ mod tests {
             health_proof(
                 &state.token,
                 challenge,
-                std::process::id(),
+                crate::host_pid::current(),
                 &state.machine.machine_id,
                 &state.machine.fingerprint(),
             )
         );
         assert!(!body.to_string().contains(&state.token));
+        listener.handle.abort();
+    }
+
+    #[test]
+    fn cli_proof_is_domain_separated_from_shutdown_and_health() {
+        let cli = cli_proof(
+            "token-1",
+            "challenge-1",
+            42,
+            "machine-1",
+            "fingerprint-1",
+            1_234_567_890,
+        );
+        let shutdown = shutdown_proof(
+            "token-1",
+            "challenge-1",
+            42,
+            "machine-1",
+            "fingerprint-1",
+            1_234_567_890,
+        );
+        let health = health_proof("token-1", "challenge-1", 42, "machine-1", "fingerprint-1");
+        assert_ne!(cli, shutdown);
+        assert_ne!(cli, health);
+        assert!(!cli.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cli_forwards_schema_without_opening_a_websocket() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+            .await
+            .unwrap();
+        let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
+        let url = cli_url(
+            listener.port,
+            &state.token,
+            crate::host_pid::current(),
+            &state.machine.machine_id,
+            &state.machine.fingerprint(),
+        );
+        let response = crate::http::Client::new()
+            .post(&url)
+            .json(&serde_json::json!({
+                "argv": ["schema"],
+                "cwd": dir.path().to_string_lossy(),
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!url.contains(&state.token));
+        let body = response.text().await.unwrap();
+        let mut exit = None;
+        let mut saw_schema = false;
+        for line in body.lines() {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            if let Some(code) = value.get("exit").and_then(|value| value.as_i64()) {
+                exit = Some(code);
+            }
+            if value["stream"] == "stdout" {
+                let printed = value["line"].as_str().unwrap();
+                assert!(
+                    printed.contains("genet.cli/v1") || printed.contains("\"schema\""),
+                    "{printed}"
+                );
+                saw_schema = true;
+            }
+        }
+        assert_eq!(exit, Some(0));
+        assert!(saw_schema);
+        listener.handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cli_machine_selector_does_not_run_the_command_locally() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+            .await
+            .unwrap();
+        let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
+        let url = cli_url(
+            listener.port,
+            &state.token,
+            crate::host_pid::current(),
+            &state.machine.machine_id,
+            &state.machine.fingerprint(),
+        );
+        let response = crate::http::Client::new()
+            .post(&url)
+            .json(&serde_json::json!({
+                "argv": ["--machine", "m_not_paired", "session", "list"],
+                "cwd": dir.path().to_string_lossy(),
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.unwrap();
+        assert!(
+            !body.contains("\"sessions\""),
+            "a missing --machine must not fall back to this daemon's session list: {body}"
+        );
+        assert!(
+            body.contains("fabric")
+                || body.contains("machineNotPaired")
+                || body.contains("not a machine"),
+            "must fail honestly rather than run locally: {body}"
+        );
+        listener.handle.abort();
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_proof_cannot_authorize_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+            .await
+            .unwrap();
+        let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
+        let challenge = crate::devices::random_token();
+        let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
+        let proof = shutdown_proof(
+            &state.token,
+            &challenge,
+            crate::host_pid::current(),
+            &state.machine.machine_id,
+            &state.machine.fingerprint(),
+            expires_at,
+        );
+        let response = crate::http::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/cli?challenge={challenge}&pid={}&expiresAt={expires_at}&proof={proof}",
+                listener.port,
+                crate::host_pid::current(),
+            ))
+            .json(&serde_json::json!({
+                "argv": ["schema"],
+                "cwd": "/",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         listener.handle.abort();
     }
 }

@@ -16,6 +16,9 @@ const COMPILER_VERSION: &str = "qwen3-context-v1";
 const MAX_PINNED: usize = 50;
 const MAX_AUTOMATIC: usize = 150;
 const MAX_WALKED_ENTRIES: usize = 2_000;
+/// Entries walked between yields. A cold directory tree is the disk's business,
+/// not the control plane's; see `blocking::breathe`.
+const WALK_STEP_ENTRIES: usize = 128;
 const MAX_MESSAGE_CHARS: usize = 400;
 const MAX_PROJECT_CONTEXT_CHARS: usize = 2_000;
 const MAX_CONTEXT_FILE_BYTES: u64 = 16 * 1024;
@@ -72,13 +75,7 @@ pub async fn compile(
             .iter()
             .map(|folder| folder.name.clone())
             .collect::<Vec<_>>();
-        let discovered = tokio::task::spawn_blocking(move || {
-            discover_project_context(&workspace_name, &folder_names, &roots)
-        })
-        .await
-        .context("joining Qwen3 project-context scan")?;
-
-        match discovered {
+        match discover_project_context(&workspace_name, &folder_names, &roots).await {
             Ok(discovered) => {
                 project_context = discovered.context;
                 omitted.project_context_truncated = discovered.context_truncated;
@@ -176,7 +173,7 @@ struct DiscoveredContext {
     index_unavailable: bool,
 }
 
-fn discover_project_context(
+async fn discover_project_context(
     workspace_name: &str,
     folder_names: &[String],
     roots: &[PathBuf],
@@ -254,6 +251,9 @@ fn discover_project_context(
                 continue;
             }
             walked += 1;
+            if walked.is_multiple_of(WALK_STEP_ENTRIES) {
+                crate::blocking::breathe().await;
+            }
             if let Some(name) = entry.path().file_stem().and_then(|name| name.to_str()) {
                 add_name_terms(
                     &mut ranked,
@@ -480,8 +480,8 @@ const COMMON_TERMS: &[&str] = &[
 mod tests {
     use super::*;
 
-    #[test]
-    fn project_files_and_genethub_configuration_are_bounded_and_secret_safe() {
+    #[tokio::test]
+    async fn project_files_and_genethub_configuration_are_bounded_and_secret_safe() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("GeneHubFabric.rs"), "").unwrap();
         std::fs::write(dir.path().join("private_key.pem"), "").unwrap();
@@ -495,7 +495,9 @@ mod tests {
         std::fs::write(config.join("context.md"), "这是 GeneHub Agent 项目。").unwrap();
         std::fs::write(config.join("preferences.jsonl"), "{}\n").unwrap();
 
-        let result = discover_project_context("GeneHub", &[], &[dir.path().into()]).unwrap();
+        let result = discover_project_context("GeneHub", &[], &[dir.path().into()])
+            .await
+            .unwrap();
         assert!(result.terms.iter().any(|term| term.text == "GeneHubFabric"));
         assert!(result.terms.iter().any(|term| term.text == "PipeSpace"));
         assert!(!result

@@ -16,13 +16,16 @@
 //! operating system as a list and never through a shell, so nothing in it can
 //! become a second command on the way.
 
-use anyhow::{Context, Result};
-use genehub_proto::{ErrorCode, ExchangeResponseHead, ShellFrame, ShellRunRequest};
+use anyhow::Result;
+use genehub_proto::{
+    Confinement, ErrorCode, ExchangeResponseHead, ProtocolError, ShellFrame, ShellRunRequest,
+};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
 use super::endpoint::{send_error, PeerServices, ServerStream};
 use crate::authz::Principal;
+use crate::state::Shared;
 
 /// How much of one read is turned into one frame. Large enough that a chatty
 /// build does not become a frame per line, small enough that the first output
@@ -48,6 +51,187 @@ const SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 /// and name it.
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
 
+pub(crate) enum StartError {
+    Protocol(ProtocolError),
+    Transport(String),
+}
+
+pub(crate) struct Started {
+    pub confinement: Option<Confinement>,
+    pub frames: mpsc::Receiver<ShellFrame>,
+}
+
+fn protocol(code: ErrorCode, message: impl Into<String>) -> StartError {
+    StartError::Protocol(ProtocolError {
+        code,
+        message: message.into(),
+    })
+}
+
+/// Starts a command for a local caller and yields its frames, including Exit.
+///
+/// Shared by the data-plane `shell.run` stream and the in-process CLI front.
+pub(crate) async fn start(
+    state: &Shared,
+    caller: &Principal,
+    request: ShellRunRequest,
+    stdin: Vec<u8>,
+) -> Result<Started, StartError> {
+    if stdin.len() > MAX_STDIN_BYTES {
+        return Err(protocol(
+            ErrorCode::BadRequest,
+            format!("standard input exceeds {MAX_STDIN_BYTES} bytes"),
+        ));
+    }
+    let Some((program, arguments)) = request.argv.split_first() else {
+        return Err(protocol(
+            ErrorCode::BadRequest,
+            "shell.run needs a command to run",
+        ));
+    };
+
+    let workspace = state
+        .workspaces
+        .get(&request.workspace_id)
+        .await
+        .map_err(|error| protocol(ErrorCode::NotFound, format!("{error:#}")))?;
+
+    let cwd = match &request.cwd {
+        None => workspace.root.clone(),
+        Some(cwd) => {
+            let candidate = std::path::Path::new(cwd);
+            let resolved = workspace
+                .folders
+                .iter()
+                .find_map(|folder| {
+                    crate::session::store::ensure_within(&folder.root, candidate).ok()
+                })
+                .or_else(|| crate::session::store::ensure_within(&workspace.root, candidate).ok());
+            match resolved {
+                Some(resolved) => resolved,
+                None => {
+                    return Err(protocol(
+                        ErrorCode::Forbidden,
+                        format!("cwd {cwd} escapes the workspace"),
+                    ))
+                }
+            }
+        }
+    };
+
+    let confinement = match crate::isolation::required_for(caller, &workspace) {
+        Ok(confinement) => confinement,
+        Err(refusal) => return Err(protocol(ErrorCode::IsolationUnavailable, refusal)),
+    };
+
+    let argv = crate::process::launch_argv(program, confinement.as_ref())
+        .map_err(|error| StartError::Transport(format!("{program}: {error:#}")))?;
+    let mut command = crate::process::command(&argv, arguments, &cwd);
+    command
+        .envs(&request.env)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if stdin.is_empty() {
+        command.stdin(std::process::Stdio::null());
+    } else {
+        command.stdin(std::process::Stdio::piped());
+    }
+
+    let mut child = match crate::process::Group::spawn(&mut command) {
+        Ok(child) => child,
+        Err(error) => {
+            let code = if error.kind() == std::io::ErrorKind::NotFound {
+                ErrorCode::NotFound
+            } else {
+                ErrorCode::Internal
+            };
+            return Err(protocol(code, format!("{program}: {error}")));
+        }
+    };
+
+    if let Some(mut sink) = child.stdin() {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = sink.write_all(&stdin).await;
+            let _ = sink.shutdown().await;
+        });
+    }
+
+    let (sender, mut frames) = mpsc::channel(FRAME_QUEUE);
+    if let Some(stdout) = child.stdout() {
+        let sender = sender.clone();
+        tokio::spawn(pump(stdout, sender, |data| ShellFrame::Stdout { data }));
+    }
+    if let Some(stderr) = child.stderr() {
+        let sender = sender.clone();
+        tokio::spawn(pump(stderr, sender, |data| ShellFrame::Stderr { data }));
+    }
+    drop(sender);
+
+    let described = crate::isolation::describe(confinement.as_ref());
+    let (out, rx) = mpsc::channel(FRAME_QUEUE);
+    let timeout_ms = request.timeout_ms;
+    let argv_log = request.argv.clone();
+    tokio::spawn(async move {
+        let deadline = timeout_ms.map(|milliseconds| {
+            tokio::time::Instant::now() + std::time::Duration::from_millis(milliseconds)
+        });
+        let mut timed_out = false;
+        let status = loop {
+            tokio::select! {
+                frame = frames.recv() => match frame {
+                    Some(frame) => {
+                        if out.send(frame).await.is_err() {
+                            return;
+                        }
+                    }
+                    None => break Some(match child.wait().await {
+                        Ok(status) => status,
+                        Err(_) => break None,
+                    }),
+                },
+                status = child.wait() => break Some(match status {
+                    Ok(status) => status,
+                    Err(_) => break None,
+                }),
+                () = sleep_until(deadline) => {
+                    timed_out = true;
+                    tracing::info!(
+                        milliseconds = timeout_ms,
+                        argv = ?argv_log,
+                        "a command ran out of time and was ended",
+                    );
+                    break child.end().await;
+                }
+                // The caller went away: the peer reset the stream, or its
+                // carrier died and the handler holding this receiver was
+                // aborted. A command that produces no output would otherwise
+                // learn about it only when it next wrote something — that is,
+                // never — and outlive the request that asked for it.
+                () = out.closed() => {
+                    tracing::debug!(
+                        argv = ?argv_log,
+                        "the caller went away and the command was ended with it",
+                    );
+                    child.end().await;
+                    return;
+                }
+            }
+        };
+        while let Ok(Some(frame)) = tokio::time::timeout(SETTLE, frames.recv()).await {
+            if out.send(frame).await.is_err() {
+                return;
+            }
+        }
+        let _ = out.send(exit_frame(status.as_ref(), timed_out)).await;
+    });
+
+    Ok(Started {
+        confinement: described,
+        frames: rx,
+    })
+}
+
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     // Whatever the caller sent is the command's standard input. Read before
     // anything is spawned, because the command must not start until its input
@@ -66,19 +250,6 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
             .await
         }
     };
-    let Some((program, arguments)) = request.argv.split_first() else {
-        return send_error(
-            stream,
-            400,
-            ErrorCode::BadRequest,
-            "shell.run needs a command to run",
-        )
-        .await;
-    };
-
-    // A resource-routed peer holds one workspace and nothing else. Checked
-    // before the workspace is even looked up, so that a wrong id cannot be
-    // told apart from a forbidden one by how long the answer takes.
     if let Some(scope) = &services.access.workspace_id {
         if scope != &request.workspace_id {
             return send_error(
@@ -90,81 +261,21 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
             .await;
         }
     }
-    let workspace = match services.state.workspaces.get(&request.workspace_id).await {
-        Ok(workspace) => workspace,
-        Err(error) => {
-            return send_error(stream, 404, ErrorCode::NotFound, format!("{error:#}")).await
-        }
-    };
-
-    let cwd = match &request.cwd {
-        None => workspace.root.clone(),
-        // Any of the workspace's folders, not only the first: a multi-folder
-        // workspace is one project. Refusing beats clamping to the root — a
-        // command quietly run in the wrong directory looks like it worked.
-        Some(cwd) => {
-            let candidate = std::path::Path::new(cwd);
-            let resolved = workspace
-                .folders
-                .iter()
-                .find_map(|folder| {
-                    crate::session::store::ensure_within(&folder.root, candidate).ok()
-                })
-                .or_else(|| crate::session::store::ensure_within(&workspace.root, candidate).ok());
-            match resolved {
-                Some(resolved) => resolved,
-                None => {
-                    return send_error(
-                        stream,
-                        403,
-                        ErrorCode::Forbidden,
-                        format!("cwd {cwd} escapes the workspace"),
-                    )
-                    .await
-                }
-            }
-        }
-    };
-
     let caller = Principal::of(&services.state, &services.access);
-    let confinement = match crate::isolation::required_for(&caller, &workspace) {
-        Ok(confinement) => confinement,
-        // Not 403: the caller is allowed and the machine is unable, and no
-        // wider grant would change that.
-        Err(refusal) => {
-            return send_error(stream, 501, ErrorCode::IsolationUnavailable, refusal).await
-        }
-    };
-
-    let argv = crate::process::launch_argv(program, confinement.as_ref())?;
-    let mut command = crate::process::command(&argv, arguments, &cwd);
-    command
-        .envs(&request.env)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    // A pipe only when there is something to put in it. An empty pipe and
-    // `/dev/null` both read as end-of-file, so the difference is invisible to
-    // the command — but a pipe is one more thing to hold open and close in
-    // order, and there is no reason to arrange that for nothing.
-    if stdin.is_empty() {
-        command.stdin(std::process::Stdio::null());
-    } else {
-        command.stdin(std::process::Stdio::piped());
-    }
-
-    // The command belongs to the request that asked for it, and so does
-    // everything it starts. If this task goes away — the peer disconnected,
-    // the endpoint tore down — none of it may outlive the only thing that was
-    // watching it (`process.rs`).
-    let mut child = match crate::process::Group::spawn(&mut command) {
-        Ok(child) => child,
-        Err(error) => {
-            let (status, code) = if error.kind() == std::io::ErrorKind::NotFound {
-                (404, ErrorCode::NotFound)
-            } else {
-                (500, ErrorCode::Internal)
+    let mut started = match start(&services.state, &caller, request, stdin).await {
+        Ok(started) => started,
+        Err(StartError::Protocol(error)) => {
+            let status = match error.code {
+                ErrorCode::BadRequest => 400,
+                ErrorCode::Forbidden => 403,
+                ErrorCode::NotFound => 404,
+                ErrorCode::IsolationUnavailable => 501,
+                _ => 500,
             };
-            return send_error(stream, status, code, format!("{program}: {error}")).await;
+            return send_error(stream, status, error.code, error.message).await;
+        }
+        Err(StartError::Transport(message)) => {
+            return send_error(stream, 500, ErrorCode::Internal, message).await
         }
     };
 
@@ -173,95 +284,15 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
             status: 200,
             metadata: serde_json::json!({
                 "codec": "json-u32be",
-                // Said before the first byte of output, because it is what the
-                // output has to be read in light of: under confinement a path
-                // outside the workspace does not report "forbidden", it reports
-                // nothing at all, and a caller that has not been told the rule
-                // will read that as "this machine does not have it".
-                "confinement": crate::isolation::describe(confinement.as_ref()),
+                "confinement": started.confinement,
             }),
             body_length: None,
             error: None,
         })
         .await?;
-
-    // Written from a task rather than here, because a command that reads none
-    // of its input — `head -1` on something large — leaves the pipe full and
-    // the write unfinished, and this side has output to be getting on with.
-    // The handle is dropped when the write ends, which is what tells the
-    // command its input is complete.
-    if let Some(mut sink) = child.stdin() {
-        tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
-            // Both failures mean the same thing and neither is ours to report:
-            // the command stopped reading, which it is allowed to do.
-            let _ = sink.write_all(&stdin).await;
-            let _ = sink.shutdown().await;
-        });
-    }
-
-    let (sender, mut frames) = mpsc::channel(FRAME_QUEUE);
-    let mut readers = tokio::task::JoinSet::new();
-    if let Some(stdout) = child.stdout() {
-        readers.spawn(pump(stdout, sender.clone(), |data| ShellFrame::Stdout {
-            data,
-        }));
-    }
-    if let Some(stderr) = child.stderr() {
-        readers.spawn(pump(stderr, sender.clone(), |data| ShellFrame::Stderr {
-            data,
-        }));
-    }
-    // Both readers hold a clone, so the channel closes when the last of them
-    // sees end-of-file.
-    drop(sender);
-
-    // Absent means no limit: an open-ended command is a legitimate thing to
-    // ask for over a stream the caller can walk away from.
-    let deadline = request.timeout_ms.map(|milliseconds| {
-        tokio::time::Instant::now() + std::time::Duration::from_millis(milliseconds)
-    });
-    let mut timed_out = false;
-
-    // Whichever comes first. Waiting for end-of-file before asking for the
-    // exit status would be waiting for the wrong thing: a command that leaves
-    // something behind — `sleep 30 &` — has handed its stdout to a process
-    // that outlives it, and the pipe stays open long after there is an exit
-    // status to report.
-    let status = loop {
-        tokio::select! {
-            frame = frames.recv() => match frame {
-                Some(frame) => stream.write_message(&frame).await?,
-                None => break Some(child.wait().await.context("waiting for the command")?),
-            },
-            status = child.wait() => break Some(status.context("waiting for the command")?),
-            () = sleep_until(deadline) => {
-                timed_out = true;
-                tracing::info!(
-                    milliseconds = request.timeout_ms,
-                    argv = ?request.argv,
-                    "a command ran out of time and was ended",
-                );
-                // Asked to finish before being made to, so that a command
-                // interrupted this way still gets to leave the workspace in a
-                // sane state — a half-written file is a worse outcome than a
-                // slow one.
-                break child.end().await;
-            }
-        }
-    };
-
-    // The command is over; what it wrote may not have arrived yet. Drain until
-    // the output falls quiet rather than until the pipe closes, because the
-    // thing still holding the pipe is exactly the thing that is not going to
-    // close it.
-    while let Ok(Some(frame)) = tokio::time::timeout(SETTLE, frames.recv()).await {
+    while let Some(frame) = started.frames.recv().await {
         stream.write_message(&frame).await?;
     }
-
-    stream
-        .write_message(&exit_frame(status.as_ref(), timed_out))
-        .await?;
     stream.finish().await
 }
 
@@ -304,7 +335,7 @@ async fn pump<R>(
 /// The last word on a command. `None` where the operating system could not be
 /// asked how it ended, which happens only after it has already been stopped —
 /// so there is still an answer to give, just a less specific one.
-fn exit_frame(status: Option<&std::process::ExitStatus>, timed_out: bool) -> ShellFrame {
+fn exit_frame(status: Option<&crate::os_process::ExitStatus>, timed_out: bool) -> ShellFrame {
     #[cfg(unix)]
     let signal = {
         use std::os::unix::process::ExitStatusExt;

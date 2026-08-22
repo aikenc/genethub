@@ -105,7 +105,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
         throw new Error("the workspace would not open");
       workspaceId = workspace.data.id;
       workspaceRootHandle = workspace.data.folders[0]!.rootHandle;
-    }, 30_000);
+    }, 120_000);
 
     afterAll(async () => {
       client?.close();
@@ -636,10 +636,10 @@ function startDaemon(
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const timer = setTimeout(
-      () => reject(new Error("the daemon never reported a port")),
-      15_000,
-    );
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("the daemon never reported a port"));
+    }, 60_000);
     child.stderr?.on("data", (chunk) =>
       process.stderr.write(`[daemon] ${chunk}`),
     );

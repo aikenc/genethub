@@ -5,18 +5,26 @@
 
 pub mod adapter;
 pub mod authz;
+pub(crate) mod blocking;
 pub mod channel;
 pub mod channel_auth;
+pub mod cli_front;
 pub mod config;
 pub mod dataplane;
 pub mod devices;
 pub mod diagnostics;
 pub mod files;
+pub(crate) mod fs_cap;
+pub(crate) mod fs_lock;
 pub mod git;
+pub mod host_pid;
+pub(crate) mod http;
 pub mod hub;
 pub mod isolation;
 pub mod lifecycle;
 pub mod link;
+pub(crate) mod os_process;
+
 pub mod logs;
 pub mod process;
 pub mod processes;
@@ -81,7 +89,7 @@ impl Daemon {
         transport::local::websocket_admission(
             self.port,
             &self.state.token,
-            std::process::id(),
+            crate::host_pid::current(),
             &self.state.machine.machine_id,
             &self.state.machine.fingerprint(),
         )

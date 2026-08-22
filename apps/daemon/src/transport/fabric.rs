@@ -14,7 +14,6 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use genehub_proto::{PeerAuth, PeerHello, TransportKind};
 use tokio::sync::{mpsc, Notify};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -22,6 +21,7 @@ use crate::config::Enrollment;
 use crate::dataplane::{endpoint, handshake};
 use crate::state::Shared;
 use crate::transport::admission::Admission;
+use crate::transport::ws;
 
 const VERSION: u8 = 2;
 const HEADER_BYTES: usize = 28;
@@ -35,6 +35,19 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Matches the browser half of this wire (`packages/web/src/fabric/frame.ts`).
 const MAX_ROUTE_TICKET_BYTES: usize = 4096;
 const BACKOFF: [u64; 6] = [1, 2, 5, 10, 30, 60];
+
+/// The same bounds on both ends of every Fabric socket. One outer stream
+/// carries every peer link this node has, so a frame limit that differed
+/// between the uplink and the dialer would be a limit that only some of the
+/// traffic obeyed.
+fn socket_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_write_buffer_size: 512 * 1024,
+        max_message_size: Some(MAX_WIRE_FRAME_BYTES),
+        max_frame_size: Some(MAX_WIRE_FRAME_BYTES),
+        ..WebSocketConfig::default()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -259,21 +272,10 @@ async fn run_once(
     diagnostic_operation: &'static str,
 ) -> Result<()> {
     validate_fabric_url(url)?;
-    let request = url
-        .into_client_request()
-        .context("building the Fabric uplink request")?;
-    let config = WebSocketConfig {
-        max_write_buffer_size: 512 * 1024,
-        max_message_size: Some(MAX_WIRE_FRAME_BYTES),
-        max_frame_size: Some(MAX_WIRE_FRAME_BYTES),
-        ..WebSocketConfig::default()
-    };
-    let (socket, _) = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        tokio_tungstenite::connect_async_with_config(request, Some(config), false),
-    )
-    .await
-    .context("Fabric WebSocket handshake timed out")??;
+    tracing::debug!(%url, "dialing the Fabric relay");
+    let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(url, socket_config()))
+        .await
+        .context("Fabric WebSocket handshake timed out")??;
     online.store(true, Ordering::Relaxed);
     state
         .diagnostics
@@ -686,7 +688,7 @@ fn decode(bytes: &[u8]) -> Option<Frame> {
 /// browsers cannot set an Authorization header. Accept exactly one `ticket`
 /// query value and keep every other URL authority rule fail-closed.
 pub(crate) fn validate_fabric_url(value: &str) -> Result<()> {
-    let url = reqwest::Url::parse(value).context("parsing the Fabric endpoint URL")?;
+    let url = crate::http::Url::parse(value).context("parsing the Fabric endpoint URL")?;
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         anyhow::bail!("Fabric endpoint URLs cannot contain credentials or fragments");
     }
@@ -791,22 +793,10 @@ pub async fn dial(
     route_ticket: &str,
     hello: &genehub_proto::PeerHello,
 ) -> std::result::Result<FabricLink, DialError> {
-    let request = url
-        .into_client_request()
-        .map_err(|error| DialError::Protocol(format!("that endpoint is not usable: {error}")))?;
-    let config = WebSocketConfig {
-        max_write_buffer_size: 512 * 1024,
-        max_message_size: Some(MAX_WIRE_FRAME_BYTES),
-        max_frame_size: Some(MAX_WIRE_FRAME_BYTES),
-        ..WebSocketConfig::default()
-    };
-    let (socket, _) = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        tokio_tungstenite::connect_async_with_config(request, Some(config), false),
-    )
-    .await
-    .map_err(|_| DialError::Unavailable("the relay did not answer in time".into()))?
-    .map_err(dial_error)?;
+    let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(url, socket_config()))
+        .await
+        .map_err(|_| DialError::Unavailable("the relay did not answer in time".into()))?
+        .map_err(dial_error)?;
     let (mut sink, mut source) = socket.split();
 
     let mut stream_id = [0u8; STREAM_ID_BYTES];
@@ -1004,6 +994,11 @@ fn dial_error(error: tokio_tungstenite::tungstenite::Error) -> DialError {
                 message: format!("the relay refused this call with status {other}"),
             },
         },
+        // A URL the client cannot even turn into a request is not a relay that
+        // failed to answer, and retrying it will not change the answer.
+        tokio_tungstenite::tungstenite::Error::Url(error) => {
+            DialError::Protocol(format!("that endpoint is not usable: {error}"))
+        }
         other => DialError::Unavailable(format!("the relay could not be reached: {other}")),
     }
 }

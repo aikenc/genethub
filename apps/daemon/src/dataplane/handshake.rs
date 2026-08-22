@@ -62,7 +62,7 @@ pub fn accept(
                 nonce,
                 proof,
             },
-            Admission::DeviceRequired,
+            Admission::DeviceRequired | Admission::Loopback { .. },
         ) => {
             let (id, answer, key) = state.devices.authenticate_session(
                 &DeviceAuth {
@@ -128,7 +128,7 @@ pub fn accept(
                 nonce,
                 proof,
             },
-            Admission::DeviceRequired,
+            Admission::DeviceRequired | Admission::Loopback { .. },
         ) => {
             let (id, answer, key) = state.devices.authenticate_invite(
                 &InviteAuth {
@@ -198,5 +198,44 @@ mod tests {
             &accepted.welcome.proof,
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_loopback_listener_also_accepts_a_pairing_invite() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+            .await
+            .unwrap();
+        let invite = state.devices.invite();
+        let (invite_id, secret) = invite.code.split_once('.').unwrap();
+        let nonce = "00112233445566778899aabbccddeeff";
+        let context = format!("invite:{invite_id}");
+        let hello = PeerHello {
+            version: genehub_proto::DATA_PLANE_VERSION,
+            client_name: "pairing".into(),
+            auth: PeerAuth::Invite {
+                invite_id: invite_id.into(),
+                nonce: nonce.into(),
+                proof: channel_auth::client_proof(secret, &context, nonce),
+            },
+            rtc_supported: false,
+        };
+        let accepted = accept(
+            &state,
+            TransportKind::Loopback,
+            Admission::Loopback {
+                server_proof: "unused-owner-proof".into(),
+            },
+            &serde_json::to_vec(&hello).unwrap(),
+            None,
+            None,
+        )
+        .expect("invite authenticates on the loopback listener");
+        channel_auth::verify_proof(
+            &channel_auth::server_proof(secret, &context, nonce, &accepted.welcome.server_nonce),
+            &accepted.welcome.proof,
+        )
+        .unwrap();
+        assert_eq!(accepted.access.bootstrap_invite.as_deref(), Some(invite_id));
     }
 }

@@ -19,6 +19,12 @@ pub const PRODUCT: &str = "GeneHub Dev";
 pub const DATA_DIR_NAME: &str = "GeneHub-dev";
 /// What the shell spawns (with `daemon run`): the merged CLI+daemon binary.
 pub const CLI_BINARY: &str = "genet-dev";
+/// The wasm shell staged next to the CLI: the desktop spawns it directly with
+/// `genehub_guest.wasm` when both are found beside the CLI binary.
+pub const HOST_BINARY: &str = "genehub-host-dev";
+/// Names the front-door CLI to the wasm shell it spawns; the shell hands it
+/// to the guest as GENEHUB_CLI.
+pub const ENV_CLI: &str = "GENEHUB_DEV_CLI";
 /// The override the shell passes to the daemon it spawns — has to stay the
 /// name the daemon reads (`apps/daemon/src/channel.rs`), or the shell and
 /// the daemon disagree about where the data lives and the shell ends up

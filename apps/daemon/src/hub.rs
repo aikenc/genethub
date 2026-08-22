@@ -99,7 +99,7 @@ pub struct FabricPeerAdmission {
 }
 
 pub struct Client {
-    http: reqwest::Client,
+    http: crate::http::Client,
     origin: String,
 }
 
@@ -114,11 +114,11 @@ impl Client {
         request_timeout: Duration,
     ) -> Self {
         Client {
-            http: reqwest::Client::builder()
+            http: crate::http::Client::builder()
                 .connect_timeout(connect_timeout)
                 .timeout(request_timeout)
                 .pool_idle_timeout(Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                .redirect(crate::http::redirect::Policy::custom(|attempt| {
                     let previous = attempt.previous();
                     let downgrade = previous.last().is_some_and(|prior| {
                         prior.scheme() == "https" && attempt.url().scheme() != "https"
@@ -142,8 +142,8 @@ impl Client {
         }
     }
 
-    fn url(&self, path: &str) -> Result<reqwest::Url> {
-        let url = reqwest::Url::parse(&format!("{}{path}", self.origin))
+    fn url(&self, path: &str) -> Result<crate::http::Url> {
+        let url = crate::http::Url::parse(&format!("{}{path}", self.origin))
             .context("parsing the Hub URL")?;
         validate_control_url(&url)?;
         Ok(url)
@@ -232,9 +232,9 @@ impl Client {
         if value.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
             return Err(anyhow!("{label} contains control characters"));
         }
-        let base = reqwest::Url::parse(&self.origin).context("parsing the Hub origin")?;
+        let base = crate::http::Url::parse(&self.origin).context("parsing the Hub origin")?;
         validate_control_url(&base)?;
-        let target = reqwest::Url::parse(value).with_context(|| format!("parsing {label}"))?;
+        let target = crate::http::Url::parse(value).with_context(|| format!("parsing {label}"))?;
         if !target.username().is_empty() || target.password().is_some() {
             return Err(anyhow!("{label} cannot contain credentials"));
         }
@@ -549,7 +549,7 @@ fn validate_channel_secret(secret: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_control_url(url: &reqwest::Url) -> Result<()> {
+fn validate_control_url(url: &crate::http::Url) -> Result<()> {
     if !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -579,7 +579,7 @@ fn validate_control_url(url: &reqwest::Url) -> Result<()> {
 }
 
 async fn read_json<T: DeserializeOwned>(
-    response: reqwest::Response,
+    response: crate::http::Response,
     limit: usize,
     label: &str,
 ) -> Result<T> {
@@ -673,7 +673,7 @@ mod tests {
             "http://127.99.1.2/api",
             "http://[::1]:8080/api",
         ] {
-            let url = reqwest::Url::parse(accepted).unwrap();
+            let url = crate::http::Url::parse(accepted).unwrap();
             assert!(validate_control_url(&url).is_ok(), "{accepted}");
         }
         for rejected in [
@@ -686,7 +686,7 @@ mod tests {
             "https://hub.example/api?secret=x",
             "https://hub.example/api#fragment",
         ] {
-            let url = reqwest::Url::parse(rejected).unwrap();
+            let url = crate::http::Url::parse(rejected).unwrap();
             assert!(validate_control_url(&url).is_err(), "{rejected}");
         }
     }

@@ -29,7 +29,23 @@ pub fn lock_pid(paths: &Paths) -> Option<u32> {
 pub fn lock_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock
         || (error.raw_os_error().is_some()
-            && error.raw_os_error() == fs2::lock_contended_error().raw_os_error())
+            && error.raw_os_error() == crate::fs_lock::lock_contended_error().raw_os_error())
+}
+
+/// After a crash the kernel has released the lock, but `endpoint.json` can
+/// still send the next start at a dead port. Older dest builds also left a
+/// `wasm-cache` of compiled images; those files are an exec path and must
+/// not stay. Only reclaim when nobody holds the lock.
+pub fn reap_stale_runtime(paths: &Paths) -> std::io::Result<()> {
+    if instance_locked(paths)? {
+        return Ok(());
+    }
+    let endpoint = paths.endpoint_file();
+    if endpoint.exists() {
+        let _ = fs::remove_file(&endpoint);
+    }
+    let _ = fs::remove_dir_all(paths.root.join("wasm-cache"));
+    Ok(())
 }
 
 /// Whether another process currently holds the daemon's kernel lock.
@@ -46,9 +62,9 @@ pub fn instance_locked(paths: &Paths) -> std::io::Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    match fs2::FileExt::try_lock_exclusive(&file) {
+    match crate::fs_lock::try_lock_exclusive(&file, paths.lock_file().as_path()) {
         Ok(()) => {
-            let _ = fs2::FileExt::unlock(&file);
+            let _ = crate::fs_lock::unlock(&file, paths.lock_file().as_path());
             Ok(false)
         }
         Err(error) if lock_contended(&error) => Ok(true),
@@ -113,4 +129,47 @@ unsafe fn libc_kill(pid: i32, signal: i32) -> i32 {
         fn kill(pid: i32, sig: i32) -> i32;
     }
     kill(pid, signal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Paths;
+
+    #[test]
+    fn a_dead_lock_loses_its_endpoint_and_legacy_wasm_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        paths.ensure().unwrap();
+        std::fs::write(paths.endpoint_file(), "{\"port\":1}").unwrap();
+        let cache = dir.path().join("wasm-cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("abc.cwasm"), b"old").unwrap();
+
+        reap_stale_runtime(&paths).unwrap();
+
+        assert!(!paths.endpoint_file().exists());
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn a_live_lock_keeps_the_published_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        paths.ensure().unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(paths.lock_file())
+            .unwrap();
+        crate::fs_lock::try_lock_exclusive(&lock, paths.lock_file().as_path()).unwrap();
+        std::fs::write(paths.endpoint_file(), "{\"port\":1}").unwrap();
+
+        reap_stale_runtime(&paths).unwrap();
+
+        assert!(paths.endpoint_file().exists());
+        drop(lock);
+    }
 }

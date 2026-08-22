@@ -404,7 +404,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable snapshot, verified 2026-08-04
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.target }}, wasm32-wasip2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.target }}
@@ -414,7 +414,10 @@ jobs:
           node scripts/version.mjs --from-tag
           node scripts/channel.mjs --from-tag
         shell: bash
-      - run: cargo build --release -p genet-cli -p genet-agent --target ${{ matrix.target }}
+      # The CLI and the wasm shell for the host target; the guest component
+      # (daemon + agent, one artifact) for wasip2. All three ship side by side.
+      - run: cargo build --release -p genet-cli -p genehub-host --target ${{ matrix.target }}
+      - run: cargo build --release -p genehub-guest --target wasm32-wasip2
       - name: Pack
         shell: bash
         env:
@@ -423,10 +426,11 @@ jobs:
           set -euo pipefail
           . scripts/channel.env
           mkdir -p dist
-          tar -czf "dist/$TARBALL_PREFIX-linux-x64.tar.gz" \
-            -C "target/${{ matrix.target }}/release" "$CLI_BINARY" "$AGENT_BINARY"
+          tar -czf "$GITHUB_WORKSPACE/dist/$TARBALL_PREFIX-linux-x64.tar.gz" \
+            -C "$GITHUB_WORKSPACE/target/${{ matrix.target }}/release" "$CLI_BINARY" "$HOST_BINARY" \
+            -C "$GITHUB_WORKSPACE/target/wasm32-wasip2/release" genehub_guest.wasm
           ls -la dist
-      # What the tarball promises: two binaries that start on a machine with no
+      # What the tarball promises: binaries that start on a machine with no
       # graphical session and nothing else installed — including no particular
       # glibc. `ldd` saying "not a dynamic executable" is the claim; starting is
       # the proof.
@@ -445,16 +449,21 @@ jobs:
           # Static-pie prints "statically linked" and exits 0; a fully static
           # binary may exit 1 with "not a dynamic executable". Either is fine.
           # What is not fine is a list of .so dependencies on the host glibc.
-          ldd "$root/$CLI_BINARY" >/tmp/ldd.out 2>&1 || true
-          if grep -qiE 'not a dynamic|statically linked' /tmp/ldd.out; then
-            echo "$CLI_BINARY is statically linked"
-          else
-            echo "FAIL: $CLI_BINARY is dynamically linked; old glibc hosts will break:" >&2
-            cat /tmp/ldd.out >&2
-            exit 1
-          fi
+          for binary in "$CLI_BINARY" "$HOST_BINARY"; do
+            ldd "$root/$binary" >/tmp/ldd.out 2>&1 || true
+            if grep -qiE 'not a dynamic|statically linked' /tmp/ldd.out; then
+              echo "$binary is statically linked"
+            else
+              echo "FAIL: $binary is dynamically linked; old glibc hosts will break:" >&2
+              cat /tmp/ldd.out >&2
+              exit 1
+            fi
+          done
+          # The first start compiles the guest component (the release channels
+          # have no precompiled cache yet — verified precompiled artifacts are a
+          # release-strategy follow-up), so this needs minutes, not seconds.
           env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
-            timeout 30 "$root/$CLI_BINARY" daemon run >"$root/out.json" 2>"$root/err.log" || true
+            timeout 240 "$root/$CLI_BINARY" daemon run >"$root/out.json" 2>"$root/err.log" || true
           grep -q '"event":"listening"' "$root/out.json" || {
             echo "FAIL: the packed daemon did not come up" >&2
             cat "$root/err.log" >&2

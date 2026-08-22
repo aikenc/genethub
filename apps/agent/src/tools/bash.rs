@@ -5,8 +5,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::os_process::{Command, Output};
 use serde_json::{json, Value};
-use tokio::process::Command;
 
 use super::{
     arg_str, arg_usize, truncate_tail, ToolResult, TruncationResult, DEFAULT_MAX_BYTES,
@@ -82,7 +82,7 @@ pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
 /// Runs a command while retaining a synchronous teardown guard. Dropping this
 /// future—because the turn was interrupted or its timeout elapsed—kills the
 /// whole process group, not only the shell at its root.
-async fn output(mut command: Command) -> std::io::Result<std::process::Output> {
+async fn output(mut command: Command) -> std::io::Result<Output> {
     let child = command.spawn()?;
     let mut group = ProcessGroup::new(child.id());
     let output = child.wait_with_output().await;
@@ -137,6 +137,11 @@ fn kill_process_group(pid: u32) {
     }
 }
 
+/// The shell already kills the group when the last handle to the child drops,
+/// which is exactly what dropping this future does.
+#[cfg(target_family = "wasm")]
+fn kill_process_group(_pid: u32) {}
+
 #[cfg(windows)]
 fn kill_process_group(pid: u32) {
     let _ = std::process::Command::new("taskkill")
@@ -174,7 +179,7 @@ fn append_status(text: &str, status: &str) -> String {
 }
 
 fn save_full_output(content: &str) -> Option<String> {
-    let path = std::env::temp_dir().join(format!("genet-bash-{}.log", uuid::Uuid::new_v4()));
+    let path = crate::os::temp_dir().join(format!("genet-bash-{}.log", uuid::Uuid::new_v4()));
     std::fs::write(&path, content).ok()?;
     Some(path.to_string_lossy().to_string())
 }
@@ -185,6 +190,18 @@ fn shell() -> &'static str {
 }
 
 #[cfg(unix)]
+fn shell_flag() -> &'static str {
+    "-c"
+}
+
+// The command runs on the host, not in here, and WASI reports nothing about
+// which host that is. Dev shells are unix.
+#[cfg(target_family = "wasm")]
+fn shell() -> &'static str {
+    "bash"
+}
+
+#[cfg(target_family = "wasm")]
 fn shell_flag() -> &'static str {
     "-c"
 }
@@ -387,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn runs_in_the_requested_directory() {
-        let dir = std::env::temp_dir().join(format!("genet-bash-{}", uuid::Uuid::new_v4()));
+        let dir = crate::os::temp_dir().join(format!("genet-bash-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("marker.txt"), "").unwrap();
         assert!(run(&json!({"command": "ls"}), &dir)
@@ -417,7 +434,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn dropping_a_command_stops_its_descendants() {
-        let dir = std::env::temp_dir().join(format!("genet-bash-cancel-{}", uuid::Uuid::new_v4()));
+        let dir = crate::os::temp_dir().join(format!("genet-bash-cancel-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let pid_file = dir.join("pid");
         let args = json!({

@@ -86,6 +86,10 @@ fn failed(error: anyhow::Error) -> Handled {
         || message.contains("workspace folder")
         || message.contains(".code-workspace")
         || message.contains("not a directory")
+        || message.contains("是内置的")
+        || message.contains("只能清空")
+        || message.contains("this agent offers")
+        || message.contains("unknown thinking level")
     {
         ErrorCode::BadRequest
     } else if message.contains("does not") || message.contains("not supported") {
@@ -141,7 +145,7 @@ async fn dispatch(
             fingerprint: state.machine.fingerprint(),
             transport,
             machine_name: crate::link::default_display_name(),
-            rtc_supported: true,
+            rtc_supported: crate::dataplane::rtc::SUPPORTED,
             features: Some(vec![
                 genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
                 genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),

@@ -28,13 +28,17 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
                                                └──────────────┘
 ```
 
-你的机器上只有一个常驻进程（daemon），它按需拉起 agent 子进程。所有客户端说同一套协议，**看不见背后是哪种 agent，也看不见走的是哪条通道**。
+你的机器上只有一个常驻 daemon host 进程：原生 `genehub-host` 装载 `genehub_guest.wasm` 的 daemon 入口；每个内置 agent 由另一个短生命周期 host 进程装载同一制品的 agent 入口。所有客户端说同一套协议，**看不见背后是哪种 agent，也看不见走的是哪条通道**。
+
+**产品运行时只有 WASM guest。** 不存在可切换的原生 daemon/agent 模式。`genehub-host` 与薄 `genet` 只负责装载和生命周期。缺 host、缺 `genehub_guest.wasm`、或二者 `sha256(wit/genehub-host.wit)` 对不上时，在 instantiate 之前失败，不得改跑原生业务二进制，也不得把原生路径当兼容层保留。
+
+原生 `genet` 不再解析产品动词，也不再作为 E2EE 端点：它只做 confine、daemon 启停、`agent-serve` 和把 argv 经 loopback `POST /cli` 交给本机 daemon。业务语义与 `--machine` 拨号都在 daemon（guest）里。合同见 [cli-thin-forwarder.md](./cli-thin-forwarder.md)。
 
 ---
 
-## 2. 四条不可让步的边界
+## 2. 五条不可让步的边界
 
-后面所有取舍都从这四条推导。
+后面所有取舍都从这五条推导。
 
 ### B1. Agent 是插件，内核不认识任何具体 agent
 
@@ -53,6 +57,21 @@ daemon 业务代码里不允许出现 `if agent == "genet"`。具体 agent 的�
 ### B4. relay 不理解它搬运的东西
 
 relay 只认 Fabric 帧头与 opaque endpoint/route admission，不 parse E2EE payload，不落库，不做业务鉴权。它有权知道连接元数据和 outer stream 路由，不知道内部 logical stream、method、workspace/path 或内容；这一点写在 [security-model.md](./security-model.md) 里，并由 CI 静态检查守住（§6.4）。
+
+### B5. 业务变化默认不要求用户安装新原生程序
+
+WASM 重构的交付北星是：**不牺牲产品能力、可靠性和安全性，滚动 90 天内至少 95% 的产品问题与新特性只通过 guest + 官网完成端到端更新。official 在线用户分钟级收敛；beta/alpha/dev 高频版本秒级收敛；用户不确认、不下载安装、不重启，浏览器 UI 变化最多只需刷新。**
+
+95% 按产品 change set 计，不按 commit 或代码行数计。纯文档/治理不进分母；同时更新 guest 与浏览器、却让 desktop WebView 继续旧能力的 change set 不进分子。修改 WIT、host/Wasmtime、CLI 生命周期、desktop OS 壳、安装器或签名根时必须走完整模式，目标占比不超过 5%。CI 要保存滚动 90 天的机械分类与证据，未建立报表前不得声称达标。
+
+| 模式 | 制品边界 | P95 目标（从 validated immutable candidate 被批准推广开始） |
+|---|---|---|
+| 完整模式 | 每平台 host/launcher + 只编一次的 guest + 官网；用于原生/WIT 边界变化 | official 发布并让在线客户端安全收敛 ≤10 分钟 |
+| 高频模式 | 签名 `genehub_guest.wasm` + 向后兼容的 proto + 官网；不编 host | beta/alpha/dev 发布并让在线客户端收敛 ≤60 秒，工程目标 ≤30 秒 |
+
+速度不能跳过测试或签名。客户端必须后台发现、下载、验签、预热、在 safe point 切换、健康确认并在失败时自动回 known-good；活动 turn、PTY 与子进程不得静默丢失。Web/guest 必须声明兼容窗口和同一 release set，严格版本不相容时自动升级为完整/原子模式。
+
+当前状态是：默认 daemon/agent WASM、薄 CLI、Fabric/RTC 与 Linux 能力回归门已经完成；Windows host 的 owner-only ACL 尚未实现并阻断默认 WASM 首启。双模式 CI、组件签名与自动回滚、官网-only 部署、desktop UI 热更新、混合版本窗口和 SLO telemetry 同样尚未完成。详细状态见 [roadmap.md](./roadmap.md) 的“WASM 持续交付”。
 
 ---
 
@@ -169,8 +188,9 @@ enum ToolCallDetail {                // 决定前端用哪个渲染器
 
 | 部件 | 归它 | 不归它 |
 |------|------|--------|
-| **daemon**（Rust，本仓） | 会话生命周期、持久化、断线重放；adapter 注册与启停；文件 / git / PTY；出站长连接 | 跟模型说话、执行工具（agent 的事）；身份与授权（控制面的事） |
+| **daemon guest**（Rust → WASM，本仓） | 会话生命周期、持久化、断线重放；adapter 注册与启停；文件 / git / PTY policy；出站长连接与 RTC policy | 跟模型说话、执行工具（agent 的事）；账号身份（控制面的事）；OS 连接机械（host 的事） |
 | **agent**（Rust，本仓） | 与模型对话、跑工具、技能装载 | 会话持久化、对外协议 |
+| **native host / CLI**（Rust，本仓） | Wasmtime/WASI、process/PTY/permissions/isolation 与 RTC 连接 resource；daemon 生命周期和 argv 转发 | session/workspace/provider、Fabric/RTC 策略、产品动词解释 |
 | **relay**（Node，本仓） | 两端之间搬字节；在线表；背压与限额 | 看 payload、存任何东西、决定谁能连 |
 | **workbench**（前端，本仓） | 会话、项目、文件、终端、**自己的设备管理** | 账号体系本身 |
 | **控制面**（本仓之外，只在托管部署里） | 账号、机器目录、Fabric endpoint/route/peer capability 准入、presence/revocation | 解析或转发业务 payload |
@@ -259,10 +279,14 @@ interface FabricAuthority {
 ## 8. 仓库结构
 
 ```
-apps/daemon      ← Rust：会话内核 + adapter 层 + 本地 WS + 出站长连接
-apps/agent       ← Rust：内置 Genet Agent（众多 adapter 中的一个后端）
+apps/daemon      ← Rust：编入 guest 的会话内核 + adapter 层 + 本地 WS + 出站长连接
+apps/agent       ← Rust：编入同一 guest 的内置 Genet Agent
+apps/guest       ← wasm32-wasip2 Component：daemon/agent 双入口
+apps/host        ← 原生 Wasmtime/WASI 与 typed OS/RTC 连接层
 apps/relay       ← Node：转发层。无数据库、无业务、可自建
 apps/desktop     ← 仅 Windows/macOS 的 Tauri 2 壳；复用 Web 工作台
+packages/native  ← 跨 CLI/host 的原生进程与隔离机制
+packages/wasi-guest ← guest 的非阻塞 WASI/process/TLS/stdio 桥
 packages/web     ← 工作台前端（四个宿主同一份产物）
 packages/proto   ← 会话协议的唯一定义处，生成 TS 类型与 Rust 结构
 skills/          ← 教 Agent 怎么用 genet CLI 的 Agent Skills

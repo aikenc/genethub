@@ -108,7 +108,7 @@ fork: boolean, attachments: boolean, };
 
 export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, commands: Array<CommandInfo>, 
 /**
- * Additional Agent-declared runtime dimensions such as Fast. Empty for
+ * Additional Agent-declared runtime dimensions such as Fast. Absent for
  * older Agents and clients; model ids remain opaque regardless.
  */
 runtimeAxes?: Array<RuntimeAxisInfo>, defaultModel?: string, defaultMode?: string, defaultEffort?: string, };

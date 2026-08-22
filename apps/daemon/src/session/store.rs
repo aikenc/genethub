@@ -510,7 +510,7 @@ impl WorkspaceHomes {
             .truncate(false)
             .open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
-        match fs2::FileExt::try_lock_shared(&file) {
+        match crate::fs_lock::try_lock_shared(&file, &path) {
             Ok(()) => {}
             Err(error) if crate::lifecycle::lock_contended(&error) => {
                 let holder = fs::read_to_string(home_dir.join(LEGACY_OWNER_NAME))
@@ -571,7 +571,7 @@ impl WorkspaceHomes {
             .truncate(false)
             .open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
-        match fs2::FileExt::try_lock_exclusive(&file) {
+        match crate::fs_lock::try_lock_exclusive(&file, &path) {
             Ok(()) => {}
             Err(error) if crate::lifecycle::lock_contended(&error) => {
                 let holder = fs::read_to_string(session_dir.join(WRITER_NAME))
@@ -590,7 +590,11 @@ impl WorkspaceHomes {
             }
             Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
         }
-        let stamp = format!("{} (pid {})\n", crate::channel::PRODUCT, std::process::id());
+        let stamp = format!(
+            "{} (pid {})\n",
+            crate::channel::PRODUCT,
+            crate::host_pid::current()
+        );
         let _ = fs::write(session_dir.join(WRITER_NAME), stamp);
         home.writers.insert(session_id.to_string(), file);
         Ok(())
@@ -1053,7 +1057,7 @@ impl Store {
             session_id,
             path.parent().expect("chat.jsonl always has a parent"),
         )?;
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut file = crate::config::open_append(&path)?;
         crate::config::restrict_to_owner(&path)?;
         for row in rows {
             writeln!(file, "{}", serde_json::to_string(row)?)?;
@@ -1164,7 +1168,7 @@ impl Store {
             session_id,
             path.parent().expect("index.jsonl always has a parent"),
         )?;
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut file = crate::config::open_append(&path)?;
         crate::config::restrict_to_owner(&path)?;
         writeln!(file, "{}", serde_json::to_string(summary)?)?;
         file.flush()?;
@@ -1326,7 +1330,7 @@ impl Store {
             id: id.clone(),
             value,
         })?;
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut file = crate::config::open_append(&path)?;
         crate::config::restrict_to_owner(&path)?;
         let offset = file.metadata()?.len();
         file.write_all(&line)?;

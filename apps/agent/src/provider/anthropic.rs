@@ -42,7 +42,7 @@ pub async fn stream(
         })?;
     let body = build_body(model, &request);
 
-    let response = reqwest::Client::new()
+    let response = genet_http::Client::new()
         .post(format!("{}/v1/messages", base.trim_end_matches('/')))
         .header("x-api-key", key)
         .header("anthropic-version", API_VERSION)

@@ -546,6 +546,31 @@ export class Client {
     });
   }
 
+  /**
+   * Opens the daemon `shell.run` stream. argv is a list, never a command line;
+   * the request body is the command's already-decided standard input.
+   * The same method the CLI publishes as `genet shell`.
+   */
+  openShellStream(request: {
+    workspaceId: string;
+    argv: string[];
+    cwd?: string | null;
+    env?: Record<string, string>;
+    timeoutMs?: number | null;
+  }): DataStream {
+    return this.requireReadyEndpoint().open({
+      version: DATA_PLANE_VERSION,
+      method: "shell.run",
+      metadata: {
+        workspaceId: request.workspaceId,
+        argv: request.argv,
+        cwd: request.cwd ?? null,
+        env: request.env ?? {},
+        timeoutMs: request.timeoutMs ?? null,
+      },
+    });
+  }
+
   async subscribe(
     sessionId: string,
     handlers: Pick<Subscription, "onEvent" | "onResync">,

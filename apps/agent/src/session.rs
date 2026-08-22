@@ -4,7 +4,7 @@
 //! leaf — branching is out of scope for now — but the on-disk shape leaves room
 //! for it so old files stay loadable once it lands.
 
-use std::fs::{create_dir_all, OpenOptions};
+use std::fs::create_dir_all;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -146,7 +146,7 @@ impl Session {
         if let Some(parent) = path.parent() {
             let _ = create_dir_all(parent);
         }
-        let opened = OpenOptions::new().create(true).append(true).open(path);
+        let opened = crate::os::open_append(path);
         match opened {
             Ok(mut file) => {
                 let _ = writeln!(file, "{value}");
