@@ -147,6 +147,7 @@ impl Paths {
 pub fn home_dir() -> Option<PathBuf> {
     dirs::home_dir().or_else(|| {
         std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
     })

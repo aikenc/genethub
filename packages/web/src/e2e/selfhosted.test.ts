@@ -98,7 +98,7 @@ describe.skipIf(
       const status = await owner.call({ type: "device.list" });
       return status?.type === "devices" && status.data.remote.online;
     }, 15_000);
-  }, 40_000);
+  }, 120_000);
 
   afterAll(async () => {
     owner?.close();

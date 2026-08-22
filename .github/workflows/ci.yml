@@ -442,7 +442,10 @@ jobs:
       - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --test wiring
       # All lifecycle cases run on both platforms. Only the test which kills a
       # listener behind the supervisor's back is Unix-specific.
-      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --test supervision
+      # These tests deliberately share process environment and each cold-start
+      # a Wasmtime component. Running them concurrently races the environment
+      # and can exhaust a hosted runner compiling several components at once.
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --test supervision -- --test-threads=1
       - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --test wiring --test supervision -- -D warnings
 
   # Single required check for branch protection. Skipped path-filtered jobs are

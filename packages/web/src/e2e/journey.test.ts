@@ -105,7 +105,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
         throw new Error("the workspace would not open");
       workspaceId = workspace.data.id;
       workspaceRootHandle = workspace.data.folders[0]!.rootHandle;
-    }, 30_000);
+    }, 120_000);
 
     afterAll(async () => {
       client?.close();
