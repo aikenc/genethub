@@ -17,13 +17,16 @@ impl wit::Host for crate::load::Host {
 fn restrict(path: &str) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to restrict a symbolic link",
+        ));
+    }
     // Directories need the execute bit to be enterable at all, which is why
     // this is not one constant.
-    let mode = if std::fs::symlink_metadata(path)?.is_dir() {
-        0o700
-    } else {
-        0o600
-    };
+    let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
@@ -84,7 +87,16 @@ mod windows_acl {
     }
 
     pub(super) fn restrict_to_current_user(path: &Path) -> std::io::Result<()> {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
         let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to restrict a reparse point",
+            ));
+        }
         let inheritance = if metadata.is_dir() {
             OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
         } else {

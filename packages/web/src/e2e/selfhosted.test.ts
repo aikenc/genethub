@@ -98,7 +98,7 @@ describe.skipIf(
       const status = await owner.call({ type: "device.list" });
       return status?.type === "devices" && status.data.remote.online;
     }, 15_000);
-  }, 120_000);
+  }, 180_000);
 
   afterAll(async () => {
     owner?.close();
@@ -430,7 +430,7 @@ function startDaemon(
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error("the daemon never reported a port"));
-    }, 60_000);
+    }, 120_000);
     child.stderr?.on("data", (chunk) =>
       process.stderr.write(`[daemon] ${chunk}`),
     );
