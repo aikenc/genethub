@@ -396,6 +396,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo build -p genet-cli
       # Daemon persistence is shared by the CLI and desktop shell. In
@@ -409,6 +411,11 @@ jobs:
       # Supervision launches the ordinary sibling executable; `cargo test`
       # only creates a hashed test harness and is not a substitute for it.
       - run: cargo build -p genehub-host
+      - name: Build the paired guest for supervision journeys
+        shell: bash
+        run: |
+          cargo build -p genehub-guest --target wasm32-wasip2
+          cp target/wasm32-wasip2/debug/genehub_guest.wasm target/debug/genehub_guest.wasm
       - name: Refuse to skip real daemon supervision
         shell: bash
         run: |
