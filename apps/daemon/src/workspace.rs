@@ -55,7 +55,7 @@ pub fn list_directory(requested: Option<&Path>) -> Result<DirectoryListing> {
 
     let path = requested
         .map(Path::to_path_buf)
-        .or_else(dirs::home_dir)
+        .or_else(crate::config::home_dir)
         .ok_or_else(|| anyhow!("no home directory"))?
         .canonicalize()
         .context("no such directory")?;

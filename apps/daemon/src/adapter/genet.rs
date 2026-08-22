@@ -130,7 +130,12 @@ impl AgentAdapter for GenetAdapter {
     async fn probe(&self) -> ProbeState {
         match &self.binary {
             Some(_) => ProbeState::Ready,
-            None => ProbeState::NotInstalled,
+            // v2: no agent binary is needed when the front door can serve the
+            // component's agent entry (`$GENEHUB_CLI agent-serve`).
+            None => match std::env::var("GENEHUB_CLI") {
+                Ok(value) if !value.is_empty() => ProbeState::Ready,
+                _ => ProbeState::NotInstalled,
+            },
         }
     }
 
@@ -174,17 +179,30 @@ impl AgentAdapter for GenetAdapter {
     }
 
     async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
-        let binary = self
-            .binary
-            .clone()
-            .ok_or_else(|| anyhow!("the built-in agent binary is not available"))?;
-
         let home = config.scratch_dir.join("genet");
         std::fs::create_dir_all(&home).context("creating the agent scratch directory")?;
         write_models_file(&home, &config.providers)?;
 
         let session_file = home.join("session.jsonl");
-        let mut command = Command::new(&binary);
+        let (mut command, describe) = match self.binary.clone() {
+            Some(binary) => (Command::new(&binary), binary.display().to_string()),
+            // v2: the agent is the `agent-run` entry of the same component the
+            // daemon runs from, reached through the front door — the shell
+            // injected GENEHUB_CLI, and `agent-serve` there becomes the agent.
+            None => {
+                let cli = std::env::var("GENEHUB_CLI")
+                    .ok()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "the built-in agent is not available: no agent binary beside the daemon and GENEHUB_CLI is unset"
+                        )
+                    })?;
+                let mut command = Command::new(&cli);
+                command.arg("agent-serve");
+                (command, format!("{cli} agent-serve"))
+            }
+        };
         command
             .arg("--mode")
             .arg("rpc")
@@ -229,7 +247,7 @@ impl AgentAdapter for GenetAdapter {
 
         let mut child = command
             .spawn()
-            .with_context(|| format!("spawning {}", binary.display()))?;
+            .with_context(|| format!("spawning {describe}"))?;
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
         let stdin = child.stdin.take().expect("stdin was piped");
@@ -997,20 +1015,26 @@ mod tests {
         assert_eq!(agent_file_name(false), BINARY);
     }
 
-    /// And the name has to be the one the installer actually stages, which lives
+    /// And the bundle has to stage what the runtime looks for, which lives
     /// in a script this test reads rather than trusts. The script takes
     /// the names from `scripts/channel.env` — written by `scripts/channel.mjs`
     /// from the same table as `BINARY` above — so the pin here is that the
-    /// staging loop consumes them.
+    /// staging loop consumes them. v2: the agent is an entry of the guest
+    /// component, so what the bundle must stage next to the CLI is the wasm
+    /// shell and the component, not a native agent binary.
     #[test]
-    fn the_installer_stages_the_agent_under_that_same_name() {
+    fn the_installer_stages_the_shell_and_the_component() {
         let script = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/scripts/bundle.mjs"),
         )
         .expect("the bundling script");
         assert!(
-            script.contains("[CLI_BINARY, AGENT_BINARY]"),
-            "the installer no longer stages the agent under its stamped name"
+            script.contains("[CLI_BINARY, HOST_BINARY]"),
+            "the installer no longer stages the wasm shell under its stamped name"
+        );
+        assert!(
+            script.contains("genehub_guest.wasm"),
+            "the installer no longer stages the guest component"
         );
         assert!(
             script.contains("scripts/channel.env"),

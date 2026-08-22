@@ -1053,7 +1053,7 @@ impl Store {
             session_id,
             path.parent().expect("chat.jsonl always has a parent"),
         )?;
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut file = crate::config::open_append(&path)?;
         crate::config::restrict_to_owner(&path)?;
         for row in rows {
             writeln!(file, "{}", serde_json::to_string(row)?)?;
@@ -1164,7 +1164,7 @@ impl Store {
             session_id,
             path.parent().expect("index.jsonl always has a parent"),
         )?;
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut file = crate::config::open_append(&path)?;
         crate::config::restrict_to_owner(&path)?;
         writeln!(file, "{}", serde_json::to_string(summary)?)?;
         file.flush()?;
@@ -1326,7 +1326,7 @@ impl Store {
             id: id.clone(),
             value,
         })?;
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut file = crate::config::open_append(&path)?;
         crate::config::restrict_to_owner(&path)?;
         let offset = file.metadata()?.len();
         file.write_all(&line)?;

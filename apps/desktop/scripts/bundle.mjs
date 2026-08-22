@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Builds a desktop installer.
 //
-// The CLI (which is also the daemon) and the built-in agent are release
-// binaries copied into `bin/`, where Tauri picks them up as bundled
-// resources. Nothing here needs Node at runtime: the UI is a static build
-// loaded by the system WebView, which is what keeps the installer small and
-// the machine free of a runtime it never asked for (`docs/desktop-client.md`
-// §4.1).
+// The CLI (which is also the daemon's front door), the wasm shell and the
+// guest component — daemon and built-in agent are both entries of the one
+// component — are release binaries copied into `bin/`, where Tauri picks them
+// up as bundled resources. Nothing here needs Node at runtime: the UI is a
+// static build loaded by the system WebView, which is what keeps the
+// installer small and the machine free of a runtime it never asked for
+// (`docs/desktop-client.md` §4.1).
 
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
@@ -23,7 +24,7 @@ const repo = join(here, "../../..");
 let CHANNEL = "dev";
 let PRODUCT = "GeneHub Dev";
 let CLI_BINARY = "genet-dev";
-let AGENT_BINARY = "genet-agent-dev";
+let HOST_BINARY = "genehub-host-dev";
 
 const envFile = join(repo, "scripts/channel.env");
 if (existsSync(envFile)) {
@@ -34,7 +35,7 @@ if (existsSync(envFile)) {
     if (key === "CHANNEL") CHANNEL = val;
     else if (key === "PRODUCT") PRODUCT = val;
     else if (key === "CLI_BINARY") CLI_BINARY = val;
-    else if (key === "AGENT_BINARY") AGENT_BINARY = val;
+    else if (key === "HOST_BINARY") HOST_BINARY = val;
   }
 }
 
@@ -59,8 +60,18 @@ if (bundles !== platformBundle) {
   fail(`desktop bundle '${bundles}' is not supported on ${process.platform}; expected '${platformBundle}'`);
 }
 
-console.log(`==> building the CLI (which is the daemon) and the built-in agent (${CHANNEL})`);
-run("cargo", ["build", "--release", "--manifest-path", join(repo, "Cargo.toml"), "-p", "genet-cli", "-p", "genet-agent"]);
+console.log(`==> building the CLI, the wasm shell and the guest component (${CHANNEL})`);
+run("cargo", ["build", "--release", "--manifest-path", join(repo, "Cargo.toml"), "-p", "genet-cli", "-p", "genehub-host"]);
+run("cargo", [
+  "build",
+  "--release",
+  "--manifest-path",
+  join(repo, "Cargo.toml"),
+  "-p",
+  "genehub-guest",
+  "--target",
+  "wasm32-wasip2",
+]);
 
 console.log("==> staging binaries");
 const binDir = join(here, "../src-tauri/bin");
@@ -73,9 +84,10 @@ for (const entry of readdirSync(binDir)) {
 // The shell looks for the platform's own name at runtime (`bundled_binary` in
 // `src-tauri/src/lib.rs`), so the suffix has to survive the copy.
 const exe = process.platform === "win32" ? ".exe" : "";
-for (const binary of [CLI_BINARY, AGENT_BINARY]) {
+for (const binary of [CLI_BINARY, HOST_BINARY]) {
   cpSync(join(repo, "target/release", binary + exe), join(binDir, binary + exe));
 }
+cpSync(join(repo, "target/wasm32-wasip2/release/genehub_guest.wasm"), join(binDir, "genehub_guest.wasm"));
 
 console.log(`==> building the installer (${bundles})`);
 run("npm", ["--prefix", join(here, ".."), "run", "build", "--", "--bundles", bundles], { shell: process.platform === "win32" });

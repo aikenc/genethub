@@ -86,25 +86,21 @@ export function tryLocateHost(openRoot: string): string | undefined {
 }
 
 export function tryLocateDaemonComponent(openRoot: string): string | undefined {
-  const override = process.env.GENEHUB_DEV_DAEMON_COMPONENT?.trim();
+  const override =
+    process.env.GENEHUB_DEV_COMPONENT?.trim() || process.env.GENEHUB_DEV_DAEMON_COMPONENT?.trim();
   if (override) {
     return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
   }
   return firstExistingFile([
-    path.resolve(openRoot, "target", "wasm32-wasip2", "release", "genehub-daemon.wasm"),
-    path.resolve(openRoot, "target", "wasm32-wasip2", "debug", "genehub-daemon.wasm"),
+    path.resolve(openRoot, "target", "wasm32-wasip2", "release", "genehub_guest.wasm"),
+    path.resolve(openRoot, "target", "wasm32-wasip2", "debug", "genehub_guest.wasm"),
   ]);
 }
 
 export function tryLocateAgentComponent(openRoot: string): string | undefined {
-  const override = process.env.GENEHUB_DEV_AGENT_COMPONENT?.trim();
-  if (override) {
-    return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
-  }
-  return firstExistingFile([
-    path.resolve(openRoot, "target", "wasm32-wasip2", "release", "genet-agent-dev.wasm"),
-    path.resolve(openRoot, "target", "wasm32-wasip2", "debug", "genet-agent-dev.wasm"),
-  ]);
+  // v2: the agent is the `agent-run` entry of the same component. There is no
+  // second artifact to locate.
+  return tryLocateDaemonComponent(openRoot);
 }
 
 export function procCmdline(pid: number): string {
@@ -125,7 +121,7 @@ export function procEnviron(pid: number): string {
 
 export function agentHostProcesses(): Array<{ pid: number; cmd: string; environ: string }> {
   return processesMatching("genehub-host-dev")
-    .filter((row) => row.cmd.includes("--mode"))
+    .filter((row) => row.cmd.includes("--entry agent"))
     .map((row) => ({ ...row, environ: procEnviron(row.pid) }));
 }
 

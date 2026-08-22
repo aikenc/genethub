@@ -70,6 +70,15 @@ const TABLE = {
     beta: "genet-agent-beta",
     alpha: "genet-agent-alpha",
   },
+  // The wasm shell: it loads genehub_guest.wasm and picks the daemon or the
+  // agent entry per process. Shipped beside the CLI in every package — the
+  // CLI refuses to start a daemon without it.
+  host_binary: {
+    dev: "genehub-host-dev",
+    official: "genehub-host",
+    beta: "genehub-host-beta",
+    alpha: "genehub-host-alpha",
+  },
   agent_home_dir: {
     dev: ".genet-agent-dev",
     official: ".genet-agent",
@@ -93,6 +102,42 @@ const TABLE = {
     alpha: "GENEHUB_ALPHA_WORKSPACE_DIR",
   },
   env_log: { dev: "GENEHUB_DEV_LOG", official: "GENEHUB_LOG", beta: "GENEHUB_BETA_LOG", alpha: "GENEHUB_ALPHA_LOG" },
+  env_host_pid: {
+    dev: "GENEHUB_DEV_HOST_PID",
+    official: "GENEHUB_HOST_PID",
+    beta: "GENEHUB_BETA_HOST_PID",
+    alpha: "GENEHUB_ALPHA_HOST_PID",
+  },
+  env_daemon_command: {
+    dev: "GENEHUB_DEV_DAEMON_COMMAND",
+    official: "GENEHUB_DAEMON_COMMAND",
+    beta: "GENEHUB_BETA_DAEMON_COMMAND",
+    alpha: "GENEHUB_ALPHA_DAEMON_COMMAND",
+  },
+  // Whoever spawns the wasm shell names the front-door CLI through this
+  // variable; the shell hands it to the guest as GENEHUB_CLI.
+  env_cli: {
+    dev: "GENEHUB_DEV_CLI",
+    official: "GENEHUB_CLI",
+    beta: "GENEHUB_BETA_CLI",
+    alpha: "GENEHUB_ALPHA_CLI",
+  },
+  // The directory the daemon was started in, handed to the guest which
+  // cannot ask the OS for it.
+  env_cwd: {
+    dev: "GENEHUB_DEV_CWD",
+    official: "GENEHUB_CWD",
+    beta: "GENEHUB_BETA_CWD",
+    alpha: "GENEHUB_ALPHA_CWD",
+  },
+  // The component file the shell loaded, handed to the guest so the daemon
+  // can watch it and ask the shell for an in-place reload when it changes.
+  env_component_file: {
+    dev: "GENEHUB_DEV_COMPONENT_FILE",
+    official: "GENEHUB_COMPONENT_FILE",
+    beta: "GENEHUB_BETA_COMPONENT_FILE",
+    alpha: "GENEHUB_ALPHA_COMPONENT_FILE",
+  },
   env_machine_name: {
     dev: "GENEHUB_DEV_MACHINE_NAME",
     official: "GENEHUB_MACHINE_NAME",
@@ -272,13 +317,28 @@ pub const WORKSPACE_DIR_NAME: &str = "${value("workspace_dir_name", channel)}";
 /// The one binary: CLI to agents, daemon as \`genet daemon run\`.
 pub const CLI_BINARY: &str = "${value("cli_binary", channel)}";
 pub const AGENT_BINARY: &str = "${value("agent_binary", channel)}";
+/// The wasm shell next to the CLI: loads \`genehub_guest.wasm\` and runs its
+/// daemon or agent entry. The CLI refuses to start a daemon without it.
+pub const HOST_BINARY: &str = "${value("host_binary", channel)}";
 /// Where the agent keeps its sessions and \`models.json\`, under the home dir.
 pub const AGENT_HOME_DIR: &str = "${value("agent_home_dir", channel)}";
 pub const ENV_DATA_DIR: &str = "${value("env_data_dir", channel)}";
 pub const ENV_WORKSPACE_DIR: &str = "${value("env_workspace_dir", channel)}";
 pub const ENV_LOG: &str = "${value("env_log", channel)}";
+/// The shell's pid, handed to the WASI guest which has none of its own.
+pub const ENV_HOST_PID: &str = "${value("env_host_pid", channel)}";
 pub const ENV_MACHINE_NAME: &str = "${value("env_machine_name", channel)}";
 pub const ENV_AGENT_COMMAND: &str = "${value("env_agent_command", channel)}";
+/// Runs the daemon instead of \`genet daemon run\`, for pointing the product at
+/// the wasm guest under its shell. Mirrors \`ENV_AGENT_COMMAND\`: a binary that
+/// already knows what it is, so no argv is appended.
+pub const ENV_DAEMON_COMMAND: &str = "${value("env_daemon_command", channel)}";
+/// Whoever spawns the wasm shell names the front-door CLI through this
+/// variable; the shell hands it to the guest as GENEHUB_CLI.
+pub const ENV_CLI: &str = "${value("env_cli", channel)}";
+/// The component file the shell loaded, handed to the guest so the daemon
+/// can watch it and ask for an in-place reload when it changes.
+pub const ENV_COMPONENT_FILE: &str = "${value("env_component_file", channel)}";
 pub const ENV_AGENT_HOME: &str = "${value("env_agent_home", channel)}";
 /// What the owner sees this machine called before they name it.
 pub const DEFAULT_MACHINE_NAME: &str = "${value("default_machine_name", channel)}";
@@ -311,6 +371,35 @@ pub const CHANNEL: &str = "${value("channel", channel)}";
 pub const PRODUCT: &str = "${value("product", channel)}";
 pub const ENV_HOME: &str = "${value("env_agent_home", channel)}";
 pub const HOME_DIR_NAME: &str = "${value("agent_home_dir", channel)}";
+/// The shell's pid, handed to the WASI guest which has none of its own.
+pub const ENV_HOST_PID: &str = "${value("env_host_pid", channel)}";
+/// The directory the daemon was started in; a WASI guest cannot ask the OS.
+pub const ENV_CWD: &str = "${value("env_cwd", channel)}";
+`;
+
+const hostModule = (channel) => `//! Which release channel this build belongs to.
+//!
+//! Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
+//! file. The shell and the guest are separate crates that must agree on the
+//! names things are handed over with, so the shell reads the same stamped
+//! constants the guest's crates do.
+
+// Not every build reads every name below; the module is the whole menu so
+// that adding a consumer never means editing the generator.
+#![allow(dead_code)]
+
+/// \`dev\` | \`official\` | \`beta\` | \`alpha\`.
+pub const CHANNEL: &str = "${value("channel", channel)}";
+/// Whoever spawns the shell names the front-door CLI through this variable;
+/// the guest sees it as GENEHUB_CLI.
+pub const ENV_CLI: &str = "${value("env_cli", channel)}";
+/// The shell's pid, handed to the WASI guest which has none of its own.
+pub const ENV_HOST_PID: &str = "${value("env_host_pid", channel)}";
+/// The directory the daemon was started in; a WASI guest cannot ask the OS.
+pub const ENV_CWD: &str = "${value("env_cwd", channel)}";
+/// The component file the shell loaded; the daemon watches it to ask for an
+/// in-place reload when it changes.
+pub const ENV_COMPONENT_FILE: &str = "${value("env_component_file", channel)}";
 `;
 
 const desktopModule = (channel) => `//! Which release channel this build belongs to.
@@ -334,6 +423,12 @@ pub const PRODUCT: &str = "${value("product", channel)}";
 pub const DATA_DIR_NAME: &str = "${value("data_dir_name", channel)}";
 /// What the shell spawns (with \`daemon run\`): the merged CLI+daemon binary.
 pub const CLI_BINARY: &str = "${value("cli_binary", channel)}";
+/// The wasm shell staged next to the CLI: the desktop spawns it directly with
+/// \`genehub_guest.wasm\` when both are found beside the CLI binary.
+pub const HOST_BINARY: &str = "${value("host_binary", channel)}";
+/// Names the front-door CLI to the wasm shell it spawns; the shell hands it
+/// to the guest as GENEHUB_CLI.
+pub const ENV_CLI: &str = "${value("env_cli", channel)}";
 /// The override the shell passes to the daemon it spawns — has to stay the
 /// name the daemon reads (\`apps/daemon/src/channel.rs\`), or the shell and
 /// the daemon disagree about where the data lives and the shell ends up
@@ -364,6 +459,7 @@ PRODUCT="${value("product", channel)}"
 DESKTOP_BINARY=${value("desktop_binary", channel)}
 CLI_BINARY=${value("cli_binary", channel)}
 AGENT_BINARY=${value("agent_binary", channel)}
+HOST_BINARY=${value("host_binary", channel)}
 ENV_DATA_DIR=${value("env_data_dir", channel)}
 ENV_WORKSPACE_DIR=${value("env_workspace_dir", channel)}
 # The daemon's override for where the agent binary lives — the journey
@@ -380,10 +476,12 @@ function stamp(channel) {
   const identifier = value("identifier", channel);
   const cliBinary = value("cli_binary", channel);
   const agentBinary = value("agent_binary", channel);
+  const hostBinary = value("host_binary", channel);
   const desktopBinary = value("desktop_binary", channel);
 
   writeFileSync(join(repo, "apps/daemon/src/channel.rs"), rustModule(channel));
   writeFileSync(join(repo, "apps/agent/src/channel.rs"), agentModule(channel));
+  writeFileSync(join(repo, "apps/host/src/channel.rs"), hostModule(channel));
   writeFileSync(join(repo, "apps/desktop/src-tauri/src/channel.rs"), desktopModule(channel));
   writeFileSync(join(repo, "packages/web/src/channel.ts"), tsModule(channel));
   writeFileSync(join(repo, "scripts/channel.env"), shellEnv(channel));
@@ -413,6 +511,7 @@ function stamp(channel) {
   // changes.
   rewriteInSection(join(repo, "apps/cli/Cargo.toml"), /^\[\[bin\]\]/, /^name = ".*"$/, `name = "${cliBinary}"`);
   rewriteInSection(join(repo, "apps/agent/Cargo.toml"), /^\[\[bin\]\]/, /^name = ".*"$/, `name = "${agentBinary}"`);
+  rewriteInSection(join(repo, "apps/host/Cargo.toml"), /^\[\[bin\]\]/, /^name = ".*"$/, `name = "${hostBinary}"`);
 
   // The installer stops the supervisor by image name and the daemon by the
   // pid in its lock file — the daemon is the same `genet` binary every client
@@ -420,7 +519,7 @@ function stamp(channel) {
   rewriteLines(join(repo, "apps/desktop/src-tauri/installer.nsh"), [
     [/^!define GH_DESKTOP_EXE ".*"$/, `!define GH_DESKTOP_EXE "${desktopBinary}.exe"`],
     [/^!define GH_CLI_EXE ".*"$/, `!define GH_CLI_EXE "${cliBinary}.exe"`],
-    [/^!define GH_AGENT_EXE ".*"$/, `!define GH_AGENT_EXE "${agentBinary}.exe"`],
+    [/^!define GH_HOST_EXE ".*"$/, `!define GH_HOST_EXE "${hostBinary}.exe"`],
     [/^!define GH_DATA_DIR_NAME ".*"$/, `!define GH_DATA_DIR_NAME "${value("data_dir_name", channel)}"`],
     // The shell-supervised daemon's lock sits one level deeper: the shell's
     // app-data directory carries the identifier on Windows (Tauri

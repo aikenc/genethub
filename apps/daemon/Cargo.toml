@@ -5,15 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "GeneHub daemon: session kernel, agent adapters and client transports"
 
-# Native product entry remains `genet daemon run` (`apps/cli`). The guest bin is
-# the same crate compiled for wasm32-wasip2 so the shell can `from_binary` it.
+# Native product entry remains `genet daemon run` (`apps/cli`), which execs
+# the shell with the single v2 component (`apps/guest`) — this crate is the
+# daemon half of that component.
 
 [lib]
 path = "src/lib.rs"
-
-[[bin]]
-name = "genehub-daemon"
-path = "src/bin/guest.rs"
 
 [dependencies]
 genehub-proto = { path = "../../packages/proto" }

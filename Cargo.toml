@@ -4,6 +4,7 @@ members = [
     "apps/agent",
     "apps/cli",
     "apps/daemon",
+    "apps/guest",
     "apps/guest-probe",
     "apps/host",
     "packages/http",

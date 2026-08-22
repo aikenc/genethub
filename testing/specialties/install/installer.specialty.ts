@@ -73,13 +73,13 @@ function fakeRelease(): string {
     "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${GENEHUB_TEST_CALLS:-/dev/null}\"\necho ok\n",
   );
   chmodSync(binary, 0o755);
-  writeFileSync(path.join(staged, "genehub-app.wasm"), "signed-wasm-fixture");
-  const agent = path.join(staged, "genet-agent-dev");
-  writeFileSync(agent, "#!/bin/sh\necho genet-agent-dev\n");
-  chmodSync(agent, 0o755);
+  const host = path.join(staged, "genehub-host-dev");
+  writeFileSync(host, "#!/bin/sh\necho genehub-host-dev\n");
+  chmodSync(host, 0o755);
+  writeFileSync(path.join(staged, "genehub_guest.wasm"), "guest-component-fixture");
   const tar = spawnSync(
     "tar",
-    ["-czf", path.join(dir, assetName()), "-C", staged, "genet-dev", "genet-agent-dev", "genehub-app.wasm"],
+    ["-czf", path.join(dir, assetName()), "-C", staged, "genet-dev", "genehub-host-dev", "genehub_guest.wasm"],
     { encoding: "utf8" },
   );
   if (tar.status !== 0) throw new Error(`tar failed: ${tar.stderr}`);
@@ -120,9 +120,9 @@ defineSpecialty(
   {
     id: "specialty.install.binaries-and-logic-on-path",
     title: "Installing puts binaries and logic where the path can find them",
-    oracle: "install.sh lands an executable genet-dev and genehub-app.wasm and says PATH/start",
-    catches: ["installer writes a truncated file", "signed wasm omitted"],
-    tags: ["core", "install", "parity", "v1-wasm"],
+    oracle: "install.sh lands an executable genet-dev and genehub-host-dev plus genehub_guest.wasm and says PATH/start",
+    catches: ["installer writes a truncated file", "guest component or shell omitted"],
+    tags: ["core", "install", "parity"],
     expectedDurationMs: 8_000,
     timeoutMs: 30_000,
     surfaces: ["install"],
@@ -139,9 +139,10 @@ defineSpecialty(
       t.assertions.assert(existsSync(installed), "genet-dev was not installed");
       const ran = spawnSync(installed, [], { encoding: "utf8" });
       t.assertions.assert(ran.status === 0, "genet-dev did not run");
+      t.assertions.assert(existsSync(path.join(bin, "genehub-host-dev")), "genehub-host-dev was not installed");
       t.assertions.assert(
-        readFileSync(path.join(bin, "genehub-app.wasm"), "utf8") === "signed-wasm-fixture",
-        "installed logic artifact did not match",
+        readFileSync(path.join(bin, "genehub_guest.wasm"), "utf8") === "guest-component-fixture",
+        "installed guest component did not match",
       );
       t.assertions.assert(output.stdout.includes("not on your PATH"), `no PATH hint in:\n${output.stdout}`);
       t.assertions.assert(output.stdout.includes("genet-dev daemon start"), `did not say what to run:\n${output.stdout}`);

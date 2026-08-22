@@ -1,8 +1,9 @@
-//! Locate the v2 shell and its components, then become them.
+//! Locate the v2 shell and its one component, then become them.
 //!
-//! `genet daemon run` / `start` are no longer a native daemon. They load the
-//! same guest the installer will ship. A missing artifact is a start failure,
-//! not a silent fall back to the native binary.
+//! `genet daemon run` / `start` are no longer a native daemon, and the agent
+//! is no longer a second artifact: both are entries of `genehub_guest.wasm`
+//! under `genehub-host-dev`. A missing artifact is a start failure, not a
+//! silent fall back to a native binary.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,8 +14,7 @@ use crate::{fail, EXIT_FAILED};
 
 pub struct Guest {
     pub host: PathBuf,
-    pub daemon: PathBuf,
-    pub agent: Option<PathBuf>,
+    pub component: PathBuf,
 }
 
 fn is_file(path: &Path) -> bool {
@@ -40,11 +40,11 @@ fn cargo_target(dir: &Path) -> Option<&Path> {
     dir.parent()
 }
 
-fn host_name() -> &'static str {
+fn host_name() -> String {
     if cfg!(windows) {
-        "genehub-host-dev.exe"
+        format!("{}.exe", channel::HOST_BINARY)
     } else {
-        "genehub-host-dev"
+        channel::HOST_BINARY.to_string()
     }
 }
 
@@ -65,75 +65,56 @@ pub fn locate() -> Result<Guest, String> {
         .filter(|path| is_file(path))
         .or_else(|| first_file(hosts))
         .ok_or_else(|| {
-            "genehub-host-dev is missing; build it with `cargo build -p genehub-host --release`"
-                .to_string()
+            format!(
+                "{} is missing; build it with `cargo build -p genehub-host --release`",
+                host_name()
+            )
         })?;
 
-    let mut daemons = vec![dir.join("genehub-daemon.wasm")];
+    let mut components = vec![dir.join("genehub_guest.wasm")];
     if let Some(target) = target {
-        daemons.push(
+        components.push(
             target
                 .join("wasm32-wasip2")
                 .join("release")
-                .join("genehub-daemon.wasm"),
+                .join("genehub_guest.wasm"),
         );
-        daemons.push(
+        components.push(
             target
                 .join("wasm32-wasip2")
                 .join("debug")
-                .join("genehub-daemon.wasm"),
+                .join("genehub_guest.wasm"),
         );
     }
-    let daemon = std::env::var("GENEHUB_DEV_DAEMON_COMPONENT")
+    let component = std::env::var("GENEHUB_DEV_COMPONENT")
         .ok()
+        .filter(|value| !value.is_empty())
+        // The bring-up name, still honoured so older runbooks keep working.
+        .or_else(|| std::env::var("GENEHUB_DEV_DAEMON_COMPONENT").ok())
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .filter(|path| is_file(path))
-        .or_else(|| first_file(daemons))
+        .or_else(|| first_file(components))
         .ok_or_else(|| {
-            "genehub-daemon.wasm is missing; build it with `cargo build -p genet-daemon --release --target wasm32-wasip2`"
+            "genehub_guest.wasm is missing; build it with `cargo build -p genehub-guest --release --target wasm32-wasip2`"
                 .to_string()
         })?;
 
-    let mut agents = vec![dir.join("genet-agent-dev.wasm")];
-    if let Some(target) = target {
-        agents.push(
-            target
-                .join("wasm32-wasip2")
-                .join("release")
-                .join("genet-agent-dev.wasm"),
-        );
-        agents.push(
-            target
-                .join("wasm32-wasip2")
-                .join("debug")
-                .join("genet-agent-dev.wasm"),
-        );
-    }
-    let agent = std::env::var("GENEHUB_DEV_AGENT_COMPONENT")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .filter(|path| is_file(path))
-        .or_else(|| first_file(agents));
-
-    Ok(Guest { host, daemon, agent })
+    Ok(Guest { host, component })
 }
 
-/// Apply the env the nested agent host reads when it is spawned as a bare
-/// binary (no `run --component`).
-pub fn prepare_agent_env(command: &mut Command, guest: &Guest) {
-    command.env("GENET_AGENT_DEV_COMMAND", &guest.host);
-    if let Some(agent) = &guest.agent {
-        command.env("GENEHUB_DEV_COMPONENT", agent);
-        command.env("GENEHUB_DEV_AGENT_COMPONENT", agent);
+/// Whoever spawns the shell tells it which CLI is the front door; the shell
+/// hands that to the guest as `GENEHUB_CLI`.
+fn cli_env(command: &mut Command) {
+    if let Ok(cli) = std::env::current_exe() {
+        command.env(channel::ENV_CLI, cli);
     }
 }
 
 fn host_command(guest: &Guest) -> Command {
     let mut command = Command::new(&guest.host);
-    command.args(["run", "--component"]).arg(&guest.daemon);
-    prepare_agent_env(&mut command, guest);
+    command.args(["run", "--component"]).arg(&guest.component);
+    cli_env(&mut command);
     command
 }
 
@@ -149,39 +130,66 @@ pub fn become_daemon() -> i32 {
         Ok(guest) => guest,
         Err(error) => fail("internal", &error, EXIT_FAILED),
     };
-    exec_host(&guest)
+    exec_host(&guest, load::Entry::Daemon, &[])
+}
+
+/// `genet agent-serve --mode rpc ...`: the agent entry of the same component.
+/// Not in the usage text — the daemon's adapter spawns this; `genet agent`
+/// stays the client verb it already was.
+pub fn become_agent(args: &[String]) -> i32 {
+    let guest = match locate() {
+        Ok(guest) => guest,
+        Err(error) => fail("internal", &error, EXIT_FAILED),
+    };
+    exec_host(&guest, load::Entry::Agent, args)
 }
 
 pub fn spawn_command() -> Result<Command, String> {
     if let Ok(override_command) = std::env::var(channel::ENV_DAEMON_COMMAND) {
         if !override_command.is_empty() {
             let mut command = Command::new(override_command);
-            if let Ok(guest) = locate() {
-                prepare_agent_env(&mut command, &guest);
-            }
+            cli_env(&mut command);
             return Ok(command);
         }
     }
     Ok(host_command(&locate()?))
 }
 
-fn exec_host(guest: &Guest) -> i32 {
-    exec_binary(
-        guest.host.clone(),
-        &[
-            "run".into(),
-            "--component".into(),
-            guest.daemon.to_string_lossy().into_owned(),
-        ],
-    )
+// Mirror of the shell's own `load::Entry`, spelled out here so the CLI does
+// not depend on the host crate.
+mod load {
+    pub enum Entry {
+        Daemon,
+        Agent,
+    }
+
+    impl Entry {
+        pub fn flag(&self) -> &'static str {
+            match self {
+                Entry::Daemon => "daemon",
+                Entry::Agent => "agent",
+            }
+        }
+    }
+}
+
+fn exec_host(guest: &Guest, entry: load::Entry, guest_args: &[String]) -> i32 {
+    let mut args = vec![
+        "run".into(),
+        "--component".into(),
+        guest.component.to_string_lossy().into_owned(),
+        "--entry".into(),
+        entry.flag().into(),
+        "--".into(),
+    ];
+    args.extend(guest_args.iter().cloned());
+    exec_binary(guest.host.clone(), &args)
 }
 
 fn exec_binary(exe: PathBuf, args: &[String]) -> i32 {
     let mut command = Command::new(&exe);
     command.args(args);
-    if let Ok(guest) = locate() {
-        prepare_agent_env(&mut command, &guest);
-    }
+    cli_env(&mut command);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

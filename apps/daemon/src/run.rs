@@ -13,10 +13,18 @@ use anyhow::{Context, Result};
 use crate::config::Paths;
 use crate::Daemon;
 
+/// Why the foreground run ended. `Reload` is the guest asking its shell to
+/// re-read the component and instantiate it again in the same process — the
+/// in-place update path (`wasm-v2-resident-shell.md`).
+pub enum Exit {
+    Shutdown,
+    Reload,
+}
+
 /// Runs the daemon in the foreground until a signal or a local client asks it
 /// to stop. The listening line goes to stdout for whoever spawned us — the
 /// desktop shell reads it to learn the endpoint without racing the file write.
-pub async fn run() -> Result<()> {
+pub async fn run() -> Result<Exit> {
     // The data directory has to be known before logging starts, because the log
     // goes in it. Anything that fails in between is on stderr, which the desktop
     // shell keeps in the same directory.
@@ -50,13 +58,60 @@ pub async fn run() -> Result<()> {
     tracing::info!("listening on 127.0.0.1:{}", daemon.port);
 
     let asked = daemon.state.shutdown.clone();
+    let component_changed = component_watcher();
     tokio::select! {
         _ = wait_for_signal() => {}
         _ = asked.notified() => tracing::info!("a local client asked us to stop"),
+        // The component file we were loaded from changed on disk: a dev
+        // rebuild landed, or an installer replaced us. Hand the process back
+        // to the shell, which re-reads the artifact and instantiates it again
+        // in this same pid.
+        _ = component_changed => {
+            tracing::info!("the guest component changed on disk; reloading in place");
+            daemon.shutdown().await;
+            return Ok(Exit::Reload);
+        }
     }
     tracing::info!("shutting down");
     daemon.shutdown().await;
-    Ok(())
+    Ok(Exit::Shutdown)
+}
+
+/// Fires when the component file the shell loaded changes. Pending forever
+/// when there is nothing to watch: a native run has no component, and a guest
+/// whose shell did not name one cannot be reloaded anyway.
+///
+/// mtime+len, not a hash: the point is to notice a replaced artifact, and a
+/// 26 MB component is not re-read every two seconds to do it. A write in
+/// progress shows up as a missing file or a changing stamp and is waited out
+/// rather than raced.
+async fn component_watcher() {
+    let path = match std::env::var(crate::channel::ENV_COMPONENT_FILE) {
+        Ok(value) if !value.is_empty() => std::path::PathBuf::from(value),
+        _ => {
+            tracing::info!("no component file named by the shell; in-place reload is off");
+            std::future::pending::<std::path::PathBuf>().await
+        }
+    };
+    let stamp = |path: &std::path::Path| {
+        std::fs::metadata(path)
+            .ok()
+            .and_then(|meta| meta.modified().ok().map(|mtime| (mtime, meta.len())))
+    };
+    let original = stamp(&path);
+    tracing::info!(component = %path.display(), stamp = ?original, "watching the component file");
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+    loop {
+        interval.tick().await;
+        let current = stamp(&path);
+        match (original, current) {
+            // Gone (a replace mid-flight) is not a change to act on.
+            (_, None) => {}
+            (Some(before), Some(now)) if now != before => return,
+            (None, Some(_)) => return,
+            _ => {}
+        }
+    }
 }
 
 fn listening_payload(daemon: &Daemon) -> serde_json::Value {

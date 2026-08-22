@@ -141,6 +141,17 @@ impl Paths {
     }
 }
 
+/// `dirs::home_dir`, with a WASI answer: the `dirs` crate has no wasi sys
+/// implementation and returns `None` in the guest, while the guest does have
+/// the user's env — HOME comes through the shell like any other variable.
+pub fn home_dir() -> Option<PathBuf> {
+    dirs::home_dir().or_else(|| {
+        std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    })
+}
+
 /// The workspace override named by this channel, else a folder in the user's
 /// home named after it.
 ///
@@ -150,7 +161,7 @@ fn default_workspace() -> Result<PathBuf> {
     if let Ok(dir) = std::env::var(crate::channel::ENV_WORKSPACE_DIR) {
         return Ok(PathBuf::from(dir));
     }
-    let home = dirs::home_dir().context("no home directory")?;
+    let home = home_dir().context("no home directory")?;
     Ok(home.join(crate::channel::WORKSPACE_DIR_NAME))
 }
 
@@ -932,6 +943,42 @@ pub(crate) fn restrict_dir_to_owner(path: &Path) -> Result<()> {
 #[cfg(not(any(unix, windows, target_family = "wasm")))]
 pub fn restrict_to_owner(_path: &Path) -> Result<()> {
     anyhow::bail!("owner-only file permissions are unsupported on this platform")
+}
+
+/// Opens a log-style file to append to it.
+///
+/// wasip2 silently drops O_APPEND: an append handle there writes at offset 0
+/// every time, so guest code that appends this way overwrites the file from
+/// the top (seen as self-erasing daemon.log/chat.jsonl in the wasm shell).
+/// The guest instead opens read+write and positions at the end itself; the
+/// files this is used for have a single writer at a time. Native keeps
+/// O_APPEND, which is atomic across processes.
+#[cfg(not(target_family = "wasm"))]
+pub fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    // Readable too: callers dedupe against what is already there before they
+    // append. O_APPEND still owns where writes land.
+    options.read(true).create(true).append(true);
+    // Every caller restricts the file to its owner right after opening;
+    // creating with the final mode closes the window in between.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+#[cfg(target_family = "wasm")]
+pub fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::io::Seek;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
+    file.seek(std::io::SeekFrom::End(0))?;
+    Ok(file)
 }
 
 #[cfg(not(any(unix, windows, target_family = "wasm")))]

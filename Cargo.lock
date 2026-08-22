@@ -1159,6 +1159,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "genehub-guest"
+version = "0.0.0"
+dependencies = [
+ "genet-agent",
+ "genet-daemon",
+ "tokio",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "genehub-guest-probe"
 version = "0.0.0"
 dependencies = [
@@ -1175,6 +1185,7 @@ dependencies = [
  "http-body-util",
  "libc",
  "portable-pty",
+ "sha2",
  "tokio",
  "wasmtime",
  "wasmtime-wasi",

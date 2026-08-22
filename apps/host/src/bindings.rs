@@ -1,12 +1,11 @@
-//! Generated bindings for the imports the shell provides to the guest.
-//!
-//! The world is `daemon-command`: the guest is still a `wasi:cli/run` command
-//! and only adds what WASI cannot give it.
+//! Generated bindings for the `daemon` world: the imports the shell provides
+//! and the two exports (`run` / `agent-run`) it picks between per process.
 
 wasmtime::component::bindgen!({
     path: "../../wit",
-    world: "daemon-command",
+    world: "daemon",
     imports: { default: async },
+    exports: { default: async },
     with: {
         "genehub:host/process.child": crate::process::ChildHandle,
         "genehub:host/pty.session": crate::pty::PtySession,

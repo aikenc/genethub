@@ -9,18 +9,16 @@ import {
   parseJson,
   procCmdline,
   runGenet,
-  tryLocateAgentComponent,
   tryLocateDaemonComponent,
   tryLocateHost,
   type CaseContext,
 } from "../../framework/public.ts";
 
-function requireWasm(openRoot: string): { host: string; daemon: string } {
+function requireWasm(openRoot: string): { host: string; component: string } {
   const host = tryLocateHost(openRoot);
-  const daemon = tryLocateDaemonComponent(openRoot);
-  const agent = tryLocateAgentComponent(openRoot);
-  if (!host || !daemon || !agent) throw new BlockedError("wasm artifacts missing");
-  return { host, daemon };
+  const component = tryLocateDaemonComponent(openRoot);
+  if (!host || !component) throw new BlockedError("wasm artifacts missing");
+  return { host, component };
 }
 
 function meta(id: string, title: string, oracle: string, catches: string[], ms = 20_000) {
@@ -71,8 +69,8 @@ defineSpecialty(
 defineSpecialty(
   meta(
     "specialty.wasm.lifecycle.two-data-dirs-two-hosts",
-    "Two data directories get two host processes, each loading the daemon component",
-    "pids differ, both cmdlines contain genehub-daemon.wasm, and stop of one leaves the other running",
+    "Two data directories get two host processes, each loading the one component",
+    "pids differ, both cmdlines contain genehub_guest.wasm, and stop of one leaves the other running",
     ["second start reuses the first host", "one dir falls back to native"],
     25_000,
   ),
@@ -89,8 +87,8 @@ defineSpecialty(
     const startedB = parseJson(runGenet(genet, ["daemon", "start"], envB).stdout);
     try {
       t.assertions.assert(startedA.pid !== startedB.pid, `shared pid ${startedA.pid}`);
-      t.assertions.assert(procCmdline(Number(startedA.pid)).includes("genehub-daemon.wasm"), procCmdline(Number(startedA.pid)));
-      t.assertions.assert(procCmdline(Number(startedB.pid)).includes("genehub-daemon.wasm"), procCmdline(Number(startedB.pid)));
+      t.assertions.assert(procCmdline(Number(startedA.pid)).includes("genehub_guest.wasm"), procCmdline(Number(startedA.pid)));
+      t.assertions.assert(procCmdline(Number(startedB.pid)).includes("genehub_guest.wasm"), procCmdline(Number(startedB.pid)));
       runGenet(genet, ["daemon", "stop"], envA);
       const stillB = parseJson(runGenet(genet, ["daemon", "status"], envB).stdout);
       t.assertions.assert(stillB.running === true && stillB.pid === startedB.pid, `B died when A stopped: ${JSON.stringify(stillB)}`);
@@ -129,7 +127,7 @@ defineSpecialty(
   meta(
     "specialty.wasm.lifecycle.copied-host-without-component-refuses",
     "A host binary copied next to the CLI is not enough if the .wasm is absent",
-    "start fails naming genehub-daemon.wasm rather than running a native daemon",
+    "start fails naming genehub_guest.wasm rather than running a native daemon",
     ["host without a component falls through to genet daemon run"],
     10_000,
   ),
@@ -148,13 +146,14 @@ defineSpecialty(
       ...t.env.env,
       GENEHUB_DEV_DATA_DIR: path.join(t.env.root, "copied-host-data"),
     });
+    delete env.GENEHUB_DEV_COMPONENT;
     delete env.GENEHUB_DEV_DAEMON_COMPONENT;
     delete env.GENEHUB_DEV_DAEMON_COMMAND;
     delete env.GENEHUB_HOST;
     const result = runGenet(clone, ["daemon", "start"], env);
     t.assertions.assert(result.code !== 0, `CLI+host without wasm started: ${result.stdout}`);
     t.assertions.assert(
-      /genehub-daemon\.wasm is missing/i.test(`${result.stderr}\n${result.stdout}`),
+      /genehub_guest\.wasm is missing/i.test(`${result.stderr}\n${result.stdout}`),
       `wrong failure: ${result.stderr || result.stdout}`,
     );
   },

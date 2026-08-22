@@ -182,10 +182,14 @@ fn the_windows_installer_stops_the_daemon_before_replacing_it() {
     // same `genet` binary every CLI client runs, so it is stopped by the pid
     // in its lock file — an image-name kill would take a running
     // `genet session send --wait` down with it (`genethub-cli.md` §2).
-    let agent = nsis_define(&script, "GH_AGENT_EXE");
+    //
+    // The wasm shell is not the exception: the daemon and every agent are
+    // host processes, and the daemon's own lock-pid kill already ran above,
+    // so what remains under the host's image name is what must go.
+    let host = nsis_define(&script, "GH_HOST_EXE");
     assert!(
-        script.contains("/T /IM ${GH_AGENT_EXE}"),
-        "genet-agent ({agent}) ships in the bundle but the installer never stops it"
+        script.contains("/T /IM ${GH_HOST_EXE}"),
+        "the wasm shell ({host}) ships in the bundle but the installer never stops it"
     );
     assert!(
         script.contains("/F /T /PID"),
@@ -616,6 +620,7 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
         ("identifier", "com.genethub.desktop"),
         ("cli_binary", "genet"),
         ("agent_binary", "genet-agent"),
+        ("host_binary", "genehub-host"),
         ("desktop_binary", "genethub-desktop"),
     ] {
         assert!(
@@ -635,6 +640,12 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
             "genet-agent-dev",
             "genet-agent-beta",
             "genet-agent-alpha",
+        ),
+        (
+            "host_binary",
+            "genehub-host-dev",
+            "genehub-host-beta",
+            "genehub-host-alpha",
         ),
         (
             "desktop_binary",

@@ -6,14 +6,13 @@ import {
   defineSpecialty,
   agentHostProcesses,
   procCmdline,
-  tryLocateAgentComponent,
   tryLocateDaemonComponent,
   tryLocateHost,
   type CaseContext,
 } from "../../framework/public.ts";
 
 function requireWasm(openRoot: string): void {
-  if (!tryLocateHost(openRoot) || !tryLocateDaemonComponent(openRoot) || !tryLocateAgentComponent(openRoot)) {
+  if (!tryLocateHost(openRoot) || !tryLocateDaemonComponent(openRoot)) {
     throw new BlockedError("wasm artifacts missing");
   }
 }
@@ -96,8 +95,8 @@ defineSpecialty(
       const agents = agentHostProcesses().filter((row) => row.environ.includes(t.env.data));
       t.assertions.assert(agents.length > 0, "agent host never appeared");
       t.assertions.assert(
-        agents.some((row) => row.environ.includes("genet-agent-dev.wasm")),
-        `killed a host that was not the agent component: ${JSON.stringify(agents.map((row) => row.cmd))}`,
+        agents.some((row) => row.cmd.includes("--entry agent") && row.cmd.includes("genehub_guest.wasm")),
+        `killed a host that was not the agent entry: ${JSON.stringify(agents.map((row) => row.cmd))}`,
       );
       for (const row of agents) {
         process.kill(row.pid, "SIGKILL");

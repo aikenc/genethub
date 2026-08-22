@@ -32,7 +32,7 @@
 
 !define GH_DESKTOP_EXE "genethub-desktop-dev.exe"
 !define GH_CLI_EXE "genet-dev.exe"
-!define GH_AGENT_EXE "genet-agent-dev.exe"
+!define GH_HOST_EXE "genehub-host-dev.exe"
 !define GH_DATA_DIR_NAME "GeneHub-dev"
 !define GH_BUNDLE_ID "com.genethub.desktop.dev"
 
@@ -93,7 +93,13 @@
     nsExec::Exec 'taskkill /F /T /PID $4'
     Pop $0
   genehub_no_shell_lock:
-  nsExec::Exec 'taskkill /F /T /IM ${GH_AGENT_EXE}'
+  ; The wasm shell: the daemon and every agent are `genehub-host` processes
+  ; (the agent is the same component's second entry, not its own binary). The
+  ; lock-pid kills above already took the daemons and, with /T, their agents;
+  ; this catches a shell left behind by a daemon that died without a lock —
+  ; and it has to happen, because a running host holds its own exe open the
+  ; same way the old agent binary did.
+  nsExec::Exec 'taskkill /F /T /IM ${GH_HOST_EXE}'
   Pop $0
 
   ; Wait for the file to actually be writable — up to about six seconds, which is

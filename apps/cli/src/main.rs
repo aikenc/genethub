@@ -91,6 +91,11 @@ async fn run(args: Vec<String>) {
             Some(_) => converse::session(&args[1..], &selection).await,
         },
         Some("agent") => converse::agent(&args[1..], &selection).await,
+        // Not a user verb: the daemon's adapter spawns the agent through the
+        // front door (`$GENEHUB_CLI agent-serve --mode rpc ...`), and this is
+        // where that becomes the component's agent entry. `genet agent` stays
+        // the client verb it already was.
+        Some("agent-serve") => crate::wasm::become_agent(&args[1..]),
         Some("shell") => shell::shell(&args[1..], &selection).await,
         Some("speech") => speech::speech(&args[1..], &selection).await,
         Some("process") => process::process(&args[1..], &selection).await,

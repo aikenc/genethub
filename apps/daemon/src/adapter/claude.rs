@@ -740,7 +740,7 @@ fn claude_config_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         return Ok(PathBuf::from(path));
     }
-    dirs::home_dir()
+    crate::config::home_dir()
         .map(|home| home.join(".claude"))
         .ok_or_else(|| anyhow!("cannot find the Claude config directory"))
 }

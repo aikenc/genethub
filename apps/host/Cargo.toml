@@ -16,6 +16,7 @@ fs2.workspace = true
 http = "1"
 http-body-util = "0.1"
 portable-pty = "0.9"
+sha2 = "0.10"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "process", "io-util", "sync", "time"] }
 wasmtime = { version = "48", default-features = false, features = ["anyhow", "async", "component-model", "cranelift", "parallel-compilation"] }
 wasmtime-wasi = "48"

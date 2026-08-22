@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -11,7 +11,6 @@ import {
   processesMatching,
   agentHostProcesses,
   runGenet,
-  tryLocateAgentComponent,
   tryLocateDaemonComponent,
   tryLocateHost,
   type CaseContext,
@@ -21,18 +20,16 @@ type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>
 
 function requireWasmArtifacts(openRoot: string): {
   host: string;
-  daemon: string;
-  agent: string;
+  component: string;
 } {
   const host = tryLocateHost(openRoot);
-  const daemon = tryLocateDaemonComponent(openRoot);
-  const agent = tryLocateAgentComponent(openRoot);
-  if (!host || !daemon || !agent) {
+  const component = tryLocateDaemonComponent(openRoot);
+  if (!host || !component) {
     throw new BlockedError(
-      `wasm artifacts missing: host=${host ?? "no"} daemon=${daemon ?? "no"} agent=${agent ?? "no"}`,
+      `wasm artifacts missing: host=${host ?? "no"} component=${component ?? "no"}`,
     );
   }
-  return { host, daemon, agent };
+  return { host, component };
 }
 
 function wasmMeta(
@@ -61,7 +58,7 @@ function wasmMeta(
     },
     surfaces: ["genehub-host", "daemon", "agent"],
     productInterfaces: ["genet-cli", "@genehub/web/client"],
-    requiredArtifacts: ["genehub-host-dev", "genehub-daemon.wasm", "genet-agent-dev.wasm"],
+    requiredArtifacts: ["genehub-host-dev", "genehub_guest.wasm"],
   };
 }
 
@@ -95,8 +92,8 @@ function cliJson(t: CaseContext, args: string[], extraEnv: NodeJS.ProcessEnv = {
 defineSpecialty(
   wasmMeta(
     "specialty.wasm.guest-identity.daemon-is-host-component",
-    "The running daemon is the host loading genehub-daemon.wasm, not genet daemon run",
-    "status pid cmdline contains genehub-host-dev and genehub-daemon.wasm and does not contain 'daemon run'",
+    "The running daemon is the host loading genehub_guest.wasm, not genet daemon run",
+    "status pid cmdline contains genehub-host-dev and genehub_guest.wasm and does not contain 'daemon run'",
     [
       "native genet-dev is still the listener",
       "wrapper script leftover as the pid",
@@ -112,10 +109,10 @@ defineSpecialty(
       t.assertions.assert(Number.isInteger(pid) && pid > 1, `implausible pid ${status.pid}`);
       const cmd = procCmdline(pid);
       t.assertions.assert(cmd.includes("genehub-host-dev"), `pid ${pid} is not the host: ${cmd}`);
-      t.assertions.assert(cmd.includes("genehub-daemon.wasm"), `pid ${pid} did not load the daemon component: ${cmd}`);
+      t.assertions.assert(cmd.includes("genehub_guest.wasm"), `pid ${pid} did not load the component: ${cmd}`);
       t.assertions.assert(!cmd.includes("daemon run"), `pid ${pid} still looks like native daemon run: ${cmd}`);
       t.assertions.assert(
-        cmd.includes(path.basename(artifacts.daemon)) || cmd.includes(artifacts.daemon),
+        cmd.includes(path.basename(artifacts.component)) || cmd.includes(artifacts.component),
         `host loaded a different component: ${cmd}`,
       );
       const listed = await opened.client.call({ type: "workspace.list" });
@@ -156,12 +153,13 @@ defineSpecialty(
 defineSpecialty(
   wasmMeta(
     "specialty.wasm.guest-identity.agent-is-second-host-process",
-    "A builtin session is a second host process loading the agent component",
-    "after session.create, a live pid other than the daemon has genet-agent-dev.wasm in its cmdline",
+    "A builtin session is a second host process running the same component's agent entry",
+    "after session.create, a live pid other than the daemon runs genehub-host-dev with --entry agent on the same genehub_guest.wasm",
     [
       "agent runs inside the daemon instance",
       "native genet-agent-dev is spawned instead",
       "session.create succeeds without an agent process",
+      "agent entry loads a different component than the daemon",
     ],
     { llm: "mock", ms: 40_000 },
   ),
@@ -171,6 +169,7 @@ defineSpecialty(
       t,
       async (opened) => {
         const daemonPid = Number(cliJson(t, ["daemon", "status"]).pid);
+        const daemonCmd = procCmdline(daemonPid);
         opened.mock.script({ text: "agent process alive" });
         const sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
         const events = await t.flows.main.attachEventLog(opened.client, sessionId);
@@ -184,7 +183,7 @@ defineSpecialty(
           `turn did not complete: ${events.map((event) => event.type).join(",")}`,
         );
         const agents = agentHostProcesses().filter((row) => row.environ.includes(t.env.data));
-        t.assertions.assert(agents.length > 0, `no nested host --mode process: ${JSON.stringify(agents)}`);
+        t.assertions.assert(agents.length > 0, `no nested host --entry agent process: ${JSON.stringify(agents)}`);
         t.assertions.assert(
           agents.some((row) => row.pid !== daemonPid),
           `agent shares the daemon pid ${daemonPid}: ${JSON.stringify(agents)}`,
@@ -194,8 +193,15 @@ defineSpecialty(
           `agent is not the host: ${JSON.stringify(agents)}`,
         );
         t.assertions.assert(
-          agents.some((row) => row.environ.includes("genet-agent-dev.wasm")),
-          `nested host is not loading the agent component: ${JSON.stringify(agents.map((row) => ({ pid: row.pid, cmd: row.cmd, environ: row.environ.slice(0, 400) })))}`,
+          agents.some((row) => row.cmd.includes("--entry agent") && row.cmd.includes("genehub_guest.wasm")),
+          `nested host is not the agent entry of the component: ${JSON.stringify(agents.map((row) => ({ pid: row.pid, cmd: row.cmd })))}`,
+        );
+        t.assertions.assert(
+          agents.some((row) => {
+            const component = row.cmd.match(/--component\s+(\S+)/)?.[1];
+            return component != null && daemonCmd.includes(component);
+          }),
+          `agent entry loaded a different component than the daemon: ${JSON.stringify(agents.map((row) => row.cmd))}`,
         );
         t.assertions.assert(
           !agents.some((row) => /(^|\s)genet-agent-dev(\s|$)/.test(row.cmd) && !row.cmd.includes("genehub-host-dev")),
@@ -273,12 +279,13 @@ defineSpecialty(
       GENEHUB_DEV_DATA_DIR: path.join(t.env.root, "isolated-data"),
     });
     delete env.GENEHUB_DEV_DAEMON_COMMAND;
+    delete env.GENEHUB_DEV_COMPONENT;
     delete env.GENEHUB_DEV_DAEMON_COMPONENT;
     delete env.GENEHUB_HOST;
     const result = runGenet(clone, ["daemon", "start"], env);
     t.assertions.assert(result.code !== 0, `isolated CLI started without artifacts: ${result.stdout}`);
     t.assertions.assert(
-      /genehub-host-dev is missing|genehub-daemon.wasm is missing/i.test(`${result.stderr}\n${result.stdout}`),
+      /genehub-host-dev is missing|genehub_guest\.wasm is missing/i.test(`${result.stderr}\n${result.stdout}`),
       `failure did not name the missing artifact: ${result.stderr || result.stdout}`,
     );
     t.assertions.assert(
@@ -663,11 +670,173 @@ defineSpecialty(
 
 defineSpecialty(
   wasmMeta(
+    "specialty.wasm.cli.agent-serve-runs-the-agent-entry",
+    "genet agent-serve --mode rpc answers a JSONL command through the component's agent entry",
+    "a get_commands line gets a success response with the same id, stdin close exits 0, and no --mode exits 2",
+    [
+      "agent-serve hits the client verb instead of the guest",
+      "agent entry never wired into the component",
+      "guest argv is swallowed by the shell",
+    ],
+    { ms: 30_000 },
+  ),
+  async (t) => {
+    requireWasmArtifacts(t.openRoot);
+    const genet = locateGenet(t.openRoot);
+    const env = genetEnv(t.openRoot, t.env.env);
+    const { spawnSync } = await import("node:child_process");
+    const answered = spawnSync(genet, ["agent-serve", "--mode", "rpc"], {
+      env,
+      encoding: "utf8",
+      input: '{"id":"1","type":"get_commands"}\n',
+      timeout: 60_000,
+    });
+    t.assertions.assert(answered.status === 0, `agent-serve exited ${answered.status}: ${answered.stderr}`);
+    const frames = answered.stdout
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const response = frames.find((frame) => frame.id === "1");
+    t.assertions.assert(
+      response?.type === "response" && response.command === "get_commands" && response.success === true,
+      `no success response for get_commands: ${answered.stdout.slice(0, 400)}`,
+    );
+    const refused = runGenet(genet, ["agent-serve"], env);
+    t.assertions.assert(refused.code === 2, `agent-serve without --mode exited ${refused.code}`);
+    t.assertions.assert(
+      refused.stderr.includes("--mode rpc"),
+      `refusal did not explain --mode rpc: ${refused.stderr}`,
+    );
+  },
+);
+
+defineSpecialty(
+  wasmMeta(
+    "specialty.wasm.lifecycle.precompiled-cache-warms-restart",
+    "The dev channel caches the compiled component and a restart deserializes instead of recompiling",
+    "after stop, <data>/wasm-cache holds a sha256-named .cwasm; the next start logs 'cache hit' and serves /health",
+    [
+      "every start pays a full Cranelift compile",
+      "cache key ignores the component bytes",
+      "cache write is not atomic and a partial file is trusted",
+    ],
+    { ms: 40_000 },
+  ),
+  async (t) => {
+    requireWasmArtifacts(t.openRoot);
+    const genet = locateGenet(t.openRoot);
+    const env = genetEnv(t.openRoot, t.env.env);
+    const started = runGenet(genet, ["daemon", "start"], env);
+    t.assertions.assert(started.code === 0, `cold start failed: ${started.stderr || started.stdout}`);
+    runGenet(genet, ["daemon", "stop"], env);
+    const cacheDir = path.join(t.env.data, "wasm-cache");
+    const entries = existsSync(cacheDir) ? readdirSync(cacheDir) : [];
+    t.assertions.assert(
+      entries.some((name) => /^[0-9a-f]{64}\.cwasm$/.test(name) && statSync(path.join(cacheDir, name)).size > 0),
+      `no content-addressed cache entry in ${cacheDir}: ${entries.join(",")}`,
+    );
+    const leftovers = entries.filter((name) => name.startsWith("."));
+    t.assertions.assert(leftovers.length === 0, `unrenamed temp files in cache: ${leftovers.join(",")}`);
+    const warm = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_HOST_DEBUG: "1" });
+    const restarted = runGenet(genet, ["daemon", "start"], warm);
+    try {
+      t.assertions.assert(restarted.code === 0, `warm start failed: ${restarted.stderr || restarted.stdout}`);
+      const log = readFileSync(path.join(t.env.data, "logs", "cli-start.log"), "utf8");
+      t.assertions.assert(log.includes("cache hit"), `warm start recompiled: ${log}`);
+      t.assertions.assert(!log.includes("compiling"), `warm start still compiled: ${log}`);
+      const status = parseJson(runGenet(genet, ["daemon", "status"], env).stdout);
+      t.assertions.assert(status.running === true, `not running after warm start: ${JSON.stringify(status)}`);
+    } finally {
+      runGenet(genet, ["daemon", "stop"], env);
+    }
+  },
+);
+
+defineSpecialty(
+  wasmMeta(
+    "specialty.wasm.lifecycle.component-change-reloads-in-place",
+    "Replacing the component on disk reloads the daemon inside the same host process",
+    "touching the watched component file makes the daemon log 'reloading in place', start again, and keep the same pid",
+    [
+      "update requires a process restart",
+      "watcher fires on the daemon's own reads",
+      "reload comes back as a different pid",
+      "daemon never comes back after a reload",
+    ],
+    { ms: 45_000 },
+  ),
+  async (t) => {
+    const { component } = requireWasmArtifacts(t.openRoot);
+    const genet = locateGenet(t.openRoot);
+    // A private copy: the shared artifact must not be touched — sixteen other
+    // environments run daemons off it right now. The lease runs the log filter
+    // at warn; the reload lines are info, so this daemon opts into info.
+    const copy = path.join(t.env.data, "genehub_guest.wasm");
+    copyFileSync(component, copy);
+    const env = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_DEV_COMPONENT: copy, GENEHUB_DEV_LOG: "info" });
+    const started = runGenet(genet, ["daemon", "start"], env);
+    t.assertions.assert(started.code === 0, `start failed: ${started.stderr || started.stdout}`);
+    const logFile = path.join(t.env.data, "logs", "daemon.log");
+    try {
+      const before = parseJson(runGenet(genet, ["daemon", "status"], env).stdout);
+      t.assertions.assert(before.running === true, `not running: ${JSON.stringify(before)}`);
+      const pid = String(before.pid);
+      // A future mtime, not "now": coarse filesystem timestamps could otherwise
+      // equal the stamp the watcher took at start.
+      const future = new Date(Date.now() + 60_000);
+      utimesSync(copy, future, future);
+      const deadline = Date.now() + 40_000;
+      let log = "";
+      while (Date.now() < deadline) {
+        log = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
+        const starts = log.split("\n").filter((line) => line.includes("daemon_started")).length;
+        if (log.includes("reloading in place") && starts >= 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      t.assertions.assert(
+        log.includes("reloading in place"),
+        `the daemon never noticed the replaced component:\n${log.slice(-800)}`,
+      );
+      t.assertions.assert(
+        log.split("\n").filter((line) => line.includes("daemon_started")).length >= 2,
+        `the daemon did not come up again after the reload:\n${log.slice(-800)}`,
+      );
+      // The endpoint is republished at the end of the reload; status can race it.
+      let after: Record<string, unknown> = {};
+      const statusDeadline = Date.now() + 20_000;
+      while (Date.now() < statusDeadline) {
+        const probe = runGenet(genet, ["daemon", "status"], env);
+        try {
+          after = parseJson(probe.stdout);
+          if (after.running === true) break;
+        } catch {
+          after = {};
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      t.assertions.assert(after.running === true, `not serving after reload: ${JSON.stringify(after)}`);
+      t.assertions.assert(
+        String(after.pid) === pid,
+        `reload changed the pid (${pid} -> ${after.pid}); the point of reload is the same process`,
+      );
+    } finally {
+      runGenet(genet, ["daemon", "stop"], env);
+    }
+  },
+);
+
+defineSpecialty(
+  wasmMeta(
     "specialty.wasm.persistence.history-survives-host-restart",
     "Killing the host and starting it again restores the same session timeline",
-    "after restart the session is listable and its title/id match",
-    ["endpoint.json pid is stale", "guest store is only in linear memory", "restart starts a native daemon"],
-    { llm: "mock", ms: 50_000 },
+    "after restart the session is listable and both turns' rows survive on disk, not just the last batch",
+    [
+      "endpoint.json pid is stale",
+      "guest store is only in linear memory",
+      "restart starts a native daemon",
+      "wasip2 append regression: each save overwrites chat.jsonl from offset 0",
+    ],
+    { llm: "mock", ms: 60_000 },
   ),
   async (t) => {
     requireWasmArtifacts(t.openRoot);
@@ -675,12 +844,18 @@ defineSpecialty(
     let sessionId = "";
     try {
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
-      opened.mock.script({ text: "before restart" });
+      opened.mock.script({ text: "first-reply-marker" });
       sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
       const events = await t.flows.main.attachEventLog(opened.client, sessionId);
       await t.flows.main.sendPrompt(opened.client, sessionId, "Remember this turn.");
       await t.tools.waitUntil(
         () => events.some((event) => event.type === "turnCompleted" || event.type === "turnFailed"),
+        45_000,
+      );
+      opened.mock.script({ text: "second-reply-marker" });
+      await t.flows.main.sendPrompt(opened.client, sessionId, "And this one.");
+      await t.tools.waitUntil(
+        () => events.filter((event) => event.type === "turnCompleted" || event.type === "turnFailed").length >= 2,
         45_000,
       );
     } finally {
@@ -691,11 +866,18 @@ defineSpecialty(
     const again = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
       const cmd = procCmdline(Number(cliJson(t, ["daemon", "status"]).pid));
-      t.assertions.assert(cmd.includes("genehub-daemon.wasm"), `restarted as native: ${cmd}`);
-      const listed = await again.client.call({ type: "session.list", payload: { workspaceId: again.workspaceId } });
+      t.assertions.assert(cmd.includes("genehub_guest.wasm"), `restarted as native: ${cmd}`);
+      const listed = await again.client.call({ type: "session.list", payload: { workspaceId: again.workspaceId, includeArchived: false } });
       t.assertions.assert(listed?.type === "sessions", `session.list ${listed?.type}`);
       const ids = listed?.type === "sessions" ? listed.data.map((row: { id: string }) => row.id) : [];
       t.assertions.assert(ids.includes(sessionId), `session ${sessionId} missing after restart: ${ids.join(",")}`);
+      const got = await again.client.call({ type: "session.get", payload: { sessionId } });
+      t.assertions.assert(got?.type === "snapshot", `session.get ${got?.type}`);
+      const timeline = JSON.stringify(got?.type === "snapshot" ? got.data : {});
+      t.assertions.assert(
+        timeline.includes("first-reply-marker") && timeline.includes("second-reply-marker"),
+        `restart kept only the last written batch: ${timeline.slice(0, 400)}`,
+      );
     } finally {
       again.client.close();
       again.daemon.stop();

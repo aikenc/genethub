@@ -76,14 +76,7 @@ impl LogFile {
 }
 
 fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(path)?;
+    let file = crate::config::open_append(path)?;
     // Correct legacy files too: creation mode does not change an existing
     // world-readable log left by an older build or permissive umask.
     crate::config::restrict_to_owner(path).map_err(|error| {

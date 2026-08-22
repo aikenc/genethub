@@ -20,6 +20,9 @@ pub const WORKSPACE_DIR_NAME: &str = "GeneHub-dev";
 /// The one binary: CLI to agents, daemon as `genet daemon run`.
 pub const CLI_BINARY: &str = "genet-dev";
 pub const AGENT_BINARY: &str = "genet-agent-dev";
+/// The wasm shell next to the CLI: loads `genehub_guest.wasm` and runs its
+/// daemon or agent entry. The CLI refuses to start a daemon without it.
+pub const HOST_BINARY: &str = "genehub-host-dev";
 /// Where the agent keeps its sessions and `models.json`, under the home dir.
 pub const AGENT_HOME_DIR: &str = ".genet-agent-dev";
 pub const ENV_DATA_DIR: &str = "GENEHUB_DEV_DATA_DIR";
@@ -33,6 +36,12 @@ pub const ENV_AGENT_COMMAND: &str = "GENET_AGENT_DEV_COMMAND";
 /// the wasm guest under its shell. Mirrors `ENV_AGENT_COMMAND`: a binary that
 /// already knows what it is, so no argv is appended.
 pub const ENV_DAEMON_COMMAND: &str = "GENEHUB_DEV_DAEMON_COMMAND";
+/// Whoever spawns the wasm shell names the front-door CLI through this
+/// variable; the shell hands it to the guest as GENEHUB_CLI.
+pub const ENV_CLI: &str = "GENEHUB_DEV_CLI";
+/// The component file the shell loaded, handed to the guest so the daemon
+/// can watch it and ask for an in-place reload when it changes.
+pub const ENV_COMPONENT_FILE: &str = "GENEHUB_DEV_COMPONENT_FILE";
 pub const ENV_AGENT_HOME: &str = "GENET_AGENT_DEV_HOME";
 /// What the owner sees this machine called before they name it.
 pub const DEFAULT_MACHINE_NAME: &str = "GeneHub Dev machine";

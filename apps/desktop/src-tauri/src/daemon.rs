@@ -213,11 +213,38 @@ impl Daemon {
     }
 
     fn spawn(&self) -> Result<Endpoint, String> {
-        // The daemon is the CLI binary in its other shape (`genethub-cli.md`
-        // §2): same file every client runs, `daemon run` is the resident one.
-        let mut command = Command::new(&self.binary);
+        // The daemon is the wasm component under the native shell. When the
+        // pair sits beside the CLI (the install layout), spawn the shell
+        // directly: the pid we then hold is the pid that holds the listener,
+        // with no `daemon run` exec in between. A CLI without the pair still
+        // goes through `daemon run`, which either finds them or fails closed.
+        let sibling = |name: &str| {
+            self.binary
+                .parent()
+                .map(|dir| dir.join(name))
+                .filter(|path| path.is_file())
+        };
+        let host_name = if cfg!(windows) {
+            format!("{}.exe", crate::channel::HOST_BINARY)
+        } else {
+            crate::channel::HOST_BINARY.to_string()
+        };
+        let mut command = match (sibling(&host_name), sibling("genehub_guest.wasm")) {
+            (Some(host), Some(component)) => {
+                let mut command = Command::new(host);
+                command.args(["run", "--component"]).arg(component);
+                // The shell hands this to the guest as GENEHUB_CLI, the front
+                // door the agent entry is reached through.
+                command.env(crate::channel::ENV_CLI, &self.binary);
+                command
+            }
+            _ => {
+                let mut command = Command::new(&self.binary);
+                command.args(["daemon", "run"]);
+                command
+            }
+        };
         command
-            .args(["daemon", "run"])
             .env(crate::channel::ENV_DATA_DIR, &self.data_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

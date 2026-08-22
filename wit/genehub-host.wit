@@ -102,15 +102,8 @@ interface file-lock {
   open: func(path: string) -> result<handle, string>;
 }
 
-/// Bring-up shape: the guest is still a `wasi:cli/run` command and only adds the
-/// imports WASI cannot provide. Delete once the shell drives `daemon` below.
-world daemon-command {
-  import process;
-  import pty;
-  import file-lock;
-  import fs-perms;
-}
-
+/// The one v2 artifact. A single component carries both entries; the shell
+/// picks one per OS process (`genehub-host-dev run --entry daemon|agent`).
 world daemon {
   import process;
   import pty;
