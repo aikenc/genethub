@@ -7,10 +7,13 @@ description = "The single v2 wasm component: daemon `run` and agent `agent-run` 
 publish = false
 
 # A cdylib so the component exports the `daemon` world's two entries rather
-# than `wasi:cli/run`. On a native target the crate is empty: it exists only
-# to be built for wasm32-wasip2.
+    # than `wasi:cli/run`. On a native target the crate is empty: it exists only
+    # to be built for wasm32-wasip2.
 [lib]
 crate-type = ["cdylib"]
+
+[build-dependencies]
+sha2 = "0.10"
 
 [dependencies]
 genet-agent = { path = "../agent" }

@@ -38,6 +38,13 @@ pub async fn run() -> Result<Exit> {
         )
         .with_writer(Tee::new(crate::logs::LogFile::open(paths.log_file())))
         .init();
+    // A previous host that trapped or was killed has already dropped the
+    // kernel lock. Reclaim the files it left so this start is not talking
+    // to a dead port or compiling a half-written cache.
+    if let Err(error) = crate::lifecycle::reap_stale_runtime(&paths) {
+        tracing::warn!(%error, "could not reclaim leftover runtime files");
+    }
+
     tracing::info!("log: {}", paths.log_file().display());
     tracing::info!(
         event = "daemon_started",

@@ -3,6 +3,7 @@
 //! This binary is the OS entry. It must not grow Session / Agent / Hub /
 //! workspace / provider types. `CHANNEL` is compile-time `dev`: no verify.
 
+mod abi;
 mod bindings;
 mod channel;
 mod file_lock;

@@ -206,6 +206,14 @@ fn start() -> i32 {
         return ok(value);
     }
 
+    if let Err(error) = lifecycle::reap_stale_runtime(&paths) {
+        fail(
+            "internal",
+            &format!("could not reclaim leftover runtime files: {error}"),
+            EXIT_FAILED,
+        );
+    }
+
     // The daemon is the wasm guest under genehub-host-dev. stdout and stderr
     // go to a log beside the daemon's own: the listening line is how the shell
     // learns the endpoint when it spawns, but the CLI learns it from

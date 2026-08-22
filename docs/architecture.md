@@ -30,7 +30,7 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
 
 你的机器上只有一个常驻 daemon host 进程：原生 `genehub-host` 装载 `genehub_guest.wasm` 的 daemon 入口；每个内置 agent 由另一个短生命周期 host 进程装载同一制品的 agent 入口。所有客户端说同一套协议，**看不见背后是哪种 agent，也看不见走的是哪条通道**。
 
-**产品运行时只有 WASM guest。** 不存在可切换的原生 daemon/agent 模式。`genehub-host` 与薄 `genet` 只负责装载和生命周期。缺 host、缺 `genehub_guest.wasm`、或二者 WIT 对不上时启动失败，不得改跑原生业务二进制，也不得把原生路径当兼容层保留。
+**产品运行时只有 WASM guest。** 不存在可切换的原生 daemon/agent 模式。`genehub-host` 与薄 `genet` 只负责装载和生命周期。缺 host、缺 `genehub_guest.wasm`、或二者 `sha256(wit/genehub-host.wit)` 对不上时，在 instantiate 之前失败，不得改跑原生业务二进制，也不得把原生路径当兼容层保留。
 
 原生 `genet` 不再解析产品动词，也不再作为 E2EE 端点：它只做 confine、daemon 启停、`agent-serve` 和把 argv 经 loopback `POST /cli` 交给本机 daemon。业务语义与 `--machine` 拨号都在 daemon（guest）里。合同见 [cli-thin-forwarder.md](./cli-thin-forwarder.md)。
 

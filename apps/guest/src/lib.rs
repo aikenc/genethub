@@ -6,6 +6,12 @@
 
 #![cfg(target_family = "wasm")]
 
+/// Same 32 bytes the host baked from `wit/genehub-host.wit`. The shell reads
+/// this custom section before instantiate so a stale pair fails closed.
+#[used]
+#[link_section = "genehub-abi"]
+static ABI_DIGEST: [u8; 32] = *include_bytes!(concat!(env!("OUT_DIR"), "/genehub-abi.bin"));
+
 wit_bindgen::generate!({
     path: "../../wit",
     world: "daemon",

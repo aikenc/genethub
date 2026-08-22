@@ -108,15 +108,15 @@ async fn run_component_async(path: &Path, guest_args: &[String], entry: Entry) -
     match entry {
         Entry::Agent => {
             let component = load_component(&engine, path)?;
-            let (mut store, linker) = build_instance(&engine, guest_args, None)?;
-            run_agent(&engine, &mut store, &linker, &component, path).await
+            let (store, linker) = build_instance(&engine, guest_args, None)?;
+            run_agent(&engine, store, &linker, &component, path).await
         }
         Entry::Daemon => loop {
             // Bytes are re-read every round: "reload" exists so an update can
             // replace the artifact on disk and continue in this same pid.
             let component = load_component(&engine, path)?;
-            let (mut store, linker) = build_instance(&engine, guest_args, Some(path))?;
-            match run_daemon(&engine, &mut store, &linker, &component).await? {
+            let (store, linker) = build_instance(&engine, guest_args, Some(path))?;
+            match run_daemon(&engine, store, &linker, &component).await? {
                 DaemonExit::Shutdown => return Ok(0),
                 DaemonExit::Reload => debug_log("guest asked to reload; re-instantiating"),
             }
@@ -128,40 +128,48 @@ async fn run_component_async(path: &Path, guest_args: &[String], entry: Entry) -
 /// `wasi:cli/run` for a plain command component (the component-health probe).
 async fn run_daemon(
     engine: &Engine,
-    store: &mut Store<Host>,
+    mut store: Store<Host>,
     linker: &Linker<Host>,
     component: &Component,
 ) -> Result<DaemonExit> {
     if exports(engine, component).iter().any(|name| name == "run") {
-        let guest = crate::bindings::Daemon::instantiate_async(&mut *store, component, linker)
+        let guest = match crate::bindings::Daemon::instantiate_async(&mut store, component, linker)
             .await
             .anyhow()
-            .context("instantiate guest")?;
-        let action = guest
-            .call_run(store)
-            .await
-            .anyhow()
-            .context("guest run")?
-            .map_err(|error| anyhow::anyhow!("guest run failed: {error}"))?;
-        return Ok(if action == "reload" {
-            DaemonExit::Reload
-        } else {
-            DaemonExit::Shutdown
-        });
+            .context("instantiate guest")
+        {
+            Ok(guest) => guest,
+            Err(error) => return abandon_store(store, error),
+        };
+        match guest.call_run(&mut store).await {
+            Ok(Ok(action)) => {
+                return Ok(if action == "reload" {
+                    DaemonExit::Reload
+                } else {
+                    DaemonExit::Shutdown
+                });
+            }
+            Ok(Err(error)) => return abandon_store(store, anyhow::anyhow!("guest run failed: {error}")),
+            Err(error) => {
+                return abandon_store(
+                    store,
+                    anyhow::Error::from(error).context("guest run"),
+                )
+            }
+        }
     }
-    let command = Command::instantiate_async(&mut *store, component, linker)
+    let command = match Command::instantiate_async(&mut store, component, linker)
         .await
         .anyhow()
-        .context("instantiate guest")?;
-    match command
-        .wasi_cli_run()
-        .call_run(store)
-        .await
-        .anyhow()
-        .context("wasi:cli/run")?
+        .context("instantiate guest")
     {
-        Ok(()) => Ok(DaemonExit::Shutdown),
-        Err(()) => bail!("guest wasi:cli/run returned error"),
+        Ok(command) => command,
+        Err(error) => return abandon_store(store, error),
+    };
+    match command.wasi_cli_run().call_run(&mut store).await {
+        Ok(Ok(())) => Ok(DaemonExit::Shutdown),
+        Ok(Err(())) => abandon_store(store, anyhow::anyhow!("guest wasi:cli/run returned error")),
+        Err(error) => abandon_store(store, anyhow::Error::from(error).context("wasi:cli/run")),
     }
 }
 
@@ -169,7 +177,7 @@ async fn run_daemon(
 /// the v2 component is a packaging bug, not a shape to accommodate.
 async fn run_agent(
     engine: &Engine,
-    store: &mut Store<Host>,
+    mut store: Store<Host>,
     linker: &Linker<Host>,
     component: &Component,
     path: &Path,
@@ -180,17 +188,36 @@ async fn run_agent(
             path.display()
         );
     }
-    let guest = crate::bindings::Daemon::instantiate_async(&mut *store, component, linker)
+    let guest = match crate::bindings::Daemon::instantiate_async(&mut store, component, linker)
         .await
         .anyhow()
-        .context("instantiate guest")?;
-    let code = guest
-        .call_agent_run(store)
-        .await
-        .anyhow()
-        .context("guest agent-run")?
-        .map_err(|error| anyhow::anyhow!("guest agent-run failed: {error}"))?;
-    Ok(code as i32)
+        .context("instantiate guest")
+    {
+        Ok(guest) => guest,
+        Err(error) => return abandon_store(store, error),
+    };
+    match guest.call_agent_run(&mut store).await {
+        Ok(Ok(code)) => Ok(code as i32),
+        Ok(Err(error)) => abandon_store(store, anyhow::anyhow!("guest agent-run failed: {error}")),
+        Err(error) => abandon_store(
+            store,
+            anyhow::Error::from(error).context("guest agent-run"),
+        ),
+    }
+}
+
+/// A trap can leave the resource table inconsistent. Dropping that Store
+/// often traps again (`resource has children`). The process is exiting;
+/// forgetting the table lets the OS reclaim fds and child pids.
+fn abandon_store<T>(store: Store<Host>, error: anyhow::Error) -> Result<T> {
+    std::mem::forget(store);
+    let message = format!("{error:#}");
+    if message.contains("resource has children") {
+        bail!(
+            "guest dropped a host resource while child handles were still live; exiting so the supervisor can restart cleanly: {message}"
+        );
+    }
+    Err(error)
 }
 
 /// The export names a component was built with, so the shell drives the entry
@@ -327,8 +354,11 @@ fn build_instance(
 /// a recompile.
 fn load_component(engine: &Engine, path: &Path) -> Result<Component> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    crate::abi::assert_digest_if_present(&bytes)?;
+    reap_cache_temporaries();
     if CHANNEL == "dev" {
         if let Some(component) = cache_hit(engine, &bytes) {
+            require_product_digest(&bytes, engine, &component)?;
             return Ok(component);
         }
     }
@@ -336,10 +366,37 @@ fn load_component(engine: &Engine, path: &Path) -> Result<Component> {
     let component = Component::from_binary(engine, &bytes)
         .anyhow()
         .context("Component::from_binary")?;
+    require_product_digest(&bytes, engine, &component)?;
     if CHANNEL == "dev" {
         cache_store(&bytes, &component);
     }
     Ok(component)
+}
+
+/// The v2 product guest exports `agent-run`. A plain `wasi:cli/run` probe
+/// does not, and must not be forced through the ABI stamp.
+fn require_product_digest(bytes: &[u8], engine: &Engine, component: &Component) -> Result<()> {
+    if exports(engine, component)
+        .iter()
+        .any(|name| name == "agent-run")
+    {
+        crate::abi::assert_paired(bytes)?;
+    }
+    Ok(())
+}
+
+fn cache_dir() -> PathBuf {
+    std::env::var("GENEHUB_DEV_CACHE_DIR")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("GENEHUB_DEV_DATA_DIR")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(|data| PathBuf::from(data).join("wasm-cache"))
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("genehub-dev-wasm-cache"))
 }
 
 fn cache_path(bytes: &[u8]) -> PathBuf {
@@ -350,18 +407,26 @@ fn cache_path(bytes: &[u8]) -> PathBuf {
         name.push_str(&format!("{byte:02x}"));
     }
     name.push_str(".cwasm");
-    let dir = std::env::var("GENEHUB_DEV_CACHE_DIR")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("GENEHUB_DEV_DATA_DIR")
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(|data| PathBuf::from(data).join("wasm-cache"))
-        })
-        .unwrap_or_else(|| std::env::temp_dir().join("genehub-dev-wasm-cache"));
-    dir.join(name)
+    cache_dir().join(name)
+}
+
+/// Write-then-rename can leave `.{pid}-{hash}.cwasm` after a kill. Those
+/// files are never a cache hit; deleting them is the only way they go away.
+fn leftover_cache_name(name: &str) -> bool {
+    name.starts_with('.') && name.ends_with(".cwasm")
+}
+
+fn reap_cache_temporaries() {
+    let dir = cache_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if leftover_cache_name(&name.to_string_lossy()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn cache_hit(engine: &Engine, bytes: &[u8]) -> Option<Component> {

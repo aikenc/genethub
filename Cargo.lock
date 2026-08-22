@@ -1164,6 +1164,7 @@ version = "0.0.0"
 dependencies = [
  "genet-agent",
  "genet-daemon",
+ "sha2",
  "tokio",
  "wit-bindgen",
 ]
