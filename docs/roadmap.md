@@ -35,6 +35,7 @@
 |---|---|---|
 | Windows 能力 parity | host 的非 Unix `fs-perms` 固定返回 `Unsupported`，而 guest 首启必做 owner-only 收紧，当前 Windows 默认 WASM daemon 因此不能完成首启 | 实现 Windows ACL；待发布三件套在 Windows runner 与安装后主旅程通过 |
 | CI 影响分类 | Rust path filter 漏 host/guest/WIT/proto 等目录；没有 90 天 change-set 指标 | 自动分类完整/高频模式，漏标 fail closed，热路径实测 ≥95% |
+| 测试工程基线 | `testing` 的 TypeScript typecheck 有 4 个 HEAD 既有错误（一个可空值、三个未使用 import）；testctl lint/governance 通过不能替代它 | 修到 `npm --prefix testing run typecheck` 0 error，并纳入候选机械门 |
 | guest 构建 | release 各平台重复编；当前 release profile 为 fat LTO 单 codegen unit，热重编实测 71.66 秒 | guest 每 candidate 只编一次；iterate profile 的 build+upload P95 支撑 ≤60 秒端到端 |
 | 完整/高频 workflow | 只有 tag/full release，没有 guest+website workflow，当前 SHA 没有远端发布演练 | 两模式分别有 rehearsal、真实耗时、失败门与可晋升的 immutable artifact |
 | 供应链与兼容 | official/beta 未验签；无 host/world/proto 兼容清单、反回滚 | 签名 release set 每次装载验证；不兼容候选拒绝并回 known-good |
@@ -45,7 +46,7 @@
 | SLO telemetry | 不存在 | promotion→site/manifest→online active/rollback 全链记录 P50/P95；official ≤10 分钟，高频 ≤60 秒 |
 | 运行时债务 | guest readiness 仍为 4 ms timer poll；host 读写 preopen 根目录；`.cwasm` 预编译只在 dev 启用 | 真 `wasi:io/poll` reactor、可审计最小 preopen/能力边界、official/beta 验签后预编译 |
 
-顺序：先修 Windows ACL 并完成跨平台默认 WASM 首启门；再修 CI 覆盖与双 binding 生成，建立可信构建基线；继而做签名 release-set、双槽位与回滚、safe-point、website-only/desktop UI 更新和混合版本；最后以远端演练和 90 天指标关闭愿景门。速度门永远不能替代下面 MVP 与能力回归门。
+顺序：先修 Windows ACL 并完成跨平台默认 WASM 首启门；同时清掉测试工程 typecheck 基线错误，再修 CI 覆盖与双 binding 生成，建立可信构建基线；继而做签名 release-set、双槽位与回滚、safe-point、website-only/desktop UI 更新和混合版本；最后以远端演练和 90 天指标关闭愿景门。速度门永远不能替代下面 MVP 与能力回归门。
 
 ---
 
