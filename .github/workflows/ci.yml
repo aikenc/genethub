@@ -406,6 +406,9 @@ jobs:
       # Its Windows implementation must be exercised on NTFS, not merely
       # cross-compiled from Linux.
       - run: cargo test -p genehub-host --bin genehub-host-dev fs_perms::tests
+      # Supervision launches the ordinary sibling executable; `cargo test`
+      # only creates a hashed test harness and is not a substitute for it.
+      - run: cargo build -p genehub-host
       - name: Refuse to skip real daemon supervision
         shell: bash
         run: |

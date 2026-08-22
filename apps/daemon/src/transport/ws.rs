@@ -35,6 +35,10 @@ pub type Socket = WebSocketStream<Transport>;
 /// reading the HTTP status off `Error::Http`, and that has to keep working
 /// when the socket underneath came from WASI.
 #[cfg(not(target_family = "wasm"))]
+// Tungstenite's public error grew beyond Clippy's generic size threshold. It
+// stays unboxed here because this is the compatibility boundary used by both
+// native and WASI transports, and changing it would spread through callers.
+#[allow(clippy::result_large_err)]
 pub async fn connect(url: &str, config: WebSocketConfig) -> Result<Socket, Error> {
     let request = url.into_client_request()?;
     let (socket, _) =

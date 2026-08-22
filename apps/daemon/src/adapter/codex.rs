@@ -1316,7 +1316,7 @@ fn decode_base64(input: &str) -> Result<Vec<u8>> {
         return Err(anyhow!("base64 length is not a multiple of 4"));
     }
     let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);
-    for chunk in cleaned.chunks_exact(4) {
+    for chunk in cleaned.as_chunks::<4>().0 {
         let pad = chunk.iter().filter(|&&byte| byte == b'=').count();
         if pad > 2 {
             return Err(anyhow!("base64 padding is longer than two characters"));
