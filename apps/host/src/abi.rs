@@ -34,11 +34,8 @@ pub fn hex_digest(digest: &[u8; 32]) -> String {
 /// Called on the raw file, before instantiate, so a mismatched pair never
 /// reaches the linker.
 pub fn assert_paired(component: &[u8]) -> Result<()> {
-    let guest = guest_digest(component).context(pairing_message(
-        CHANNEL,
-        "missing-digest",
-        None,
-    ))?;
+    let guest =
+        guest_digest(component).context(pairing_message(CHANNEL, "missing-digest", None))?;
     assert_same(guest)
 }
 
@@ -53,11 +50,7 @@ pub fn assert_digest_if_present(component: &[u8]) -> Result<()> {
 
 fn assert_same(guest: [u8; 32]) -> Result<()> {
     if guest != host_digest() {
-        anyhow::bail!(pairing_message(
-            CHANNEL,
-            "digest-mismatch",
-            Some(guest),
-        ));
+        anyhow::bail!(pairing_message(CHANNEL, "digest-mismatch", Some(guest),));
     }
     Ok(())
 }
@@ -95,8 +88,7 @@ pub fn is_pairing_failure(error: &anyhow::Error) -> bool {
 
 /// The first `genehub-abi` custom section in a module or component.
 pub fn guest_digest(bytes: &[u8]) -> Option<[u8; 32]> {
-    find_section(bytes, SECTION)
-        .and_then(|payload| <[u8; 32]>::try_from(payload).ok())
+    find_section(bytes, SECTION).and_then(|payload| <[u8; 32]>::try_from(payload).ok())
 }
 
 /// Walk core-module and component custom sections, including nested modules.
@@ -142,8 +134,7 @@ fn read_leb128(bytes: &[u8]) -> Option<(usize, usize)> {
     let mut shift = 0;
     for (index, byte) in bytes.iter().copied().enumerate() {
         let bits = (byte & 0x7f) as usize;
-        value |= bits
-            .checked_shl(shift)?;
+        value |= bits.checked_shl(shift)?;
         if byte & 0x80 == 0 {
             return Some((value, index + 1));
         }
@@ -230,7 +221,10 @@ mod tests {
         assert_eq!(recovery_action("official"), "update");
         let official = pairing_message("official", "digest-mismatch", Some(host_digest()));
         assert!(official.contains("action=update"), "{official}");
-        assert!(official.contains("install the GeneHub update"), "{official}");
+        assert!(
+            official.contains("install the GeneHub update"),
+            "{official}"
+        );
         assert!(!official.contains("compile genehub-host"), "{official}");
     }
 

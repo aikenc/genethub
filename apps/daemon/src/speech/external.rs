@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::os_process::Command;
 use genehub_proto::{
     decode_speech_json, encode_speech_audio, encode_speech_frame, encode_speech_json,
     SpeechCancelReason, SpeechCompleted, SpeechContextUpdate, SpeechFailure, SpeechFailureCode,
@@ -10,7 +11,6 @@ use genehub_proto::{
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use crate::os_process::Command;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{SpeechConfig, SpeechRuntimeConfig};

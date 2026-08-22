@@ -95,7 +95,9 @@ mod guest {
         let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
         if tls {
             Ok(Transport::Tls(
-                TlsStream::connect(host, port, host).await.map_err(Error::Io)?,
+                TlsStream::connect(host, port, host)
+                    .await
+                    .map_err(Error::Io)?,
             ))
         } else {
             Ok(Transport::Plain(
@@ -105,7 +107,10 @@ mod guest {
     }
 
     fn invalid(message: &str) -> Error {
-        Error::Io(io::Error::new(io::ErrorKind::InvalidInput, message.to_string()))
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            message.to_string(),
+        ))
     }
 
     impl AsyncRead for Transport {

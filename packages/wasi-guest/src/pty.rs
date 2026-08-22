@@ -35,8 +35,7 @@ impl Session {
         cols: u16,
         rows: u16,
     ) -> io::Result<Session> {
-        let session =
-            host::open(argv, cwd, env, cols, rows).map_err(io::Error::other)?;
+        let session = host::open(argv, cwd, env, cols, rows).map_err(io::Error::other)?;
         let id = NEXT.with(|next| {
             let value = next.get();
             next.set(value + 1);

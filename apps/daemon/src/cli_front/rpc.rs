@@ -105,10 +105,7 @@ impl Rpc {
             Ok(rpc) => Ok(rpc),
             Err(error) => Err(fail(
                 "daemon_unreachable",
-                &format!(
-                    "{error}; run `{} daemon start`",
-                    crate::channel::CLI_BINARY
-                ),
+                &format!("{error}; run `{} daemon start`", crate::channel::CLI_BINARY),
                 EXIT_UNREACHABLE,
             )),
         }
@@ -294,9 +291,7 @@ pub struct Running {
 }
 
 enum RunningInner {
-    Local {
-        frames: mpsc::Receiver<ShellFrame>,
-    },
+    Local { frames: mpsc::Receiver<ShellFrame> },
     Remote(rpc_wire::Running),
 }
 

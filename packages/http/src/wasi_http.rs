@@ -417,9 +417,7 @@ impl RequestBuilder {
         if let Some(error) = self.error {
             return Err(error);
         }
-        let url = self
-            .url
-            .ok_or_else(|| Error::new("request has no url"))?;
+        let url = self.url.ok_or_else(|| Error::new("request has no url"))?;
         let deadline = self.timeout.or(self.settings.timeout);
 
         let mut method = self.method;
@@ -523,10 +521,7 @@ async fn send_once(
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
         {
-            fields.push((
-                "content-length".into(),
-                body.len().to_string().into_bytes(),
-            ));
+            fields.push(("content-length".into(), body.len().to_string().into_bytes()));
         }
     }
     let headers = Fields::from_list(&fields)
@@ -762,14 +757,17 @@ impl Response {
     /// Pinned on the way out: callers poll this with `StreamExt::next`, which
     /// wants `Unpin`, and `unfold`'s future is not.
     pub fn bytes_stream(self) -> impl Stream<Item = Result<Bytes, Error>> + Send + Unpin {
-        Box::pin(futures_util::stream::unfold(Some(self.body), |state| async move {
-            let mut body = state?;
-            match body.chunk().await {
-                Ok(Some(chunk)) => Some((Ok(chunk), Some(body))),
-                Ok(None) => None,
-                Err(e) => Some((Err(e), None)),
-            }
-        }))
+        Box::pin(futures_util::stream::unfold(
+            Some(self.body),
+            |state| async move {
+                let mut body = state?;
+                match body.chunk().await {
+                    Ok(Some(chunk)) => Some((Ok(chunk), Some(body))),
+                    Ok(None) => None,
+                    Err(e) => Some((Err(e), None)),
+                }
+            },
+        ))
     }
 }
 

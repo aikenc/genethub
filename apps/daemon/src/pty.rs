@@ -35,8 +35,14 @@ mod guest {
     const POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
     pub enum PtyMessage {
-        Output { pty_id: String, data: String },
-        Closed { pty_id: String, exit_code: Option<i32> },
+        Output {
+            pty_id: String,
+            data: String,
+        },
+        Closed {
+            pty_id: String,
+            exit_code: Option<i32>,
+        },
     }
 
     pub struct Terminals {
@@ -88,7 +94,6 @@ mod guest {
             sessions.insert(id.clone(), session.clone());
             drop(sessions);
 
-
             let outbound = self.outbound.clone();
             let reader_id = id.clone();
             // Weak on purpose: closing a terminal is removing it from the map,
@@ -99,7 +104,9 @@ mod guest {
             drop(session);
             tokio::spawn(async move {
                 let exit_code = loop {
-                    let Some(session) = reader.upgrade() else { return };
+                    let Some(session) = reader.upgrade() else {
+                        return;
+                    };
                     match session.read(CHUNK) {
                         Err(_) | Ok(None) => break session.exit_code(),
                         Ok(Some(chunk)) if chunk.is_empty() => {

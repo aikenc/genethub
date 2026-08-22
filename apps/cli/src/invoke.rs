@@ -106,7 +106,10 @@ async fn stream(argv: Vec<String>, stdin: Vec<u8>, cwd: String) -> Result<i32, S
         .send()
         .await
         .map_err(|error| {
-            format!("{error}; run `{} daemon start`", genet_daemon::channel::CLI_BINARY)
+            format!(
+                "{error}; run `{} daemon start`",
+                genet_daemon::channel::CLI_BINARY
+            )
         })?;
     if !response.status().is_success() {
         return Err(format!(
@@ -166,7 +169,8 @@ fn apply(record: &CliRecord, exit: &mut Option<i32>) {
 }
 
 fn admission() -> Result<(String, Endpoint), String> {
-    let paths = Paths::discover().map_err(|error| format!("locate the data directory: {error:#}"))?;
+    let paths =
+        Paths::discover().map_err(|error| format!("locate the data directory: {error:#}"))?;
     let endpoint = read_endpoint(&paths).ok_or_else(|| {
         format!(
             "the daemon is not running; run `{} daemon start`",
@@ -206,11 +210,7 @@ fn piped_stdin() -> Vec<u8> {
     }
     let mut buffer = Vec::new();
     if std::io::stdin().read_to_end(&mut buffer).is_err() {
-        fail(
-            "invalid_args",
-            "could not read standard input",
-            EXIT_FAILED,
-        );
+        fail("invalid_args", "could not read standard input", EXIT_FAILED);
     }
     if buffer.len() > MAX_STDIN_BYTES {
         fail(

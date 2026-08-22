@@ -17,13 +17,13 @@ pub mod files;
 pub(crate) mod fs_cap;
 pub(crate) mod fs_lock;
 pub mod git;
+pub mod host_pid;
 pub(crate) mod http;
 pub mod hub;
-pub(crate) mod os_process;
 pub mod isolation;
 pub mod lifecycle;
 pub mod link;
-pub mod host_pid;
+pub(crate) mod os_process;
 
 pub mod logs;
 pub mod process;

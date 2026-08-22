@@ -6,13 +6,13 @@
 
 use std::time::Duration;
 
+use crate::config::Paths;
+use crate::dataplane::client::ClientEndpoint;
 use futures_util::{SinkExt, StreamExt};
 use genehub_proto::{
     Confinement, HelloResult, HubTicket, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply,
     Request, SequencedEvent, ServerFrame, ShellFrame, ShellRunRequest,
 };
-use crate::config::Paths;
-use crate::dataplane::client::ClientEndpoint;
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
@@ -125,11 +125,7 @@ impl Rpc {
             auth: PeerAuth::Loopback {
                 context: context.into(),
                 nonce: nonce.clone(),
-                proof: crate::channel_auth::client_proof(
-                    &admission.server_proof,
-                    context,
-                    &nonce,
-                ),
+                proof: crate::channel_auth::client_proof(&admission.server_proof, context, &nonce),
             },
             rtc_supported: false,
         };
@@ -177,8 +173,7 @@ impl Rpc {
         );
 
         let (mut sink, mut stream) = socket.split();
-        let (inbound, mut outbound, carrier) =
-            crate::dataplane::endpoint::carrier_channels();
+        let (inbound, mut outbound, carrier) = crate::dataplane::endpoint::carrier_channels();
         let writer = tokio::spawn(async move {
             while let Some(record) = outbound.recv().await {
                 if sink.send(Message::Binary(record)).await.is_err() {
@@ -261,11 +256,7 @@ impl Rpc {
         let auth = PeerAuth::Hosted {
             capability_id: ticket.channel_capability.clone(),
             nonce: nonce.clone(),
-            proof: crate::channel_auth::client_proof(
-                &ticket.channel_secret,
-                &context,
-                &nonce,
-            ),
+            proof: crate::channel_auth::client_proof(&ticket.channel_secret, &context, &nonce),
         };
         let rpc = Self::over_fabric(
             &ticket.url,
@@ -582,19 +573,14 @@ async fn link_up(
     // The proof is what makes the relay uninteresting: whoever is holding the
     // other end of this route either knows the secret or does not, and
     // occupying the slot in front of the machine proves nothing.
-    let expected = crate::channel_auth::server_proof(
-        secret,
-        context,
-        nonce,
-        &link.welcome.server_nonce,
-    );
+    let expected =
+        crate::channel_auth::server_proof(secret, context, nonce, &link.welcome.server_nonce);
     crate::channel_auth::verify_proof(&expected, &link.welcome.proof).map_err(|_| {
         ConnectError::Protocol(
             "whoever answered at that address could not prove the expected secret".into(),
         )
     })?;
-    let key =
-        crate::channel_auth::derive_key(secret, context, nonce, &link.welcome.server_nonce);
+    let key = crate::channel_auth::derive_key(secret, context, nonce, &link.welcome.server_nonce);
     let crate::transport::fabric::FabricLink { carrier, pump, .. } = link;
     let (data, endpoint_task) = ClientEndpoint::start(key, carrier);
     let monitor = tokio::spawn(async move {

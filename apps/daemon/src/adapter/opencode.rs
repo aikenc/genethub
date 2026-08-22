@@ -11,6 +11,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::os_process::{Child, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -19,7 +20,6 @@ use genehub_proto::{
     SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
-use crate::os_process::{Child, Command};
 use tokio::sync::{broadcast, Mutex};
 
 use super::{

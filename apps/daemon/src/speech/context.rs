@@ -251,7 +251,7 @@ async fn discover_project_context(
                 continue;
             }
             walked += 1;
-            if walked % WALK_STEP_ENTRIES == 0 {
+            if walked.is_multiple_of(WALK_STEP_ENTRIES) {
                 crate::blocking::breathe().await;
             }
             if let Some(name) = entry.path().file_stem().and_then(|name| name.to_str()) {

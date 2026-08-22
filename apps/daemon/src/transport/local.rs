@@ -717,13 +717,7 @@ pub fn websocket_admission(
 
 /// Mints a one-use loopback URL for `POST /cli`. The reusable bearer stays in
 /// endpoint.json; only this short-lived proof crosses the socket.
-pub fn cli_url(
-    port: u16,
-    token: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-) -> String {
+pub fn cli_url(port: u16, token: &str, pid: u32, machine_id: &str, fingerprint: &str) -> String {
     let challenge = crate::devices::random_token();
     let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
     let proof = cli_proof(token, &challenge, pid, machine_id, fingerprint, expires_at);

@@ -79,12 +79,9 @@ mod tests {
             ),
             Some(bat)
         );
-        assert!(look_in_dir(
-            &dir,
-            "genet-locate-probe",
-            &[".exe".into(), ".cmd".into()],
-        )
-        .is_none());
+        assert!(
+            look_in_dir(&dir, "genet-locate-probe", &[".exe".into(), ".cmd".into()],).is_none()
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

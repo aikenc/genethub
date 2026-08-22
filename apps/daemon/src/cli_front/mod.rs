@@ -12,6 +12,10 @@ mod place;
 mod process;
 mod query;
 mod rpc;
+// The local CLI now calls the router in-process. Keep the loopback dialer in
+// the shared wire client for native compatibility without treating that
+// intentionally dormant entry point as a release-blocking lint.
+#[allow(dead_code)]
 mod rpc_wire;
 mod shell;
 mod speech;
@@ -111,9 +115,7 @@ pub(crate) fn caller_cwd() -> PathBuf {
 }
 
 pub(crate) fn caller_stdin() -> Vec<u8> {
-    CALLER_STDIN
-        .try_with(Clone::clone)
-        .unwrap_or_default()
+    CALLER_STDIN.try_with(Clone::clone).unwrap_or_default()
 }
 
 pub fn emit_stdout(line: impl AsRef<str>) {

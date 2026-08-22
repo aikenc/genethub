@@ -618,7 +618,11 @@ mod tests {
         );
         std::fs::write(dir.path().join("page.html"), "<script>ok()</script>").unwrap();
         assert_eq!(
-            preview(dir.path(), "page.html").await.unwrap().metadata.kind,
+            preview(dir.path(), "page.html")
+                .await
+                .unwrap()
+                .metadata
+                .kind,
             AssetPreviewKind::Html
         );
         std::fs::write(dir.path().join("fake.png"), b"not a png").unwrap();

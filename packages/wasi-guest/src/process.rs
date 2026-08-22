@@ -369,8 +369,8 @@ impl AsyncWrite for ChildStdin {
         if me.delay.waiting(cx) {
             return Poll::Pending;
         }
-        let written = with_child(me.handle.0, |child| child.write_stdin(buf))?
-            .map_err(io::Error::other)?;
+        let written =
+            with_child(me.handle.0, |child| child.write_stdin(buf))?.map_err(io::Error::other)?;
         if written == 0 && !buf.is_empty() {
             return me.delay.idle(cx);
         }

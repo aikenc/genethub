@@ -76,6 +76,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::os_process::{Child, ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
@@ -86,7 +87,6 @@ use genehub_proto::{
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use crate::os_process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;

@@ -590,7 +590,11 @@ impl WorkspaceHomes {
             }
             Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
         }
-        let stamp = format!("{} (pid {})\n", crate::channel::PRODUCT, crate::host_pid::current());
+        let stamp = format!(
+            "{} (pid {})\n",
+            crate::channel::PRODUCT,
+            crate::host_pid::current()
+        );
         let _ = fs::write(session_dir.join(WRITER_NAME), stamp);
         home.writers.insert(session_id.to_string(), file);
         Ok(())
