@@ -85,7 +85,8 @@ genet daemon stop     # 停止后台 daemon
 ```
 
 安装脚本会安装薄 CLI `genet`、原生装载壳 `genehub-host` 和同时承载 daemon/agent 两个入口的
-`genehub_guest.wasm`，并在下载后强制校验 `SHA256SUMS`。**当前**升级仍需从
+`genehub_guest.wasm`，并在下载后强制校验 `SHA256SUMS`。业务只跑在这份 WASM 里：没有原生
+daemon/agent 模式，缺件或不匹配直接失败，不会回退。**当前**升级仍需从
 [GitHub Releases](https://github.com/aikenc/genethub/releases/latest) 下载新版本并核对摘要；独立签名根、
 组件自动更新与回滚落地前，不会把摘要校验描述成安全的无感更新。
 

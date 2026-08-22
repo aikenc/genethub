@@ -2,6 +2,7 @@
 
 > 合同：`genet` 原生二进制不再解析业务动词，也不再作为 E2EE 端点。
 > 它只做本机生命周期与把 argv 交给本机 daemon。业务语义在 daemon（guest）里。
+> 产品没有原生业务模式：daemon/agent 只装载 `genehub_guest.wasm`，缺件或不匹配即失败，禁止回退。
 >
 > 状态（2026-08-22）：实现与默认 WASM journey 已落地；它消除了高频模式的 CLI 业务漏网点，但**没有**自动生成 guest+官网制品、发布、验签或更新。交付愿景与剩余门见 [architecture.md](./architecture.md) B5 和 [roadmap.md](./roadmap.md)“WASM 持续交付”。
 

@@ -24,7 +24,7 @@
 
 ### 已达成的 Linux/dev 运行时底座
 
-- `genehub_guest.wasm` 同时提供 daemon/agent 两个入口，默认启动缺件即失败，不退回原生业务 daemon。
+- `genehub_guest.wasm` 同时提供 daemon/agent 两个入口。这是**唯一**业务运行时：缺 host/guest 或 WIT 不匹配即失败。产品不保留原生 daemon/agent 模式，也不允许任何回退。
 - 原生 `genet` 是 `/cli` 薄转发器；会话、工作区、agent adapter、CLI 动词、Fabric 与 RTC policy 都在 guest。
 - host 只提供 Wasmtime/WASI 与 typed OS/连接资源；RTC 的 ICE/DTLS/SCTP 连接机制在 host，admission、名额、超时与 Fabric 回落在 guest。
 - dev-2 Linux 本地 change gate 331/331 qualified，重建工件后的 WASM specialty 35/35 qualified；同 PID 重实例化已有测试。这不是 Windows 安装后首启证据。

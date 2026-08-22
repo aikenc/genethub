@@ -14,6 +14,7 @@
 | **内核不认识具体 agent** | 具体知识全部关在 adapter 里，见 [architecture.md](./architecture.md) §2 |
 | **无状态优先** | 除会话记录外不缓存；重启后靠磁盘恢复，不靠内存 |
 | **单服务实例** | daemon 是一个 host + guest 实例，不拆微服务、不引数据库服务；agent/外部工具仍按需独立进程，SQLite 或 JSONL 落盘 |
+| **只有 WASM 业务运行时** | 产品全面切换到 `genehub_guest.wasm`。没有原生 daemon/agent 模式，缺件或不匹配即失败，禁止任何回退 |
 
 体积门以真实 installer/tarball 为准：下载 ≤80MB。2026-08-22 本槽位分项是 launcher 2.35MB、host 11.17MB、guest 6.83MB；不能再用旧“单 daemon 二进制”口径验收。
 
