@@ -636,10 +636,10 @@ function startDaemon(
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const timer = setTimeout(
-      () => reject(new Error("the daemon never reported a port")),
-      15_000,
-    );
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("the daemon never reported a port"));
+    }, 60_000);
     child.stderr?.on("data", (chunk) =>
       process.stderr.write(`[daemon] ${chunk}`),
     );
