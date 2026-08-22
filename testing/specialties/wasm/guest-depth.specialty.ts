@@ -712,13 +712,13 @@ defineSpecialty(
 
 defineSpecialty(
   wasmMeta(
-    "specialty.wasm.lifecycle.precompiled-cache-warms-restart",
-    "The dev channel caches the compiled component and a restart deserializes instead of recompiling",
-    "after stop, <data>/wasm-cache holds a sha256-named .cwasm; the next start logs 'cache hit' and serves /health",
+    "specialty.wasm.lifecycle.compiled-guest-stays-in-memory",
+    "The host compiles the guest in memory and never writes a .cwasm beside the data dir",
+    "after start, <data>/wasm-cache does not exist or holds no .cwasm; a restart still serves /health",
     [
-      "every start pays a full Cranelift compile",
-      "cache key ignores the component bytes",
-      "cache write is not atomic and a partial file is trusted",
+      "a compiled image is written next to user data",
+      "a built-in agent deserializes a cache file",
+      "a restart cannot come back without a disk cache",
     ],
     { ms: 40_000 },
   ),
@@ -732,20 +732,14 @@ defineSpecialty(
     const cacheDir = path.join(t.env.data, "wasm-cache");
     const entries = existsSync(cacheDir) ? readdirSync(cacheDir) : [];
     t.assertions.assert(
-      entries.some((name) => /^[0-9a-f]{64}\.cwasm$/.test(name) && statSync(path.join(cacheDir, name)).size > 0),
-      `no content-addressed cache entry in ${cacheDir}: ${entries.join(",")}`,
+      !entries.some((name) => name.endsWith(".cwasm")),
+      `compiled guest leaked onto disk in ${cacheDir}: ${entries.join(",")}`,
     );
-    const leftovers = entries.filter((name) => name.startsWith("."));
-    t.assertions.assert(leftovers.length === 0, `unrenamed temp files in cache: ${leftovers.join(",")}`);
-    const warm = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_HOST_DEBUG: "1" });
-    const restarted = runGenet(genet, ["daemon", "start"], warm);
+    const restarted = runGenet(genet, ["daemon", "start"], env);
     try {
-      t.assertions.assert(restarted.code === 0, `warm start failed: ${restarted.stderr || restarted.stdout}`);
-      const log = readFileSync(path.join(t.env.data, "logs", "cli-start.log"), "utf8");
-      t.assertions.assert(log.includes("cache hit"), `warm start recompiled: ${log}`);
-      t.assertions.assert(!log.includes("compiling"), `warm start still compiled: ${log}`);
+      t.assertions.assert(restarted.code === 0, `restart failed: ${restarted.stderr || restarted.stdout}`);
       const status = parseJson(runGenet(genet, ["daemon", "status"], env).stdout);
-      t.assertions.assert(status.running === true, `not running after warm start: ${JSON.stringify(status)}`);
+      t.assertions.assert(status.running === true, `not running after restart: ${JSON.stringify(status)}`);
     } finally {
       runGenet(genet, ["daemon", "stop"], env);
     }

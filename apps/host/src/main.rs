@@ -53,7 +53,11 @@ fn run_and_exit(component: &std::path::Path, guest_args: &[String], entry: load:
         Ok(code) => code,
         Err(error) => {
             eprintln!("{error:#}");
-            4
+            if crate::abi::is_pairing_failure(&error) {
+                crate::abi::EXIT_PAIRING
+            } else {
+                4
+            }
         }
     };
     // Leave the moment the guest is done. Everything it held — the

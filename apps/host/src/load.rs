@@ -26,11 +26,6 @@ impl<T> Anyhow<T> for std::result::Result<T, wasmtime::Error> {
     }
 }
 
-/// Compile-time channel, stamped by `scripts/channel.mjs`. Official/beta
-/// verification is a later crate path. A runtime skip flag must never appear
-/// here — it would leak into release.
-use crate::channel::CHANNEL;
-
 pub struct Host {
     pub table: ResourceTable,
     pub wasi: WasiCtx,
@@ -82,7 +77,12 @@ enum DaemonExit {
     Reload,
 }
 
-/// Read bytes, compile (or reuse the dev cache), instantiate, run the entry.
+/// Read bytes, compile in this process, instantiate, run the entry.
+///
+/// Never write a `.cwasm` beside the data dir: a file the guest (or anything
+/// that can write the data dir) can replace is an exec path. The compiled
+/// image lives in this process only. A built-in agent is another host process
+/// and compiles from the same bytes; it does not deserialize a cache file.
 ///
 /// Dev does not verify. Never `from_file`: that re-opens a path after the
 /// buffer was inspected and is the TOCTOU the contract forbids.
@@ -100,10 +100,8 @@ async fn run_component_async(path: &Path, guest_args: &[String], entry: Entry) -
     // Cranelift stays at its default opt level: on a release-profile guest,
     // dropping to `None` saves ~0.04s of compile and costs guest code quality.
     // Wasmtime's own compile cache stays off (§5.1.6): a cache the runtime
-    // trusts implicitly is an exec path. The dev channel instead keeps its
-    // own content-addressed store below — keyed by the sha256 of the exact
-    // bytes it was asked to run, so a poisoned entry fails deserialization
-    // and costs one recompile, never a wrong guest.
+    // trusts implicitly is an exec path. We do not add a file-backed dev
+    // store either — the compiled image stays in this process.
     let engine = Engine::new(&config)?;
     match entry {
         Entry::Agent => {
@@ -348,28 +346,15 @@ fn build_instance(
     Ok((store, linker))
 }
 
-/// Compile, with the dev channel's content-addressed precompiled store in
-/// front. The file name is the sha256 of the exact bytes requested, so a
-/// replaced artifact is a different key and a forged file can only ever cost
-/// a recompile.
+/// Compile in memory from the bytes we just read. No file cache.
 fn load_component(engine: &Engine, path: &Path) -> Result<Component> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     crate::abi::assert_digest_if_present(&bytes)?;
-    reap_cache_temporaries();
-    if CHANNEL == "dev" {
-        if let Some(component) = cache_hit(engine, &bytes) {
-            require_product_digest(&bytes, engine, &component)?;
-            return Ok(component);
-        }
-    }
     debug_log(&format!("compiling {}-byte component", bytes.len()));
     let component = Component::from_binary(engine, &bytes)
         .anyhow()
         .context("Component::from_binary")?;
     require_product_digest(&bytes, engine, &component)?;
-    if CHANNEL == "dev" {
-        cache_store(&bytes, &component);
-    }
     Ok(component)
 }
 
@@ -383,96 +368,6 @@ fn require_product_digest(bytes: &[u8], engine: &Engine, component: &Component) 
         crate::abi::assert_paired(bytes)?;
     }
     Ok(())
-}
-
-fn cache_dir() -> PathBuf {
-    std::env::var("GENEHUB_DEV_CACHE_DIR")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("GENEHUB_DEV_DATA_DIR")
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(|data| PathBuf::from(data).join("wasm-cache"))
-        })
-        .unwrap_or_else(|| std::env::temp_dir().join("genehub-dev-wasm-cache"))
-}
-
-fn cache_path(bytes: &[u8]) -> PathBuf {
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(bytes);
-    let mut name = String::with_capacity(70);
-    for byte in digest {
-        name.push_str(&format!("{byte:02x}"));
-    }
-    name.push_str(".cwasm");
-    cache_dir().join(name)
-}
-
-/// Write-then-rename can leave `.{pid}-{hash}.cwasm` after a kill. Those
-/// files are never a cache hit; deleting them is the only way they go away.
-fn leftover_cache_name(name: &str) -> bool {
-    name.starts_with('.') && name.ends_with(".cwasm")
-}
-
-fn reap_cache_temporaries() {
-    let dir = cache_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if leftover_cache_name(&name.to_string_lossy()) {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-fn cache_hit(engine: &Engine, bytes: &[u8]) -> Option<Component> {
-    let path = cache_path(bytes);
-    let cached = std::fs::read(&path).ok()?;
-    // SAFETY: the file is named by the sha256 of the exact wasm bytes this
-    // process was asked to run and lives in a directory only this user can
-    // write. A corrupt or stale file fails deserialization; it cannot make us
-    // run anything but those bytes' own compilation.
-    match unsafe { Component::deserialize(engine, &cached) } {
-        Ok(component) => {
-            debug_log("precompiled cache hit");
-            Some(component)
-        }
-        Err(error) => {
-            debug_log(&format!(
-                "discarding unusable cache {}: {error}",
-                path.display()
-            ));
-            let _ = std::fs::remove_file(&path);
-            None
-        }
-    }
-}
-
-fn cache_store(bytes: &[u8], component: &Component) {
-    let path = cache_path(bytes);
-    let Some(dir) = path.parent() else { return };
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-    }
-    let Ok(serialized) = component.serialize() else {
-        return;
-    };
-    // Write-then-rename: a host killed mid-write leaves a tmp file, never a
-    // half cache entry under the final name.
-    let tmp = dir.join(format!(".{}-{}", std::process::id(), path.file_name().unwrap_or_default().to_string_lossy()));
-    if std::fs::write(&tmp, serialized).is_err() {
-        return;
-    }
-    let _ = std::fs::rename(&tmp, &path);
 }
 
 /// Progress is silent by default: this process' stderr belongs to the guest's

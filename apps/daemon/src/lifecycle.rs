@@ -32,9 +32,10 @@ pub fn lock_contended(error: &std::io::Error) -> bool {
             && error.raw_os_error() == crate::fs_lock::lock_contended_error().raw_os_error())
 }
 
-/// After a crash the kernel has released the lock, but `endpoint.json` and
-/// half-written wasm-cache files can still send the next start at a dead
-/// port or a poison compile. Only reclaim when nobody holds the lock.
+/// After a crash the kernel has released the lock, but `endpoint.json` can
+/// still send the next start at a dead port. Older dest builds also left a
+/// `wasm-cache` of compiled images; those files are an exec path and must
+/// not stay. Only reclaim when nobody holds the lock.
 pub fn reap_stale_runtime(paths: &Paths) -> std::io::Result<()> {
     if instance_locked(paths)? {
         return Ok(());
@@ -43,24 +44,8 @@ pub fn reap_stale_runtime(paths: &Paths) -> std::io::Result<()> {
     if endpoint.exists() {
         let _ = fs::remove_file(&endpoint);
     }
-    reap_wasm_cache_temporaries(&paths.root.join("wasm-cache"));
+    let _ = fs::remove_dir_all(paths.root.join("wasm-cache"));
     Ok(())
-}
-
-/// Host write-then-rename leaves `.{pid}-{hash}.cwasm` after a kill.
-pub fn leftover_wasm_cache_name(name: &str) -> bool {
-    name.starts_with('.') && name.ends_with(".cwasm")
-}
-
-fn reap_wasm_cache_temporaries(dir: &std::path::Path) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if leftover_wasm_cache_name(&entry.file_name().to_string_lossy()) {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
 }
 
 /// Whether another process currently holds the daemon's kernel lock.
@@ -152,30 +137,19 @@ mod tests {
     use crate::config::Paths;
 
     #[test]
-    fn leftover_cache_names_are_the_write_rename_temporaries() {
-        assert!(leftover_wasm_cache_name(".1234-abc.cwasm"));
-        assert!(!leftover_wasm_cache_name("abc.cwasm"));
-        assert!(!leftover_wasm_cache_name(".tmp"));
-    }
-
-    #[test]
-    fn a_dead_lock_loses_its_endpoint_and_cache_temporaries() {
+    fn a_dead_lock_loses_its_endpoint_and_legacy_wasm_cache() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path());
         paths.ensure().unwrap();
         std::fs::write(paths.endpoint_file(), "{\"port\":1}").unwrap();
         let cache = dir.path().join("wasm-cache");
         std::fs::create_dir_all(&cache).unwrap();
-        let leftover = cache.join(".9-dead.cwasm");
-        let keep = cache.join("abc.cwasm");
-        std::fs::write(&leftover, b"tmp").unwrap();
-        std::fs::write(&keep, b"ok").unwrap();
+        std::fs::write(cache.join("abc.cwasm"), b"old").unwrap();
 
         reap_stale_runtime(&paths).unwrap();
 
         assert!(!paths.endpoint_file().exists());
-        assert!(!leftover.exists());
-        assert!(keep.exists());
+        assert!(!cache.exists());
     }
 
     #[test]

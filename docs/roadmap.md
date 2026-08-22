@@ -44,7 +44,7 @@
 | Web/desktop | Cloud 只有完整人工 deploy；desktop WebView 固化在 installer | website-only 原子部署；desktop 有签名热 Web bundle 或不计入 95% 分子 |
 | 混合版本 | Web/daemon 严格要求 data-plane v3 相等 | 至少一个明确兼容窗口和可证明的 guest/Web 切换顺序 |
 | SLO telemetry | 不存在 | promotion→site/manifest→online active/rollback 全链记录 P50/P95；official ≤10 分钟，高频 ≤60 秒 |
-| 运行时债务 | guest readiness 仍为 4 ms timer poll；host 读写 preopen 根目录；`.cwasm` 预编译只在 dev 启用 | 真 `wasi:io/poll` reactor、可审计最小 preopen/能力边界、official/beta 验签后预编译 |
+| 运行时债务 | guest readiness 仍为 4 ms timer poll；host 读写 preopen 根目录 | 真 `wasi:io/poll` reactor、可审计最小 preopen/能力边界 |
 
 顺序：先修 Windows ACL 并完成跨平台默认 WASM 首启门；同时清掉测试工程 typecheck 基线错误，再修 CI 覆盖与双 binding 生成，建立可信构建基线；继而做签名 release-set、双槽位与回滚、safe-point、website-only/desktop UI 更新和混合版本；最后以远端演练和 90 天指标关闭愿景门。速度门永远不能替代下面 MVP 与能力回归门。
 

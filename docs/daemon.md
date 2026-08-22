@@ -16,7 +16,8 @@
 | **单服务实例** | daemon 是一个 host + guest 实例，不拆微服务、不引数据库服务；agent/外部工具仍按需独立进程，SQLite 或 JSONL 落盘 |
 | **只有 WASM 业务运行时** | 产品全面切换到 `genehub_guest.wasm`。没有原生 daemon/agent 模式，缺件或不匹配即失败，禁止任何回退 |
 | **启动 ABI 配对** | host 与 guest 都嵌入 `sha256(wit/genehub-host.wit)`；装载、instantiate 之前比对，不一致则拒绝启动并要求成对重建 |
-| **崩溃可自动回收** | 无锁时清掉残留 `endpoint.json` 与半写 wasm-cache；guest trap 不二次拖死 Store，进程退出后由 supervisor 只重启 daemon |
+| **崩溃可自动回收** | 无锁时清掉残留 `endpoint.json`，并删除旧版遗留的整个 `wasm-cache`；guest trap 不二次拖死 Store，进程退出后由 supervisor 只重启 daemon |
+| **编译只在内存** | host 用 `from_binary` 在本进程编译 guest；不写 `.cwasm`。内置 agent 是另一个 host 进程，同样从 wasm 字节编译，不读磁盘预编译像 |
 
 体积门以真实 installer/tarball 为准：下载 ≤80MB。2026-08-22 本槽位分项是 launcher 2.35MB、host 11.17MB、guest 6.83MB；不能再用旧“单 daemon 二进制”口径验收。
 

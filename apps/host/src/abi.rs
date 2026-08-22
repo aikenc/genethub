@@ -6,10 +6,15 @@
 //! start failure with a rebuild instruction, not an opaque linker trap after
 //! a long compile.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+
+use crate::channel::CHANNEL;
 
 const SECTION: &str = "genehub-abi";
 const HOST_DIGEST: [u8; 32] = *include_bytes!(concat!(env!("OUT_DIR"), "/genehub-abi.bin"));
+
+/// Host process exit when the guest is not the pair this binary was built for.
+pub const EXIT_PAIRING: i32 = 5;
 
 /// The WIT digest this host binary was compiled against.
 pub fn host_digest() -> [u8; 32] {
@@ -29,9 +34,11 @@ pub fn hex_digest(digest: &[u8; 32]) -> String {
 /// Called on the raw file, before instantiate, so a mismatched pair never
 /// reaches the linker.
 pub fn assert_paired(component: &[u8]) -> Result<()> {
-    let guest = guest_digest(component).context(
-        "genehub_guest.wasm has no genehub-abi digest; rebuild genehub-guest against wit/genehub-host.wit",
-    )?;
+    let guest = guest_digest(component).context(pairing_message(
+        CHANNEL,
+        "missing-digest",
+        None,
+    ))?;
     assert_same(guest)
 }
 
@@ -46,13 +53,44 @@ pub fn assert_digest_if_present(component: &[u8]) -> Result<()> {
 
 fn assert_same(guest: [u8; 32]) -> Result<()> {
     if guest != host_digest() {
-        bail!(
-            "host/guest ABI mismatch: host={} guest={}; rebuild both against the same wit/genehub-host.wit",
-            hex_digest(&host_digest()),
-            hex_digest(&guest)
-        );
+        anyhow::bail!(pairing_message(
+            CHANNEL,
+            "digest-mismatch",
+            Some(guest),
+        ));
     }
     Ok(())
+}
+
+/// What a supervisor or a person should do after `ABI_PAIRING_FAILED`.
+pub fn recovery_action(channel: &str) -> &'static str {
+    if channel == "dev" {
+        "rebuild"
+    } else {
+        "update"
+    }
+}
+
+pub fn pairing_message(channel: &str, reason: &str, guest: Option<[u8; 32]>) -> String {
+    let action = recovery_action(channel);
+    let host = hex_digest(&host_digest());
+    let guest = guest
+        .map(|digest| hex_digest(&digest))
+        .unwrap_or_else(|| "none".to_string());
+    let how = if action == "rebuild" {
+        "compile genehub-host and genehub-guest from this checkout against wit/genehub-host.wit, then restart"
+    } else {
+        "install the GeneHub update that ships this host and guest together; do not mix artifacts from different builds"
+    };
+    format!(
+        "ABI_PAIRING_FAILED channel={channel} action={action} reason={reason} host={host} guest={guest} {how}"
+    )
+}
+
+pub fn is_pairing_failure(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("ABI_PAIRING_FAILED"))
 }
 
 /// The first `genehub-abi` custom section in a module or component.
@@ -166,7 +204,10 @@ mod tests {
         let empty = b"\0asm\x01\x00\x00\x00";
         assert!(guest_digest(empty).is_none());
         let error = assert_paired(empty).unwrap_err().to_string();
-        assert!(error.contains("no genehub-abi digest"), "{error}");
+        assert!(error.contains("ABI_PAIRING_FAILED"), "{error}");
+        assert!(error.contains("action=rebuild"), "{error}");
+        assert!(error.contains("reason=missing-digest"), "{error}");
+        assert!(is_pairing_failure(&anyhow::anyhow!("{error}")));
     }
 
     #[test]
@@ -175,9 +216,22 @@ mod tests {
         other[0] ^= 0xff;
         let guest = module_with_section(SECTION, &other);
         let error = assert_paired(&guest).unwrap_err().to_string();
-        assert!(error.contains("ABI mismatch"), "{error}");
+        assert!(error.contains("ABI_PAIRING_FAILED"), "{error}");
+        assert!(error.contains("action=rebuild"), "{error}");
+        assert!(error.contains("reason=digest-mismatch"), "{error}");
         assert!(error.contains(&hex_digest(&host_digest())), "{error}");
         assert!(error.contains(&hex_digest(&other)), "{error}");
+    }
+
+    #[test]
+    fn official_and_beta_ask_for_an_update() {
+        assert_eq!(recovery_action("dev"), "rebuild");
+        assert_eq!(recovery_action("beta"), "update");
+        assert_eq!(recovery_action("official"), "update");
+        let official = pairing_message("official", "digest-mismatch", Some(host_digest()));
+        assert!(official.contains("action=update"), "{official}");
+        assert!(official.contains("install the GeneHub update"), "{official}");
+        assert!(!official.contains("compile genehub-host"), "{official}");
     }
 
     #[test]
