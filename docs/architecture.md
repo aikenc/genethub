@@ -1,6 +1,9 @@
 # GeneHub 架构
 
-> 本文是**本仓最上层的事实来源**。其他文档展开各自领域，冲突时以本文为准。
+> 本文是**技术层最上层的事实来源**。其他领域文档展开各自范围，技术取舍冲突时以本文为准。
+> 产品意图（为谁做、怎么验收、商业形态）由运营侧维护，不在本仓；本仓需要的那部分已经收敛成
+> [engineering-guidance.md](./engineering-guidance.md) §0 的四条边界判据。
+> 本文 §2 的 B1–B5 是该文与 [engineering-laws.md](./engineering-laws.md) 引用的技术边界来源。
 
 GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设备安全访问它的开源软件。本仓包含四个可独立部署的部件与它们之间的协议。
 
@@ -69,7 +72,7 @@ WASM 重构的交付北星是：**不牺牲产品能力、可靠性和安全性�
 | 完整模式 | 每平台 host/launcher + 只编一次的 guest + 官网；用于原生/WIT 边界变化 | official 发布并让在线客户端安全收敛 ≤10 分钟 |
 | 高频模式 | 签名 `genehub_guest.wasm` + 向后兼容的 proto + 官网；不编 host | beta/alpha/dev 发布并让在线客户端收敛 ≤60 秒，工程目标 ≤30 秒 |
 
-速度不能跳过测试或签名。客户端必须后台发现、下载、验签、预热、在 safe point 切换、健康确认并在失败时自动回 known-good；活动 turn、PTY 与子进程不得静默丢失。Web/guest 必须声明兼容窗口和同一 release set，严格版本不相容时自动升级为完整/原子模式。
+速度不能跳过测试或签名。客户端必须后台发现、下载、验签、预热、健康确认并在失败时自动回 known-good。切换时打断进行中的一轮是可接受的，只要用户看得见发生了什么且状态可恢复——不为 turn/PTY 的无缝续接设计额外机制，按最低成本处理。Web/guest 必须声明兼容窗口和同一 release set，严格版本不相容时自动升级为完整/原子模式。
 
 当前状态是：默认 daemon/agent WASM、薄 CLI、Fabric/RTC 与 Linux 能力回归门已经完成；Windows host 的 owner-only ACL 尚未实现并阻断默认 WASM 首启。双模式 CI、组件签名与自动回滚、官网-only 部署、desktop UI 热更新、混合版本窗口和 SLO telemetry 同样尚未完成。详细状态见 [roadmap.md](./roadmap.md) 的“WASM 持续交付”。
 

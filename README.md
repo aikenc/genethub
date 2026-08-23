@@ -33,17 +33,29 @@ GeneHub Agent 随安装包提供，配置 Anthropic 或 OpenAI-compatible 模型
 
 ## 愿景与理念
 
-我们希望 coding agent 像 Git 和 SSH 一样，成为开发者**可以拥有、可以替换、可以自建**的基础设施，
-而不是被锁在某个终端、编辑器或云平台里的一次性对话。
+> **把你所有的机器变成一台，把你所有的 Agent 变成一个能对话的人——算力和作品都留在你自己手里。**
 
-GeneHub 的设计遵循六条原则：
+我们相信两件事：模型每隔几个月强一次，而人打字的速度从未变过，**人机之间的带宽会取代模型能力成为
+主要瓶颈**；同时，未发布的作品、商业软件许可、本地模型与外设、已经买下的硬件都长在端侧，
+**端侧生产力生态不会被 cloud-only 取代**。
 
-1. **机器是事实来源。** 工作区、密钥、进程和会话记录由你的机器持有；远端设备只是经过授权的操作界面。
-2. **Agent 是插件。** daemon 和前端只认统一协议，不把任何一家 agent 的私有事件格式变成产品协议。
-3. **会话应当跟着人，而不是跟着窗口。** 关掉页面、网络切换或换一台设备，都不该终止正在机器上执行的任务。
-4. **官方托管是便利，不是绑定。** 想省心，可以直接使用官方 Hub；需要自主控制时，也可以自行部署远程入口，不必迁移工作区或会话。
-5. **信任来自可核对的边界。** 数据保存在哪里、远程连接经过什么组件、设备如何获得授权，都应当在代码和文档中说清楚。
-6. **业务更新不应变成用户的安装任务。** 目标是 95% 的产品 change set 只更新 WASM guest 与工作台：official 分钟级，beta/alpha/dev 秒级，后台验签、切换和失败回滚；浏览器 UI 变化最多要求刷新。当前 Linux/dev 运行时底座已验证，Windows owner-only ACL 和自动交付链仍在 [roadmap](./docs/roadmap.md) 推进。
+由此产品分三层，顺序不能颠倒：**拥有**（工作区、密钥、进程和会话记录都在你自己的设备上）→
+**汇聚**（你的机器和 Agent 汇聚成一个可指挥的整体，多一台机器换来的是产能而不只是一个入口）→
+**带宽**（作品本身成为界面，你点、你选、你说，而不是把体验翻译成文字）。
+
+四条承诺，每条都能被验收：
+
+1. **资产不动。** 工作区、密钥、进程和会话记录由你的机器持有；远端设备只是经过授权的操作界面。
+2. **多机是常态。** 本机只是目录里延迟最低、断网也在的那一项，不是唯一的一等目标。
+3. **Agent 可替换。** daemon 和前端只认统一协议，不把任何一家 agent 的私有事件格式变成产品协议；
+   你已经付费和熟悉的 agent 是一等公民。
+4. **会话跟着人。** 关掉页面、切换网络或换一台设备，都不该终止正在机器上执行的任务，回来还能接上。
+
+两条工程纪律支撑上面四条：**信任来自可核对的边界**——数据存在哪里、远程连接经过什么组件、设备如何
+获得授权，都写在代码和文档里，开源侧不依赖官方服务也能独立部署；**业务更新不该变成用户的安装任务**
+——目标是 95% 的产品 change set 只更新 WASM guest 与工作台，official 分钟级、beta/alpha/dev 秒级，
+后台验签、切换和失败回滚。当前 Linux/dev 运行时底座已验证，Windows owner-only ACL 与自动交付链仍在
+[roadmap](./docs/roadmap.md) 推进；在测量系统建立之前，95% 与分钟级都是目标而不是已达成的状态。
 
 ## 快速开始
 
@@ -229,6 +241,8 @@ node apps/desktop/scripts/bundle.mjs
 | 文档 | 适合什么时候读 |
 | --- | --- |
 | [architecture.md](./docs/architecture.md) | 理解顶层分层、不可让步的边界和演进顺序 |
+| [engineering-guidance.md](./docs/engineering-guidance.md) | 动手之前：这个方案该长什么形状 |
+| [engineering-laws.md](./docs/engineering-laws.md) | 实现与提交之前：哪些事不许做 |
 | [third-party-agents.md](./docs/third-party-agents.md) | 接入 Claude Code、Codex、OpenCode、Cursor 或自定义 ACP agent |
 | [daemon.md](./docs/daemon.md) | 修改会话内核、工作区、设备、传输或存储 |
 | [web-workbench.md](./docs/web-workbench.md) | 修改工作台、宿主适配与移动端体验 |
@@ -238,7 +252,8 @@ node apps/desktop/scripts/bundle.mjs
 | [testing.md](./docs/testing.md) | 选择受影响的测试与端到端门禁 |
 | [roadmap.md](./docs/roadmap.md) | 查看已经落地、正在推进和明确不做的能力 |
 
-如果你准备修改协议或跨部件行为，请先读 `architecture.md`，再运行对应窄测试与 `testing.md` 中的门禁。
+如果你准备修改协议或跨部件行为，请先读 `architecture.md` 确认边界，按 `engineering-guidance.md`
+形成方案，实现时对照 `engineering-laws.md`，最后运行对应窄测试与 `testing.md` 中的门禁。
 问题、设计讨论和功能建议可以提交到 [GitHub Issues](https://github.com/aikenc/genethub/issues)。
 
 ## License
