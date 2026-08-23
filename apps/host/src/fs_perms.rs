@@ -9,7 +9,8 @@ use crate::bindings::genehub::host::fs_perms as wit;
 
 impl wit::Host for crate::load::Host {
     async fn restrict_to_owner(&mut self, path: String) -> Result<(), String> {
-        restrict(&path).map_err(|error| format!("{path}: {error}"))
+        let host_path = crate::guest_paths::host_path_from_guest(&path);
+        restrict(&host_path.to_string_lossy()).map_err(|error| format!("{path}: {error}"))
     }
 }
 

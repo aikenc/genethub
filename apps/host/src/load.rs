@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::p2::bindings::Command;
-use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 use wasmtime_wasi_tls::{WasiTlsCtx, WasiTlsCtxBuilder, WasiTlsCtxView, WasiTlsView};
 
@@ -255,7 +255,7 @@ fn build_instance(
                 | crate::channel::ENV_CLI
                 | crate::channel::ENV_COMPONENT_FILE
         ) {
-            wasi.env(key, value);
+            wasi.env(key, crate::guest_paths::env_value_for_guest(value));
         }
     }
     wasi.inherit_network();
@@ -263,11 +263,10 @@ fn build_instance(
     // address check. Without this the guest's listener bind fails outright.
     wasi.allow_tcp(true);
     wasi.allow_ip_name_lookup(true);
-    // Preopen is a Store lifetime constant. Host root now; guest product
-    // code still does workspace checks. Cannot add dirs later.
-    wasi.preopened_dir("/", "/", FsPerms::ReadWrite)
-        .anyhow()
-        .context("preopen host root")?;
+    // Preopen is a Store lifetime constant. Host root on Unix; each Windows
+    // volume as `/c`, `/d`, … so a tempfile on C: is reachable when the
+    // checkout lives on D:. Cannot add dirs later.
+    crate::guest_paths::preopen_host_filesystem(&mut wasi)?;
     // GENEHUB_CLI names the front-door CLI, so the guest can reach product
     // surface (`genet session context`, `genet agent-serve`). Whoever launched
     // the shell says which CLI that is; a shell launched by hand answers for
@@ -278,7 +277,10 @@ fn build_instance(
         .map(PathBuf::from)
         .or_else(|| std::env::current_exe().ok());
     if let Some(cli) = cli {
-        wasi.env("GENEHUB_CLI", cli.to_string_lossy());
+        wasi.env(
+            "GENEHUB_CLI",
+            crate::guest_paths::env_value_for_guest(cli.to_string_lossy()),
+        );
     }
     // The guest has no pid of its own, and the process a local client can see
     // holding the listening socket is this one. See the v2 proposal §6.9.
@@ -287,14 +289,17 @@ fn build_instance(
     // working directory and inherits none. Whoever launched the shell did pick
     // one, though, and relative paths in a request are meant against it.
     if let Ok(cwd) = std::env::current_dir() {
-        wasi.env(crate::channel::ENV_CWD, cwd.to_string_lossy());
+        wasi.env(
+            crate::channel::ENV_CWD,
+            crate::guest_paths::env_value_for_guest(cwd.to_string_lossy()),
+        );
     }
     // The daemon watches this file and asks for an in-place reload when it
     // changes — the dev rebuild loop and a replaced install both ride it.
     if let Some(component) = component_file {
         wasi.env(
             crate::channel::ENV_COMPONENT_FILE,
-            component.to_string_lossy(),
+            crate::guest_paths::env_value_for_guest(component.to_string_lossy()),
         );
     }
 

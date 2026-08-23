@@ -11,6 +11,7 @@ mod channel;
 mod error;
 mod file_lock;
 mod fs_perms;
+mod guest_paths;
 mod http_hooks;
 mod isolation;
 mod keys;

@@ -67,7 +67,8 @@ impl ChildHandle {
         cwd: Option<&str>,
     ) -> Result<Self, String> {
         let (program, arguments) = argv.split_first().ok_or("empty argv")?;
-        let mut command = tokio::process::Command::new(program);
+        let mut command =
+            tokio::process::Command::new(crate::guest_paths::host_path_from_guest(program));
         command
             .args(arguments)
             .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -76,7 +77,7 @@ impl ChildHandle {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         if let Some(cwd) = cwd {
-            command.current_dir(cwd);
+            command.current_dir(crate::guest_paths::host_path_from_guest(cwd));
         }
         own_session(&mut command);
 

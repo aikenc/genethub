@@ -59,12 +59,13 @@ impl wit::HostHandle for crate::load::Host {
 
 impl wit::Host for crate::load::Host {
     async fn open(&mut self, path: String) -> Result<Resource<LockHandle>, String> {
+        let host_path = crate::guest_paths::host_path_from_guest(&path);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&path)
+            .open(&host_path)
             .map_err(|error| format!("opening {path}: {error}"))?;
         self.table
             .push(LockHandle { file })

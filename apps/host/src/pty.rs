@@ -53,11 +53,17 @@ impl PtySession {
             })
             .map_err(|error| format!("allocating a pty: {error}"))?;
 
-        let mut command = CommandBuilder::new(program);
+        let program = crate::guest_paths::host_path_from_guest(program)
+            .to_string_lossy()
+            .into_owned();
+        let mut command = CommandBuilder::new(&program);
         for argument in arguments {
             command.arg(argument);
         }
-        command.cwd(cwd);
+        let cwd = crate::guest_paths::host_path_from_guest(cwd)
+            .to_string_lossy()
+            .into_owned();
+        command.cwd(&cwd);
         for (key, value) in env {
             command.env(key, value);
         }
