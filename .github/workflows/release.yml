@@ -232,7 +232,7 @@ jobs:
           STABLE_KEY_ID: ${{ vars.GENEHUB_STABLE_COMPONENT_KEY_ID }}
         run: |
           set -euo pipefail
-          node scripts/version.mjs --from-tag
+          node scripts/stamp-version.mjs --from-tag
           node scripts/channel.mjs --from-tag
           . scripts/channel.env
           cargo build --release -p genehub-guest --target wasm32-wasip2
@@ -351,11 +351,11 @@ jobs:
       # The version this release ships, taken from the tag and written into the
       # three files that have to carry one, and the channel, written into
       # everything that names a process, a directory or an override. The tree
-      # itself says 0.0.0 and dev — no human edits either: `scripts/version.mjs`
+      # itself says 0.0.0 and dev — no human edits either: `scripts/stamp-version.mjs`
       # and `scripts/channel.mjs` explain why, and hold the whole rule so that
       # no workflow has to repeat it.
       - run: |
-          node scripts/version.mjs --from-tag
+          node scripts/stamp-version.mjs --from-tag
           node scripts/channel.mjs --from-tag
         shell: bash
 
@@ -478,7 +478,7 @@ jobs:
           # And that it is the build this release claims to be. Without this, a
           # job that lost its stamping step would ship a daemon calling itself
           # 0.0.0 — which tells every user they run an unreleased build, silently.
-          node scripts/version.mjs --verify "target/release/$CLI_BINARY$exe" || exit 1
+          node scripts/stamp-version.mjs --verify "target/release/$CLI_BINARY$exe" || exit 1
           env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
             "target/release/$CLI_BINARY$exe" daemon run >"$root/out.json" 2>"$root/err.log" &
           pid=$!
@@ -574,7 +574,7 @@ jobs:
       # As in the installer job: the tag is where the version and the channel
       # come from.
       - run: |
-          node scripts/version.mjs --from-tag
+          node scripts/stamp-version.mjs --from-tag
           node scripts/channel.mjs --from-tag
         shell: bash
       # The CLI and the wasm shell for the host target; the guest component
@@ -616,7 +616,7 @@ jobs:
           tar -xzf "dist/$TARBALL_PREFIX-linux-x64.tar.gz" -C "$root"
           # The unpacked copy, so this is a claim about what is in the tarball
           # rather than about what was left in the build directory.
-          node scripts/version.mjs --verify "$root/$CLI_BINARY"
+          node scripts/stamp-version.mjs --verify "$root/$CLI_BINARY"
           # Static-pie prints "statically linked" and exits 0; a fully static
           # binary may exit 1 with "not a dynamic executable". Either is fine.
           # What is not fine is a list of .so dependencies on the host glibc.

@@ -9,7 +9,7 @@
 // that makes a build belong to one of them is derived here, from one table,
 // so no two files can disagree about what a beta is called.
 //
-// It works the way `scripts/version.mjs` works, and for the same reason: the
+// It works the way `scripts/stamp-version.mjs` works, and for the same reason: the
 // tree always claims to be `local`, and the release workflow stamps
 // `stable|beta|dev` in just before it builds. A channel a human has to
 // edit into a dozen places is a channel that ships half-renamed — one process
@@ -20,7 +20,7 @@
 // rewritten wholesale — sed-ing values into source code is how a quote or a
 // comma ends up in a binary name. The packaging files (tauri.conf.json, the
 // two `[[bin]]` names, installer.nsh, install.sh) carry marked lines this
-// script rewrites in place, the same portable way version.mjs does.
+// script rewrites in place, the same portable way stamp-version.mjs does.
 //
 //   node scripts/channel.mjs local|stable|beta|dev   stamp the tree for a channel
 //   node scripts/channel.mjs --from-tag              stamp from the tag being built, if there is one
@@ -304,7 +304,7 @@ pub const DEFAULT_MANIFEST_URL: &str =
 //! Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
 //! file. The tree always says \`local\`; a release build is the workflow
 //! stamping its channel in before it compiles, exactly the way
-//! \`scripts/version.mjs\` stamps the version.
+//! \`scripts/stamp-version.mjs\` stamps the version.
 
 // Not every build reads every name below; the module is the whole menu so
 // that adding a consumer never means editing the generator.

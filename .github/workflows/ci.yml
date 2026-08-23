@@ -26,11 +26,11 @@ permissions:
   contents: read
 
 jobs:
-  # Decide which heavy jobs this change actually needs, and whether the result
-  # can ship as a Live Release or must be an App Release. The decision lives in
+  # Decide which heavy jobs this change actually needs. The decision lives in
   # scripts/ci-classify.mjs (table-tested by scripts/ci-classify.test.mjs);
   # main push and pull requests share it, only release (force_full) runs
-  # everything.
+  # everything. The release type is NOT decided here — it is a runtime fact
+  # the publisher derives from the signed ABI hash at publish time.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -38,7 +38,6 @@ jobs:
       relay: ${{ steps.filter.outputs.relay }}
       web: ${{ steps.filter.outputs.web }}
       desktop: ${{ steps.filter.outputs.desktop }}
-      release_type: ${{ steps.filter.outputs.release_type }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

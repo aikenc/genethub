@@ -17,9 +17,9 @@
 // and the desktop shell sits outside the workspace on purpose (root `Cargo.toml`
 // says why). Its manifest has to carry a literal, so something has to write it.
 //
-//   node scripts/version.mjs 0.1.18                 write a version
-//   node scripts/version.mjs --from-tag             write the tag being built, if there is one
-//   node scripts/version.mjs --verify <binary>      check a built binary reports what it should
+//   node scripts/stamp-version.mjs 0.1.18                 write a version
+//   node scripts/stamp-version.mjs --from-tag             write the tag being built, if there is one
+//   node scripts/stamp-version.mjs --verify <binary>      check a built binary reports what it should
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -33,9 +33,9 @@ const UNRELEASED = "0.0.0";
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const usage = () => {
-  console.error(`  node scripts/version.mjs 0.1.18                 write a version
-  node scripts/version.mjs --from-tag             write the tag being built, if there is one
-  node scripts/version.mjs --verify <binary>      check a built binary reports what it should`);
+  console.error(`  node scripts/stamp-version.mjs 0.1.18                 write a version
+  node scripts/stamp-version.mjs --from-tag             write the tag being built, if there is one
+  node scripts/stamp-version.mjs --verify <binary>      check a built binary reports what it should`);
 };
 
 // What a build made from this checkout should report: the tag it is building,

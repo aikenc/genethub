@@ -1,31 +1,36 @@
 #!/usr/bin/env node
-// The one place that decides what a change set means: which CI jobs must run
-// and whether the result can ship as a Live Release (Client Component + Web,
-// no reinstall) or must be an App Release (installer). The workflow calls this
-// script and nothing else; a path that matches no rule fails safe to the full
-// suite + App, so a renamed directory can never sneak past the heavy gates.
+// The one place that decides which heavy CI jobs a change set must run. The
+// workflow calls this script and nothing else; a path that matches no rule
+// fails safe to the full suite, so a renamed directory can never sneak past
+// the heavy gates.
 //
-// The table is the spec. `docs/version-management.md` §8.1 in genethub-cloud
-// defines the two release types; the mapping below is derived from the
-// dependency closures:
+// This script does NOT decide the release type. Whether a change ships as a
+// Live Release (Client Component + Web, no reinstall) or must be an App
+// Release (installer) is a runtime fact, decided at publish time by the ABI
+// hash: `publisher/component.mjs` refuses a component whose `appAbiHash`
+// differs from the channel's current one unless an explicit App Release is
+// paired. A path table can only guess at that boundary; the signed hash is
+// the truth. Keeping a second, path-based guess here would let the two
+// disagree, so the release decision has exactly one home.
 //
-//   App closure (ships in the installer):
+// The table below is only a test selector. It is derived from the dependency
+// closures:
+//
+//   Native closure (ships in the installer):
 //     apps/host (loads the Component), apps/cli (launcher), apps/desktop
 //     (shell + installer), wit/ (ABI hash), scripts/ (stamping/install/
 //     release tooling), Cargo.toml/Cargo.lock (native dependency graph),
 //     packages/native (linked into the Host binary).
 //
-//   Component closure (Live-updatable):
-//     apps/guest, apps/guest-probe, apps/daemon + apps/agent (compiled into
-//     the Component; the CLI only uses their stable control-plane helpers),
-//     packages/proto (WebProtocol, absorbed by the adapter window),
-//     packages/http, packages/wasi-guest.
+//   Component closure (compiled into the Client Component):
+//     apps/guest, apps/guest-probe, apps/daemon + apps/agent,
+//     packages/proto (WebProtocol), packages/http, packages/wasi-guest.
 //
-//   Hosted (Live-deployable): apps/relay, packages/workbench (the Workbench).
+//   Hosted (deployed, not installed): apps/relay, packages/workbench.
 //
 //   testing/ gates the above but ships nothing itself.
 //
-//   node scripts/ci-classify.mjs --all            every job, release_type=app
+//   node scripts/ci-classify.mjs --all            every job
 //   node scripts/ci-classify.mjs --stdin          read changed paths, one per line
 //   node scripts/ci-classify.mjs --files a b c    classify explicit paths
 //
@@ -36,33 +41,31 @@
 const ALL_JOBS = ["rust", "relay", "web", "desktop"];
 
 // Order is irrelevant: every file matches exactly one rule or falls through to
-// the fail-safe. `jobs` lists the heavy jobs the path must trigger; `release`
-// is the weakest release type the path can ship through.
+// the fail-safe. `jobs` lists the heavy jobs the path must trigger.
 const RULES = [
-  { match: (f) => f.startsWith(".github/"), jobs: ALL_JOBS, release: "app", force: true, why: "CI/release definition" },
-  { match: (f) => f === "Cargo.toml" || f === "Cargo.lock", jobs: ["rust", "desktop"], release: "app", why: "native dependency graph" },
-  { match: (f) => f.startsWith("wit/"), jobs: ["rust", "desktop"], release: "app", why: "ABI hash boundary" },
-  { match: (f) => f.startsWith("apps/host/"), jobs: ["rust", "desktop"], release: "app", why: "Host runtime ships in the installer" },
-  { match: (f) => f.startsWith("apps/cli/"), jobs: ["rust", "desktop"], release: "app", why: "CLI/launcher ships in the installer" },
-  { match: (f) => f.startsWith("apps/desktop/"), jobs: ["desktop"], release: "app", why: "Desktop shell and installer" },
-  { match: (f) => f.startsWith("apps/daemon/"), jobs: ["rust", "desktop"], release: "live", why: "compiled into the Component; desktop shares its persistence" },
-  { match: (f) => f.startsWith("apps/agent/"), jobs: ["rust"], release: "live", why: "compiled into the Component" },
-  { match: (f) => f.startsWith("apps/guest/") || f.startsWith("apps/guest-probe/"), jobs: ["rust"], release: "live", why: "the Client Component itself" },
-  { match: (f) => f.startsWith("apps/relay/"), jobs: ["relay"], release: "live", why: "hosted service, deployed not installed" },
-  { match: (f) => f.startsWith("packages/proto/"), jobs: ["rust"], release: "live", why: "WebProtocol, absorbed by the adapter window" },
-  { match: (f) => f.startsWith("packages/http/") || f.startsWith("packages/wasi-guest/"), jobs: ["rust"], release: "live", why: "Component closure support crate" },
-  { match: (f) => f.startsWith("packages/native/"), jobs: ["rust", "desktop"], release: "app", why: "linked into the Host binary" },
-  { match: (f) => f.startsWith("packages/workbench/"), jobs: ["web"], release: "live", why: "the Workbench" },
-  { match: (f) => f.startsWith("testing/"), jobs: ["rust"], release: "live", why: "test engineering ships nothing" },
-  { match: (f) => f.startsWith("scripts/"), jobs: ["rust", "desktop"], release: "app", why: "stamping, installer and release tooling" },
-  { match: (f) => f.startsWith("docs/") || f.endsWith(".md") || f.startsWith("LICENSE"), jobs: [], release: "live", why: "documentation" },
+  { match: (f) => f.startsWith(".github/"), jobs: ALL_JOBS, force: true, why: "CI/release definition" },
+  { match: (f) => f === "Cargo.toml" || f === "Cargo.lock", jobs: ["rust", "desktop"], why: "native dependency graph" },
+  { match: (f) => f.startsWith("wit/"), jobs: ["rust", "desktop"], why: "ABI hash boundary" },
+  { match: (f) => f.startsWith("apps/host/"), jobs: ["rust", "desktop"], why: "Host runtime ships in the installer" },
+  { match: (f) => f.startsWith("apps/cli/"), jobs: ["rust", "desktop"], why: "CLI/launcher ships in the installer" },
+  { match: (f) => f.startsWith("apps/desktop/"), jobs: ["desktop"], why: "Desktop shell and installer" },
+  { match: (f) => f.startsWith("apps/daemon/"), jobs: ["rust", "desktop"], why: "compiled into the Component; desktop shares its persistence" },
+  { match: (f) => f.startsWith("apps/agent/"), jobs: ["rust"], why: "compiled into the Component" },
+  { match: (f) => f.startsWith("apps/guest/") || f.startsWith("apps/guest-probe/"), jobs: ["rust"], why: "the Client Component itself" },
+  { match: (f) => f.startsWith("apps/relay/"), jobs: ["relay"], why: "hosted service, deployed not installed" },
+  { match: (f) => f.startsWith("packages/proto/"), jobs: ["rust"], why: "WebProtocol, absorbed by the adapter window" },
+  { match: (f) => f.startsWith("packages/http/") || f.startsWith("packages/wasi-guest/"), jobs: ["rust"], why: "Component closure support crate" },
+  { match: (f) => f.startsWith("packages/native/"), jobs: ["rust", "desktop"], why: "linked into the Host binary" },
+  { match: (f) => f.startsWith("packages/workbench/"), jobs: ["web"], why: "the Workbench" },
+  { match: (f) => f.startsWith("testing/"), jobs: ["rust"], why: "test engineering ships nothing" },
+  { match: (f) => f.startsWith("scripts/"), jobs: ["rust", "desktop"], why: "stamping, installer and release tooling" },
+  { match: (f) => f.startsWith("docs/") || f.endsWith(".md") || f.startsWith("LICENSE"), jobs: [], why: "documentation" },
 ];
 
 export function classifyFiles(files) {
   const jobs = { rust: false, relay: false, web: false, desktop: false };
   const unmatched = [];
   let force = false;
-  let releaseType = "live";
   const reasons = [];
 
   for (const file of files) {
@@ -73,21 +76,19 @@ export function classifyFiles(files) {
       continue;
     }
     if (rule.force) force = true;
-    if (rule.release === "app") releaseType = "app";
     for (const job of rule.jobs) jobs[job] = true;
     reasons.push(`${file}: ${rule.why}`);
   }
 
   if (force) {
     for (const job of ALL_JOBS) jobs[job] = true;
-    releaseType = "app";
   }
 
   // The web job's mandatory journeys drive a real daemon, agent and relay; a
   // change on either side of that wire must re-prove them.
   if (jobs.rust || jobs.relay) jobs.web = true;
 
-  return { ...jobs, releaseType, force, unmatched, reasons };
+  return { ...jobs, force, unmatched, reasons };
 }
 
 function parseArgs(argv) {
@@ -112,7 +113,7 @@ if (isMain) {
     process.exit(2);
   }
   const result = args.all
-    ? { rust: true, relay: true, web: true, desktop: true, releaseType: "app", force: true, unmatched: [], reasons: ["--all: full suite"] }
+    ? { rust: true, relay: true, web: true, desktop: true, force: true, unmatched: [], reasons: ["--all: full suite"] }
     : classifyFiles(args.files ?? (await readStdin()));
 
   for (const reason of result.reasons) console.error(`  ${reason}`);
@@ -120,12 +121,11 @@ if (isMain) {
     console.error(`  unmatched (fail-safe to full suite): ${result.unmatched.join(", ")}`);
   }
   console.error(
-    `filter: rust=${result.rust} relay=${result.relay} web=${result.web} desktop=${result.desktop} release_type=${result.releaseType}`,
+    `filter: rust=${result.rust} relay=${result.relay} web=${result.web} desktop=${result.desktop}`,
   );
 
   console.log(`rust=${result.rust}`);
   console.log(`relay=${result.relay}`);
   console.log(`web=${result.web}`);
   console.log(`desktop=${result.desktop}`);
-  console.log(`release_type=${result.releaseType}`);
 }
