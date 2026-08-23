@@ -26,8 +26,11 @@ permissions:
   contents: read
 
 jobs:
-  # Decide which heavy jobs this change actually needs. main push and pull
-  # requests share the same path filter; only release (force_full) runs everything.
+  # Decide which heavy jobs this change actually needs, and whether the result
+  # can ship as a Live Release or must be an App Release. The decision lives in
+  # scripts/ci-classify.mjs (table-tested by scripts/ci-classify.test.mjs);
+  # main push and pull requests share it, only release (force_full) runs
+  # everything.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -35,11 +38,19 @@ jobs:
       relay: ${{ steps.filter.outputs.relay }}
       web: ${{ steps.filter.outputs.web }}
       desktop: ${{ steps.filter.outputs.desktop }}
+      release_type: ${{ steps.filter.outputs.release_type }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      # A broken classifier must never produce output: its own contract tests
+      # run in this job, before any classification is trusted.
+      - name: The classifier must pass its own contract tests
+        run: node --test scripts/ci-classify.test.mjs
       - id: filter
         shell: bash
         run: |
@@ -48,11 +59,7 @@ jobs:
           # Tag / rehearsal release: pay for the whole matrix once, at the point
           # something is about to ship. main and PR stay on the path filter.
           if [ "${{ inputs.force_full }}" = "true" ]; then
-            echo "rust=true" >> "$GITHUB_OUTPUT"
-            echo "relay=true" >> "$GITHUB_OUTPUT"
-            echo "web=true" >> "$GITHUB_OUTPUT"
-            echo "desktop=true" >> "$GITHUB_OUTPUT"
-            echo "force_full: full suite"
+            node scripts/ci-classify.mjs --all >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -63,79 +70,15 @@ jobs:
             base="${{ github.event.before }}"
             head="${{ github.sha }}"
             if [ "$base" = "0000000000000000000000000000000000000000" ] || [ -z "$base" ]; then
-              echo "rust=true" >> "$GITHUB_OUTPUT"
-              echo "relay=true" >> "$GITHUB_OUTPUT"
-              echo "web=true" >> "$GITHUB_OUTPUT"
-              echo "desktop=true" >> "$GITHUB_OUTPUT"
+              node scripts/ci-classify.mjs --all >> "$GITHUB_OUTPUT"
               echo "no usable before SHA: full suite"
               exit 0
             fi
           fi
 
-          mapfile -t files < <(git diff --name-only "$base" "$head")
-          printf 'changed (%d):\n' "${#files[@]}"
-          printf '  %s\n' "${files[@]}"
-
-          rust=false
-          relay=false
-          web=false
-          desktop=false
-          # Workflow or shared CI fixtures changed: trust nothing, run everything.
-          force=false
-
-          for f in "${files[@]}"; do
-            case "$f" in
-              .github/workflows/*|.github/agent-clis/*)
-                force=true
-                ;;
-              Cargo.toml|Cargo.lock|apps/daemon/*|apps/cli/*|apps/agent/*|apps/host/*|apps/proto/*|testing/*)
-                rust=true
-                ;;
-              apps/relay/*)
-                relay=true
-                ;;
-              packages/web/*)
-                web=true
-                ;;
-              apps/desktop/*)
-                desktop=true
-                ;;
-            esac
-          done
-
-          if [ "$force" = true ]; then
-            rust=true
-            relay=true
-            web=true
-            desktop=true
-          fi
-
-          # The web job's mandatory journeys drive a real daemon, agent, and
-          # relay. A change on either side of that wire must re-prove it.
-          if [ "$rust" = true ] || [ "$relay" = true ]; then
-            web=true
-          fi
-
-          # Daemon persistence is shared with the desktop shell; a daemon-only
-          # change still has to exercise Windows DACL and supervision.
-          if [ "$rust" = true ]; then
-            for f in "${files[@]}"; do
-              case "$f" in
-                apps/daemon/*|apps/cli/*|apps/host/*|Cargo.toml|Cargo.lock)
-                  desktop=true
-                  break
-                  ;;
-              esac
-            done
-          fi
-
-          {
-            echo "rust=$rust"
-            echo "relay=$relay"
-            echo "web=$web"
-            echo "desktop=$desktop"
-          } >> "$GITHUB_OUTPUT"
-          echo "filter: rust=$rust relay=$relay web=$web desktop=$desktop"
+          git diff --name-only "$base" "$head" | tee /tmp/changed-files
+          printf 'changed (%d)\n' "$(wc -l < /tmp/changed-files)"
+          node scripts/ci-classify.mjs --stdin < /tmp/changed-files >> "$GITHUB_OUTPUT"
 
   # A lock file records where each tarball came from. Written on a machine with a
   # company mirror in its npm config, it records that mirror — and then every

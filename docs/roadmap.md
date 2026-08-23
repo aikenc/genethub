@@ -34,7 +34,7 @@
 | 工作项 | 当前状态 | 完成门 |
 |---|---|---|
 | Windows 能力 parity | host 的非 Unix `fs-perms` 固定返回 `Unsupported`，而 guest 首启必做 owner-only 收紧，当前 Windows 默认 WASM daemon 因此不能完成首启 | 实现 Windows ACL；待发布三件套在 Windows runner 与安装后主旅程通过 |
-| CI 影响分类 | Rust path filter 漏 host/guest/WIT/proto 等目录；没有 90 天 change-set 指标 | 自动分类完整/高频模式，漏标 fail closed，热路径实测 ≥95% |
+| CI 影响分类 | 分类已收敛到 `scripts/ci-classify.mjs`：全路径覆盖、漏标 fail closed 到全量+App、表驱动契约测试随 `changes` job 自校验，并输出 Live/App release_type；仍缺 90 天 change-set 指标，release_type 尚未接入发布 workflow | 热路径实测 ≥95%；classifier 输出驱动 candidate/promote workflow |
 | 测试工程基线 | `testing` 的 TypeScript typecheck 有 4 个 HEAD 既有错误（一个可空值、三个未使用 import）；testctl lint/governance 通过不能替代它 | 修到 `npm --prefix testing run typecheck` 0 error，并纳入候选机械门 |
 | guest 构建 | release 各平台重复编；当前 release profile 为 fat LTO 单 codegen unit，热重编实测 71.66 秒 | guest 每 candidate 只编一次；iterate profile 的 build+upload P95 支撑 ≤60 秒端到端 |
 | 完整/高频 workflow | 只有 tag/full release，没有 guest+website workflow，当前 SHA 没有远端发布演练 | 两模式分别有 rehearsal、真实耗时、失败门与可晋升的 immutable artifact |
