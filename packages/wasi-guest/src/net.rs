@@ -33,14 +33,15 @@ const CHUNK: u64 = 64 * 1024;
 
 /// A connected TCP socket, plus the two byte streams it produced.
 ///
-/// The socket resource is kept alive alongside the streams on purpose:
-/// dropping it closes the connection out from under them.
+/// Field order is drop order. The streams are children of the socket in
+/// Wasmtime's table; dropping the socket first traps with `resource has
+/// children` and the host process exits. Keep the parent last.
 pub struct TcpStream {
-    socket: TcpSocket,
     input: InputStream,
     output: OutputStream,
     read_delay: Backoff,
     write_delay: Backoff,
+    socket: TcpSocket,
 }
 
 impl TcpStream {

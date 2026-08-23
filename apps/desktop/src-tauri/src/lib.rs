@@ -90,7 +90,7 @@ fn apply_application_routes(
     let mut previous = None;
     while Instant::now() < deadline {
         let directive = application_route(binary, data_dir, claim_existing)?;
-        if previous.as_deref() != Some(&directive.navigate) {
+        if previous.as_deref() != Some(directive.navigate.as_str()) {
             let target = external_web_url(&directive.navigate)?;
             ensure_web_reachable(&target)?;
             navigate(app, target)?;

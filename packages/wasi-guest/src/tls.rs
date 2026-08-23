@@ -43,15 +43,17 @@ mod bindings {
 use bindings::wasi::tls::types::{ClientConnection, ClientHandshake};
 
 /// An established TLS client connection.
+///
+/// Field order is drop order. Encrypted streams are children of the TLS
+/// connection, and the connection sits on the TCP socket; dropping a parent
+/// first traps with `resource has children` and the host process exits.
 pub struct TlsStream {
-    /// Dropping this tears the session down, and dropping the socket under it
-    /// closes the transport. Both outlive the streams for that reason.
-    _connection: ClientConnection,
-    _socket: TcpSocket,
     input: InputStream,
     output: OutputStream,
     read_delay: Backoff,
     write_delay: Backoff,
+    _connection: ClientConnection,
+    _socket: TcpSocket,
 }
 
 impl TlsStream {
