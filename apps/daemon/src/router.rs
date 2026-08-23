@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use genehub_proto::{
-    ErrorCode, HelloResult, ProtocolError, Reply, Request, TransportKind, PROTOCOL_VERSION,
+    ErrorCode, HelloResult, ProtocolError, Reply, Request, TransportKind, WEB_PROTOCOL_VERSION,
 };
 use tokio::sync::broadcast;
 
@@ -141,7 +141,7 @@ async fn dispatch(
     match request {
         Request::ConnectionIdentity => Handled::ok(Reply::Hello(HelloResult {
             daemon_version: state.version.clone(),
-            protocol_version: PROTOCOL_VERSION,
+            web_protocol: WEB_PROTOCOL_VERSION,
             machine_id: state.machine.machine_id.clone(),
             fingerprint: state.machine.fingerprint(),
             transport,
@@ -1354,7 +1354,7 @@ fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::Unsupported => "unsupported",
         ErrorCode::Forbidden => "forbidden",
         ErrorCode::Internal => "internal",
-        ErrorCode::ProtocolVersion => "protocolVersion",
+        ErrorCode::WebProtocol => "webProtocol",
         ErrorCode::IsolationUnavailable => "isolationUnavailable",
     }
 }

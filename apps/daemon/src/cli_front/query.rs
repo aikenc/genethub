@@ -673,7 +673,7 @@ fn encoded_blob_refs(trunk: &RoundTrunk) -> Vec<Value> {
 pub fn connect_error(error: ConnectError) -> CliFailure {
     match error {
         ConnectError::Rejected(ProtocolError {
-            code: ErrorCode::ProtocolVersion,
+            code: ErrorCode::WebProtocol,
             message,
         })
         | ConnectError::Protocol(message) => CliFailure::protocol(message),
@@ -697,7 +697,7 @@ pub fn remote_connect_error(machine_id: &str, error: ConnectError) -> CliFailure
     let details = Some(json!({"machineId": machine_id}));
     match error {
         ConnectError::Rejected(ProtocolError {
-            code: ErrorCode::ProtocolVersion,
+            code: ErrorCode::WebProtocol,
             message,
         })
         | ConnectError::Protocol(message) => CliFailure::protocol(message),
@@ -856,7 +856,7 @@ fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
         "workingDirectory": {"selector": "--cwd", "value": null, "inferred": false},
         "daemon": {
             "version": hello.daemon_version,
-            "protocolVersion": hello.protocol_version,
+            "webProtocol": hello.web_protocol,
             "machineId": hello.machine_id,
             "machineName": hello.machine_name,
             "fingerprint": hello.fingerprint,
@@ -1575,7 +1575,7 @@ pub fn rpc_error(error: RpcError) -> CliFailure {
             ErrorCode::Unsupported => CliFailure::business("unsupportedCapability", message, None),
             ErrorCode::Forbidden => CliFailure::business("forbidden", message, None),
             ErrorCode::Internal => CliFailure::business("internal", message, None),
-            ErrorCode::ProtocolVersion => CliFailure::protocol(message),
+            ErrorCode::WebProtocol => CliFailure::protocol(message),
             // Not retryable and not fixable by asking for more: this machine
             // cannot confine a process, and an agent told to wait would wait
             // forever (`genet-remote-execution.md` §7.5).
@@ -1768,7 +1768,7 @@ mod tests {
     fn hello() -> HelloResult {
         HelloResult {
             daemon_version: "1.2.3".into(),
-            protocol_version: genehub_proto::DATA_PLANE_VERSION,
+            web_protocol: genehub_proto::DATA_PLANE_VERSION,
             machine_id: "m_local".into(),
             fingerprint: "AA-BB".into(),
             transport: TransportKind::Loopback,
@@ -1886,14 +1886,14 @@ mod tests {
         assert_eq!(forbidden.code, "forbidden");
 
         let version = rpc_error(RpcError::Remote(ProtocolError {
-            code: ErrorCode::ProtocolVersion,
+            code: ErrorCode::WebProtocol,
             message: "wrong version".into(),
         }));
         assert_eq!(version.code, "protocolIncompatible");
         assert_eq!(version.exit, crate::cli_front::EXIT_UNREACHABLE);
 
         let handshake = connect_error(ConnectError::Rejected(ProtocolError {
-            code: ErrorCode::ProtocolVersion,
+            code: ErrorCode::WebProtocol,
             message: "wrong version during Hello".into(),
         }));
         assert_eq!(handshake.code, "protocolIncompatible");

@@ -12,7 +12,7 @@ export {
   ClientRequestTooLargeError,
   ConnectionOutcomeUnknownError,
   MAX_RPC_BODY_BYTES,
-  PROTOCOL_VERSION,
+  WEB_PROTOCOL_VERSION,
   ProtocolError_,
 } from "./protocol/client";
 export type {

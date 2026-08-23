@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  PROTOCOL_VERSION,
-  RETAINED_PROTOCOL_VERSIONS,
+  WEB_PROTOCOL_VERSION,
+  RETAINED_WEB_PROTOCOLS,
   UnsupportedBusinessProtocolError,
   protocolCodec,
   type AdjacentProtocolAdapter,
@@ -12,7 +12,7 @@ const text = new TextDecoder();
 
 describe("business protocol adapters", () => {
   it("keeps v3 byte-compatible when no conversion is required", () => {
-    const codec = protocolCodec(PROTOCOL_VERSION);
+    const codec = protocolCodec(WEB_PROTOCOL_VERSION);
     expect(text.decode(codec.encodeRequest({ type: "agent.list" }))).toBe(
       '{"type":"agent.list"}',
     );
@@ -61,7 +61,7 @@ describe("business protocol adapters", () => {
 
   it("keeps exactly eight protocol generations in scope", () => {
     const latest = 20;
-    expect(() => protocolCodec(latest - RETAINED_PROTOCOL_VERSIONS, [], latest)).toThrow(
+    expect(() => protocolCodec(latest - RETAINED_WEB_PROTOCOLS, [], latest)).toThrow(
       "超出网页保留",
     );
     expect(() => protocolCodec(latest + 1, [], latest)).toThrow("请刷新网页");

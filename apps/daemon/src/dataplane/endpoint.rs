@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     ErrorCode, ExchangeRequestHead, ExchangeResponseHead, ProtocolError, ProtocolIdentity, Reply,
-    Request, ServerFrame, TransportKind, PROTOCOL_IDENTITY_METHOD, PROTOCOL_VERSION,
+    Request, ServerFrame, TransportKind, PROTOCOL_IDENTITY_METHOD, WEB_PROTOCOL_VERSION,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
@@ -873,7 +873,7 @@ async fn handle_protocol_identity(
         anyhow::bail!("protocol.identity has no request body");
     }
     let payload = serde_json::to_vec(&ProtocolIdentity {
-        protocol_version: PROTOCOL_VERSION,
+        web_protocol: WEB_PROTOCOL_VERSION,
     })?;
     stream
         .respond(&ExchangeResponseHead {
@@ -1055,7 +1055,7 @@ async fn send_protocol_error(stream: &mut ServerStream, error: ProtocolError) ->
         ErrorCode::NotFound => 404,
         ErrorCode::Conflict => 409,
         ErrorCode::Unsupported => 422,
-        ErrorCode::ProtocolVersion => 426,
+        ErrorCode::WebProtocol => 426,
         ErrorCode::Internal => 500,
         // Not 403: the caller is allowed, the machine is unable. Retrying with
         // a wider grant would not help, and neither would retrying at all

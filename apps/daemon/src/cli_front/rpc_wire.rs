@@ -614,10 +614,10 @@ fn verify_remote_identity(
     hello: &HelloResult,
     machine: &PairedMachine,
 ) -> Result<(), ConnectError> {
-    if !business_protocol_supported(hello.protocol_version) {
-        return Err(business_protocol_mismatch(
+    if !web_protocol_supported(hello.web_protocol) {
+        return Err(web_protocol_mismatch(
             &machine.machine_id,
-            hello.protocol_version,
+            hello.web_protocol,
         ));
     }
     if !hello.machine_id.is_empty() && hello.machine_id != machine.machine_id {
@@ -712,38 +712,38 @@ fn verify_local_identity(
             "the loopback listener returned an inconsistent daemon identity".into(),
         ));
     }
-    if !business_protocol_supported(hello.protocol_version) {
-        return Err(business_protocol_mismatch(
+    if !web_protocol_supported(hello.web_protocol) {
+        return Err(web_protocol_mismatch(
             "the loopback daemon",
-            hello.protocol_version,
+            hello.web_protocol,
         ));
     }
     Ok(())
 }
 
 /// Eight retained business generations, matching the Web adjacent-adapter window.
-const RETAINED_BUSINESS_PROTOCOLS: u32 = 8;
+const RETAINED_WEB_PROTOCOLS: u32 = 8;
 
-fn business_protocol_supported(version: u32) -> bool {
-    let latest = genehub_proto::PROTOCOL_VERSION;
+fn web_protocol_supported(version: u32) -> bool {
+    let latest = genehub_proto::WEB_PROTOCOL_VERSION;
     let oldest = latest
-        .saturating_sub(RETAINED_BUSINESS_PROTOCOLS - 1)
+        .saturating_sub(RETAINED_WEB_PROTOCOLS - 1)
         .max(1);
     version >= oldest && version <= latest
 }
 
-fn business_protocol_mismatch(peer: &str, advertised: u32) -> ConnectError {
-    let latest = genehub_proto::PROTOCOL_VERSION;
+fn web_protocol_mismatch(peer: &str, advertised: u32) -> ConnectError {
+    let latest = genehub_proto::WEB_PROTOCOL_VERSION;
     if advertised > latest {
         ConnectError::Protocol(format!(
             "{peer} uses business protocol v{advertised}; this CLI only supports up to v{latest}. Upgrade the CLI."
         ))
     } else {
         let oldest = latest
-            .saturating_sub(RETAINED_BUSINESS_PROTOCOLS - 1)
+            .saturating_sub(RETAINED_WEB_PROTOCOLS - 1)
             .max(1);
         ConnectError::Protocol(format!(
-            "{peer} uses business protocol v{advertised}, which is outside this CLI's {RETAINED_BUSINESS_PROTOCOLS}-generation window (v{oldest}–v{latest}). Upgrade the App."
+            "{peer} uses business protocol v{advertised}, which is outside this CLI's {RETAINED_WEB_PROTOCOLS}-generation window (v{oldest}–v{latest}). Upgrade the App."
         ))
     }
 }
@@ -782,7 +782,7 @@ fn error_code_name(code: genehub_proto::ErrorCode) -> &'static str {
         Unsupported => "unsupported",
         Forbidden => "forbidden",
         Internal => "internal",
-        ProtocolVersion => "protocol_mismatch",
+        WebProtocol => "protocol_mismatch",
         IsolationUnavailable => "isolation_unavailable",
     }
 }
@@ -812,7 +812,7 @@ mod tests {
         };
         let hello = HelloResult {
             daemon_version: "test".into(),
-            protocol_version: genehub_proto::PROTOCOL_VERSION,
+            web_protocol: genehub_proto::WEB_PROTOCOL_VERSION,
             machine_id: admission.machine_id.clone(),
             fingerprint: admission.fingerprint.clone(),
             transport: TransportKind::Loopback,
@@ -838,7 +838,7 @@ mod tests {
         let (admission, hello) = local_contract();
         verify_local_identity(&hello, &admission).unwrap();
         let mut unsupported = hello.clone();
-        unsupported.protocol_version = genehub_proto::PROTOCOL_VERSION + 1;
+        unsupported.web_protocol = genehub_proto::WEB_PROTOCOL_VERSION + 1;
         let error = verify_local_identity(&unsupported, &admission).unwrap_err();
         assert!(error.to_string().contains("business protocol"), "{error}");
         assert!(!error.to_string().contains("speaks data plane"), "{error}");

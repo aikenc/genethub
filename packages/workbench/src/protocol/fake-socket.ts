@@ -21,7 +21,7 @@ import {
   type DataStream,
   type RecordCarrier,
 } from "../dataplane";
-import { PROTOCOL_VERSION } from "./codec";
+import { WEB_PROTOCOL_VERSION } from "./codec";
 import type { WebSocketLike } from "./client";
 
 interface Sent {
@@ -275,10 +275,10 @@ export class FakeSocket implements WebSocketLike {
         { status: 200, metadata: null },
         new TextEncoder().encode(
           JSON.stringify({
-            protocolVersion:
-              identity.protocolVersion ??
-              this.options.identity?.protocolVersion ??
-              PROTOCOL_VERSION,
+            webProtocol:
+              identity.webProtocol ??
+              this.options.identity?.webProtocol ??
+              WEB_PROTOCOL_VERSION,
           }),
         ),
       );
@@ -300,7 +300,7 @@ export class FakeSocket implements WebSocketLike {
           type: "hello",
           data: {
             daemonVersion: "test",
-            protocolVersion: PROTOCOL_VERSION,
+            webProtocol: WEB_PROTOCOL_VERSION,
             machineId: "m_test",
             machineName: "测试机器",
             fingerprint: "AAAA-BBBB",

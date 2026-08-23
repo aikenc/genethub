@@ -31,13 +31,13 @@ import {
 } from "../dataplane";
 import type { BinaryWebSocketLike } from "../dataplane/websocket";
 import {
-  PROTOCOL_VERSION,
+  WEB_PROTOCOL_VERSION,
   UnsupportedBusinessProtocolError,
   protocolCodec,
   type ProtocolCodec,
 } from "./codec";
 
-export { PROTOCOL_VERSION } from "./codec";
+export { WEB_PROTOCOL_VERSION } from "./codec";
 export const MAX_RPC_BODY_BYTES = 2_900_000;
 const MAX_PREVIEW_BYTES = 64 * 1024 * 1024;
 const MAX_EVENT_BYTES = 3 * 1024 * 1024;
@@ -264,7 +264,7 @@ export class Client {
   private connectionEpoch = 0;
   private connectionAttemptId: string | null = null;
   private carrier: "websocket" | "fabric" | null = null;
-  private businessCodec: ProtocolCodec = protocolCodec(PROTOCOL_VERSION);
+  private businessCodec: ProtocolCodec = protocolCodec(WEB_PROTOCOL_VERSION);
 
   failure: ProtocolError | null = null;
   identity: HelloResult | null = null;
@@ -960,15 +960,15 @@ export class Client {
         throw new PeerAuthenticationError(`protocol.identity failed (${head.status})`);
       }
       const value = await collectBody(stream.body(), 8 * 1024);
-      const identity = JSON.parse(decoder.decode(value)) as { protocolVersion?: unknown };
+      const identity = JSON.parse(decoder.decode(value)) as { webProtocol?: unknown };
       if (
-        typeof identity.protocolVersion !== "number" ||
-        !Number.isSafeInteger(identity.protocolVersion) ||
-        identity.protocolVersion <= 0
+        typeof identity.webProtocol !== "number" ||
+        !Number.isSafeInteger(identity.webProtocol) ||
+        identity.webProtocol <= 0
       ) {
         throw new PeerAuthenticationError("daemon 返回了无效的业务协议版本");
       }
-      return identity.protocolVersion;
+      return identity.webProtocol;
     })();
     return withTimeout(operation, 10_000, "protocol.identity 超时", () =>
       stream.reset(DataReset.Timeout),

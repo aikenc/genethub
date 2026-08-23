@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-import { Client, PROTOCOL_VERSION } from "./client";
+import { Client, WEB_PROTOCOL_VERSION } from "./client";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { exports?: Record<string, string> };
@@ -22,6 +22,6 @@ describe("canonical client export", () => {
 
   it("exposes the same Client class the workbench uses", () => {
     expect(typeof Client).toBe("function");
-    expect(PROTOCOL_VERSION).toBeGreaterThan(0);
+    expect(WEB_PROTOCOL_VERSION).toBeGreaterThan(0);
   });
 });

@@ -102,7 +102,7 @@ fn pack(
         artifact_channel,
         revision,
         channel::HOST_ABI,
-        genehub_proto::PROTOCOL_VERSION,
+        genehub_proto::WEB_PROTOCOL_VERSION,
         key_id,
         &component,
     )

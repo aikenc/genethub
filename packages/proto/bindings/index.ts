@@ -224,7 +224,7 @@ workspaceFiles: Array<DirectoryEntry>,
  */
 roots: boolean, };
 
-export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "protocolVersion" | "isolationUnavailable";
+export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "webProtocol" | "isolationUnavailable";
 
 /**
  * The first encrypted record on a client-opened logical stream.
@@ -285,7 +285,7 @@ export type GitChangeKind = "added" | "modified" | "deleted" | "renamed" | "untr
 
 export type GitStatus = { branch?: string, changes: Array<GitChange>, clean: boolean, };
 
-export type HelloResult = { daemonVersion: string, protocolVersion: number, machineId: string, 
+export type HelloResult = { daemonVersion: string, webProtocol: number, machineId: string, 
 /**
  * Short human-comparable form of the daemon key, for out-of-band checking.
  */
@@ -535,9 +535,9 @@ export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { 
 export type ProtocolError = { code: ErrorCode, message: string, };
 
 /**
- * Advertised business protocol, independent of the carrier handshake.
+ * Advertised WebProtocol generation, independent of the carrier handshake.
  */
-export type ProtocolIdentity = { protocolVersion: number, };
+export type ProtocolIdentity = { webProtocol: number, };
 
 /**
  * A provider's configuration, minus the secret.

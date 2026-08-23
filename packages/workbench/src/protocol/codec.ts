@@ -3,8 +3,8 @@ import type { Reply, Request, ServerFrame } from "@genehub/proto";
 import { ADJACENT_PROTOCOL_ADAPTERS } from "./adapters";
 import * as v3 from "./versions/v3";
 
-export const PROTOCOL_VERSION = v3.VERSION;
-export const RETAINED_PROTOCOL_VERSIONS = 8;
+export const WEB_PROTOCOL_VERSION = v3.VERSION;
+export const RETAINED_WEB_PROTOCOLS = 8;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -45,12 +45,12 @@ export class UnsupportedBusinessProtocolError extends Error {
 export function protocolCodec(
   requested: number,
   adapters: readonly AdjacentProtocolAdapter[] = ADJACENT_PROTOCOL_ADAPTERS,
-  latest: number = PROTOCOL_VERSION,
+  latest: number = WEB_PROTOCOL_VERSION,
 ): ProtocolCodec {
   if (!Number.isSafeInteger(requested) || requested <= 0) {
     throw new UnsupportedBusinessProtocolError(requested, latest, "daemon 返回了无效的业务协议版本");
   }
-  const oldest = Math.max(1, latest - RETAINED_PROTOCOL_VERSIONS + 1);
+  const oldest = Math.max(1, latest - RETAINED_WEB_PROTOCOLS + 1);
   if (requested < oldest || requested > latest) {
     throw new UnsupportedBusinessProtocolError(requested, latest);
   }
@@ -113,5 +113,5 @@ function protocolErrorMessage(requested: number, latest: number): string {
   if (requested > latest) {
     return `daemon 使用业务协议 v${requested}，当前网页只支持到 v${latest}；请刷新网页`;
   }
-  return `daemon 使用的业务协议 v${requested} 已超出网页保留的 ${RETAINED_PROTOCOL_VERSIONS} 代兼容窗口；请升级 App`;
+  return `daemon 使用的业务协议 v${requested} 已超出网页保留的 ${RETAINED_WEB_PROTOCOLS} 代兼容窗口；请升级 App`;
 }

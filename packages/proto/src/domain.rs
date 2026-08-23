@@ -767,7 +767,7 @@ pub enum TransportKind {
 #[ts(export, export_to = "index.ts")]
 pub struct HelloResult {
     pub daemon_version: String,
-    pub protocol_version: u32,
+    pub web_protocol: u32,
     pub machine_id: String,
     /// Short human-comparable form of the daemon key, for out-of-band checking.
     pub fingerprint: String,

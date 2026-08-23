@@ -1124,7 +1124,7 @@ describe("the controls offered to the user", () => {
       call: vi.fn(async () => ({
         type: "speechCapabilities",
         data: {
-          protocolVersion: 2,
+          webProtocol: 2,
           runtimeStatus: { state: "unavailable", message: "Qwen3 runtime 尚未就绪" },
           runtime: {
             id: "qwen3-asr",

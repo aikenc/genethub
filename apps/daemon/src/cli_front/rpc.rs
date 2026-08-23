@@ -369,7 +369,7 @@ fn error_code_name(code: genehub_proto::ErrorCode) -> &'static str {
         Unsupported => "unsupported",
         Forbidden => "forbidden",
         Internal => "internal",
-        ProtocolVersion => "protocol_mismatch",
+        WebProtocol => "protocol_mismatch",
         IsolationUnavailable => "isolation_unavailable",
     }
 }

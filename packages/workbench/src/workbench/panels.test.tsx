@@ -36,7 +36,7 @@ function stubDaemon(answers: Partial<Record<Request["type"], (payload: never) =>
     onStateChange: () => () => {},
     identity: {
       daemonVersion: "test",
-      protocolVersion: 3,
+      webProtocol: 3,
       machineId: "m_device",
       machineName: "test",
       fingerprint: "AA-BB",
@@ -581,7 +581,7 @@ describe("the settings panel", () => {
       machineId: "m_1",
       fingerprint: "AAAA-BBBB-CCCC-DDDD",
       daemonVersion: "0.1.0",
-      protocolVersion: 1,
+      webProtocol: 1,
       transport: "loopback",
     };
     install(client);
@@ -604,7 +604,7 @@ describe("the settings panel", () => {
       machineId: "m_1",
       fingerprint: "AAAA-BBBB-CCCC-DDDD",
       daemonVersion: "0.1.0",
-      protocolVersion: 1,
+      webProtocol: 1,
       transport: "loopback",
     };
     install(client);
@@ -731,7 +731,7 @@ describe("the version section", () => {
       machineId: "m_1",
       fingerprint: "AAAA-BBBB-CCCC-DDDD",
       daemonVersion: "0.1.17",
-      protocolVersion: 1,
+      webProtocol: 1,
       transport: "loopback",
     };
     install(stub.client);
@@ -869,7 +869,7 @@ describe("the version section", () => {
       machineId: "m_1",
       fingerprint: "AAAA-BBBB-CCCC-DDDD",
       daemonVersion: "0.0.0",
-      protocolVersion: 1,
+      webProtocol: 1,
       transport: "loopback",
     };
     install(stub.client);
@@ -895,7 +895,7 @@ describe("the version section", () => {
       machineId: "m_1",
       fingerprint: "AAAA-BBBB-CCCC-DDDD",
       daemonVersion: "0.0.0",
-      protocolVersion: 1,
+      webProtocol: 1,
       transport: "loopback",
     };
     install(stub.client);

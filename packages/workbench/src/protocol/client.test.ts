@@ -95,7 +95,7 @@ describe("the v3 peer connection", () => {
     expect(client.identity).toMatchObject({
       machineId: "m_local",
       fingerprint: "FP-LOCAL",
-      protocolVersion: 3,
+      webProtocol: 3,
     });
     const types = queue.latest().sent.map((message) => message.type);
     expect(types.indexOf("protocol.identity")).toBeGreaterThanOrEqual(0);
@@ -125,7 +125,7 @@ describe("the v3 peer connection", () => {
     await waitFor(() => client.connectionState === "ready");
 
     expect(queue.latest().lastOf("protocol.identity")).toBeDefined();
-    expect(client.identity).toMatchObject({ protocolVersion: 3 });
+    expect(client.identity).toMatchObject({ webProtocol: 3 });
     client.close();
   });
 
@@ -133,7 +133,7 @@ describe("the v3 peer connection", () => {
     const proof = localProof();
     const queue = socketQueue({
       secret: proof.proof,
-      identity: { ...localIdentity, protocolVersion: 4 },
+      identity: { ...localIdentity, webProtocol: 4 },
     });
     const client = new Client({
       url: "ws://127.0.0.1:42123/ws",
