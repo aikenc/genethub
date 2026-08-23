@@ -71,7 +71,10 @@ impl ChildHandle {
             tokio::process::Command::new(crate::guest_paths::host_path_from_guest(program));
         command
             .args(arguments)
-            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .envs(
+                env.iter()
+                    .map(|(k, v)| (k.as_str(), crate::guest_paths::env_value_for_host(v))),
+            )
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -231,7 +234,7 @@ impl wit::Host for crate::load::Host {
     }
 
     async fn scratch_dir(&mut self) -> String {
-        std::env::temp_dir().to_string_lossy().into_owned()
+        crate::guest_paths::env_value_for_guest(std::env::temp_dir().to_string_lossy())
     }
 }
 

@@ -65,7 +65,7 @@ impl PtySession {
             .into_owned();
         command.cwd(&cwd);
         for (key, value) in env {
-            command.env(key, value);
+            command.env(key, crate::guest_paths::env_value_for_host(value));
         }
 
         let mut child = pair

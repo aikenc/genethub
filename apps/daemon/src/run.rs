@@ -254,10 +254,18 @@ impl SingleInstance {
         // File contents are for human/CLI diagnostics only. The kernel-held
         // lock is the authority: it is released on crash and cannot suffer pid
         // reuse or the check-then-write race of the former pid probe.
-        file.set_len(0)?;
-        file.rewind()?;
-        write!(file, "{}", crate::host_pid::current())?;
-        file.sync_all()?;
+        //
+        // On WASI the host holds the lock on a second handle. Windows
+        // `LockFileEx` is mandatory, so `set_len` / `write` through the guest
+        // fd then fail as a bare `I/O error (os error 29)` and first start
+        // never prints the listening line.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            file.set_len(0)?;
+            file.rewind()?;
+            write!(file, "{}", crate::host_pid::current())?;
+            file.sync_all()?;
+        }
         Ok(SingleInstance {
             file: Some(file),
             path,
