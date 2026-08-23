@@ -61,7 +61,11 @@ pub struct ChildHandle {
 }
 
 impl ChildHandle {
-    pub fn spawn(argv: &[String], env: &[(String, String)], cwd: Option<&str>) -> Result<Self, String> {
+    pub fn spawn(
+        argv: &[String],
+        env: &[(String, String)],
+        cwd: Option<&str>,
+    ) -> Result<Self, String> {
         let (program, arguments) = argv.split_first().ok_or("empty argv")?;
         let mut command = tokio::process::Command::new(program);
         command
@@ -214,11 +218,9 @@ impl wit::Host for crate::load::Host {
     ) -> Result<Resource<ChildHandle>, wit::SpawnError> {
         let child = ChildHandle::spawn(&argv, &env, cwd.as_deref())
             .map_err(|message| wit::SpawnError { message })?;
-        self.table
-            .push(child)
-            .map_err(|error| wit::SpawnError {
-                message: error.to_string(),
-            })
+        self.table.push(child).map_err(|error| wit::SpawnError {
+            message: error.to_string(),
+        })
     }
 
     async fn locate(&mut self, name: String, extra: Vec<String>) -> Option<String> {

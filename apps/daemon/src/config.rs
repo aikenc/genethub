@@ -122,7 +122,7 @@ impl Paths {
             self.devices_file(),
             self.log_file(),
         ] {
-            match fs::symlink_metadata(&path) {
+            match sensitive_metadata(&path) {
                 Ok(metadata) => {
                     reject_link_or_reparse(&path, &metadata)?;
                     if !metadata.is_file() {
@@ -147,6 +147,7 @@ impl Paths {
 pub fn home_dir() -> Option<PathBuf> {
     dirs::home_dir().or_else(|| {
         std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
     })
@@ -693,7 +694,7 @@ pub fn save_private(path: &Path, body: &[u8]) -> Result<()> {
     drop(file);
     replace_private(&tmp, path)?;
     cleanup.disarm();
-    let metadata = fs::symlink_metadata(path)
+    let metadata = sensitive_metadata(path)
         .with_context(|| format!("inspecting published private file {}", path.display()))?;
     reject_link_or_reparse(path, &metadata)?;
     if !metadata.is_file() {
@@ -759,7 +760,7 @@ impl Drop for PrivateTemp {
 }
 
 pub(crate) fn ensure_real_directory(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
+    match sensitive_metadata(path) {
         Ok(metadata) => {
             reject_link_or_reparse(path, &metadata)?;
             if !metadata.is_dir() {
@@ -773,13 +774,27 @@ pub(crate) fn ensure_real_directory(path: &Path) -> Result<()> {
         }
     }
     fs::create_dir_all(path)?;
-    let metadata = fs::symlink_metadata(path)
+    let metadata = sensitive_metadata(path)
         .with_context(|| format!("inspecting created directory {}", path.display()))?;
     reject_link_or_reparse(path, &metadata)?;
     if !metadata.is_dir() {
         anyhow::bail!("expected a directory at {}", path.display());
     }
     Ok(())
+}
+
+/// WASI on a Windows host cannot perform a no-follow metadata lookup and
+/// returns `ENOTSUP` before the native ACL import gets a chance to inspect the
+/// path. The import is the fail-closed no-follow boundary there; ordinary
+/// metadata remains useful to distinguish files and directories in the guest.
+#[cfg(target_family = "wasm")]
+fn sensitive_metadata(path: &Path) -> std::io::Result<fs::Metadata> {
+    fs::metadata(path)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn sensitive_metadata(path: &Path) -> std::io::Result<fs::Metadata> {
+    fs::symlink_metadata(path)
 }
 
 #[cfg(unix)]

@@ -1358,16 +1358,6 @@ fn error_code_name(code: ErrorCode) -> &'static str {
     }
 }
 
-/// Integrity metadata delivered beside a binary is not an authenticity root.
-/// Until releases have an independently pinned signing key, no protocol caller
-/// may make this machine fetch or execute an update.
-fn automatic_update_refusal() -> Handled {
-    Handled::err(
-        ErrorCode::Unsupported,
-        "自动更新尚未启用：请从官方发布页手动下载，并核对 SHA256SUMS",
-    )
-}
-
 async fn remote_status(state: &Shared) -> genehub_proto::RemoteAccess {
     match state.remote.get() {
         Some(remote) => remote.status().await,
@@ -1454,15 +1444,11 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_update_entry_points_fail_closed() {
-        let handled = automatic_update_refusal();
-        match handled.reply {
-            Err(error) => {
-                assert_eq!(error.code, ErrorCode::Unsupported);
-                assert!(error.message.contains("手动下载"));
-                assert!(error.message.contains("SHA256SUMS"));
-            }
-            Ok(_) => panic!("an unsigned updater entry point was enabled"),
-        }
+    fn native_update_entry_points_fail_closed() {
+        let check = crate::host_update::check().expect_err("native check must refuse");
+        assert!(check.contains("手动下载"), "{check}");
+        assert!(check.contains("SHA256SUMS"), "{check}");
+        let apply = crate::host_update::apply("web").expect_err("native apply must refuse");
+        assert!(apply.contains("手动下载"), "{apply}");
     }
 }

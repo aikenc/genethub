@@ -476,7 +476,8 @@ impl Downloader {
 /// something other than a release, and a name with a separator in it is a path
 /// we never agreed to write to.
 fn target_path(dir: &Path, url: &str) -> Result<PathBuf> {
-    let parsed = crate::http::Url::parse(url).with_context(|| format!("reading the address {url}"))?;
+    let parsed =
+        crate::http::Url::parse(url).with_context(|| format!("reading the address {url}"))?;
     if parsed.scheme() != "https" {
         bail!("拒绝下载：{} 不是 https 地址", parsed.scheme());
     }

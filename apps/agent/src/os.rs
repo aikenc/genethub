@@ -55,7 +55,10 @@ pub fn cwd() -> PathBuf {
 /// this one process as its writer. Native keeps O_APPEND.
 #[cfg(not(target_family = "wasm"))]
 pub fn open_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new().create(true).append(true).open(path)
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
 #[cfg(target_family = "wasm")]

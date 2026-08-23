@@ -4814,7 +4814,10 @@ mod tests {
         // take over, so exercise the real retry boundary instead of racing it.
         let mut locked = false;
         for _ in 0..40 {
-            match crate::fs_lock::try_lock_exclusive(&legacy, &dir.path().join(".genethub/owner.lock")) {
+            match crate::fs_lock::try_lock_exclusive(
+                &legacy,
+                &dir.path().join(".genethub/owner.lock"),
+            ) {
                 Ok(()) => {
                     locked = true;
                     break;

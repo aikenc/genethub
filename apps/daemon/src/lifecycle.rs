@@ -161,6 +161,7 @@ mod tests {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(paths.lock_file())
             .unwrap();
         crate::fs_lock::try_lock_exclusive(&lock, paths.lock_file().as_path()).unwrap();

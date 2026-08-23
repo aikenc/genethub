@@ -10,10 +10,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-#[cfg(not(target_family = "wasm"))]
-pub use cap_std::fs::Dir;
 #[cfg(all(not(unix), not(target_family = "wasm")))]
 use cap_std::ambient_authority;
+#[cfg(not(target_family = "wasm"))]
+pub use cap_std::fs::Dir;
 
 #[cfg(target_family = "wasm")]
 use std::fs::{self, File};
@@ -103,7 +103,12 @@ impl Dir {
         fs::write(self.join(relative.as_ref()), contents)
     }
 
-    pub fn rename(&self, from: impl AsRef<Path>, _to_dir: &Self, to: impl AsRef<Path>) -> io::Result<()> {
+    pub fn rename(
+        &self,
+        from: impl AsRef<Path>,
+        _to_dir: &Self,
+        to: impl AsRef<Path>,
+    ) -> io::Result<()> {
         fs::rename(self.join(from.as_ref()), self.join(to.as_ref()))
     }
 
@@ -115,7 +120,12 @@ impl Dir {
         fs::remove_dir_all(self.join(relative.as_ref()))
     }
 
-    pub fn copy(&self, from: impl AsRef<Path>, _to_dir: &Self, to: impl AsRef<Path>) -> io::Result<u64> {
+    pub fn copy(
+        &self,
+        from: impl AsRef<Path>,
+        _to_dir: &Self,
+        to: impl AsRef<Path>,
+    ) -> io::Result<u64> {
         fs::copy(self.join(from.as_ref()), self.join(to.as_ref()))
     }
 

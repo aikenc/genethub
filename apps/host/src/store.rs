@@ -141,6 +141,7 @@ impl ArtifactStore {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub fn discard_active(&self) -> Result<()> {
         remove_if_present(&self.active)?;
         sync_directory(&self.root)

@@ -54,7 +54,9 @@ pub fn stderr() -> Stdout {
 
 fn failed(context: &str, error: StreamError) -> io::Error {
     match error {
-        StreamError::Closed => io::Error::new(io::ErrorKind::BrokenPipe, format!("{context}: closed")),
+        StreamError::Closed => {
+            io::Error::new(io::ErrorKind::BrokenPipe, format!("{context}: closed"))
+        }
         StreamError::LastOperationFailed(e) => {
             io::Error::other(format!("{context}: {}", e.to_debug_string()))
         }

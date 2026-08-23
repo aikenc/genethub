@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
+use crate::os_process::{Child, ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
@@ -17,7 +18,6 @@ use genehub_proto::{
 };
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use crate::os_process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, Mutex};
 
 use super::stdio::write_json_line;

@@ -282,7 +282,10 @@ impl Daemon {
             }
         });
 
-        match rx.recv_timeout(Duration::from_secs(20)) {
+        // The resident shell compiles the component in memory on every cold
+        // start. Constrained Windows and macOS runners can legitimately spend
+        // longer than twenty seconds here even though the process is healthy.
+        match rx.recv_timeout(Duration::from_secs(60)) {
             Ok(()) => {
                 let (endpoint, published_pid) = self
                     .published()

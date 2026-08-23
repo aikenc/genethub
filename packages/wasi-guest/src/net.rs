@@ -18,7 +18,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use wasi::io::streams::{InputStream, OutputStream, StreamError};
 use wasi::sockets::instance_network::instance_network;
 use wasi::sockets::ip_name_lookup::resolve_addresses;
-use wasi::sockets::network::{ErrorCode, IpAddress, IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, Ipv6SocketAddress};
+use wasi::sockets::network::{
+    ErrorCode, IpAddress, IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, Ipv6SocketAddress,
+};
 use wasi::sockets::tcp::TcpSocket;
 use wasi::sockets::tcp_create_socket::create_tcp_socket;
 
@@ -78,7 +80,10 @@ async fn connect_to(address: IpAddress, port: u16) -> io::Result<TcpStream> {
     let (family, remote) = match address {
         IpAddress::Ipv4(octets) => (
             IpAddressFamily::Ipv4,
-            IpSocketAddress::Ipv4(Ipv4SocketAddress { port, address: octets }),
+            IpSocketAddress::Ipv4(Ipv4SocketAddress {
+                port,
+                address: octets,
+            }),
         ),
         IpAddress::Ipv6(groups) => (
             IpAddressFamily::Ipv6,
@@ -91,7 +96,8 @@ async fn connect_to(address: IpAddress, port: u16) -> io::Result<TcpStream> {
         ),
     };
     let network = instance_network();
-    let socket = create_tcp_socket(family).map_err(|error| socket_error("create a socket", error))?;
+    let socket =
+        create_tcp_socket(family).map_err(|error| socket_error("create a socket", error))?;
     socket
         .start_connect(&network, remote)
         .map_err(|error| socket_error("start connecting", error))?;
@@ -183,7 +189,11 @@ impl AsyncRead for TcpStream {
 }
 
 impl AsyncWrite for TcpStream {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let me = self.get_mut();
         Stream::poll_write_to(&me.output, &mut me.write_delay, cx, buf)
     }

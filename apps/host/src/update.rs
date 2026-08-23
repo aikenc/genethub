@@ -241,10 +241,17 @@ pub fn apply(_request_id: &str) -> Result<()> {
         .and_then(|verifier| verifier.verify(&signed))
         .map_err(|error| anyhow!("{error}"))?
     };
+    if verified.digest() != manifest.artifact.sha256 {
+        bail!(
+            "verified artifact {} digest {} does not match the signed manifest",
+            verified.artifact_id(),
+            verified.digest()
+        );
+    }
     guard
         .store
         .stage(&verified)
-        .map_err(|error| anyhow!("{error}"))?;
+        .map_err(|error| anyhow!("staging artifact {}: {error}", verified.artifact_id()))?;
     guard
         .store
         .advance_high_water(verified.envelope().logic_revision())

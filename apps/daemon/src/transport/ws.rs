@@ -35,6 +35,10 @@ pub type Socket = WebSocketStream<Transport>;
 /// reading the HTTP status off `Error::Http`, and that has to keep working
 /// when the socket underneath came from WASI.
 #[cfg(not(target_family = "wasm"))]
+// Tungstenite's public error grew beyond Clippy's generic size threshold. It
+// stays unboxed here because this is the compatibility boundary used by both
+// native and WASI transports, and changing it would spread through callers.
+#[allow(clippy::result_large_err)]
 pub async fn connect(url: &str, config: WebSocketConfig) -> Result<Socket, Error> {
     let request = url.into_client_request()?;
     let (socket, _) =
@@ -95,7 +99,9 @@ mod guest {
         let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
         if tls {
             Ok(Transport::Tls(
-                TlsStream::connect(host, port, host).await.map_err(Error::Io)?,
+                TlsStream::connect(host, port, host)
+                    .await
+                    .map_err(Error::Io)?,
             ))
         } else {
             Ok(Transport::Plain(
@@ -105,7 +111,10 @@ mod guest {
     }
 
     fn invalid(message: &str) -> Error {
-        Error::Io(io::Error::new(io::ErrorKind::InvalidInput, message.to_string()))
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            message.to_string(),
+        ))
     }
 
     impl AsyncRead for Transport {

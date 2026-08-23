@@ -29,7 +29,11 @@ fn genet_on(live: &Live) -> Command {
     command
 }
 
-fn envelope_from(command: &mut Command, arguments: &[&str], expected_exit: i32) -> serde_json::Value {
+fn envelope_from(
+    command: &mut Command,
+    arguments: &[&str],
+    expected_exit: i32,
+) -> serde_json::Value {
     let output = command.args(arguments).output().unwrap();
     assert_eq!(
         output.status.code(),
@@ -106,11 +110,8 @@ async fn a_machine_selector_is_refused_by_name_rather_than_ignored() {
     assert_eq!(local_only["error"]["code"], "commandNotRoutable");
     assert_eq!(local_only["error"]["details"]["command"], "daemon.stop");
 
-    let statically_answered = envelope_from(
-        &mut genet_on(&live),
-        &["schema", "--machine", "m_other"],
-        2,
-    );
+    let statically_answered =
+        envelope_from(&mut genet_on(&live), &["schema", "--machine", "m_other"], 2);
     assert_eq!(statically_answered["error"]["code"], "commandNotRoutable");
 
     let routable = envelope_from(

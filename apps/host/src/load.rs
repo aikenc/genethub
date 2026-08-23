@@ -304,7 +304,7 @@ fn build_instance(
             table: ResourceTable::new(),
             wasi: wasi.build(),
             http: WasiHttpCtx::new(),
-            http_hooks: crate::http_hooks::Hooks::default(),
+            http_hooks: crate::http_hooks::Hooks,
             tls: WasiTlsCtxBuilder::new().build(),
         },
     );
@@ -324,7 +324,7 @@ fn build_instance(
     // by name.
     let mut tls = wasmtime_wasi_tls::p2::LinkOptions::default();
     tls.tls(true);
-    wasmtime_wasi_tls::p2::add_to_linker(&mut linker, &mut tls)
+    wasmtime_wasi_tls::p2::add_to_linker(&mut linker, &tls)
         .anyhow()
         .context("wasi:tls linker")?;
     crate::bindings::genehub::host::process::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| {

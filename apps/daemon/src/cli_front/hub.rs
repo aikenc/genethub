@@ -6,8 +6,8 @@
 
 use std::time::{Duration, Instant};
 
-use genehub_proto::{HubClaim, HubStatus, Reply, Request};
 use crate::channel;
+use genehub_proto::{HubClaim, HubStatus, Reply, Request};
 
 use super::rpc::Rpc;
 use super::{fail, ok, EXIT_FAILED, EXIT_INVALID_ARGS};
@@ -124,7 +124,9 @@ async fn login(args: &[String]) -> i32 {
 
     let payload = login_payload(&status, None);
     if let Some(url) = payload.get("url").and_then(|value| value.as_str()) {
-        super::emit_stderr(format!("open this URL in a browser to approve the machine:\n{url}"));
+        super::emit_stderr(format!(
+            "open this URL in a browser to approve the machine:\n{url}"
+        ));
     }
 
     if !options.wait {
@@ -396,9 +398,7 @@ async fn wait_until_settled(rpc: &Rpc, initial: serde_json::Value) -> i32 {
                     return ok(initial);
                 }
             }
-            Err(error) => {
-                return fail("daemon_unreachable", &error, super::EXIT_UNREACHABLE)
-            }
+            Err(error) => return fail("daemon_unreachable", &error, super::EXIT_UNREACHABLE),
         }
         tokio::time::sleep(WAIT_POLL).await;
     }

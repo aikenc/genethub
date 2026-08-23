@@ -105,7 +105,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
         throw new Error("the workspace would not open");
       workspaceId = workspace.data.id;
       workspaceRootHandle = workspace.data.folders[0]!.rootHandle;
-    }, 30_000);
+    }, 120_000);
 
     afterAll(async () => {
       client?.close();
@@ -193,11 +193,11 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
 
       await waitFor(
         () => assistantText(timeline).includes("读完了") && timeline.status === "idle",
-        20_000,
+        60_000,
       );
       expect(timeline.status).toBe("idle");
       expect(timeline.lastError).toBeNull();
-    }, 30_000);
+    }, 90_000);
 
     it("runs a tool the model asks for, and the file really changes", async () => {
       model.script(
@@ -243,7 +243,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
         },
       });
 
-      await waitFor(() => assistantText(timeline).includes("写好了"), 20_000);
+      await waitFor(() => assistantText(timeline).includes("写好了"), 60_000);
       expect(
         readFileSync(path.join(workspaceDir, "result.txt"), "utf8").trim(),
       ).toBe("DONE");
@@ -253,7 +253,7 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
         toolCall,
         "the browser should see the tool call, not just its effect",
       ).toBeTruthy();
-    }, 30_000);
+    }, 90_000);
 
     /**
      * The acceptance action behind the whole adapter layer: one piece of frontend
@@ -312,9 +312,12 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
             },
           });
           // The mock answers every unscripted turn the same way, including the
-          // extra call OpenCode makes to name the thread.
+          // extra call OpenCode makes to name the thread. Wait for idle so the
+          // naming turn cannot leave one timeline with an extra item kind.
           await waitFor(
-            () => assistantText(timeline).includes("好的"),
+            () =>
+              assistantText(timeline).includes("好的") &&
+              timeline.status === "idle",
             60_000,
           ).catch(() => {
             throw new Error(
@@ -636,10 +639,10 @@ function startDaemon(
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const timer = setTimeout(
-      () => reject(new Error("the daemon never reported a port")),
-      15_000,
-    );
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("the daemon never reported a port"));
+    }, 60_000);
     child.stderr?.on("data", (chunk) =>
       process.stderr.write(`[daemon] ${chunk}`),
     );

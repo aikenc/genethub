@@ -7,10 +7,10 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::os_process::Command;
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{GitChange, GitChangeKind, GitStatus};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use crate::os_process::Command;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_STDOUT_BYTES: usize = 2 * 1024 * 1024;

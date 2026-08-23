@@ -119,7 +119,11 @@ impl AsyncRead for TlsStream {
 }
 
 impl AsyncWrite for TlsStream {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let me = self.get_mut();
         Stream::poll_write_to(&me.output, &mut me.write_delay, cx, buf)
     }

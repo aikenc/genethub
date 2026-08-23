@@ -5,8 +5,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use serde_json::{json, Value};
 use crate::os_process::{Command, Output};
+use serde_json::{json, Value};
 
 use super::{
     arg_str, arg_usize, truncate_tail, ToolResult, TruncationResult, DEFAULT_MAX_BYTES,

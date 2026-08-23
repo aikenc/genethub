@@ -76,6 +76,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::os_process::{Child, ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
@@ -86,7 +87,6 @@ use genehub_proto::{
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use crate::os_process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
@@ -1316,7 +1316,7 @@ fn decode_base64(input: &str) -> Result<Vec<u8>> {
         return Err(anyhow!("base64 length is not a multiple of 4"));
     }
     let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);
-    for chunk in cleaned.chunks_exact(4) {
+    for chunk in cleaned.as_chunks::<4>().0 {
         let pad = chunk.iter().filter(|&&byte| byte == b'=').count();
         if pad > 2 {
             return Err(anyhow!("base64 padding is longer than two characters"));
