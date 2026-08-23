@@ -17,7 +17,7 @@ fn daemon_binary() -> PathBuf {
     // workspace's own target directory rather than this crate's.
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     // The stamp decides what the binary is called (`genet` in a release,
-    // `genet-dev` in the tree) — read it from the daemon's channel constants
+    // `genet-local` in the tree) — read it from the daemon's channel constants
     // rather than pinning one channel's name here.
     let channel = std::fs::read_to_string(repo.join("apps/daemon/src/channel.rs"))
         .expect("the daemon channel constants must be readable");

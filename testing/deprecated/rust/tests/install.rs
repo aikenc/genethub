@@ -37,7 +37,7 @@ fn installing_puts_both_binaries_where_the_path_can_find_them() {
         stderr(&output)
     );
 
-    for binary in ["genet-dev", "genet-agent-dev"] {
+    for binary in ["genet-local", "genet-agent-local"] {
         let path = bin.join(binary);
         assert!(path.is_file(), "{binary} was not installed");
         let mode = fs::metadata(&path).expect("stat").permissions().mode();
@@ -58,7 +58,7 @@ fn installing_puts_both_binaries_where_the_path_can_find_them() {
         "no PATH hint in:\n{said}"
     );
     assert!(
-        said.contains("genet-dev daemon start"),
+        said.contains("genet-local daemon start"),
         "did not say what to run:\n{said}"
     );
 }
@@ -99,7 +99,7 @@ fn unsafe_download_bases_are_refused_before_fetching() {
     ] {
         let output = Command::new("sh")
             .arg(&script)
-            .env("GENEHUB_DEV_DOWNLOAD_BASE", base)
+            .env("GENEHUB_LOCAL_DOWNLOAD_BASE", base)
             .output()
             .expect("run install.sh");
         assert!(
@@ -150,7 +150,7 @@ fn a_download_that_does_not_match_its_checksum_is_not_installed() {
         "unhelpful refusal: {}",
         stderr(&output)
     );
-    assert!(!bin.join("genet-dev").exists(), "installed anyway");
+    assert!(!bin.join("genet-local").exists(), "installed anyway");
 }
 
 #[test]
@@ -179,13 +179,13 @@ fn a_release_with_no_checksums_is_refused_rather_than_trusted() {
 /// The tree's own copy of the script claims channel `dev`, and a dev install
 /// has no artifacts to fetch. Without an explicit download base the script
 /// must refuse — the alternative is someone piping the source checkout into
-/// `sh` and quietly installing the official line over their dev machine.
+/// `sh` and quietly installing the stable line over their source checkout.
 #[test]
 fn the_tree_installer_refuses_without_an_explicit_download_base() {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh");
     let output = Command::new("sh")
         .arg(script)
-        .env_remove("GENEHUB_DEV_DOWNLOAD_BASE")
+        .env_remove("GENEHUB_LOCAL_DOWNLOAD_BASE")
         .output()
         .expect("run install.sh");
     assert!(!output.status.success(), "a dev install.sh ran anyway");
@@ -216,9 +216,9 @@ fn fake_release() -> TempDir {
     // Stand-ins rather than the real binaries: what is under test is the script,
     // and building the daemon here would make this test depend on a build it
     // does not care about.
-    for binary in ["genet-dev", "genet-agent-dev"] {
+    for binary in ["genet-local", "genet-agent-local"] {
         let path = staged.join(binary);
-        let body = if binary == "genet-dev" {
+        let body = if binary == "genet-local" {
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${GENEHUB_TEST_CALLS:-/dev/null}\"\necho ok\n"
         } else {
             "#!/bin/sh\necho ok\n"
@@ -233,8 +233,8 @@ fn fake_release() -> TempDir {
         .arg(&asset)
         .arg("-C")
         .arg(&staged)
-        .arg("genet-dev")
-        .arg("genet-agent-dev")
+        .arg("genet-local")
+        .arg("genet-agent-local")
         .status()
         .expect("run tar");
     assert!(tar.success(), "tar failed");
@@ -261,7 +261,7 @@ fn asset_name() -> String {
     } else {
         "x64"
     };
-    format!("genet-dev-{os}-{arch}.tar.gz")
+    format!("genet-local-{os}-{arch}.tar.gz")
 }
 
 fn install(release: &Path, bin: &Path) -> Output {
@@ -320,10 +320,10 @@ cp "$GENEHUB_TEST_RELEASE/${url##*/}" "$output"
         .env("PATH", path)
         .env("GENEHUB_TEST_RELEASE", release)
         .env(
-            "GENEHUB_DEV_DOWNLOAD_BASE",
+            "GENEHUB_LOCAL_DOWNLOAD_BASE",
             "https://downloads.example.invalid",
         )
-        .env("GENEHUB_DEV_BIN_DIR", bin);
+        .env("GENEHUB_LOCAL_BIN_DIR", bin);
     if let Some(calls) = calls {
         command
             .env("GENEHUB_RESTART_DAEMON", "1")

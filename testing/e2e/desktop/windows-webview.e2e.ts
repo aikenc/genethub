@@ -7,7 +7,7 @@ import { BlockedError, defineE2e } from "../../framework/public.ts";
 defineE2e(
   {
     id: "e2e.desktop.windows-webview",
-    title: "Windows WebView2 loads the remote official site without a native bridge",
+    title: "Windows WebView2 loads the remote stable site without a native bridge",
     oracle:
       "Installed Desktop boot page navigates to the channel HTTPS origin; the remote page has no Tauri invoke surface",
     catches: [
@@ -28,7 +28,7 @@ defineE2e(
     }
     const executable = path.join(
       t.openRoot,
-      "apps/desktop/src-tauri/target/release/genethub-desktop-dev.exe",
+      "apps/desktop/src-tauri/target/release/genethub-desktop-local.exe",
     );
     if (!existsSync(executable)) {
       throw new BlockedError("build the dev Desktop bundle before running the Windows WebView2 gate");

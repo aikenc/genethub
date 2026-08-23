@@ -57,7 +57,7 @@ fn assert_same(guest: [u8; 32]) -> Result<()> {
 
 /// What a supervisor or a person should do after `ABI_PAIRING_FAILED`.
 pub fn recovery_action(channel: &str) -> &'static str {
-    if channel == "dev" {
+    if channel == "local" {
         "rebuild"
     } else {
         "update"
@@ -215,17 +215,15 @@ mod tests {
     }
 
     #[test]
-    fn official_and_beta_ask_for_an_update() {
-        assert_eq!(recovery_action("dev"), "rebuild");
+    fn released_channels_ask_for_an_update() {
+        assert_eq!(recovery_action("local"), "rebuild");
+        assert_eq!(recovery_action("dev"), "update");
         assert_eq!(recovery_action("beta"), "update");
-        assert_eq!(recovery_action("official"), "update");
-        let official = pairing_message("official", "digest-mismatch", Some(host_digest()));
-        assert!(official.contains("action=update"), "{official}");
-        assert!(
-            official.contains("install the GeneHub update"),
-            "{official}"
-        );
-        assert!(!official.contains("compile genehub-host"), "{official}");
+        assert_eq!(recovery_action("stable"), "update");
+        let stable = pairing_message("stable", "digest-mismatch", Some(host_digest()));
+        assert!(stable.contains("action=update"), "{stable}");
+        assert!(stable.contains("install the GeneHub update"), "{stable}");
+        assert!(!stable.contains("compile genehub-host"), "{stable}");
     }
 
     #[test]

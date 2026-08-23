@@ -271,14 +271,14 @@ fn warn_if_cross_channel(hub_url: &str) {
     let lower = hub_url.to_ascii_lowercase();
     let looks_beta = lower.contains("relay-beta") || lower.contains("beta.");
     match channel::CHANNEL {
-        "official" if looks_beta => {
+        "stable" if looks_beta => {
             super::emit_stderr(format!(
-                "warning: official build pointing at a beta/self-built Hub ({hub_url})"
+                "warning: stable build pointing at a beta/self-built Hub ({hub_url})"
             ));
         }
         "beta" if lower.contains("relay.genethub.com") && !looks_beta => {
             super::emit_stderr(format!(
-                "warning: beta build pointing at the official Hub ({hub_url})"
+                "warning: beta build pointing at the stable Hub ({hub_url})"
             ));
         }
         _ => {}

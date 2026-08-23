@@ -15,7 +15,7 @@ const CHINESE_GATE: Partial<Record<GateName, string>> = {
   merge: "合并门禁",
   dev: "开发发布门禁",
   beta: "Beta 发布门禁",
-  official: "正式发布门禁",
+  stable: "Stable 发布门禁",
 };
 
 export function parseSummaryLanguage(value: string): SummaryLanguage {

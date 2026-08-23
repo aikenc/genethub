@@ -55,7 +55,7 @@ function parityMeta(id: string, title: string, oracle: string, catches: string[]
     },
     surfaces: ["genehub-host", "daemon"],
     productInterfaces: ["@genehub/workbench/client"],
-    requiredArtifacts: ["genehub-host-dev", "genehub_guest.wasm"],
+    requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"],
   };
 }
 

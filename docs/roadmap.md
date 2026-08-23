@@ -9,7 +9,7 @@
 
 | 阶段 | 名称 | 用户能得到什么 | 状态 |
 |------|------|----------------|------|
-| **WASM 持续交付** | 95% 高频变化不重发原生程序 | official 分钟级、beta/alpha/dev 秒级，后台更新且自动回滚 | Linux/dev 底座已验证；Windows parity 与交付链未完成 |
+| **WASM 持续交付** | 95% 高频变化不重发原生程序 | stable 分钟级、beta/dev 秒级，后台更新且自动回滚 | Linux/dev 底座已验证；Windows parity 与交付链未完成 |
 | **MVP** | 能装、能挂、能跑、能接力 | 安装 → 托盘后台 → 真跑起一条任务 → 换设备继续 | 进行中 |
 | **自成闭环** | 不依赖任何外部服务 | 只部署 relay + 静态工作台，就能远程用自己的电脑 | ✅ |
 | **M2** | 能带走 · 能多选 | 手机 App、设备管理、分屏 | 计划 |
@@ -38,12 +38,12 @@
 | 测试工程基线 | `testing` 的 TypeScript typecheck 有 4 个 HEAD 既有错误（一个可空值、三个未使用 import）；testctl lint/governance 通过不能替代它 | 修到 `npm --prefix testing run typecheck` 0 error，并纳入候选机械门 |
 | guest 构建 | release 各平台重复编；当前 release profile 为 fat LTO 单 codegen unit，热重编实测 71.66 秒 | guest 每 candidate 只编一次；iterate profile 的 build+upload P95 支撑 ≤60 秒端到端 |
 | 完整/高频 workflow | 只有 tag/full release，没有 guest+website workflow，当前 SHA 没有远端发布演练 | 两模式分别有 rehearsal、真实耗时、失败门与可晋升的 immutable artifact |
-| 供应链与兼容 | official/beta 未验签；无 host/world/proto 兼容清单、反回滚 | 签名 release set 每次装载验证；不兼容候选拒绝并回 known-good |
+| 供应链与兼容 | stable/beta 未验签；无 host/world/proto 兼容清单、反回滚 | 签名 release set 每次装载验证；不兼容候选拒绝并回 known-good |
 | 客户端更新 | 只有用户点击检查/下载 installer；自动路径 fail-closed | 后台发现/下载/预热/健康确认/回滚，无提示与人工重启 |
 | 切换连续性 | 当前 reload 销毁 Store、断控制面并杀 process/PTY，活动 turn 会丢且用户看不出发生了什么 | 中断可见且状态可恢复即可，不追求无缝续接；更新失败不影响正在工作的 known-good 实例 |
 | Web/desktop | Cloud 只有完整人工 deploy；desktop WebView 固化在 installer | website-only 原子部署；desktop 有签名热 Web bundle 或不计入 95% 分子 |
 | 混合版本 | Web/daemon 严格要求 data-plane v3 相等 | 至少一个明确兼容窗口和可证明的 guest/Web 切换顺序 |
-| SLO telemetry | 不存在 | promotion→site/manifest→online active/rollback 全链记录 P50/P95；official ≤10 分钟，高频 ≤60 秒 |
+| SLO telemetry | 不存在 | promotion→site/manifest→online active/rollback 全链记录 P50/P95；stable ≤10 分钟，高频 ≤60 秒 |
 | 运行时债务 | guest readiness 仍为 4 ms timer poll；host 读写 preopen 根目录 | 真 `wasi:io/poll` reactor、可审计最小 preopen/能力边界 |
 
 顺序：先修 Windows ACL 并完成跨平台默认 WASM 首启门；同时清掉测试工程 typecheck 基线错误，再修 CI 覆盖与双 binding 生成，建立可信构建基线；继而做签名 release-set、双槽位与回滚、website-only/desktop UI 更新和混合版本；最后以远端演练和 90 天指标关闭愿景门。速度门永远不能替代下面 MVP 与能力回归门。

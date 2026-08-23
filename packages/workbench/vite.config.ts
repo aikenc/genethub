@@ -69,7 +69,7 @@ function relayProxy(): Record<string, string | ProxyOptions> {
 }
 
 export default defineConfig({
-  plugins: [react(), devIdentity()],
+  plugins: [react(), localIdentity()],
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
@@ -107,15 +107,15 @@ export default defineConfig({
   },
 });
 
-function devIdentity() {
+function localIdentity() {
   return {
-    name: "genehub-dev-identity",
+    name: "genehub-local-identity",
     transformIndexHtml(html: string) {
-      const name = process.env.VITE_GENEHUB_DEV_NAME;
+      const name = process.env.VITE_GENEHUB_LOCAL_NAME;
       if (!name) return html;
       return html
         .replace("<title>GeneHub</title>", `<title>GeneHub ${name}</title>`)
-        .replace("</head>", `  <meta name="genehub-dev-build" content="开发版 ${name}" />\n  </head>`);
+        .replace("</head>", `  <meta name="genehub-local-build" content="本地版 ${name}" />\n  </head>`);
     },
   };
 }

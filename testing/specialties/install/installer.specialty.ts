@@ -20,7 +20,7 @@ function installerUnsupported(): boolean {
 function assetName(): string {
   const os = process.platform === "darwin" ? "macos" : "linux";
   const arch = process.arch === "arm64" ? "arm64" : "x64";
-  return `genet-dev-${os}-${arch}.tar.gz`;
+  return `genet-local-${os}-${arch}.tar.gz`;
 }
 
 function scriptPath(openRoot: string): string {
@@ -67,19 +67,19 @@ function fakeRelease(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "genehub-install-release-"));
   const staged = path.join(dir, "staged");
   mkdirSync(staged, { recursive: true });
-  const binary = path.join(staged, "genet-dev");
+  const binary = path.join(staged, "genet-local");
   writeFileSync(
     binary,
     "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${GENEHUB_TEST_CALLS:-/dev/null}\"\necho ok\n",
   );
   chmodSync(binary, 0o755);
-  const host = path.join(staged, "genehub-host-dev");
-  writeFileSync(host, "#!/bin/sh\necho genehub-host-dev\n");
+  const host = path.join(staged, "genehub-host-local");
+  writeFileSync(host, "#!/bin/sh\necho genehub-host-local\n");
   chmodSync(host, 0o755);
   writeFileSync(path.join(staged, "genehub_guest.wasm"), "guest-component-fixture");
   const tar = spawnSync(
     "tar",
-    ["-czf", path.join(dir, assetName()), "-C", staged, "genet-dev", "genehub-host-dev", "genehub_guest.wasm"],
+    ["-czf", path.join(dir, assetName()), "-C", staged, "genet-local", "genehub-host-local", "genehub_guest.wasm"],
     { encoding: "utf8" },
   );
   if (tar.status !== 0) throw new Error(`tar failed: ${tar.stderr}`);
@@ -103,8 +103,8 @@ function runInstall(
       ...process.env,
       PATH: `${tools}:${process.env.PATH ?? ""}`,
       GENEHUB_TEST_RELEASE: release,
-      GENEHUB_DEV_DOWNLOAD_BASE: "https://downloads.example.invalid",
-      GENEHUB_DEV_BIN_DIR: bin,
+      GENEHUB_LOCAL_DOWNLOAD_BASE: "https://downloads.example.invalid",
+      GENEHUB_LOCAL_BIN_DIR: bin,
       ...extra,
     },
   });
@@ -120,7 +120,7 @@ defineSpecialty(
   {
     id: "specialty.install.binaries-and-logic-on-path",
     title: "Installing puts binaries and logic where the path can find them",
-    oracle: "install.sh lands an executable genet-dev and genehub-host-dev plus genehub_guest.wasm and says PATH/start",
+    oracle: "install.sh lands an executable genet-local and genehub-host-local plus genehub_guest.wasm and says PATH/start",
     catches: ["installer writes a truncated file", "guest component or shell omitted"],
     tags: ["core", "install", "parity"],
     expectedDurationMs: 8_000,
@@ -135,17 +135,17 @@ defineSpecialty(
     try {
       const output = runInstall(t.openRoot, release, bin);
       t.assertions.assert(output.status === 0, `install failed: ${output.stderr}`);
-      const installed = path.join(bin, "genet-dev");
-      t.assertions.assert(existsSync(installed), "genet-dev was not installed");
+      const installed = path.join(bin, "genet-local");
+      t.assertions.assert(existsSync(installed), "genet-local was not installed");
       const ran = spawnSync(installed, [], { encoding: "utf8" });
-      t.assertions.assert(ran.status === 0, "genet-dev did not run");
-      t.assertions.assert(existsSync(path.join(bin, "genehub-host-dev")), "genehub-host-dev was not installed");
+      t.assertions.assert(ran.status === 0, "genet-local did not run");
+      t.assertions.assert(existsSync(path.join(bin, "genehub-host-local")), "genehub-host-local was not installed");
       t.assertions.assert(
         readFileSync(path.join(bin, "genehub_guest.wasm"), "utf8") === "guest-component-fixture",
         "installed guest component did not match",
       );
       t.assertions.assert(output.stdout.includes("not on your PATH"), `no PATH hint in:\n${output.stdout}`);
-      t.assertions.assert(output.stdout.includes("genet-dev daemon start"), `did not say what to run:\n${output.stdout}`);
+      t.assertions.assert(output.stdout.includes("genet-local daemon start"), `did not say what to run:\n${output.stdout}`);
     } finally {
       rmSync(release, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
@@ -208,7 +208,7 @@ defineSpecialty(
     ]) {
       const output = spawnSync("sh", [scriptPath(t.openRoot)], {
         encoding: "utf8",
-        env: { ...process.env, GENEHUB_DEV_DOWNLOAD_BASE: base },
+        env: { ...process.env, GENEHUB_LOCAL_DOWNLOAD_BASE: base },
       });
       t.assertions.assert(output.status !== 0, `unsafe download base was accepted: ${base}`);
       t.assertions.assert(
@@ -266,7 +266,7 @@ defineSpecialty(
       const output = runInstall(t.openRoot, release, bin);
       t.assertions.assert(output.status !== 0, "a corrupt download was accepted");
       t.assertions.assert(output.stderr.includes("checksum mismatch"), `unhelpful refusal: ${output.stderr}`);
-      t.assertions.assert(!existsSync(path.join(bin, "genet-dev")), "installed anyway");
+      t.assertions.assert(!existsSync(path.join(bin, "genet-local")), "installed anyway");
     } finally {
       rmSync(release, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
@@ -304,10 +304,10 @@ defineSpecialty(
 
 defineSpecialty(
   {
-    id: "specialty.install.dev-tree-needs-base",
+    id: "specialty.install.local-tree-needs-base",
     title: "The tree installer refuses without an explicit download base",
-    oracle: "dev install.sh without GENEHUB_DEV_DOWNLOAD_BASE exits mentioning channel: dev",
-    catches: ["source checkout silently installs official"],
+    oracle: "local install.sh without GENEHUB_LOCAL_DOWNLOAD_BASE exits mentioning channel: local",
+    catches: ["source checkout silently installs stable"],
     tags: ["core", "install", "parity"],
     expectedDurationMs: 2_000,
     timeoutMs: 15_000,
@@ -315,11 +315,11 @@ defineSpecialty(
   },
   async (t) => {
     const env = { ...process.env };
-    delete env.GENEHUB_DEV_DOWNLOAD_BASE;
+    delete env.GENEHUB_LOCAL_DOWNLOAD_BASE;
     const output = spawnSync("sh", [scriptPath(t.openRoot)], { encoding: "utf8", env });
-    t.assertions.assert(output.status !== 0, "a dev install.sh ran anyway");
+    t.assertions.assert(output.status !== 0, "a local install.sh ran anyway");
     t.assertions.assert(
-      (output.stderr ?? "").includes("channel: dev"),
+      (output.stderr ?? "").includes("channel: local"),
       `the refusal does not say why:\n${output.stderr}`,
     );
   },

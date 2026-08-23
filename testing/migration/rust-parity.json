@@ -425,10 +425,10 @@
       "oldId": "rust.install.the_tree_installer_refuses_without_an_explicit_download_base",
       "suite": "install",
       "testName": "the_tree_installer_refuses_without_an_explicit_download_base",
-      "tsId": "specialty.install.dev-tree-needs-base",
+      "tsId": "specialty.install.local-tree-needs-base",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS specialty.install.dev-tree-needs-base runs scripts/install.sh against a fake release with a curl shim, matching the Rust unix installer properties. Unsupported linux/arm64 is BlockedError rather than a silent return.",
+      "assertionDelta": "TS specialty.install.local-tree-needs-base runs scripts/install.sh against a fake release with a curl shim, matching the Rust unix installer properties. Unsupported linux/arm64 is BlockedError rather than a silent return.",
       "legacyExecution": "stopped"
     },
     {
@@ -925,10 +925,10 @@
       "oldId": "rust.supply_chain.app_release_embeds_one_signed_logic_and_separates_fast_from_official_distribution",
       "suite": "supply_chain",
       "testName": "app_release_embeds_one_signed_logic_and_separates_fast_from_official_distribution",
-      "tsId": "specialty.contracts.release-signed-logic",
+      "tsId": "specialty.contracts.release-signed-component",
       "status": "ts-owned",
       "oracleClass": "native-intrinsic",
-      "assertionDelta": "TS specialty.contracts.release-signed-logic reads the same release/workflow source facts as the frozen supply-chain tests (native-intrinsic / public-behavior as classified).",
+      "assertionDelta": "TS specialty.contracts.release-signed-component reads the same release/workflow source facts as the frozen supply-chain tests (native-intrinsic / public-behavior as classified).",
       "legacyExecution": "stopped"
     },
     {

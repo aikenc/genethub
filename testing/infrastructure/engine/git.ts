@@ -23,7 +23,7 @@ export function repoIdentity(repo: string): RepoIdentity {
 
 export function artifactIdentity(openRoot: string): ArtifactIdentity {
   const suffix = process.platform === "win32" ? ".exe" : "";
-  const names = ["genet-dev", "genet-beta", "genet-alpha", "genet"];
+  const names = ["genet-local", "genet-dev", "genet-beta", "genet"];
   for (const name of names) {
     const candidate = path.join(openRoot, "target", "debug", `${name}${suffix}`);
     if (!existsSync(candidate)) continue;

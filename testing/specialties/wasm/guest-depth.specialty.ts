@@ -58,7 +58,7 @@ function wasmMeta(
     },
     surfaces: ["genehub-host", "daemon", "agent"],
     productInterfaces: ["genet-cli", "@genehub/workbench/client"],
-    requiredArtifacts: ["genehub-host-dev", "genehub_guest.wasm"],
+    requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"],
   };
 }
 
@@ -93,9 +93,9 @@ defineSpecialty(
   wasmMeta(
     "specialty.wasm.guest-identity.daemon-is-host-component",
     "The running daemon is the host loading genehub_guest.wasm, not genet daemon run",
-    "status pid cmdline contains genehub-host-dev and genehub_guest.wasm and does not contain 'daemon run'",
+    "status pid cmdline contains genehub-host-local and genehub_guest.wasm and does not contain 'daemon run'",
     [
-      "native genet-dev is still the listener",
+      "native genet-local is still the listener",
       "wrapper script leftover as the pid",
       "status pid is the guest-less CLI",
     ],
@@ -108,7 +108,7 @@ defineSpecialty(
       const pid = Number(status.pid);
       t.assertions.assert(Number.isInteger(pid) && pid > 1, `implausible pid ${status.pid}`);
       const cmd = procCmdline(pid);
-      t.assertions.assert(cmd.includes("genehub-host-dev"), `pid ${pid} is not the host: ${cmd}`);
+      t.assertions.assert(cmd.includes("genehub-host-local"), `pid ${pid} is not the host: ${cmd}`);
       t.assertions.assert(cmd.includes("genehub_guest.wasm"), `pid ${pid} did not load the component: ${cmd}`);
       t.assertions.assert(!cmd.includes("daemon run"), `pid ${pid} still looks like native daemon run: ${cmd}`);
       t.assertions.assert(
@@ -124,7 +124,7 @@ defineSpecialty(
 defineSpecialty(
   wasmMeta(
     "specialty.wasm.guest-identity.host-pid-not-inherited",
-    "A pre-set GENEHUB_DEV_HOST_PID does not become the advertised daemon pid",
+    "A pre-set GENEHUB_LOCAL_HOST_PID does not become the advertised daemon pid",
     "status.pid is the live host pid, not the inherited value 1",
     [
       "inherit_env wins over the shell assertion",
@@ -135,7 +135,7 @@ defineSpecialty(
   async (t) => {
     requireWasmArtifacts(t.openRoot);
     const genet = locateGenet(t.openRoot);
-    const env = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_DEV_HOST_PID: "1" });
+    const env = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_LOCAL_HOST_PID: "1" });
     const started = runGenet(genet, ["daemon", "start"], env);
     t.assertions.assert(started.code === 0, `start failed: ${started.stderr || started.stdout}`);
     try {
@@ -143,7 +143,7 @@ defineSpecialty(
       t.assertions.assert(status.running === true, `not running: ${JSON.stringify(status)}`);
       t.assertions.assert(status.pid !== 1 && status.pid !== "1", `inherited fake pid leaked: ${JSON.stringify(status)}`);
       const pid = Number(status.pid);
-      t.assertions.assert(procCmdline(pid).includes("genehub-host-dev"), "live pid is not the host");
+      t.assertions.assert(procCmdline(pid).includes("genehub-host-local"), "live pid is not the host");
     } finally {
       runGenet(genet, ["daemon", "stop"], env);
     }
@@ -154,10 +154,10 @@ defineSpecialty(
   wasmMeta(
     "specialty.wasm.guest-identity.agent-is-second-host-process",
     "A builtin session is a second host process running the same component's agent entry",
-    "after session.create, a live pid other than the daemon runs genehub-host-dev with --entry agent on the same genehub_guest.wasm",
+    "after session.create, a live pid other than the daemon runs genehub-host-local with --entry agent on the same genehub_guest.wasm",
     [
       "agent runs inside the daemon instance",
-      "native genet-agent-dev is spawned instead",
+      "native genet-agent-local is spawned instead",
       "session.create succeeds without an agent process",
       "agent entry loads a different component than the daemon",
     ],
@@ -189,7 +189,7 @@ defineSpecialty(
           `agent shares the daemon pid ${daemonPid}: ${JSON.stringify(agents)}`,
         );
         t.assertions.assert(
-          agents.every((row) => row.cmd.includes("genehub-host-dev") || row.cmd.includes(path.basename(artifacts.host))),
+          agents.every((row) => row.cmd.includes("genehub-host-local") || row.cmd.includes(path.basename(artifacts.host))),
           `agent is not the host: ${JSON.stringify(agents)}`,
         );
         t.assertions.assert(
@@ -204,7 +204,7 @@ defineSpecialty(
           `agent entry loaded a different component than the daemon: ${JSON.stringify(agents.map((row) => row.cmd))}`,
         );
         t.assertions.assert(
-          !agents.some((row) => /(^|\s)genet-agent-dev(\s|$)/.test(row.cmd) && !row.cmd.includes("genehub-host-dev")),
+          !agents.some((row) => /(^|\s)genet-agent-local(\s|$)/.test(row.cmd) && !row.cmd.includes("genehub-host-local")),
           `native agent binary was spawned: ${JSON.stringify(agents)}`,
         );
       },
@@ -263,7 +263,7 @@ defineSpecialty(
   wasmMeta(
     "specialty.wasm.lifecycle.missing-component-fails-closed",
     "A CLI copied away from the artifacts refuses to start a native daemon",
-    "daemon start exits non-zero and no genehub-host-dev child appears under that data dir",
+    "daemon start exits non-zero and no genehub-host-local child appears under that data dir",
     ["silent fallback to genet daemon run", "start succeeds without a component"],
   ),
   async (t) => {
@@ -276,16 +276,16 @@ defineSpecialty(
     chmodSync(clone, 0o755);
     const env = genetEnv(t.openRoot, {
       ...t.env.env,
-      GENEHUB_DEV_DATA_DIR: path.join(t.env.root, "isolated-data"),
+      GENEHUB_LOCAL_DATA_DIR: path.join(t.env.root, "isolated-data"),
     });
-    delete env.GENEHUB_DEV_DAEMON_COMMAND;
-    delete env.GENEHUB_DEV_COMPONENT;
-    delete env.GENEHUB_DEV_DAEMON_COMPONENT;
+    delete env.GENEHUB_LOCAL_DAEMON_COMMAND;
+    delete env.GENEHUB_LOCAL_COMPONENT;
+    delete env.GENEHUB_LOCAL_DAEMON_COMPONENT;
     delete env.GENEHUB_HOST;
     const result = runGenet(clone, ["daemon", "start"], env);
     t.assertions.assert(result.code !== 0, `isolated CLI started without artifacts: ${result.stdout}`);
     t.assertions.assert(
-      /genehub-host-dev is missing|genehub_guest\.wasm is missing/i.test(`${result.stderr}\n${result.stdout}`),
+      /genehub-host-local is missing|genehub_guest\.wasm is missing/i.test(`${result.stderr}\n${result.stdout}`),
       `failure did not name the missing artifact: ${result.stderr || result.stdout}`,
     );
     t.assertions.assert(
@@ -457,7 +457,7 @@ defineSpecialty(
     "notes.txt is read and the turn completes; a file is not reported missing",
     [
       "guest cwd is the preopen root",
-      "GENEHUB_DEV_CWD is the daemon directory rather than the workspace",
+      "GENEHUB_LOCAL_CWD is the daemon directory rather than the workspace",
       "tool output is No such file or directory",
     ],
     { llm: "mock", ms: 45_000 },
@@ -767,7 +767,7 @@ defineSpecialty(
     // at warn; the reload lines are info, so this daemon opts into info.
     const copy = path.join(t.env.data, "genehub_guest.wasm");
     copyFileSync(component, copy);
-    const env = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_DEV_COMPONENT: copy, GENEHUB_DEV_LOG: "info" });
+    const env = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_LOCAL_COMPONENT: copy, GENEHUB_LOCAL_LOG: "info" });
     const started = runGenet(genet, ["daemon", "start"], env);
     t.assertions.assert(started.code === 0, `start failed: ${started.stderr || started.stdout}`);
     const logFile = path.join(t.env.data, "logs", "daemon.log");

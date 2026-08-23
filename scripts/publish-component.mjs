@@ -24,8 +24,8 @@ main().catch((error) => {
 async function main() {
   const commit = argumentsMap.has("commit");
   const channel = argumentsMap.get("channel") ?? "beta";
-  if (!new Set(["official", "beta", "alpha"]).has(channel)) {
-    throw new Error("--channel must be official, beta or alpha");
+  if (!new Set(["stable", "beta", "dev"]).has(channel)) {
+    throw new Error("--channel must be stable, beta or dev");
   }
   const cloud = resolve(
     argumentsMap.get("cloud-root") ?? process.env.GENEHUB_CLOUD_ROOT ?? join(open, "../genethub-cloud"),
@@ -53,7 +53,7 @@ async function main() {
     ? resolve(argumentsMap.get("signer"))
     : buildSigner(argumentsMap.get("cargo") ?? "cargo");
   const signing = signingIdentity(channel, commit, signer);
-  const githubUrl = channel === "official"
+  const githubUrl = channel === "stable"
     ? argumentsMap.get("github-url") ??
       (!commit
         ? "https://github.com/aikenc/genethub/releases/download/component-candidate/genehub_guest.wasm"
@@ -101,7 +101,7 @@ function buildRaw(cargo) {
 
 function buildSigner(cargo) {
   exec(cargo, ["build", "--release", "-p", "genehub-host"]);
-  return join(open, "target/release", process.platform === "win32" ? "genehub-host-dev.exe" : "genehub-host-dev");
+  return join(open, "target/release", process.platform === "win32" ? "genehub-host-local.exe" : "genehub-host-local");
 }
 
 function signingIdentity(channel, commit, signer) {

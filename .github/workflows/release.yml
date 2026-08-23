@@ -4,17 +4,17 @@ name: Release
 # cross-build a Tauri bundle: the installer embeds the system WebView glue and
 # the packaging tool of the platform it targets.
 #
-# Three lines ship from this one workflow (`docs/dual-channel-release.md` in
-# genethub-cloud): a plain `v0.22.2` tag builds the official line, a
-# `v0.23.0-beta.4` tag the beta line, a `v0.23.0-alpha.4` tag the alpha
-# (intranet) line. The tag decides everything — the names the binaries carry,
+# Three lines ship from this one workflow (`docs/version-management.md` in
+# genethub-cloud): a plain `v0.22.2` tag builds the stable line, a
+# `v0.23.0-beta.4` tag the beta line, a `v0.0.0-dev.4` tag the dev
+# (internal) line. The tag decides everything — the names the binaries carry,
 # the Hub the build points at, the release it publishes to — because a channel
 # chosen by a dropdown in the Actions tab is a channel somebody picks wrong.
 on:
   push:
     tags: ["v*"]
   # Also runnable by hand, so a release can be rehearsed without inventing a
-  # tag for it. Nothing is published in that case, and the build is dev,
+  # tag for it. Nothing is published in that case, and the build is local,
   # matching the tree.
   workflow_dispatch:
 
@@ -107,21 +107,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BETA_HUB_URL: ${{ vars.GENEHUB_BETA_HUB_URL || 'https://relay-beta.genethub.com' }}
-          ALPHA_HUB_URL: ${{ vars.GENEHUB_ALPHA_HUB_URL || 'https://relay-alpha.genethub.com' }}
-          OFFICIAL_HUB_URL: ${{ vars.GENEHUB_HUB_URL || 'https://relay.genethub.com' }}
+          DEV_HUB_URL: ${{ vars.GENEHUB_DEV_HUB_URL || 'https://relay-dev.genethub.com' }}
+          STABLE_HUB_URL: ${{ vars.GENEHUB_HUB_URL || 'https://relay.genethub.com' }}
         run: |
           set -euo pipefail
-          # The tag's shape, and only that: `v1.2.3` is official,
-          # `v1.3.0-beta.4` is beta, `v1.3.0-alpha.4` is alpha, and anything
+          # The tag's shape, and only that: `v1.2.3` is stable,
+          # `v1.3.0-beta.4` is beta, `v0.0.0-dev.4` is dev, and anything
           # else is not a release — refused here rather than published under a
           # guessed channel.
           tag="${GITHUB_REF_NAME:-}"
           if [[ "$tag" == v* ]]; then
             case "$tag" in
               v[0-9]*.[0-9]*.[0-9]*-beta.[0-9]*)  want=beta ;;
-              v[0-9]*.[0-9]*.[0-9]*-alpha.[0-9]*) want=alpha ;;
-              v[0-9]*.[0-9]*.[0-9]*)              want=official ;;
-              *) echo "::error::'$tag' is neither vX.Y.Z nor vX.Y.Z-beta.N nor vX.Y.Z-alpha.N — no such release"; exit 1 ;;
+              v0.0.0-dev.[0-9]*)                  want=dev ;;
+              v[0-9]*.[0-9]*.[0-9]*)              want=stable ;;
+              *) echo "::error::'$tag' is neither vX.Y.Z nor vX.Y.Z-beta.N nor v0.0.0-dev.N — no such release"; exit 1 ;;
             esac
           fi
           channel="$(node scripts/channel.mjs --detect)"
@@ -131,16 +131,17 @@ jobs:
           fi
 
           # Number discipline the checklist cannot enforce: once a minor has
-          # shipped officially, a prerelease of that same minor is an update
-          # that is older than what its testers already run. Prereleases of
-          # either line live strictly on the next minor.
-          if [[ "$channel" == beta || "$channel" == alpha ]] && [[ "$tag" == v* ]]; then
-            latest_official="$(gh release view --json tagName -q .tagName || true)"
-            if [ -n "$latest_official" ]; then
+          # shipped on stable, a beta of that same minor is an update
+          # that is older than what its testers already run. Betas live
+          # strictly on the next minor. Dev tags are always 0.0.0-dev.N and
+          # stay off the product version line, so no such check applies.
+          if [[ "$channel" == beta ]] && [[ "$tag" == v* ]]; then
+            latest_stable="$(gh release view --json tagName -q .tagName || true)"
+            if [ -n "$latest_stable" ]; then
               pre_minor="$(sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/' <<<"$tag")"
-              official_minor="$(sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/' <<<"$latest_official")"
-              if [ "$pre_minor" -le "$official_minor" ]; then
-                echo "::error::$tag is a $channel of minor $pre_minor, but $latest_official already shipped — prereleases start at 0.$((official_minor + 1)).0-$channel.1"
+              stable_minor="$(sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/' <<<"$latest_stable")"
+              if [ "$pre_minor" -le "$stable_minor" ]; then
+                echo "::error::$tag is a beta of minor $pre_minor, but $latest_stable already shipped — betas start at 0.$((stable_minor + 1)).0-beta.1"
                 exit 1
               fi
             fi
@@ -156,28 +157,29 @@ jobs:
                 hub_url="$BETA_HUB_URL"
                 echo "prerelease=true"
                 ;;
-              alpha)
-                echo "asset_prefix=GeneHub-alpha"
-                echo "tarball_prefix=genet-alpha"
-                echo "manifest=latest-alpha.json"
-                # Alpha is the intranet line: the default is only a placeholder,
-                # a real deployment sets the variable to its own address.
-                hub_url="$ALPHA_HUB_URL"
-                echo "prerelease=true"
-                ;;
-              official)
-                echo "asset_prefix=GeneHub"
-                echo "tarball_prefix=genet"
-                echo "manifest=latest.json"
-                hub_url="$OFFICIAL_HUB_URL"
-                echo "prerelease=false"
-                ;;
-              *)
-                # dev: a rehearsal. Nothing is published (the publish job only
-                # runs on a tag), so the names only have to be honest.
+              dev)
                 echo "asset_prefix=GeneHub-dev"
                 echo "tarball_prefix=genet-dev"
                 echo "manifest=latest-dev.json"
+                # Dev is the internal line: the default is only a placeholder,
+                # a real dev-* slot deployment sets the variable to its own
+                # address.
+                hub_url="$DEV_HUB_URL"
+                echo "prerelease=true"
+                ;;
+              stable)
+                echo "asset_prefix=GeneHub"
+                echo "tarball_prefix=genet"
+                echo "manifest=latest.json"
+                hub_url="$STABLE_HUB_URL"
+                echo "prerelease=false"
+                ;;
+              *)
+                # local: a rehearsal. Nothing is published (the publish job
+                # only runs on a tag), so the names only have to be honest.
+                echo "asset_prefix=GeneHub-local"
+                echo "tarball_prefix=genet-local"
+                echo "manifest=latest-local.json"
                 hub_url=
                 echo "prerelease=true"
                 ;;
@@ -222,12 +224,12 @@ jobs:
         env:
           CHANNEL: ${{ needs.channel.outputs.name }}
           HUB_URL: ${{ needs.channel.outputs.hub_url }}
-          BETA_SIGNING_KEY: ${{ secrets.GENEHUB_BETA_LOGIC_SIGNING_KEY }}
-          BETA_KEY_ID: ${{ vars.GENEHUB_BETA_LOGIC_KEY_ID }}
-          ALPHA_SIGNING_KEY: ${{ secrets.GENEHUB_ALPHA_LOGIC_SIGNING_KEY }}
-          ALPHA_KEY_ID: ${{ vars.GENEHUB_ALPHA_LOGIC_KEY_ID }}
-          OFFICIAL_SIGNING_KEY: ${{ secrets.GENEHUB_OFFICIAL_LOGIC_SIGNING_KEY }}
-          OFFICIAL_KEY_ID: ${{ vars.GENEHUB_OFFICIAL_LOGIC_KEY_ID }}
+          BETA_SIGNING_KEY: ${{ secrets.GENEHUB_BETA_COMPONENT_SIGNING_KEY }}
+          BETA_KEY_ID: ${{ vars.GENEHUB_BETA_COMPONENT_KEY_ID }}
+          DEV_SIGNING_KEY: ${{ secrets.GENEHUB_DEV_COMPONENT_SIGNING_KEY }}
+          DEV_KEY_ID: ${{ vars.GENEHUB_DEV_COMPONENT_KEY_ID }}
+          STABLE_SIGNING_KEY: ${{ secrets.GENEHUB_STABLE_COMPONENT_SIGNING_KEY }}
+          STABLE_KEY_ID: ${{ vars.GENEHUB_STABLE_COMPONENT_KEY_ID }}
         run: |
           set -euo pipefail
           node scripts/version.mjs --from-tag
@@ -240,8 +242,8 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             case "$CHANNEL" in
               beta) signing_key="$BETA_SIGNING_KEY"; key_id="$BETA_KEY_ID"; manifest=latest-beta.json ;;
-              alpha) signing_key="$ALPHA_SIGNING_KEY"; key_id="$ALPHA_KEY_ID"; manifest=latest-alpha.json ;;
-              official) signing_key="$OFFICIAL_SIGNING_KEY"; key_id="$OFFICIAL_KEY_ID"; manifest=latest.json ;;
+              dev) signing_key="$DEV_SIGNING_KEY"; key_id="$DEV_KEY_ID"; manifest=latest-dev.json ;;
+              stable) signing_key="$STABLE_SIGNING_KEY"; key_id="$STABLE_KEY_ID"; manifest=latest.json ;;
               *) echo "::error::tag build has non-release channel $CHANNEL"; exit 1 ;;
             esac
             test -n "$signing_key" || {
@@ -411,9 +413,9 @@ jobs:
       #
       # The names live in `!define` lines now, because the channel decides them
       # and the channels install side by side: a prerelease installer must stop
-      # prerelease processes and leave the official line alone, and the defines
+      # prerelease processes and leave the stable line alone, and the defines
       # are what `scripts/channel.mjs` stamps. The stamp is checked both ways —
-      # every non-official name carries its channel's suffix, official names
+      # every non-stable name carries its channel's suffix, stable names
       # never do — because a half-stamped tree is exactly how one channel's
       # installer learns to kill another's daemon.
       - name: The installer stops processes that exist, and only this channel's
@@ -447,11 +449,11 @@ jobs:
               exit 1
             }
             case "$channel:$name" in
-              beta:*-beta.exe | alpha:*-alpha.exe | dev:*-dev.exe) ;;
-              official:*)
+              beta:*-beta.exe | dev:*-dev.exe | local:*-local.exe) ;;
+              stable:*)
                 case "$name" in
-                  *-beta.exe | *-alpha.exe | *-dev.exe)
-                    echo "::error::official build ships a marked process name '$name' — a half-stamped tree"
+                  *-beta.exe | *-dev.exe | *-local.exe)
+                    echo "::error::stable build ships a marked process name '$name' — a half-stamped tree"
                     exit 1
                     ;;
                 esac
@@ -497,7 +499,7 @@ jobs:
       # Two names for one file, on purpose:
       #
       # The version-free one is what a link can point at forever
-      # (`releases/latest/download/<name>` for official; the rolling `beta`
+      # (`releases/latest/download/<name>` for stable; the rolling `beta`
       # release for beta), which is what the install script and the docs use.
       #
       # The versioned one is what a person downloads. A browser that has seen
@@ -521,7 +523,7 @@ jobs:
             exit 1
           }
           version="${GITHUB_REF_NAME#v}"
-          # Official `0.22.2` and prerelease `0.23.0-beta.4` / `0.23.0-alpha.1`
+          # Stable `0.22.2` and prerelease `0.23.0-beta.4` / `0.0.0-dev.1`
           # both get a second, versioned name. The old `*[!0-9.]*` guard treated
           # every `-beta.N` as "not a version" and skipped the copy, so the
           # site's manifest pointed at a file the release never uploaded.
@@ -668,18 +670,18 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: guest-wasm-release
-          path: logic
+          path: component
       - name: Include the exact signed guest in the release
-        run: cp logic/genehub_guest.wasm dist/genehub_guest.wasm
+        run: cp component/genehub_guest.wasm dist/genehub_guest.wasm
       - run: ls -la dist
       # A fixed address for "what is the newest version", so the app's 检查更新
       # has something to ask that is not the GitHub API: 60 requests an hour is
       # counted per address, and everyone behind one office router shares it.
       #
       # One manifest per channel — `latest.json`, `latest-beta.json`,
-      # `latest-alpha.json` — and
+      # `latest-dev.json` — and
       # never one measuring the other: the two lines version independently,
-      # and a beta that compared itself against the official number would
+      # and a beta that compared itself against the stable number would
       # announce a downgrade as an upgrade. `channel` is written into the file
       # so a reader can refuse a manifest that is not its own.
       #
@@ -733,9 +735,9 @@ jobs:
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
-      # The tag's own release: official goes out as a normal release and may be
+      # The tag's own release: stable goes out as a normal release and may be
       # `latest`; beta is always a prerelease and must never become `latest`,
-      # because `releases/latest` is the official line's fixed address.
+      # because `releases/latest` is the stable line's fixed address.
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/*
@@ -743,9 +745,9 @@ jobs:
           generate_release_notes: true
       # A prerelease additionally publishes to a rolling release named after
       # its channel. GitHub's `latest` never names a prerelease, so without
-      # this there is no fixed address a beta or alpha daemon or install
+      # this there is no fixed address a beta or dev daemon or install
       # script can ask for the newest one — this is the address
-      # `latest-beta.json` / `latest-alpha.json` and the download bases point
+      # `latest-beta.json` / `latest-dev.json` and the download bases point
       # at, and it is what makes them stay put.
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         if: needs.channel.outputs.prerelease == 'true'
@@ -760,14 +762,14 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, linux, genehub-publisher]
     concurrency:
-      group: genehub-logic-${{ needs.channel.outputs.name }}
+      group: genehub-component-${{ needs.channel.outputs.name }}
       cancel-in-progress: false
     permissions:
       contents: read
     env:
-      OFFICIAL_STAGE: ${{ vars.GENEHUB_OFFICIAL_STAGE }}
+      STABLE_STAGE: ${{ vars.GENEHUB_STABLE_STAGE }}
       BETA_STAGE: ${{ vars.GENEHUB_BETA_STAGE }}
-      ALPHA_STAGE: ${{ vars.GENEHUB_ALPHA_STAGE }}
+      DEV_STAGE: ${{ vars.GENEHUB_DEV_STAGE }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -784,7 +786,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: guest-wasm-release
-          path: release-input/logic
+          path: release-input/component
       - name: Read back the signed release bytes and activate the component manifest
         shell: bash
         env:
@@ -794,13 +796,13 @@ jobs:
         run: |
           set -euo pipefail
           case "$CHANNEL" in
-            official) stage="$OFFICIAL_STAGE" ;;
+            stable) stage="$STABLE_STAGE" ;;
             beta) stage="$BETA_STAGE" ;;
-            alpha) stage="$ALPHA_STAGE" ;;
+            dev) stage="$DEV_STAGE" ;;
             *) echo "unexpected release channel $CHANNEL" >&2; exit 1 ;;
           esac
           test -n "$stage" || { echo "publisher stage is not configured for $CHANNEL" >&2; exit 1; }
-          identity="$GITHUB_WORKSPACE/release-input/logic/component-identity.json"
+          identity="$GITHUB_WORKSPACE/release-input/component/component-identity.json"
           abi="$(node -e 'const i=require(process.argv[1]); process.stdout.write(String(i.appAbiHash))' "$identity")"
           command=(
             node "$GITHUB_WORKSPACE/genethub-cloud/publisher/publish-prepared-component.mjs"
@@ -812,12 +814,12 @@ jobs:
             --channel "$CHANNEL"
             --store "$stage/artifacts"
             --public-origin "$PUBLIC_ORIGIN"
-            --component "$GITHUB_WORKSPACE/release-input/logic/genehub_guest.wasm"
+            --component "$GITHUB_WORKSPACE/release-input/component/genehub_guest.wasm"
             --component-identity "$identity"
             --app-release "${GITHUB_REF_NAME#v}"
             --app-abi-hash "$abi"
           )
-          if [ "$CHANNEL" = official ]; then
+          if [ "$CHANNEL" = stable ]; then
             command+=(--github-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/genehub_guest.wasm")
           fi
           "${command[@]}"

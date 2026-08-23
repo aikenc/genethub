@@ -29,7 +29,7 @@ export function selectForGate(
       : { include: false, reason: "not contract" };
   }
   if (item.runner === "playwright") {
-    return gate === "beta" || gate === "official"
+    return gate === "beta" || gate === "stable"
       ? { include: true, reason: "release browser matrix" }
       : { include: false, reason: "playwright not in this gate" };
   }
@@ -81,10 +81,10 @@ export function qualificationReasons(input: {
   if (input.blocked > 0) reasons.push("required cases blocked");
   if (input.unstable > 0) reasons.push("run marked unstable");
   if (input.interrupted > 0) reasons.push("run interrupted");
-  if ((input.gate === "dev" || input.gate === "beta" || input.gate === "official") && input.dirty) {
+  if ((input.gate === "dev" || input.gate === "beta" || input.gate === "stable") && input.dirty) {
     reasons.push("dirty worktree cannot qualify a release gate");
   }
-  if ((input.gate === "dev" || input.gate === "beta" || input.gate === "official") && !input.artifactHash) {
+  if ((input.gate === "dev" || input.gate === "beta" || input.gate === "stable") && !input.artifactHash) {
     reasons.push("release gate requires an immutable artifact hash");
   }
   if (input.requiredOpenSha && input.openSha && input.requiredOpenSha !== input.openSha) {

@@ -1,6 +1,6 @@
 # 测试规格
 
-> 状态（2026-08-22）：业务质量主干已迁到 `testing/` 的 TypeScript `testctl`、journeys、specialties 与 E2E；默认产物是 `genet-dev + genehub-host-dev + genehub_guest.wasm`。本页早期的 L1/J-mock/J-real 设计背景仍可读，但执行、产物与资格合同以 `testing/README.md` 及 Cloud `docs/testing/engineering-{principles,laws}.md` 为准。当前 331/331 qualified 是 Linux 本地 WASM parity 证据，既不能复用为 Windows 安装后首启证据，也不能复用为尚未存在的 official/高频发布资格。测试工程自身的 TypeScript typecheck 目前仍有 4 个 HEAD 既有错误：`component-health.specialty.ts` 的可空值，以及 `fail-closed.specialty.ts` / `surfaces.specialty.ts` 的 3 个未使用 import；在它们清零前也不得称测试工程机械基线全绿。
+> 状态（2026-08-22）：业务质量主干已迁到 `testing/` 的 TypeScript `testctl`、journeys、specialties 与 E2E；默认产物是 `genet-local + genehub-host-local + genehub_guest.wasm`。本页早期的 L1/J-mock/J-real 设计背景仍可读，但执行、产物与资格合同以 `testing/README.md` 及 Cloud `docs/testing/engineering-{principles,laws}.md` 为准。当前 331/331 qualified 是 Linux 本地 WASM parity 证据，既不能复用为 Windows 安装后首启证据，也不能复用为尚未存在的 stable/高频发布资格。测试工程自身的 TypeScript typecheck 目前仍有 4 个 HEAD 既有错误：`component-health.specialty.ts` 的可空值，以及 `fail-closed.specialty.ts` / `surfaces.specialty.ts` 的 3 个未使用 import；在它们清零前也不得称测试工程机械基线全绿。
 > 核心原则：**一套用例，两种模式。** 全链路集成与真实模型 E2E 跑的是**同一份测试代码**，唯一区别是 LLM 后端接的是 mock 还是真实模型。  
 > 用例全部**基于用户旅程**设计，不按模块切。  
 > 上位文档：[architecture.md](./architecture.md)。

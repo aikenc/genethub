@@ -31,7 +31,7 @@ const REPO = path.resolve(
 );
 const DAEMON = builtBinary(
   REPO,
-  ["genet-dev", "genet-beta", "genet-alpha", "genet"],
+  ["genet-local", "genet-dev", "genet-beta", "genet"],
   process.env.GENET_E2E_DAEMON,
 );
 

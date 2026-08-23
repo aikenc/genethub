@@ -595,7 +595,7 @@ mod tests {
         let artifact = signed("0.0.0-dev.1");
         let other_channel = ArtifactVerifier::new(
             "genehub:client-component/wasm",
-            "official",
+            "stable",
             TEST_ABI_HASH,
             64 * 1024,
             [("dev-local".to_string(), key().verifying_key())],

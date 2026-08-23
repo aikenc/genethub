@@ -4,7 +4,7 @@ use genet_daemon::config::Paths;
 use genet_daemon::Daemon;
 
 fn genet() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_genet-dev"))
+    Command::new(env!("CARGO_BIN_EXE_genet-local"))
 }
 
 struct Live {
@@ -24,8 +24,8 @@ async fn live() -> Live {
 fn genet_on(live: &Live) -> Command {
     let mut command = genet();
     command
-        .env("GENEHUB_DEV_DATA_DIR", live.dir.path())
-        .env("GENEHUB_DEV_WORKSPACE_DIR", live.dir.path());
+        .env("GENEHUB_LOCAL_DATA_DIR", live.dir.path())
+        .env("GENEHUB_LOCAL_WORKSPACE_DIR", live.dir.path());
     command
 }
 
@@ -181,8 +181,8 @@ fn a_failed_dial_never_prints_the_local_daemon_bearer() {
 
     let output = genet()
         .arg("context")
-        .env("GENEHUB_DEV_DATA_DIR", dir.path())
-        .env("GENEHUB_DEV_WORKSPACE_DIR", dir.path())
+        .env("GENEHUB_LOCAL_DATA_DIR", dir.path())
+        .env("GENEHUB_LOCAL_WORKSPACE_DIR", dir.path())
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(3));

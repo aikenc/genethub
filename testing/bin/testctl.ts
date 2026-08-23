@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -136,9 +136,16 @@ async function main(): Promise<number> {
     const startedAt = new Date();
     const results: UnitResult[] = [];
     const scheduler = createScheduler(plan.units, defaultBudget(environments));
+    // Every environment compiles the same component on each daemon start;
+    // a shared, machine-local cache (target/ is gitignored) turns that into
+    // one compile per artifact hash. The host only honours this on the local
+    // channel — released builds always recompile.
+    const componentCache = path.join(openRoot, "target", "test-component-cache");
+    mkdirSync(componentCache, { recursive: true });
     const extraEnv: Record<string, string> = {
       TESTCTL_OPEN_ROOT: openRoot,
       TESTCTL_CLOUD_ROOT: cloudRoot ?? "",
+      GENEHUB_TEST_COMPONENT_CACHE_DIR: componentCache,
     };
     const runDeadline = maxRunMs > 0 ? Date.now() + maxRunMs : Number.POSITIVE_INFINITY;
     const inflight = new Set<Promise<void>>();

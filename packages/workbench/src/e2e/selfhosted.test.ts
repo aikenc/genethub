@@ -25,12 +25,12 @@ const REPO = path.resolve(
 );
 const DAEMON = builtBinary(
   REPO,
-  ["genet-dev", "genet-beta", "genet-alpha", "genet"],
+  ["genet-local", "genet-dev", "genet-beta", "genet"],
   process.env.GENET_E2E_DAEMON,
 );
 const AGENT = builtBinary(
   REPO,
-  ["genet-agent-dev", "genet-agent-beta", "genet-agent-alpha", "genet-agent"],
+  ["genet-agent-local", "genet-agent-beta", "genet-agent-dev", "genet-agent"],
   process.env.GENET_E2E_AGENT,
 );
 const RELAY = path.join(REPO, "apps/relay/dist/main.js");

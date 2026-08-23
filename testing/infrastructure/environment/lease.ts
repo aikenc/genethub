@@ -30,11 +30,11 @@ export function createLease(prefix = "genehub-env-"): EnvironmentLease {
     XDG_CACHE_HOME: path.join(home, ".cache"),
     XDG_STATE_HOME: path.join(home, ".local", "state"),
     GENEHUB_DATA_DIR: data,
-    GENEHUB_DEV_DATA_DIR: data,
+    GENEHUB_LOCAL_DATA_DIR: data,
     GENEHUB_WORKSPACE_DIR: workspace,
-    GENEHUB_DEV_WORKSPACE_DIR: workspace,
+    GENEHUB_LOCAL_WORKSPACE_DIR: workspace,
     GENEHUB_LOG: path.join(logs, "daemon.log"),
-    GENEHUB_DEV_LOG: "warn",
+    GENEHUB_LOCAL_LOG: "warn",
   };
   return {
     id: path.basename(root),

@@ -215,9 +215,9 @@ jobs:
         with:
           name: open-ci-bins
           path: |
-            target/debug/genet-dev
-            target/debug/genet-agent-dev
-            target/debug/genehub-host-dev
+            target/debug/genet-local
+            target/debug/genet-agent-local
+            target/debug/genehub-host-local
             target/debug/genehub_guest.wasm
           if-no-files-found: error
           retention-days: 1
@@ -266,8 +266,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GENET_E2E_REQUIRED: "1"
-      GENET_E2E_DAEMON: ${{ github.workspace }}/target/debug/genet-dev
-      GENET_E2E_AGENT: ${{ github.workspace }}/target/debug/genet-agent-dev
+      GENET_E2E_DAEMON: ${{ github.workspace }}/target/debug/genet-local
+      GENET_E2E_AGENT: ${{ github.workspace }}/target/debug/genet-agent-local
     defaults:
       run:
         working-directory: packages/workbench
@@ -306,7 +306,7 @@ jobs:
           cargo build --release -p genehub-guest --target wasm32-wasip2
           cp target/wasm32-wasip2/release/genehub_guest.wasm target/debug/genehub_guest.wasm
         working-directory: .
-      - run: chmod +x target/debug/genet-dev target/debug/genet-agent-dev target/debug/genehub-host-dev
+      - run: chmod +x target/debug/genet-local target/debug/genet-agent-local target/debug/genehub-host-local
         working-directory: .
       # The artifact contains compiled JavaScript, not its runtime packages.
       # Keep the cheap production-only install while avoiding relay dev
@@ -362,7 +362,7 @@ jobs:
       # The WASM guest delegates chmod-equivalent hardening to the native host.
       # Its Windows implementation must be exercised on NTFS, not merely
       # cross-compiled from Linux.
-      - run: cargo test -p genehub-host --bin genehub-host-dev fs_perms::tests
+      - run: cargo test -p genehub-host --bin genehub-host-local fs_perms::tests
       # Supervision launches the ordinary sibling executable; `cargo test`
       # only creates a hashed test harness and is not a substitute for it.
       - run: cargo build -p genehub-host
@@ -374,7 +374,7 @@ jobs:
       - name: Refuse to skip real daemon supervision
         shell: bash
         run: |
-          binary=target/debug/genet-dev
+          binary=target/debug/genet-local
           if [ "$RUNNER_OS" = Windows ]; then binary="${binary}.exe"; fi
           test -x "$binary"
       - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check

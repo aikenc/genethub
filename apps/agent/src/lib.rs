@@ -3,7 +3,7 @@
 //! RPC mode only: the daemon spawns this agent and speaks JSONL over stdio.
 //! There is no interactive interface on purpose.
 //!
-//! The same code runs two ways: the native `genet-agent-dev` binary (a thin
+//! The same code runs two ways: the native `genet-agent-local` binary (a thin
 //! shim over [`run`]), and the `agent-run` export of the single v2 wasm
 //! component (`apps/guest`).
 

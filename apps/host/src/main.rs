@@ -89,7 +89,7 @@ fn run_and_exit(component: &std::path::Path, guest_args: &[String], entry: load:
 }
 
 const USAGE: &str =
-    "usage: genehub-host-dev run --component <path.wasm> [--entry daemon|agent] [-- <guest args>]";
+    "usage: genehub-host-local run --component <path.wasm> [--entry daemon|agent] [-- <guest args>]";
 
 /// Anything after `--` belongs to the guest, which reads it as its own argv.
 fn parse_run(

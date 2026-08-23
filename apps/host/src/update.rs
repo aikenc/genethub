@@ -125,10 +125,10 @@ fn store_root() -> Result<PathBuf> {
         .or_else(|| {
             dirs_data().map(|root| {
                 root.join(match channel::CHANNEL {
-                    "official" => "GeneHub",
+                    "stable" => "GeneHub",
                     "beta" => "GeneHub-beta",
-                    "alpha" => "GeneHub-alpha",
-                    _ => "GeneHub-dev",
+                    "dev" => "GeneHub-dev",
+                    _ => "GeneHub-local",
                 })
             })
         })

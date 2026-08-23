@@ -21,7 +21,7 @@ defineSpecialty(
     t.assertions.assert(t.env.workspace.startsWith(t.env.root), "workspace escaped the lease");
     t.assertions.assert(process.env.HOME === t.env.home, "HOME is not the lease home");
     t.assertions.assert(
-      process.env.GENEHUB_DEV_DATA_DIR === t.env.data,
+      process.env.GENEHUB_LOCAL_DATA_DIR === t.env.data,
       "daemon data dir is not the lease data",
     );
     const marker = path.join(t.env.home, "isolation-marker");

@@ -7,7 +7,7 @@ description = "Thin native shell: from_binary load, WASI preopen, guest run-loop
 publish = false
 
 [[bin]]
-name = "genehub-host-dev"
+name = "genehub-host-local"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -33,7 +33,7 @@ tempfile = "3"
 thiserror.workspace = true
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "process", "io-util", "sync", "time"] }
 wasmparser = "0.239"
-wasmtime = { version = "48", default-features = false, features = ["anyhow", "async", "component-model", "cranelift", "parallel-compilation"] }
+wasmtime = { version = "48", default-features = false, features = ["anyhow", "async", "cache", "component-model", "cranelift", "parallel-compilation"] }
 wasmtime-wasi = "48"
 wasmtime-wasi-http = "48"
 wasmtime-wasi-tls = "48"

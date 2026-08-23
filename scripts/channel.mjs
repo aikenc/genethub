@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 // The release channel of the product, written in at build time.
 //
-// Four identities of the product exist — `dev` (what the source tree claims
-// to be), the two prerelease lines `alpha` and `beta`, and the `official`
-// release — and the released three must coexist on one machine without
-// sharing processes, data directories, environment variables or update feeds
-// (`docs/dual-channel-release.md` in genethub-cloud). Everything that makes a
-// build belong to one of them is derived here, from one table, so no two
-// files can disagree about what a beta is called.
+// Four identities of the product exist — `local` (what the source tree claims
+// to be), the deployable internal line `dev`, the `beta` prerelease line, and
+// the `stable` release — and the released three must coexist on one machine
+// without sharing processes, data directories, environment variables or
+// update feeds (`docs/version-management.md` in genethub-cloud). Everything
+// that makes a build belong to one of them is derived here, from one table,
+// so no two files can disagree about what a beta is called.
 //
 // It works the way `scripts/version.mjs` works, and for the same reason: the
-// tree always claims to be `dev`, and the release workflow stamps
-// `official|beta|alpha` in just before it builds. A channel a human has to
+// tree always claims to be `local`, and the release workflow stamps
+// `stable|beta|dev` in just before it builds. A channel a human has to
 // edit into a dozen places is a channel that ships half-renamed — one process
 // killed by the wrong installer, one daemon reading the other line's data
 // directory.
@@ -22,9 +22,9 @@
 // two `[[bin]]` names, installer.nsh, install.sh) carry marked lines this
 // script rewrites in place, the same portable way version.mjs does.
 //
-//   node scripts/channel.mjs dev|official|beta|alpha   stamp the tree for a channel
-//   node scripts/channel.mjs --from-tag                stamp from the tag being built, if there is one
-//   node scripts/channel.mjs --show                    print the channel the tree is stamped for
+//   node scripts/channel.mjs local|stable|beta|dev   stamp the tree for a channel
+//   node scripts/channel.mjs --from-tag              stamp from the tag being built, if there is one
+//   node scripts/channel.mjs --show                  print the channel the tree is stamped for
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -33,203 +33,205 @@ import { fileURLToPath } from "node:url";
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const usage = () => {
-  console.error(`  node scripts/channel.mjs dev|official|beta|alpha   stamp the tree for a channel
-  node scripts/channel.mjs --from-tag                stamp from the tag being built, if there is one
-  node scripts/channel.mjs --show                    print the channel the tree is stamped for`);
+  console.error(`  node scripts/channel.mjs local|stable|beta|dev   stamp the tree for a channel
+  node scripts/channel.mjs --from-tag              stamp from the tag being built, if there is one
+  node scripts/channel.mjs --show                  print the channel the tree is stamped for`);
 };
 
 // The one table. All four columns side by side so a review — and the wiring
-// tests — can see every channel in the same glance. The official column is
-// frozen: those names are what installed copies already answer to, and
-// changing one silently orphans every override a user has set.
+// tests — can see every channel in the same glance. The stable column keeps
+// the unprefixed names: those are what installed copies already answer to,
+// and changing one silently orphans every override a user has set.
 //
-// dev is what the tree claims: it installs nowhere, updates from nowhere and
-// points at no Hub — a source build has no business touching the released
-// lines' data, and there is no release to fetch for it.
+// local is what the tree claims: it installs nowhere, updates from nowhere
+// and points at no Hub — a source build has no business touching the released
+// lines' data, and there is no release to fetch for it. A source checkout
+// only ever runs `local`; a deployable internal build is `dev`, stamped by
+// its dev-* PipeSpace release flow.
 const TABLE = {
-  channel: { dev: "dev", official: "official", beta: "beta", alpha: "alpha" },
-  product: { dev: "GeneHub Dev", official: "GeneHub", beta: "GeneHub Beta", alpha: "GeneHub Alpha" },
+  channel: { local: "local", dev: "dev", beta: "beta", stable: "stable" },
+  product: { local: "GeneHub Local", dev: "GeneHub Dev", beta: "GeneHub Beta", stable: "GeneHub" },
   identifier: {
+    local: "com.genethub.desktop.local",
     dev: "com.genethub.desktop.dev",
-    official: "com.genethub.desktop",
     beta: "com.genethub.desktop.beta",
-    alpha: "com.genethub.desktop.alpha",
+    stable: "com.genethub.desktop",
   },
   desktop_binary: {
+    local: "genethub-desktop-local",
     dev: "genethub-desktop-dev",
-    official: "genethub-desktop",
     beta: "genethub-desktop-beta",
-    alpha: "genethub-desktop-alpha",
+    stable: "genethub-desktop",
   },
   // The one binary that is both the CLI and the daemon (`genet daemon
   // run`) — the merge retired a separate daemon binary (`genethub-cli.md`).
-  cli_binary: { dev: "genet-dev", official: "genet", beta: "genet-beta", alpha: "genet-alpha" },
+  cli_binary: { local: "genet-local", dev: "genet-dev", beta: "genet-beta", stable: "genet" },
   agent_binary: {
+    local: "genet-agent-local",
     dev: "genet-agent-dev",
-    official: "genet-agent",
     beta: "genet-agent-beta",
-    alpha: "genet-agent-alpha",
+    stable: "genet-agent",
   },
   // The wasm shell: it loads genehub_guest.wasm and picks the daemon or the
   // agent entry per process. Shipped beside the CLI in every package — the
   // CLI refuses to start a daemon without it.
   host_binary: {
+    local: "genehub-host-local",
     dev: "genehub-host-dev",
-    official: "genehub-host",
     beta: "genehub-host-beta",
-    alpha: "genehub-host-alpha",
+    stable: "genehub-host",
   },
   agent_home_dir: {
+    local: ".genet-agent-local",
     dev: ".genet-agent-dev",
-    official: ".genet-agent",
     beta: ".genet-agent-beta",
-    alpha: ".genet-agent-alpha",
+    stable: ".genet-agent",
   },
-  data_dir_name: { dev: "GeneHub-dev", official: "GeneHub", beta: "GeneHub-beta", alpha: "GeneHub-alpha" },
+  data_dir_name: { local: "GeneHub-local", dev: "GeneHub-dev", beta: "GeneHub-beta", stable: "GeneHub" },
   workspace_dir_name: {
+    local: "GeneHub-local",
     dev: "GeneHub-dev",
-    official: "GeneHub",
     beta: "GeneHub-beta",
-    alpha: "GeneHub-alpha",
+    stable: "GeneHub",
   },
-  tray_id: { dev: "genethub-tray-dev", official: "genethub-tray", beta: "genethub-tray-beta", alpha: "genethub-tray-alpha" },
+  tray_id: { local: "genethub-tray-local", dev: "genethub-tray-dev", beta: "genethub-tray-beta", stable: "genethub-tray" },
 
-  env_data_dir: { dev: "GENEHUB_DEV_DATA_DIR", official: "GENEHUB_DATA_DIR", beta: "GENEHUB_BETA_DATA_DIR", alpha: "GENEHUB_ALPHA_DATA_DIR" },
+  env_data_dir: { local: "GENEHUB_LOCAL_DATA_DIR", dev: "GENEHUB_DEV_DATA_DIR", beta: "GENEHUB_BETA_DATA_DIR", stable: "GENEHUB_DATA_DIR" },
   env_workspace_dir: {
+    local: "GENEHUB_LOCAL_WORKSPACE_DIR",
     dev: "GENEHUB_DEV_WORKSPACE_DIR",
-    official: "GENEHUB_WORKSPACE_DIR",
     beta: "GENEHUB_BETA_WORKSPACE_DIR",
-    alpha: "GENEHUB_ALPHA_WORKSPACE_DIR",
+    stable: "GENEHUB_WORKSPACE_DIR",
   },
-  env_log: { dev: "GENEHUB_DEV_LOG", official: "GENEHUB_LOG", beta: "GENEHUB_BETA_LOG", alpha: "GENEHUB_ALPHA_LOG" },
+  env_log: { local: "GENEHUB_LOCAL_LOG", dev: "GENEHUB_DEV_LOG", beta: "GENEHUB_BETA_LOG", stable: "GENEHUB_LOG" },
   env_host_pid: {
+    local: "GENEHUB_LOCAL_HOST_PID",
     dev: "GENEHUB_DEV_HOST_PID",
-    official: "GENEHUB_HOST_PID",
     beta: "GENEHUB_BETA_HOST_PID",
-    alpha: "GENEHUB_ALPHA_HOST_PID",
+    stable: "GENEHUB_HOST_PID",
   },
   env_daemon_command: {
+    local: "GENEHUB_LOCAL_DAEMON_COMMAND",
     dev: "GENEHUB_DEV_DAEMON_COMMAND",
-    official: "GENEHUB_DAEMON_COMMAND",
     beta: "GENEHUB_BETA_DAEMON_COMMAND",
-    alpha: "GENEHUB_ALPHA_DAEMON_COMMAND",
+    stable: "GENEHUB_DAEMON_COMMAND",
   },
   // Whoever spawns the wasm shell names the front-door CLI through this
   // variable; the shell hands it to the guest as GENEHUB_CLI.
   env_cli: {
+    local: "GENEHUB_LOCAL_CLI",
     dev: "GENEHUB_DEV_CLI",
-    official: "GENEHUB_CLI",
     beta: "GENEHUB_BETA_CLI",
-    alpha: "GENEHUB_ALPHA_CLI",
+    stable: "GENEHUB_CLI",
   },
   // The directory the daemon was started in, handed to the guest which
   // cannot ask the OS for it.
   env_cwd: {
+    local: "GENEHUB_LOCAL_CWD",
     dev: "GENEHUB_DEV_CWD",
-    official: "GENEHUB_CWD",
     beta: "GENEHUB_BETA_CWD",
-    alpha: "GENEHUB_ALPHA_CWD",
+    stable: "GENEHUB_CWD",
   },
   // The component file the shell loaded, handed to the guest so the daemon
   // can watch it and ask the shell for an in-place reload when it changes.
   env_component_file: {
+    local: "GENEHUB_LOCAL_COMPONENT_FILE",
     dev: "GENEHUB_DEV_COMPONENT_FILE",
-    official: "GENEHUB_COMPONENT_FILE",
     beta: "GENEHUB_BETA_COMPONENT_FILE",
-    alpha: "GENEHUB_ALPHA_COMPONENT_FILE",
+    stable: "GENEHUB_COMPONENT_FILE",
   },
   env_machine_name: {
+    local: "GENEHUB_LOCAL_MACHINE_NAME",
     dev: "GENEHUB_DEV_MACHINE_NAME",
-    official: "GENEHUB_MACHINE_NAME",
     beta: "GENEHUB_BETA_MACHINE_NAME",
-    alpha: "GENEHUB_ALPHA_MACHINE_NAME",
+    stable: "GENEHUB_MACHINE_NAME",
   },
   env_agent_command: {
+    local: "GENET_AGENT_LOCAL_COMMAND",
     dev: "GENET_AGENT_DEV_COMMAND",
-    official: "GENET_AGENT_COMMAND",
     beta: "GENET_AGENT_BETA_COMMAND",
-    alpha: "GENET_AGENT_ALPHA_COMMAND",
+    stable: "GENET_AGENT_COMMAND",
   },
   env_agent_home: {
+    local: "GENET_AGENT_LOCAL_HOME",
     dev: "GENET_AGENT_DEV_HOME",
-    official: "GENET_AGENT_HOME",
     beta: "GENET_AGENT_BETA_HOME",
-    alpha: "GENET_AGENT_ALPHA_HOME",
+    stable: "GENET_AGENT_HOME",
   },
   env_download_base: {
+    local: "GENEHUB_LOCAL_DOWNLOAD_BASE",
     dev: "GENEHUB_DEV_DOWNLOAD_BASE",
-    official: "GENEHUB_DOWNLOAD_BASE",
     beta: "GENEHUB_BETA_DOWNLOAD_BASE",
-    alpha: "GENEHUB_ALPHA_DOWNLOAD_BASE",
+    stable: "GENEHUB_DOWNLOAD_BASE",
   },
-  env_bin_dir: { dev: "GENEHUB_DEV_BIN_DIR", official: "GENEHUB_BIN_DIR", beta: "GENEHUB_BETA_BIN_DIR", alpha: "GENEHUB_ALPHA_BIN_DIR" },
-  env_hub_url: { dev: "GENEHUB_DEV_HUB_URL", official: "GENEHUB_HUB_URL", beta: "GENEHUB_BETA_HUB_URL", alpha: "GENEHUB_ALPHA_HUB_URL" },
+  env_bin_dir: { local: "GENEHUB_LOCAL_BIN_DIR", dev: "GENEHUB_DEV_BIN_DIR", beta: "GENEHUB_BETA_BIN_DIR", stable: "GENEHUB_BIN_DIR" },
+  env_hub_url: { local: "GENEHUB_LOCAL_HUB_URL", dev: "GENEHUB_DEV_HUB_URL", beta: "GENEHUB_BETA_HUB_URL", stable: "GENEHUB_HUB_URL" },
 
   default_machine_name: {
+    local: "GeneHub Local machine",
     dev: "GeneHub Dev machine",
-    official: "GeneHub machine",
     beta: "GeneHub Beta machine",
-    alpha: "GeneHub Alpha machine",
+    stable: "GeneHub machine",
   },
   agent_label: {
+    local: "GeneHub Local Agent",
     dev: "GeneHub Dev Agent",
-    official: "GeneHub Agent",
     beta: "GeneHub Beta Agent",
-    alpha: "GeneHub Alpha Agent",
+    stable: "GeneHub Agent",
   },
 
-  // The update manifest needs a stable address per channel. Official rides
+  // The update manifest needs a stable address per channel. Stable rides
   // the latest release; prereleases cannot — GitHub's `latest` never names
-  // one — so beta and alpha releases additionally publish to rolling `beta`
-  // and `alpha` tags, which is what makes these addresses stay put
-  // (release.yml). dev has none: a source build is not on the scale at all.
+  // one — so beta and dev releases additionally publish to rolling `beta`
+  // and `dev` tags, which is what makes these addresses stay put
+  // (release.yml). local has none: a source build is not on the scale at all.
   manifest_url: {
-    dev: "",
-    official: "https://github.com/aikenc/genethub/releases/latest/download/latest.json",
+    local: "",
+    dev: "https://github.com/aikenc/genethub/releases/download/dev/latest-dev.json",
     beta: "https://github.com/aikenc/genethub/releases/download/beta/latest-beta.json",
-    alpha: "https://github.com/aikenc/genethub/releases/download/alpha/latest-alpha.json",
+    stable: "https://github.com/aikenc/genethub/releases/latest/download/latest.json",
   },
 
   // Default Hub this channel's CLI/daemon dials (`genethub-cli.md` §4.1).
-  // Alpha's public name is only a default — it is the intranet line, and a
-  // real deployment overrides it (GENEHUB_ALPHA_HUB_URL / CI vars).
+  // Dev's public name is only a default — each dev-* slot is its own
+  // deployment, and a real one overrides it (GENEHUB_DEV_HUB_URL / CI vars).
   hub_url: {
-    dev: "",
-    official: "https://relay.genethub.com",
+    local: "",
+    dev: "https://relay-dev.genethub.com",
     beta: "https://relay-beta.genethub.com",
-    alpha: "https://relay-alpha.genethub.com",
+    stable: "https://relay.genethub.com",
   },
   web_app_url: {
-    dev: "http://127.0.0.1:5173/app",
-    official: "https://relay.genethub.com/app",
+    local: "http://127.0.0.1:5173/app",
+    dev: "https://relay-dev.genethub.com/app",
     beta: "https://relay-beta.genethub.com/app",
-    alpha: "https://relay-alpha.genethub.com/app",
+    stable: "https://relay.genethub.com/app",
   },
   component_manifest_urls: {
-    dev: [],
-    official: ["https://relay.genethub.com/artifacts/manifests/component/latest.json"],
+    local: [],
+    dev: ["https://relay-dev.genethub.com/artifacts/manifests/component/latest-dev.json"],
     beta: ["https://relay-beta.genethub.com/artifacts/manifests/component/latest-beta.json"],
-    alpha: ["https://relay-alpha.genethub.com/artifacts/manifests/component/latest-alpha.json"],
+    stable: ["https://relay.genethub.com/artifacts/manifests/component/latest.json"],
   },
   app_download_url: {
+    local: "https://github.com/aikenc/genethub/releases",
     dev: "https://github.com/aikenc/genethub/releases",
-    official: "https://github.com/aikenc/genethub/releases",
     beta: "https://github.com/aikenc/genethub/releases",
-    alpha: "https://github.com/aikenc/genethub/releases",
+    stable: "https://github.com/aikenc/genethub/releases",
   },
 
   // Where install.sh pulls the Linux tarball from. The prerelease lines
   // cannot use `releases/latest/download` (same reason as above), so their
   // default is their own control plane, which resolves the newest
-  // prerelease itself. dev refuses to install at all unless
-  // GENEHUB_DEV_DOWNLOAD_BASE is given — there is no dev artifact.
+  // prerelease itself. local refuses to install at all unless
+  // GENEHUB_LOCAL_DOWNLOAD_BASE is given — there is no local artifact.
   download_base: {
-    dev: "",
-    official: "https://github.com/aikenc/genethub/releases/latest/download",
+    local: "",
+    dev: "https://relay-dev.genethub.com/download/dev",
     beta: "https://relay-beta.genethub.com/download/beta",
-    alpha: "https://relay-alpha.genethub.com/download/alpha",
+    stable: "https://github.com/aikenc/genethub/releases/latest/download",
   },
-  tarball_prefix: { dev: "genet-dev", official: "genet", beta: "genet-beta", alpha: "genet-alpha" },
+  tarball_prefix: { local: "genet-local", dev: "genet-dev", beta: "genet-beta", stable: "genet" },
 };
 
 const value = (key, channel) => {
@@ -238,7 +240,7 @@ const value = (key, channel) => {
   return row[channel];
 };
 
-const CHANNEL_TYPE = '"dev" | "official" | "beta" | "alpha"';
+const CHANNEL_TYPE = '"local" | "dev" | "beta" | "stable"';
 
 // One line replaced at a time, matching only what the marker comments
 // promise — a replace that silently matches nothing is how a channel ships
@@ -288,7 +290,7 @@ function rewriteInSection(path, sectionStart, pattern, substitute) {
 const rustModule = (channel) => {
   const manifestUrl = value("manifest_url", channel);
   // rustfmt's line budget decides the shape: the released channels' URLs do
-  // not fit on one line and dev's empty string does, and CI rejects a tree
+  // not fit on one line and local's empty string does, and CI rejects a tree
   // rustfmt would rewrite — so the generator emits what rustfmt would.
   const manifestConst =
     `pub const DEFAULT_MANIFEST_URL: &str = "${manifestUrl}";`.length <= 100
@@ -300,7 +302,7 @@ pub const DEFAULT_MANIFEST_URL: &str =
   return `//! Which release channel this build belongs to.
 //!
 //! Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
-//! file. The tree always says \`dev\`; a release build is the workflow
+//! file. The tree always says \`local\`; a release build is the workflow
 //! stamping its channel in before it compiles, exactly the way
 //! \`scripts/version.mjs\` stamps the version.
 
@@ -308,7 +310,7 @@ pub const DEFAULT_MANIFEST_URL: &str =
 // that adding a consumer never means editing the generator.
 #![allow(dead_code)]
 
-/// \`dev\` | \`official\` | \`beta\` | \`alpha\`.
+/// \`local\` | \`dev\` | \`beta\` | \`stable\`.
 pub const CHANNEL: &str = "${value("channel", channel)}";
 /// What the product calls itself on screen.
 pub const PRODUCT: &str = "${value("product", channel)}";
@@ -347,10 +349,10 @@ pub const DEFAULT_MACHINE_NAME: &str = "${value("default_machine_name", channel)
 /// What the built-in agent calls itself in the picker.
 pub const AGENT_LABEL: &str = "${value("agent_label", channel)}";
 /// Where the published builds of this channel announce themselves.
-/// Empty for dev: a source build is not on the update scale at all.
+/// Empty for local: a source build is not on the update scale at all.
 ${manifestConst}
 /// Default Hub for \`genet hub login\` and a standalone first pair.
-/// Empty for dev: a source build points nowhere unless told.
+/// Empty for local: a source build points nowhere unless told.
 pub const DEFAULT_HUB_URL: &str = "${value("hub_url", channel)}";
 pub const ENV_HUB_URL: &str = "${value("env_hub_url", channel)}";
 /// Channel website the Desktop shell navigates to after boot.
@@ -369,7 +371,7 @@ const agentModule = (channel) => `//! Which release channel this build belongs t
 // that adding a consumer never means editing the generator.
 #![allow(dead_code)]
 
-/// \`dev\` | \`official\` | \`beta\` | \`alpha\`.
+/// \`local\` | \`dev\` | \`beta\` | \`stable\`.
 pub const CHANNEL: &str = "${value("channel", channel)}";
 /// What the product calls itself on screen.
 pub const PRODUCT: &str = "${value("product", channel)}";
@@ -392,7 +394,7 @@ const hostModule = (channel) => `//! Which release channel this build belongs to
 // that adding a consumer never means editing the generator.
 #![allow(dead_code)]
 
-/// \`dev\` | \`official\` | \`beta\` | \`alpha\`.
+/// \`local\` | \`dev\` | \`beta\` | \`stable\`.
 pub const CHANNEL: &str = "${value("channel", channel)}";
 /// Whoever spawns the shell names the front-door CLI through this variable;
 /// the guest sees it as GENEHUB_CLI.
@@ -407,7 +409,7 @@ pub const ENV_COMPONENT_FILE: &str = "${value("env_component_file", channel)}";
 /// Content-addressed module id in \`genehub.component.artifact.v3\`. The App ↔
 /// Component ABI is pinned by the WIT digest in \`abi.rs\`, not by a number.
 pub const MODULE_ID: &str = "genehub:client-component/wasm";
-/// Stamped signed-component discovery URLs. Empty for dev.
+/// Stamped signed-component discovery URLs. Empty for local.
 pub const COMPONENT_MANIFEST_URLS: &[&str] = &[${value("component_manifest_urls", channel).map((entry) => `"${entry}"`).join(", ")}];
 /// Data-dir env the desktop/CLI already stamps; the host store lives under it.
 pub const ENV_DATA_DIR: &str = "${value("env_data_dir", channel)}";
@@ -416,14 +418,14 @@ pub const ENV_DATA_DIR: &str = "${value("env_data_dir", channel)}";
 const desktopModule = (channel) => `//! Which release channel this build belongs to.
 //!
 //! Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
-//! file. The tree always says \`dev\`; a release build is the workflow
+//! file. The tree always says \`local\`; a release build is the workflow
 //! stamping its channel in before it compiles.
 
 // Not every build reads every name below; the module is the whole menu so
 // that adding a consumer never means editing the generator.
 #![allow(dead_code)]
 
-/// \`dev\` | \`official\` | \`beta\` | \`alpha\`.
+/// \`local\` | \`dev\` | \`beta\` | \`stable\`.
 pub const CHANNEL: &str = "${value("channel", channel)}";
 /// What the product calls itself on screen.
 pub const PRODUCT: &str = "${value("product", channel)}";
@@ -446,7 +448,7 @@ pub const ENV_CLI: &str = "${value("env_cli", channel)}";
 /// adopting the other channel's daemon through a stale endpoint file.
 pub const ENV_DATA_DIR: &str = "${value("env_data_dir", channel)}";
 pub const TRAY_ID: &str = "${value("tray_id", channel)}";
-/// Official download page opened from the tray.
+/// Stable download page opened from the tray.
 pub const APP_DOWNLOAD_URL: &str = "${value("app_download_url", channel)}";
 /// Channel website the shell may navigate to after boot.
 pub const WEB_APP_URL: &str = "${value("web_app_url", channel)}";
@@ -455,8 +457,8 @@ pub const WEB_APP_URL: &str = "${value("web_app_url", channel)}";
 const tsModule = (channel) => `// Which release channel this build belongs to.
 //
 // Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
-// file. The tree always says "dev"; a release build is the workflow stamping
-// its channel in before it compiles. The separately deployed hosted Web sets
+// file. The tree always says "local"; a release build is the workflow stamping
+// its channel in before it compiles. The separately deployed Web sets
 // VITE_GENEHUB_CHANNEL instead, so publishing a page never mutates the paired
 // Open checkout just to stamp a native release identity.
 export type ReleaseChannel = ${CHANNEL_TYPE};
@@ -466,19 +468,19 @@ export const CHANNEL: ReleaseChannel = isReleaseChannel(hostedChannel)
   ? hostedChannel
   : STAMPED_CHANNEL;
 const PRODUCTS: Record<ReleaseChannel, string> = {
+  local: "GeneHub Local",
   dev: "GeneHub Dev",
-  official: "GeneHub",
   beta: "GeneHub Beta",
-  alpha: "GeneHub Alpha",
+  stable: "GeneHub",
 };
 export const PRODUCT = import.meta.env.VITE_GENEHUB_BRAND || PRODUCTS[CHANNEL];
 // The desktop shell checks its own release independently from whichever
 // daemon the workbench currently controls. In a browser this stays unused;
-// in a source build it is empty, because dev is not on a release scale.
+// in a source build it is empty, because local is not on a release scale.
 export const MANIFEST_URL = "${value("manifest_url", channel)}";
 
 function isReleaseChannel(value: unknown): value is ReleaseChannel {
-  return value === "dev" || value === "official" || value === "beta" || value === "alpha";
+  return value === "local" || value === "dev" || value === "beta" || value === "stable";
 }
 `;
 
@@ -524,7 +526,7 @@ function stamp(channel) {
   // and locks apart. Every substitute keeps the line's tail — a whole-line
   // replacement eats the trailing comma and the next Tauri build reports a
   // parse error, not a wrong name.
-  // Boot page only: the remote official site brings its own CSP. Giving the
+  // Boot page only: the remote stable site brings its own CSP. Giving the
   // bundled boot surface connect-src/ipc would recreate a privileged renderer.
   const csp = "default-src 'self'; style-src 'self' 'unsafe-inline'";
   rewriteLines(join(repo, "apps/desktop/src-tauri/tauri.conf.json"), [
@@ -578,19 +580,19 @@ function stamp(channel) {
   console.log(readFileSync(join(repo, "scripts/install.sh"), "utf8").match(/^# channel:.*$/m)[0]);
 }
 
-// The channel a tag build belongs to: anything carrying a semver prerelease
-// marker is that prerelease line, a plain version is official, and anything
-// else is not a release at all.
+// The channel a tag build belongs to: a plain product version is stable, a
+// `-beta.N` prerelease is the beta line, and the `0.0.0-dev.N` slot sequence
+// is a dev release. Anything else is not a release at all.
 function fromRef() {
   const ref = process.env.GITHUB_REF_NAME ?? "";
   if (/^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$/.test(ref)) return "beta";
-  if (/^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$/.test(ref)) return "alpha";
-  if (/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(ref)) return "official";
+  if (/^v0\.0\.0-dev\.[0-9]+$/.test(ref)) return "dev";
+  if (/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(ref)) return "stable";
   return "";
 }
 
 const arg = process.argv[2] ?? "";
-if (["dev", "official", "beta", "alpha"].includes(arg)) {
+if (["local", "dev", "beta", "stable"].includes(arg)) {
   stamp(arg);
 } else if (arg === "--from-tag") {
   const channel = fromRef();
@@ -602,8 +604,8 @@ if (["dev", "official", "beta", "alpha"].includes(arg)) {
 } else if (arg === "--detect") {
   // Just the answer, without touching the tree — the workflow's first job
   // asks this to decide what the later jobs build and publish. A rehearsal
-  // run is not a release tag, so it builds dev, matching the tree.
-  process.stdout.write(fromRef() || "dev");
+  // run is not a release tag, so it builds local, matching the tree.
+  process.stdout.write(fromRef() || "local");
 } else if (arg === "--show") {
   const body = readFileSync(join(repo, "apps/daemon/src/channel.rs"), "utf8");
   process.stdout.write(body.match(/pub const CHANNEL: &str = "(.*)";/)[1]);

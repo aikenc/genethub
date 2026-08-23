@@ -8,7 +8,7 @@ description = "genet: the GeneHub CLI, and the daemon it controls, in one binary
 # The one binary every channel ships. `scripts/channel.mjs` rewrites this
 # name when it stamps a channel; the crate name stays put across channels.
 [[bin]]
-name = "genet-dev"
+name = "genet-local"
 path = "src/main.rs"
 
 [dependencies]

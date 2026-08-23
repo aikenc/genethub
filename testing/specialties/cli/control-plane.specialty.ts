@@ -21,7 +21,7 @@ interface CliFixture {
 
 function fixture(t: CaseContext, dataDir = t.env.data): CliFixture {
   const genet = locateGenet(t.openRoot);
-  const env = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_DEV_DATA_DIR: dataDir });
+  const env = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_LOCAL_DATA_DIR: dataDir });
   return {
     genet,
     env,

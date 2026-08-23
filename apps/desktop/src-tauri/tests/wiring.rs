@@ -17,7 +17,7 @@ fn config() -> serde_json::Value {
     serde_json::from_str(&raw).expect("parse tauri.conf.json")
 }
 
-/// The official page is untrusted in exactly the same way as a page in Chrome:
+/// The stable page is untrusted in exactly the same way as a page in Chrome:
 /// it receives neither a Tauri global nor a command/capability surface.
 #[test]
 fn remote_product_web_has_no_native_bridge() {
@@ -497,42 +497,42 @@ fn nothing_in_the_tree_claims_to_be_a_release() {
     }
 }
 
-/// The product's channel works the way its version does: the tree says `dev`,
-/// and a release is the workflow stamping its channel in
+/// The product's channel works the way its version does: the tree says
+/// `local`, and a release is the workflow stamping its channel in
 /// (`scripts/channel.mjs`, modelled on `scripts/version.mjs`).
 ///
 /// Checked here for the same reason as the version: a tree accidentally
 /// committed half-stamped for a release channel is a release that renames
 /// itself, kills the wrong processes and reads the wrong data directory. And
-/// the official column of the table is frozen — those names are what
+/// the stable column of the table keeps the unprefixed names — those are what
 /// installed copies already answer to, so renaming one orphans every override
 /// a user has set.
 #[test]
-fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
+fn the_tree_claims_to_be_local_and_only_the_stamper_says_otherwise() {
     let stamper = read(repo().join("scripts/channel.mjs"));
 
-    // Every generated module says dev, and the stamping script is what writes
-    // each of them — a constants file nothing regenerates is one a release
-    // build compiles straight past.
+    // Every generated module says local, and the stamping script is what
+    // writes each of them — a constants file nothing regenerates is one a
+    // release build compiles straight past.
     let modules = [
         (
             "apps/daemon/src/channel.rs",
-            "pub const CHANNEL: &str = \"dev\";",
+            "pub const CHANNEL: &str = \"local\";",
         ),
         (
             "apps/desktop/src-tauri/src/channel.rs",
-            "pub const CHANNEL: &str = \"dev\";",
+            "pub const CHANNEL: &str = \"local\";",
         ),
         (
             "packages/workbench/src/channel.ts",
-            "const STAMPED_CHANNEL: ReleaseChannel = \"dev\";",
+            "const STAMPED_CHANNEL: ReleaseChannel = \"local\";",
         ),
     ];
     for (path, marker) in modules {
         let body = read(repo().join(path));
         assert!(
             body.contains(marker),
-            "{path} is not stamped dev — the tree ships the dev channel; \
+            "{path} is not stamped local — the tree ships the local identity; \
              a release build stamps its own channel in CI (scripts/channel.mjs)"
         );
         assert!(
@@ -544,7 +544,7 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
 
     let config = config();
     // productName is the install-directory / application-bundle name, not the display
-    // brand — those carry a space on beta/alpha/dev and would break unquoted
+    // brand — those carry a space on beta/dev/local and would break unquoted
     // shells. It must match DATA_DIR_NAME and never contain whitespace.
     let data_dir = read(repo().join("apps/desktop/src-tauri/src/channel.rs"))
         .lines()
@@ -554,7 +554,7 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
         .trim_matches(|c| c == '"' || c == ';')
         .to_string();
     assert_eq!(config["productName"], data_dir);
-    assert_eq!(config["productName"], "GeneHub-dev");
+    assert_eq!(config["productName"], "GeneHub-local");
     assert!(
         !config["productName"]
             .as_str()
@@ -563,19 +563,19 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
         "productName must be path-safe; a space lands the installer under a \
          directory that breaks unquoted shells"
     );
-    assert_eq!(config["app"]["windows"][0]["title"], "GeneHub Dev");
-    assert_eq!(config["identifier"], "com.genethub.desktop.dev");
-    assert_eq!(config["mainBinaryName"], "genethub-desktop-dev");
+    assert_eq!(config["app"]["windows"][0]["title"], "GeneHub Local");
+    assert_eq!(config["identifier"], "com.genethub.desktop.local");
+    assert_eq!(config["mainBinaryName"], "genethub-desktop-local");
 
     let installer = read(repo().join("scripts/install.sh"));
     assert!(
-        installer.contains("# channel: dev") && installer.contains("channel=dev"),
-        "install.sh is not stamped dev — the tree's installer must refuse to \
+        installer.contains("# channel: local") && installer.contains("channel=local"),
+        "install.sh is not stamped local — the tree's installer must refuse to \
          run rather than quietly install a released line"
     );
 
-    // The frozen column. These are the names already installed copies answer
-    // to; the other columns may grow, this one may not move.
+    // The unprefixed column. These are the names already installed copies
+    // answer to; the other columns may grow, this one does not move.
     let row = |key: &str| {
         // Line-anchored, or `hub_url` would match inside `env_hub_url` and the
         // row would come back as the environment-variable table — a test that
@@ -602,8 +602,8 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
         ("desktop_binary", "genethub-desktop"),
     ] {
         assert!(
-            row(key).contains(&format!("official: \"{name}\"")),
-            "the official column of scripts/channel.mjs moved: {key} no longer \
+            row(key).contains(&format!("stable: \"{name}\"")),
+            "the stable column of scripts/channel.mjs moved: {key} no longer \
              stamps {name:?} — that is what installed copies already answer to, \
              and renaming it silently orphans every override a user has set"
         );
@@ -611,17 +611,17 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
 
     // The marked columns keep their marks: a channel whose binaries do not
     // carry its suffix is one whose installer kills another line's processes.
-    for (key, dev, beta, alpha) in [
-        ("cli_binary", "genet-dev", "genet-beta", "genet-alpha"),
+    for (key, local, beta, dev) in [
+        ("cli_binary", "genet-local", "genet-beta", "genet-dev"),
         (
             "desktop_binary",
-            "genethub-desktop-dev",
+            "genethub-desktop-local",
             "genethub-desktop-beta",
-            "genethub-desktop-alpha",
+            "genethub-desktop-dev",
         ),
     ] {
         let row = row(key);
-        for (channel, name) in [("dev", dev), ("beta", beta), ("alpha", alpha)] {
+        for (channel, name) in [("local", local), ("beta", beta), ("dev", dev)] {
             assert!(
                 row.contains(&format!("{channel}: \"{name}\"")),
                 "the {channel} column of {key} lost its mark ({name})"
@@ -629,22 +629,22 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
         }
     }
 
-    // dev updates from nowhere and points at no Hub: a source build is not on
-    // the release scale. Component discovery is independent of the installer.
+    // local updates from nowhere and points at no Hub: a source build is not
+    // on the release scale. Component discovery is independent of the installer.
     assert!(
-        row("component_manifest_urls").contains("dev: []"),
-        "the dev column gained a signed component feed"
+        row("component_manifest_urls").contains("local: []"),
+        "the local column gained a signed component feed"
     );
     assert!(
-        row("hub_url").contains("dev: \"\""),
-        "the dev column gained a default Hub — a source build points nowhere \
+        row("hub_url").contains("local: \"\""),
+        "the local column gained a default Hub — a source build points nowhere \
          unless told"
     );
 
     // The native shell only chooses fixed origins. Once navigated, CSP belongs
     // to the website response, not to a channel-specific local Web bundle.
     let web = row("web_app_url");
-    for channel in ["official", "beta", "alpha"] {
+    for channel in ["stable", "beta", "dev"] {
         assert!(web.contains(&format!("{channel}: \"https://")));
     }
     let csp = config["app"]["security"]["csp"]

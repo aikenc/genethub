@@ -53,7 +53,7 @@ GeneHub Agent 随安装包提供，配置 Anthropic 或 OpenAI-compatible 模型
 
 两条工程纪律支撑上面四条：**信任来自可核对的边界**——数据存在哪里、远程连接经过什么组件、设备如何
 获得授权，都写在代码和文档里，开源侧不依赖官方服务也能独立部署；**业务更新不该变成用户的安装任务**
-——目标是 95% 的产品 change set 只更新 WASM guest 与工作台，official 分钟级、beta/alpha/dev 秒级，
+——目标是 95% 的产品 change set 只更新 WASM guest 与工作台，stable 分钟级、beta/dev 秒级，
 后台验签、切换和失败回滚。当前 Linux/dev 运行时底座已验证，Windows owner-only ACL 与自动交付链仍在
 [roadmap](./docs/roadmap.md) 推进；在测量系统建立之前，95% 与分钟级都是目标而不是已达成的状态。
 
@@ -181,19 +181,19 @@ npm --prefix packages/workbench run build
 npm --prefix apps/relay run build
 ```
 
-源码树始终使用隔离的 `dev` channel：构建出的原生入口是 `genet-dev` / `genehub-host-dev`，业务制品是
+源码树始终使用隔离的 `local` 身份：构建出的原生入口是 `genet-local` / `genehub-host-local`，业务制品是
 `genehub_guest.wasm`，版本为 `0.0.0`，并且**没有默认 Hub 地址**。这是为了避免本地开发意外读写
-正式版的数据或连到正式服务。
+stable 线的数据或连到 stable 服务。
 
 ```bash
-./target/debug/genet-dev daemon start
-./target/debug/genet-dev status
+./target/debug/genet-local daemon start
+./target/debug/genet-local status
 
 # 需要测试远端流程时，显式指定与你的构建匹配的 Hub
-./target/debug/genet-dev hub login --hub https://your-hub.example --wait
+./target/debug/genet-local hub login --hub https://your-hub.example --wait
 ```
 
-不要直接执行仓库里的 `scripts/install.sh` 来安装正式版：源码中的脚本同样属于 `dev` channel，会有意拒绝下载。
+不要直接执行仓库里的 `scripts/install.sh` 来安装 stable 线：源码中的脚本同样盖着 `local` 章，会有意拒绝下载。
 正式版请使用[快速开始](#快速开始)中的发布入口。
 
 ### 测试

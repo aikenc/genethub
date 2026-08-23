@@ -30,11 +30,11 @@
 ; and leave the other lines' alone. `scripts/channel.mjs` rewrites these five
 ; lines when it stamps a channel; nothing else here changes.
 
-!define GH_DESKTOP_EXE "genethub-desktop-dev.exe"
-!define GH_CLI_EXE "genet-dev.exe"
-!define GH_HOST_EXE "genehub-host-dev.exe"
-!define GH_DATA_DIR_NAME "GeneHub-dev"
-!define GH_BUNDLE_ID "com.genethub.desktop.dev"
+!define GH_DESKTOP_EXE "genethub-desktop-local.exe"
+!define GH_CLI_EXE "genet-local.exe"
+!define GH_HOST_EXE "genehub-host-local.exe"
+!define GH_DATA_DIR_NAME "GeneHub-local"
+!define GH_BUNDLE_ID "com.genethub.desktop.local"
 
 !macro StopGeneHubProcesses
   DetailPrint "正在停止 GeneHub 后台进程…"

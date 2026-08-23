@@ -18,13 +18,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "../../..");
 
 // What this build calls itself. `scripts/channel.mjs` writes channel.env next
-// to itself before a release build (and `dev` when nobody stamped), so the
+// to itself before a release build (and `local` when nobody stamped), so the
 // packaging here agrees with the names cargo just built. The defaults are for
-// a local build nobody stamped — dev, because that is what the tree says.
-let CHANNEL = "dev";
-let PRODUCT = "GeneHub Dev";
-let CLI_BINARY = "genet-dev";
-let HOST_BINARY = "genehub-host-dev";
+// a build nobody stamped — local, because that is what the tree says.
+let CHANNEL = "local";
+let PRODUCT = "GeneHub Local";
+let CLI_BINARY = "genet-local";
+let HOST_BINARY = "genehub-host-local";
 
 const envFile = join(repo, "scripts/channel.env");
 if (existsSync(envFile)) {
@@ -86,7 +86,7 @@ if (!preparedGuest) {
 console.log("==> staging binaries");
 const binDir = join(here, "../src-tauri/bin");
 // Cleaned first: the previous build's staged binaries are still here, and a
-// beta build after an official one would otherwise ship both channels'
+// beta build after a stable one would otherwise ship both channels'
 // daemons in one installer. README.md is tracked and stays.
 for (const entry of readdirSync(binDir)) {
   if (entry !== "README.md") rmSync(join(binDir, entry), { recursive: true, force: true });

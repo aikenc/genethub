@@ -52,7 +52,7 @@ defineSpecialty(
     const genet = locateGenet(t.openRoot);
     const env = genetEnv(t.openRoot, {
       ...t.env.env,
-      GENEHUB_DEV_DAEMON_COMPONENT: junk,
+      GENEHUB_LOCAL_DAEMON_COMPONENT: junk,
       GENEHUB_HOST: artifacts.host,
     });
     const result = runGenet(genet, ["daemon", "start"], env);
@@ -81,8 +81,8 @@ defineSpecialty(
     const b = path.join(t.env.root, "data-b");
     mkdirSync(a, { recursive: true });
     mkdirSync(b, { recursive: true });
-    const envA = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_DEV_DATA_DIR: a });
-    const envB = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_DEV_DATA_DIR: b });
+    const envA = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_LOCAL_DATA_DIR: a });
+    const envB = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_LOCAL_DATA_DIR: b });
     const startedA = parseJson(runGenet(genet, ["daemon", "start"], envA).stdout);
     const startedB = parseJson(runGenet(genet, ["daemon", "start"], envB).stdout);
     try {
@@ -144,11 +144,11 @@ defineSpecialty(
     chmodSync(hostClone, 0o755);
     const env = genetEnv(t.openRoot, {
       ...t.env.env,
-      GENEHUB_DEV_DATA_DIR: path.join(t.env.root, "copied-host-data"),
+      GENEHUB_LOCAL_DATA_DIR: path.join(t.env.root, "copied-host-data"),
     });
-    delete env.GENEHUB_DEV_COMPONENT;
-    delete env.GENEHUB_DEV_DAEMON_COMPONENT;
-    delete env.GENEHUB_DEV_DAEMON_COMMAND;
+    delete env.GENEHUB_LOCAL_COMPONENT;
+    delete env.GENEHUB_LOCAL_DAEMON_COMPONENT;
+    delete env.GENEHUB_LOCAL_DAEMON_COMMAND;
     delete env.GENEHUB_HOST;
     const result = runGenet(clone, ["daemon", "start"], env);
     t.assertions.assert(result.code !== 0, `CLI+host without wasm started: ${result.stdout}`);

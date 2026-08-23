@@ -14,7 +14,7 @@ export type GateName =
   | "merge"
   | "dev"
   | "beta"
-  | "official"
+  | "stable"
   | "infra-compact"
   | "infra-parallel"
   | "specialty:page-experience"

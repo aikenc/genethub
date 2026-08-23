@@ -39,7 +39,7 @@ defineSpecialty(
     const load = readFileSync(hostSrc, "utf8");
     t.assertions.assert(load.includes("Component::from_binary"), "host lost from_binary");
     t.assertions.assert(!/Component::from_file\b/.test(load), "host must not call from_file");
-    t.assertions.assert(load.includes("CHANNEL") && load.includes("\"dev\""), "dev channel is not compile-time");
+    t.assertions.assert(load.includes("CHANNEL") && load.includes("\"local\""), "local channel is not compile-time");
 
     let host = tryLocateHost(t.openRoot);
     let guest = tryLocateGuestProbe(t.openRoot);
@@ -48,11 +48,11 @@ defineSpecialty(
       guest = tryLocateGuestProbe(t.openRoot);
     }
     if (!host) {
-      build(t.openRoot, ["build", "-p", "genehub-host", "--bin", "genehub-host-dev"]);
+      build(t.openRoot, ["build", "-p", "genehub-host", "--bin", "genehub-host-local"]);
       host = tryLocateHost(t.openRoot);
     }
     if (!host || !guest) {
-      throw new BlockedError("genehub-host-dev or genehub-guest-probe.wasm is missing after build");
+      throw new BlockedError("genehub-host-local or genehub-guest-probe.wasm is missing after build");
     }
 
     const child = spawn(host, ["run", "--component", guest], {

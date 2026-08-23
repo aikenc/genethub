@@ -33,7 +33,7 @@ function rustFiles(openRoot: string, relative: string): string[] {
 defineSpecialty(
   {
     id: "specialty.contracts.release-actions-pinned",
-    title: "Release actions are immutable and only official GitHub can write contents",
+    title: "Release actions are immutable and contents write stays in the publish job",
     oracle: "release.yml pins SHAs, contents:write stays in the publish job",
     catches: ["floating action tag", "write permission leak"],
     tags: ["core", "contract", "parity"],
@@ -72,7 +72,7 @@ defineSpecialty(
     t.assertions.assert(!workflow.includes("echo \"hub_url=${{ vars."), "hub url interpolated into bash");
     t.assertions.assert(workflow.includes("BETA_HUB_URL: ${{ vars.GENEHUB_BETA_HUB_URL"), "beta hub env missing");
     if (workflow.includes("\n  publish_fast_website:\n")) {
-      const fast = between(workflow, "\n  publish_fast_website:\n", "\n  publish_official_website:\n");
+      const fast = between(workflow, "\n  publish_fast_website:\n", "\n  publish_component_website:\n");
       t.assertions.assert(!fast.includes("contents: write"), "fast website writes contents");
       t.assertions.assert(!fast.includes("softprops/action-gh-release"), "fast website publishes GitHub releases");
     }
@@ -81,20 +81,20 @@ defineSpecialty(
 
 defineSpecialty(
   {
-    id: "specialty.contracts.release-signed-logic",
-    title: "App release embeds one signed logic and separates fast from official distribution",
-    oracle: "release.yml still packs genehub-app.wasm with channel-specific keys",
-    catches: ["unsigned logic", "fast channel writing GitHub contents"],
-    tags: ["core", "contract", "parity", "v1-wasm"],
+    id: "specialty.contracts.release-signed-component",
+    title: "App release embeds one signed component with channel-specific keys",
+    oracle: "release.yml packs genehub_guest.wasm signed per channel",
+    catches: ["unsigned component", "channel signing key missing"],
+    tags: ["core", "contract", "parity"],
     expectedDurationMs: 400,
     timeoutMs: 10_000,
     surfaces: ["release"],
   },
   async (t) => {
     const workflow = readOpen(t.openRoot, ".github/workflows/release.yml");
-    t.assertions.assert(workflow.includes("GENEHUB_BETA_LOGIC_SIGNING_KEY"), "beta key missing");
-    t.assertions.assert(workflow.includes("GENEHUB_OFFICIAL_LOGIC_SIGNING_KEY"), "official key missing");
-    t.assertions.assert(workflow.includes("dist/genehub-app.wasm"), "signed wasm not packed");
+    t.assertions.assert(workflow.includes("GENEHUB_BETA_COMPONENT_SIGNING_KEY"), "beta key missing");
+    t.assertions.assert(workflow.includes("GENEHUB_STABLE_COMPONENT_SIGNING_KEY"), "stable key missing");
+    t.assertions.assert(workflow.includes("dist/genehub_guest.wasm"), "signed component not packed");
   },
 );
 

@@ -8,7 +8,7 @@
 //! stay put (`.github/workflows/release.yml`).
 //!
 //! It lives in the daemon rather than in the desktop shell for two reasons: the
-//! shell exists on Windows and macOS only (the official macOS artifact still
+//! shell exists on Windows and macOS only (the stable macOS artifact still
 //! depends on signing/notarization), while Linux reaches the same workbench in a
 //! browser; and this way the outbound call needs no exception beyond what a
 //! released shell already opens for Hub WSS (`scripts/channel.mjs` stamps
@@ -34,7 +34,7 @@ use crate::state::Shared;
 /// The open repository's own releases rather than a service: a copy of this
 /// daemon should not have to reach anybody's control plane to learn that a newer
 /// copy of itself exists. Per channel, so a beta never measures itself against
-/// an official release — the address lives with the other channel names.
+/// a stable release — the address lives with the other channel names.
 pub use crate::channel::DEFAULT_MANIFEST_URL;
 
 /// Long enough for a slow link, short enough that the window says something

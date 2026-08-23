@@ -56,8 +56,8 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
     id: process.env.TESTCTL_LEASE_ROOT ? "leased" : "inline",
     root: process.env.TESTCTL_LEASE_ROOT ?? "",
     home: process.env.HOME ?? "",
-    data: process.env.GENEHUB_DEV_DATA_DIR ?? "",
-    workspace: process.env.GENEHUB_DEV_WORKSPACE_DIR ?? "",
+    data: process.env.GENEHUB_LOCAL_DATA_DIR ?? "",
+    workspace: process.env.GENEHUB_LOCAL_WORKSPACE_DIR ?? "",
     config: process.env.XDG_CONFIG_HOME ?? "",
     logs: process.env.GENEHUB_LOG ?? "",
     env: Object.fromEntries(

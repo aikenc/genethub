@@ -2,7 +2,7 @@
 //!
 //! `genet daemon run` / `start` are no longer a native daemon, and the agent
 //! is no longer a second artifact: both are entries of `genehub_guest.wasm`
-//! under `genehub-host-dev`. A missing artifact is a start failure, not a
+//! under `genehub-host-local`. A missing artifact is a start failure, not a
 //! silent fall back to a native binary.
 
 use std::path::{Path, PathBuf};
@@ -86,11 +86,11 @@ pub fn locate() -> Result<Guest, String> {
                 .join("genehub_guest.wasm"),
         );
     }
-    let component = std::env::var("GENEHUB_DEV_COMPONENT")
+    let component = std::env::var("GENEHUB_LOCAL_COMPONENT")
         .ok()
         .filter(|value| !value.is_empty())
         // The bring-up name, still honoured so older runbooks keep working.
-        .or_else(|| std::env::var("GENEHUB_DEV_DAEMON_COMPONENT").ok())
+        .or_else(|| std::env::var("GENEHUB_LOCAL_DAEMON_COMPONENT").ok())
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .filter(|path| is_file(path))

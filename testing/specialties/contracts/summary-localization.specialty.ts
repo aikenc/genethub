@@ -15,7 +15,7 @@ const manifest: RunManifest = {
   runnerVersion: "testctl.v1",
   open: { path: "/open", sha: "open-sha", branch: "dev", dirty: true, dirtyDigest: "dirty" },
   cloud: { path: "/cloud", sha: "cloud-sha", branch: "dev", dirty: false, dirtyDigest: "clean" },
-  artifact: { path: "/artifact", hash: "artifact-hash", kind: "genet-dev" },
+  artifact: { path: "/artifact", hash: "artifact-hash", kind: "genet-local" },
   catalogDigest: "catalog",
   selected: ["case.failed"],
   notExecuted: [],

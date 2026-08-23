@@ -214,7 +214,7 @@ fn start() -> i32 {
         );
     }
 
-    // The daemon is the wasm guest under genehub-host-dev. stdout and stderr
+    // The daemon is the wasm guest under genehub-host-local. stdout and stderr
     // go to a log beside the daemon's own: the listening line is how the shell
     // learns the endpoint when it spawns, but the CLI learns it from
     // `endpoint.json`, and a pipe nobody drains is a future hang.

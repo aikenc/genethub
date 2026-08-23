@@ -100,8 +100,19 @@ async fn run_component_async(path: &Path, guest_args: &[String], entry: Entry) -
     // Cranelift stays at its default opt level: on a release-profile guest,
     // dropping to `None` saves ~0.04s of compile and costs guest code quality.
     // Wasmtime's own compile cache stays off (§5.1.6): a cache the runtime
-    // trusts implicitly is an exec path. We do not add a file-backed dev
-    // store either — the compiled image stays in this process.
+    // trusts implicitly is an exec path, so released channels never get one.
+    // The single exception is the local tree under a test harness that names
+    // an explicit directory: hundreds of environments each compiling the same
+    // component on every daemon start is the gate's dominant cost.
+    if crate::channel::CHANNEL == "local" {
+        if let Ok(dir) = std::env::var("GENEHUB_TEST_COMPONENT_CACHE_DIR") {
+            if !dir.is_empty() {
+                let mut cache = wasmtime::CacheConfig::new();
+                cache.with_directory(dir);
+                config.cache(Some(wasmtime::Cache::new(cache)?));
+            }
+        }
+    }
     let engine = Engine::new(&config)?;
     match entry {
         Entry::Agent => {
@@ -375,7 +386,7 @@ fn load_component(engine: &Engine, path: &Path) -> Result<Component> {
     // Source builds keep their file-watcher loop and never consult a release
     // activation store. Published channels are compile-time identities and
     // are the only binaries that may select a downloaded signed guest.
-    let active = if crate::channel::CHANNEL == "dev" {
+    let active = if crate::channel::CHANNEL == "local" {
         None
     } else {
         crate::update::load_active_bytes()?

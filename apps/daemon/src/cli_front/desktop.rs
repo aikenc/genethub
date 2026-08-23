@@ -39,7 +39,7 @@ async fn route(args: &[String]) -> i32 {
     };
     let hub_url = match resolve_hub_url() {
         Ok(value) => Some(value),
-        Err(error) if channel::CHANNEL == "dev" && error.code == "invalidArgs" => None,
+        Err(error) if channel::CHANNEL == "local" && error.code == "invalidArgs" => None,
         Err(error) => return output::fail(error),
     };
     let Some(hub_url) = hub_url else {

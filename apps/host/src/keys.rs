@@ -8,10 +8,10 @@ use crate::channel;
 const DEVELOPMENT_KEY_ID: &str = "dev-local";
 const DEVELOPMENT_SEED: [u8; 32] = [7; 32];
 
-/// Independent signing root for component artifacts. Official/beta/alpha pin a
-/// public key into this host binary; dev uses a fixed local seed.
+/// Independent signing root for component artifacts. Stable/beta/dev pin a
+/// public key into this host binary; local uses a fixed seed.
 pub fn trusted_key() -> Result<(String, VerifyingKey)> {
-    if channel::CHANNEL == "dev" {
+    if channel::CHANNEL == "local" {
         return Ok((
             DEVELOPMENT_KEY_ID.to_string(),
             SigningKey::from_bytes(&DEVELOPMENT_SEED).verifying_key(),

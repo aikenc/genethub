@@ -24,12 +24,12 @@ export function daemonEnvironment(
   },
 ): Record<string, string> {
   const binary = path.basename(daemon).replace(/\.exe$/i, "");
-  const channel = binary.endsWith("-dev")
-    ? "DEV"
-    : binary.endsWith("-beta")
-      ? "BETA"
-      : binary.endsWith("-alpha")
-        ? "ALPHA"
+  const channel = binary.endsWith("-local")
+    ? "LOCAL"
+    : binary.endsWith("-dev")
+      ? "DEV"
+      : binary.endsWith("-beta")
+        ? "BETA"
         : "";
   const infix = channel ? `_${channel}` : "";
   return {

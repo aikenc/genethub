@@ -263,7 +263,7 @@ declare global {
 let detected: { desktop: boolean; host: Host } | null = null;
 
 export function detectHost(): Host {
-  // Desktop WebView is always an ordinary browser: the remote official page
+  // Desktop WebView is always an ordinary browser: the remote stable page
   // has no Tauri bridge. Loopback admission stays on the CLI/shell, not the page.
   const desktop = false;
   if (!detected || detected.desktop !== desktop) {

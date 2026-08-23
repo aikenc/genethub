@@ -155,8 +155,8 @@ mod tests {
     #[test]
     fn windows_checkout_on_d_does_not_collapse_onto_c() {
         assert_eq!(
-            host_to_guest(r"D:\a\genethub\genethub\target\debug\genet-dev.exe"),
-            "/d/a/genethub/genethub/target/debug/genet-dev.exe"
+            host_to_guest(r"D:\a\genethub\genethub\target\debug\genet-local.exe"),
+            "/d/a/genethub/genethub/target/debug/genet-local.exe"
         );
     }
 

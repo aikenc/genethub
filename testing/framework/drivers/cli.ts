@@ -17,7 +17,7 @@ export function locateGenet(openRoot: string): string {
   const override = process.env.GENET_E2E_DAEMON?.trim();
   if (override) return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
   const suffix = process.platform === "win32" ? ".exe" : "";
-  const names = ["genet-dev", "genet-beta", "genet-alpha", "genet"];
+  const names = ["genet-local", "genet-dev", "genet-beta", "genet"];
   for (const name of names) {
     const candidate = path.resolve(openRoot, "target", "debug", `${name}${suffix}`);
     if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
@@ -29,7 +29,7 @@ export function locateGenet(openRoot: string): string {
   throw new BlockedError("genet artifact is missing");
 }
 
-const AGENT_NAMES = ["genet-agent-dev", "genet-agent-beta", "genet-agent-alpha", "genet-agent"];
+const AGENT_NAMES = ["genet-agent-local", "genet-agent-beta", "genet-agent-dev", "genet-agent"];
 
 function firstExistingFile(candidates: string[]): string | undefined {
   for (const candidate of candidates) {
@@ -45,7 +45,7 @@ export function tryLocateAgentBeside(genet: string): string | undefined {
 
 export function tryLocateAgent(openRoot: string): string | undefined {
   const override =
-    process.env.GENET_AGENT_DEV_COMMAND?.trim() ||
+    process.env.GENET_AGENT_LOCAL_COMMAND?.trim() ||
     process.env.GENET_AGENT_BETA_COMMAND?.trim() ||
     process.env.GENET_AGENT_BINARY?.trim();
   if (override) {
@@ -80,14 +80,14 @@ export function tryLocateHost(openRoot: string): string | undefined {
   }
   const suffix = process.platform === "win32" ? ".exe" : "";
   return firstExistingFile([
-    path.resolve(openRoot, "target", "debug", `genehub-host-dev${suffix}`),
-    path.resolve(openRoot, "target", "release", `genehub-host-dev${suffix}`),
+    path.resolve(openRoot, "target", "debug", `genehub-host-local${suffix}`),
+    path.resolve(openRoot, "target", "release", `genehub-host-local${suffix}`),
   ]);
 }
 
 export function tryLocateDaemonComponent(openRoot: string): string | undefined {
   const override =
-    process.env.GENEHUB_DEV_COMPONENT?.trim() || process.env.GENEHUB_DEV_DAEMON_COMPONENT?.trim();
+    process.env.GENEHUB_LOCAL_COMPONENT?.trim() || process.env.GENEHUB_LOCAL_DAEMON_COMPONENT?.trim();
   if (override) {
     return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
   }
@@ -120,7 +120,7 @@ export function procEnviron(pid: number): string {
 }
 
 export function agentHostProcesses(): Array<{ pid: number; cmd: string; environ: string }> {
-  return processesMatching("genehub-host-dev")
+  return processesMatching("genehub-host-local")
     .filter((row) => row.cmd.includes("--entry agent"))
     .map((row) => ({ ...row, environ: procEnviron(row.pid) }));
 }

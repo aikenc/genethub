@@ -216,7 +216,7 @@ impl Journey {
         // The daemon finds the agent next to its own binary in production; in a
         // test it lives in the cargo target directory instead. Both the binary
         // name and the override variable are the stamped ones — a dev tree
-        // builds `genet-agent-dev` and listens for `GENET_AGENT_DEV_COMMAND`.
+        // builds `genet-agent-local` and listens for `GENET_AGENT_LOCAL_COMMAND`.
         let (env_name, binary) = agent_command_override()?;
         std::env::set_var(env_name, binary);
         point_confinement_at_the_real_binary();
@@ -443,7 +443,7 @@ fn point_confinement_at_the_real_binary() {
     let Some(target) = here.parent().and_then(|deps| deps.parent()) else {
         return;
     };
-    for name in ["genet-dev", "genet"] {
+    for name in ["genet-local", "genet"] {
         let candidate = target.join(name);
         if candidate.is_file() {
             std::env::set_var(CONFINE_COMMAND_ENV, candidate);

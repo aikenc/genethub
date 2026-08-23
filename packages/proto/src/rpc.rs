@@ -398,7 +398,7 @@ pub enum Request {
     /// Returns the daemon's bounded, privacy-safe support record.
     ///
     /// Unlike `log.tail`, this contains only fixed operation names, outcomes,
-    /// error classes and coarse connectivity state. It is safe for an official
+    /// error classes and coarse connectivity state. It is safe for a stable
     /// client to attach to an explicit feedback submission without copying
     /// terminal, Agent, prompt, filesystem path or credential text.
     #[serde(rename = "diagnostics.snapshot")]

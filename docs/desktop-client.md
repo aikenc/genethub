@@ -125,8 +125,8 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 | 项 | 实测（未压缩） | 说明 |
 |----|----------------|------|
 | Tauri 壳（含工作台静态产物） | 5.3 MB（重构前记录） | 用系统 WebView，不带 Chromium；须在下一次真实 installer 重测 |
-| `genet-dev` | 2.35 MB | 2026-08-22 本槽位 release launcher |
-| `genehub-host-dev` | 11.17 MB | 2026-08-22 本槽位 release Wasmtime/OS 壳 |
+| `genet-local` | 2.35 MB | 2026-08-22 本槽位 release launcher |
+| `genehub-host-local` | 11.17 MB | 2026-08-22 本槽位 release Wasmtime/OS 壳 |
 | `genehub_guest.wasm` | 6.83 MB | 2026-08-22 单制品 daemon/agent 双入口 |
 | 图标与桌面项 | < 10 KB | |
 
