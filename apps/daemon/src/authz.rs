@@ -250,6 +250,8 @@ impl Principal {
 pub enum StreamMethod {
     /// The peer's single fan-in of session, terminal and notice frames.
     Events,
+    /// Lean carrier method that returns the advertised business protocol.
+    ProtocolIdentity,
     /// Streams the bytes of a workspace file.
     AssetPreview,
     /// Runs a command and streams what it writes.
@@ -264,6 +266,7 @@ impl StreamMethod {
     pub fn parse(method: &str) -> Option<StreamMethod> {
         match method {
             "events" => Some(StreamMethod::Events),
+            genehub_proto::PROTOCOL_IDENTITY_METHOD => Some(StreamMethod::ProtocolIdentity),
             "asset.preview" => Some(StreamMethod::AssetPreview),
             "shell.run" => Some(StreamMethod::ShellRun),
             "rtc.negotiate" => Some(StreamMethod::RtcNegotiate),
@@ -276,7 +279,7 @@ impl StreamMethod {
         match self {
             // The stream itself carries only what its per-frame gates already
             // allowed; opening it proves nothing and grants nothing.
-            StreamMethod::Events => Capability::Handshake,
+            StreamMethod::Events | StreamMethod::ProtocolIdentity => Capability::Handshake,
             // Returns file bytes. That it arrives as a stream rather than a
             // request does not make it a cheaper thing to hand out.
             StreamMethod::AssetPreview => Capability::Files,
@@ -507,6 +510,11 @@ mod tests {
         );
         assert_eq!(
             StreamMethod::parse("events").map(StreamMethod::required),
+            Some(Capability::Handshake)
+        );
+        assert_eq!(
+            StreamMethod::parse(genehub_proto::PROTOCOL_IDENTITY_METHOD)
+                .map(StreamMethod::required),
             Some(Capability::Handshake)
         );
         assert_eq!(StreamMethod::parse("rpc"), None);

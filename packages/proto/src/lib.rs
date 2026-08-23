@@ -212,6 +212,21 @@ mod tests {
     }
 
     #[test]
+    fn protocol_identity_is_camel_case_and_independent_of_the_carrier() {
+        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(DATA_PLANE_VERSION, 3);
+        assert_eq!(PROTOCOL_IDENTITY_METHOD, "protocol.identity");
+        let encoded = serde_json::to_value(ProtocolIdentity {
+            protocol_version: PROTOCOL_VERSION,
+        })
+        .expect("serialize");
+        assert_eq!(encoded, json!({"protocolVersion": 3}));
+        round_trip(ProtocolIdentity {
+            protocol_version: PROTOCOL_VERSION,
+        });
+    }
+
+    #[test]
     fn an_invite_sent_the_way_it_was_sent_before_grants_still_means_no_limits() {
         // Pairing is the exchange that has to keep working on the machine
         // nobody can walk over to and fix, so an older client that never heard

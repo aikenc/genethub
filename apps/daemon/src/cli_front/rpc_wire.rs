@@ -6,13 +6,13 @@
 
 use std::time::Duration;
 
+use crate::config::Paths;
+use crate::dataplane::client::ClientEndpoint;
 use futures_util::{SinkExt, StreamExt};
 use genehub_proto::{
     Confinement, HelloResult, HubTicket, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply,
     Request, SequencedEvent, ServerFrame, ShellFrame, ShellRunRequest,
 };
-use crate::config::Paths;
-use crate::dataplane::client::ClientEndpoint;
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
@@ -125,11 +125,7 @@ impl Rpc {
             auth: PeerAuth::Loopback {
                 context: context.into(),
                 nonce: nonce.clone(),
-                proof: crate::channel_auth::client_proof(
-                    &admission.server_proof,
-                    context,
-                    &nonce,
-                ),
+                proof: crate::channel_auth::client_proof(&admission.server_proof, context, &nonce),
             },
             rtc_supported: false,
         };
@@ -177,8 +173,7 @@ impl Rpc {
         );
 
         let (mut sink, mut stream) = socket.split();
-        let (inbound, mut outbound, carrier) =
-            crate::dataplane::endpoint::carrier_channels();
+        let (inbound, mut outbound, carrier) = crate::dataplane::endpoint::carrier_channels();
         let writer = tokio::spawn(async move {
             while let Some(record) = outbound.recv().await {
                 if sink.send(Message::Binary(record)).await.is_err() {
@@ -261,11 +256,7 @@ impl Rpc {
         let auth = PeerAuth::Hosted {
             capability_id: ticket.channel_capability.clone(),
             nonce: nonce.clone(),
-            proof: crate::channel_auth::client_proof(
-                &ticket.channel_secret,
-                &context,
-                &nonce,
-            ),
+            proof: crate::channel_auth::client_proof(&ticket.channel_secret, &context, &nonce),
         };
         let rpc = Self::over_fabric(
             &ticket.url,
@@ -582,19 +573,14 @@ async fn link_up(
     // The proof is what makes the relay uninteresting: whoever is holding the
     // other end of this route either knows the secret or does not, and
     // occupying the slot in front of the machine proves nothing.
-    let expected = crate::channel_auth::server_proof(
-        secret,
-        context,
-        nonce,
-        &link.welcome.server_nonce,
-    );
+    let expected =
+        crate::channel_auth::server_proof(secret, context, nonce, &link.welcome.server_nonce);
     crate::channel_auth::verify_proof(&expected, &link.welcome.proof).map_err(|_| {
         ConnectError::Protocol(
             "whoever answered at that address could not prove the expected secret".into(),
         )
     })?;
-    let key =
-        crate::channel_auth::derive_key(secret, context, nonce, &link.welcome.server_nonce);
+    let key = crate::channel_auth::derive_key(secret, context, nonce, &link.welcome.server_nonce);
     let crate::transport::fabric::FabricLink { carrier, pump, .. } = link;
     let (data, endpoint_task) = ClientEndpoint::start(key, carrier);
     let monitor = tokio::spawn(async move {
@@ -628,13 +614,11 @@ fn verify_remote_identity(
     hello: &HelloResult,
     machine: &PairedMachine,
 ) -> Result<(), ConnectError> {
-    if hello.protocol_version != genehub_proto::DATA_PLANE_VERSION {
-        return Err(ConnectError::Protocol(format!(
-            "{} speaks data plane {}, this build speaks {}",
-            machine.machine_id,
+    if !business_protocol_supported(hello.protocol_version) {
+        return Err(business_protocol_mismatch(
+            &machine.machine_id,
             hello.protocol_version,
-            genehub_proto::DATA_PLANE_VERSION
-        )));
+        ));
     }
     if !hello.machine_id.is_empty() && hello.machine_id != machine.machine_id {
         return Err(ConnectError::Protocol(format!(
@@ -720,7 +704,6 @@ fn verify_local_identity(
         .unwrap_or_default()
         .as_secs();
     if admission.expires_at <= now
-        || hello.protocol_version != genehub_proto::DATA_PLANE_VERSION
         || hello.transport != genehub_proto::TransportKind::Loopback
         || hello.machine_id != admission.machine_id
         || hello.fingerprint != admission.fingerprint
@@ -729,7 +712,40 @@ fn verify_local_identity(
             "the loopback listener returned an inconsistent daemon identity".into(),
         ));
     }
+    if !business_protocol_supported(hello.protocol_version) {
+        return Err(business_protocol_mismatch(
+            "the loopback daemon",
+            hello.protocol_version,
+        ));
+    }
     Ok(())
+}
+
+/// Eight retained business generations, matching the Web adjacent-adapter window.
+const RETAINED_BUSINESS_PROTOCOLS: u32 = 8;
+
+fn business_protocol_supported(version: u32) -> bool {
+    let latest = genehub_proto::PROTOCOL_VERSION;
+    let oldest = latest
+        .saturating_sub(RETAINED_BUSINESS_PROTOCOLS - 1)
+        .max(1);
+    version >= oldest && version <= latest
+}
+
+fn business_protocol_mismatch(peer: &str, advertised: u32) -> ConnectError {
+    let latest = genehub_proto::PROTOCOL_VERSION;
+    if advertised > latest {
+        ConnectError::Protocol(format!(
+            "{peer} uses business protocol v{advertised}; this CLI only supports up to v{latest}. Upgrade the CLI."
+        ))
+    } else {
+        let oldest = latest
+            .saturating_sub(RETAINED_BUSINESS_PROTOCOLS - 1)
+            .max(1);
+        ConnectError::Protocol(format!(
+            "{peer} uses business protocol v{advertised}, which is outside this CLI's {RETAINED_BUSINESS_PROTOCOLS}-generation window (v{oldest}–v{latest}). Upgrade the App."
+        ))
+    }
 }
 
 fn dial_failure(port: u16) -> String {
@@ -796,7 +812,7 @@ mod tests {
         };
         let hello = HelloResult {
             daemon_version: "test".into(),
-            protocol_version: genehub_proto::DATA_PLANE_VERSION,
+            protocol_version: genehub_proto::PROTOCOL_VERSION,
             machine_id: admission.machine_id.clone(),
             fingerprint: admission.fingerprint.clone(),
             transport: TransportKind::Loopback,
@@ -815,6 +831,34 @@ mod tests {
         let mut wrong = hello;
         wrong.machine_id = "m_attacker".into();
         assert!(verify_local_identity(&wrong, &admission).is_err());
+    }
+
+    #[test]
+    fn advertised_business_protocol_must_stay_inside_the_retained_window() {
+        let (admission, hello) = local_contract();
+        verify_local_identity(&hello, &admission).unwrap();
+        let mut unsupported = hello.clone();
+        unsupported.protocol_version = genehub_proto::PROTOCOL_VERSION + 1;
+        let error = verify_local_identity(&unsupported, &admission).unwrap_err();
+        assert!(error.to_string().contains("business protocol"), "{error}");
+        assert!(!error.to_string().contains("speaks data plane"), "{error}");
+
+        let machine = PairedMachine {
+            machine_id: hello.machine_id.clone(),
+            name: "remote".into(),
+            fingerprint: hello.fingerprint.clone(),
+            endpoint: String::new(),
+            device_id: "d".into(),
+            secret: String::new(),
+            paired_at: String::new(),
+        };
+        verify_remote_identity(&hello, &machine).unwrap();
+        let remote = verify_remote_identity(&unsupported, &machine).unwrap_err();
+        assert!(remote.to_string().contains("business protocol"), "{remote}");
+        assert!(
+            !remote.to_string().contains("speaks data plane"),
+            "{remote}"
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ import {
   type DataStream,
   type RecordCarrier,
 } from "../dataplane";
+import { PROTOCOL_VERSION } from "./codec";
 import type { WebSocketLike } from "./client";
 
 interface Sent {
@@ -37,6 +38,11 @@ export interface FakePeerOptions {
   identity?: Partial<HelloResult>;
   /** Identity is normally the one daemon RPC the fake answers itself. */
   autoIdentity?: boolean;
+  /**
+   * `protocol.identity` is answered automatically so current daemons stay
+   * the default. Set false to emulate an older peer that returns 404.
+   */
+  autoProtocolIdentity?: boolean;
 }
 
 /**
@@ -249,6 +255,35 @@ export class FakeSocket implements WebSocketLike {
 
     const body = await collectBody(stream.body(), 4 * 1024 * 1024);
     const id = String(stream.id);
+    if (method === "protocol.identity") {
+      this.sent.push({ id, type: method });
+      this.streams.set(id, stream);
+      if (this.options.autoProtocolIdentity === false) {
+        await this.respond(
+          id,
+          {
+            status: 404,
+            metadata: null,
+            error: { code: "notFound", message: "unknown exchange method" },
+          },
+          new Uint8Array(),
+        );
+        return;
+      }
+      await this.respond(
+        id,
+        { status: 200, metadata: null },
+        new TextEncoder().encode(
+          JSON.stringify({
+            protocolVersion:
+              identity.protocolVersion ??
+              this.options.identity?.protocolVersion ??
+              PROTOCOL_VERSION,
+          }),
+        ),
+      );
+      return;
+    }
     if (method === "rpc") {
       const request = JSON.parse(new TextDecoder().decode(body)) as Request;
       this.sent.push({
@@ -265,7 +300,7 @@ export class FakeSocket implements WebSocketLike {
           type: "hello",
           data: {
             daemonVersion: "test",
-            protocolVersion: DATA_PLANE_VERSION,
+            protocolVersion: PROTOCOL_VERSION,
             machineId: "m_test",
             machineName: "测试机器",
             fingerprint: "AAAA-BBBB",

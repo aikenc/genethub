@@ -30,8 +30,14 @@ import {
   type RtcDataLink,
 } from "../dataplane";
 import type { BinaryWebSocketLike } from "../dataplane/websocket";
+import {
+  PROTOCOL_VERSION,
+  UnsupportedBusinessProtocolError,
+  protocolCodec,
+  type ProtocolCodec,
+} from "./codec";
 
-export const PROTOCOL_VERSION = DATA_PLANE_VERSION;
+export { PROTOCOL_VERSION } from "./codec";
 export const MAX_RPC_BODY_BYTES = 2_900_000;
 const MAX_PREVIEW_BYTES = 64 * 1024 * 1024;
 const MAX_EVENT_BYTES = 3 * 1024 * 1024;
@@ -258,6 +264,7 @@ export class Client {
   private connectionEpoch = 0;
   private connectionAttemptId: string | null = null;
   private carrier: "websocket" | "fabric" | null = null;
+  private businessCodec: ProtocolCodec = protocolCodec(PROTOCOL_VERSION);
 
   failure: ProtocolError | null = null;
   identity: HelloResult | null = null;
@@ -645,7 +652,7 @@ export class Client {
       this.clearConnectTimer();
       void this.establish(socket, epoch).catch((error: unknown) => {
         if (!this.isCurrent(socket, epoch)) return;
-        if (error instanceof PeerAuthenticationError) {
+        if (fatalConnectionError(error)) {
           this.failClosed(error.message);
         } else {
           this.report(error);
@@ -703,7 +710,7 @@ export class Client {
           await this.activateEndpoint(link.endpoint, epoch);
         } catch (error) {
           if (!this.isCurrentEpoch(epoch)) return;
-          if (error instanceof PeerAuthenticationError) this.failClosed(error.message);
+          if (fatalConnectionError(error)) this.failClosed(error.message);
           else {
             this.report(error);
             link.close();
@@ -777,6 +784,7 @@ export class Client {
       return;
     }
 
+    this.businessCodec = protocolCodec(await this.protocolIdentityOn(endpoint));
     const identity = await this.rpc(endpoint, { type: "connection.identity" });
     if (identity?.type !== "hello") {
       throw new PeerAuthenticationError("the encrypted peer identity was not returned");
@@ -901,7 +909,7 @@ export class Client {
     requestId = diagnosticId("internal"),
   ): Promise<Reply | undefined> {
     const budget = timeoutMs ?? this.options.requestTimeoutMs ?? 60_000;
-    const body = encoder.encode(JSON.stringify(request));
+    const body = this.businessCodec.encodeRequest(request);
     const stream = endpoint.open({
       version: DATA_PLANE_VERSION,
       method: "rpc",
@@ -925,13 +933,45 @@ export class Client {
         throw new ClientRequestTooLargeError();
       }
       const value = await collectBody(stream.body(), MAX_RPC_BODY_BYTES);
-      return value.byteLength === 0 ? undefined : (JSON.parse(decoder.decode(value)) as Reply);
+      return value.byteLength === 0 ? undefined : this.businessCodec.decodeReply(value);
     })();
     return withTimeout(
       operation,
       budget,
       "the daemon did not answer the request before its deadline",
       () => stream.reset(DataReset.Timeout),
+    );
+  }
+
+  private async protocolIdentityOn(endpoint: DataEndpoint): Promise<number> {
+    const stream = endpoint.open({
+      version: DATA_PLANE_VERSION,
+      method: "protocol.identity",
+      metadata: null,
+      bodyLength: 0,
+      timeoutMs: 10_000,
+    });
+    const operation = (async () => {
+      await stream.finish();
+      const head = await stream.responseHead;
+      if (head.status === 404) return 3;
+      if (head.error) throw new ProtocolError_(head.error);
+      if (head.status !== 200) {
+        throw new PeerAuthenticationError(`protocol.identity failed (${head.status})`);
+      }
+      const value = await collectBody(stream.body(), 8 * 1024);
+      const identity = JSON.parse(decoder.decode(value)) as { protocolVersion?: unknown };
+      if (
+        typeof identity.protocolVersion !== "number" ||
+        !Number.isSafeInteger(identity.protocolVersion) ||
+        identity.protocolVersion <= 0
+      ) {
+        throw new PeerAuthenticationError("daemon 返回了无效的业务协议版本");
+      }
+      return identity.protocolVersion;
+    })();
+    return withTimeout(operation, 10_000, "protocol.identity 超时", () =>
+      stream.reset(DataReset.Timeout),
     );
   }
 
@@ -981,7 +1021,7 @@ export class Client {
           throw new DataPlaneError("invalid event message length");
         }
         if (buffered.byteLength < 4 + length) break;
-        const frame = JSON.parse(decoder.decode(buffered.slice(4, 4 + length))) as ServerFrame;
+        const frame = this.businessCodec.decodeServerFrame(buffered.slice(4, 4 + length));
         buffered = buffered.slice(4 + length);
         this.receiveEvent(frame);
       }
@@ -1532,6 +1572,15 @@ class PeerAuthenticationError extends Error {
     super(message, options);
     this.name = "PeerAuthenticationError";
   }
+}
+
+function fatalConnectionError(
+  error: unknown,
+): error is PeerAuthenticationError | UnsupportedBusinessProtocolError {
+  return (
+    error instanceof PeerAuthenticationError ||
+    error instanceof UnsupportedBusinessProtocolError
+  );
 }
 
 function nextBinaryMessage(socket: WebSocketLike, timeoutMs: number): Promise<Uint8Array> {

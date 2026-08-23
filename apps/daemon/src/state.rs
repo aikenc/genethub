@@ -64,6 +64,9 @@ pub struct AppState {
     /// to kill the process and skip every bit of cleanup. Asking over the same
     /// loopback connection it already uses works the same everywhere.
     pub shutdown: Arc<tokio::sync::Notify>,
+    /// Raised after a host-owned signed guest apply. The run loop returns
+    /// `Exit::Reload`; sessions and child processes are dropped.
+    pub reload: Arc<tokio::sync::Notify>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -166,6 +169,7 @@ impl AppState {
             fanout: std::sync::OnceLock::new(),
             models: RwLock::new(std::collections::HashMap::new()),
             shutdown: Arc::new(tokio::sync::Notify::new()),
+            reload: Arc::new(tokio::sync::Notify::new()),
         });
         Ok((state, pty_rx))
     }

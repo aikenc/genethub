@@ -65,10 +65,16 @@ pub async fn run() -> Result<Exit> {
     tracing::info!("listening on 127.0.0.1:{}", daemon.port);
 
     let asked = daemon.state.shutdown.clone();
+    let reload = daemon.state.reload.clone();
     let component_changed = component_watcher();
     tokio::select! {
         _ = wait_for_signal() => {}
         _ = asked.notified() => tracing::info!("a local client asked us to stop"),
+        _ = reload.notified() => {
+            tracing::info!("a signed guest update was applied; reloading in place");
+            daemon.shutdown().await;
+            return Ok(Exit::Reload);
+        }
         // The component file we were loaded from changed on disk: a dev
         // rebuild landed, or an installer replaced us. Hand the process back
         // to the shell, which re-reads the artifact and instantiates it again

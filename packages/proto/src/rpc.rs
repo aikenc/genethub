@@ -11,10 +11,25 @@ use crate::timeline::Attachment;
 
 /// Bumped when a change would break an older client. Clients that see a version
 /// they do not know must refuse to connect rather than guess.
-pub const PROTOCOL_VERSION: u32 = crate::data::DATA_PLANE_VERSION;
+///
+/// Business JSON version spoken by Web/CLI. It deliberately does not inherit
+/// the binary carrier version: either side may evolve without turning a
+/// protocol adapter into a data-plane upgrade.
+pub const PROTOCOL_VERSION: u32 = 3;
+/// Lean carrier method that returns `{ protocolVersion }` before the first
+/// business RPC. It is not a `Request` variant.
+pub const PROTOCOL_IDENTITY_METHOD: &str = "protocol.identity";
 /// Maximum typed RPC body accepted before it is divided into bounded v3 data
 /// frames.
 pub const MAX_RPC_BODY_BYTES: usize = 2_900_000;
+
+/// Advertised business protocol, independent of the carrier handshake.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ProtocolIdentity {
+    pub protocol_version: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]

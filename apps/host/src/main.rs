@@ -4,16 +4,22 @@
 //! workspace / provider types. `CHANNEL` is compile-time `dev`: no verify.
 
 mod abi;
+mod artifact;
+mod artifact_cli;
 mod bindings;
 mod channel;
+mod error;
 mod file_lock;
 mod fs_perms;
 mod http_hooks;
 mod isolation;
+mod keys;
 mod load;
 mod process;
 mod pty;
 mod rtc;
+mod store;
+mod update;
 
 use std::env;
 use std::path::PathBuf;
@@ -39,6 +45,14 @@ fn main() {
                 std::process::exit(2);
             });
             run_and_exit(&component, &guest_args, entry);
+        }
+        Some(command @ ("pack" | "pack-dev" | "inspect" | "public-key" | "dev-public-key")) => {
+            let mut artifact_args = vec![command.to_string()];
+            artifact_args.extend(args);
+            if let Err(error) = artifact_cli::run(&artifact_args) {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
         }
         Some("--version" | "-V") => println!("{}", env!("CARGO_PKG_VERSION")),
         _ => {

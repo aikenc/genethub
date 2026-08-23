@@ -18,12 +18,21 @@ genehub-proto = { path = "../../packages/proto" }
 genet-native = { path = "../../packages/native" }
 
 anyhow.workspace = true
+base64.workspace = true
 bytes = "1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 fs2.workspace = true
 http = "1"
 http-body-util = "0.1"
 portable-pty = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tempfile = "3"
+thiserror.workspace = true
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "process", "io-util", "sync", "time"] }
+wasmparser = "0.239"
 wasmtime = { version = "48", default-features = false, features = ["anyhow", "async", "component-model", "cranelift", "parallel-compilation"] }
 wasmtime-wasi = "48"
 wasmtime-wasi-http = "48"

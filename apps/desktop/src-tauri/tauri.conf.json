@@ -5,13 +5,12 @@
   "identifier": "com.genethub.desktop.dev",
   "mainBinaryName": "genethub-desktop-dev",
   "build": {
-    "frontendDist": "../../../packages/web/dist",
-    "beforeBuildCommand": "npm --prefix ../../packages/web run build",
-    "beforeDevCommand": "npm --prefix ../../packages/web run dev",
-    "devUrl": "http://localhost:5173"
+    "frontendDist": "../boot",
+    "beforeDevCommand": "npm --prefix ../../packages/web run dest",
+    "devUrl": "http://127.0.0.1:5173"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "title": "GeneHub Dev",
@@ -21,12 +20,12 @@
         "minHeight": 520,
         "resizable": true,
         "visible": true,
-        "decorations": false,
+        "decorations": true,
         "backgroundColor": "#181B1A"
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:* ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {

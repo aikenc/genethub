@@ -762,8 +762,9 @@ describe("the version section", () => {
     expect(calls.some((call) => call.type === "update.check")).toBe(false);
   });
 
-  it("ignores executable URLs from an old daemon and offers only the fixed manual page", async () => {
+  it("ignores executable URLs and only applies a signed guest update after confirm", async () => {
     const opened: string[] = [];
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     const { calls } = connected({
       "update.check": () => ({
         type: "update",
@@ -775,19 +776,43 @@ describe("the version section", () => {
           downloadUrl: "https://example.test/GeneHub-setup.exe",
         },
       }),
+      "update.download": () => ({ type: "updateDownload", data: { state: "idle" } }),
     });
 
     render(<SettingsPanel host={desktopish("0.1.17", opened)} />);
     await userEvent.click(await screen.findByTestId("check-update"));
 
-    expect(await screen.findByText(/有新版本 0\.1\.18/)).toBeTruthy();
+    expect(await screen.findByText(/有签名更新 0\.1\.18/)).toBeTruthy();
     expect(screen.getByTestId("manual-update-note")).toHaveTextContent("自动下载和安装暂未启用");
     expect(screen.queryByTestId("download-update")).toBeNull();
     expect(calls.some((call) => call.type === "update.download")).toBe(false);
     expect(opened).toEqual([]);
 
+    await userEvent.click(screen.getByTestId("apply-guest-update"));
+    expect(confirm).toHaveBeenCalledWith("将断开会话并结束后台进程，确认更新？");
+    expect(calls.some((call) => call.type === "update.download")).toBe(true);
+
     await userEvent.click(screen.getByTestId("manual-update-link"));
     expect(opened).toEqual(["https://github.com/aikenc/genethub/releases"]);
+    confirm.mockRestore();
+  });
+
+  it("does not apply a signed guest update when the confirm is cancelled", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const { calls } = connected({
+      "update.check": () => ({
+        type: "update",
+        data: { current: "0.1.17", latest: "0.1.18", newer: true },
+      }),
+    });
+
+    render(<SettingsPanel host={desktopish("0.1.17")} />);
+    await userEvent.click(await screen.findByTestId("check-update"));
+    await userEvent.click(await screen.findByTestId("apply-guest-update"));
+
+    expect(confirm).toHaveBeenCalled();
+    expect(calls.some((call) => call.type === "update.download")).toBe(false);
+    confirm.mockRestore();
   });
 
   /// The one answer worth refusing to give: reaching nothing is not the same

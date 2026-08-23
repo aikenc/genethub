@@ -54,3 +54,5 @@ pub const DEFAULT_MANIFEST_URL: &str = "";
 /// Empty for dev: a source build points nowhere unless told.
 pub const DEFAULT_HUB_URL: &str = "";
 pub const ENV_HUB_URL: &str = "GENEHUB_DEV_HUB_URL";
+/// Channel website the Desktop shell navigates to after boot.
+pub const WEB_APP_URL: &str = "http://127.0.0.1:5173/app";

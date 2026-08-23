@@ -11,7 +11,7 @@
 
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -60,18 +60,28 @@ if (bundles !== platformBundle) {
   fail(`desktop bundle '${bundles}' is not supported on ${process.platform}; expected '${platformBundle}'`);
 }
 
-console.log(`==> building the CLI, the wasm shell and the guest component (${CHANNEL})`);
+const preparedGuest = process.env.GENEHUB_GUEST_WASM
+  ? resolve(process.env.GENEHUB_GUEST_WASM)
+  : null;
+if (preparedGuest && !existsSync(preparedGuest)) {
+  fail(`GENEHUB_GUEST_WASM does not exist: ${preparedGuest}`);
+}
+
+console.log(`==> building the CLI and wasm shell (${CHANNEL})`);
 run("cargo", ["build", "--release", "--manifest-path", join(repo, "Cargo.toml"), "-p", "genet-cli", "-p", "genehub-host"]);
-run("cargo", [
-  "build",
-  "--release",
-  "--manifest-path",
-  join(repo, "Cargo.toml"),
-  "-p",
-  "genehub-guest",
-  "--target",
-  "wasm32-wasip2",
-]);
+if (!preparedGuest) {
+  console.log("==> building the development guest component");
+  run("cargo", [
+    "build",
+    "--release",
+    "--manifest-path",
+    join(repo, "Cargo.toml"),
+    "-p",
+    "genehub-guest",
+    "--target",
+    "wasm32-wasip2",
+  ]);
+}
 
 console.log("==> staging binaries");
 const binDir = join(here, "../src-tauri/bin");
@@ -87,7 +97,10 @@ const exe = process.platform === "win32" ? ".exe" : "";
 for (const binary of [CLI_BINARY, HOST_BINARY]) {
   cpSync(join(repo, "target/release", binary + exe), join(binDir, binary + exe));
 }
-cpSync(join(repo, "target/wasm32-wasip2/release/genehub_guest.wasm"), join(binDir, "genehub_guest.wasm"));
+cpSync(
+  preparedGuest ?? join(repo, "target/wasm32-wasip2/release/genehub_guest.wasm"),
+  join(binDir, "genehub_guest.wasm"),
+);
 
 console.log(`==> building the installer (${bundles})`);
 run("npm", ["--prefix", join(here, ".."), "run", "build", "--", "--bundles", bundles], { shell: process.platform === "win32" });

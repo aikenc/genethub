@@ -1,11 +1,9 @@
-//! What the window needs from the shell before either of them runs.
+//! Contracts for the minimal Desktop shell.
 //!
-//! The workbench and this shell are built separately and only meet in a packaged
-//! app, so the things they agree about are agreed nowhere — no compiler sees both
-//! sides. That is how the app shipped deciding it was a browser: the frontend
-//! looks for `window.__TAURI__`, Tauri 2 only injects it when asked, and nothing
-//! anywhere said so. These read the two files and check they still say the same
-//! thing.
+//! Native code supervises and enrolls the daemon, then displays the fixed
+//! channel website as an ordinary browser. These tests pin the boundary because
+//! Rust, Tauri configuration and the separately deployed Web have no shared type
+//! checker.
 
 use std::path::{Path, PathBuf};
 
@@ -19,106 +17,110 @@ fn config() -> serde_json::Value {
     serde_json::from_str(&raw).expect("parse tauri.conf.json")
 }
 
-/// Without this the packaged app takes the browser path, looks for an address in
-/// the URL of a page that has no URL, and tells the user there is no machine to
-/// connect to — on a machine whose daemon is running perfectly.
+/// The official page is untrusted in exactly the same way as a page in Chrome:
+/// it receives neither a Tauri global nor a command/capability surface.
 #[test]
-fn the_frontend_can_tell_it_is_not_in_a_browser() {
+fn remote_product_web_has_no_native_bridge() {
+    let config = config();
+    assert_eq!(config["app"]["withGlobalTauri"], serde_json::json!(false));
+
+    let host = read(repo().join("packages/web/src/host/index.ts"));
+    assert!(host.contains("always an ordinary browser"));
+    assert!(!host.contains("desktop ? desktopHost()"));
+
+    let shell = read(repo().join("apps/desktop/src-tauri/src/lib.rs"));
+    assert!(!shell.contains("generate_handler!"));
+    assert!(!shell.contains("#[tauri::command]"));
+
+    let title_bar = read(repo().join("packages/web/src/shell/TitleBar.tsx"));
+    assert!(title_bar.contains("if (!controls) return null"));
+}
+
+/// Product Web is not an installer asset. The only bundled page explains native
+/// startup failures before the shell applies a signed-Wasm navigation directive.
+#[test]
+fn the_bundle_contains_only_a_boot_surface_then_applies_the_wasm_route() {
     let config = config();
     assert_eq!(
-        config["app"]["withGlobalTauri"],
-        serde_json::json!(true),
-        "packages/web/src/host/index.ts decides which shell it is in by the \
-         presence of window.__TAURI__, and Tauri only injects that when \
-         withGlobalTauri is on"
+        config["build"]["frontendDist"],
+        serde_json::json!("../boot")
     );
+    assert!(config["build"].get("beforeBuildCommand").is_none());
+    // `beforeDevCommand` may start the Web dev server for `tauri dev`; it is
+    // not an installer input. Only frontendDist and bundle resources decide
+    // what ships in the App.
+    assert!(!config["bundle"]["resources"]
+        .to_string()
+        .contains("packages/web"));
 
-    let host = std::fs::read_to_string(repo().join("packages/web/src/host/index.ts"))
-        .expect("read the host layer");
-    assert!(
-        host.contains("window.__TAURI__"),
-        "the frontend no longer keys off window.__TAURI__, so this test is \
-         pinning the wrong thing — check what it detects now"
-    );
+    let boot = read(repo().join("apps/desktop/boot/index.html"));
+    assert!(boot.contains("GeneHub 正在启动"));
+    assert!(!boot.contains("<script"));
+
+    let shell = read(repo().join("apps/desktop/src-tauri/src/lib.rs"));
+    assert!(shell.contains("command.args([\"desktop\", \"route\"]);"));
+    assert!(!shell.contains("channel::WEB_APP_URL"));
+    assert!(!shell.contains("HubStatus"));
+    assert!(shell.contains("window.navigate(url)"));
+    assert!(shell.contains("ensure_web_reachable(&target)?"));
 }
 
-/// Each of these is invoked by name from the frontend, where a typo is a runtime
-/// error in a window with no console.
 #[test]
-fn every_command_the_workbench_calls_exists_here() {
-    let shell = std::fs::read_to_string(repo().join("apps/desktop/src-tauri/src/lib.rs"))
-        .expect("read the shell");
-    let host = std::fs::read_to_string(repo().join("packages/web/src/host/index.ts"))
-        .expect("read the host layer");
+fn windows_runs_a_real_webview2_offline_and_remote_origin_gate() {
+    let e2e = read(repo().join("apps/desktop/scripts/windows-webview-e2e.mjs"));
+    assert!(e2e.contains("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"));
+    assert!(e2e.contains("Runtime.evaluate"));
+    assert!(e2e.contains("http://127.0.0.1:5173/app"));
+    assert!(e2e.contains("globalThis.__TAURI__"));
 
-    let registered: Vec<&str> = shell
-        .split_once("generate_handler![")
-        .expect("the shell registers commands")
-        .1
-        .split_once(']')
-        .expect("an unterminated generate_handler!")
-        .0
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .collect();
-
-    for command in [
-        "daemon_endpoint",
-        "daemon_problem",
-        "restart_daemon",
-        "notify",
-        "open_external",
-        "install_update",
-        "open_window",
-        "open_logs",
-        "pick_directory",
-        "pick_workspace_file",
-        "app_version",
-        "window_minimize",
-        "window_toggle_maximize",
-        "window_is_maximized",
-        "window_close",
-        "set_window_background",
-    ] {
-        assert!(
-            host.contains(&format!("\"{command}\"")),
-            "{command} is registered but nothing calls it — either the frontend \
-             lost a feature or this list is stale"
-        );
-        assert!(
-            shell.contains(&format!("fn {command}(")),
-            "the frontend calls {command} and this shell has no such command"
-        );
-        assert!(
-            registered.contains(&command),
-            "{command} exists but is not in generate_handler! ({registered:?}), \
-             so calling it fails at runtime"
-        );
-    }
+    let release = read(repo().join(".github/workflows/release.yml"));
+    assert!(release.contains("node apps/desktop/scripts/windows-webview-e2e.mjs"));
+    assert!(release.contains("Real WebView2 keeps the offline boot page"));
 }
 
-/// The page reaches opener/dialog/notification only through the narrow Rust
-/// commands above. Granting each plugin's default frontend capability as well
-/// would let a compromised renderer bypass URL validation and invoke arbitrary
-/// operating-system protocol handlers directly.
 #[test]
-fn privileged_plugins_are_not_exposed_directly_to_the_renderer() {
-    let raw =
-        std::fs::read_to_string(repo().join("apps/desktop/src-tauri/capabilities/default.json"))
-            .expect("read desktop capabilities");
+fn every_release_package_embeds_one_signed_guest_and_pins_its_baseline() {
+    let release = read(repo().join(".github/workflows/release.yml"));
+    assert!(release.contains("daemon_logic:"));
+    assert!(release.contains("name: guest-wasm-release"));
+    assert!(release.contains("GENEHUB_GUEST_WASM_PUBLIC_KEY"));
+    assert!(release.contains("GENEHUB_BUNDLED_LOGIC_REVISION"));
+    assert!(release.contains("publish-prepared-logic.mjs"));
+    assert!(release
+        .contains("cmp \"$GENEHUB_GUEST_WASM\" apps/desktop/src-tauri/bin/genehub_guest.wasm"));
+
+    let bundle = read(repo().join("apps/desktop/scripts/bundle.mjs"));
+    assert!(bundle.contains("process.env.GENEHUB_GUEST_WASM"));
+    assert!(bundle.contains("preparedGuest ??"));
+}
+
+#[test]
+fn machine_claim_is_an_explicit_tray_recovery_not_an_every_start_side_effect() {
+    let shell = read(repo().join("apps/desktop/src-tauri/src/lib.rs"));
+    let tray = read(repo().join("apps/desktop/src-tauri/src/tray.rs"));
+    assert!(shell.contains("if claim_existing"));
+    assert!(tray.contains("crate::start_claim(app)"));
+    assert!(shell.contains("command.arg(\"--claim\")"));
+    assert!(!shell.contains("HubClaim"));
+}
+
+#[test]
+fn the_tray_uses_the_channel_stamped_app_download_page() {
+    let tray = read(repo().join("apps/desktop/src-tauri/src/tray.rs"));
+    let channel = read(repo().join("apps/desktop/src-tauri/src/channel.rs"));
+    assert!(tray.contains("channel::APP_DOWNLOAD_URL"));
+    assert!(channel.contains("pub const APP_DOWNLOAD_URL"));
+    assert!(!tray.contains("open_url(\"https://genethub.com/download\""));
+}
+
+/// The boot page is remote code's only possible predecessor, so it does not need
+/// any renderer permission either. Native tray actions stay in Rust.
+#[test]
+fn renderer_capabilities_are_empty() {
+    let raw = read(repo().join("apps/desktop/src-tauri/capabilities/default.json"));
     let capability: serde_json::Value =
         serde_json::from_str(&raw).expect("parse desktop capabilities");
-    let permissions = capability["permissions"]
-        .as_array()
-        .expect("desktop permissions are an array");
-
-    for forbidden in ["opener:default", "dialog:default", "notification:default"] {
-        assert!(
-            !permissions.iter().any(|value| value == forbidden),
-            "{forbidden} lets renderer JavaScript bypass the shell's validated command"
-        );
-    }
+    assert_eq!(capability["permissions"], serde_json::json!([]));
 }
 
 #[test]
@@ -128,39 +130,17 @@ fn macos_bundle_explains_microphone_access_for_speech_input() {
     assert!(plist.contains("语音转换为可编辑文字"));
 }
 
-/// Turning the decorations off takes away the only way the OS gives anyone to
-/// move, maximise or close the window — so the page has to put all three back,
-/// and the shell has to permit the drag. Any one of the three missing is a
-/// window that cannot be got rid of, which is worse than the white title bar
-/// this arrangement exists to remove.
+/// An ordinary website must not draw or control native chrome. The OS owns the
+/// title bar, movement, maximize and close actions.
 #[test]
-fn a_window_with_no_decorations_draws_its_own_title_bar() {
+fn the_remote_page_uses_os_window_decorations() {
     let config = config();
-    let window = &config["app"]["windows"][0];
     assert_eq!(
-        window["decorations"],
-        serde_json::json!(false),
-        "the window uses the system title bar again, which takes its colour \
-         from the OS and not from the workbench — if that is deliberate, \
-         packages/web/src/shell/TitleBar.tsx is now a second one"
+        config["app"]["windows"][0]["decorations"],
+        serde_json::json!(true)
     );
-    assert!(
-        window["backgroundColor"].is_string(),
-        "with no decorations the window's own colour is what shows before the \
-         page paints and along the edge while it is being resized"
-    );
-
-    let bar = read(repo().join("packages/web/src/shell/TitleBar.tsx"));
-    assert!(
-        bar.contains("data-tauri-drag-region"),
-        "nothing in the title bar is draggable, so the window cannot be moved"
-    );
-
     let capabilities = read(repo().join("apps/desktop/src-tauri/capabilities/default.json"));
-    assert!(
-        capabilities.contains("core:window:allow-start-dragging"),
-        "the drag region is drawn but the shell refuses the drag it asks for"
-    );
+    assert!(!capabilities.contains("core:window"));
 }
 
 /// An upgrade replaces files the running daemon is holding open, and Windows
@@ -173,24 +153,11 @@ fn the_windows_installer_stops_the_daemon_before_replacing_it() {
         script.contains("NSIS_HOOK_PREINSTALL"),
         "the hook runs nowhere before the install"
     );
-    // Every executable staged into the bundle is a file the installer will
-    // overwrite, so every one of them has to be stopped first. The names come
-    // from the defines, not literals: the two channels install side by side,
-    // and scripts/channel.mjs rewrites the defines for a release build.
-    //
-    // The daemon is the exception, and the exception is the point: it is the
-    // same `genet` binary every CLI client runs, so it is stopped by the pid
+    // The daemon is the same `genet` binary every CLI client and built-in
+    // Agent role runs, so it is stopped by the pid
     // in its lock file — an image-name kill would take a running
     // `genet session send --wait` down with it (`genethub-cli.md` §2).
-    //
-    // The wasm shell is not the exception: the daemon and every agent are
-    // host processes, and the daemon's own lock-pid kill already ran above,
-    // so what remains under the host's image name is what must go.
-    let host = nsis_define(&script, "GH_HOST_EXE");
-    assert!(
-        script.contains("/T /IM ${GH_HOST_EXE}"),
-        "the wasm shell ({host}) ships in the bundle but the installer never stops it"
-    );
+    assert!(!script.contains("GH_AGENT_EXE"));
     assert!(
         script.contains("/F /T /PID"),
         "the daemon is not stopped by its lock-file pid any more"
@@ -311,16 +278,35 @@ fn the_windows_installer_defaults_upgrades_to_overwriting() {
     );
 }
 
-/// A path received from the workbench or Relay must never become a child
-/// process before releases have an independent signing root.
+/// A normal first install ends by launching the shell, whose first action after
+/// supervising the daemon is the auth-first route. The user may opt out on the
+/// finish page, while unattended installs require the explicit `/R` flag.
 #[test]
-fn automatic_update_commands_fail_closed_without_network_or_execution() {
+fn the_windows_installer_offers_launch_on_finish() {
+    let config = config();
+    let template = config["bundle"]["windows"]["nsis"]["template"]
+        .as_str()
+        .expect("no custom NSIS template");
+    let script = read(repo().join("apps/desktop/src-tauri").join(template));
+    assert!(script.contains("!define MUI_FINISHPAGE_RUN"));
+    assert!(script.contains("!define MUI_FINISHPAGE_RUN_FUNCTION RunMainBinary"));
+    assert!(script.contains("Function RunMainBinary"));
+    assert!(script.contains("nsis_tauri_utils::RunAsUser"));
+}
+
+/// The website cannot hand native code a file or URL to execute. App updates
+/// remain an explicit trip to the channel-stamped download page.
+#[test]
+fn the_remote_renderer_cannot_install_an_update() {
     let shell = read(repo().join("apps/desktop/src-tauri/src/lib.rs"));
-    assert!(shell.contains("fn install_update(_app"));
-    assert!(shell.contains("Err(AUTOMATIC_UPDATE_DISABLED.to_string())"));
-    assert!(!shell.contains("std::process::Command::new(file)"));
+    assert!(!shell.contains("install_update"));
     assert!(!shell.contains("fetch_app_manifest"));
-    assert!(shell.contains("download_url: None"));
+    assert!(!shell.contains("generate_handler!"));
+
+    let tray = read(repo().join("apps/desktop/src-tauri/src/tray.rs"));
+    assert!(tray.contains("channel::APP_DOWNLOAD_URL"));
+    assert!(!tray.contains("open_url(\"https://genethub.com/download\""));
+    assert!(tray.contains(".open_url("));
 }
 
 /// The failure this whole arrangement is shaped around.
@@ -534,16 +520,12 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
             "pub const CHANNEL: &str = \"dev\";",
         ),
         (
-            "apps/agent/src/channel.rs",
-            "pub const CHANNEL: &str = \"dev\";",
-        ),
-        (
             "apps/desktop/src-tauri/src/channel.rs",
             "pub const CHANNEL: &str = \"dev\";",
         ),
         (
             "packages/web/src/channel.ts",
-            "export const CHANNEL: \"dev\" | \"official\" | \"beta\" | \"alpha\" = \"dev\";",
+            "const STAMPED_CHANNEL: ReleaseChannel = \"dev\";",
         ),
     ];
     for (path, marker) in modules {
@@ -612,15 +594,11 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
         ("env_workspace_dir", "GENEHUB_WORKSPACE_DIR"),
         ("env_log", "GENEHUB_LOG"),
         ("env_machine_name", "GENEHUB_MACHINE_NAME"),
-        ("env_agent_command", "GENET_AGENT_COMMAND"),
-        ("env_agent_home", "GENET_AGENT_HOME"),
         ("env_download_base", "GENEHUB_DOWNLOAD_BASE"),
         ("env_bin_dir", "GENEHUB_BIN_DIR"),
         ("env_hub_url", "GENEHUB_HUB_URL"),
         ("identifier", "com.genethub.desktop"),
         ("cli_binary", "genet"),
-        ("agent_binary", "genet-agent"),
-        ("host_binary", "genehub-host"),
         ("desktop_binary", "genethub-desktop"),
     ] {
         assert!(
@@ -635,18 +613,6 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
     // carry its suffix is one whose installer kills another line's processes.
     for (key, dev, beta, alpha) in [
         ("cli_binary", "genet-dev", "genet-beta", "genet-alpha"),
-        (
-            "agent_binary",
-            "genet-agent-dev",
-            "genet-agent-beta",
-            "genet-agent-alpha",
-        ),
-        (
-            "host_binary",
-            "genehub-host-dev",
-            "genehub-host-beta",
-            "genehub-host-alpha",
-        ),
         (
             "desktop_binary",
             "genethub-desktop-dev",
@@ -664,12 +630,10 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
     }
 
     // dev updates from nowhere and points at no Hub: a source build is not on
-    // the release scale, and pretending otherwise is how a dev daemon reads a
-    // release's data or announces a downgrade as an upgrade.
+    // the release scale. Guest logic discovery is independent of the installer.
     assert!(
-        row("manifest_url").contains("dev: \"\""),
-        "the dev column gained an update manifest — a source build must not \
-         measure itself against any release"
+        row("logic_manifest_urls").contains("dev: []"),
+        "the dev column gained a signed guest feed"
     );
     assert!(
         row("hub_url").contains("dev: \"\""),
@@ -677,34 +641,18 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
          unless told"
     );
 
-    // Remote workbench dials the Hub's WSS itself. A released package whose
-    // CSP lists only loopback signs tickets that can never be redeemed — the
-    // WebView blocks the upgrade before the relay sees it. Dev stays
-    // loopback-only; every shipping column must open https/wss.
-    let connect_src = row("connect_src");
-    assert!(
-        connect_src.contains("dev: \"'self' ws://127.0.0.1:*"),
-        "the dev column of connect_src must stay loopback-only"
-    );
+    // The native shell only chooses fixed origins. Once navigated, CSP belongs
+    // to the website response, not to a channel-specific local Web bundle.
+    let web = row("web_app_url");
     for channel in ["official", "beta", "alpha"] {
-        assert!(
-            connect_src.contains(&format!("{channel}:")) && connect_src.contains("https: wss:"),
-            "the {channel} column of connect_src must allow https/wss — \
-             without them the desktop cannot open a remote workbench"
-        );
+        assert!(web.contains(&format!("{channel}: \"https://")));
     }
     let csp = config["app"]["security"]["csp"]
         .as_str()
         .expect("tauri.conf.json has no CSP");
     assert!(
-        csp.contains("ws://127.0.0.1:*") && !csp.contains("https: wss:"),
-        "the tree's CSP must be the dev (loopback-only) column — a release \
-         stamps https/wss in via scripts/channel.mjs"
-    );
-    assert!(
-        stamper.contains("\"csp\":"),
-        "scripts/channel.mjs no longer stamps the CSP line, so a release \
-         would ship a WebView that cannot reach the Hub"
+        !csp.contains("connect-src") && !stamper.contains("connect_src"),
+        "the boot page regained channel-specific network authority"
     );
 
     // And the daemon the shell spawns has to hear the same override name the
@@ -734,32 +682,29 @@ fn declared_version(manifest: &str) -> String {
         .expect("a manifest with no version in it")
 }
 
-/// The tray asks and the workbench answers, which works only while both halves
-/// spell the event the same way — and nothing checks that at build time, because
-/// one side is Rust and the other is TypeScript.
-///
-/// Worth pinning for this item in particular: a menu item whose event nobody
-/// listens for is a click that does nothing, and "nothing happened" is exactly
-/// what "已经是最新的了" looks like from the outside.
+/// App updates are outside the remotely loaded page's authority: the tray
+/// opens the public download page and emits no private renderer event.
 #[test]
-fn the_tray_can_ask_for_an_update_check_and_the_workbench_is_listening() {
-    let tray = std::fs::read_to_string(repo().join("apps/desktop/src-tauri/src/tray.rs"))
-        .expect("read the tray");
-    let host = std::fs::read_to_string(repo().join("packages/web/src/host/index.ts"))
-        .expect("read the host layer");
+fn the_tray_update_opens_the_channel_download_page() {
+    let tray = read(repo().join("apps/desktop/src-tauri/src/tray.rs"));
+    let host = read(repo().join("packages/web/src/host/index.ts"));
 
+    assert!(tray.contains("检查更新"));
+    assert!(tray.contains("channel::APP_DOWNLOAD_URL"));
+    assert!(!tray.contains("open_url(\"https://genethub.com/download\""));
+    assert!(!tray.contains("genehub://update"));
+    // The live page is detectHost() → browserHost(). dest-2 still keeps
+    // desktopHost() as a test helper; that leftover must not be the boot path.
+    assert!(host.contains("always an ordinary browser"));
+    assert!(!host.contains("desktop ? desktopHost()"));
+    let browser = host
+        .split("export function browserHost")
+        .nth(1)
+        .and_then(|rest| rest.split("export function desktopHost").next())
+        .unwrap_or("");
     assert!(
-        tray.contains("检查更新"),
-        "the tray has no way to ask whether there is a newer build"
-    );
-    assert!(
-        tray.contains("genehub://update"),
-        "the menu item does not emit anything, so pressing it does nothing"
-    );
-    assert!(
-        host.contains("genehub://update"),
-        "the tray emits genehub://update and the workbench listens for something \
-         else, which is a menu item that silently does nothing"
+        !browser.contains("genehub://"),
+        "the remotely loaded page regained a genehub:// listener"
     );
 }
 

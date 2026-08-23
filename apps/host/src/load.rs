@@ -147,12 +147,11 @@ async fn run_daemon(
                     DaemonExit::Shutdown
                 });
             }
-            Ok(Err(error)) => return abandon_store(store, anyhow::anyhow!("guest run failed: {error}")),
+            Ok(Err(error)) => {
+                return abandon_store(store, anyhow::anyhow!("guest run failed: {error}"))
+            }
             Err(error) => {
-                return abandon_store(
-                    store,
-                    anyhow::Error::from(error).context("guest run"),
-                )
+                return abandon_store(store, anyhow::Error::from(error).context("guest run"))
             }
         }
     }
@@ -180,7 +179,10 @@ async fn run_agent(
     component: &Component,
     path: &Path,
 ) -> Result<i32> {
-    if !exports(engine, component).iter().any(|name| name == "agent-run") {
+    if !exports(engine, component)
+        .iter()
+        .any(|name| name == "agent-run")
+    {
         bail!(
             "{} has no agent-run export; the agent entry needs the v2 component",
             path.display()
@@ -197,10 +199,7 @@ async fn run_agent(
     match guest.call_agent_run(&mut store).await {
         Ok(Ok(code)) => Ok(code as i32),
         Ok(Err(error)) => abandon_store(store, anyhow::anyhow!("guest agent-run failed: {error}")),
-        Err(error) => abandon_store(
-            store,
-            anyhow::Error::from(error).context("guest agent-run"),
-        ),
+        Err(error) => abandon_store(store, anyhow::Error::from(error).context("guest agent-run")),
     }
 }
 
@@ -293,7 +292,10 @@ fn build_instance(
     // The daemon watches this file and asks for an in-place reload when it
     // changes — the dev rebuild loop and a replaced install both ride it.
     if let Some(component) = component_file {
-        wasi.env(crate::channel::ENV_COMPONENT_FILE, component.to_string_lossy());
+        wasi.env(
+            crate::channel::ENV_COMPONENT_FILE,
+            component.to_string_lossy(),
+        );
     }
 
     let store = Store::new(
@@ -325,30 +327,58 @@ fn build_instance(
     wasmtime_wasi_tls::p2::add_to_linker(&mut linker, &mut tls)
         .anyhow()
         .context("wasi:tls linker")?;
-    crate::bindings::genehub::host::process::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-        .anyhow()
-        .context("process linker")?;
-    crate::bindings::genehub::host::file_lock::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-        .anyhow()
-        .context("file-lock linker")?;
-    crate::bindings::genehub::host::fs_perms::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-        .anyhow()
-        .context("fs-perms linker")?;
+    crate::bindings::genehub::host::process::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| {
+        state
+    })
+    .anyhow()
+    .context("process linker")?;
+    crate::bindings::genehub::host::file_lock::add_to_linker::<_, HasSelf<_>>(
+        &mut linker,
+        |state| state,
+    )
+    .anyhow()
+    .context("file-lock linker")?;
+    crate::bindings::genehub::host::fs_perms::add_to_linker::<_, HasSelf<_>>(
+        &mut linker,
+        |state| state,
+    )
+    .anyhow()
+    .context("fs-perms linker")?;
     crate::bindings::genehub::host::pty::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
         .anyhow()
         .context("pty linker")?;
-    crate::bindings::genehub::host::isolation::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-        .anyhow()
-        .context("isolation linker")?;
+    crate::bindings::genehub::host::isolation::add_to_linker::<_, HasSelf<_>>(
+        &mut linker,
+        |state| state,
+    )
+    .anyhow()
+    .context("isolation linker")?;
     crate::bindings::genehub::host::rtc::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
         .anyhow()
         .context("rtc linker")?;
+    crate::bindings::genehub::host::logic_update::add_to_linker::<_, HasSelf<_>>(
+        &mut linker,
+        |state| state,
+    )
+    .anyhow()
+    .context("logic-update linker")?;
     Ok((store, linker))
 }
 
 /// Compile in memory from the bytes we just read. No file cache.
 fn load_component(engine: &Engine, path: &Path) -> Result<Component> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    // Source builds keep their file-watcher loop and never consult a release
+    // activation store. Published channels are compile-time identities and
+    // are the only binaries that may select a downloaded signed guest.
+    let active = if crate::channel::CHANNEL == "dev" {
+        None
+    } else {
+        crate::update::load_active_bytes()?
+    };
+    let bytes = match active {
+        Some(active) => active,
+        None => std::fs::read(path).with_context(|| format!("reading {}", path.display()))?,
+    };
     crate::abi::assert_digest_if_present(&bytes)?;
     debug_log(&format!("compiling {}-byte component", bytes.len()));
     let component = Component::from_binary(engine, &bytes)
@@ -378,4 +408,3 @@ fn debug_log(message: &str) {
         eprintln!("genehub-host: {message}");
     }
 }
-

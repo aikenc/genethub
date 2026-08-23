@@ -4,6 +4,7 @@
 //! See `docs/cli-thin-forwarder.md`.
 
 mod converse;
+mod desktop;
 mod hub;
 mod machine;
 mod machines;
@@ -111,9 +112,7 @@ pub(crate) fn caller_cwd() -> PathBuf {
 }
 
 pub(crate) fn caller_stdin() -> Vec<u8> {
-    CALLER_STDIN
-        .try_with(Clone::clone)
-        .unwrap_or_default()
+    CALLER_STDIN.try_with(Clone::clone).unwrap_or_default()
 }
 
 pub fn emit_stdout(line: impl AsRef<str>) {
@@ -192,6 +191,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
         Some("machine") => Box::pin(machine::machine(&args[1..])).await,
         Some("device") => Box::pin(machine::device(&args[1..], &selection)).await,
         Some("hub") => Box::pin(hub::hub(&args[1..])).await,
+        Some("desktop") => Box::pin(desktop::desktop(&args[1..])).await,
         Some("update") => update::update(&args[1..]),
         Some("status" | "daemon" | "agent-serve") => fail(
             "invalid_args",

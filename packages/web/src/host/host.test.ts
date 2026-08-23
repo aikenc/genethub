@@ -60,12 +60,12 @@ describe("finding the machine to connect to", () => {
     vi.unstubAllGlobals();
   });
 
-  it("picks the desktop host only when the shell is actually there", () => {
+  it("stays an ordinary browser even when displayed inside a native WebView", () => {
     vi.stubGlobal("window", {});
     expect(detectHost().kind).toBe("browser");
 
     vi.stubGlobal("window", { __TAURI__: { core: { invoke: vi.fn() } } });
-    expect(detectHost().kind).toBe("desktop");
+    expect(detectHost().kind).toBe("browser");
     vi.unstubAllGlobals();
   });
 });

@@ -213,6 +213,22 @@ interface file-lock {
   open: func(path: string) -> result<handle, string>;
 }
 
+/// Host-owned signed guest update. The guest may ask to check or apply; it
+/// cannot name a URL, path, revision, channel or key.
+interface logic-update {
+  record status {
+    current-revision: u64,
+    latest-revision: option<u64>,
+    newer: bool,
+    problem: option<string>,
+  }
+
+  check: func() -> result<status, string>;
+  /// Stages, fences and atomically replaces the active guest. The caller
+  /// should then return "reload". Sessions and child processes are dropped.
+  apply: func(request-id: string) -> result<_, string>;
+}
+
 /// The one v2 artifact. A single component carries both entries; the shell
 /// picks one per OS process (`genehub-host-dev run --entry daemon|agent`).
 world daemon {
@@ -222,6 +238,7 @@ world daemon {
   import file-lock;
   import fs-perms;
   import isolation;
+  import logic-update;
   /// Resident daemon. Returns "reload" or "shutdown".
   export run: func() -> result<string, string>;
   /// Independent OS process: same artifact, agent entry.

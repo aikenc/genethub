@@ -535,6 +535,11 @@ export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { 
 export type ProtocolError = { code: ErrorCode, message: string, };
 
 /**
+ * Advertised business protocol, independent of the carrier handshake.
+ */
+export type ProtocolIdentity = { protocolVersion: number, };
+
+/**
  * A provider's configuration, minus the secret.
  *
  * `hasApiKey` rather than the key itself: the UI only needs to know whether

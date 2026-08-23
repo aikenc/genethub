@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    ErrorCode, ExchangeRequestHead, ExchangeResponseHead, ProtocolError, Reply, Request,
-    ServerFrame, TransportKind,
+    ErrorCode, ExchangeRequestHead, ExchangeResponseHead, ProtocolError, ProtocolIdentity, Reply,
+    Request, ServerFrame, TransportKind, PROTOCOL_IDENTITY_METHOD, PROTOCOL_VERSION,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
@@ -791,6 +791,9 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
         // operation, and they do not all cost the same.
         return handle_rpc(stream, services).await;
     }
+    if stream.head.method == PROTOCOL_IDENTITY_METHOD {
+        return handle_protocol_identity(stream, services).await;
+    }
     let Some(method) = StreamMethod::parse(&stream.head.method) else {
         return send_error(stream, 404, ErrorCode::NotFound, "unknown exchange method").await;
     };
@@ -806,6 +809,7 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
     }
     match method {
         StreamMethod::Events => handle_events(stream, services).await,
+        StreamMethod::ProtocolIdentity => handle_protocol_identity(stream, services).await,
         StreamMethod::AssetPreview => crate::dataplane::preview::handle(stream, services).await,
         StreamMethod::ShellRun => crate::dataplane::exec::handle(stream, services).await,
         StreamMethod::RtcNegotiate => crate::dataplane::rtc::handle(stream, services).await,
@@ -848,6 +852,39 @@ async fn refuse(stream: &mut ServerStream, needed: Capability) -> Result<()> {
         ),
     )
     .await
+}
+
+async fn handle_protocol_identity(
+    stream: &mut ServerStream,
+    services: &PeerServices,
+) -> Result<()> {
+    let needed = StreamMethod::ProtocolIdentity.required();
+    if !Principal::of(&services.state, &services.access).allows(needed) {
+        services.state.diagnostics.record(
+            "stream",
+            "authorization",
+            "error",
+            Some(needed.as_str()),
+        );
+        return refuse(stream, needed).await;
+    }
+    let body = stream.read_body(0).await?;
+    if !body.is_empty() {
+        anyhow::bail!("protocol.identity has no request body");
+    }
+    let payload = serde_json::to_vec(&ProtocolIdentity {
+        protocol_version: PROTOCOL_VERSION,
+    })?;
+    stream
+        .respond(&ExchangeResponseHead {
+            status: 200,
+            metadata: serde_json::Value::Null,
+            body_length: Some(payload.len() as u64),
+            error: None,
+        })
+        .await?;
+    stream.write(&payload).await?;
+    stream.finish().await
 }
 
 async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {

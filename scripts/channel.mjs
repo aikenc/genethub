@@ -199,6 +199,24 @@ const TABLE = {
     beta: "https://relay-beta.genethub.com",
     alpha: "https://relay-alpha.genethub.com",
   },
+  web_app_url: {
+    dev: "http://127.0.0.1:5173/app",
+    official: "https://relay.genethub.com/app",
+    beta: "https://relay-beta.genethub.com/app",
+    alpha: "https://relay-alpha.genethub.com/app",
+  },
+  logic_manifest_urls: {
+    dev: [],
+    official: ["https://relay.genethub.com/artifacts/manifests/logic/latest.json"],
+    beta: ["https://relay-beta.genethub.com/artifacts/manifests/logic/latest-beta.json"],
+    alpha: ["https://relay-alpha.genethub.com/artifacts/manifests/logic/latest-alpha.json"],
+  },
+  app_download_url: {
+    dev: "https://github.com/aikenc/genethub/releases",
+    official: "https://github.com/aikenc/genethub/releases",
+    beta: "https://github.com/aikenc/genethub/releases",
+    alpha: "https://github.com/aikenc/genethub/releases",
+  },
 
   // Where install.sh pulls the Linux tarball from. The prerelease lines
   // cannot use `releases/latest/download` (same reason as above), so their
@@ -212,22 +230,6 @@ const TABLE = {
     alpha: "https://relay-alpha.genethub.com/download/alpha",
   },
   tarball_prefix: { dev: "genet-dev", official: "genet", beta: "genet-beta", alpha: "genet-alpha" },
-
-  // What the WebView is allowed to dial. Loopback is always there (the local
-  // daemon). Released channels also need https/wss: the workbench reaches a
-  // remote machine by opening `wss://…/fabric/v2?ticket=…` itself — if
-  // CSP lists only loopback, hub.connect succeeds, the ticket is never
-  // redeemed, and the UI sits on 「已断开」while burning tickets in a loop.
-  // Wide `https: wss:` (not a pinned host) so a user who pairs with their own
-  // Hub is not locked to the default name. Dev stays loopback-only: it has no
-  // default Hub and is not a shipping build.
-  connect_src: {
-    dev: "'self' ws://127.0.0.1:* http://127.0.0.1:* ipc: http://ipc.localhost",
-    official:
-      "'self' ws://127.0.0.1:* http://127.0.0.1:* https: wss: ipc: http://ipc.localhost",
-    beta: "'self' ws://127.0.0.1:* http://127.0.0.1:* https: wss: ipc: http://ipc.localhost",
-    alpha: "'self' ws://127.0.0.1:* http://127.0.0.1:* https: wss: ipc: http://ipc.localhost",
-  },
 };
 
 const value = (key, channel) => {
@@ -351,6 +353,8 @@ ${manifestConst}
 /// Empty for dev: a source build points nowhere unless told.
 pub const DEFAULT_HUB_URL: &str = "${value("hub_url", channel)}";
 pub const ENV_HUB_URL: &str = "${value("env_hub_url", channel)}";
+/// Channel website the Desktop shell navigates to after boot.
+pub const WEB_APP_URL: &str = "${value("web_app_url", channel)}";
 `;
 };
 
@@ -400,6 +404,15 @@ pub const ENV_CWD: &str = "${value("env_cwd", channel)}";
 /// The component file the shell loaded; the daemon watches it to ask for an
 /// in-place reload when it changes.
 pub const ENV_COMPONENT_FILE: &str = "${value("env_component_file", channel)}";
+/// Host ABI integer written into signed guest envelopes. Bump when
+/// \`wit/genehub-host.wit\` changes a load-time contract.
+pub const HOST_ABI: u32 = 23;
+/// Content-addressed module id in \`genehub.daemon.artifact.v2\`.
+pub const MODULE_ID: &str = "genehub:guest/wasm";
+/// Stamped signed-logic discovery URLs. Empty for dev.
+pub const LOGIC_MANIFEST_URLS: &[&str] = &[${value("logic_manifest_urls", channel).map((entry) => `"${entry}"`).join(", ")}];
+/// Data-dir env the desktop/CLI already stamps; the host store lives under it.
+pub const ENV_DATA_DIR: &str = "${value("env_data_dir", channel)}";
 `;
 
 const desktopModule = (channel) => `//! Which release channel this build belongs to.
@@ -435,19 +448,40 @@ pub const ENV_CLI: &str = "${value("env_cli", channel)}";
 /// adopting the other channel's daemon through a stale endpoint file.
 pub const ENV_DATA_DIR: &str = "${value("env_data_dir", channel)}";
 pub const TRAY_ID: &str = "${value("tray_id", channel)}";
+/// Official download page opened from the tray.
+pub const APP_DOWNLOAD_URL: &str = "${value("app_download_url", channel)}";
+/// Channel website the shell may navigate to after boot.
+pub const WEB_APP_URL: &str = "${value("web_app_url", channel)}";
 `;
 
 const tsModule = (channel) => `// Which release channel this build belongs to.
 //
 // Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
 // file. The tree always says "dev"; a release build is the workflow stamping
-// its channel in before it compiles.
-export const CHANNEL: ${CHANNEL_TYPE} = "${value("channel", channel)}";
-export const PRODUCT = "${value("product", channel)}";
+// its channel in before it compiles. The separately deployed hosted Web sets
+// VITE_GENEHUB_CHANNEL instead, so publishing a page never mutates the paired
+// Open checkout just to stamp a native release identity.
+export type ReleaseChannel = ${CHANNEL_TYPE};
+const STAMPED_CHANNEL: ReleaseChannel = "${value("channel", channel)}";
+const hostedChannel = import.meta.env.VITE_GENEHUB_CHANNEL;
+export const CHANNEL: ReleaseChannel = isReleaseChannel(hostedChannel)
+  ? hostedChannel
+  : STAMPED_CHANNEL;
+const PRODUCTS: Record<ReleaseChannel, string> = {
+  dev: "GeneHub Dev",
+  official: "GeneHub",
+  beta: "GeneHub Beta",
+  alpha: "GeneHub Alpha",
+};
+export const PRODUCT = import.meta.env.VITE_GENEHUB_BRAND || PRODUCTS[CHANNEL];
 // The desktop shell checks its own release independently from whichever
 // daemon the workbench currently controls. In a browser this stays unused;
 // in a source build it is empty, because dev is not on a release scale.
 export const MANIFEST_URL = "${value("manifest_url", channel)}";
+
+function isReleaseChannel(value: unknown): value is ReleaseChannel {
+  return value === "dev" || value === "official" || value === "beta" || value === "alpha";
+}
 `;
 
 const shellEnv = (channel) => `# Written by scripts/channel.mjs — edit that script, not this file.
@@ -492,8 +526,9 @@ function stamp(channel) {
   // and locks apart. Every substitute keeps the line's tail — a whole-line
   // replacement eats the trailing comma and the next Tauri build reports a
   // parse error, not a wrong name.
-  const csp =
-    `default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ${value("connect_src", channel)}`;
+  // Boot page only: the remote official site brings its own CSP. Giving the
+  // bundled boot surface connect-src/ipc would recreate a privileged renderer.
+  const csp = "default-src 'self'; style-src 'self' 'unsafe-inline'";
   rewriteLines(join(repo, "apps/desktop/src-tauri/tauri.conf.json"), [
     [/^  "productName": "[^"]*"/, (line) => line.replace(/"productName": "[^"]*"/, `"productName": "${pathName}"`)],
     [/^  "identifier": "[^"]*"/, (line) => line.replace(/"identifier": "[^"]*"/, `"identifier": "${identifier}"`)],

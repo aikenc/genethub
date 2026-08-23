@@ -30,6 +30,7 @@ const FORWARDED: &[&str] = &[
     "machine",
     "device",
     "hub",
+    "desktop",
 ];
 
 /// Deliberately not the async entry point, and deliberately doing one thing

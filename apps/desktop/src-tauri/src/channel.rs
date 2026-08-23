@@ -31,3 +31,9 @@ pub const ENV_CLI: &str = "GENEHUB_DEV_CLI";
 /// adopting the other channel's daemon through a stale endpoint file.
 pub const ENV_DATA_DIR: &str = "GENEHUB_DEV_DATA_DIR";
 pub const TRAY_ID: &str = "genethub-tray-dev";
+/// Official download page opened from the tray. Dest is empty: a source
+/// build is not on the update scale.
+pub const APP_DOWNLOAD_URL: &str = "https://github.com/aikenc/genethub/releases";
+/// Channel website the shell may navigate to after boot. Dest uses the
+/// local Vite workbench.
+pub const WEB_APP_URL: &str = "http://127.0.0.1:5173/app";

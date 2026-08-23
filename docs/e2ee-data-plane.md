@@ -6,6 +6,15 @@
 
 GeneHub 现在只有一套当前数据面协议：**protocol v3**。它把业务语义与物理连接分开，并在一个已认证的 peer link 内复用有界 logical streams。
 
+版本拆成两层，数字目前都是 3，但含义不同：
+
+- `DATA_PLANE_VERSION = 3`：carrier / handshake / frame。`PeerHello.version` 与 record 必须匹配。
+- `PROTOCOL_VERSION = 3`：业务 JSON（`Request` / `Reply` / `ServerFrame`），与 carrier 独立。
+- E2EE 之后、第一条业务 RPC 之前，新客户端调用精简 carrier method `protocol.identity`，得到 `{ protocolVersion }`。它不是 `Request` 变体。
+- 旧客户端可以跳过 `protocol.identity` 直接发 `connection.identity`。新客户端若收到 404，假定业务协议为 v3。
+- 邀请 / claim 路径不调用 `protocol.identity`。
+- Web 保留最多 8 代相邻适配器；当前仅 v3 直通，没有空的 v3→v4 适配器。
+
 ```text
 业务层             RPC / events / asset.preview / shell.run / rtc.negotiate
                          │
@@ -168,6 +177,7 @@ FIN
 
 head 是最多 8 KiB 的 UTF-8 JSON；body 是原始 bytes，不做 base64。method、metadata 和 body 都处于 E2EE record 内。MVP 注册的方法是：
 
+- `protocol.identity`：返回 `{ protocolVersion }` 的精简 carrier method，不是业务 `Request`。
 - `rpc`：现有业务 `Request/Reply` schema 作为 exchange body；它已不再是连接层 envelope，也没有全连接 request id、pending sequence 或 authenticated wrapper。
 - `events`：一个长期 response body，消息使用 `u32be length + JSON`。
 - `asset.preview`：文件系统 Preview，见下文档。

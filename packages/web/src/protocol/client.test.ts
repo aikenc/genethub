@@ -97,6 +97,78 @@ describe("the v3 peer connection", () => {
       fingerprint: "FP-LOCAL",
       protocolVersion: 3,
     });
+    const types = queue.latest().sent.map((message) => message.type);
+    expect(types.indexOf("protocol.identity")).toBeGreaterThanOrEqual(0);
+    expect(types.indexOf("connection.identity")).toBeGreaterThan(
+      types.indexOf("protocol.identity"),
+    );
+    client.close();
+  });
+
+  it("assumes business protocol v3 when protocol.identity is missing", async () => {
+    const proof = localProof();
+    const queue = socketQueue({
+      secret: proof.proof,
+      identity: localIdentity,
+      autoProtocolIdentity: false,
+    });
+    const client = new Client({
+      url: "ws://127.0.0.1:42123/ws",
+      localServerProof: proof,
+      socketFactory: queue.factory,
+      rtcEnabled: false,
+    });
+    client.connect();
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.length === 1);
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+
+    expect(queue.latest().lastOf("protocol.identity")).toBeDefined();
+    expect(client.identity).toMatchObject({ protocolVersion: 3 });
+    client.close();
+  });
+
+  it("fail-closes when protocol.identity reports a version with no adapter", async () => {
+    const proof = localProof();
+    const queue = socketQueue({
+      secret: proof.proof,
+      identity: { ...localIdentity, protocolVersion: 4 },
+    });
+    const client = new Client({
+      url: "ws://127.0.0.1:42123/ws",
+      localServerProof: proof,
+      socketFactory: queue.factory,
+      rtcEnabled: false,
+    });
+    client.connect();
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.length === 1);
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "closed");
+
+    expect(client.failure?.message).toContain("请刷新网页");
+  });
+
+  it("skips protocol.identity on the invite/claim path", async () => {
+    const secret = "i".repeat(64);
+    const queue = socketQueue({ secret });
+    const client = new Client({
+      url: "ws://127.0.0.1:42123/ws",
+      inviteCredential: { inviteId: `inv_${"a".repeat(32)}`, secret },
+      socketFactory: queue.factory,
+      rtcEnabled: false,
+    });
+    client.connect();
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+
+    expect(queue.latest().sent.map((message) => message.type)).not.toContain("protocol.identity");
+    expect(queue.latest().sent.map((message) => message.type)).not.toContain(
+      "connection.identity",
+    );
     client.close();
   });
 

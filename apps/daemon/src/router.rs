@@ -797,9 +797,18 @@ async fn dispatch(
             )))
         }
 
-        Request::UpdateCheck => automatic_update_refusal(),
+        Request::UpdateCheck => match crate::host_update::check() {
+            Ok(status) => Handled::ok(Reply::Update(status)),
+            Err(message) => Handled::err(ErrorCode::Unsupported, message),
+        },
 
-        Request::UpdateDownload => automatic_update_refusal(),
+        Request::UpdateDownload => match crate::host_update::apply("web") {
+            Ok(()) => {
+                state.reload.notify_waiters();
+                Handled::ok(Reply::UpdateDownload(state.updates.state()))
+            }
+            Err(message) => Handled::err(ErrorCode::Unsupported, message),
+        },
 
         Request::UpdateDownloadState => Handled::ok(Reply::UpdateDownload(state.updates.state())),
 

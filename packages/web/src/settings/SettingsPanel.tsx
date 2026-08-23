@@ -650,10 +650,35 @@ function Answer({ status, subject }: { status: UpdateStatus | null; subject: "�
     return <p className="text-muted">{subject} 已经是最新的了。</p>;
   }
 
+  return <GuestUpdatePrompt latest={status.latest} subject={subject} />;
+}
+
+function GuestUpdatePrompt({
+  latest,
+  subject,
+}: {
+  latest?: string;
+  subject: "整机" | "daemon";
+}) {
+  const apply = useWorkbench((state) => state.downloadUpdate);
   return (
-    <p className="text-muted">
-      {subject} 有新版本 {status.latest}。自动下载未启用，请使用上方官方发布页手动更新。
-    </p>
+    <div className="space-y-2">
+      <p className="text-muted">
+        {subject} 有签名更新 {latest}。更新会断开当前连接并结束后台进程。
+      </p>
+      <button
+        type="button"
+        data-testid="apply-guest-update"
+        className="rounded border border-line px-2 py-1 text-sm"
+        onClick={() => {
+          if (window.confirm("将断开会话并结束后台进程，确认更新？")) {
+            void apply();
+          }
+        }}
+      >
+        更新并重载
+      </button>
+    </div>
   );
 }
 

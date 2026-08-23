@@ -21,3 +21,13 @@ pub const ENV_CWD: &str = "GENEHUB_DEV_CWD";
 /// The component file the shell loaded; the daemon watches it to ask for an
 /// in-place reload when it changes.
 pub const ENV_COMPONENT_FILE: &str = "GENEHUB_DEV_COMPONENT_FILE";
+/// Host ABI integer written into signed guest envelopes. Bump when
+/// `wit/genehub-host.wit` changes a load-time contract.
+pub const HOST_ABI: u32 = 23;
+/// Content-addressed module id in `genehub.daemon.artifact.v2`.
+pub const MODULE_ID: &str = "genehub:guest/wasm";
+/// Stamped signed-logic discovery URLs. Empty for dev: a source build is
+/// not on the update scale.
+pub const LOGIC_MANIFEST_URLS: &[&str] = &[];
+/// Data-dir env the desktop/CLI already stamps; the host store lives under it.
+pub const ENV_DATA_DIR: &str = "GENEHUB_DEV_DATA_DIR";
