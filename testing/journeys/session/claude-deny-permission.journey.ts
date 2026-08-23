@@ -29,7 +29,7 @@ defineJourney(
       const asking =
         claude.catalog.defaultMode === "manual" || claude.catalog.defaultMode === "default"
           ? claude.catalog.defaultMode
-          : "default";
+          : "manual";
       await opened.client.call({ type: "session.setMode", payload: { sessionId, modeId: asking } });
       await t.flows.main.sendPrompt(
         opened.client,
