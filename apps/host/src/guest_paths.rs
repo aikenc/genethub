@@ -95,6 +95,7 @@ pub fn host_path_from_guest(path: impl AsRef<str>) -> PathBuf {
     }
 }
 
+#[cfg(any(windows, test))]
 fn host_to_guest(value: &str) -> String {
     // `PATH` and friends are lists. Only a single drive path is rewritten.
     if value.contains(';') {
@@ -120,6 +121,7 @@ fn host_segment_from_guest(value: &str) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+#[cfg(any(windows, test))]
 fn guest_to_host(path: &str) -> Option<PathBuf> {
     if path.len() >= 3 && path.as_bytes()[1] == b':' {
         return Some(PathBuf::from(path));

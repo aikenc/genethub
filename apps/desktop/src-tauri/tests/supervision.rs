@@ -71,23 +71,28 @@ fn kill_whatever_is_listening_on(port: u16) {
 
 #[cfg(unix)]
 fn listeners_on(port: u16) -> Vec<String> {
-    // `ss` prints one row per listening socket, with `pid=NNN` in the last
-    // column: `LISTEN 0 511 127.0.0.1:41519 0.0.0.0:* users:(("x",pid=7,fd=9))`
-    if let Ok(output) = std::process::Command::new("ss")
-        .args(["-H", "-ltnp", "sport", "=", &format!(":{port}")])
-        .output()
+    // Linux `ss` prints one row per listening socket, with `pid=NNN` in the
+    // last column. macOS runners may ship a different `ss` whose rows are
+    // not that shape; trusting a non-empty misparse kills the wrong pid
+    // and the watchdog never sees a death.
+    #[cfg(target_os = "linux")]
     {
-        let listing = String::from_utf8_lossy(&output.stdout);
-        let pids: Vec<String> = listing
-            .split("pid=")
-            .skip(1)
-            .filter_map(|rest| {
-                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-                (!digits.is_empty()).then_some(digits)
-            })
-            .collect();
-        if !pids.is_empty() {
-            return pids;
+        if let Ok(output) = std::process::Command::new("ss")
+            .args(["-H", "-ltnp", "sport", "=", &format!(":{port}")])
+            .output()
+        {
+            let listing = String::from_utf8_lossy(&output.stdout);
+            let pids: Vec<String> = listing
+                .split("pid=")
+                .skip(1)
+                .filter_map(|rest| {
+                    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                    (!digits.is_empty()).then_some(digits)
+                })
+                .collect();
+            if !pids.is_empty() {
+                return pids;
+            }
         }
     }
 
@@ -244,18 +249,27 @@ fn the_watchdog_brings_the_daemon_back_and_says_where_it_went() {
 
     let restarts = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&restarts);
-    daemon.watch(move |change| {
-        if let Watch::Restarted(endpoint) = change {
-            seen.lock().unwrap().push(endpoint);
-        }
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let fail_seen = Arc::clone(&failures);
+    daemon.watch(move |change| match change {
+        Watch::Restarted(endpoint) => seen.lock().unwrap().push(endpoint),
+        Watch::Failed(error) => fail_seen.lock().unwrap().push(error),
+        _ => {}
     });
 
     kill_whatever_is_listening_on(first.port);
 
-    let restarted = wait_for(Duration::from_secs(30), || {
+    // Cold start compiles the guest in-process; the spawn path already waits
+    // sixty seconds for that. Thirty was racing the same compile on restart.
+    let restarted = wait_for(Duration::from_secs(90), || {
         restarts.lock().unwrap().first().cloned()
     })
-    .expect("the watchdog should have restarted the daemon");
+    .unwrap_or_else(|| {
+        panic!(
+            "the watchdog should have restarted the daemon; failures={:?}",
+            failures.lock().unwrap()
+        )
+    });
 
     assert_ne!(
         restarted.port, first.port,
