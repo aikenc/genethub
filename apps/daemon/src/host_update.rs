@@ -4,10 +4,10 @@ use genehub_proto::UpdateStatus;
 
 #[cfg(target_family = "wasm")]
 pub fn check() -> Result<UpdateStatus, String> {
-    let status = genet_wasi::wit::genehub::host::logic_update::check()?;
+    let status = genet_wasi::wit::genehub::host::component_update::check()?;
     Ok(UpdateStatus {
-        current: status.current_revision.to_string(),
-        latest: status.latest_revision.map(|value| value.to_string()),
+        current: status.current_version,
+        latest: status.latest_version,
         newer: status.newer,
         url: None,
         download_url: None,
@@ -22,7 +22,7 @@ pub fn check() -> Result<UpdateStatus, String> {
 
 #[cfg(target_family = "wasm")]
 pub fn apply(request_id: &str) -> Result<(), String> {
-    genet_wasi::wit::genehub::host::logic_update::apply(request_id)
+    genet_wasi::wit::genehub::host::component_update::apply(request_id)
 }
 
 #[cfg(not(target_family = "wasm"))]

@@ -6,11 +6,12 @@ use tempfile::{NamedTempFile, TempPath};
 
 use crate::artifact::{ArtifactVerifier, SignedArtifact, VerifiedArtifact};
 use crate::error::{ArtifactError, Result};
+use crate::version::ProductVersion;
 
 const ACTIVE_FILE: &str = "active.wasm";
 const CANDIDATE_FILE: &str = "candidate.wasm";
-const HIGH_WATER_FILE: &str = "highest-revision";
-const MAX_HIGH_WATER_BYTES: usize = 32;
+const HIGH_WATER_FILE: &str = "highest-version";
+const MAX_HIGH_WATER_BYTES: usize = 64;
 const MAX_ENVELOPE_BYTES: usize = 16 * 1024;
 
 /// The complete durable update state: one active artifact, one staged
@@ -43,51 +44,44 @@ impl ArtifactStore {
         })
     }
 
-    pub fn highest_revision(&self) -> Result<u64> {
+    pub fn highest_version(&self) -> Result<Option<ProductVersion>> {
         let bytes = match read_limited(&self.high_water, MAX_HIGH_WATER_BYTES) {
             Ok(bytes) => bytes,
             Err(ArtifactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(0)
+                return Ok(None)
             }
             Err(error) => return Err(error),
         };
         let text = std::str::from_utf8(&bytes)
-            .map_err(|_| ArtifactError::State("highest revision is not UTF-8".to_string()))?;
-        let number = text.strip_suffix('\n').unwrap_or(text);
-        if number.is_empty()
-            || !number.bytes().all(|byte| byte.is_ascii_digit())
-            || (number.len() > 1 && number.starts_with('0'))
-            || text != format!("{number}\n")
-        {
+            .map_err(|_| ArtifactError::State("highest version is not UTF-8".to_string()))?;
+        let version = text.strip_suffix('\n').unwrap_or(text);
+        let parsed = ProductVersion::parse(version)
+            .map_err(|_| ArtifactError::State("highest version is not canonical".to_string()))?;
+        if text != format!("{parsed}\n") {
             return Err(ArtifactError::State(
-                "highest revision is not a canonical decimal line".to_string(),
+                "highest version is not a canonical line".to_string(),
             ));
         }
-        number
-            .parse::<u64>()
-            .map_err(|_| ArtifactError::State("highest revision does not fit in u64".to_string()))
+        Ok(Some(parsed))
     }
 
     /// Advances the anti-replay fence before a staged candidate can become
-    /// active. Repeating the same revision is allowed to repair a missing or
+    /// active. Repeating the same version is allowed to repair a missing or
     /// corrupted active file; lowering the fence is never allowed.
-    pub fn advance_high_water(&self, revision: u64) -> Result<()> {
-        if revision == 0 {
-            return Err(ArtifactError::State(
-                "logic revision must be positive".to_string(),
-            ));
+    pub fn advance_high_water(&self, version: &ProductVersion) -> Result<()> {
+        let current = self.highest_version()?;
+        if let Some(current) = &current {
+            if version < current {
+                return Err(ArtifactError::VersionReplay {
+                    candidate: version.to_string(),
+                    highest: current.to_string(),
+                });
+            }
+            if version == current {
+                return Ok(());
+            }
         }
-        let current = self.highest_revision()?;
-        if revision < current {
-            return Err(ArtifactError::RevisionReplay {
-                candidate: revision,
-                highest: current,
-            });
-        }
-        if revision == current {
-            return Ok(());
-        }
-        replace_bytes(&self.high_water, format!("{revision}\n").as_bytes())?;
+        replace_bytes(&self.high_water, format!("{version}\n").as_bytes())?;
         sync_directory(&self.root)
     }
 
@@ -107,20 +101,23 @@ impl ArtifactStore {
     }
 
     /// Publishes the already-fenced candidate as the sole downloaded active.
-    pub fn commit_candidate(&self, revision: u64) -> Result<()> {
-        let highest = self.highest_revision()?;
-        if revision != highest {
+    pub fn commit_candidate(&self, version: &ProductVersion) -> Result<()> {
+        let highest = self.highest_version()?;
+        if highest.as_ref() != Some(version) {
             return Err(ArtifactError::State(format!(
-                "candidate revision {revision} does not match highest revision {highest}"
+                "candidate version {version} does not match highest version {}",
+                highest
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "<none>".to_string())
             )));
         }
         let candidate = self
             .load_candidate()?
             .ok_or_else(|| ArtifactError::State("staged candidate is missing".to_string()))?;
-        if candidate.envelope().logic_revision() != revision {
+        if &candidate.envelope().version() != version {
             return Err(ArtifactError::State(format!(
-                "staged candidate revision {} does not match highest revision {revision}",
-                candidate.envelope().logic_revision()
+                "staged candidate version {} does not match highest version {version}",
+                candidate.envelope().release_version()
             )));
         }
         atomic_replace(&self.candidate, &self.active)?;
@@ -133,11 +130,11 @@ impl ArtifactStore {
         let Some(candidate) = self.load_candidate()? else {
             return Ok(false);
         };
-        if candidate.envelope().logic_revision() != self.highest_revision()? {
+        if Some(&candidate.envelope().version()) != self.highest_version()?.as_ref() {
             self.discard_candidate()?;
             return Ok(false);
         }
-        self.commit_candidate(candidate.envelope().logic_revision())?;
+        self.commit_candidate(&candidate.envelope().version())?;
         Ok(true)
     }
 
@@ -258,17 +255,22 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     const EMPTY_WASM: &[u8] = b"\0asm\x01\x00\x00\x00";
+    const TEST_ABI_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn key() -> SigningKey {
         SigningKey::from_bytes(&[7; 32])
     }
 
-    fn signed(revision: u64) -> crate::artifact::VerifiedArtifact {
+    fn version(raw: &str) -> crate::version::ProductVersion {
+        crate::version::ProductVersion::parse(raw).unwrap()
+    }
+
+    fn signed(version: &str) -> crate::artifact::VerifiedArtifact {
         let envelope = ArtifactEnvelope::unsigned(
-            "genehub:guest/wasm",
+            "genehub:client-component/wasm",
             "dev",
-            revision,
-            23,
+            version,
+            TEST_ABI_HASH,
             3,
             "dev-local",
             EMPTY_WASM,
@@ -277,9 +279,9 @@ mod tests {
         let signature = key().sign(&envelope.signing_payload().unwrap());
         let artifact = SignedArtifact::new(envelope.with_signature(&signature), EMPTY_WASM);
         ArtifactVerifier::new(
-            "genehub:guest/wasm",
+            "genehub:client-component/wasm",
             "dev",
-            23,
+            TEST_ABI_HASH,
             64 * 1024,
             [("dev-local".to_string(), key().verifying_key())],
         )
@@ -292,9 +294,9 @@ mod tests {
         ArtifactStore::open(
             dir.path(),
             ArtifactVerifier::new(
-                "genehub:guest/wasm",
+                "genehub:client-component/wasm",
                 "dev",
-                23,
+                TEST_ABI_HASH,
                 64 * 1024,
                 [("dev-local".to_string(), key().verifying_key())],
             )
@@ -307,37 +309,37 @@ mod tests {
     fn candidate_failure_never_changes_active_or_high_water() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
-        let first = signed(2);
+        let first = signed("0.1.2");
         store.stage(&first).unwrap();
-        store.advance_high_water(2).unwrap();
-        store.commit_candidate(2).unwrap();
-        assert_eq!(store.highest_revision().unwrap(), 2);
-        assert!(store.stage(&signed(1)).is_ok());
-        assert!(store.advance_high_water(1).is_err());
-        assert_eq!(store.highest_revision().unwrap(), 2);
+        store.advance_high_water(&version("0.1.2")).unwrap();
+        store.commit_candidate(&version("0.1.2")).unwrap();
+        assert_eq!(store.highest_version().unwrap(), Some(version("0.1.2")));
+        assert!(store.stage(&signed("0.1.1")).is_ok());
+        assert!(store.advance_high_water(&version("0.1.1")).is_err());
+        assert_eq!(store.highest_version().unwrap(), Some(version("0.1.2")));
         assert_eq!(
             store
                 .load_active()
                 .unwrap()
                 .unwrap()
                 .envelope()
-                .logic_revision(),
-            2
+                .release_version(),
+            "0.1.2"
         );
     }
 
     #[test]
-    fn replay_is_rejected_and_equal_revision_can_repair_corruption() {
+    fn replay_is_rejected_and_equal_version_can_repair_corruption() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
-        store.stage(&signed(3)).unwrap();
-        store.advance_high_water(3).unwrap();
-        store.commit_candidate(3).unwrap();
-        assert!(store.advance_high_water(2).is_err());
+        store.stage(&signed("0.1.3")).unwrap();
+        store.advance_high_water(&version("0.1.3")).unwrap();
+        store.commit_candidate(&version("0.1.3")).unwrap();
+        assert!(store.advance_high_water(&version("0.1.2")).is_err());
         store.discard_active().unwrap();
-        store.stage(&signed(3)).unwrap();
-        store.advance_high_water(3).unwrap();
-        store.commit_candidate(3).unwrap();
-        assert_eq!(store.highest_revision().unwrap(), 3);
+        store.stage(&signed("0.1.3")).unwrap();
+        store.advance_high_water(&version("0.1.3")).unwrap();
+        store.commit_candidate(&version("0.1.3")).unwrap();
+        assert_eq!(store.highest_version().unwrap(), Some(version("0.1.3")));
     }
 }

@@ -205,11 +205,11 @@ const TABLE = {
     beta: "https://relay-beta.genethub.com/app",
     alpha: "https://relay-alpha.genethub.com/app",
   },
-  logic_manifest_urls: {
+  component_manifest_urls: {
     dev: [],
-    official: ["https://relay.genethub.com/artifacts/manifests/logic/latest.json"],
-    beta: ["https://relay-beta.genethub.com/artifacts/manifests/logic/latest-beta.json"],
-    alpha: ["https://relay-alpha.genethub.com/artifacts/manifests/logic/latest-alpha.json"],
+    official: ["https://relay.genethub.com/artifacts/manifests/component/latest.json"],
+    beta: ["https://relay-beta.genethub.com/artifacts/manifests/component/latest-beta.json"],
+    alpha: ["https://relay-alpha.genethub.com/artifacts/manifests/component/latest-alpha.json"],
   },
   app_download_url: {
     dev: "https://github.com/aikenc/genethub/releases",
@@ -404,13 +404,11 @@ pub const ENV_CWD: &str = "${value("env_cwd", channel)}";
 /// The component file the shell loaded; the daemon watches it to ask for an
 /// in-place reload when it changes.
 pub const ENV_COMPONENT_FILE: &str = "${value("env_component_file", channel)}";
-/// Host ABI integer written into signed guest envelopes. Bump when
-/// \`wit/genehub-host.wit\` changes a load-time contract.
-pub const HOST_ABI: u32 = 23;
-/// Content-addressed module id in \`genehub.daemon.artifact.v2\`.
-pub const MODULE_ID: &str = "genehub:guest/wasm";
-/// Stamped signed-logic discovery URLs. Empty for dev.
-pub const LOGIC_MANIFEST_URLS: &[&str] = &[${value("logic_manifest_urls", channel).map((entry) => `"${entry}"`).join(", ")}];
+/// Content-addressed module id in \`genehub.component.artifact.v3\`. The App ↔
+/// Component ABI is pinned by the WIT digest in \`abi.rs\`, not by a number.
+pub const MODULE_ID: &str = "genehub:client-component/wasm";
+/// Stamped signed-component discovery URLs. Empty for dev.
+pub const COMPONENT_MANIFEST_URLS: &[&str] = &[${value("component_manifest_urls", channel).map((entry) => `"${entry}"`).join(", ")}];
 /// Data-dir env the desktop/CLI already stamps; the host store lives under it.
 pub const ENV_DATA_DIR: &str = "${value("env_data_dir", channel)}";
 `;

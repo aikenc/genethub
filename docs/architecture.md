@@ -63,16 +63,16 @@ relay 只认 Fabric 帧头与 opaque endpoint/route admission，不 parse E2EE p
 
 ### B5. 业务变化默认不要求用户安装新原生程序
 
-WASM 重构的交付北星是：**不牺牲产品能力、可靠性和安全性，滚动 90 天内至少 95% 的产品问题与新特性只通过 guest + 官网完成端到端更新。official 在线用户分钟级收敛；beta/alpha/dev 高频版本秒级收敛；用户不确认、不下载安装、不重启，浏览器 UI 变化最多只需刷新。**
+WASM 重构的交付北星是：**不牺牲产品能力、可靠性和安全性，滚动 90 天内至少 95% 的产品问题与新特性只通过 Live Release（Client Component + Web）完成端到端更新。official 在线用户分钟级收敛；beta/alpha/dev 高频版本秒级收敛；用户不确认、不下载安装、不重启，浏览器 UI 变化最多只需刷新。**
 
-95% 按产品 change set 计，不按 commit 或代码行数计。纯文档/治理不进分母；同时更新 guest 与浏览器、却让 desktop WebView 继续旧能力的 change set 不进分子。修改 WIT、host/Wasmtime、CLI 生命周期、desktop OS 壳、安装器或签名根时必须走完整模式，目标占比不超过 5%。CI 要保存滚动 90 天的机械分类与证据，未建立报表前不得声称达标。
+95% 按产品 change set 计，不按 commit 或代码行数计。纯文档/治理不进分母；同时更新 Client Component 与浏览器、却让 desktop WebView 继续旧能力的 change set 不进分子。修改 WIT、host/Wasmtime、CLI 生命周期、desktop OS 壳、安装器或签名根时必须走 App Release，目标占比不超过 5%。CI 要保存滚动 90 天的机械分类与证据，未建立报表前不得声称达标。
 
-| 模式 | 制品边界 | P95 目标（从 validated immutable candidate 被批准推广开始） |
+| Release 类型 | 制品边界 | P95 目标（从 validated immutable candidate 被批准推广开始） |
 |---|---|---|
-| 完整模式 | 每平台 host/launcher + 只编一次的 guest + 官网；用于原生/WIT 边界变化 | official 发布并让在线客户端安全收敛 ≤10 分钟 |
-| 高频模式 | 签名 `genehub_guest.wasm` + 向后兼容的 proto + 官网；不编 host | beta/alpha/dev 发布并让在线客户端收敛 ≤60 秒，工程目标 ≤30 秒 |
+| App Release | 每平台 host/launcher + 只编一次的 Client Component + Web；用于原生/WIT 边界变化 | official 发布并让在线客户端安全收敛 ≤10 分钟 |
+| Live Release | 签名 `genehub_guest.wasm` + 向后兼容的 WebProtocol + Web；不编 host，只动第三位版本号 | beta/alpha/dev 发布并让在线客户端收敛 ≤60 秒，工程目标 ≤30 秒 |
 
-速度不能跳过测试或签名。客户端必须后台发现、下载、验签、预热、健康确认并在失败时自动回 known-good。切换时打断进行中的一轮是可接受的，只要用户看得见发生了什么且状态可恢复——不为 turn/PTY 的无缝续接设计额外机制，按最低成本处理。Web/guest 必须声明兼容窗口和同一 release set，严格版本不相容时自动升级为完整/原子模式。
+速度不能跳过测试或签名。客户端必须后台发现、下载、验签、预热、健康确认并在失败时自动回 known-good。切换时打断进行中的一轮是可接受的，只要用户看得见发生了什么且状态可恢复——不为 turn/PTY 的无缝续接设计额外机制，按最低成本处理。Web/Client Component 必须声明兼容窗口和同一 release set，严格版本不相容时自动升级为 App Release。
 
 当前状态是：默认 daemon/agent WASM、薄 CLI、Fabric/RTC 与 Linux 能力回归门已经完成；Windows host 的 owner-only ACL 尚未实现并阻断默认 WASM 首启。双模式 CI、组件签名与自动回滚、官网-only 部署、desktop UI 热更新、混合版本窗口和 SLO telemetry 同样尚未完成。详细状态见 [roadmap.md](./roadmap.md) 的“WASM 持续交付”。
 

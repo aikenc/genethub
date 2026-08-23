@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Build, sign, inspect and optionally activate one guest-only update. Native
-// binaries, tags and GitHub releases are deliberately outside this command.
+// Build, sign, inspect and optionally activate one component-only update.
+// Native binaries, tags and GitHub releases are deliberately outside this command.
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -30,7 +30,7 @@ async function main() {
   const cloud = resolve(
     argumentsMap.get("cloud-root") ?? process.env.GENEHUB_CLOUD_ROOT ?? join(open, "../genethub-cloud"),
   );
-  const { publishLogic } = await import(pathToFileURL(join(cloud, "publisher/logic.mjs")).href);
+  const { publishComponent } = await import(pathToFileURL(join(cloud, "publisher/component.mjs")).href);
   if (commit) {
     requireClean(open, "genethub");
     requireClean(cloud, "genethub-cloud");
@@ -56,18 +56,18 @@ async function main() {
   const githubUrl = channel === "official"
     ? argumentsMap.get("github-url") ??
       (!commit
-        ? "https://github.com/aikenc/genethub/releases/download/logic-candidate/genehub_guest.wasm"
+        ? "https://github.com/aikenc/genethub/releases/download/component-candidate/genehub_guest.wasm"
         : undefined)
     : undefined;
   const appRelease = argumentsMap.has("app-release")
     ? {
         release: required("--app-release", argumentsMap.get("app-release")),
-        platformAbi: positiveInteger("--app-platform-abi", argumentsMap.get("app-platform-abi")),
+        appAbiHash: requiredHash("--app-abi-hash", argumentsMap.get("app-abi-hash")),
       }
     : undefined;
 
   try {
-    const result = await publishLogic({
+    const result = await publishComponent({
       root,
       channel,
       publicOrigin,
@@ -77,12 +77,12 @@ async function main() {
       verifyPublic: commit,
       appRelease,
       pausedReason: argumentsMap.get("paused-reason"),
-      build: async (revision) => signAndInspect({
+      build: async (version) => signAndInspect({
         signer,
         raw,
-        output: join(temporary, `genehub-guest-${revision}.wasm`),
+        output: join(temporary, `genehub-component-${version}.wasm`),
         channel,
-        revision,
+        version,
         ...signing,
       }),
     });
@@ -105,7 +105,7 @@ function buildSigner(cargo) {
 }
 
 function signingIdentity(channel, commit, signer) {
-  const prefix = `GENEHUB_${channel.toUpperCase()}_LOGIC`;
+  const prefix = `GENEHUB_${channel.toUpperCase()}_COMPONENT`;
   const signingKey = commit
     ? required(`${prefix}_SIGNING_KEY`, process.env[`${prefix}_SIGNING_KEY`])
     : Buffer.alloc(32, 29).toString("base64").replace(/=+$/u, "");
@@ -113,7 +113,7 @@ function signingIdentity(channel, commit, signer) {
     ? required(`${prefix}_KEY_ID`, process.env[`${prefix}_KEY_ID`])
     : "candidate-only";
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(keyId)) throw new Error(`${prefix}_KEY_ID is not a safe key id`);
-  const environment = { ...process.env, GENEHUB_GUEST_WASM_SIGNING_KEY: signingKey };
+  const environment = { ...process.env, GENEHUB_COMPONENT_SIGNING_KEY: signingKey };
   if (commit) {
     const publicKey = execFileSync(signer, ["public-key"], { cwd: open, env: environment, encoding: "utf8" }).trim();
     const developmentKey = execFileSync(signer, ["dev-public-key"], { cwd: open, encoding: "utf8" }).trim();
@@ -122,10 +122,10 @@ function signingIdentity(channel, commit, signer) {
   return { keyId, environment };
 }
 
-function signAndInspect({ signer, raw, output, channel, revision, keyId, environment }) {
+function signAndInspect({ signer, raw, output, channel, version, keyId, environment }) {
   execFileSync(
     signer,
-    ["pack", raw, output, channel, String(revision), keyId],
+    ["pack", raw, output, channel, version, keyId],
     { cwd: open, env: environment, stdio: ["ignore", "inherit", "inherit"] },
   );
   const identity = JSON.parse(execFileSync(signer, ["inspect", output], { cwd: open, encoding: "utf8" }));
@@ -165,12 +165,10 @@ function requiredAbsolute(label, value) {
   return path;
 }
 
-function positiveInteger(label, value) {
-  const number = Number(value);
-  if (!Number.isSafeInteger(number) || number <= 0 || String(number) !== value) {
-    throw new Error(`${label} must be a canonical positive integer`);
-  }
-  return number;
+function requiredHash(label, value) {
+  const text = required(label, value);
+  if (!/^[0-9a-f]{64}$/.test(text)) throw new Error(`${label} must be a lowercase SHA-256 hex digest`);
+  return text;
 }
 
 function parseArguments(values) {
@@ -193,11 +191,11 @@ function parseArguments(values) {
 
 function usage() {
   process.stdout.write(`Usage:
-  node scripts/publish-guest-wasm.mjs --channel beta [--raw FILE] [--paused-reason TEXT] [--discard-candidate]
-  node scripts/publish-guest-wasm.mjs --commit --channel beta --store DIR --public-origin URL
+  node scripts/publish-component.mjs --channel beta [--raw FILE] [--paused-reason TEXT] [--discard-candidate]
+  node scripts/publish-component.mjs --commit --channel beta --store DIR --public-origin URL
 
 The default uses an isolated candidate store. --commit additionally requires a
-clean paired checkout and GENEHUB_<CHANNEL>_LOGIC_SIGNING_KEY / _KEY_ID. ABI
-changes additionally require --app-release VERSION --app-platform-abi ABI.
+clean paired checkout and GENEHUB_<CHANNEL>_COMPONENT_SIGNING_KEY / _KEY_ID.
+ABI hash changes additionally require --app-release VERSION --app-abi-hash HASH.
 `);
 }

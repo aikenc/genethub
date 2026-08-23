@@ -60,11 +60,11 @@ if (bundles !== platformBundle) {
   fail(`desktop bundle '${bundles}' is not supported on ${process.platform}; expected '${platformBundle}'`);
 }
 
-const preparedGuest = process.env.GENEHUB_GUEST_WASM
-  ? resolve(process.env.GENEHUB_GUEST_WASM)
+const preparedGuest = process.env.GENEHUB_COMPONENT_WASM
+  ? resolve(process.env.GENEHUB_COMPONENT_WASM)
   : null;
 if (preparedGuest && !existsSync(preparedGuest)) {
-  fail(`GENEHUB_GUEST_WASM does not exist: ${preparedGuest}`);
+  fail(`GENEHUB_COMPONENT_WASM does not exist: ${preparedGuest}`);
 }
 
 console.log(`==> building the CLI and wasm shell (${CHANNEL})`);

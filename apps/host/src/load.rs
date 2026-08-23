@@ -361,12 +361,12 @@ fn build_instance(
     crate::bindings::genehub::host::rtc::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
         .anyhow()
         .context("rtc linker")?;
-    crate::bindings::genehub::host::logic_update::add_to_linker::<_, HasSelf<_>>(
+    crate::bindings::genehub::host::component_update::add_to_linker::<_, HasSelf<_>>(
         &mut linker,
         |state| state,
     )
     .anyhow()
-    .context("logic-update linker")?;
+    .context("component-update linker")?;
     Ok((store, linker))
 }
 

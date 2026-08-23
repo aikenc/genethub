@@ -79,18 +79,18 @@ fn windows_runs_a_real_webview2_offline_and_remote_origin_gate() {
 }
 
 #[test]
-fn every_release_package_embeds_one_signed_guest_and_pins_its_baseline() {
+fn every_release_package_embeds_one_signed_component_and_pins_its_baseline() {
     let release = read(repo().join(".github/workflows/release.yml"));
-    assert!(release.contains("daemon_logic:"));
+    assert!(release.contains("signed_component:"));
     assert!(release.contains("name: guest-wasm-release"));
-    assert!(release.contains("GENEHUB_GUEST_WASM_PUBLIC_KEY"));
-    assert!(release.contains("GENEHUB_BUNDLED_LOGIC_REVISION"));
-    assert!(release.contains("publish-prepared-logic.mjs"));
+    assert!(release.contains("GENEHUB_COMPONENT_PUBLIC_KEY"));
+    assert!(release.contains("GENEHUB_BUNDLED_RELEASE_VERSION"));
+    assert!(release.contains("publish-prepared-component.mjs"));
     assert!(release
-        .contains("cmp \"$GENEHUB_GUEST_WASM\" apps/desktop/src-tauri/bin/genehub_guest.wasm"));
+        .contains("cmp \"$GENEHUB_COMPONENT_WASM\" apps/desktop/src-tauri/bin/genehub_guest.wasm"));
 
     let bundle = read(repo().join("apps/desktop/scripts/bundle.mjs"));
-    assert!(bundle.contains("process.env.GENEHUB_GUEST_WASM"));
+    assert!(bundle.contains("process.env.GENEHUB_COMPONENT_WASM"));
     assert!(bundle.contains("preparedGuest ??"));
 }
 
@@ -630,10 +630,10 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
     }
 
     // dev updates from nowhere and points at no Hub: a source build is not on
-    // the release scale. Guest logic discovery is independent of the installer.
+    // the release scale. Component discovery is independent of the installer.
     assert!(
-        row("logic_manifest_urls").contains("dev: []"),
-        "the dev column gained a signed guest feed"
+        row("component_manifest_urls").contains("dev: []"),
+        "the dev column gained a signed component feed"
     );
     assert!(
         row("hub_url").contains("dev: \"\""),

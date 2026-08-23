@@ -721,14 +721,12 @@ fn verify_local_identity(
     Ok(())
 }
 
-/// Eight retained business generations, matching the Web adjacent-adapter window.
+/// Eight retained WebProtocol generations, matching the Web adjacent-adapter window.
 const RETAINED_WEB_PROTOCOLS: u32 = 8;
 
 fn web_protocol_supported(version: u32) -> bool {
     let latest = genehub_proto::WEB_PROTOCOL_VERSION;
-    let oldest = latest
-        .saturating_sub(RETAINED_WEB_PROTOCOLS - 1)
-        .max(1);
+    let oldest = latest.saturating_sub(RETAINED_WEB_PROTOCOLS - 1).max(1);
     version >= oldest && version <= latest
 }
 
@@ -736,14 +734,12 @@ fn web_protocol_mismatch(peer: &str, advertised: u32) -> ConnectError {
     let latest = genehub_proto::WEB_PROTOCOL_VERSION;
     if advertised > latest {
         ConnectError::Protocol(format!(
-            "{peer} uses business protocol v{advertised}; this CLI only supports up to v{latest}. Upgrade the CLI."
+            "{peer} uses WebProtocol v{advertised}; this CLI only supports up to v{latest}. Upgrade the CLI."
         ))
     } else {
-        let oldest = latest
-            .saturating_sub(RETAINED_WEB_PROTOCOLS - 1)
-            .max(1);
+        let oldest = latest.saturating_sub(RETAINED_WEB_PROTOCOLS - 1).max(1);
         ConnectError::Protocol(format!(
-            "{peer} uses business protocol v{advertised}, which is outside this CLI's {RETAINED_WEB_PROTOCOLS}-generation window (v{oldest}–v{latest}). Upgrade the App."
+            "{peer} uses WebProtocol v{advertised}, which is outside this CLI's {RETAINED_WEB_PROTOCOLS}-generation window (v{oldest}–v{latest}). Upgrade the App."
         ))
     }
 }
@@ -834,13 +830,13 @@ mod tests {
     }
 
     #[test]
-    fn advertised_business_protocol_must_stay_inside_the_retained_window() {
+    fn advertised_web_protocol_must_stay_inside_the_retained_window() {
         let (admission, hello) = local_contract();
         verify_local_identity(&hello, &admission).unwrap();
         let mut unsupported = hello.clone();
         unsupported.web_protocol = genehub_proto::WEB_PROTOCOL_VERSION + 1;
         let error = verify_local_identity(&unsupported, &admission).unwrap_err();
-        assert!(error.to_string().contains("business protocol"), "{error}");
+        assert!(error.to_string().contains("WebProtocol"), "{error}");
         assert!(!error.to_string().contains("speaks data plane"), "{error}");
 
         let machine = PairedMachine {
@@ -854,7 +850,7 @@ mod tests {
         };
         verify_remote_identity(&hello, &machine).unwrap();
         let remote = verify_remote_identity(&unsupported, &machine).unwrap_err();
-        assert!(remote.to_string().contains("business protocol"), "{remote}");
+        assert!(remote.to_string().contains("WebProtocol"), "{remote}");
         assert!(
             !remote.to_string().contains("speaks data plane"),
             "{remote}"

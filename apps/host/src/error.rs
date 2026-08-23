@@ -10,8 +10,11 @@ pub enum ArtifactError {
     #[error("artifact slot state is invalid: {0}")]
     State(String),
 
-    #[error("logic revision {candidate} is older than highest accepted revision {highest}")]
-    RevisionReplay { candidate: u64, highest: u64 },
+    #[error("release version {candidate} is older than highest accepted version {highest}")]
+    VersionReplay { candidate: String, highest: String },
+
+    #[error("envelope field {field} is invalid: {reason}")]
+    EnvelopeField { field: &'static str, reason: String },
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

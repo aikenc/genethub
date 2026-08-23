@@ -1,7 +1,7 @@
-//! Host-owned signed guest discovery and cold activation.
+//! Host-owned signed component discovery and cold activation.
 //!
 //! The Web/guest can request `check` or `apply`. They cannot name a URL, path,
-//! revision, channel or key.
+//! version, channel or key.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -10,29 +10,31 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 
+use crate::abi;
 use crate::artifact::{ArtifactVerifier, SignedArtifact};
-use crate::bindings::genehub::host::logic_update as wit;
+use crate::bindings::genehub::host::component_update as wit;
 use crate::channel;
 use crate::keys;
 use crate::store::ArtifactStore;
+use crate::version::ProductVersion;
 
-const LOGIC_SCHEMA: &str = "genehub.logic-manifest.v1";
+const RELEASE_MANIFEST_SCHEMA: &str = "genehub.release-manifest.v2";
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 3;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LogicManifest {
+struct ComponentManifest {
     schema: String,
     channel: String,
-    logic_revision: u64,
-    platform_abi: u32,
-    protocol_version: u32,
+    release_version: String,
+    app_abi_hash: String,
+    web_protocol: u32,
     artifact: ArtifactDescriptor,
     #[allow(dead_code)]
     source: serde_json::Value,
-    activation: LogicActivation,
+    activation: ComponentActivation,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -51,7 +53,7 @@ struct ArtifactSource {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LogicActivation {
+struct ComponentActivation {
     enabled: bool,
     #[serde(default)]
     paused_reason: Option<String>,
@@ -59,7 +61,7 @@ struct LogicActivation {
 
 struct Runtime {
     store: ArtifactStore,
-    baseline_revision: u64,
+    baseline_version: Option<ProductVersion>,
 }
 
 static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
@@ -72,7 +74,7 @@ fn runtime() -> Result<&'static Mutex<Runtime>> {
     let _ = RUNTIME.set(Mutex::new(opened));
     RUNTIME
         .get()
-        .ok_or_else(|| anyhow!("logic update runtime failed to initialize"))
+        .ok_or_else(|| anyhow!("component update runtime failed to initialize"))
 }
 
 fn open_runtime() -> Result<Runtime> {
@@ -80,7 +82,7 @@ fn open_runtime() -> Result<Runtime> {
     let verifier = ArtifactVerifier::new(
         channel::MODULE_ID,
         channel::CHANNEL,
-        channel::HOST_ABI,
+        abi::hex_digest(&abi::host_digest()),
         MAX_ARTIFACT_BYTES,
         [(key_id, key)],
     )
@@ -89,34 +91,30 @@ fn open_runtime() -> Result<Runtime> {
     let store = ArtifactStore::open(root, verifier).map_err(|error| anyhow!("{error}"))?;
     store
         .recover_candidate()
-        .map_err(|error| anyhow!("recovering the signed guest candidate: {error}"))?;
-    let baseline_revision = bundled_revision()?;
-    if baseline_revision > 0 {
+        .map_err(|error| anyhow!("recovering the signed component candidate: {error}"))?;
+    let baseline_version = bundled_version()?;
+    if let Some(baseline) = &baseline_version {
         store
-            .advance_high_water(baseline_revision)
-            .map_err(|error| anyhow!("recording bundled guest revision: {error}"))?;
+            .advance_high_water(baseline)
+            .map_err(|error| anyhow!("recording bundled component version: {error}"))?;
     }
     Ok(Runtime {
         store,
-        baseline_revision,
+        baseline_version,
     })
 }
 
-fn bundled_revision() -> Result<u64> {
-    parse_bundled_revision(option_env!("GENEHUB_BUNDLED_LOGIC_REVISION"))
+fn bundled_version() -> Result<Option<ProductVersion>> {
+    parse_bundled_version(option_env!("GENEHUB_BUNDLED_RELEASE_VERSION"))
 }
 
-fn parse_bundled_revision(raw: Option<&str>) -> Result<u64> {
+fn parse_bundled_version(raw: Option<&str>) -> Result<Option<ProductVersion>> {
     let Some(raw) = raw else {
-        return Ok(0);
+        return Ok(None);
     };
-    let revision = raw
-        .parse::<u64>()
-        .with_context(|| "GENEHUB_BUNDLED_LOGIC_REVISION must be a canonical positive integer")?;
-    if revision == 0 || revision.to_string() != raw {
-        bail!("GENEHUB_BUNDLED_LOGIC_REVISION must be a canonical positive integer");
-    }
-    Ok(revision)
+    ProductVersion::parse(raw)
+        .map(Some)
+        .map_err(|_| anyhow!("GENEHUB_BUNDLED_RELEASE_VERSION must be a canonical Product Version"))
 }
 
 fn store_root() -> Result<PathBuf> {
@@ -134,8 +132,8 @@ fn store_root() -> Result<PathBuf> {
                 })
             })
         })
-        .ok_or_else(|| anyhow!("no data directory for the guest update store"))?;
-    Ok(data.join("logic"))
+        .ok_or_else(|| anyhow!("no data directory for the component update store"))?;
+    Ok(data.join("component"))
 }
 
 fn dirs_data() -> Option<PathBuf> {
@@ -148,14 +146,14 @@ pub fn check() -> Result<wit::Status> {
     let runtime = runtime()?;
     let guard = runtime
         .lock()
-        .map_err(|_| anyhow!("logic update lock was poisoned"))?;
-    let current = current_revision(&guard)?;
-    if channel::LOGIC_MANIFEST_URLS.is_empty() {
+        .map_err(|_| anyhow!("component update lock was poisoned"))?;
+    let current = current_version(&guard)?;
+    if channel::COMPONENT_MANIFEST_URLS.is_empty() {
         return Ok(wit::Status {
-            current_revision: current,
-            latest_revision: None,
+            current_version: current,
+            latest_version: None,
             newer: false,
-            problem: Some("这个通道没有签名 guest 更新源：请从官方发布页手动更新".to_string()),
+            problem: Some("这个通道没有签名组件更新源：请从官方发布页手动更新".to_string()),
         });
     }
     drop(guard);
@@ -163,43 +161,49 @@ pub fn check() -> Result<wit::Status> {
         Ok(manifest) => manifest,
         Err(error) => {
             return Ok(wit::Status {
-                current_revision: current,
-                latest_revision: None,
+                current_version: current,
+                latest_version: None,
                 newer: false,
                 problem: Some(error.to_string()),
             })
         }
     };
-    if manifest.schema != LOGIC_SCHEMA || manifest.channel != channel::CHANNEL {
+    if manifest.schema != RELEASE_MANIFEST_SCHEMA || manifest.channel != channel::CHANNEL {
         return Ok(wit::Status {
-            current_revision: current,
-            latest_revision: None,
+            current_version: current,
+            latest_version: None,
             newer: false,
             problem: Some("更新清单不属于这个通道".to_string()),
         });
     }
     if !manifest.activation.enabled {
         return Ok(wit::Status {
-            current_revision: current,
-            latest_revision: Some(manifest.logic_revision),
+            current_version: current,
+            latest_version: Some(manifest.release_version),
             newer: false,
             problem: manifest.activation.paused_reason,
         });
     }
+    let newer = match ProductVersion::parse(&manifest.release_version) {
+        Ok(latest) => ProductVersion::parse(&current)
+            .map(|current| latest > current)
+            .unwrap_or(false),
+        Err(_) => false,
+    };
     Ok(wit::Status {
-        current_revision: current,
-        latest_revision: Some(manifest.logic_revision),
-        newer: manifest.logic_revision > current,
+        current_version: current,
+        latest_version: Some(manifest.release_version),
+        newer,
         problem: None,
     })
 }
 
 pub fn apply(_request_id: &str) -> Result<()> {
-    if channel::LOGIC_MANIFEST_URLS.is_empty() {
-        bail!("这个通道没有签名 guest 更新源");
+    if channel::COMPONENT_MANIFEST_URLS.is_empty() {
+        bail!("这个通道没有签名组件更新源");
     }
     let manifest = fetch_manifest()?;
-    if manifest.schema != LOGIC_SCHEMA || manifest.channel != channel::CHANNEL {
+    if manifest.schema != RELEASE_MANIFEST_SCHEMA || manifest.channel != channel::CHANNEL {
         bail!("更新清单不属于这个通道");
     }
     if !manifest.activation.enabled {
@@ -208,19 +212,22 @@ pub fn apply(_request_id: &str) -> Result<()> {
             manifest
                 .activation
                 .paused_reason
-                .unwrap_or_else(|| "该通道的 guest 更新已暂停".to_string())
+                .unwrap_or_else(|| "该通道的组件更新已暂停".to_string())
         );
     }
-    if manifest.platform_abi != channel::HOST_ABI {
-        bail!("guest 更新需要新的 host（ABI {}）", manifest.platform_abi);
+    let abi_hash = abi::hex_digest(&abi::host_digest());
+    if manifest.app_abi_hash != abi_hash {
+        bail!("组件更新需要新的 App（ABI 摘要 {}）", manifest.app_abi_hash);
     }
+    let manifest_version = ProductVersion::parse(&manifest.release_version)
+        .map_err(|_| anyhow!("更新清单携带了非规范版本号"))?;
     let bytes = download_artifact(&manifest)?;
     let signed = SignedArtifact::from_single_file(&bytes).map_err(|error| anyhow!("{error}"))?;
-    if signed.envelope.logic_revision() != manifest.logic_revision
+    if signed.envelope.release_version() != manifest.release_version
         || signed.envelope.sha256() != manifest.artifact.sha256
         || signed.envelope.size() != manifest.artifact.size
-        || signed.envelope.platform_abi() != manifest.platform_abi
-        || signed.envelope.protocol_version() != manifest.protocol_version
+        || signed.envelope.app_abi_hash() != manifest.app_abi_hash
+        || signed.envelope.web_protocol() != manifest.web_protocol
         || signed.envelope.channel() != manifest.channel
     {
         bail!("downloaded artifact does not match the signed manifest");
@@ -228,13 +235,13 @@ pub fn apply(_request_id: &str) -> Result<()> {
     let runtime = runtime()?;
     let guard = runtime
         .lock()
-        .map_err(|_| anyhow!("logic update lock was poisoned"))?;
+        .map_err(|_| anyhow!("component update lock was poisoned"))?;
     let verified = {
         let (key_id, key) = keys::trusted_key()?;
         ArtifactVerifier::new(
             channel::MODULE_ID,
             channel::CHANNEL,
-            channel::HOST_ABI,
+            abi_hash,
             MAX_ARTIFACT_BYTES,
             [(key_id, key)],
         )
@@ -254,11 +261,11 @@ pub fn apply(_request_id: &str) -> Result<()> {
         .map_err(|error| anyhow!("staging artifact {}: {error}", verified.artifact_id()))?;
     guard
         .store
-        .advance_high_water(verified.envelope().logic_revision())
+        .advance_high_water(&manifest_version)
         .map_err(|error| anyhow!("{error}"))?;
     guard
         .store
-        .commit_candidate(verified.envelope().logic_revision())
+        .commit_candidate(&manifest_version)
         .map_err(|error| anyhow!("{error}"))?;
     Ok(())
 }
@@ -268,47 +275,55 @@ pub fn load_active_bytes() -> Result<Option<Vec<u8>>> {
     let runtime = runtime()?;
     let guard = runtime
         .lock()
-        .map_err(|_| anyhow!("logic update lock was poisoned"))?;
+        .map_err(|_| anyhow!("component update lock was poisoned"))?;
     let Some(active) = guard
         .store
         .load_active()
-        .map_err(|error| anyhow!("loading the active signed guest: {error}"))?
+        .map_err(|error| anyhow!("loading the active signed component: {error}"))?
     else {
         return Ok(None);
     };
-    if active.envelope().logic_revision() < guard.baseline_revision {
-        return Ok(None);
+    if let Some(baseline) = &guard.baseline_version {
+        if active.envelope().version() < *baseline {
+            return Ok(None);
+        }
     }
     let file = SignedArtifact::new(active.envelope().clone(), active.component().to_vec())
         .to_single_file()
-        .map_err(|error| anyhow!("encoding the active signed guest: {error}"))?;
+        .map_err(|error| anyhow!("encoding the active signed component: {error}"))?;
     Ok(Some(file))
 }
 
-fn current_revision(runtime: &Runtime) -> Result<u64> {
+fn current_version(runtime: &Runtime) -> Result<String> {
     let highest = runtime
         .store
-        .highest_revision()
+        .highest_version()
         .map_err(|error| anyhow!("{error}"))?;
-    Ok(highest.max(runtime.baseline_revision))
+    let current = match (highest, &runtime.baseline_version) {
+        (Some(highest), Some(baseline)) => highest.max(baseline.clone()),
+        (Some(highest), None) => highest,
+        (None, Some(baseline)) => baseline.clone(),
+        (None, None) => return Ok("0.0.0".to_string()),
+    };
+    Ok(current.to_string())
 }
 
-fn fetch_manifest() -> Result<LogicManifest> {
+fn fetch_manifest() -> Result<ComponentManifest> {
     let mut last_error = None;
-    for url in channel::LOGIC_MANIFEST_URLS {
+    for url in channel::COMPONENT_MANIFEST_URLS {
         match get_bytes(url, MAX_MANIFEST_BYTES) {
             Ok(bytes) => {
-                let manifest: LogicManifest = serde_json::from_slice(&bytes)
-                    .with_context(|| format!("parsing logic manifest from {url}"))?;
+                let manifest: ComponentManifest = serde_json::from_slice(&bytes)
+                    .with_context(|| format!("parsing the release manifest from {url}"))?;
                 return Ok(manifest);
             }
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| anyhow!("no stamped logic manifest URL")))
+    Err(last_error.unwrap_or_else(|| anyhow!("no stamped component manifest URL")))
 }
 
-fn download_artifact(manifest: &LogicManifest) -> Result<Vec<u8>> {
+fn download_artifact(manifest: &ComponentManifest) -> Result<Vec<u8>> {
     let mut last_error = None;
     for source in &manifest.artifact.sources {
         match get_bytes(&source.url, MAX_ARTIFACT_BYTES + 16 * 1024) {
@@ -316,7 +331,7 @@ fn download_artifact(manifest: &LogicManifest) -> Result<Vec<u8>> {
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| anyhow!("logic manifest has no artifact source")))
+    Err(last_error.unwrap_or_else(|| anyhow!("release manifest has no artifact source")))
 }
 
 fn get_bytes(url: &str, limit: usize) -> Result<Vec<u8>> {
@@ -329,7 +344,7 @@ fn get_bytes(url: &str, limit: usize) -> Result<Vec<u8>> {
                 attempt.stop()
             } else if let Some(previous) = attempt.previous().last() {
                 if previous.origin() != attempt.url().origin() {
-                    attempt.error(anyhow!("logic update refused a cross-origin redirect"))
+                    attempt.error(anyhow!("component update refused a cross-origin redirect"))
                 } else {
                     attempt.follow()
                 }
@@ -361,16 +376,16 @@ fn validate_url(url: &str) -> Result<()> {
                 .host_str()
                 .is_some_and(|host| host == "127.0.0.1" || host == "[::1]"))
     {
-        bail!("logic update URLs must be https");
+        bail!("component update URLs must be https");
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        bail!("logic update URLs must not contain credentials");
+        bail!("component update URLs must not contain credentials");
     }
     Ok(())
 }
 
 impl crate::load::Host {
-    // Marker so logic-update Host impl lives next to the other imports.
+    // Marker so component-update Host impl lives next to the other imports.
 }
 
 impl wit::Host for crate::load::Host {
@@ -388,12 +403,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bundled_revision_is_absent_or_canonical_and_positive() {
-        assert_eq!(parse_bundled_revision(None).unwrap(), 0);
-        assert_eq!(parse_bundled_revision(Some("42")).unwrap(), 42);
-        for value in ["", "0", "01", "+1", "-1", "1 "] {
+    fn bundled_version_is_absent_or_canonical() {
+        assert_eq!(parse_bundled_version(None).unwrap(), None);
+        assert_eq!(
+            parse_bundled_version(Some("0.1.2")).unwrap(),
+            Some(ProductVersion::parse("0.1.2").unwrap())
+        );
+        assert!(parse_bundled_version(Some("0.2.0-beta.1"))
+            .unwrap()
+            .is_some());
+        for value in ["", "0", "42", "1.2", "01.2.3", "1.2.3 ", "v1.2.3"] {
             assert!(
-                parse_bundled_revision(Some(value)).is_err(),
+                parse_bundled_version(Some(value)).is_err(),
                 "accepted {value:?}"
             );
         }
@@ -401,10 +422,10 @@ mod tests {
 
     #[test]
     fn update_sources_are_https_or_literal_loopback_in_debug_builds() {
-        assert!(
-            validate_url("https://relay.genethub.com/artifacts/manifests/logic/latest.json")
-                .is_ok()
-        );
+        assert!(validate_url(
+            "https://relay.genethub.com/artifacts/manifests/component/latest.json"
+        )
+        .is_ok());
         assert!(validate_url("https://user:secret@relay.genethub.com/update").is_err());
         assert!(validate_url("http://localhost:8080/update").is_err());
         assert!(validate_url("file:///tmp/update").is_err());

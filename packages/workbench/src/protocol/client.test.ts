@@ -105,7 +105,7 @@ describe("the v3 peer connection", () => {
     client.close();
   });
 
-  it("assumes business protocol v3 when protocol.identity is missing", async () => {
+  it("assumes WebProtocol v3 when protocol.identity is missing", async () => {
     const proof = localProof();
     const queue = socketQueue({
       secret: proof.proof,

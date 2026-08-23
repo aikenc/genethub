@@ -21,6 +21,7 @@ mod pty;
 mod rtc;
 mod store;
 mod update;
+mod version;
 
 use std::env;
 use std::path::PathBuf;

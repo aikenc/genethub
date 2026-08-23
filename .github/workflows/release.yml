@@ -195,14 +195,14 @@ jobs:
             printf 'hub_url=%s\n' "$hub_url"
           } >> "$GITHUB_OUTPUT"
 
-  # The portable guest is built and signed exactly once. Every native package
-  # below embeds these exact bytes and compiles the pinned public key and
-  # bundled revision into its host.
-  daemon_logic:
+  # The portable client component is built and signed exactly once. Every
+  # native package below embeds these exact bytes and compiles the pinned
+  # public key and bundled release version into its host.
+  signed_component:
     needs: [channel, verify]
     runs-on: ubuntu-latest
     outputs:
-      revision: ${{ steps.logic.outputs.revision }}
+      version: ${{ steps.component.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -216,8 +216,8 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: release-guest-wasm
-      - name: Build and sign the one cross-platform guest artifact
-        id: logic
+      - name: Build and sign the one cross-platform component artifact
+        id: component
         shell: bash
         env:
           CHANNEL: ${{ needs.channel.outputs.name }}
@@ -245,54 +245,60 @@ jobs:
               *) echo "::error::tag build has non-release channel $CHANNEL"; exit 1 ;;
             esac
             test -n "$signing_key" || {
-              echo "::error::$CHANNEL guest signing key is required for an App release"
+              echo "::error::$CHANNEL component signing key is required for an App release"
               exit 1
             }
             [[ "$key_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || {
-              echo "::error::$CHANNEL guest key id must be a safe non-empty identifier"
+              echo "::error::$CHANNEL component key id must be a safe non-empty identifier"
               exit 1
             }
-            revision="$(CHANNEL="$CHANNEL" MANIFEST_URL="$HUB_URL/artifacts/manifests/logic/$manifest" node --input-type=module -e '
+            # An App Release takes the tag's Product Version and it must move
+            # the channel forward: anything at or below the public manifest
+            # would be an anti-rollback violation on every installed host.
+            version="$(CHANNEL="$CHANNEL" TAG_VERSION="${GITHUB_REF_NAME#v}" MANIFEST_URL="$HUB_URL/artifacts/manifests/component/$manifest" node --input-type=module -e '
+              import { compareProductVersions } from "./scripts/product-version.mjs";
+              const tag = process.env.TAG_VERSION;
               const response = await fetch(process.env.MANIFEST_URL, {
                 cache: "no-store",
                 redirect: "error",
                 signal: AbortSignal.timeout(30_000),
               });
-              let current = 0;
               if (response.status !== 404) {
-                if (!response.ok) throw new Error(`logic manifest returned ${response.status}`);
+                if (!response.ok) throw new Error(`release manifest returned ${response.status}`);
                 const body = await response.json();
-                if (body.schema !== "genehub.logic-manifest.v1" || body.channel !== process.env.CHANNEL ||
-                    !Number.isSafeInteger(body.logicRevision) || body.logicRevision <= 0) {
-                  throw new Error("current logic manifest has an invalid identity");
+                if (body.schema !== "genehub.release-manifest.v2" || body.channel !== process.env.CHANNEL ||
+                    typeof body.releaseVersion !== "string") {
+                  throw new Error("current release manifest has an invalid identity");
                 }
-                current = body.logicRevision;
+                if (compareProductVersions(body.releaseVersion, tag) >= 0) {
+                  throw new Error(`tag ${tag} does not move the channel past ${body.releaseVersion}`);
+                }
               }
-              process.stdout.write(String(Math.max(current + 1, Date.now())));
+              process.stdout.write(tag);
             ')"
-            export GENEHUB_GUEST_WASM_SIGNING_KEY="$signing_key"
+            export GENEHUB_COMPONENT_SIGNING_KEY="$signing_key"
             "target/release/$HOST_BINARY" pack \
-              "$raw" dist/genehub_guest.wasm "$CHANNEL" "$revision" "$key_id"
+              "$raw" dist/genehub_guest.wasm "$CHANNEL" "$version" "$key_id"
             public_key="$("target/release/$HOST_BINARY" public-key)"
           else
-            revision=1
+            version="0.0.0-dev.1"
             key_id=dev-local
-            "target/release/$HOST_BINARY" pack-dev "$raw" dist/genehub_guest.wasm "$revision"
+            "target/release/$HOST_BINARY" pack-dev "$raw" dist/genehub_guest.wasm "$version"
             public_key="$("target/release/$HOST_BINARY" dev-public-key)"
           fi
           "target/release/$HOST_BINARY" inspect dist/genehub_guest.wasm \
-            > dist/logic-identity.json
-          REVISION="$revision" node --input-type=module -e '
+            > dist/component-identity.json
+          VERSION="$version" node --input-type=module -e '
             import { readFileSync } from "node:fs";
-            const identity = JSON.parse(readFileSync("dist/logic-identity.json", "utf8"));
-            if (identity.logicRevision !== Number(process.env.REVISION)) throw new Error("signed revision drifted");
+            const identity = JSON.parse(readFileSync("dist/component-identity.json", "utf8"));
+            if (identity.releaseVersion !== process.env.VERSION) throw new Error("signed version drifted");
           '
           {
-            printf 'GENEHUB_GUEST_WASM_KEY_ID=%s\n' "$key_id"
-            printf 'GENEHUB_GUEST_WASM_PUBLIC_KEY=%s\n' "$public_key"
-            printf 'GENEHUB_BUNDLED_LOGIC_REVISION=%s\n' "$revision"
+            printf 'GENEHUB_COMPONENT_KEY_ID=%s\n' "$key_id"
+            printf 'GENEHUB_COMPONENT_PUBLIC_KEY=%s\n' "$public_key"
+            printf 'GENEHUB_BUNDLED_RELEASE_VERSION=%s\n' "$version"
           } > dist/trust.env
-          printf 'revision=%s\n' "$revision" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           test "$(od -An -tx1 -N4 dist/genehub_guest.wasm | tr -d ' \n')" = 0061736d
           sha256sum dist/genehub_guest.wasm
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -311,7 +317,7 @@ jobs:
   # dependency. macOS waits for signing and notarisation, without which the
   # download is a security warning with an app behind it.
   installers:
-    needs: [channel, verify, daemon_logic]
+    needs: [channel, verify, signed_component]
     strategy:
       fail-fast: false
       matrix:
@@ -362,7 +368,7 @@ jobs:
         shell: bash
         env:
           BUNDLES: ${{ matrix.bundles }}
-          GENEHUB_GUEST_WASM: ${{ runner.temp }}/guest-wasm/genehub_guest.wasm
+          GENEHUB_COMPONENT_WASM: ${{ runner.temp }}/guest-wasm/genehub_guest.wasm
           # The Hub this build suggests, per channel. Only published builds get
           # one: a copy someone compiles from this repository has no business
           # defaulting to somebody else's service, and the field stays empty
@@ -387,7 +393,7 @@ jobs:
               | tail -15 | while IFS= read -r line; do echo "::error::$line"; done
             exit "$status"
           fi
-          cmp "$GENEHUB_GUEST_WASM" apps/desktop/src-tauri/bin/genehub_guest.wasm || {
+          cmp "$GENEHUB_COMPONENT_WASM" apps/desktop/src-tauri/bin/genehub_guest.wasm || {
             echo "::error::desktop bundle did not embed the signed guest artifact byte-for-byte"
             exit 1
           }
@@ -539,7 +545,7 @@ jobs:
   # on ubuntu-22.04 was requiring GLIBC_2.34 and failing on those machines with
   # a wall of `version 'GLIBC_…' not found` — exactly what `curl | sh` users hit.
   binaries:
-    needs: [channel, verify, daemon_logic]
+    needs: [channel, verify, signed_component]
     strategy:
       fail-fast: false
       matrix:
@@ -641,7 +647,7 @@ jobs:
           path: dist/*
 
   publish:
-    needs: [channel, daemon_logic, installers, binaries]
+    needs: [channel, signed_component, installers, binaries]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -749,8 +755,8 @@ jobs:
           prerelease: true
           files: dist/*
 
-  publish_logic_website:
-    needs: [channel, cloud_source, daemon_logic, publish]
+  publish_component_website:
+    needs: [channel, cloud_source, signed_component, publish]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, linux, genehub-publisher]
     concurrency:
@@ -779,7 +785,7 @@ jobs:
         with:
           name: guest-wasm-release
           path: release-input/logic
-      - name: Read back the signed release bytes and activate the logic manifest
+      - name: Read back the signed release bytes and activate the component manifest
         shell: bash
         env:
           CHANNEL: ${{ needs.channel.outputs.name }}
@@ -794,10 +800,10 @@ jobs:
             *) echo "unexpected release channel $CHANNEL" >&2; exit 1 ;;
           esac
           test -n "$stage" || { echo "publisher stage is not configured for $CHANNEL" >&2; exit 1; }
-          identity="$GITHUB_WORKSPACE/release-input/logic/logic-identity.json"
-          abi="$(node -e 'const i=require(process.argv[1]); process.stdout.write(String(i.platformAbi))' "$identity")"
+          identity="$GITHUB_WORKSPACE/release-input/logic/component-identity.json"
+          abi="$(node -e 'const i=require(process.argv[1]); process.stdout.write(String(i.appAbiHash))' "$identity")"
           command=(
-            node "$GITHUB_WORKSPACE/genethub-cloud/publisher/publish-prepared-logic.mjs"
+            node "$GITHUB_WORKSPACE/genethub-cloud/publisher/publish-prepared-component.mjs"
             --commit
             --cloud-root "$GITHUB_WORKSPACE/genethub-cloud"
             --open-root "$GITHUB_WORKSPACE/genethub"
@@ -806,10 +812,10 @@ jobs:
             --channel "$CHANNEL"
             --store "$stage/artifacts"
             --public-origin "$PUBLIC_ORIGIN"
-            --logic "$GITHUB_WORKSPACE/release-input/logic/genehub_guest.wasm"
-            --logic-identity "$identity"
+            --component "$GITHUB_WORKSPACE/release-input/logic/genehub_guest.wasm"
+            --component-identity "$identity"
             --app-release "${GITHUB_REF_NAME#v}"
-            --app-platform-abi "$abi"
+            --app-abi-hash "$abi"
           )
           if [ "$CHANNEL" = official ]; then
             command+=(--github-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/genehub_guest.wasm")

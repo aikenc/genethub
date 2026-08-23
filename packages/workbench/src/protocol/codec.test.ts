@@ -10,7 +10,7 @@ import {
 
 const text = new TextDecoder();
 
-describe("business protocol adapters", () => {
+describe("WebProtocol adapters", () => {
   it("keeps v3 byte-compatible when no conversion is required", () => {
     const codec = protocolCodec(WEB_PROTOCOL_VERSION);
     expect(text.decode(codec.encodeRequest({ type: "agent.list" }))).toBe(

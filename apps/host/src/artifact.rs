@@ -8,15 +8,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{ArtifactError, Result};
+use crate::version::ProductVersion;
 
-const ENVELOPE_FORMAT_VERSION: u32 = 2;
-const SIGNATURE_DOMAIN: &[u8] = b"genehub-app-artifact-v2\0";
-const ARTIFACT_ID_DOMAIN: &[u8] = b"genehub-app-artifact-id-v2\0";
+const ENVELOPE_FORMAT_VERSION: u32 = 3;
+const SIGNATURE_DOMAIN: &[u8] = b"genehub-client-component-v3\0";
+const ARTIFACT_ID_DOMAIN: &[u8] = b"genehub-client-component-id-v3\0";
 const MAX_MODULE_ID_BYTES: usize = 128;
 const MAX_CHANNEL_BYTES: usize = 32;
+const MAX_VERSION_BYTES: usize = 64;
 const MAX_KEY_ID_BYTES: usize = 64;
 const ED25519_SIGNATURE_BASE64_BYTES: usize = 86;
-const ARTIFACT_CUSTOM_SECTION: &str = "genehub.daemon.artifact.v2";
+const ARTIFACT_CUSTOM_SECTION: &str = "genehub.component.artifact.v3";
 const MAX_ENVELOPE_BYTES: usize = 16 * 1024;
 
 /// Signed, immutable metadata stored beside one Wasm component.
@@ -26,9 +28,9 @@ pub struct ArtifactEnvelope {
     format_version: u32,
     module_id: String,
     channel: String,
-    logic_revision: u64,
-    platform_abi: u32,
-    protocol_version: u32,
+    release_version: String,
+    app_abi_hash: String,
+    web_protocol: u32,
     size: u64,
     sha256: String,
     key_id: String,
@@ -41,9 +43,9 @@ impl ArtifactEnvelope {
     pub fn unsigned(
         module_id: impl Into<String>,
         channel: impl Into<String>,
-        logic_revision: u64,
-        platform_abi: u32,
-        protocol_version: u32,
+        release_version: impl Into<String>,
+        app_abi_hash: impl Into<String>,
+        web_protocol: u32,
         key_id: impl Into<String>,
         component: &[u8],
     ) -> Result<Self> {
@@ -51,9 +53,9 @@ impl ArtifactEnvelope {
             format_version: ENVELOPE_FORMAT_VERSION,
             module_id: module_id.into(),
             channel: channel.into(),
-            logic_revision,
-            platform_abi,
-            protocol_version,
+            release_version: release_version.into(),
+            app_abi_hash: app_abi_hash.into(),
+            web_protocol,
             size: u64::try_from(component.len()).map_err(|_| {
                 ArtifactError::Verification("component size does not fit in u64".to_string())
             })?,
@@ -78,9 +80,9 @@ impl ArtifactEnvelope {
         payload.extend_from_slice(&self.format_version.to_be_bytes());
         append_field(&mut payload, self.module_id.as_bytes())?;
         append_field(&mut payload, self.channel.as_bytes())?;
-        payload.extend_from_slice(&self.logic_revision.to_be_bytes());
-        payload.extend_from_slice(&self.platform_abi.to_be_bytes());
-        payload.extend_from_slice(&self.protocol_version.to_be_bytes());
+        append_field(&mut payload, self.release_version.as_bytes())?;
+        append_field(&mut payload, self.app_abi_hash.as_bytes())?;
+        payload.extend_from_slice(&self.web_protocol.to_be_bytes());
         payload.extend_from_slice(&self.size.to_be_bytes());
         append_field(&mut payload, self.sha256.as_bytes())?;
         append_field(&mut payload, self.key_id.as_bytes())?;
@@ -95,16 +97,22 @@ impl ArtifactEnvelope {
         &self.channel
     }
 
-    pub fn logic_revision(&self) -> u64 {
-        self.logic_revision
+    pub fn release_version(&self) -> &str {
+        &self.release_version
     }
 
-    pub fn platform_abi(&self) -> u32 {
-        self.platform_abi
+    /// Parsed Product Version, guaranteed valid by shape validation.
+    pub fn version(&self) -> ProductVersion {
+        ProductVersion::parse(&self.release_version)
+            .expect("an envelope that passed shape validation carries a canonical version")
     }
 
-    pub fn protocol_version(&self) -> u32 {
-        self.protocol_version
+    pub fn app_abi_hash(&self) -> &str {
+        &self.app_abi_hash
+    }
+
+    pub fn web_protocol(&self) -> u32 {
+        self.web_protocol
     }
 
     pub fn size(&self) -> u64 {
@@ -128,32 +136,20 @@ impl ArtifactEnvelope {
         }
         validate_text("module id", &self.module_id, MAX_MODULE_ID_BYTES)?;
         validate_channel(&self.channel)?;
-        if self.logic_revision == 0 {
+        if self.release_version.len() > MAX_VERSION_BYTES {
             return Err(ArtifactError::Verification(
-                "logic revision must be positive".to_string(),
+                "release version exceeds the envelope limit".to_string(),
             ));
         }
-        if self.platform_abi == 0 {
+        ProductVersion::parse(&self.release_version)?;
+        validate_digest("App ABI hash", &self.app_abi_hash)?;
+        if self.web_protocol == 0 {
             return Err(ArtifactError::Verification(
-                "platform ABI must be positive".to_string(),
-            ));
-        }
-        if self.protocol_version == 0 {
-            return Err(ArtifactError::Verification(
-                "protocol version must be positive".to_string(),
+                "WebProtocol generation must be positive".to_string(),
             ));
         }
         validate_key_id(&self.key_id)?;
-        if self.sha256.len() != 64
-            || !self
-                .sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(ArtifactError::Verification(
-                "SHA-256 must be 64 lowercase hexadecimal characters".to_string(),
-            ));
-        }
+        validate_digest("SHA-256", &self.sha256)?;
         Ok(())
     }
 }
@@ -292,7 +288,7 @@ impl VerifiedArtifact {
 pub struct ArtifactVerifier {
     expected_module_id: String,
     expected_channel: String,
-    expected_platform_abi: u32,
+    expected_abi_hash: String,
     max_artifact_bytes: usize,
     trusted_keys: Arc<BTreeMap<String, VerifyingKey>>,
 }
@@ -301,7 +297,7 @@ impl ArtifactVerifier {
     pub fn new(
         expected_module_id: impl Into<String>,
         expected_channel: impl Into<String>,
-        expected_platform_abi: u32,
+        expected_abi_hash: impl Into<String>,
         max_artifact_bytes: usize,
         trusted_keys: impl IntoIterator<Item = (String, VerifyingKey)>,
     ) -> Result<Self> {
@@ -309,6 +305,8 @@ impl ArtifactVerifier {
         validate_text("module id", &expected_module_id, MAX_MODULE_ID_BYTES)?;
         let expected_channel = expected_channel.into();
         validate_channel(&expected_channel)?;
+        let expected_abi_hash = expected_abi_hash.into();
+        validate_digest("expected App ABI hash", &expected_abi_hash)?;
         if max_artifact_bytes == 0 {
             return Err(ArtifactError::Verification(
                 "maximum artifact size must be positive".to_string(),
@@ -331,7 +329,7 @@ impl ArtifactVerifier {
         Ok(Self {
             expected_module_id,
             expected_channel,
-            expected_platform_abi,
+            expected_abi_hash,
             max_artifact_bytes,
             trusted_keys: Arc::new(keys),
         })
@@ -352,10 +350,10 @@ impl ArtifactVerifier {
                 envelope.channel, self.expected_channel
             )));
         }
-        if envelope.platform_abi != self.expected_platform_abi {
+        if envelope.app_abi_hash != self.expected_abi_hash {
             return Err(ArtifactError::Verification(format!(
-                "artifact ABI {} does not match platform ABI {}",
-                envelope.platform_abi, self.expected_platform_abi
+                "artifact ABI hash {} does not match this App's ABI hash {}",
+                envelope.app_abi_hash, self.expected_abi_hash
             )));
         }
         if artifact.component.len() > self.max_artifact_bytes {
@@ -479,6 +477,19 @@ fn validate_channel(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_digest(label: &str, value: &str) -> Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ArtifactError::Verification(format!(
+            "{label} must be 64 lowercase hexadecimal characters"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_key_id(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > MAX_KEY_ID_BYTES
@@ -524,17 +535,18 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     const EMPTY_WASM: &[u8] = b"\0asm\x01\x00\x00\x00";
+    const TEST_ABI_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn key() -> SigningKey {
         SigningKey::from_bytes(&[7; 32])
     }
 
-    fn signed(revision: u64) -> SignedArtifact {
+    fn signed(version: &str) -> SignedArtifact {
         let envelope = ArtifactEnvelope::unsigned(
-            "genehub:guest/wasm",
+            "genehub:client-component/wasm",
             "dev",
-            revision,
-            23,
+            version,
+            TEST_ABI_HASH,
             3,
             "dev-local",
             EMPTY_WASM,
@@ -546,9 +558,9 @@ mod tests {
 
     fn verifier() -> ArtifactVerifier {
         ArtifactVerifier::new(
-            "genehub:guest/wasm",
+            "genehub:client-component/wasm",
             "dev",
-            23,
+            TEST_ABI_HASH,
             64 * 1024,
             [("dev-local".to_string(), key().verifying_key())],
         )
@@ -557,16 +569,17 @@ mod tests {
 
     #[test]
     fn a_canonical_single_file_round_trips_and_verifies() {
-        let file = signed(1).to_single_file().unwrap();
+        let file = signed("0.0.0-dev.1").to_single_file().unwrap();
         let artifact = SignedArtifact::from_single_file(&file).unwrap();
         let verified = verifier().verify(&artifact).unwrap();
-        assert_eq!(verified.envelope().logic_revision(), 1);
+        assert_eq!(verified.envelope().release_version(), "0.0.0-dev.1");
+        assert_eq!(verified.envelope().app_abi_hash(), TEST_ABI_HASH);
         assert_eq!(verified.component(), EMPTY_WASM);
     }
 
     #[test]
     fn a_tampered_section_is_rejected_before_instantiate() {
-        let mut file = signed(1).to_single_file().unwrap();
+        let mut file = signed("0.0.0-dev.1").to_single_file().unwrap();
         let last = file.len() - 1;
         file[last] ^= 0x01;
         assert!(
@@ -578,16 +591,39 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_channel_or_abi_is_not_trusted() {
-        let artifact = signed(1);
-        let other = ArtifactVerifier::new(
-            "genehub:guest/wasm",
+    fn a_wrong_channel_or_abi_hash_is_not_trusted() {
+        let artifact = signed("0.0.0-dev.1");
+        let other_channel = ArtifactVerifier::new(
+            "genehub:client-component/wasm",
             "official",
-            23,
+            TEST_ABI_HASH,
             64 * 1024,
             [("dev-local".to_string(), key().verifying_key())],
         )
         .unwrap();
-        assert!(other.verify(&artifact).is_err());
+        assert!(other_channel.verify(&artifact).is_err());
+        let other_abi = ArtifactVerifier::new(
+            "genehub:client-component/wasm",
+            "dev",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            64 * 1024,
+            [("dev-local".to_string(), key().verifying_key())],
+        )
+        .unwrap();
+        assert!(other_abi.verify(&artifact).is_err());
+    }
+
+    #[test]
+    fn a_non_canonical_version_is_rejected_at_shape_validation() {
+        assert!(ArtifactEnvelope::unsigned(
+            "genehub:client-component/wasm",
+            "dev",
+            "01.2.3",
+            TEST_ABI_HASH,
+            3,
+            "dev-local",
+            EMPTY_WASM,
+        )
+        .is_err());
     }
 }

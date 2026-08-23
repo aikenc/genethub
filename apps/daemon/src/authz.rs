@@ -250,7 +250,7 @@ impl Principal {
 pub enum StreamMethod {
     /// The peer's single fan-in of session, terminal and notice frames.
     Events,
-    /// Lean carrier method that returns the advertised business protocol.
+    /// Lean carrier method that returns the advertised WebProtocol.
     ProtocolIdentity,
     /// Streams the bytes of a workspace file.
     AssetPreview,

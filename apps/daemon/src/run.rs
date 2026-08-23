@@ -219,6 +219,16 @@ async fn wait_for_signal() {
     }
 }
 
+/// Truncates the lock file to the current pid. Shared by the native path
+/// (where a failure is fatal) and the guest path (where a mandatory-lock
+/// refusal is tolerated by the caller).
+fn write_lock_pid(file: &mut std::fs::File) -> std::io::Result<()> {
+    file.set_len(0)?;
+    file.rewind()?;
+    write!(file, "{}", crate::host_pid::current())?;
+    file.sync_all()
+}
+
 /// A lock file holding the current pid.
 ///
 /// Two daemons on one data directory would fight over session files and both
@@ -257,15 +267,15 @@ impl SingleInstance {
         //
         // On WASI the host holds the lock on a second handle. Windows
         // `LockFileEx` is mandatory, so `set_len` / `write` through the guest
-        // fd then fail as a bare `I/O error (os error 29)` and first start
-        // never prints the listening line.
+        // fd fails there as a bare `I/O error (os error 29)`; that must not
+        // abort first start, so the guest write is best-effort. Where the
+        // lock is advisory (Unix) the write lands and the CLI can name the
+        // daemon's pid; where it is refused the content stays empty and the
+        // kernel lock remains the running signal.
         #[cfg(not(target_family = "wasm"))]
-        {
-            file.set_len(0)?;
-            file.rewind()?;
-            write!(file, "{}", crate::host_pid::current())?;
-            file.sync_all()?;
-        }
+        write_lock_pid(&mut file)?;
+        #[cfg(target_family = "wasm")]
+        let _ = write_lock_pid(&mut file);
         Ok(SingleInstance {
             file: Some(file),
             path,
