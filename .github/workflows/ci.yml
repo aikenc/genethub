@@ -270,7 +270,7 @@ jobs:
       GENET_E2E_AGENT: ${{ github.workspace }}/target/debug/genet-agent-dev
     defaults:
       run:
-        working-directory: packages/web
+        working-directory: packages/workbench
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -280,7 +280,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: |
-            packages/web/package-lock.json
+            packages/workbench/package-lock.json
             apps/relay/package-lock.json
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         if: needs.rust.result != 'success'

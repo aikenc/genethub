@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
-import { ProtocolError_ } from "@genehub/web/client";
+import { ProtocolError_ } from "@genehub/workbench/client";
 
 export function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);

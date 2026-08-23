@@ -37,7 +37,7 @@ function agentCase(
       expectedDurationMs: 30_000,
       timeoutMs,
       surfaces: ["daemon", "agent", "workbench-client"],
-      productInterfaces: ["genet-cli", "@genehub/web/client"],
+      productInterfaces: ["genet-cli", "@genehub/workbench/client"],
     },
     run,
   );

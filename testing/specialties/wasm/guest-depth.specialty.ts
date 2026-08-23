@@ -57,7 +57,7 @@ function wasmMeta(
       pool: "standard" as const,
     },
     surfaces: ["genehub-host", "daemon", "agent"],
-    productInterfaces: ["genet-cli", "@genehub/web/client"],
+    productInterfaces: ["genet-cli", "@genehub/workbench/client"],
     requiredArtifacts: ["genehub-host-dev", "genehub_guest.wasm"],
   };
 }

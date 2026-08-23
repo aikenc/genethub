@@ -21,7 +21,7 @@
 //     packages/proto (WebProtocol, absorbed by the adapter window),
 //     packages/http, packages/wasi-guest.
 //
-//   Hosted (Live-deployable): apps/relay, packages/web (the Workbench).
+//   Hosted (Live-deployable): apps/relay, packages/workbench (the Workbench).
 //
 //   testing/ gates the above but ships nothing itself.
 //
@@ -52,7 +52,7 @@ const RULES = [
   { match: (f) => f.startsWith("packages/proto/"), jobs: ["rust"], release: "live", why: "WebProtocol, absorbed by the adapter window" },
   { match: (f) => f.startsWith("packages/http/") || f.startsWith("packages/wasi-guest/"), jobs: ["rust"], release: "live", why: "Component closure support crate" },
   { match: (f) => f.startsWith("packages/native/"), jobs: ["rust", "desktop"], release: "app", why: "linked into the Host binary" },
-  { match: (f) => f.startsWith("packages/web/"), jobs: ["web"], release: "live", why: "the Workbench" },
+  { match: (f) => f.startsWith("packages/workbench/"), jobs: ["web"], release: "live", why: "the Workbench" },
   { match: (f) => f.startsWith("testing/"), jobs: ["rust"], release: "live", why: "test engineering ships nothing" },
   { match: (f) => f.startsWith("scripts/"), jobs: ["rust", "desktop"], release: "app", why: "stamping, installer and release tooling" },
   { match: (f) => f.startsWith("docs/") || f.endsWith(".md") || f.startsWith("LICENSE"), jobs: [], release: "live", why: "documentation" },

@@ -273,7 +273,7 @@ interface FabricAuthority {
 | 手机（Tauri Mobile） | 同上 | relay |
 | 自建部署 | 静态文件 | 同浏览器 |
 
-宿主差异收敛在 `packages/web/src/host/` 一个模块里，业务组件不允许出现 `if (isTauri)`。范围与移动端约束见 [web-workbench.md](./web-workbench.md)。
+宿主差异收敛在 `packages/workbench/src/host/` 一个模块里，业务组件不允许出现 `if (isTauri)`。范围与移动端约束见 [web-workbench.md](./web-workbench.md)。
 
 **本仓前端的范围是：会话、项目、文件、终端、以及你自己的设备管理。** 账号体系的界面不在本仓——它属于运营控制面的人，跟"用哪个 agent 干活"是两件事。
 
@@ -290,7 +290,7 @@ apps/relay       ← Node：转发层。无数据库、无业务、可自建
 apps/desktop     ← 仅 Windows/macOS 的 Tauri 2 壳；复用 Web 工作台
 packages/native  ← 跨 CLI/host 的原生进程与隔离机制
 packages/wasi-guest ← guest 的非阻塞 WASI/process/TLS/stdio 桥
-packages/web     ← 工作台前端（四个宿主同一份产物）
+packages/workbench     ← 工作台前端（四个宿主同一份产物）
 packages/proto   ← 会话协议的唯一定义处，生成 TS 类型与 Rust 结构
 skills/          ← 教 Agent 怎么用 genet CLI 的 Agent Skills
 testing/         ← 跨部件旅程测试（daemon + agent + mock 模型）

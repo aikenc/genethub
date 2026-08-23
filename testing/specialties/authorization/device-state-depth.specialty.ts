@@ -6,7 +6,7 @@ import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 
 function authStateCase(id: string, title: string, oracle: string, catches: string[], run: (t: CaseContext, opened: Opened) => Promise<void>): void {
-  defineSpecialty({ id: `specialty.authorization.state.${id}`, title, oracle, catches, tags: ["core", "daemon", "authorization-state-depth"], llm: { default: "none" }, expectedDurationMs: 20_000, timeoutMs: 120_000, resources: { environments: 1, cpu: 1, memoryMb: 512, io: 1, browser: 0, pool: "standard" }, surfaces: ["daemon", "workbench-client"], productInterfaces: ["@genehub/web/client"] }, async (t) => {
+  defineSpecialty({ id: `specialty.authorization.state.${id}`, title, oracle, catches, tags: ["core", "daemon", "authorization-state-depth"], llm: { default: "none" }, expectedDurationMs: 20_000, timeoutMs: 120_000, resources: { environments: 1, cpu: 1, memoryMb: 512, io: 1, browser: 0, pool: "standard" }, surfaces: ["daemon", "workbench-client"], productInterfaces: ["@genehub/workbench/client"] }, async (t) => {
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try { await run(t, opened); } finally { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
   });

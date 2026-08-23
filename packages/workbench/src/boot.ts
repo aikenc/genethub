@@ -10,7 +10,7 @@
  * phone the composer sat behind the keyboard. Neither is visible to anyone
  * working in this repository, because the entry point here does call it.
  *
- * So it is not something a host is asked to remember. Importing `@genehub/web`
+ * So it is not something a host is asked to remember. Importing `@genehub/workbench`
  * is what a host does by definition, and this comes with it.
  *
  * Before the first paint, not in an effect: the stylesheet is render-blocking

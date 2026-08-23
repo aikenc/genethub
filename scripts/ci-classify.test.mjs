@@ -91,7 +91,7 @@ const CASES = [
   // --- Hosted: Live Release ---
   {
     name: "workbench-only change runs web only",
-    files: ["packages/web/src/session/Timeline.tsx"],
+    files: ["packages/workbench/src/session/Timeline.tsx"],
     want: { ...NONE, web: true, releaseType: "live" },
   },
   {
@@ -120,12 +120,12 @@ const CASES = [
   // --- Composition rules ---
   {
     name: "one App path escalates a whole Live change set",
-    files: ["packages/web/src/App.tsx", "wit/genehub-host.wit"],
+    files: ["packages/workbench/src/App.tsx", "wit/genehub-host.wit"],
     want: { ...NONE, rust: true, web: true, desktop: true, releaseType: "app" },
   },
   {
     name: "workbench + protocol is a Live Release with web+rust",
-    files: ["packages/web/src/App.tsx", "packages/proto/src/lib.rs"],
+    files: ["packages/workbench/src/App.tsx", "packages/proto/src/lib.rs"],
     want: { ...NONE, rust: true, web: true, releaseType: "live" },
   },
 ];
@@ -158,7 +158,7 @@ test("every rule family path matches exactly one rule (no fall-through)", () => 
     "packages/http/Cargo.toml",
     "packages/wasi-guest/Cargo.toml",
     "packages/native/Cargo.toml",
-    "packages/web/package.json",
+    "packages/workbench/package.json",
     "testing/package.json",
     "scripts/version.mjs",
     "docs/testing.md",

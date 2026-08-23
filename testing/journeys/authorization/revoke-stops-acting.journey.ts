@@ -10,7 +10,7 @@ defineJourney(
     expectedDurationMs: 30_000,
     timeoutMs: 90_000,
     surfaces: ["daemon", "workbench-client"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });

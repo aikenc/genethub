@@ -318,7 +318,7 @@
       "tsId": "specialty.concurrency.parallel-sessions",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS proves two workspaces and two genet sessions complete without mixing turnStarted, through @genehub/web/client. Does not copy native_resource_count, multi-browser subscribe, or load-profile timing (those probes are do-not-export).",
+      "assertionDelta": "TS proves two workspaces and two genet sessions complete without mixing turnStarted, through @genehub/workbench/client. Does not copy native_resource_count, multi-browser subscribe, or load-profile timing (those probes are do-not-export).",
       "legacyExecution": "stopped"
     },
     {
@@ -438,7 +438,7 @@
       "tsId": "journey.session.tool-write",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.tool-write is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.tool-write is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -448,7 +448,7 @@
       "tsId": "journey.session.stream-before-complete",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.stream-before-complete is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.stream-before-complete is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -458,7 +458,7 @@
       "tsId": "journey.session.multi-step-copy",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.multi-step-copy is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.multi-step-copy is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -468,7 +468,7 @@
       "tsId": "journey.session.uninstalled-agents-omitted",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.uninstalled-agents-omitted is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.uninstalled-agents-omitted is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -478,7 +478,7 @@
       "tsId": "journey.session.picker-from-provider",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.picker-from-provider is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.picker-from-provider is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -488,7 +488,7 @@
       "tsId": "journey.session.custom-provider",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.custom-provider is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.custom-provider is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -498,7 +498,7 @@
       "tsId": "journey.session.models-by-hand",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.models-by-hand is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.models-by-hand is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -508,7 +508,7 @@
       "tsId": "journey.session.capabilities-declared",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.capabilities-declared is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.capabilities-declared is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -518,7 +518,7 @@
       "tsId": "journey.session.thinking-effort",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.thinking-effort is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.thinking-effort is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -528,7 +528,7 @@
       "tsId": "journey.session.choice-before-prompt",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.choice-before-prompt is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.choice-before-prompt is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -538,7 +538,7 @@
       "tsId": "journey.session.old-thinking-mode-name",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.old-thinking-mode-name is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.old-thinking-mode-name is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -548,7 +548,7 @@
       "tsId": "journey.session.mid-turn-refused",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.mid-turn-refused is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.mid-turn-refused is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -558,7 +558,7 @@
       "tsId": "journey.session.unknown-tool-renders",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.unknown-tool-renders is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.unknown-tool-renders is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -568,7 +568,7 @@
       "tsId": "journey.session.missing-credentials",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.missing-credentials is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.missing-credentials is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -578,7 +578,7 @@
       "tsId": "journey.session.key-in-settings-next-task",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.key-in-settings-next-task is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.key-in-settings-next-task is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -588,7 +588,7 @@
       "tsId": "journey.session.rejected-key-names-provider",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.rejected-key-names-provider is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.rejected-key-names-provider is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -598,7 +598,7 @@
       "tsId": "journey.session.real-provider-rejects-key",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.real-provider-rejects-key is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.real-provider-rejects-key is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -608,7 +608,7 @@
       "tsId": "journey.session.model-rate-limited",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.model-rate-limited is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.model-rate-limited is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -618,7 +618,7 @@
       "tsId": "journey.session.system-prompt-and-tools",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.system-prompt-and-tools is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.system-prompt-and-tools is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -628,7 +628,7 @@
       "tsId": "journey.session.history-replayed-to-model",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.history-replayed-to-model is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.history-replayed-to-model is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -638,7 +638,7 @@
       "tsId": "journey.session.git-commit",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.git-commit is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.git-commit is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -648,7 +648,7 @@
       "tsId": "journey.session.process-list-empty",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.process-list-empty is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.process-list-empty is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -658,7 +658,7 @@
       "tsId": "journey.workspace.browse-and-edit",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.workspace.browse-and-edit is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.workspace.browse-and-edit is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -668,7 +668,7 @@
       "tsId": "journey.workspace.writes-outside-refused",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.workspace.writes-outside-refused is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.workspace.writes-outside-refused is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -678,7 +678,7 @@
       "tsId": "journey.session.pty-echo",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.pty-echo is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.pty-echo is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -688,7 +688,7 @@
       "tsId": "journey.session.command-output-bounded",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.command-output-bounded is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.command-output-bounded is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -698,7 +698,7 @@
       "tsId": "journey.session.reconnect-replays-gap",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.reconnect-replays-gap is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.reconnect-replays-gap is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -708,7 +708,7 @@
       "tsId": "journey.session.gap-older-than-window",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.gap-older-than-window is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.gap-older-than-window is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -718,7 +718,7 @@
       "tsId": "journey.session.history-survives-restart",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.history-survives-restart is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.history-survives-restart is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -728,7 +728,7 @@
       "tsId": "journey.session.reopen-from-list",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.reopen-from-list is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.reopen-from-list is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -738,7 +738,7 @@
       "tsId": "journey.session.interrupt-cancels",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.interrupt-cancels is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.interrupt-cancels is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -748,7 +748,7 @@
       "tsId": "journey.session.continues-round-unknown",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.continues-round-unknown is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.continues-round-unknown is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -758,7 +758,7 @@
       "tsId": "journey.session.continues-round-after-interrupt",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.continues-round-after-interrupt is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.continues-round-after-interrupt is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -768,7 +768,7 @@
       "tsId": "journey.session.round-ledger-on-disk",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.round-ledger-on-disk is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.round-ledger-on-disk is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -778,7 +778,7 @@
       "tsId": "journey.session.interrupted-round-superseded",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.interrupted-round-superseded is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.interrupted-round-superseded is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -788,7 +788,7 @@
       "tsId": "journey.session.drop-mid-turn-survives",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.drop-mid-turn-survives is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.drop-mid-turn-survives is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -798,7 +798,7 @@
       "tsId": "journey.session.second-client-same-timeline",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.second-client-same-timeline is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.second-client-same-timeline is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -808,7 +808,7 @@
       "tsId": "journey.session.wrong-token-rejected",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.wrong-token-rejected is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.wrong-token-rejected is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -818,7 +818,7 @@
       "tsId": "journey.session.missing-session-not-found",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.missing-session-not-found is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.missing-session-not-found is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -828,7 +828,7 @@
       "tsId": "journey.session.empty-prompt-refused",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.empty-prompt-refused is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.empty-prompt-refused is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -838,7 +838,7 @@
       "tsId": "journey.session.list-and-archive",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.list-and-archive is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.list-and-archive is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -848,7 +848,7 @@
       "tsId": "journey.session.title-from-prompt",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.title-from-prompt is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.title-from-prompt is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -858,7 +858,7 @@
       "tsId": "journey.session.tool-states",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.tool-states is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.tool-states is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -868,7 +868,7 @@
       "tsId": "journey.session.log-readable",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.log-readable is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.log-readable is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -878,7 +878,7 @@
       "tsId": "journey.session.log-cannot-escape",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.log-cannot-escape is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.log-cannot-escape is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {
@@ -888,7 +888,7 @@
       "tsId": "journey.session.cwd-stays-inside",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "TS journey.session.cwd-stays-inside is the required public-behavior oracle on @genehub/web/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
+      "assertionDelta": "TS journey.session.cwd-stays-inside is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
       "legacyExecution": "stopped"
     },
     {

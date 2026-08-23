@@ -175,9 +175,9 @@ cargo build -p genet-cli -p genehub-host
 cargo build --release -p genehub-guest --target wasm32-wasip2
 
 # Web workbench 与 Relay
-npm ci --prefix packages/web
+npm ci --prefix packages/workbench
 npm ci --prefix apps/relay
-npm --prefix packages/web run build
+npm --prefix packages/workbench run build
 npm --prefix apps/relay run build
 ```
 
@@ -207,9 +207,9 @@ cargo test --workspace --no-fail-fast
 npm --prefix apps/relay run typecheck
 npm --prefix apps/relay test
 
-npm --prefix packages/web run typecheck
-npm --prefix packages/web test
-npm --prefix packages/web run build
+npm --prefix packages/workbench run typecheck
+npm --prefix packages/workbench test
+npm --prefix packages/workbench run build
 ```
 
 Windows 或 macOS 上构建桌面安装包：
@@ -233,7 +233,7 @@ node apps/desktop/scripts/bundle.mjs
 | `apps/relay` | 无状态 Fabric Relay |
 | `apps/desktop` | Windows/macOS Tauri 2 桌面壳 |
 | `packages/proto` | Rust 协议定义及生成的 TypeScript bindings |
-| `packages/web` | 浏览器、桌面和手机共用的工作台 |
+| `packages/workbench` | 浏览器、桌面和手机共用的工作台 |
 | `testing` | 跨部件旅程、安装与安全边界测试 |
 
 ## 继续阅读

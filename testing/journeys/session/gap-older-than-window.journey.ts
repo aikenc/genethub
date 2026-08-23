@@ -14,7 +14,7 @@ defineJourney(
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,
     surfaces: ["daemon", "agent", "workbench-client"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
     writeFileSync(

@@ -517,7 +517,7 @@ function stamp(channel) {
   writeFileSync(join(repo, "apps/agent/src/channel.rs"), agentModule(channel));
   writeFileSync(join(repo, "apps/host/src/channel.rs"), hostModule(channel));
   writeFileSync(join(repo, "apps/desktop/src-tauri/src/channel.rs"), desktopModule(channel));
-  writeFileSync(join(repo, "packages/web/src/channel.ts"), tsModule(channel));
+  writeFileSync(join(repo, "packages/workbench/src/channel.ts"), tsModule(channel));
   writeFileSync(join(repo, "scripts/channel.env"), shellEnv(channel));
 
   // The bundle config: productName is the install-directory name (and what

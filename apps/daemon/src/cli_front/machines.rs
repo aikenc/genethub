@@ -5,7 +5,7 @@
 //! files sit in one directory, and reading one as the other would be a
 //! credential leak rather than a typo (`genet-remote-execution.md` §4.2).
 //!
-//! The shape mirrors `packages/web/src/devices/machines.ts`, because a phone
+//! The shape mirrors `packages/workbench/src/devices/machines.ts`, because a phone
 //! and a terminal that pair with the same machine are holding the same thing
 //! and there is no reason for them to disagree about what it is called.
 

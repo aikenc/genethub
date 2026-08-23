@@ -9,7 +9,7 @@
 
 ```
 packages/proto        ← 会话协议唯一定义处，生成 TS 类型与 Rust 结构
-packages/web          ← 工作台（浏览器 / 桌面 / 手机同一份产物）
+packages/workbench          ← 工作台（浏览器 / 桌面 / 手机同一份产物）
 apps/daemon           ← Rust：会话内核 + agent adapter 层 + 三种接入通道
 apps/agent            ← Rust：内置 agent（adapter 的一个后端）
 apps/guest            ← wasm32-wasip2 Component：daemon/agent 双入口
@@ -23,7 +23,7 @@ testing/              ← 跨部件旅程测试
 |------|------|------|
 | **桌面** | [Tauri 2](https://tauri.app/) | **UI 仍是 H5**，但走系统 WebView：拿到 Electron 的开发体验，不用背 Chromium + Node 的体积。壳本身几 MB，预算留给 sidecar |
 | **手机** | 浏览器工作台 | 同一份 Web 产物直接使用，不在当前范围内维护 iOS / Android 原生壳 |
-| **浏览器** | 同一 `packages/web` 直出 | 链接打开即用 |
+| **浏览器** | 同一 `packages/workbench` 直出 | 链接打开即用 |
 | **daemon / 内置 agent** | Rust → WASM Component | 同一份 `genehub_guest.wasm` 的两个入口；业务变化不要求重编 host |
 | **native host / CLI** | Rust + Wasmtime 48 | 装载 Component，提供 WASI 与 OS/RTC 连接边界；CLI 只转发产品 argv |
 | **relay** | Node（TypeScript） | **仅服务端**；逻辑极薄（帧头 + 转发），换语言的收益要等到连接数受内存限制才出现 |
@@ -47,7 +47,7 @@ testing/              ← 跨部件旅程测试
 └── 默认配置：本机直连，无需任何服务端
 ```
 
-**PC 端零 Node 运行时是硬约束**，但它禁的是运行时进程，不是技术栈：窗口内容依然是 `packages/web` 那套 H5，只是跑在系统 WebView 而不是 Node 上。Node 只允许出现在构建期（前端打包、tauri-cli）与服务端（relay）。约束细则与验收方式见 [desktop-client.md](./desktop-client.md) §4.1–4.2。
+**PC 端零 Node 运行时是硬约束**，但它禁的是运行时进程，不是技术栈：窗口内容依然是 `packages/workbench` 那套 H5，只是跑在系统 WebView 而不是 Node 上。Node 只允许出现在构建期（前端打包、tauri-cli）与服务端（relay）。约束细则与验收方式见 [desktop-client.md](./desktop-client.md) §4.1–4.2。
 
 ---
 
@@ -59,7 +59,7 @@ testing/              ← 跨部件旅程测试
 | daemon ↔ 前端 | 只走归一化会话协议；agent 的线格式不外泄 |
 | relay ↔ 控制面 | 版本化 Fabric HTTP 契约，只定义在 `apps/relay/src/contract/fabric-wire.ts` 并由 Cloud 镜像 |
 | 桌面壳 ↔ daemon | 进程分离，本地 WS 通信，不做进程内链接 |
-| 前端 ↔ 宿主 | 只经 `packages/web/src/host/`，业务组件不出现 `if (isTauri)` |
+| 前端 ↔ 宿主 | 只经 `packages/workbench/src/host/`，业务组件不出现 `if (isTauri)` |
 | 协议定义 | 只在 `packages/proto`，前后端都从这里生成 |
 
 共同点：**每一条都对应一次可能的替换**——换 agent、换前端、换中转、换壳。边界守住了，替换就是替换；守不住就是重写。
@@ -98,7 +98,7 @@ daemon 跑在 wasm component 里时，前两条由 guest 自己开 socket，`was
 
 1. `packages/proto`：会话协议定稿，生成两端类型
 2. `apps/daemon`：会话内核 + `genet` adapter + 本地 WS
-3. `packages/web`：工作台骨架（会话流、工具渲染、输入区）
+3. `packages/workbench`：工作台骨架（会话流、工具渲染、输入区）
 4. `apps/daemon`：`acp` 与 `opencode` adapter —— 用另外两种形状证伪抽象
 5. `apps/relay` + 配对：出站长连接、票据、转发
 6. `apps/desktop`：Tauri 壳 + sidecar + 托盘

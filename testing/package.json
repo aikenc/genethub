@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@genehub/proto": "file:../packages/proto",
-    "@genehub/web": "file:../packages/web",
+    "@genehub/workbench": "file:../packages/workbench",
     "tsx": "^4.20.5",
     "ws": "^8.18.3"
   },

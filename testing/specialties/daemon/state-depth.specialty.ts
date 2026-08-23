@@ -33,7 +33,7 @@ function daemonCase(
       expectedDurationMs: 20_000,
       timeoutMs: 75_000,
       surfaces: ["daemon", "workbench-client"],
-      productInterfaces: ["genet-cli", "@genehub/web/client"],
+      productInterfaces: ["genet-cli", "@genehub/workbench/client"],
     },
     run,
   );

@@ -15,7 +15,7 @@ defineJourney(
     expectedDurationMs: 30_000,
     timeoutMs: 90_000,
     surfaces: ["daemon", "agent", "workbench-client"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
     writeFileSync(path.join(t.env.workspace, "source.txt"), "the-secret-value");

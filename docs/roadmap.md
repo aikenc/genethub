@@ -65,7 +65,7 @@
 | Daemon | `apps/daemon`：会话内核、本地 WS、出站长连接、文件 / git / PTY、配对 | ✅ |
 | Adapter | `genet` ✅ · `acp` ✅ · `opencode` ✅ · `claude` ✅ · `codex` ✅ | ✅ |
 | Relay | `apps/relay`：帧转发、契约、限额、撤销订阅 | ✅ |
-| Web | `packages/web`：会话、工作区文件、工作区变更、工作区终端、设置、打开工作区、开箱即用的首个会话 | ✅ |
+| Web | `packages/workbench`：会话、工作区文件、工作区变更、工作区终端、设置、打开工作区、开箱即用的首个会话 | ✅ |
 | Desktop | Tauri 壳：托盘、关窗驻留、单实例、sidecar daemon、看门狗与接管遗留进程 | ✅ |
 | 测试 | 跨部件集成 + 全栈旅程（浏览器客户端 → daemon → agent → 脚本化模型） | ✅ |
 | 打包 | 安装包体积实测与自动校验 | ✅ |

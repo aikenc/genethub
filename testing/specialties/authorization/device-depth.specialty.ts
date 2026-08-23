@@ -21,7 +21,7 @@ function authCase(
       timeoutMs: 90_000,
       resources: { environments: 1, cpu: 1, memoryMb: 512, io: 1, browser: 0, pool: "standard" },
       surfaces: ["daemon", "workbench-client"],
-      productInterfaces: ["@genehub/web/client"],
+      productInterfaces: ["@genehub/workbench/client"],
     },
     async (t) => {
       const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });

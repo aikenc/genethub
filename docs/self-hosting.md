@@ -74,7 +74,7 @@ Relay 不需要持久卷，重启即清空在线 endpoint/route；daemon 会自�
 ## 3. 托管静态工作台
 
 ```bash
-cd packages/web
+cd packages/workbench
 npm install
 npm run build
 ```

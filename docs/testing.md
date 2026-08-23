@@ -289,9 +289,9 @@ Windows/macOS **装包之后**的首启仍要每次发版手动过一遍主旅�
 | 发布供应链 | `testing/tests/supply_chain.rs` | release workflow 的第三方 Action 全部固定完整 commit SHA；checkout 不保留凭据；只有 publish job 有 `contents: write`；发布注释不把同源摘要冒充签名 | 无 |
 | 设备准入 | `testing/tests/devices.rs` | **真实 daemon + 进程内汇合 relay**：新设备经 relay 配对、换到凭证后重连、陌生人被拒、邀请码只能用一次、握手不能重放、撤销当场断连、重启后仍然可达且仍然认得旧设备 | 无 |
 | relay | `apps/relay && npm test` | 帧转发、契约、边界检查、wire 摘要 | 无 |
-| 工作台 | `packages/web && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |
-| **全栈旅程** | `packages/web/src/e2e/journey.test.ts` | **真实 launcher + host + WASM daemon/agent + 脚本化模型**，用工作台自己的客户端 | 三件套 artifact + `testctl` 环境 |
-| **自建全栈** | `packages/web/src/e2e/selfhosted.test.ts` | 只用开源件：**真实 relay（汇合模式）+ 真实 WASM daemon + 独立 agent host + 工作台自己的配对与客户端代码**。新设备配对进来能经转发跑完一轮流式对话，历史留在机器上，relay 重启后自动恢复，撤销当场断 | 三件套 artifact + `apps/relay` build；由 `testctl` 隔离进程和证据 |
+| 工作台 | `packages/workbench && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |
+| **全栈旅程** | `packages/workbench/src/e2e/journey.test.ts` | **真实 launcher + host + WASM daemon/agent + 脚本化模型**，用工作台自己的客户端 | 三件套 artifact + `testctl` 环境 |
+| **自建全栈** | `packages/workbench/src/e2e/selfhosted.test.ts` | 只用开源件：**真实 relay（汇合模式）+ 真实 WASM daemon + 独立 agent host + 工作台自己的配对与客户端代码**。新设备配对进来能经转发跑完一轮流式对话，历史留在机器上，relay 重启后自动恢复，撤销当场断 | 三件套 artifact + `apps/relay` build；由 `testctl` 隔离进程和证据 |
 | 跨栈配对 | 控制面仓库的 `test/pairing.test.ts`、`test/relay.test.ts` | daemon 自己走设备码配对，浏览器经 relay 连回来 | 同上 |
 | 跨栈首启 | 控制面仓库的 `test/first-run.test.ts` | 全程没有账号、没有 cookie、没人批准任何东西：daemon 自己拿到临时身份，另一个浏览器扫链接进来，经转发层连上这台机器 | 同上 |
 

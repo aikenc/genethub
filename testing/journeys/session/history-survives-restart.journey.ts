@@ -12,7 +12,7 @@ defineJourney(
     expectedDurationMs: 40_000,
     timeoutMs: 120_000,
     surfaces: ["daemon", "agent", "workbench-client"],
-    productInterfaces: ["genet-cli", "@genehub/web/client"],
+    productInterfaces: ["genet-cli", "@genehub/workbench/client"],
   },
   async (t) => {
     const first = await t.flows.main.completeVerifiableTask({

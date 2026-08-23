@@ -11,7 +11,7 @@ defineSpecialty(
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],
-    productInterfaces: ["genet-cli", "@genehub/web/client"],
+    productInterfaces: ["genet-cli", "@genehub/workbench/client"],
   },
   async (t) => {
     const result = await t.flows.branches.reconnectAfterStop({

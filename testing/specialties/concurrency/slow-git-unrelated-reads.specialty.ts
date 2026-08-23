@@ -15,7 +15,7 @@ defineSpecialty(
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
     const git = spawnSync("which", ["git"], { encoding: "utf8" });

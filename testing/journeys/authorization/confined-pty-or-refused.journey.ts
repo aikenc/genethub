@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { ProtocolError_ } from "@genehub/web/client";
+import { ProtocolError_ } from "@genehub/workbench/client";
 
 import { defineJourney } from "../../framework/public.ts";
 
@@ -17,7 +17,7 @@ defineJourney(
     expectedDurationMs: 40_000,
     timeoutMs: 120_000,
     surfaces: ["daemon", "workbench-client"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });

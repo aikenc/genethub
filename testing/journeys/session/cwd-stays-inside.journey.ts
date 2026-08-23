@@ -15,7 +15,7 @@ defineJourney(
     expectedDurationMs: 30_000,
     timeoutMs: 90_000,
     surfaces: ["daemon", "agent", "workbench-client"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
     mkdirSync(path.join(t.env.workspace, "services/api"), { recursive: true });

@@ -1,6 +1,6 @@
 //! Carrier-neutral client half of the v3 data plane.
 //!
-//! The browser has the equivalent implementation in `packages/web`.  This
+//! The browser has the equivalent implementation in `packages/workbench`.  This
 //! small Rust half keeps CLI and integration clients on the exact same binary
 //! frame, flow-control and E2EE contract as every other peer.
 

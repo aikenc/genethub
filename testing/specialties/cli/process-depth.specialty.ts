@@ -34,7 +34,7 @@ function processCase(
       timeoutMs: 120_000,
       resources: { environments: 1, cpu: 1, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
       surfaces: ["daemon", "workbench-client"],
-      productInterfaces: ["@genehub/web/client"],
+      productInterfaces: ["@genehub/workbench/client"],
     },
     async (t) => withWorkspace(t, (opened) => run(t, opened)),
   );

@@ -237,7 +237,7 @@ mod tests {
         assert!(open_data_record(&key, Direction::DaemonToClient, 2, &wire).is_err());
     }
 
-    /// Mirrored byte-for-byte in packages/web/src/devices/proof.test.ts.
+    /// Mirrored byte-for-byte in packages/workbench/src/devices/proof.test.ts.
     ///
     /// Round trips inside either implementation cannot detect a length prefix,
     /// protocol version, nonce layout or AAD field drifting on only one side.

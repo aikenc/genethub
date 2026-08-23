@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { AssetPreviewError_ } from "@genehub/web/client";
+import { AssetPreviewError_ } from "@genehub/workbench/client";
 
 import { defineJourney } from "../../framework/public.ts";
 
@@ -15,7 +15,7 @@ defineJourney(
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,
     surfaces: ["daemon", "workbench-client"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
     writeFileSync(path.join(t.env.workspace, "secret.txt"), "the bytes");

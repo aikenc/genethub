@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import { ProtocolError_ } from "@genehub/web/client";
+import { ProtocolError_ } from "@genehub/workbench/client";
 
 import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
 
@@ -27,7 +27,7 @@ function protocolCase(
       timeoutMs,
       resources: { environments: 1, cpu: 1, memoryMb: 512, io: 1, browser: 0, pool: "standard" },
       surfaces: ["daemon", "workbench-client"],
-      productInterfaces: ["@genehub/web/client", "daemon-protocol"],
+      productInterfaces: ["@genehub/workbench/client", "daemon-protocol"],
     },
     async (t) => {
       const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });

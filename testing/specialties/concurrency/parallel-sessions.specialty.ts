@@ -13,7 +13,7 @@ defineSpecialty(
     expectedDurationMs: 30_000,
     timeoutMs: 75_000,
     surfaces: ["daemon", "workbench-client"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });

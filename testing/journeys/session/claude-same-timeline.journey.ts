@@ -10,7 +10,7 @@ defineJourney(
     expectedDurationMs: 90_000,
     timeoutMs: 180_000,
     surfaces: ["daemon", "agent", "workbench-client"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
     t.flows.main.pointClaudeAtBuiltinLlm(t.env);

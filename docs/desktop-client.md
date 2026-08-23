@@ -10,7 +10,7 @@
 **Linux 这一版只有命令行**：`scripts/install.sh` 装薄 CLI `genet`、原生 `genehub-host` 与
 `genehub_guest.wasm`；daemon/内置 agent 是同一 component 的两个入口，不再发布独立 agent 二进制。
 daemon 启动后打印不含长期密钥、15 秒有效且只能使用一次的连接地址，浏览器指过去就是同一个工作台——同一份
-`packages/web`，不少一个功能。
+`packages/workbench`，不少一个功能。
 
 这不是砍功能，是 Linux 机器的实际用法：多半是 SSH 进去的，窗口没有用；有图形界面
 的那些，浏览器本来就在。为一个"打开一个浏览器"的壳去背 WebKitGTK 与
@@ -152,13 +152,13 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 
 **不打包**：任何外部 agent 的 SDK 或运行时。用户想用 Claude Code、Cursor、OpenCode，daemon 检测本机已装的即可（[architecture.md](./architecture.md) §3.3）——把别人的 CLI 塞进我们的安装包既臃肿又有授权麻烦，还会把它的运行时依赖变成我们的。
 
-**这条约束的顺带好处**：桌面端 UI 和浏览器工作台是**同一套前端代码**（`packages/web`），一次实现两处运行，差异只有一层薄薄的能力适配（见 §4.2）。
+**这条约束的顺带好处**：桌面端 UI 和浏览器工作台是**同一套前端代码**（`packages/workbench`），一次实现两处运行，差异只有一层薄薄的能力适配（见 §4.2）。
 
 验收方式：桌面配置只允许把 launcher、host、guest 与静态 Web 产物放进 bundle；Windows/macOS CI 都应编译外壳并运行真实 daemon 的 start/adopt/stop 监督测试。发布流水线还必须直接启动将要随包发布的三件套，确认 guest 真能报出端口——装得上但跑不起来的包，不能等用户安装后才发现。当前 Windows host 的 `fs-perms` 仍返回 `Unsupported`，而 guest 首启强制收紧数据目录；修好 Windows ACL 并跑过三件套首启前，Windows WASM 包不能视为可发布。
 
 ### 4.2 同一套前端，两种宿主
 
-`packages/web` 同时作为浏览器工作台和桌面窗口内容，靠一层运行环境适配抹平差异：
+`packages/workbench` 同时作为浏览器工作台和桌面窗口内容，靠一层运行环境适配抹平差异：
 
 | 差异点 | 浏览器里 | 桌面 WebView 里 |
 |--------|----------|-----------------|
@@ -168,7 +168,7 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 | 窗口外框 | 浏览器画的，不归我们管 | 自绘标题栏 + 窗内菜单（§6.0），窗口控制经 `Host.window` |
 | 登录态 | Cookie / 设备会话 | 复用 daemon 本地凭证，不必再登一次 |
 
-约束：**这层适配必须收敛在一个模块里**（`packages/web/src/host/`），业务组件不允许直接判断"我是不是在 Tauri 里"。否则两个宿主的分支会长满全项目，最后变成事实上的两套前端。
+约束：**这层适配必须收敛在一个模块里**（`packages/workbench/src/host/`），业务组件不允许直接判断"我是不是在 Tauri 里"。否则两个宿主的分支会长满全项目，最后变成事实上的两套前端。
 
 **交付状态：** 当前 Tauri `frontendDist` 仍把 Web 产物固化进 installer；官网更新或浏览器刷新不会更新 desktop WebView。若要把 UI 变化计入 95% 高频端到端交付，必须增加签名、内容寻址、可离线启动且可回滚的热 Web bundle，或让壳从受控远程 origin 加载并重新完成 CSP/离线/信任模型评审。未完成前，涉及 desktop UI 的 change set 走完整模式。
 

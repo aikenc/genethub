@@ -35,7 +35,7 @@ function meta(
     timeoutMs: 150_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" as const },
     surfaces: ["genehub-host", "daemon", "agent", "workspace"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
   };
 }
 

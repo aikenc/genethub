@@ -5,7 +5,7 @@ import {
   type InviteChannelCredential,
   type LocalServerProof,
   type WebSocketLike,
-} from "@genehub/web/client";
+} from "@genehub/workbench/client";
 
 export async function connectProductClient(input: {
   url: string;

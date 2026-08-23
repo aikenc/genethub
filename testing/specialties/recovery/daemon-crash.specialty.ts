@@ -71,7 +71,7 @@ function recoveryCase(
       timeoutMs: 120_000,
       resources: { environments: 1, cpu: 2, memoryMb: 768, io: 2, browser: 0, pool: "standard" },
       surfaces: ["genet-cli", "daemon", "agent", "workbench-client"],
-      productInterfaces: ["genet-cli", "@genehub/web/client"],
+      productInterfaces: ["genet-cli", "@genehub/workbench/client"],
     },
     run,
   );

@@ -28,7 +28,7 @@ defineJourney(
     timeoutMs: 90_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "genet-cli", "workbench-client"],
-    productInterfaces: ["genet-cli", "@genehub/web/client"],
+    productInterfaces: ["genet-cli", "@genehub/workbench/client"],
   },
   async (t) => {
     const nativeSecret = "native-machine-secret";

@@ -50,7 +50,7 @@ function fabricMeta(id: string, title: string, oracle: string, catches: string[]
       pool: "standard" as const,
     },
     surfaces: ["genehub-host", "daemon"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
     requiredArtifacts: ["genehub-host-dev", "genehub_guest.wasm"],
   };
 }

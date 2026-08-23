@@ -61,7 +61,7 @@ export function lintLayers(openRoot: string, extraRoot?: string): LintFinding[] 
       if (caseFiles.has(path.resolve(path.dirname(file), spec)) && !file.includes("/engine/") && !file.includes("/adapters/") && !file.endsWith("framework/worker.ts")) {
         findings.push({ file, rule: "L03", message: `imports registered case ${spec}` });
       }
-      if (layer === "business" && spec.includes("packages/web/src/") && !spec.includes("@genehub/web/client")) {
+      if (layer === "business" && spec.includes("packages/workbench/src/") && !spec.includes("@genehub/workbench/client")) {
         findings.push({ file, rule: "L16", message: `business case imports private product source ${spec}` });
       }
     }

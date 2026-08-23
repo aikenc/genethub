@@ -12,7 +12,7 @@ defineJourney(
     expectedDurationMs: 120_000,
     timeoutMs: 210_000,
     surfaces: ["daemon", "agent", "workbench-client"],
-    productInterfaces: ["@genehub/web/client"],
+    productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
     const which = spawnSync("which", ["cursor-agent"], { encoding: "utf8" });

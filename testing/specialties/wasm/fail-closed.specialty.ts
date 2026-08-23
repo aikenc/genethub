@@ -33,7 +33,7 @@ function meta(id: string, title: string, oracle: string, catches: string[], ms =
     timeoutMs: 120_000,
     resources: { environments: 1, cpu: 1, memoryMb: 512, io: 1, browser: 0, pool: "standard" as const },
     surfaces: ["genehub-host", "daemon"],
-    productInterfaces: ["genet-cli", "@genehub/web/client"],
+    productInterfaces: ["genet-cli", "@genehub/workbench/client"],
   };
 }
 

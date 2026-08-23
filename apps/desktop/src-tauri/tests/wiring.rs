@@ -24,7 +24,7 @@ fn remote_product_web_has_no_native_bridge() {
     let config = config();
     assert_eq!(config["app"]["withGlobalTauri"], serde_json::json!(false));
 
-    let host = read(repo().join("packages/web/src/host/index.ts"));
+    let host = read(repo().join("packages/workbench/src/host/index.ts"));
     assert!(host.contains("always an ordinary browser"));
     assert!(!host.contains("desktop ? desktopHost()"));
 
@@ -32,7 +32,7 @@ fn remote_product_web_has_no_native_bridge() {
     assert!(!shell.contains("generate_handler!"));
     assert!(!shell.contains("#[tauri::command]"));
 
-    let title_bar = read(repo().join("packages/web/src/shell/TitleBar.tsx"));
+    let title_bar = read(repo().join("packages/workbench/src/shell/TitleBar.tsx"));
     assert!(title_bar.contains("if (!controls) return null"));
 }
 
@@ -51,7 +51,7 @@ fn the_bundle_contains_only_a_boot_surface_then_applies_the_wasm_route() {
     // what ships in the App.
     assert!(!config["bundle"]["resources"]
         .to_string()
-        .contains("packages/web"));
+        .contains("packages/workbench"));
 
     let boot = read(repo().join("apps/desktop/boot/index.html"));
     assert!(boot.contains("GeneHub 正在启动"));
@@ -524,7 +524,7 @@ fn the_tree_claims_to_be_dev_and_only_the_stamper_says_otherwise() {
             "pub const CHANNEL: &str = \"dev\";",
         ),
         (
-            "packages/web/src/channel.ts",
+            "packages/workbench/src/channel.ts",
             "const STAMPED_CHANNEL: ReleaseChannel = \"dev\";",
         ),
     ];
@@ -687,7 +687,7 @@ fn declared_version(manifest: &str) -> String {
 #[test]
 fn the_tray_update_opens_the_channel_download_page() {
     let tray = read(repo().join("apps/desktop/src-tauri/src/tray.rs"));
-    let host = read(repo().join("packages/web/src/host/index.ts"));
+    let host = read(repo().join("packages/workbench/src/host/index.ts"));
 
     assert!(tray.contains("检查更新"));
     assert!(tray.contains("channel::APP_DOWNLOAD_URL"));

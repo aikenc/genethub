@@ -13,7 +13,7 @@ defineJourney(
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],
-    productInterfaces: ["genet-cli", "@genehub/web/client"],
+    productInterfaces: ["genet-cli", "@genehub/workbench/client"],
   },
   async (t) => {
     mkdirSync(path.join(t.env.workspace, "src"), { recursive: true });

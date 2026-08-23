@@ -336,7 +336,7 @@ jobs:
           path: ${{ runner.temp }}/guest-wasm
 
       - run: npm ci
-        working-directory: packages/web
+        working-directory: packages/workbench
       - run: npm ci
         working-directory: apps/desktop
 

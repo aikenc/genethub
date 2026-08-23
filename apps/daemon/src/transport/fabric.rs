@@ -32,7 +32,7 @@ const MAX_PEERS: usize = 32;
 const MAX_PENDING: usize = 8;
 const WRITER_QUEUE: usize = 256;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-/// Matches the browser half of this wire (`packages/web/src/fabric/frame.ts`).
+/// Matches the browser half of this wire (`packages/workbench/src/fabric/frame.ts`).
 const MAX_ROUTE_TICKET_BYTES: usize = 4096;
 const BACKOFF: [u64; 6] = [1, 2, 5, 10, 30, 60];
 
