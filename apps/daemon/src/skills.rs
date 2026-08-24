@@ -11,33 +11,12 @@ const MAX_DESCRIPTION_LENGTH: usize = 1024;
 
 struct BuiltinFile {
     relative_path: &'static str,
-    contents: &'static str,
+    contents: &'static [u8],
 }
 
-const BUILTIN_FILES: &[BuiltinFile] = &[
-    BuiltinFile {
-        relative_path: "genehub-session-history/SKILL.md",
-        contents: include_str!("../builtin-skills/genehub-session-history/SKILL.md"),
-    },
-    BuiltinFile {
-        relative_path: "genehub-speech-runtime/SKILL.md",
-        contents: include_str!("../builtin-skills/genehub-speech-runtime/SKILL.md"),
-    },
-    BuiltinFile {
-        relative_path: "genehub-speech-runtime/agents/openai.yaml",
-        contents: include_str!("../builtin-skills/genehub-speech-runtime/agents/openai.yaml"),
-    },
-    BuiltinFile {
-        relative_path: "genehub-speech-runtime/references/models.md",
-        contents: include_str!("../builtin-skills/genehub-speech-runtime/references/models.md"),
-    },
-    BuiltinFile {
-        relative_path: "genehub-speech-runtime/references/runtime-contract.md",
-        contents: include_str!(
-            "../builtin-skills/genehub-speech-runtime/references/runtime-contract.md"
-        ),
-    },
-];
+include!(concat!(env!("OUT_DIR"), "/builtin_skills.rs"));
+
+pub const ENTRYPOINT_MANIFEST: &str = ".entrypoints";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
@@ -70,7 +49,7 @@ fn normalize_front_door_cli(value: Option<std::ffi::OsString>) -> Option<PathBuf
 pub fn materialize(root: &Path) -> Option<PathBuf> {
     for file in BUILTIN_FILES {
         let target = root.join(file.relative_path);
-        if std::fs::read_to_string(&target).ok().as_deref() == Some(file.contents) {
+        if std::fs::read(&target).ok().as_deref() == Some(file.contents) {
             continue;
         }
         let parent = target.parent()?;
@@ -82,27 +61,7 @@ pub fn materialize(root: &Path) -> Option<PathBuf> {
             );
             return None;
         }
-        let file_name = target
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("builtin");
-        // The daemon may be a WASI guest and therefore has no process id of
-        // its own. The host pid is already the product-wide process identity
-        // used for locks and local admission, and is safe for this atomic
-        // materialization name as well.
-        let temporary = parent.join(format!(".{file_name}.{}.tmp", crate::host_pid::current()));
-        let installed = std::fs::write(&temporary, file.contents).and_then(|_| {
-            std::fs::rename(&temporary, &target).or_else(|first_error| {
-                if target.exists() {
-                    std::fs::remove_file(&target)?;
-                    std::fs::rename(&temporary, &target)
-                } else {
-                    Err(first_error)
-                }
-            })
-        });
-        if let Err(error) = installed {
-            let _ = std::fs::remove_file(&temporary);
+        if let Err(error) = install_file(&target, file.contents) {
             tracing::warn!(
                 path = %file.relative_path,
                 %error,
@@ -111,7 +70,44 @@ pub fn materialize(root: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+    let mut entrypoints = BUILTIN_ENTRYPOINTS.join("\n");
+    entrypoints.push('\n');
+    let manifest = root.join(ENTRYPOINT_MANIFEST);
+    if std::fs::read(&manifest).ok().as_deref() != Some(entrypoints.as_bytes()) {
+        if let Err(error) = install_file(&manifest, entrypoints.as_bytes()) {
+            tracing::warn!(%error, "could not install built-in Skill entrypoint manifest");
+            return None;
+        }
+    }
     Some(root.to_path_buf())
+}
+
+fn install_file(target: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| std::io::Error::other("built-in Skill file has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("builtin");
+    // The daemon may be a WASI guest and therefore has no process id of its
+    // own. The host pid is the product-wide process identity used for locks
+    // and is safe for this atomic materialization name as well.
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", crate::host_pid::current()));
+    std::fs::write(&temporary, contents)?;
+    let installed = std::fs::rename(&temporary, target).or_else(|first_error| {
+        if target.exists() {
+            std::fs::remove_file(target)?;
+            std::fs::rename(&temporary, target)
+        } else {
+            Err(first_error)
+        }
+    });
+    if installed.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    installed
 }
 
 /// Load exactly the product-owned Skill entrypoints compiled into this daemon.
@@ -119,11 +115,8 @@ pub fn materialize(root: &Path) -> Option<PathBuf> {
 pub fn load(skills_root: &Path) -> Vec<Skill> {
     let mut skills = Vec::new();
     if materialize(skills_root).is_some() {
-        for file in BUILTIN_FILES {
-            if !file.relative_path.ends_with("/SKILL.md") {
-                continue;
-            }
-            if let Some(skill) = parse_skill_file(&skills_root.join(file.relative_path)) {
+        for entrypoint in BUILTIN_ENTRYPOINTS {
+            if let Some(skill) = parse_skill_file(&skills_root.join(entrypoint)) {
                 skills.push(skill);
             }
         }
@@ -293,6 +286,14 @@ mod tests {
     fn all_product_built_ins_and_references_are_materialized() {
         let root = temp_dir("all-builtins");
         let skills = load(&root);
+        for file in BUILTIN_FILES {
+            assert_eq!(
+                std::fs::read(root.join(file.relative_path)).unwrap(),
+                file.contents
+            );
+        }
+        let entrypoints = std::fs::read_to_string(root.join(ENTRYPOINT_MANIFEST)).unwrap();
+        assert_eq!(entrypoints.lines().collect::<Vec<_>>(), BUILTIN_ENTRYPOINTS);
         assert!(skills
             .iter()
             .any(|skill| skill.name == "genehub-session-history"));

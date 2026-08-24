@@ -26,6 +26,9 @@ pub mod lifecycle;
 pub mod link;
 pub(crate) mod os_process;
 
+#[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;
 pub mod logs;
 pub mod process;
 pub mod processes;

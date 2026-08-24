@@ -1,7 +1,21 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { defineJourney, locateGenet } from "../../framework/public.ts";
+
+async function regularFiles(root: string, relative = ""): Promise<string[]> {
+  const files: string[] = [];
+  const entries = await readdir(path.join(root, ...relative.split("/").filter(Boolean)), {
+    withFileTypes: true,
+  });
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    const child = relative ? `${relative}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) files.push(...(await regularFiles(root, child)));
+    else if (entry.isFile()) files.push(child);
+  }
+  return files;
+}
 
 defineJourney(
   {
@@ -24,6 +38,29 @@ defineJourney(
       await writeFile(
         path.join(projectSkill, "SKILL.md"),
         "---\nname: must-not-leak\ndescription: Workspace data, not a GeneHub built-in\n---\n",
+      );
+      const sourceSkills = path.join(t.openRoot, "apps", "daemon", "builtin-skills");
+      const installedSkills = path.join(t.env.data, "builtin-skills");
+      const sourceFiles = await regularFiles(sourceSkills);
+      for (const relative of sourceFiles) {
+        const source = await readFile(path.join(sourceSkills, ...relative.split("/")));
+        const installed = await readFile(path.join(installedSkills, ...relative.split("/")));
+        t.assertions.assert(
+          source.equals(installed),
+          `built-in Skill resource was not embedded and materialized exactly: ${relative}`,
+        );
+      }
+      const expectedEntrypoints = sourceFiles
+        .filter((relative) => relative.split("/").length === 2 && relative.endsWith("/SKILL.md"))
+        .sort();
+      const entrypoints = (await readFile(path.join(installedSkills, ".entrypoints"), "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .sort();
+      t.assertions.assert(
+        JSON.stringify(entrypoints) === JSON.stringify(expectedEntrypoints),
+        "the materialized built-in Skill entrypoint manifest drifted from the source tree",
       );
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
       opened.mock.script({ text: "ok" });

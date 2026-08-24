@@ -47,12 +47,34 @@ pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
 }
 
 fn load_daemon_builtins(dir: &Path) -> Vec<Skill> {
-    let mut skills = load_dir(dir, false);
-    for skill in &mut skills {
+    let Ok(manifest) = std::fs::read_to_string(dir.join(".entrypoints")) else {
+        return Vec::new();
+    };
+    let mut skills = Vec::new();
+    for line in manifest.lines().filter(|line| !line.is_empty()) {
+        let relative = Path::new(line);
+        if relative.is_absolute()
+            || relative.file_name().is_none_or(|name| name != "SKILL.md")
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        let Some(mut skill) = parse_skill_file(&dir.join(relative)) else {
+            continue;
+        };
+        if skills
+            .iter()
+            .any(|existing: &Skill| existing.name == skill.name)
+        {
+            continue;
+        }
         // The daemon already injected this catalog uniformly into every Agent.
         // Keep the entries for `/skill:` expansion without adding a second copy
         // to the built-in Agent's own prompt.
         skill.disable_model_invocation = true;
+        skills.push(skill);
     }
     skills
 }
@@ -369,8 +391,19 @@ mod tests {
             "genehub-session-history",
             "---\nname: genehub-session-history\ndescription: Read history\n---\n",
         );
+        write_skill(
+            &dir,
+            "must-not-load",
+            "---\nname: must-not-load\ndescription: Unknown data-dir Skill\n---\n",
+        );
+        std::fs::write(
+            dir.join(".entrypoints"),
+            "genehub-session-history/SKILL.md\n",
+        )
+        .unwrap();
         let skills = load_daemon_builtins(&dir);
         assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "genehub-session-history");
         assert!(skills[0].disable_model_invocation);
         assert!(format_for_prompt(&skills).is_empty());
     }

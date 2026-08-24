@@ -168,6 +168,9 @@ agent_end                {messages}
 
 ## 5. SKILL 机制
 
+GeneHub 产品内置 Skill 的目录、构建期扫描、打包和新增流程见
+[builtin-skills.md](./builtin-skills.md)。
+
 遵循开放的 [Agent Skills 标准](https://agentskills.io/specification)，为别的工具写的技能目录可以直接拿来用：
 
 - 发现路径分两类：daemon 的 `GENEHUB_SKILLS_DIR` 只包含 GeneHub 产品内置 Skill，优先且不可覆盖；项目 `.genehub/skills/`、用户级 agent 目录和共享 `.agents/skills` 属于 Agent 自己的扩展机制，不会进入 daemon 注入给第三方 Agent 的产品目录
