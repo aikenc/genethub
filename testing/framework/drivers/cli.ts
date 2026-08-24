@@ -18,9 +18,11 @@ export function locateGenet(openRoot: string): string {
   if (override) return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
   const suffix = process.platform === "win32" ? ".exe" : "";
   const names = ["genet-local", "genet-dev", "genet-beta", "genet"];
-  for (const name of names) {
-    const candidate = path.resolve(openRoot, "target", "debug", `${name}${suffix}`);
-    if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+  for (const profile of ["iterate", "debug", "release"] as const) {
+    for (const name of names) {
+      const candidate = path.resolve(openRoot, "target", profile, `${name}${suffix}`);
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+    }
   }
   for (const name of names) {
     const fromPath = locateOnPath(`${name}${suffix}`);
@@ -58,7 +60,11 @@ export function tryLocateAgent(openRoot: string): string | undefined {
   } catch {
     // genet itself may be missing in artifact-locator cases
   }
-  return firstExistingFile(AGENT_NAMES.map((name) => path.resolve(openRoot, "target", "debug", `${name}${suffix}`)));
+  return firstExistingFile(
+    (["iterate", "debug", "release"] as const).flatMap((profile) =>
+      AGENT_NAMES.map((name) => path.resolve(openRoot, "target", profile, `${name}${suffix}`)),
+    ),
+  );
 }
 
 export function tryLocateWasm(openRoot: string): string | undefined {
@@ -80,6 +86,7 @@ export function tryLocateHost(openRoot: string): string | undefined {
   }
   const suffix = process.platform === "win32" ? ".exe" : "";
   return firstExistingFile([
+    path.resolve(openRoot, "target", "iterate", `genehub-host-local${suffix}`),
     path.resolve(openRoot, "target", "debug", `genehub-host-local${suffix}`),
     path.resolve(openRoot, "target", "release", `genehub-host-local${suffix}`),
   ]);

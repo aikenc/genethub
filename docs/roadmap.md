@@ -34,9 +34,9 @@
 | 工作项 | 当前状态 | 完成门 |
 |---|---|---|
 | Windows 能力 parity | host 已在 `apps/host/src/fs_perms.rs` 实现 Windows owner-only DACL；`ci.yml` desktop 腿在 `windows-latest` 上跑 `fs_perms::tests`，CI #202（`2016f15`）已绿。剩下的是用待发布 launcher/host/guest 三件套跑安装后首启与主旅程，不是「接口固定返回 Unsupported」 | 待发布三件套在 Windows runner 与安装后主旅程通过 |
-| CI 影响分类 | `scripts/ci-classify.mjs` 只选择 `rust`/`relay`/`web`/`desktop` 测试腿；漏标 fail closed 到全量，表驱动契约测试随 `changes` job 自校验。它不输出 Live/App `release_type`，也不驱动发布 workflow。仍缺 90 天 change-set 指标 | 热路径实测 ≥95%；另有发布分类器驱动 candidate/promote workflow |
+| CI 影响分类 | `scripts/ci-classify.mjs` 选择 `rust`/`relay`/`web`/`desktop`/`guest` 腿，并输出 `native_host`/`native_cli`/`native_daemon` 供 Win/mac 跳过 rustc；漏标 fail closed 到全量，表驱动契约测试随 `changes` job 自校验。它不输出 Live/App `release_type`，也不驱动发布 workflow。仍缺 90 天 change-set 指标 | 热路径实测 ≥95%；另有发布分类器驱动 candidate/promote workflow |
 | 测试工程基线 | `testing` 的 TypeScript typecheck 有 4 个 HEAD 既有错误（一个可空值、三个未使用 import）；testctl lint/governance 通过不能替代它 | 修到 `npm --prefix testing run typecheck` 0 error，并纳入候选机械门 |
-| guest 构建 | 非 stable 已走 `[profile.iterate]`（`opt-level=1` + `strip`，无 fat LTO）。`daemon` world 只在 `genet-wasi` 生成一次。dev-2 上 iterate 热重编 **2.67 秒**、产物约 **13MB**；release 热重编仍约 **71 秒**、约 **6.6MB**。tag/full 仍可能按平台再编 host | guest 每 candidate 只编一次；Live 推广不再重编 |
+| guest 构建 | 非 stable 已走 `[profile.iterate]`（`opt-level=1` + `strip`，无 fat LTO）。`daemon` world 只在 `genet-wasi` 生成一次。CI 的 `guest` job 只在 Linux 编 `wasm32-wasip2`，Win/mac 下载同一份；release 也已是 Linux 单次编译后分发。dev-2 上 iterate 热重编 **2.67 秒**、产物约 **13MB**；release 热重编仍约 **71 秒**、约 **6.6MB**。tag/full 仍按平台编原生 host/CLI | guest 每 candidate 只编一次；Live 推广不再重编 |
 | 完整/高频 workflow | 只有 tag/full release，没有 guest+website workflow，当前 SHA 没有远端发布演练 | 两模式分别有 rehearsal、真实耗时、失败门与可晋升的 immutable artifact |
 | 供应链与兼容 | stable/beta 未验签；无 host/world/proto 兼容清单、反回滚 | 签名 release set 每次装载验证；不兼容候选拒绝并回 known-good |
 | 客户端更新 | 只有用户点击检查/下载 installer；自动路径 fail-closed | 后台发现/下载/预热/健康确认/回滚，无提示与人工重启 |

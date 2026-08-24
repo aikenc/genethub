@@ -14,50 +14,68 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classifyFiles } from "./ci-classify.mjs";
 
-const ALL = { rust: true, relay: true, web: true, desktop: true };
-const NONE = { rust: false, relay: false, web: false, desktop: false };
+const ALL = {
+  rust: true,
+  relay: true,
+  web: true,
+  desktop: true,
+  guest: true,
+  native_host: true,
+  native_cli: true,
+  native_daemon: true,
+};
+const NONE = {
+  rust: false,
+  relay: false,
+  web: false,
+  desktop: false,
+  guest: false,
+  native_host: false,
+  native_cli: false,
+  native_daemon: false,
+};
 
 const CASES = [
   // --- Native closure: ships in the installer, runs the heavy gates ---
   {
     name: "[regression] WIT change runs rust+desktop",
     files: ["wit/genehub-host.wit"],
-    want: { ...NONE, rust: true, web: true, desktop: true },
+    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true },
   },
   {
     name: "host runtime change runs rust+desktop",
     files: ["apps/host/src/update.rs"],
-    want: { ...NONE, rust: true, web: true, desktop: true },
+    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true },
   },
   {
     name: "CLI change runs rust+desktop",
     files: ["apps/cli/src/control.rs"],
-    want: { ...NONE, rust: true, web: true, desktop: true },
+    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_cli: true },
   },
   {
-    name: "desktop shell change runs desktop without rust",
+    name: "desktop shell change runs desktop without rust or native rustc",
     files: ["apps/desktop/src-tauri/src/main.rs"],
-    want: { ...NONE, desktop: true },
+    want: { ...NONE, desktop: true, guest: true },
   },
   {
     name: "[regression] channel stamping script runs rust+desktop",
     files: ["scripts/channel.mjs"],
-    want: { ...NONE, rust: true, web: true, desktop: true },
+    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true, native_cli: true },
   },
   {
     name: "installer script runs rust+desktop",
     files: ["scripts/install.sh"],
-    want: { ...NONE, rust: true, web: true, desktop: true },
+    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true, native_cli: true },
   },
   {
     name: "workspace Cargo.lock runs rust+desktop",
     files: ["Cargo.lock"],
-    want: { ...NONE, rust: true, web: true, desktop: true },
+    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true, native_cli: true, native_daemon: true },
   },
   {
     name: "packages/native links into the Host binary",
     files: ["packages/native/src/fs.rs"],
-    want: { ...NONE, rust: true, web: true, desktop: true },
+    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true },
   },
   {
     name: "workflow edits force the full suite",
@@ -69,39 +87,44 @@ const CASES = [
   {
     name: "[regression] protocol crate change runs rust",
     files: ["packages/proto/src/lib.rs"],
-    want: { ...NONE, rust: true, web: true },
+    want: { ...NONE, rust: true, web: true, guest: true, native_host: true },
   },
   {
     name: "[regression] guest component change runs rust",
     files: ["apps/guest/src/lib.rs"],
-    want: { ...NONE, rust: true, web: true },
+    want: { ...NONE, rust: true, web: true, guest: true },
   },
   {
     name: "daemon change runs rust+desktop",
     files: ["apps/daemon/src/adapter/claude.rs"],
-    want: { ...NONE, rust: true, web: true, desktop: true },
+    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_cli: true, native_daemon: true },
   },
   {
     name: "agent change runs rust",
     files: ["apps/agent/src/main.rs"],
-    want: { ...NONE, rust: true, web: true },
+    want: { ...NONE, rust: true, web: true, guest: true },
   },
   {
     name: "http support crate runs rust",
     files: ["packages/http/src/client.rs"],
-    want: { ...NONE, rust: true, web: true },
+    want: { ...NONE, rust: true, web: true, guest: true, native_cli: true },
+  },
+  {
+    name: "wasi-guest crate is component-only",
+    files: ["packages/wasi-guest/src/lib.rs"],
+    want: { ...NONE, rust: true, web: true, guest: true },
   },
 
   // --- Hosted: deployed, not installed ---
   {
     name: "workbench-only change runs web only",
     files: ["packages/workbench/src/session/Timeline.tsx"],
-    want: { ...NONE, web: true },
+    want: { ...NONE, web: true, guest: true },
   },
   {
     name: "relay change runs relay and re-proves the web journeys",
     files: ["apps/relay/src/main.ts"],
-    want: { ...NONE, relay: true, web: true },
+    want: { ...NONE, relay: true, web: true, guest: true },
   },
 
   // --- Benign and fail-safe ---
@@ -113,7 +136,7 @@ const CASES = [
   {
     name: "test engineering change runs rust",
     files: ["testing/journeys/session.test.ts"],
-    want: { ...NONE, rust: true, web: true },
+    want: { ...NONE, rust: true, web: true, guest: true },
   },
   {
     name: "[regression] an unmatched path fails safe to the full suite",
@@ -125,12 +148,12 @@ const CASES = [
   {
     name: "one native path escalates a whole change set to rust+desktop",
     files: ["packages/workbench/src/App.tsx", "wit/genehub-host.wit"],
-    want: { ...NONE, rust: true, web: true, desktop: true },
+    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true },
   },
   {
     name: "workbench + protocol runs web+rust",
     files: ["packages/workbench/src/App.tsx", "packages/proto/src/lib.rs"],
-    want: { ...NONE, rust: true, web: true },
+    want: { ...NONE, rust: true, web: true, guest: true, native_host: true },
   },
 ];
 
@@ -141,6 +164,10 @@ for (const { name, files, want } of CASES) {
     assert.equal(got.relay, want.relay, "relay");
     assert.equal(got.web, want.web, "web");
     assert.equal(got.desktop, want.desktop, "desktop");
+    assert.equal(got.guest, want.guest, "guest");
+    assert.equal(got.native_host, want.native_host, "native_host");
+    assert.equal(got.native_cli, want.native_cli, "native_cli");
+    assert.equal(got.native_daemon, want.native_daemon, "native_daemon");
   });
 }
 
@@ -175,7 +202,16 @@ test("every rule family path matches exactly one rule (no fall-through)", () => 
 test("empty change set runs nothing", () => {
   const got = classifyFiles([]);
   assert.deepEqual(
-    { rust: got.rust, relay: got.relay, web: got.web, desktop: got.desktop },
+    {
+      rust: got.rust,
+      relay: got.relay,
+      web: got.web,
+      desktop: got.desktop,
+      guest: got.guest,
+      native_host: got.native_host,
+      native_cli: got.native_cli,
+      native_daemon: got.native_daemon,
+    },
     { ...NONE },
   );
 });

@@ -2,3 +2,7 @@
 # generated newline. Keep Git's other whitespace checks enabled for this file,
 # but do not report the generator's stable formatting as a hand-written error.
 /packages/proto/bindings/index.ts whitespace=-trailing-space
+
+# Host and guest bake sha256 of this file. Keep LF so a Linux-built guest
+# pairs with a host compiled on Windows.
+/wit/** text eol=lf
