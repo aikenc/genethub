@@ -1165,6 +1165,7 @@ impl AgentSession for ClaudeSession {
                 id: Some(turn_id.clone()),
                 ..TurnState::default()
             };
+            usage::record_round_start(&mut turn.usage);
         }
         let _ = self.events.send(SessionEvent::TurnStarted {
             turn_id: turn_id.clone(),
@@ -1519,6 +1520,7 @@ fn translate_stream_event(
             let Some(text) = text.filter(|text| !text.is_empty()) else {
                 return;
             };
+            usage::record_first_token(&mut state.usage);
             let Some((item_id, _, accumulated)) = state.open_blocks.get_mut(&index) else {
                 return;
             };
@@ -1729,6 +1731,7 @@ fn translate_assistant_snapshot(
         });
     if state.seen_assistant.insert(snapshot_key) {
         state.usage.llm_rounds += 1;
+        usage::record_round_start(&mut state.usage);
         if let Some(reported) = message.get("usage").or_else(|| frame.get("usage")) {
             usage::add_usage(&mut state.usage, reported);
         }
@@ -1881,6 +1884,7 @@ fn translate_result(
         if let Some(cost) = frame.get("total_cost_usd").and_then(Value::as_f64) {
             usage.cost_usd = Some(cost);
         }
+        usage::finalize_output_rate(&mut usage);
         let _ = events.send(SessionEvent::TurnCompleted {
             turn_id,
             usage,

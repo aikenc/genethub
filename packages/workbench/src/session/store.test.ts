@@ -458,6 +458,7 @@ describe("live session status in the sidebar", () => {
           cacheWriteTokens: 0,
           llmRounds: 1,
           toolOutputTokens: 0,
+          compactionCount: 0,
         },
       },
     });

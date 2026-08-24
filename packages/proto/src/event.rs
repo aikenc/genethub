@@ -29,8 +29,33 @@ pub struct Usage {
     #[serde(default)]
     #[ts(type = "number")]
     pub tool_output_tokens: u64,
+    /// Context compactions that happened during this turn. Counted from the
+    /// timeline markers the agent emitted, so it is exact even when the
+    /// provider reports no token totals.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub compaction_count: u64,
+    /// Mean time from one LLM round's request to its first token, across the
+    /// rounds of this turn. `None` when no adapter timing was captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub avg_ttft_ms: Option<u64>,
+    /// Mean output tokens per second while the turn was streaming. `None`
+    /// when no tokens were observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub avg_output_rate_tps: Option<f64>,
     #[ts(optional)]
     pub cost_usd: Option<f64>,
+    /// Timing scratch, not part of the wire contract: when the in-flight
+    /// round's request started, and when its first token landed.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub round_started_at_ms: Option<i64>,
+    #[serde(skip)]
+    #[ts(skip)]
+    pub first_token_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

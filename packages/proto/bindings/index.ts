@@ -1298,7 +1298,23 @@ llmRounds: number,
  * `input - cached`: uncached input also contains the prompt, history
  * and tool schemas, so the two numbers are compared, never equated.
  */
-toolOutputTokens: number, costUsd?: number, };
+toolOutputTokens: number, 
+/**
+ * Context compactions that happened during this turn. Counted from the
+ * timeline markers the agent emitted, so it is exact even when the
+ * provider reports no token totals.
+ */
+compactionCount: number, 
+/**
+ * Mean time from one LLM round's request to its first token, across the
+ * rounds of this turn. `None` when no adapter timing was captured.
+ */
+avgTtftMs?: number, 
+/**
+ * Mean output tokens per second while the turn was streaming. `None`
+ * when no tokens were observed.
+ */
+avgOutputRateTps?: number, costUsd?: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 

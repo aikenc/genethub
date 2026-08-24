@@ -439,6 +439,24 @@ function PendingBubble({
   );
 }
 
+/** A horizontal rule with a label, rendered between batches at a compaction. */
+function CompactionMarker({ reason }: { reason: string }) {
+  return (
+    <div
+      className="flex items-center gap-2 py-1"
+      role="separator"
+      data-testid="compaction-marker"
+    >
+      <span className="h-px flex-1 bg-line" aria-hidden="true" />
+      <span className="flex items-center gap-1.5 text-xs text-muted">
+        <span aria-hidden="true">✂️</span>
+        历史已压缩（{reason}）
+      </span>
+      <span className="h-px flex-1 bg-line" aria-hidden="true" />
+    </div>
+  );
+}
+
 function Item({ item }: { item: TimelineItem }) {
   switch (item.type) {
     case "userMessage":
@@ -492,11 +510,7 @@ function Item({ item }: { item: TimelineItem }) {
       );
 
     case "compaction":
-      return (
-        <p className="text-center text-xs text-muted">
-          —— 历史已压缩（{item.reason}）——
-        </p>
-      );
+      return <CompactionMarker reason={item.reason} />;
 
     case "error":
       return (
@@ -1041,12 +1055,18 @@ const EMPTY_USAGE: Usage = {
   cacheWriteTokens: 0,
   llmRounds: 0,
   toolOutputTokens: 0,
+  compactionCount: 0,
 };
 
 function uncachedTokens(usage: Usage): number {
   return usage.inputTokens >= usage.cacheReadTokens
     ? usage.inputTokens - usage.cacheReadTokens
     : usage.inputTokens;
+}
+
+/** A token count the provider actually sent, or an em-dash when it never did. */
+function reportedTokens(value: number): string {
+  return value > 0 ? formatTokens(value) : "—";
 }
 
 function estimateToolOutputTokens(items: TimelineItem[]): number {
@@ -1116,6 +1136,7 @@ function TurnFooter({
   const toolOut =
     usage?.toolOutputTokens ||
     (liveItems ? estimateToolOutputTokens(liveItems) : 0);
+  const rounds = usage?.llmRounds ?? 0;
   const forkTitle = canFork
     ? "从这个 turn 创建分支并选择 Agent"
     : live
@@ -1164,13 +1185,20 @@ function TurnFooter({
       </div>
       {details ? (
         <div className="mt-1 flex flex-wrap justify-end gap-x-3 rounded-md bg-raised px-2 py-1">
-          <span>Cached {usage ? formatTokens(usage.cacheReadTokens) : "—"}</span>
-          <span>Input {usage ? formatTokens(usage.inputTokens) : "—"}</span>
-          <span>Uncached {usage ? formatTokens(uncachedTokens(usage)) : "—"}</span>
-          <span>Output {usage ? formatTokens(usage.outputTokens) : "—"}</span>
-          <span>Tool out {usage || liveItems ? formatTokens(toolOut) : "—"}</span>
-          <span>LLM {usage ? String(usage.llmRounds ?? 0) : "—"}</span>
-          <span>Tools {tools}</span>
+          <span data-testid="usage-summary">
+            {usage
+              ? `input(cached:${reportedTokens(usage.cacheReadTokens)}, toolcall:${reportedTokens(toolOut)}, uncached:${reportedTokens(uncachedTokens(usage))}) output ${reportedTokens(usage.outputTokens)} turn ${tools}/${rounds}`
+              : "—"}
+          </span>
+          {usage && usage.compactionCount > 0 ? (
+            <span data-testid="usage-compactions">压缩 {usage.compactionCount}</span>
+          ) : null}
+          {usage?.avgTtftMs != null ? (
+            <span data-testid="usage-ttft">TTFT {formatDuration(usage.avgTtftMs)}</span>
+          ) : null}
+          {usage?.avgOutputRateTps != null ? (
+            <span data-testid="usage-rate">{usage.avgOutputRateTps.toFixed(1)} tok/s</span>
+          ) : null}
         </div>
       ) : null}
     </footer>

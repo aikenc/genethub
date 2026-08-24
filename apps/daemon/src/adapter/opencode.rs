@@ -347,6 +347,9 @@ struct TurnState {
     /// and OpenCode streams the user's own message back the same way it streams
     /// the reply; without this the prompt would be echoed as an answer.
     assistant_messages: std::collections::HashSet<String>,
+    /// Compaction part ids already surfaced, so a resent `message.part.updated`
+    /// does not stack a second marker for the same squeeze.
+    emitted_compactions: std::collections::HashSet<String>,
     counter: u64,
     usage: Usage,
 }
@@ -389,6 +392,7 @@ impl AgentSession for OpenCodeSession {
                 id: Some(turn_id.clone()),
                 ..TurnState::default()
             };
+            usage::record_round_start(&mut turn.usage);
         }
         let _ = self.events.send(SessionEvent::TurnStarted {
             turn_id: turn_id.clone(),
@@ -438,6 +442,7 @@ impl AgentSession for OpenCodeSession {
                         usage.cost_usd = reported.cost_usd.or(usage.cost_usd);
                     }
                     state.id = None;
+                    usage::finalize_output_rate(&mut usage);
                     SessionEvent::TurnCompleted {
                         turn_id: completed,
                         usage,
@@ -814,6 +819,7 @@ fn translate_event(
                 if let Some(id) = info.get("id").and_then(Value::as_str) {
                     if state.assistant_messages.insert(id.to_string()) {
                         state.usage.llm_rounds += 1;
+                        usage::record_round_start(&mut state.usage);
                     }
                 }
                 let parsed = usage_from_info(info);
@@ -863,10 +869,30 @@ fn emit_part(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            if !text.is_empty() {
+                usage::record_first_token(&mut state.usage);
+            }
             if part_type == "reasoning" {
                 TimelineItem::Reasoning { id: item_id, text }
             } else {
                 TimelineItem::AssistantMessage { id: item_id, text }
+            }
+        }
+        "compaction" => {
+            // OpenCode puts a compaction part on a synthetic user message when
+            // it squeezes history. `auto` marks the CLI's own decision versus
+            // the user's `/compact`.
+            if !state.emitted_compactions.insert(part_id.to_string()) {
+                return;
+            }
+            let trigger = if part.get("auto").and_then(Value::as_bool).unwrap_or(true) {
+                "auto"
+            } else {
+                "manual"
+            };
+            TimelineItem::Compaction {
+                id: item_id,
+                reason: format!("OpenCode compressed its context ({trigger})."),
             }
         }
         "tool" => {

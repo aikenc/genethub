@@ -186,6 +186,7 @@ impl ActiveRound {
             TimelineItem::AssistantMessage { .. } => TrunkItem::Monologue,
             TimelineItem::Reasoning { .. } => TrunkItem::Reasoning,
             TimelineItem::ToolCall { name, .. } => TrunkItem::ToolCall(name.as_str()),
+            TimelineItem::Compaction { .. } => TrunkItem::Compaction,
             _ => return None,
         };
         self.current_trunk.push(item.id(), trunk_item)

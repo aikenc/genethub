@@ -142,6 +142,7 @@ describe("the session timeline", () => {
           cacheWriteTokens: 0,
           llmRounds: 1,
           toolOutputTokens: 20,
+          compactionCount: 0,
         },
       },
     ]);

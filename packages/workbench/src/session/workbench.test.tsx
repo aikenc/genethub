@@ -966,6 +966,7 @@ describe("what the user sees in a session", () => {
             cacheWriteTokens: 0,
             llmRounds: 1,
             toolOutputTokens: 0,
+            compactionCount: 0,
           },
           toolCalls: 0,
         },
@@ -1784,6 +1785,7 @@ describe("a whole turn as the timeline sees it", () => {
               cacheWriteTokens: 0,
               llmRounds: 1,
               toolOutputTokens: 4,
+                compactionCount: 0,
               costUsd: undefined,
             },
             toolCalls: 1,
@@ -1801,6 +1803,7 @@ describe("a whole turn as the timeline sees it", () => {
           cacheWriteTokens: 0,
           llmRounds: 1,
           toolOutputTokens: 4,
+            compactionCount: 0,
           costUsd: undefined,
         },
       },
@@ -1814,14 +1817,14 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("写好了。");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("2 分钟前");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("耗时 5s");
-    expect(screen.queryByText("Cached 3")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("usage-summary")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /5 输出 tokens/ }));
-    expect(screen.getByText("Cached 3")).toBeInTheDocument();
-    expect(screen.getByText("Input 10")).toBeInTheDocument();
-    expect(screen.getByText("Uncached 7")).toBeInTheDocument();
-    expect(screen.getByText("Tool out 4")).toBeInTheDocument();
-    expect(screen.getByText("LLM 1")).toBeInTheDocument();
-    expect(screen.getByText("Tools 1")).toBeInTheDocument();
+    // turnSummary stats carry cacheReadTokens:3/input:10 (uncached 7); the
+    // turnCompleted event has cacheReadTokens:0 but the footer renders the
+    // turnSummary stats, so the summary line shows the richer breakdown.
+    expect(screen.getByTestId("usage-summary")).toHaveTextContent(
+      "input(cached:3, toolcall:4, uncached:7) output 5 turn 1/1",
+    );
     expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled();
     expect(state.status).toBe("idle");
   });
@@ -1881,6 +1884,7 @@ describe("a whole turn as the timeline sees it", () => {
             cacheWriteTokens: 0,
             llmRounds: 1,
             toolOutputTokens: 0,
+              compactionCount: 0,
             costUsd: undefined,
           },
           toolCalls: 0,

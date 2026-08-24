@@ -10,6 +10,51 @@ use genehub_proto::{ItemDelta, SessionEvent, TimelineItem, ToolCallDetail, ToolS
 use serde_json::Value;
 use tokio::sync::broadcast;
 
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// Marks the moment one LLM round's request went out. TTFT for that round is
+/// measured from here to the first token that comes back. A round's clock is
+/// set once: the turn's opening request already started it, so a later call
+/// for the same round is a no-op rather than a reset that would erase the
+/// model's thinking-before-typing.
+pub fn record_round_start(usage: &mut Usage) {
+    if usage.round_started_at_ms.is_none() {
+        usage.round_started_at_ms = Some(now_ms());
+    }
+}
+
+/// Records the first token of a round: folds its latency into the running
+/// average TTFT and opens the output-rate window. A no-op once the round has
+/// already produced a token, so only the leading token counts.
+pub fn record_first_token(usage: &mut Usage) {
+    let Some(started) = usage.round_started_at_ms else {
+        return;
+    };
+    let now = now_ms();
+    let ttft = now.saturating_sub(started).max(0) as u64;
+    let rounds = usage.llm_rounds.max(1);
+    usage.avg_ttft_ms = Some(match usage.avg_ttft_ms {
+        Some(avg) => (avg * (rounds - 1) + ttft) / rounds,
+        None => ttft,
+    });
+    usage.round_started_at_ms = None;
+    usage.first_token_at_ms = Some(now);
+}
+
+/// Closes the output-rate window at end of turn: tokens produced divided by
+/// the streaming wall-clock. Only meaningful when tokens were actually seen.
+pub fn finalize_output_rate(usage: &mut Usage) {
+    let Some(first) = usage.first_token_at_ms.take() else {
+        return;
+    };
+    let elapsed = now_ms().saturating_sub(first).max(1) as u64;
+    if usage.output_tokens > 0 {
+        usage.avg_output_rate_tps = Some(usage.output_tokens as f64 / (elapsed as f64 / 1000.0));
+    }
+}
+
 /// Roughly chars/4, matching the estimator the frontend uses for the same
 /// strings. Exact tokenizer counts are not available on every adapter wire.
 pub fn estimate_tokens(text: &str) -> u64 {
@@ -153,6 +198,15 @@ pub fn merge_progress(tracked: &mut Usage, incoming: &Usage) {
     if incoming.cost_usd.is_some() {
         tracked.cost_usd = incoming.cost_usd;
     }
+    if incoming.avg_ttft_ms.is_some() {
+        tracked.avg_ttft_ms = incoming.avg_ttft_ms;
+    }
+    if incoming.avg_output_rate_tps.is_some() {
+        tracked.avg_output_rate_tps = incoming.avg_output_rate_tps;
+    }
+    if incoming.compaction_count > tracked.compaction_count {
+        tracked.compaction_count = incoming.compaction_count;
+    }
 }
 
 pub fn tool_output_text(detail: &ToolCallDetail) -> String {
@@ -249,28 +303,13 @@ pub fn fill_usage_from_items(usage: &mut Usage, items: &[TimelineItem]) {
     if usage.llm_rounds == 0 {
         usage.llm_rounds = inferred_llm_rounds(items);
     }
-    // Cursor ACP currently omits PromptResponse.usage. Count the text the
-    // user can already see so the footer is not stuck at zero.
-    if usage.output_tokens == 0 {
-        usage.output_tokens = items
-            .iter()
-            .map(|item| match item {
-                TimelineItem::AssistantMessage { text, .. }
-                | TimelineItem::Reasoning { text, .. } => estimate_tokens(text),
-                _ => 0,
-            })
-            .sum();
-    }
-    if usage.input_tokens == 0 {
-        let user: u64 = items
-            .iter()
-            .map(|item| match item {
-                TimelineItem::UserMessage { text, .. } => estimate_tokens(text),
-                _ => 0,
-            })
-            .sum();
-        usage.input_tokens = user.saturating_add(usage.tool_output_tokens);
-    }
+    // Compactions are timeline facts, not estimates: every marker the agent
+    // emitted is one real context squeeze, counted here so the footer can
+    // report it regardless of whether the provider also sends token totals.
+    usage.compaction_count = items
+        .iter()
+        .filter(|item| matches!(item, TimelineItem::Compaction { .. }))
+        .count() as u64;
 }
 
 /// Tool results that have just settled on the original (pre-overview) event.
@@ -387,7 +426,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_provider_usage_is_estimated_from_visible_text() {
+    fn missing_provider_usage_stays_zero_but_counts_rounds_tools_and_compactions() {
+        // Cursor ACP omits PromptResponse.usage entirely (verified against the
+        // live CLI). Per the no-estimation rule we do not invent input/output
+        // tokens for it; what we can still count exactly is rounds, tool
+        // output, and compactions, because those are timeline facts.
         let mut usage = Usage::default();
         fill_usage_from_items(
             &mut usage,
@@ -409,11 +452,16 @@ mod tests {
                         raw: json!({"rawOutput": {"content": "abcdefghijkl"}}),
                     },
                 },
+                TimelineItem::Compaction {
+                    id: "k1".into(),
+                    reason: "auto".into(),
+                },
             ],
         );
-        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.output_tokens, 0, "no estimation: Cursor never reported");
+        assert_eq!(usage.input_tokens, 0, "no estimation: Cursor never reported");
         assert_eq!(usage.tool_output_tokens, 3);
-        assert_eq!(usage.input_tokens, 4);
         assert_eq!(usage.llm_rounds, 1);
+        assert_eq!(usage.compaction_count, 1);
     }
 }

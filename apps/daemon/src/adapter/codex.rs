@@ -888,6 +888,11 @@ struct TurnState {
     /// We asked for this turn to stop, so its end is a cancellation however the
     /// CLI happens to label it.
     interrupt_requested: bool,
+    /// Codex reports one compaction twice: a `thread/compacted` notification and
+    /// a completed `contextCompaction` item. This counts the notifications that
+    /// arrived first so the item does not emit a second marker for the same
+    /// squeeze.
+    unpaired_compactions: u32,
 }
 
 struct CodexSession {
@@ -1051,6 +1056,7 @@ impl AgentSession for CodexSession {
                 usage,
                 ..TurnState::default()
             };
+            usage::record_round_start(&mut state.usage);
         }
         let _ = self.events.send(SessionEvent::TurnStarted {
             turn_id: turn_id.clone(),
@@ -1897,6 +1903,7 @@ async fn translate(
         "turn/plan/updated" if is_current_turn(params, &state) => plan(params, &mut state, events),
         "thread/compacted" if is_current_turn(params, &state) => {
             if let Some(turn_id) = state.id.clone() {
+                state.unpaired_compactions += 1;
                 let _ = events.send(SessionEvent::Item {
                     turn_id,
                     item: TimelineItem::Compaction {
@@ -1982,9 +1989,11 @@ fn finish(state: &mut TurnState, params: &Value, events: &broadcast::Sender<Sess
             },
         }
     } else {
+        let mut usage = state.usage.clone();
+        usage::finalize_output_rate(&mut usage);
         SessionEvent::TurnCompleted {
             turn_id,
-            usage: state.usage.clone(),
+            usage,
             fork_checkpoint: state.codex_turn.clone(),
         }
     };
@@ -2046,6 +2055,7 @@ fn stream(
     if delta.is_empty() {
         return;
     }
+    usage::record_first_token(&mut state.usage);
     if state.open.contains(item_id) {
         let _ = events.send(SessionEvent::ItemDelta {
             turn_id,
@@ -2116,6 +2126,7 @@ fn item_frame(
             });
             if settled {
                 state.usage.llm_rounds += 1;
+                usage::record_round_start(&mut state.usage);
                 usage::emit_progress(events, &turn_id, &state.usage);
             }
         }
@@ -2207,10 +2218,18 @@ fn item_frame(
                 detail: ToolCallDetail::Unknown { raw: item.clone() },
             });
         }
-        "contextCompaction" => emit(TimelineItem::Compaction {
-            id,
-            reason: "Codex pruned its own history to make room.".into(),
-        }),
+        "contextCompaction" => {
+            // The same squeeze already produced a marker via `thread/compacted`;
+            // only emit when no notification is waiting to be paired.
+            if state.unpaired_compactions > 0 {
+                state.unpaired_compactions -= 1;
+            } else {
+                emit(TimelineItem::Compaction {
+                    id,
+                    reason: "Codex pruned its own history to make room.".into(),
+                });
+            }
+        }
         "error" => emit(TimelineItem::Error {
             id,
             message: match item.get("message") {

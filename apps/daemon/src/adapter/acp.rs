@@ -525,9 +525,6 @@ struct TurnState {
     text_item: Option<String>,
     reasoning_item: Option<String>,
     usage: Usage,
-    /// Cursor ACP usually never sets this. When a provider does send tokens,
-    /// stop accumulating the chars/4 estimate.
-    usage_reported: bool,
 }
 
 impl TurnState {
@@ -700,6 +697,9 @@ impl AgentSession for AcpSession {
                 id: Some(turn_id.clone()),
                 ..TurnState::default()
             };
+            // The first round's clock starts with the request, not the first
+            // chunk, so TTFT includes the model's thinking-before-typing.
+            usage::record_round_start(&mut turn.usage);
         }
         let _ = self.events.send(SessionEvent::TurnStarted {
             turn_id: turn_id.clone(),
@@ -760,11 +760,16 @@ impl AgentSession for AcpSession {
                             if parsed.input_tokens > 0 || parsed.output_tokens > 0 {
                                 let rounds = usage.llm_rounds;
                                 let tool_out = usage.tool_output_tokens;
+                                let avg_ttft = usage.avg_ttft_ms;
+                                let first_token = usage.first_token_at_ms;
                                 usage = parsed;
                                 usage.llm_rounds = rounds;
                                 usage.tool_output_tokens = tool_out;
+                                usage.avg_ttft_ms = avg_ttft;
+                                usage.first_token_at_ms = first_token;
                             }
                         }
+                        usage::finalize_output_rate(&mut usage);
                         SessionEvent::TurnCompleted {
                             turn_id: completed_turn,
                             usage,
@@ -1761,12 +1766,10 @@ fn translate_update(
             let delta = text_of(update);
             if state.text_item.is_none() && state.reasoning_item.is_none() {
                 state.usage.llm_rounds += 1;
+                usage::record_round_start(&mut state.usage);
             }
-            if !state.usage_reported && !delta.is_empty() {
-                state.usage.output_tokens = state
-                    .usage
-                    .output_tokens
-                    .saturating_add(usage::estimate_tokens(&delta));
+            if !delta.is_empty() {
+                usage::record_first_token(&mut state.usage);
             }
             match state.text_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
@@ -1790,12 +1793,10 @@ fn translate_update(
             let delta = text_of(update);
             if state.text_item.is_none() && state.reasoning_item.is_none() {
                 state.usage.llm_rounds += 1;
+                usage::record_round_start(&mut state.usage);
             }
-            if !state.usage_reported && !delta.is_empty() {
-                state.usage.output_tokens = state
-                    .usage
-                    .output_tokens
-                    .saturating_add(usage::estimate_tokens(&delta));
+            if !delta.is_empty() {
+                usage::record_first_token(&mut state.usage);
             }
             match state.reasoning_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
@@ -1884,10 +1885,13 @@ fn translate_update(
                 if parsed.input_tokens > 0 || parsed.output_tokens > 0 {
                     let rounds = state.usage.llm_rounds;
                     let tool_out = state.usage.tool_output_tokens;
+                    let avg_ttft = state.usage.avg_ttft_ms;
+                    let first_token = state.usage.first_token_at_ms;
                     state.usage = parsed;
                     state.usage.llm_rounds = rounds;
                     state.usage.tool_output_tokens = tool_out;
-                    state.usage_reported = true;
+                    state.usage.avg_ttft_ms = avg_ttft;
+                    state.usage.first_token_at_ms = first_token;
                     usage::emit_progress(events, &turn_id, &state.usage);
                 }
             }
