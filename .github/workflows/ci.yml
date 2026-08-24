@@ -38,6 +38,10 @@ jobs:
       relay: ${{ steps.filter.outputs.relay }}
       web: ${{ steps.filter.outputs.web }}
       desktop: ${{ steps.filter.outputs.desktop }}
+      guest: ${{ steps.filter.outputs.guest }}
+      native_host: ${{ steps.filter.outputs.native_host }}
+      native_cli: ${{ steps.filter.outputs.native_cli }}
+      native_daemon: ${{ steps.filter.outputs.native_daemon }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -49,7 +53,7 @@ jobs:
       # A broken classifier must never produce output: its own contract tests
       # run in this job, before any classification is trusted.
       - name: The classifier must pass its own contract tests
-        run: node --test scripts/ci-classify.test.mjs
+        run: node --test scripts/ci-classify.test.mjs scripts/ci-native-fingerprint.test.mjs
       - id: filter
         shell: bash
         run: |
@@ -135,8 +139,32 @@ jobs:
           fi
           echo "no path collides on a case-insensitive filesystem"
 
-  rust:
+  # wasm32-wasip2 is the same bytes on every OS. Compile the guest once on
+  # Linux and hand the artifact to rust / web / desktop. Windows and macOS
+  # must not rustc this crate.
+  guest:
     needs: changes
+    if: needs.changes.outputs.guest == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Compile the guest once on Linux
+        run: cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: open-ci-guest
+          path: target/wasm32-wasip2/iterate/genehub_guest.wasm
+          if-no-files-found: error
+          retention-days: 1
+
+  rust:
+    needs: [changes, guest]
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -146,7 +174,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy, rustfmt
-          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -175,11 +202,16 @@ jobs:
       # the artifact handoff still look there. `cargo test` only builds test
       # harnesses and may overwrite genet-local with a debug CLI; restage
       # after the tests so the web job does not get that image.
+      - name: Reuse the Linux guest wasm
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: open-ci-guest
+          path: target/wasm32-wasip2/iterate
       - name: Stage iterate CLI, host, agent, and guest
         run: |
           cargo build --profile iterate -p genet-cli -p genet-agent -p genehub-host
-          cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
           mkdir -p target/debug
+          test -f target/wasm32-wasip2/iterate/genehub_guest.wasm
           cp target/iterate/genet-local target/debug/genet-local
           cp target/iterate/genet-agent-local target/debug/genet-agent-local
           cp target/iterate/genehub-host-local target/debug/genehub-host-local
@@ -263,13 +295,14 @@ jobs:
           retention-days: 1
 
   web:
-    needs: [changes, rust, relay]
+    needs: [changes, guest, rust, relay]
     # `always()` so a skipped rust/relay job does not cancel a web-only PR.
     # Still refuse to run when a dependency that did run has failed.
     if: >-
       always()
       && needs.changes.result == 'success'
       && needs.changes.outputs.web == 'true'
+      && (needs.guest.result == 'success' || needs.guest.result == 'skipped')
       && (needs.rust.result == 'success' || needs.rust.result == 'skipped')
       && (needs.relay.result == 'success' || needs.relay.result == 'skipped')
     runs-on: ubuntu-latest
@@ -293,8 +326,6 @@ jobs:
             apps/relay/package-lock.json
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         if: needs.rust.result != 'success'
-        with:
-          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         if: needs.rust.result != 'success'
       # Prefer the bins the rust job already produced. Rebuild only when that job
@@ -308,12 +339,18 @@ jobs:
         with:
           name: open-ci-bins
           path: target/debug
+      - name: Reuse the Linux guest wasm
+        if: needs.rust.result != 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: open-ci-guest
+          path: target/wasm32-wasip2/iterate
       - name: Build daemon and agent bins
         if: needs.rust.result != 'success'
         run: |
           cargo build --profile iterate -p genet-cli -p genet-agent -p genehub-host
-          cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
           mkdir -p target/debug
+          test -f target/wasm32-wasip2/iterate/genehub_guest.wasm
           cp target/iterate/genet-local target/debug/genet-local
           cp target/iterate/genet-agent-local target/debug/genet-agent-local
           cp target/iterate/genehub-host-local target/debug/genehub-host-local
@@ -354,7 +391,7 @@ jobs:
       - run: npm run build
 
   desktop:
-    needs: changes
+    needs: [changes, guest]
     if: needs.changes.outputs.desktop == 'true'
     strategy:
       fail-fast: false
@@ -366,32 +403,78 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - id: rustc
+        shell: bash
+        run: echo "version=$(rustc --version | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+      - id: fp
+        shell: bash
+        run: node scripts/ci-native-fingerprint.mjs >> "$GITHUB_OUTPUT"
+      # Restore the last iterate host/CLI built from this exact source tree.
+      # A miss (or a hit that left no file) rebuilds. A hit is not a test skip:
+      # supervision still runs against the restored binaries.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        id: host-bin
+        with:
+          path: |
+            target/iterate/genehub-host-local
+            target/iterate/genehub-host-local.exe
+          key: iterate-host-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ steps.fp.outputs.host }}
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        id: cli-bin
+        with:
+          path: |
+            target/iterate/genet-local
+            target/iterate/genet-local.exe
+          key: iterate-cli-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ steps.fp.outputs.cli }}
       # Daemon persistence is shared by the CLI and desktop shell. In
       # particular, the owner-only Windows DACL assertions must execute on a
       # real Windows filesystem; a Linux cross-check can only compile them.
-      - run: cargo test -p genet-daemon --lib
+      - if: needs.changes.outputs.native_daemon == 'true'
+        run: cargo test -p genet-daemon --lib
       # The WASM guest delegates chmod-equivalent hardening to the native host.
       # Its Windows implementation must be exercised on NTFS, not merely
       # cross-compiled from Linux.
-      - run: cargo test -p genehub-host --bin genehub-host-local fs_perms::tests
+      - if: needs.changes.outputs.native_host == 'true'
+        run: cargo test -p genehub-host --bin genehub-host-local fs_perms::tests
+      - name: Build iterate host when the fingerprint misses
+        if: steps.host-bin.outputs.cache-hit != 'true'
+        run: cargo build --profile iterate -p genehub-host
+      - name: Build iterate CLI when the fingerprint misses
+        if: steps.cli-bin.outputs.cache-hit != 'true'
+        run: cargo build --profile iterate -p genet-cli
+      - name: Reuse the Linux guest wasm
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: open-ci-guest
+          path: target/wasm32-wasip2/iterate
       # Supervision launches the ordinary sibling pair. A debug host is ~500MB
       # and runs Cranelift unoptimized: on this Linux box that is 6s to
       # listening for the 13MB iterate guest; a Windows runner plus Defender
       # scanning that image is what blew the old 60s budget (CI #205). The
       # iterate profile is the product-shaped compile (opt-1, stripped, ~36MB,
       # <1s here). Stage it next to the guest so the tests keep looking in
-      # target/debug.
+      # target/debug. Guest bytes come from the Linux job; Win/mac never rustc
+      # wasm32-wasip2.
       - name: Stage iterate CLI, host, and guest for supervision
         shell: bash
         run: |
-          cargo build --profile iterate -p genet-cli -p genehub-host
-          cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
-          mkdir -p target/debug
+          set -euo pipefail
           exe=
           if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
+          if [ ! -x "target/iterate/genehub-host-local${exe}" ]; then
+            echo "host cache claimed a hit but the binary is missing; rebuilding"
+            cargo build --profile iterate -p genehub-host
+          fi
+          if [ ! -x "target/iterate/genet-local${exe}" ]; then
+            echo "cli cache claimed a hit but the binary is missing; rebuilding"
+            cargo build --profile iterate -p genet-cli
+          fi
+          test -f target/wasm32-wasip2/iterate/genehub_guest.wasm
+          mkdir -p target/debug
           cp "target/iterate/genet-local${exe}" "target/debug/genet-local${exe}"
           cp "target/iterate/genehub-host-local${exe}" "target/debug/genehub-host-local${exe}"
           cp target/wasm32-wasip2/iterate/genehub_guest.wasm target/debug/genehub_guest.wasm
@@ -422,7 +505,7 @@ jobs:
   # Single required check for branch protection. Skipped path-filtered jobs are
   # fine; a failed or cancelled job that was supposed to run is not.
   gate:
-    needs: [changes, lockfiles, rust, relay, web, desktop]
+    needs: [changes, lockfiles, guest, rust, relay, web, desktop]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -431,10 +514,12 @@ jobs:
         env:
           CHANGES: ${{ needs.changes.result }}
           LOCKFILES: ${{ needs.lockfiles.result }}
+          GUEST: ${{ needs.guest.result }}
           RUST: ${{ needs.rust.result }}
           RELAY: ${{ needs.relay.result }}
           WEB: ${{ needs.web.result }}
           DESKTOP: ${{ needs.desktop.result }}
+          WANT_GUEST: ${{ needs.changes.outputs.guest }}
           WANT_RUST: ${{ needs.changes.outputs.rust }}
           WANT_RELAY: ${{ needs.changes.outputs.relay }}
           WANT_WEB: ${{ needs.changes.outputs.web }}
@@ -458,6 +543,7 @@ jobs:
           }
           check changes "$CHANGES" true
           check lockfiles "$LOCKFILES" true
+          check guest "$GUEST" "$WANT_GUEST"
           check rust "$RUST" "$WANT_RUST"
           check relay "$RELAY" "$WANT_RELAY"
           check web "$WEB" "$WANT_WEB"

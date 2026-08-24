@@ -246,8 +246,8 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 | 平台 | 做法 |
 |------|------|
 | Linux（有无图形界面都一样） | `scripts/install.sh` 只装 daemon/CLI + 内置 agent，工作台用浏览器打开；不构建、不测试 Linux 桌面壳。用例见 §8.1「安装脚本」 |
-| Windows | 发布流水线（`.github/workflows/release.yml`）构建安装包；桌面 CI 在 Windows runner 上执行壳层 library、wiring、真实 daemon supervision 与 lint。凡是会拉起 daemon 的 CI 腿（rust / web / desktop）都启动 iterate 剖面的 CLI/host，不要用 debug host（本机 506MB / 6s） |
-| macOS | 桌面 CI 在 macOS runner 上执行同一组壳层 library、wiring、真实 daemon supervision 与 lint；正式安装包等待签名、公证完成后再发布 |
+| Windows | 发布流水线（`.github/workflows/release.yml`）构建安装包；桌面 CI 在 Windows runner 上执行壳层 library、wiring、真实 daemon supervision 与 lint。`genehub_guest.wasm` 只在 Linux `guest` job 编译，Win/mac 下载同一份。host/CLI 用源码指纹缓存，命中则跳过 rustc；daemon lib 与 host `fs_perms` 只在对应树变化时重跑。凡是会拉起 daemon 的 CI 腿都启动 iterate 剖面的 CLI/host，不要用 debug host（本机 506MB / 6s） |
+| macOS | 与 Windows 同一套壳层测试与跳过规则；正式安装包等待签名、公证完成后再发布 |
 
 Windows/macOS **装包之后**的首启仍要每次发版手动过一遍主旅程——runner 上没有能点托盘的人。Linux 的安装门禁只覆盖 daemon/CLI，不能拿 Linux WebView 编译代替两个桌面目标的验证。
 

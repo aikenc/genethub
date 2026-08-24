@@ -30,6 +30,12 @@
 //
 //   testing/ gates the above but ships nothing itself.
 //
+// Extra outputs (not jobs) tell later legs what they may skip:
+//   guest         compile genehub_guest.wasm once on Linux
+//   native_host   Win/mac host rustc + fs_perms
+//   native_cli    Win/mac CLI rustc (the CLI links the daemon crate)
+//   native_daemon Win/mac `cargo test -p genet-daemon --lib`
+//
 //   node scripts/ci-classify.mjs --all            every job
 //   node scripts/ci-classify.mjs --stdin          read changed paths, one per line
 //   node scripts/ci-classify.mjs --files a b c    classify explicit paths
@@ -39,31 +45,39 @@
 // before trusting any output — a broken classifier never produces one.
 
 const ALL_JOBS = ["rust", "relay", "web", "desktop"];
+const ALL_NATIVES = ["host", "cli", "daemon"];
 
 // Order is irrelevant: every file matches exactly one rule or falls through to
-// the fail-safe. `jobs` lists the heavy jobs the path must trigger.
+// the fail-safe. `jobs` lists the heavy jobs the path must trigger. `native`
+// lists which Win/mac rustc trees a later desktop run may not skip.
 const RULES = [
-  { match: (f) => f.startsWith(".github/"), jobs: ALL_JOBS, force: true, why: "CI/release definition" },
-  { match: (f) => f === "Cargo.toml" || f === "Cargo.lock", jobs: ["rust", "desktop"], why: "native dependency graph" },
-  { match: (f) => f.startsWith("wit/"), jobs: ["rust", "desktop"], why: "ABI hash boundary" },
-  { match: (f) => f.startsWith("apps/host/"), jobs: ["rust", "desktop"], why: "Host runtime ships in the installer" },
-  { match: (f) => f.startsWith("apps/cli/"), jobs: ["rust", "desktop"], why: "CLI/launcher ships in the installer" },
-  { match: (f) => f.startsWith("apps/desktop/"), jobs: ["desktop"], why: "Desktop shell and installer" },
-  { match: (f) => f.startsWith("apps/daemon/"), jobs: ["rust", "desktop"], why: "compiled into the Component; desktop shares its persistence" },
-  { match: (f) => f.startsWith("apps/agent/"), jobs: ["rust"], why: "compiled into the Component" },
-  { match: (f) => f.startsWith("apps/guest/") || f.startsWith("apps/guest-probe/"), jobs: ["rust"], why: "the Client Component itself" },
-  { match: (f) => f.startsWith("apps/relay/"), jobs: ["relay"], why: "hosted service, deployed not installed" },
-  { match: (f) => f.startsWith("packages/proto/"), jobs: ["rust"], why: "WebProtocol, absorbed by the adapter window" },
-  { match: (f) => f.startsWith("packages/http/") || f.startsWith("packages/wasi-guest/"), jobs: ["rust"], why: "Component closure support crate" },
-  { match: (f) => f.startsWith("packages/native/"), jobs: ["rust", "desktop"], why: "linked into the Host binary" },
-  { match: (f) => f.startsWith("packages/workbench/"), jobs: ["web"], why: "the Workbench" },
-  { match: (f) => f.startsWith("testing/"), jobs: ["rust"], why: "test engineering ships nothing" },
-  { match: (f) => f.startsWith("scripts/"), jobs: ["rust", "desktop"], why: "stamping, installer and release tooling" },
-  { match: (f) => f.startsWith("docs/") || f.endsWith(".md") || f.startsWith("LICENSE"), jobs: [], why: "documentation" },
+  { match: (f) => f.startsWith(".github/"), jobs: ALL_JOBS, force: true, native: ALL_NATIVES, why: "CI/release definition" },
+  { match: (f) => f === "Cargo.toml" || f === "Cargo.lock", jobs: ["rust", "desktop"], native: ALL_NATIVES, why: "native dependency graph" },
+  { match: (f) => f.startsWith("wit/"), jobs: ["rust", "desktop"], native: ["host"], why: "ABI hash boundary" },
+  { match: (f) => f.startsWith("apps/host/"), jobs: ["rust", "desktop"], native: ["host"], why: "Host runtime ships in the installer" },
+  { match: (f) => f.startsWith("apps/cli/"), jobs: ["rust", "desktop"], native: ["cli"], why: "CLI/launcher ships in the installer" },
+  { match: (f) => f.startsWith("apps/desktop/"), jobs: ["desktop"], native: [], why: "Desktop shell and installer" },
+  { match: (f) => f.startsWith("apps/daemon/"), jobs: ["rust", "desktop"], native: ["cli", "daemon"], why: "compiled into the Component; desktop shares its persistence" },
+  { match: (f) => f.startsWith("apps/agent/"), jobs: ["rust"], native: [], why: "compiled into the Component" },
+  { match: (f) => f.startsWith("apps/guest/") || f.startsWith("apps/guest-probe/"), jobs: ["rust"], native: [], why: "the Client Component itself" },
+  { match: (f) => f.startsWith("apps/relay/"), jobs: ["relay"], native: [], why: "hosted service, deployed not installed" },
+  { match: (f) => f.startsWith("packages/proto/"), jobs: ["rust"], native: ["host"], why: "WebProtocol, absorbed by the adapter window" },
+  { match: (f) => f.startsWith("packages/http/"), jobs: ["rust"], native: ["cli"], why: "HTTP crate linked into the CLI" },
+  { match: (f) => f.startsWith("packages/wasi-guest/"), jobs: ["rust"], native: [], why: "Component closure support crate" },
+  { match: (f) => f.startsWith("packages/native/"), jobs: ["rust", "desktop"], native: ["host"], why: "linked into the Host binary" },
+  { match: (f) => f.startsWith("packages/workbench/"), jobs: ["web"], native: [], why: "the Workbench" },
+  { match: (f) => f.startsWith("testing/"), jobs: ["rust"], native: [], why: "test engineering ships nothing" },
+  { match: (f) => f.startsWith("scripts/"), jobs: ["rust", "desktop"], native: ["host", "cli"], why: "stamping, installer and release tooling" },
+  { match: (f) => f.startsWith("docs/") || f.endsWith(".md") || f.startsWith("LICENSE"), jobs: [], native: [], why: "documentation" },
 ];
+
+function emptyNatives() {
+  return { host: false, cli: false, daemon: false };
+}
 
 export function classifyFiles(files) {
   const jobs = { rust: false, relay: false, web: false, desktop: false };
+  const natives = emptyNatives();
   const unmatched = [];
   let force = false;
   const reasons = [];
@@ -77,18 +91,33 @@ export function classifyFiles(files) {
     }
     if (rule.force) force = true;
     for (const job of rule.jobs) jobs[job] = true;
+    for (const native of rule.native ?? []) natives[native] = true;
     reasons.push(`${file}: ${rule.why}`);
   }
 
   if (force) {
     for (const job of ALL_JOBS) jobs[job] = true;
+    for (const native of ALL_NATIVES) natives[native] = true;
   }
 
   // The web job's mandatory journeys drive a real daemon, agent and relay; a
   // change on either side of that wire must re-prove them.
   if (jobs.rust || jobs.relay) jobs.web = true;
 
-  return { ...jobs, force, unmatched, reasons };
+  // wasm32-wasip2 is platform-independent. One Linux compile feeds every
+  // job that starts a daemon.
+  const guest = jobs.rust || jobs.desktop || jobs.web;
+
+  return {
+    ...jobs,
+    guest,
+    native_host: natives.host,
+    native_cli: natives.cli,
+    native_daemon: natives.daemon,
+    force,
+    unmatched,
+    reasons,
+  };
 }
 
 function parseArgs(argv) {
@@ -105,6 +134,41 @@ async function readStdin() {
   return data.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 
+function allSuite() {
+  return {
+    rust: true,
+    relay: true,
+    web: true,
+    desktop: true,
+    guest: true,
+    native_host: true,
+    native_cli: true,
+    native_daemon: true,
+    force: true,
+    unmatched: [],
+    reasons: ["--all: full suite"],
+  };
+}
+
+function emit(result) {
+  for (const reason of result.reasons) console.error(`  ${reason}`);
+  if (result.unmatched.length) {
+    console.error(`  unmatched (fail-safe to full suite): ${result.unmatched.join(", ")}`);
+  }
+  console.error(
+    `filter: rust=${result.rust} relay=${result.relay} web=${result.web} desktop=${result.desktop} guest=${result.guest} native_host=${result.native_host} native_cli=${result.native_cli} native_daemon=${result.native_daemon}`,
+  );
+
+  console.log(`rust=${result.rust}`);
+  console.log(`relay=${result.relay}`);
+  console.log(`web=${result.web}`);
+  console.log(`desktop=${result.desktop}`);
+  console.log(`guest=${result.guest}`);
+  console.log(`native_host=${result.native_host}`);
+  console.log(`native_cli=${result.native_cli}`);
+  console.log(`native_daemon=${result.native_daemon}`);
+}
+
 const isMain = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 if (isMain) {
   const args = parseArgs(process.argv.slice(2));
@@ -112,20 +176,5 @@ if (isMain) {
     console.error("usage: ci-classify.mjs --all | --stdin | --files <path...>");
     process.exit(2);
   }
-  const result = args.all
-    ? { rust: true, relay: true, web: true, desktop: true, force: true, unmatched: [], reasons: ["--all: full suite"] }
-    : classifyFiles(args.files ?? (await readStdin()));
-
-  for (const reason of result.reasons) console.error(`  ${reason}`);
-  if (result.unmatched.length) {
-    console.error(`  unmatched (fail-safe to full suite): ${result.unmatched.join(", ")}`);
-  }
-  console.error(
-    `filter: rust=${result.rust} relay=${result.relay} web=${result.web} desktop=${result.desktop}`,
-  );
-
-  console.log(`rust=${result.rust}`);
-  console.log(`relay=${result.relay}`);
-  console.log(`web=${result.web}`);
-  console.log(`desktop=${result.desktop}`);
+  emit(args.all ? allSuite() : classifyFiles(args.files ?? (await readStdin())));
 }
