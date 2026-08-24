@@ -6,7 +6,6 @@
 pub mod adapter;
 pub mod authz;
 pub(crate) mod blocking;
-pub mod channel;
 pub mod channel_auth;
 pub mod cli_front;
 pub mod config;
@@ -15,16 +14,22 @@ pub mod devices;
 pub mod diagnostics;
 pub mod files;
 pub(crate) mod fs_cap;
-pub(crate) mod fs_lock;
 pub mod git;
 pub mod host_pid;
 pub(crate) mod host_update;
 pub(crate) mod http;
 pub mod hub;
 pub mod isolation;
-pub mod lifecycle;
 pub mod link;
 pub(crate) mod os_process;
+
+// The native front door owns the build identity, the on-disk layout, the
+// daemon's own lock and the loopback control-plane proofs. Re-exported at the
+// paths this crate has always used, so that being a component again is the only
+// difference the rest of the code sees (`docs/cli-thin-forwarder.md` §6).
+pub use genet_frontdoor::channel;
+pub use genet_frontdoor::fs_lock;
+pub use genet_frontdoor::lifecycle;
 
 pub mod logs;
 pub mod process;
@@ -87,8 +92,8 @@ impl Daemon {
         self.websocket_admission().url
     }
 
-    pub fn websocket_admission(&self) -> transport::local::LocalWebSocketAdmission {
-        transport::local::websocket_admission(
+    pub fn websocket_admission(&self) -> genet_frontdoor::proof::LocalWebSocketAdmission {
+        genet_frontdoor::proof::websocket_admission(
             self.port,
             &self.state.token,
             crate::host_pid::current(),

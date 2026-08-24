@@ -114,7 +114,23 @@ stdin 只用于 `genet shell` 的管道输入，上限仍是 1 MiB。更大的�
 
 这是源码边界已经具备的能力，不是当前发布能力：现有 `release.yml` 仍只有 tag/full release，没有独立的 guest+website Live workflow。非 stable 的 guest 编译已改走 `[profile.iterate]`（`opt-level=1` + `strip`），不再为热改付 fat LTO；Stable 安装包仍用 `[profile.release]`。客户端也还没有签名组件 manifest、自动应用或回滚。只有这些门关闭后，表里的模式 2 才能计入 95% 的端到端交付分子。
 
-CLI crate 若仍 `depend` `genet-daemon`（为 Paths / lifecycle / isolation / 控制面证明），`cargo build --workspace` 仍会连带重编。这不影响已安装的原生二进制，也不影响模式 2 只替换 wasm。把控制面抽成独立小 crate 是后续清理，不是本变更的完成门。
+控制面已经抽成独立小 crate（2026-08-24）。`apps/cli/src` 不再 `depend` `genet-daemon`：
+
+| 前门要的东西 | 现在在哪 |
+| --- | --- |
+| 构建身份（channel 常量） | `packages/frontdoor::channel`，`scripts/channel.mjs` 整篇写入 |
+| 数据目录布局与 owner-only 加固 | `packages/frontdoor::{paths, perms}` |
+| `daemon.lock` 与进程存活/停止 | `packages/frontdoor::{fs_lock, lifecycle}` |
+| loopback 控制面证明 | `packages/frontdoor::proof` |
+| 退出码与答复信封形状 | `packages/frontdoor::envelope` |
+| `--machine` / `--cwd` 解析 | `packages/frontdoor::selectors` |
+| confine | 直接用 `genet_native::confine`，不再经 daemon 转手 |
+
+信封只共享**形状**，不共享**去处**：前门打到自己的 stdout，guest 里的动词打到 `POST /cli` 的 NDJSON 流。动词路由表（`RESERVED` / `ROUTABLE` / `canonical` / `routing`）留在 `apps/daemon/src/cli_front/target.rs`，因为那是业务。
+
+`packages/proto` 同时从 App 侧脱开：`apps/host` 只为 `webProtocol` 一个数字依赖过整份会话 schema，现在依赖 `packages/identity`（三个协议世代常量，零依赖）；isolation 报告类型归 `packages/native`，由探测内核的那一层自己定义，daemon 再翻译成线上类型。
+
+可核验的结果：改 `apps/daemon/src/router.rs` 或 `packages/proto/src/rpc.rs` 之后 `cargo build -p genet-cli` 无事可做，`cargo check -p genehub-host` 同样无事可做。CI 分类器与原生指纹已按此收紧（`scripts/ci-classify.mjs`、`scripts/ci-native-fingerprint.mjs`）。
 
 ## 7. 完成门
 

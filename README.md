@@ -235,6 +235,8 @@ node apps/desktop/scripts/bundle.mjs
 | `apps/relay` | 无状态 Fabric Relay |
 | `apps/desktop` | Windows/macOS Tauri 2 桌面壳 |
 | `packages/proto` | Rust 协议定义及生成的 TypeScript bindings |
+| `packages/frontdoor` | 原生前门与 daemon 共用的那点东西：构建身份、磁盘布局与权限、生命周期、控制面证明、信封形状 |
+| `packages/identity` | 协议世代常量，让 host 不必为一个数字链进整份 schema |
 | `packages/workbench` | 浏览器、桌面和手机共用的工作台 |
 | `testing` | 跨部件旅程、安装与安全边界测试 |
 

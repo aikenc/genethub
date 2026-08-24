@@ -442,7 +442,7 @@ pub const HOST_BINARY: &str = "${value("host_binary", channel)}";
 /// to the guest as GENEHUB_CLI.
 pub const ENV_CLI: &str = "${value("env_cli", channel)}";
 /// The override the shell passes to the daemon it spawns — has to stay the
-/// name the daemon reads (\`apps/daemon/src/channel.rs\`), or the shell and
+/// name the daemon reads (\`packages/frontdoor/src/channel.rs\`), or the shell and
 /// the daemon disagree about where the data lives and the shell ends up
 /// adopting the other channel's daemon through a stale endpoint file.
 pub const ENV_DATA_DIR: &str = "${value("env_data_dir", channel)}";
@@ -512,7 +512,7 @@ function stamp(channel) {
   const hostBinary = value("host_binary", channel);
   const desktopBinary = value("desktop_binary", channel);
 
-  writeFileSync(join(repo, "apps/daemon/src/channel.rs"), rustModule(channel));
+  writeFileSync(join(repo, "packages/frontdoor/src/channel.rs"), rustModule(channel));
   writeFileSync(join(repo, "apps/agent/src/channel.rs"), agentModule(channel));
   writeFileSync(join(repo, "apps/host/src/channel.rs"), hostModule(channel));
   writeFileSync(join(repo, "apps/desktop/src-tauri/src/channel.rs"), desktopModule(channel));
@@ -571,7 +571,7 @@ function stamp(channel) {
   console.log(`stamped ${channel} into the workspace, the shell and the packaging`);
   // Printed because this runs unattended: the log of a release should show
   // what went in, not just that something ran.
-  console.log(readFileSync(join(repo, "apps/daemon/src/channel.rs"), "utf8").match(/pub const CHANNEL.*$/m)[0]);
+  console.log(readFileSync(join(repo, "packages/frontdoor/src/channel.rs"), "utf8").match(/pub const CHANNEL.*$/m)[0]);
   const conf = readFileSync(join(repo, "apps/desktop/src-tauri/tauri.conf.json"), "utf8");
   console.log(conf.match(/"productName".*$/m)[0].trim());
   console.log(conf.match(/"identifier".*$/m)[0].trim());
@@ -606,7 +606,7 @@ if (["local", "dev", "beta", "stable"].includes(arg)) {
   // run is not a release tag, so it builds local, matching the tree.
   process.stdout.write(fromRef() || "local");
 } else if (arg === "--show") {
-  const body = readFileSync(join(repo, "apps/daemon/src/channel.rs"), "utf8");
+  const body = readFileSync(join(repo, "packages/frontdoor/src/channel.rs"), "utf8");
   process.stdout.write(body.match(/pub const CHANNEL: &str = "(.*)";/)[1]);
 } else {
   usage();

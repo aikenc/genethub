@@ -9,13 +9,11 @@ mod control;
 mod invoke;
 mod wasm;
 
-use genet_daemon::cli_front::{output, target};
+use genet_frontdoor::selectors;
 
-/// Exit codes, frozen for scripts and agents (`genethub-cli.md` §3.2).
-pub const EXIT_OK: i32 = 0;
-pub const EXIT_INVALID_ARGS: i32 = 2;
-pub const EXIT_UNREACHABLE: i32 = 3;
-pub const EXIT_FAILED: i32 = 4;
+/// Exit codes, frozen for scripts and agents (`genethub-cli.md` §3.2). Shared
+/// with the component, which answers the forwarded verbs with the same set.
+pub use genet_frontdoor::envelope::{EXIT_FAILED, EXIT_INVALID_ARGS, EXIT_OK, EXIT_UNREACHABLE};
 
 const FORWARDED: &[&str] = &[
     "schema",
@@ -44,8 +42,8 @@ const FORWARDED: &[&str] = &[
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.first().map(String::as_str) == Some(genet_daemon::isolation::CONFINE_ARG) {
-        std::process::exit(genet_daemon::isolation::confine_and_exec(&args[1..]));
+    if args.first().map(String::as_str) == Some(genet_native::confine::CONFINE_ARG) {
+        std::process::exit(genet_native::confine::confine_and_exec(&args[1..]));
     }
 
     run(args)
@@ -103,10 +101,35 @@ fn should_forward(head: &str, args: &[String]) -> bool {
         || (!head.starts_with('-') && args.len() > 1)
 }
 
+/// Strips the global selectors from a verb that stays native, and refuses them.
+///
+/// Every verb the front door keeps acts on this machine's own process, so
+/// neither `--machine` nor `--cwd` can mean anything for one. Answered here
+/// because these verbs never reach the component's routing table — asking that
+/// table would mean linking it, and `agent-serve` in particular used to fall
+/// through it as an agent id and have its `--machine` silently ignored.
 fn native_rest(args: &[String]) -> Result<Vec<String>, i32> {
-    let (selection, rest) = target::split(args).map_err(output::fail)?;
-    target::enforce(&selection, target::canonical(&rest).as_deref()).map_err(output::fail)?;
+    let (selection, rest) = selectors::split(args).map_err(fail_envelope)?;
+    selectors::refuse_on_local_verb(&selection, native_command(&rest).as_deref())
+        .map_err(fail_envelope)?;
     Ok(rest)
+}
+
+/// The dotted name of a native verb, for naming it in a refusal.
+fn native_command(rest: &[String]) -> Option<String> {
+    let head = rest.first()?.as_str();
+    match (head, rest.get(1).map(String::as_str)) {
+        ("daemon", Some(verb)) if !verb.starts_with('-') => Some(format!("daemon.{verb}")),
+        ("daemon" | "status" | "update" | "agent-serve", _) => Some(head.to_string()),
+        _ => None,
+    }
+}
+
+/// Prints a refusal in the shared envelope and hands back its exit code.
+fn fail_envelope(error: genet_frontdoor::envelope::CliFailure) -> i32 {
+    eprintln!("error: {}", error.message);
+    println!("{}", genet_frontdoor::envelope::error_envelope(&error));
+    error.exit
 }
 
 fn update(args: &[String]) -> i32 {
@@ -202,18 +225,12 @@ pub fn usage() -> i32 {
 /// error on stdout, and an exit code from the frozen set.
 pub fn fail(code: &str, message: &str, exit: i32) -> ! {
     eprintln!("error: {message}");
+    // The same envelope the component prints for a forwarded verb, built from
+    // the one definition of it, so a caller cannot tell from the shape whether
+    // the answer came from here or from over the loopback.
     println!(
         "{}",
-        serde_json::json!({
-            "schema": "genet.cli/v1",
-            "type": "error",
-            "error": {
-                "code": code,
-                "message": message,
-                "retryable": false,
-                "details": null,
-            }
-        })
+        genet_frontdoor::envelope::generic_error_envelope(code, message)
     );
     std::process::exit(exit);
 }

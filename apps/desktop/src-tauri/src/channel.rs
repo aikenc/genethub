@@ -26,7 +26,7 @@ pub const HOST_BINARY: &str = "genehub-host-local";
 /// to the guest as GENEHUB_CLI.
 pub const ENV_CLI: &str = "GENEHUB_LOCAL_CLI";
 /// The override the shell passes to the daemon it spawns — has to stay the
-/// name the daemon reads (`apps/daemon/src/channel.rs`), or the shell and
+/// name the daemon reads (`packages/frontdoor/src/channel.rs`), or the shell and
 /// the daemon disagree about where the data lives and the shell ends up
 /// adopting the other channel's daemon through a stale endpoint file.
 pub const ENV_DATA_DIR: &str = "GENEHUB_LOCAL_DATA_DIR";

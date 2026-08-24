@@ -8,7 +8,8 @@
 
 use std::fs;
 
-use crate::config::Paths;
+use crate::fs_lock;
+use crate::paths::Paths;
 
 /// The pid in the lock file, if there is a readable one that parses.
 pub fn lock_pid(paths: &Paths) -> Option<u32> {
@@ -29,7 +30,7 @@ pub fn lock_pid(paths: &Paths) -> Option<u32> {
 pub fn lock_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock
         || (error.raw_os_error().is_some()
-            && error.raw_os_error() == crate::fs_lock::lock_contended_error().raw_os_error())
+            && error.raw_os_error() == fs_lock::lock_contended_error().raw_os_error())
 }
 
 /// After a crash the kernel has released the lock, but `endpoint.json` can
@@ -62,9 +63,9 @@ pub fn instance_locked(paths: &Paths) -> std::io::Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    match crate::fs_lock::try_lock_exclusive(&file, paths.lock_file().as_path()) {
+    match fs_lock::try_lock_exclusive(&file, paths.lock_file().as_path()) {
         Ok(()) => {
-            let _ = crate::fs_lock::unlock(&file, paths.lock_file().as_path());
+            let _ = fs_lock::unlock(&file, paths.lock_file().as_path());
             Ok(false)
         }
         Err(error) if lock_contended(&error) => Ok(true),
@@ -134,7 +135,6 @@ unsafe fn libc_kill(pid: i32, signal: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Paths;
 
     #[test]
     fn a_dead_lock_loses_its_endpoint_and_legacy_wasm_cache() {
@@ -164,7 +164,7 @@ mod tests {
             .truncate(false)
             .open(paths.lock_file())
             .unwrap();
-        crate::fs_lock::try_lock_exclusive(&lock, paths.lock_file().as_path()).unwrap();
+        fs_lock::try_lock_exclusive(&lock, paths.lock_file().as_path()).unwrap();
         std::fs::write(paths.endpoint_file(), "{\"port\":1}").unwrap();
 
         reap_stale_runtime(&paths).unwrap();

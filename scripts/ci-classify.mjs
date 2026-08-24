@@ -4,37 +4,52 @@
 // fails safe to the full suite, so a renamed directory can never sneak past
 // the heavy gates.
 //
-// This script does NOT decide the release type. Whether a change ships as a
-// Live Release (Client Component + Web, no reinstall) or must be an App
-// Release (installer) is a runtime fact, decided at publish time by the ABI
-// hash: `publisher/component.mjs` refuses a component whose `appAbiHash`
-// differs from the channel's current one unless an explicit App Release is
-// paired. A path table can only guess at that boundary; the signed hash is
-// the truth. Keeping a second, path-based guess here would let the two
-// disagree, so the release decision has exactly one home.
+// The question that opens the expensive legs: will this change set be *shipped
+// as a new App*? Only two things make that true — an edit to the ABI boundary
+// (`wit/`, which is the digest the publisher signs) or an edit to the App's own
+// sources (host, CLI, desktop shell, native, and the tooling that stamps and
+// packages them). Everything else, including the whole client session protocol,
+// rides out as a Live release against an App that is already installed.
 //
-// The table below is only a test selector. It is derived from the dependency
-// closures:
+// That distinction is a fact, not a policy: `apps/host/src/abi.rs` bakes
+// `sha256(wit/genehub-host.wit)` at compile time, and `publisher/component.mjs`
+// derives Live-vs-App from that signed digest. A change to `packages/proto`
+// cannot move it. This script must not invent a second, stricter answer.
 //
-//   Native closure (ships in the installer):
-//     apps/host (loads the Component), apps/cli (launcher), apps/desktop
-//     (shell + installer), wit/ (ABI hash), scripts/ (stamping/install/
-//     release tooling), Cargo.toml/Cargo.lock (native dependency graph),
-//     packages/native (linked into the Host binary).
+// So there are three tiers, not two:
 //
-//   Component closure (compiled into the Client Component):
-//     apps/guest, apps/guest-probe, apps/daemon + apps/agent,
-//     packages/proto (WebProtocol), packages/http, packages/wasi-guest.
+//   App (`desktop`) — Win/mac matrix, installer, notarization closure. Either
+//   the ABI boundary moved, or a source with platform-specific branches that
+//   ships inside a native binary did. Those branches are the reason a second
+//   and third operating system have to compile it: an owner-only DACL and a
+//   `taskkill` fallback are invisible to a Linux job.
+//     wit/, apps/host, apps/cli, apps/desktop, packages/native,
+//     packages/frontdoor, Cargo.toml/lock, scripts/, .github/.
 //
-//   Hosted (deployed, not installed): apps/relay, packages/workbench.
+//   Linux guard (`rust`) — portable code with no platform branches at all. One
+//   ubuntu job proves it still compiles and its tests still pass; a second and
+//   third operating system would be running the same code path twice more:
+//     packages/proto, packages/identity, packages/http, apps/daemon.
 //
-//   testing/ gates the above but ships nothing itself.
+//   Nothing heavy — build on a Linux box and upload:
+//     apps/guest, apps/guest-probe, apps/agent, packages/wasi-guest,
+//     packages/workbench, apps/relay, testing/, docs.
 //
-// Extra outputs (not jobs) tell later legs what they may skip:
-//   guest         compile genehub_guest.wasm once on Linux
+// `apps/daemon` and `packages/proto` sit in the guard tier because the App no
+// longer links either one: the front door's own vocabulary is `packages/
+// frontdoor` and the protocol generation it stamps is `packages/identity`, so
+// the daemon and the session schema are loaded at run time rather than compiled
+// in (`docs/cli-thin-forwarder.md` §6). Before that split, editing a session
+// message opened three operating systems.
+//
+// Extra outputs:
+//   app           == desktop. The one bit humans should read: are we building
+//                 an App on Windows and macOS this run?
+//   guest         Linux-only wasm compile, and only when a native job needs a
+//                 component to supervise
 //   native_host   Win/mac host rustc + fs_perms
-//   native_cli    Win/mac CLI rustc (the CLI links the daemon crate)
-//   native_daemon Win/mac `cargo test -p genet-daemon --lib`
+//   native_cli    Win/mac CLI rustc
+//   native_daemon leftover Win/mac daemon-lib test (lockfile / force only)
 //
 //   node scripts/ci-classify.mjs --all            every job
 //   node scripts/ci-classify.mjs --stdin          read changed paths, one per line
@@ -57,16 +72,18 @@ const RULES = [
   { match: (f) => f.startsWith("apps/host/"), jobs: ["rust", "desktop"], native: ["host"], why: "Host runtime ships in the installer" },
   { match: (f) => f.startsWith("apps/cli/"), jobs: ["rust", "desktop"], native: ["cli"], why: "CLI/launcher ships in the installer" },
   { match: (f) => f.startsWith("apps/desktop/"), jobs: ["desktop"], native: [], why: "Desktop shell and installer" },
-  { match: (f) => f.startsWith("apps/daemon/"), jobs: ["rust", "desktop"], native: ["cli", "daemon"], why: "compiled into the Component; desktop shares its persistence" },
-  { match: (f) => f.startsWith("apps/agent/"), jobs: ["rust"], native: [], why: "compiled into the Component" },
-  { match: (f) => f.startsWith("apps/guest/") || f.startsWith("apps/guest-probe/"), jobs: ["rust"], native: [], why: "the Client Component itself" },
-  { match: (f) => f.startsWith("apps/relay/"), jobs: ["relay"], native: [], why: "hosted service, deployed not installed" },
-  { match: (f) => f.startsWith("packages/proto/"), jobs: ["rust"], native: ["host"], why: "WebProtocol, absorbed by the adapter window" },
-  { match: (f) => f.startsWith("packages/http/"), jobs: ["rust"], native: ["cli"], why: "HTTP crate linked into the CLI" },
-  { match: (f) => f.startsWith("packages/wasi-guest/"), jobs: ["rust"], native: [], why: "Component closure support crate" },
+  { match: (f) => f.startsWith("apps/daemon/"), jobs: ["rust"], native: [], why: "Client Component; nothing native links it, so a Linux build guard is the whole gate" },
+  { match: (f) => f.startsWith("apps/agent/"), jobs: [], native: [], why: "Client Component; Linux wasm, not a cross-platform App" },
+  { match: (f) => f.startsWith("apps/guest/") || f.startsWith("apps/guest-probe/"), jobs: [], native: [], why: "Client Component; Linux wasm, not a cross-platform App" },
+  { match: (f) => f.startsWith("apps/relay/"), jobs: [], native: [], why: "hosted service; deploy from a Linux box, not App CI" },
+  { match: (f) => f.startsWith("packages/proto/"), jobs: ["rust"], native: [], why: "session protocol: rides inside the Component, no native binary links it" },
+  { match: (f) => f.startsWith("packages/identity/"), jobs: ["rust"], native: [], why: "protocol generation the Host stamps: portable, no platform branches" },
+  { match: (f) => f.startsWith("packages/http/"), jobs: ["rust"], native: [], why: "compiled into the CLI but portable: one OS proves it" },
+  { match: (f) => f.startsWith("packages/frontdoor/"), jobs: ["rust", "desktop"], native: ["cli"], why: "the native front door itself: per-OS locks, permissions and process control" },
+  { match: (f) => f.startsWith("packages/wasi-guest/"), jobs: [], native: [], why: "Client Component support crate" },
   { match: (f) => f.startsWith("packages/native/"), jobs: ["rust", "desktop"], native: ["host"], why: "linked into the Host binary" },
-  { match: (f) => f.startsWith("packages/workbench/"), jobs: ["web"], native: [], why: "the Workbench" },
-  { match: (f) => f.startsWith("testing/"), jobs: ["rust"], native: [], why: "test engineering ships nothing" },
+  { match: (f) => f.startsWith("packages/workbench/"), jobs: [], native: [], why: "Web/workbench; Linux npm build, not App CI" },
+  { match: (f) => f.startsWith("testing/"), jobs: [], native: [], why: "test engineering; run locally, ships nothing" },
   { match: (f) => f.startsWith("scripts/"), jobs: ["rust", "desktop"], native: ["host", "cli"], why: "stamping, installer and release tooling" },
   { match: (f) => f.startsWith("docs/") || f.endsWith(".md") || f.startsWith("LICENSE"), jobs: [], native: [], why: "documentation" },
 ];
@@ -100,17 +117,17 @@ export function classifyFiles(files) {
     for (const native of ALL_NATIVES) natives[native] = true;
   }
 
-  // The web job's mandatory journeys drive a real daemon, agent and relay; a
-  // change on either side of that wire must re-prove them.
-  if (jobs.rust || jobs.relay) jobs.web = true;
-
-  // wasm32-wasip2 is platform-independent. One Linux compile feeds every
-  // job that starts a daemon.
-  const guest = jobs.rust || jobs.desktop || jobs.web;
+  // Any native job needs one Linux wasm to launch supervision against. Tips
+  // that open no native job never reach this.
+  const guest = jobs.rust || jobs.desktop;
+  // Not `rust || desktop`: a Linux build guard is not an App build. Only the
+  // Win/mac matrix produces the thing an App release ships.
+  const app = jobs.desktop;
 
   return {
     ...jobs,
     guest,
+    app,
     native_host: natives.host,
     native_cli: natives.cli,
     native_daemon: natives.daemon,
@@ -141,6 +158,7 @@ function allSuite() {
     web: true,
     desktop: true,
     guest: true,
+    app: true,
     native_host: true,
     native_cli: true,
     native_daemon: true,
@@ -156,9 +174,10 @@ function emit(result) {
     console.error(`  unmatched (fail-safe to full suite): ${result.unmatched.join(", ")}`);
   }
   console.error(
-    `filter: rust=${result.rust} relay=${result.relay} web=${result.web} desktop=${result.desktop} guest=${result.guest} native_host=${result.native_host} native_cli=${result.native_cli} native_daemon=${result.native_daemon}`,
+    `filter: app=${result.app} rust=${result.rust} relay=${result.relay} web=${result.web} desktop=${result.desktop} guest=${result.guest} native_host=${result.native_host} native_cli=${result.native_cli} native_daemon=${result.native_daemon}`,
   );
 
+  console.log(`app=${result.app}`);
   console.log(`rust=${result.rust}`);
   console.log(`relay=${result.relay}`);
   console.log(`web=${result.web}`);

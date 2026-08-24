@@ -3,13 +3,13 @@
 use std::io::{IsTerminal, Read};
 use std::time::Duration;
 
-use genet_daemon::config::Paths;
-use genet_daemon::lifecycle;
+use genet_frontdoor::lifecycle;
+use genet_frontdoor::Paths;
 use genet_http::Client;
 use serde::Deserialize;
 use serde_json::Value;
 
-use genet_daemon::cli_front::output::{self, CliFailure};
+use genet_frontdoor::envelope::CliFailure;
 
 use crate::{fail, EXIT_FAILED};
 
@@ -40,7 +40,7 @@ struct CliRecord {
 pub async fn forward(argv: Vec<String>) -> i32 {
     match stream(argv, piped_stdin(), caller_cwd()).await {
         Ok(code) => code,
-        Err(message) => output::fail(CliFailure::daemon_unavailable(message)),
+        Err(message) => crate::fail_envelope(CliFailure::daemon_unavailable(message)),
     }
 }
 
@@ -108,14 +108,14 @@ async fn stream(argv: Vec<String>, stdin: Vec<u8>, cwd: String) -> Result<i32, S
         .map_err(|error| {
             format!(
                 "{error}; run `{} daemon start`",
-                genet_daemon::channel::CLI_BINARY
+                genet_frontdoor::channel::CLI_BINARY
             )
         })?;
     if !response.status().is_success() {
         return Err(format!(
             "the local daemon refused /cli ({}); run `{} daemon start`",
             response.status(),
-            genet_daemon::channel::CLI_BINARY
+            genet_frontdoor::channel::CLI_BINARY
         ));
     }
 
@@ -174,16 +174,16 @@ fn admission() -> Result<(String, Endpoint), String> {
     let endpoint = read_endpoint(&paths).ok_or_else(|| {
         format!(
             "the daemon is not running; run `{} daemon start`",
-            genet_daemon::channel::CLI_BINARY
+            genet_frontdoor::channel::CLI_BINARY
         )
     })?;
     if !lifecycle::pid_alive(endpoint.pid) {
         return Err(format!(
             "the daemon is not running; run `{} daemon start`",
-            genet_daemon::channel::CLI_BINARY
+            genet_frontdoor::channel::CLI_BINARY
         ));
     }
-    let url = genet_daemon::transport::local::cli_url(
+    let url = genet_frontdoor::proof::cli_url(
         endpoint.port,
         &endpoint.token,
         endpoint.pid,

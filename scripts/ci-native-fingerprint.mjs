@@ -2,8 +2,14 @@
 // Content fingerprint of the native binaries desktop CI may restore from
 // cache. The guest wasm is not here: it is compiled once on Linux.
 //
-//   host  apps/host + packages/native + packages/proto + lockfile
-//   cli   apps/cli + apps/daemon (the CLI links the daemon crate) + packages/http + lockfile
+//   host  apps/host + packages/native + packages/identity + lockfile
+//   cli   apps/cli + packages/frontdoor + packages/native + packages/http + lockfile
+//
+// Every tree is exactly what gets compiled *into* that binary, which is the
+// only thing a content fingerprint can honestly promise. Neither list holds
+// `apps/daemon` or `packages/proto` any more: the daemon is the component the
+// shell loads, not code linked into the shell, and the session schema went with
+// it. That is what the crate split bought — see `docs/cli-thin-forwarder.md` §6.
 //
 // A cache hit is not a test skip. Supervision still runs. A missing binary
 // after a reported hit is a miss: rebuild, do not pretend the gate passed.
@@ -22,13 +28,14 @@ export const TREES = {
     "Cargo.toml",
     "apps/host/",
     "packages/native/",
-    "packages/proto/",
+    "packages/identity/",
   ],
   cli: [
     "Cargo.lock",
     "Cargo.toml",
     "apps/cli/",
-    "apps/daemon/",
+    "packages/frontdoor/",
+    "packages/native/",
     "packages/http/",
   ],
 };

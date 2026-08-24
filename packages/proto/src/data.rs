@@ -14,8 +14,10 @@ use ts_rs::TS;
 use crate::domain::IsolationBackend;
 use crate::rpc::ProtocolError;
 
-/// A clean break from the former connection-wide JSON request protocol.
-pub const DATA_PLANE_VERSION: u32 = 3;
+/// A clean break from the former connection-wide JSON request protocol. Defined
+/// in `genehub-identity` alongside the WebProtocol generation it is deliberately
+/// independent of.
+pub use genehub_identity::DATA_PLANE_VERSION;
 /// Complete GeneHub record, before the WebSocket or DataChannel wrapper.
 pub const MAX_DATA_FRAME_BYTES: usize = 16 * 1024;
 pub const MAX_EXCHANGE_HEAD_BYTES: usize = 8 * 1024;

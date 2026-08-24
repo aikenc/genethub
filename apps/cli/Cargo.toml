@@ -12,8 +12,14 @@ name = "genet-local"
 path = "src/main.rs"
 
 [dependencies]
-genet-daemon = { path = "../daemon" }
+# Not `genet-daemon`. The forwarder's own vocabulary — build identity, the data
+# directory, the lock file, the loopback proofs, the answer envelope — lives in
+# `genet-frontdoor`; the verbs live in the component and arrive over `POST /cli`
+# (`docs/cli-thin-forwarder.md`). Linking the daemon for five modules is what
+# made every session-kernel edit look like a change to the installed App.
+genet-frontdoor = { path = "../../packages/frontdoor" }
 genet-http = { path = "../../packages/http" }
+genet-native = { path = "../../packages/native" }
 
 base64.workspace = true
 futures-util.workspace = true
@@ -23,5 +29,8 @@ serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+# Only the tests link the daemon: they start a real one in-process to assert the
+# forwarder talks to it correctly. Nothing shipped in the binary depends on it.
+genet-daemon = { path = "../daemon" }
 genehub-testing = { path = "../../testing/deprecated/rust" }
 tempfile = "3"

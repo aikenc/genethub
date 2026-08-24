@@ -9,6 +9,8 @@
 
 ```
 packages/proto        ← 会话协议唯一定义处，生成 TS 类型与 Rust 结构
+packages/frontdoor    ← 原生前门词汇：构建身份、磁盘布局与权限、生命周期、控制面证明
+packages/identity     ← 协议世代常量，零依赖
 packages/workbench          ← 工作台（浏览器 / 桌面 / 手机同一份产物）
 apps/daemon           ← Rust：会话内核 + agent adapter 层 + 三种接入通道
 apps/agent            ← Rust：内置 agent（adapter 的一个后端）

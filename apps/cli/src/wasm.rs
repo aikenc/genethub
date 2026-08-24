@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use genet_daemon::channel;
+use genet_frontdoor::channel;
 
 use crate::{fail, EXIT_FAILED};
 

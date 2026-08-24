@@ -9,7 +9,6 @@ description = "What only a native process can answer: OS confinement and where a
 path = "src/lib.rs"
 
 [dependencies]
-genehub-proto = { path = "../proto" }
 anyhow.workspace = true
 
 [target.'cfg(unix)'.dependencies]

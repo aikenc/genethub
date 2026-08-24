@@ -48,9 +48,43 @@ use std::path::{Path, PathBuf};
 #[cfg(not(target_family = "wasm"))]
 use anyhow::anyhow;
 use anyhow::Result;
-use genehub_proto::IsolationBackend;
-#[cfg(not(target_family = "wasm"))]
-use genehub_proto::IsolationInfo;
+
+/// The operating system confinement this machine can put a spawned process in.
+///
+/// Defined here rather than imported from the session protocol, because this is
+/// the layer that finds out: the answer comes from probing a kernel, and
+/// everything else — the wire type in `genehub-proto`, the WIT enum the shell
+/// hands the guest — is a translation of what this module discovered. Importing
+/// the wire type instead meant every native binary that merely confines a
+/// process also compiled the whole client session schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationBackend {
+    Landlock,
+    /// Unprivileged user and mount namespaces: a filesystem view built to hold
+    /// only what the caller is allowed to see. Older than Landlock by a
+    /// decade, and the only thing available on a kernel that predates it.
+    Namespaces,
+    Seatbelt,
+    AppContainer,
+    None,
+}
+
+/// What this machine can actually hold a process to, right now.
+///
+/// Reported rather than promised. A caller decides whether to run something it
+/// does not fully trust by reading this, so it has to describe what is in force
+/// on this kernel — not what the build supports and not what a configuration
+/// file asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolationInfo {
+    pub backend: IsolationBackend,
+    /// Whether a confined process would really be confined. False means every
+    /// request that needs confinement is refused, never quietly downgraded.
+    pub enforced: bool,
+    /// Why, in a sentence a person can act on. Present whether or not it worked,
+    /// because "landlock, abi 4" is as worth saying as "kernel 5.4 has none".
+    pub detail: String,
+}
 
 /// The hidden argv entry that turns a native front door into the confining
 /// wrapper. Handled by `apps/cli` and by the wasm shell, so that whichever one

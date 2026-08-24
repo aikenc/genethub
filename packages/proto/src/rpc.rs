@@ -9,16 +9,11 @@ use crate::event::{PermissionOutcome, SequencedEvent};
 use crate::speech::*;
 use crate::timeline::Attachment;
 
-/// Bumped when a change would break an older client. Clients that see a version
-/// they do not know must refuse to connect rather than guess.
-///
-/// WebProtocol version spoken by Web/CLI clients. It deliberately does not
-/// inherit the binary carrier version: either side may evolve without turning
-/// a protocol adapter into a data-plane upgrade.
-pub const WEB_PROTOCOL_VERSION: u32 = 3;
-/// Lean carrier method that returns `{ webProtocol }` before the first
-/// business RPC. It is not a `Request` variant.
-pub const PROTOCOL_IDENTITY_METHOD: &str = "protocol.identity";
+/// The generation numbers live in `genehub-identity` so that a build which only
+/// states which protocol it speaks — the native host, stamping an artifact
+/// envelope — does not link this whole schema to do it. Re-exported here
+/// because this crate stays the one import for anybody who wants the types too.
+pub use genehub_identity::{PROTOCOL_IDENTITY_METHOD, WEB_PROTOCOL_VERSION};
 /// Maximum typed RPC body accepted before it is divided into bounded v3 data
 /// frames.
 pub const MAX_RPC_BODY_BYTES: usize = 2_900_000;

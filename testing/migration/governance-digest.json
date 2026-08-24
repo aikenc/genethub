@@ -1,6 +1,6 @@
 {
   "schema": "genehub.governance-digest.v1",
-  "digest": "a708bab064c2125465a90ec25d517dda41fce7a425412042b5cae1e2e4bfba29",
+  "digest": "7500d94fda8f411f502c303a53123edc49e12c40d3b99279ce95c8e4e25c4bda",
   "files": [
     "docs/testing/engineering-principles.md",
     "docs/testing/engineering-laws.md"

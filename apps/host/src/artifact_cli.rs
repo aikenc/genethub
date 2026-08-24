@@ -103,7 +103,7 @@ fn pack(
         artifact_channel,
         version.to_string(),
         abi::hex_digest(&abi::host_digest()),
-        genehub_proto::WEB_PROTOCOL_VERSION,
+        genehub_identity::WEB_PROTOCOL_VERSION,
         key_id,
         &component,
     )

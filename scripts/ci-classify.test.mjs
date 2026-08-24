@@ -1,14 +1,21 @@
 // Table-driven contract for the CI classifier. Every row is a promise about
-// which heavy jobs a change set must re-prove. The workflow runs these tests
-// before trusting the classifier's output.
+// which of the three tiers a change set lands in: an App build on Windows and
+// macOS, a single Linux build guard, or nothing heavy at all. The workflow runs
+// these tests before trusting the classifier's output.
 //
-// The classifier is only a test selector. It does NOT decide the release
-// type: Live vs App is a runtime fact the publisher derives from the signed
-// ABI hash (see `publisher/component.mjs`), so no row here asserts one.
+// The classifier is only a job selector. It does NOT decide Live vs App
+// release: that is a runtime fact the publisher derives from the signed ABI
+// hash (see `publisher/component.mjs`), so no row here asserts a release type.
 //
 // Rows that guard real past gaps are marked [regression]:
 //   - apps/proto never existed; the protocol crate is packages/proto
 //   - wit/, apps/guest, scripts/ matched nothing and ran zero heavy jobs
+//   - a session-protocol edit opened the Windows and macOS matrix, which no
+//     edit under packages/proto can ever justify: the digest host bakes in is
+//     sha256 of wit/, so the installed App keeps pairing with the new component
+//   - the same for the daemon crate, which the CLI used to link for five
+//     modules; those modules are `packages/frontdoor` now, and nothing native
+//     links the daemon at all
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -20,6 +27,7 @@ const ALL = {
   web: true,
   desktop: true,
   guest: true,
+  app: true,
   native_host: true,
   native_cli: true,
   native_daemon: true,
@@ -30,52 +38,53 @@ const NONE = {
   web: false,
   desktop: false,
   guest: false,
+  app: false,
   native_host: false,
   native_cli: false,
   native_daemon: false,
 };
 
 const CASES = [
-  // --- Native closure: ships in the installer, runs the heavy gates ---
+  // --- App closure: ships in the installer, needs cross-platform CI ---
   {
     name: "[regression] WIT change runs rust+desktop",
     files: ["wit/genehub-host.wit"],
-    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true },
+    want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_host: true },
   },
   {
     name: "host runtime change runs rust+desktop",
     files: ["apps/host/src/update.rs"],
-    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true },
+    want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_host: true },
   },
   {
     name: "CLI change runs rust+desktop",
     files: ["apps/cli/src/control.rs"],
-    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_cli: true },
+    want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_cli: true },
   },
   {
-    name: "desktop shell change runs desktop without rust or native rustc",
+    name: "desktop shell change runs desktop without rust",
     files: ["apps/desktop/src-tauri/src/main.rs"],
-    want: { ...NONE, desktop: true, guest: true },
+    want: { ...NONE, desktop: true, guest: true, app: true },
   },
   {
     name: "[regression] channel stamping script runs rust+desktop",
     files: ["scripts/channel.mjs"],
-    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true, native_cli: true },
+    want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_host: true, native_cli: true },
   },
   {
     name: "installer script runs rust+desktop",
     files: ["scripts/install.sh"],
-    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true, native_cli: true },
+    want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_host: true, native_cli: true },
   },
   {
     name: "workspace Cargo.lock runs rust+desktop",
     files: ["Cargo.lock"],
-    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true, native_cli: true, native_daemon: true },
+    want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_host: true, native_cli: true, native_daemon: true },
   },
   {
     name: "packages/native links into the Host binary",
     files: ["packages/native/src/fs.rs"],
-    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true },
+    want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_host: true },
   },
   {
     name: "workflow edits force the full suite",
@@ -83,60 +92,76 @@ const CASES = [
     want: { ...ALL },
   },
 
-  // --- Component closure: compiled into the Client Component ---
+  // --- Linux guard only: compiled into a native binary, cannot move the ABI ---
   {
-    name: "[regression] protocol crate change runs rust",
-    files: ["packages/proto/src/lib.rs"],
-    want: { ...NONE, rust: true, web: true, guest: true, native_host: true },
+    name: "[regression] session protocol change gets a Linux guard, not the App matrix",
+    files: ["packages/proto/src/rpc.rs"],
+    want: { ...NONE, rust: true, guest: true },
   },
   {
-    name: "[regression] guest component change runs rust",
-    files: ["apps/guest/src/lib.rs"],
-    want: { ...NONE, rust: true, web: true, guest: true },
-  },
-  {
-    name: "daemon change runs rust+desktop",
+    name: "[regression] daemon change gets a Linux guard, not the App matrix",
     files: ["apps/daemon/src/adapter/claude.rs"],
-    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_cli: true, native_daemon: true },
+    want: { ...NONE, rust: true, guest: true },
   },
   {
-    name: "agent change runs rust",
-    files: ["apps/agent/src/main.rs"],
-    want: { ...NONE, rust: true, web: true, guest: true },
-  },
-  {
-    name: "http support crate runs rust",
+    name: "http support crate is portable, so one operating system proves it",
     files: ["packages/http/src/client.rs"],
-    want: { ...NONE, rust: true, web: true, guest: true, native_cli: true },
+    want: { ...NONE, rust: true, guest: true },
+  },
+
+  {
+    name: "protocol generation crate is portable: Linux guard only",
+    files: ["packages/identity/src/lib.rs"],
+    want: { ...NONE, rust: true, guest: true },
+  },
+
+  // --- App: platform-specific code that ships inside a native binary ---
+  {
+    name: "the native front door opens the App matrix: its code is per-OS",
+    files: ["packages/frontdoor/src/perms.rs"],
+    want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_cli: true },
+  },
+  {
+    name: "stamping the build identity is an App change, not a Live one",
+    files: ["packages/frontdoor/src/channel.rs"],
+    want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_cli: true },
+  },
+
+  // --- Nothing heavy: Client Component / Web / tests ---
+  {
+    name: "[regression] guest component change does not open App CI",
+    files: ["apps/guest/src/lib.rs"],
+    want: { ...NONE },
+  },
+  {
+    name: "agent change does not open App CI",
+    files: ["apps/agent/src/main.rs"],
+    want: { ...NONE },
   },
   {
     name: "wasi-guest crate is component-only",
     files: ["packages/wasi-guest/src/lib.rs"],
-    want: { ...NONE, rust: true, web: true, guest: true },
+    want: { ...NONE },
   },
-
-  // --- Hosted: deployed, not installed ---
   {
-    name: "workbench-only change runs web only",
+    name: "workbench-only change does not open App CI",
     files: ["packages/workbench/src/session/Timeline.tsx"],
-    want: { ...NONE, web: true, guest: true },
+    want: { ...NONE },
   },
   {
-    name: "relay change runs relay and re-proves the web journeys",
+    name: "relay change does not open App CI",
     files: ["apps/relay/src/main.ts"],
-    want: { ...NONE, relay: true, web: true, guest: true },
+    want: { ...NONE },
   },
-
-  // --- Benign and fail-safe ---
   {
     name: "documentation-only change runs nothing",
     files: ["docs/architecture.md", "README.md"],
     want: { ...NONE },
   },
   {
-    name: "test engineering change runs rust",
+    name: "test engineering change does not open App CI",
     files: ["testing/journeys/session.test.ts"],
-    want: { ...NONE, rust: true, web: true, guest: true },
+    want: { ...NONE },
   },
   {
     name: "[regression] an unmatched path fails safe to the full suite",
@@ -144,16 +169,21 @@ const CASES = [
     want: { ...ALL },
   },
 
-  // --- Composition rules ---
+  // --- Composition: the highest tier any single path reaches wins ---
   {
-    name: "one native path escalates a whole change set to rust+desktop",
+    name: "one App path escalates a whole change set to the Win/mac matrix",
     files: ["packages/workbench/src/App.tsx", "wit/genehub-host.wit"],
-    want: { ...NONE, rust: true, web: true, desktop: true, guest: true, native_host: true },
+    want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_host: true },
   },
   {
-    name: "workbench + protocol runs web+rust",
-    files: ["packages/workbench/src/App.tsx", "packages/proto/src/lib.rs"],
-    want: { ...NONE, rust: true, web: true, guest: true, native_host: true },
+    name: "workbench + session protocol stops at the Linux guard",
+    files: ["packages/workbench/src/App.tsx", "packages/proto/src/rpc.rs"],
+    want: { ...NONE, rust: true, guest: true },
+  },
+  {
+    name: "session protocol alongside a Host edit is App, because the Host edit is",
+    files: ["packages/proto/src/rpc.rs", "apps/host/src/update.rs"],
+    want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_host: true },
   },
 ];
 
@@ -165,6 +195,7 @@ for (const { name, files, want } of CASES) {
     assert.equal(got.web, want.web, "web");
     assert.equal(got.desktop, want.desktop, "desktop");
     assert.equal(got.guest, want.guest, "guest");
+    assert.equal(got.app, want.app, "app");
     assert.equal(got.native_host, want.native_host, "native_host");
     assert.equal(got.native_cli, want.native_cli, "native_cli");
     assert.equal(got.native_daemon, want.native_daemon, "native_daemon");
@@ -208,6 +239,7 @@ test("empty change set runs nothing", () => {
       web: got.web,
       desktop: got.desktop,
       guest: got.guest,
+      app: got.app,
       native_host: got.native_host,
       native_cli: got.native_cli,
       native_daemon: got.native_daemon,
@@ -217,8 +249,21 @@ test("empty change set runs nothing", () => {
 });
 
 test("the classifier emits no release-type field", () => {
-  // Live vs App is decided by the publisher's ABI-hash gate, not here. This
-  // pins the boundary so a path-based release guess cannot creep back in.
+  // Live vs App *release* is decided by the publisher's ABI-hash gate, not
+  // here. `app` is only "does GitHub need to compile a cross-platform App".
   const got = classifyFiles(["wit/genehub-host.wit"]);
   assert.equal("releaseType" in got, false);
+  assert.equal(got.app, true);
+});
+
+test("a Linux build guard is never reported as an App build", () => {
+  // `app` drives whether the Windows and macOS legs spin up at all, so it must
+  // track `desktop` alone. Reading it as `rust || desktop` is what put a
+  // session-protocol edit on three operating systems.
+  for (const file of ["packages/proto/src/rpc.rs", "packages/http/src/client.rs", "apps/daemon/src/lib.rs"]) {
+    const got = classifyFiles([file]);
+    assert.equal(got.rust, true, `${file} must still prove it compiles`);
+    assert.equal(got.desktop, false, `${file} must not open the Win/mac matrix`);
+    assert.equal(got.app, false, `${file} is not an App build`);
+  }
 });

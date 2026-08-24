@@ -125,7 +125,10 @@ impl AppState {
         let homes = WorkspaceHomes::default();
         let store = Store::new(homes.clone());
         let diagnostics = Arc::new(crate::diagnostics::Diagnostics::new());
-        let skills_dir = paths.skills_dir();
+        // Asked of the Skills module rather than of `Paths`: which directory
+        // daemon-owned Skills land in is this crate's business, and the layout
+        // the front door shares has no reason to know about them.
+        let skills_dir = crate::skills::skills_dir(&paths.root);
         let _ = crate::skills::materialize(&skills_dir);
         let sessions = SessionManager::new_with_diagnostics(
             store,

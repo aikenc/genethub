@@ -1,0 +1,38 @@
+[package]
+name = "genet-frontdoor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The native front door: build identity, on-disk layout, daemon lifecycle and loopback control-plane proofs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+dirs = "6"
+hmac.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+uuid.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+fs2.workspace = true
+
+# The guest has no lock types and no permission bits, so it asks the shell for
+# both. Native builds — the CLI among them — never compile this arm.
+[target.'cfg(target_family = "wasm")'.dependencies]
+genet-wasi = { path = "../wasi-guest" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
