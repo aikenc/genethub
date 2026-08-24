@@ -308,7 +308,7 @@ fn platform_key() -> String {
 /// line to ship.
 fn is_newer(current: &str, latest: &str) -> bool {
     // A build the release workflow never stamped calls itself 0.0.0
-    // (`scripts/version.mjs`), and it is behind nothing: whoever compiled it has
+    // (`scripts/stamp-version.mjs`), and it is behind nothing: whoever compiled it has
     // the source in front of them, and pointing that person at an installer is
     // telling them to replace their own tree with an older one.
     if parts(current).iter().all(|piece| *piece == 0) {

@@ -7,7 +7,7 @@ import type {
 import { useEffect, useState } from "react";
 
 import { BUILD } from "../build";
-import { CHANNEL } from "../channel";
+import { CHANNEL, type ReleaseChannel } from "../channel";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
 import type { RtcState } from "../protocol/client";
@@ -507,7 +507,7 @@ function Appearance() {
  * What an unstamped build calls itself.
  *
  * The version in the repository is 0.0.0 and the release workflow writes the tag
- * in as it builds (`scripts/version.mjs`), so this is the number every build made
+ * in as it builds (`scripts/stamp-version.mjs`), so this is the number every build made
  * from source reports — and printing it as "0.0.0" would read as a real release,
  * the very confusion the placeholder exists to avoid.
  */
@@ -517,11 +517,11 @@ const UNRELEASED = "0.0.0";
 // are two lines that never compare against each other, and the prefix is what
 // keeps a screenshot of this page from being read as the other line
 // (`scripts/channel.mjs` stamps CHANNEL in, like the version).
-const PREFIX: Record<string, string> = {
-  official: "正式版 ",
-  beta: "Beta版 ",
-  alpha: "Alpha版 ",
+const PREFIX: Record<ReleaseChannel, string> = {
+  local: "",
   dev: "开发版 ",
+  beta: "Beta版 ",
+  stable: "正式版 ",
 };
 const devSuffix = () =>
   CHANNEL === "dev" && import.meta.env.VITE_GENEHUB_DEV_NAME ? ` ${import.meta.env.VITE_GENEHUB_DEV_NAME}` : "";

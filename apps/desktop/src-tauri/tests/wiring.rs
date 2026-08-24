@@ -454,7 +454,7 @@ fn desktop_bundling_is_explicitly_limited_to_windows_and_macos() {
 /// a release.
 ///
 /// Three files have to carry a literal — Cargo needs one, the installer needs one
-/// — and all three are written by `scripts/version.mjs` from the tag as the release
+/// — and all three are written by `scripts/stamp-version.mjs` from the tag as the release
 /// is built. In the tree they stay at 0.0.0, "never released", because the version
 /// a human maintains is the version that goes wrong: these sat at 0.1.0 through
 /// seventeen tagged releases while every installed copy reported 0.1.0 to its own
@@ -465,7 +465,7 @@ fn desktop_bundling_is_explicitly_limited_to_windows_and_macos() {
 #[test]
 fn nothing_in_the_tree_claims_to_be_a_release() {
     const UNRELEASED: &str = "0.0.0";
-    let stamper = repo().join("scripts/version.mjs");
+    let stamper = repo().join("scripts/stamp-version.mjs");
     let script = std::fs::read_to_string(&stamper).expect("read the stamping script");
 
     let carriers = [
@@ -487,7 +487,7 @@ fn nothing_in_the_tree_claims_to_be_a_release() {
         assert_eq!(
             version, UNRELEASED,
             "{path} says {version}, which is a claim about a release that this \
-             checkout cannot make — the tag is the version (scripts/version.mjs)"
+             checkout cannot make — the tag is the version (scripts/stamp-version.mjs)"
         );
         assert!(
             script.contains(path),
@@ -499,7 +499,7 @@ fn nothing_in_the_tree_claims_to_be_a_release() {
 
 /// The product's channel works the way its version does: the tree says
 /// `local`, and a release is the workflow stamping its channel in
-/// (`scripts/channel.mjs`, modelled on `scripts/version.mjs`).
+/// (`scripts/channel.mjs`, modelled on `scripts/stamp-version.mjs`).
 ///
 /// Checked here for the same reason as the version: a tree accidentally
 /// committed half-stamped for a release channel is a release that renames

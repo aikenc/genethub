@@ -154,7 +154,7 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 
 **这条约束的顺带好处**：桌面端 UI 和浏览器工作台是**同一套前端代码**（`packages/workbench`），一次实现两处运行，差异只有一层薄薄的能力适配（见 §4.2）。
 
-验收方式：桌面配置只允许把 launcher、host、guest 与静态 Web 产物放进 bundle；Windows/macOS CI 都应编译外壳并运行真实 daemon 的 start/adopt/stop 监督测试。发布流水线还必须直接启动将要随包发布的三件套，确认 guest 真能报出端口——装得上但跑不起来的包，不能等用户安装后才发现。当前 Windows host 的 `fs-perms` 仍返回 `Unsupported`，而 guest 首启强制收紧数据目录；修好 Windows ACL 并跑过三件套首启前，Windows WASM 包不能视为可发布。
+验收方式：桌面配置只允许把 launcher、host、guest 与静态 Web 产物放进 bundle；Windows/macOS CI 都应编译外壳并运行真实 daemon 的 start/adopt/stop 监督测试。发布流水线还必须直接启动将要随包发布的三件套，确认 guest 真能报出端口——装得上但跑不起来的包，不能等用户安装后才发现。Windows host 的 owner-only ACL 已实现，`ci.yml` desktop 腿在 NTFS 上跑 `fs_perms::tests`；在待发布三件套跑过安装后首启与主旅程之前，Windows WASM 包仍不能视为可发布。
 
 ### 4.2 同一套前端，两种宿主
 

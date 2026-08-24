@@ -2,7 +2,7 @@
 
 > 用户 PC 上唯一的常驻业务服务。Rust 业务代码编进 `genehub_guest.wasm`，由原生 `genehub-host` 常驻装载；随桌面端或 Linux 三件套分发。
 > 上位文档：[architecture.md](./architecture.md)。本文只展开 daemon 内部。
-> 状态（2026-08-22）：默认 WASM、Fabric/RTC 与 Linux 能力 parity 已落地；Windows host 的 owner-only ACL 仍阻断默认 WASM 首启。组件自动更新、签名与无损切换也尚未落地，见 [roadmap.md](./roadmap.md)“WASM 持续交付”。
+> 状态（2026-08-24）：默认 WASM、Fabric/RTC 与 Linux 能力 parity 已落地；Windows host 的 owner-only ACL 已实现，并在 GitHub `windows-latest` 上跑过 `fs_perms::tests`。尚未用待发布三件套关闭 Windows 安装后首启与主旅程。组件自动更新、签名与无损切换也尚未落地，见 [roadmap.md](./roadmap.md)“WASM 持续交付”。
 
 ---
 

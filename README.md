@@ -54,8 +54,9 @@ GeneHub Agent 随安装包提供，配置 Anthropic 或 OpenAI-compatible 模型
 两条工程纪律支撑上面四条：**信任来自可核对的边界**——数据存在哪里、远程连接经过什么组件、设备如何
 获得授权，都写在代码和文档里，开源侧不依赖官方服务也能独立部署；**业务更新不该变成用户的安装任务**
 ——目标是 95% 的产品 change set 只更新 WASM guest 与工作台，stable 分钟级、beta/dev 秒级，
-后台验签、切换和失败回滚。当前 Linux/dev 运行时底座已验证，Windows owner-only ACL 与自动交付链仍在
-[roadmap](./docs/roadmap.md) 推进；在测量系统建立之前，95% 与分钟级都是目标而不是已达成的状态。
+后台验签、切换和失败回滚。当前 Linux/dev 运行时底座已验证，Windows owner-only ACL 已在 host 实现并经
+CI 的 NTFS 单测覆盖；安装后主旅程与自动交付链仍在 [roadmap](./docs/roadmap.md) 推进。在测量系统建立
+之前，95% 与分钟级都是目标而不是已达成的状态。
 
 ## 快速开始
 

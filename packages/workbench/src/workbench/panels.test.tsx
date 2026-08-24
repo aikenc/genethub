@@ -9,7 +9,7 @@ import { FilesPanel } from "../files/FilesPanel";
 import { LogsPanel } from "../logs/LogsPanel";
 import type { Client } from "../protocol/client";
 import { SettingsPanel } from "../settings/SettingsPanel";
-import { CHANNEL } from "../channel";
+import { CHANNEL, type ReleaseChannel } from "../channel";
 import { useWorkbench } from "../session/store";
 import { UI_SCALE_KEY, useUiScale } from "../theme/scale";
 import { browserHost } from "../host";
@@ -709,8 +709,14 @@ describe("speech settings", () => {
 
 describe("the version section", () => {
   // The prefix is the tree's channel, not a pinned one: the tree stamps
-  // `dev`, a release build stamps its own, and either is correct.
-  const prefix = { official: "正式版", beta: "Beta版", alpha: "Alpha版", dev: "开发版" }[CHANNEL];
+  // `local`, a release build stamps its own, and either is correct.
+  const PREFIX: Record<ReleaseChannel, string> = {
+    local: "",
+    dev: "开发版 ",
+    beta: "Beta版 ",
+    stable: "正式版 ",
+  };
+  const shownVersion = `${PREFIX[CHANNEL]}0.1.17`;
 
   /** A shell that knows its own build, the way the desktop one does. */
   function desktopish(version: string, opened: string[] = []) {
@@ -749,8 +755,8 @@ describe("the version section", () => {
 
     render(<SettingsPanel host={desktopish("0.1.17")} />);
 
-    expect(await screen.findByTestId("app-version")).toHaveTextContent(`${prefix} 0.1.17`);
-    expect(screen.getByTestId("daemon-version")).toHaveTextContent(`daemon ${prefix} 0.1.17`);
+    expect(await screen.findByTestId("app-version")).toHaveTextContent(shownVersion);
+    expect(screen.getByTestId("daemon-version")).toHaveTextContent(`daemon ${shownVersion}`);
     // The page is a third artefact, deployed on its own schedule, and the two
     // numbers above say nothing about it. An hour went once on a phone that was
     // three releases behind while the screen said "daemon 0.1.21" and looked
@@ -852,7 +858,7 @@ describe("the version section", () => {
 
   /**
    * What every build from source looks like: the tree carries 0.0.0 and only the
-   * release workflow stamps a real number in (`scripts/version.mjs`). Printing
+   * release workflow stamps a real number in (`scripts/stamp-version.mjs`). Printing
    * "0.0.0" would read as a release, and telling that person to go and install an
    * installer would be telling them to replace their own tree with an older one.
    */
@@ -885,7 +891,7 @@ describe("the version section", () => {
     expect(screen.queryByText("已经是最新的了。")).toBeNull();
   });
 
-  it("adds the isolated dev branch name to both source-built versions", async () => {
+  it("does not treat a local source build as a named Dev slot", async () => {
     vi.stubEnv("VITE_GENEHUB_DEV_NAME", "dev-ui");
     const stub = stubDaemon({
       "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
@@ -902,8 +908,12 @@ describe("the version section", () => {
 
     render(<SettingsPanel host={desktopish("0.0.0")} />);
 
-    expect(await screen.findByTestId("app-version")).toHaveTextContent("应用 开发版 dev-ui");
-    expect(screen.getByTestId("daemon-version")).toHaveTextContent("daemon 开发版 dev-ui");
+    // The tree stamps `local`. The isolated-branch suffix is only for a
+    // stamped `dev` build (`CHANNEL === "dev"`); leaking it here would make
+    // every source checkout look like a named Dev slot.
+    expect(await screen.findByTestId("app-version")).toHaveTextContent("应用 开发版");
+    expect(screen.getByTestId("daemon-version")).toHaveTextContent("daemon 开发版");
+    expect(screen.queryByText(/dev-ui/)).toBeNull();
     vi.unstubAllEnvs();
   });
 
@@ -968,7 +978,7 @@ describe("the version section", () => {
 
     render(<SettingsPanel host={browserHost()} />);
 
-    expect(await screen.findByTestId("daemon-version")).toHaveTextContent(`daemon ${prefix} 0.1.17`);
+    expect(await screen.findByTestId("daemon-version")).toHaveTextContent(`daemon ${shownVersion}`);
     expect(screen.queryByTestId("app-version")).toBeNull();
   });
 });

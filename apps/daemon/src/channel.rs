@@ -3,7 +3,7 @@
 //! Written wholesale by `scripts/channel.mjs` — edit that script, not this
 //! file. The tree always says `local`; a release build is the workflow
 //! stamping its channel in before it compiles, exactly the way
-//! `scripts/version.mjs` stamps the version.
+//! `scripts/stamp-version.mjs` stamps the version.
 
 // Not every build reads every name below; the module is the whole menu so
 // that adding a consumer never means editing the generator.
