@@ -170,13 +170,14 @@ agent_end                {messages}
 
 遵循开放的 [Agent Skills 标准](https://agentskills.io/specification)，为别的工具写的技能目录可以直接拿来用：
 
-- 发现路径：项目 `.genehub/skills/`、用户级 agent 目录、共享的 `.agents/skills`；目录内含 `SKILL.md` 即视为技能根，不再向下递归；尊重 `.gitignore` / `.ignore` / `.fdignore`
+- 发现路径：daemon 的 `GENEHUB_SKILLS_DIR`（若已设置）、项目 `.genehub/skills/`、用户级 agent 目录、共享的 `.agents/skills`；目录内含 `SKILL.md` 即视为技能根，不再向下递归；尊重 `.gitignore` / `.ignore` / `.fdignore`
 - frontmatter：`name`（缺省用父目录名，≤64 字符）、`description`（必填，≤1024 字符）、`disable-model-invocation`
 - 注入：把「名称 + 描述」清单写进系统提示；技能正文在被调用时才读入，避免撑爆上下文
 - 相对路径：技能文件里的相对路径按 `SKILL.md` 所在目录解析
 - 同时通过 `get_commands` 暴露为 `/skill:<name>`，`source: "skill"`
-- 内建 `genehub-session-history` 会物化到 Agent 数据目录的 `builtin-skills/`，保证按需 `read` 有真实路径；用户或项目同名 Skill 优先，可覆盖内建 fallback
-- `/skill:genehub-session-history [goal]` 可强制加载完整 SOP；普通会话只注入名称、描述和路径
+- 跨 Agent 的 `genehub-session-history` 由 daemon 物化并注入，不在 Agent 内建目录里；`GENEHUB_SKILLS_DIR` 里的同名 Skill 不可被项目覆盖
+- Agent 仍物化自己的 `genehub-speech-runtime`；用户或项目同名 Skill 可覆盖这类 Agent 本地 fallback
+- `/skill:genehub-session-history [goal]` 在 daemon 会话里强制加载同一份 SOP；普通会话只注入名称、描述和路径
 
 ---
 

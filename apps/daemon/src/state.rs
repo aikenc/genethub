@@ -125,12 +125,15 @@ impl AppState {
         let homes = WorkspaceHomes::default();
         let store = Store::new(homes.clone());
         let diagnostics = Arc::new(crate::diagnostics::Diagnostics::new());
+        let skills_dir = paths.skills_dir();
+        let _ = crate::skills::materialize(&skills_dir);
         let sessions = SessionManager::new_with_diagnostics(
             store,
             registry.clone(),
             config.replay_window,
             diagnostics.clone(),
-        );
+        )
+        .with_skills_dir(skills_dir);
 
         let config = Arc::new(RwLock::new(config));
         let workspaces = Workspaces::new(config.clone(), paths.config_file(), homes);

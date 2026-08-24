@@ -2605,6 +2605,7 @@ mod tests {
             .start(SessionConfig {
                 effort_id: None,
                 additional_system_prompt: None,
+                skills_dir: None,
                 session_id: "s1".into(),
                 cwd: dir.path().to_path_buf(),
                 model_id: None,

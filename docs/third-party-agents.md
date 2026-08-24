@@ -60,7 +60,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 
 ### 2.3 产品系统上下文
 
-所有 adapter 接收同一个 `SessionConfig.additional_system_prompt`，但上层不认识任何 CLI 的私有字段。当前用途是 Asset Preview 产物链接：浏览器按自己真实的 origin + deployment channel + device + workspace 组成结构化 prefix，daemon 校验后生成固定规范，再交给 adapter。
+所有 adapter 接收同一个 `SessionConfig.additional_system_prompt`，但上层不认识任何 CLI 的私有字段。当前用途是两段固定产品上下文：Asset Preview 路径链接规则，以及 daemon 内置 Skill 目录（名称、描述、可 `read` 的绝对路径）。Skill 文件物化在 daemon 数据目录，不放在 PipeSpace 里。浏览器按自己真实的 origin + deployment channel + device + workspace 组成结构化 prefix，daemon 校验后只保留路径链接规则，再与 Skill 目录一起交给 adapter。
 
 | Agent | adapter 映射 |
 |---|---|

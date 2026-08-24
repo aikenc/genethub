@@ -9,7 +9,7 @@ interface ImportMetaEnv {
   readonly VITE_GENEHUB_HUB_URL?: string;
   /** Identifies one isolated source-tree deployment, for example `dev-ui`. */
   readonly VITE_GENEHUB_LOCAL_NAME?: string;
-  /** Hosted Vite override for the dest-stamped release channel. */
+  /** Hosted Vite override for the dev/beta/stable release channel. */
   readonly VITE_GENEHUB_CHANNEL?: string;
   /** Hosted Vite override for the on-screen product name. */
   readonly VITE_GENEHUB_BRAND?: string;

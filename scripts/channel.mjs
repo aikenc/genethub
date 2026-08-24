@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-// The release channel of the product, written in at build time.
+// The product build identity, written at build time.
 //
-// Four identities of the product exist — `local` (what the source tree claims
-// to be), the deployable internal line `dev`, the `beta` prerelease line, and
-// the `stable` release — and the released three must coexist on one machine
+// Three release channels exist: `dev`, `beta`, and `stable`. The source tree
+// uses a fourth, non-release build identity, `local`. The released three must coexist on one machine
 // without sharing processes, data directories, environment variables or
 // update feeds (`docs/version-management.md` in genethub-cloud). Everything
 // that makes a build belong to one of them is derived here, from one table,
@@ -22,7 +21,7 @@
 // two `[[bin]]` names, installer.nsh, install.sh) carry marked lines this
 // script rewrites in place, the same portable way stamp-version.mjs does.
 //
-//   node scripts/channel.mjs local|stable|beta|dev   stamp the tree for a channel
+//   node scripts/channel.mjs local|stable|beta|dev   stamp the tree for a build identity
 //   node scripts/channel.mjs --from-tag              stamp from the tag being built, if there is one
 //   node scripts/channel.mjs --show                  print the channel the tree is stamped for
 
@@ -33,7 +32,7 @@ import { fileURLToPath } from "node:url";
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const usage = () => {
-  console.error(`  node scripts/channel.mjs local|stable|beta|dev   stamp the tree for a channel
+  console.error(`  node scripts/channel.mjs local|stable|beta|dev   stamp the tree for a build identity
   node scripts/channel.mjs --from-tag              stamp from the tag being built, if there is one
   node scripts/channel.mjs --show                  print the channel the tree is stamped for`);
 };
@@ -240,7 +239,7 @@ const value = (key, channel) => {
   return row[channel];
 };
 
-const CHANNEL_TYPE = '"local" | "dev" | "beta" | "stable"';
+const BUILD_IDENTITY_TYPE = '"local" | "dev" | "beta" | "stable"';
 
 // One line replaced at a time, matching only what the marker comments
 // promise — a replace that silently matches nothing is how a channel ships
@@ -299,7 +298,7 @@ const rustModule = (channel) => {
 // rustfmt's line budget, and CI rejects a tree rustfmt would rewrite.
 pub const DEFAULT_MANIFEST_URL: &str =
     "${manifestUrl}";`;
-  return `//! Which release channel this build belongs to.
+  return `//! Build identity: \`local\` for a source tree, otherwise the release channel.
 //!
 //! Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
 //! file. The tree always says \`local\`; a release build is the workflow
@@ -360,7 +359,7 @@ pub const WEB_APP_URL: &str = "${value("web_app_url", channel)}";
 `;
 };
 
-const agentModule = (channel) => `//! Which release channel this build belongs to.
+const agentModule = (channel) => `//! Build identity: \`local\` for a source tree, otherwise the release channel.
 //!
 //! Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
 //! file. The daemon has the full set of names; the agent only needs to find
@@ -383,7 +382,7 @@ pub const ENV_HOST_PID: &str = "${value("env_host_pid", channel)}";
 pub const ENV_CWD: &str = "${value("env_cwd", channel)}";
 `;
 
-const hostModule = (channel) => `//! Which release channel this build belongs to.
+const hostModule = (channel) => `//! Build identity: \`local\` for a source tree, otherwise the release channel.
 //!
 //! Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
 //! file. The shell and the guest are separate crates that must agree on the
@@ -415,7 +414,7 @@ pub const COMPONENT_MANIFEST_URLS: &[&str] = &[${value("component_manifest_urls"
 pub const ENV_DATA_DIR: &str = "${value("env_data_dir", channel)}";
 `;
 
-const desktopModule = (channel) => `//! Which release channel this build belongs to.
+const desktopModule = (channel) => `//! Build identity: \`local\` for a source tree, otherwise the release channel.
 //!
 //! Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
 //! file. The tree always says \`local\`; a release build is the workflow
@@ -454,20 +453,20 @@ pub const APP_DOWNLOAD_URL: &str = "${value("app_download_url", channel)}";
 pub const WEB_APP_URL: &str = "${value("web_app_url", channel)}";
 `;
 
-const tsModule = (channel) => `// Which release channel this build belongs to.
+const tsModule = (channel) => `// Build identity: "local" for a source tree, otherwise the release channel.
 //
 // Written wholesale by \`scripts/channel.mjs\` — edit that script, not this
 // file. The tree always says "local"; a release build is the workflow stamping
 // its channel in before it compiles. The separately deployed Web sets
 // VITE_GENEHUB_CHANNEL instead, so publishing a page never mutates the paired
 // Open checkout just to stamp a native release identity.
-export type ReleaseChannel = ${CHANNEL_TYPE};
-const STAMPED_CHANNEL: ReleaseChannel = "${value("channel", channel)}";
+export type BuildIdentity = ${BUILD_IDENTITY_TYPE};
+const STAMPED_CHANNEL: BuildIdentity = "${value("channel", channel)}";
 const hostedChannel = import.meta.env.VITE_GENEHUB_CHANNEL;
-export const CHANNEL: ReleaseChannel = isReleaseChannel(hostedChannel)
+export const CHANNEL: BuildIdentity = isBuildIdentity(hostedChannel)
   ? hostedChannel
   : STAMPED_CHANNEL;
-const PRODUCTS: Record<ReleaseChannel, string> = {
+const PRODUCTS: Record<BuildIdentity, string> = {
   local: "GeneHub Local",
   dev: "GeneHub Dev",
   beta: "GeneHub Beta",
@@ -479,7 +478,7 @@ export const PRODUCT = import.meta.env.VITE_GENEHUB_BRAND || PRODUCTS[CHANNEL];
 // in a source build it is empty, because local is not on a release scale.
 export const MANIFEST_URL = "${value("manifest_url", channel)}";
 
-function isReleaseChannel(value: unknown): value is ReleaseChannel {
+function isBuildIdentity(value: unknown): value is BuildIdentity {
   return value === "local" || value === "dev" || value === "beta" || value === "stable";
 }
 `;

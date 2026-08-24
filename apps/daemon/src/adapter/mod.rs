@@ -45,6 +45,9 @@ pub struct SessionConfig {
     /// adapter maps it to its strongest available native system/developer
     /// instruction mechanism; ACP has a documented lower-priority fallback.
     pub additional_system_prompt: Option<String>,
+    /// Daemon-owned Skills directory. The built-in Agent also loads this so
+    /// `/skill:` expansion sees the same files the catalog named.
+    pub skills_dir: Option<PathBuf>,
     /// Where the adapter may keep agent-private state for this session.
     pub scratch_dir: PathBuf,
     /// Provider credentials, keyed by provider id.

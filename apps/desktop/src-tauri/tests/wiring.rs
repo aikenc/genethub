@@ -49,6 +49,12 @@ fn the_bundle_contains_only_a_boot_surface_then_applies_the_wasm_route() {
     // `beforeDevCommand` may start the Web dev server for `tauri dev`; it is
     // not an installer input. Only frontendDist and bundle resources decide
     // what ships in the App.
+    assert_eq!(
+        config["build"]["beforeDevCommand"],
+        serde_json::json!("npm --prefix ../../packages/workbench run dev")
+    );
+    let workbench_manifest = read(repo().join("packages/workbench/package.json"));
+    assert!(workbench_manifest.contains("\"dev\": \"vite\""));
     assert!(!config["bundle"]["resources"]
         .to_string()
         .contains("packages/workbench"));
@@ -511,6 +517,17 @@ fn nothing_in_the_tree_claims_to_be_a_release() {
 fn the_tree_claims_to_be_local_and_only_the_stamper_says_otherwise() {
     let stamper = read(repo().join("scripts/channel.mjs"));
 
+    // Product identity has exactly three released channels plus the isolated
+    // source-tree identity. Historical deployment vocabulary must never grow
+    // a fifth binary/env namespace: that would make launchers and Agents dial
+    // a command no release workflow can produce.
+    for forbidden in ["genet-dest", "genehub-host-dest", "GENEHUB_DEST_", "dest:"] {
+        assert!(
+            !stamper.contains(forbidden),
+            "scripts/channel.mjs contains forbidden product identity {forbidden:?}"
+        );
+    }
+
     // Every generated module says local, and the stamping script is what
     // writes each of them — a constants file nothing regenerates is one a
     // release build compiles straight past.
@@ -525,7 +542,7 @@ fn the_tree_claims_to_be_local_and_only_the_stamper_says_otherwise() {
         ),
         (
             "packages/workbench/src/channel.ts",
-            "const STAMPED_CHANNEL: ReleaseChannel = \"local\";",
+            "const STAMPED_CHANNEL: BuildIdentity = \"local\";",
         ),
     ];
     for (path, marker) in modules {
@@ -693,7 +710,7 @@ fn the_tray_update_opens_the_channel_download_page() {
     assert!(tray.contains("channel::APP_DOWNLOAD_URL"));
     assert!(!tray.contains("open_url(\"https://genethub.com/download\""));
     assert!(!tray.contains("genehub://update"));
-    // The live page is detectHost() → browserHost(). dest-2 still keeps
+    // The live page is detectHost() → browserHost(). The legacy source build still keeps
     // desktopHost() as a test helper; that leftover must not be the boot path.
     assert!(host.contains("always an ordinary browser"));
     assert!(!host.contains("desktop ? desktopHost()"));

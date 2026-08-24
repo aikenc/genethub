@@ -101,6 +101,12 @@ impl Paths {
         self.root.join("updates")
     }
 
+    /// Daemon-owned Skills, materialized from this crate. Agents read the
+    /// files; they do not live in a PipeSpace.
+    pub fn skills_dir(&self) -> PathBuf {
+        crate::skills::skills_dir(&self.root)
+    }
+
     pub fn ensure(&self) -> Result<()> {
         ensure_real_directory(&self.root)
             .with_context(|| format!("creating data directory {}", self.root.display()))?;

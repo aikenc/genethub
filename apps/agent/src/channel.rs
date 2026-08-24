@@ -1,4 +1,4 @@
-//! Which release channel this build belongs to.
+//! Build identity: `local` for a source tree, otherwise the release channel.
 //!
 //! Written wholesale by `scripts/channel.mjs` — edit that script, not this
 //! file. The daemon has the full set of names; the agent only needs to find

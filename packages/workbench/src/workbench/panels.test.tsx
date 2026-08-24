@@ -9,7 +9,7 @@ import { FilesPanel } from "../files/FilesPanel";
 import { LogsPanel } from "../logs/LogsPanel";
 import type { Client } from "../protocol/client";
 import { SettingsPanel } from "../settings/SettingsPanel";
-import { CHANNEL, type ReleaseChannel } from "../channel";
+import { CHANNEL, type BuildIdentity } from "../channel";
 import { useWorkbench } from "../session/store";
 import { UI_SCALE_KEY, useUiScale } from "../theme/scale";
 import { browserHost } from "../host";
@@ -710,7 +710,7 @@ describe("speech settings", () => {
 describe("the version section", () => {
   // The prefix is the tree's channel, not a pinned one: the tree stamps
   // `local`, a release build stamps its own, and either is correct.
-  const PREFIX: Record<ReleaseChannel, string> = {
+  const PREFIX: Record<BuildIdentity, string> = {
     local: "",
     dev: "开发版 ",
     beta: "Beta版 ",
