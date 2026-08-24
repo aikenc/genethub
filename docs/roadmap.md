@@ -36,7 +36,7 @@
 | Windows 能力 parity | host 的非 Unix `fs-perms` 固定返回 `Unsupported`，而 guest 首启必做 owner-only 收紧，当前 Windows 默认 WASM daemon 因此不能完成首启 | 实现 Windows ACL；待发布三件套在 Windows runner 与安装后主旅程通过 |
 | CI 影响分类 | 分类已收敛到 `scripts/ci-classify.mjs`：全路径覆盖、漏标 fail closed 到全量+App、表驱动契约测试随 `changes` job 自校验，并输出 Live/App release_type；仍缺 90 天 change-set 指标，release_type 尚未接入发布 workflow | 热路径实测 ≥95%；classifier 输出驱动 candidate/promote workflow |
 | 测试工程基线 | `testing` 的 TypeScript typecheck 有 4 个 HEAD 既有错误（一个可空值、三个未使用 import）；testctl lint/governance 通过不能替代它 | 修到 `npm --prefix testing run typecheck` 0 error，并纳入候选机械门 |
-| guest 构建 | 非 stable 已走 `[profile.iterate]`（无 fat LTO）。`daemon` world 只在 `genet-wasi` 生成一次。dev-2 上 iterate 热重编 **3.99 秒**、release 热重编仍约 **71 秒**。tag/full 仍可能按平台再编 host | guest 每 candidate 只编一次；Live 推广不再重编 |
+| guest 构建 | 非 stable 已走 `[profile.iterate]`（`opt-level=1` + `strip`，无 fat LTO）。`daemon` world 只在 `genet-wasi` 生成一次。dev-2 上 iterate 热重编 **2.67 秒**、产物约 **13MB**；release 热重编仍约 **71 秒**、约 **6.6MB**。tag/full 仍可能按平台再编 host | guest 每 candidate 只编一次；Live 推广不再重编 |
 | 完整/高频 workflow | 只有 tag/full release，没有 guest+website workflow，当前 SHA 没有远端发布演练 | 两模式分别有 rehearsal、真实耗时、失败门与可晋升的 immutable artifact |
 | 供应链与兼容 | stable/beta 未验签；无 host/world/proto 兼容清单、反回滚 | 签名 release set 每次装载验证；不兼容候选拒绝并回 known-good |
 | 客户端更新 | 只有用户点击检查/下载 installer；自动路径 fail-closed | 后台发现/下载/预热/健康确认/回滚，无提示与人工重启 |

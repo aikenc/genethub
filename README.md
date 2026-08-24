@@ -171,7 +171,7 @@ git clone https://github.com/aikenc/genethub.git
 cd genethub
 
 # 原生 launcher/host，以及单平台 WASM guest
-# guest 用 iterate：无 fat LTO，给本地/Dev/Beta 热改。Stable 安装包才走 --release。
+# guest 用 iterate：opt-level=1 + strip，无 fat LTO。Stable 安装包才走 --release。
 cargo build -p genet-cli -p genehub-host
 cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
 

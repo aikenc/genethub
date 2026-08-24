@@ -71,8 +71,13 @@ panic = "abort"
 
 # Local / Dev / Beta Live guest builds. Custom profiles inherit from release
 # unless told otherwise — this one must not pick up fat LTO or opt-level="z".
+# debug=0 + strip drop the ~200MB DWARF that made load/test crawl; opt-level=1
+# keeps unoptimized WASM from being the next bottleneck. Neither is fat LTO.
 [profile.iterate]
 inherits = "dev"
 incremental = true
 lto = false
 codegen-units = 256
+opt-level = 1
+debug = 0
+strip = true

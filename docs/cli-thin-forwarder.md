@@ -112,7 +112,7 @@ stdin 只用于 `genet shell` 的管道输入，上限仍是 1 MiB。更大的�
 
 模式 2 不再漏 CLI 业务面。原生 `genet` 与 `genehub-host` 只在启停/装载/隔离语义变时才需要重发。
 
-这是源码边界已经具备的能力，不是当前发布能力：现有 `release.yml` 仍只有 tag/full release，没有独立的 guest+website Live workflow。非 stable 的 guest 编译已改走 `[profile.iterate]`，不再为热改付 fat LTO；Stable 安装包仍用 `[profile.release]`。客户端也还没有签名组件 manifest、自动应用或回滚。只有这些门关闭后，表里的模式 2 才能计入 95% 的端到端交付分子。
+这是源码边界已经具备的能力，不是当前发布能力：现有 `release.yml` 仍只有 tag/full release，没有独立的 guest+website Live workflow。非 stable 的 guest 编译已改走 `[profile.iterate]`（`opt-level=1` + `strip`），不再为热改付 fat LTO；Stable 安装包仍用 `[profile.release]`。客户端也还没有签名组件 manifest、自动应用或回滚。只有这些门关闭后，表里的模式 2 才能计入 95% 的端到端交付分子。
 
 CLI crate 若仍 `depend` `genet-daemon`（为 Paths / lifecycle / isolation / 控制面证明），`cargo build --workspace` 仍会连带重编。这不影响已安装的原生二进制，也不影响模式 2 只替换 wasm。把控制面抽成独立小 crate 是后续清理，不是本变更的完成门。
 

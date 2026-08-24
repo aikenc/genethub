@@ -74,7 +74,7 @@ WASM 重构的交付北星是：**不牺牲产品能力、可靠性和安全性�
 
 速度不能跳过测试或签名。客户端必须后台发现、下载、验签、预热、健康确认并在失败时自动回 known-good。切换时打断进行中的一轮是可接受的，只要用户看得见发生了什么且状态可恢复——不为 turn/PTY 的无缝续接设计额外机制，按最低成本处理。Web/Client Component 必须声明兼容窗口和同一 release set，严格版本不相容时自动升级为 App Release。
 
-当前状态是：默认 daemon/agent WASM、薄 CLI、Fabric/RTC 与 Linux 能力回归门已经完成；非 stable 的 guest 编译走 `[profile.iterate]`，`[profile.release]` 的 fat LTO 只留给 Stable 安装包。Windows host 的 owner-only ACL 尚未实现并阻断默认 WASM 首启。双模式 CI、组件签名与自动回滚、官网-only 部署、desktop UI 热更新、混合版本窗口和 SLO telemetry 同样尚未完成。详细状态见 [roadmap.md](./roadmap.md) 的“WASM 持续交付”。
+当前状态是：默认 daemon/agent WASM、薄 CLI、Fabric/RTC 与 Linux 能力回归门已经完成；非 stable 的 guest 编译走 `[profile.iterate]`（`opt-level=1` + `strip`，无 fat LTO），`[profile.release]` 的 fat LTO 只留给 Stable 安装包。Windows host 的 owner-only ACL 尚未实现并阻断默认 WASM 首启。双模式 CI、组件签名与自动回滚、官网-only 部署、desktop UI 热更新、混合版本窗口和 SLO telemetry 同样尚未完成。详细状态见 [roadmap.md](./roadmap.md) 的“WASM 持续交付”。
 
 ---
 
