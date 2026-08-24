@@ -525,6 +525,9 @@ struct TurnState {
     text_item: Option<String>,
     reasoning_item: Option<String>,
     usage: Usage,
+    /// Cursor ACP usually never sets this. When a provider does send tokens,
+    /// stop accumulating the chars/4 estimate.
+    usage_reported: bool,
 }
 
 impl TurnState {
@@ -753,8 +756,13 @@ impl AgentSession for AcpSession {
                     _ => {
                         let mut usage = state.usage.clone();
                         if let Some(reported) = value.get("usage") {
-                            if usage.input_tokens == 0 && usage.output_tokens == 0 {
-                                usage::add_usage(&mut usage, reported);
+                            let parsed = usage::parse_usage(reported);
+                            if parsed.input_tokens > 0 || parsed.output_tokens > 0 {
+                                let rounds = usage.llm_rounds;
+                                let tool_out = usage.tool_output_tokens;
+                                usage = parsed;
+                                usage.llm_rounds = rounds;
+                                usage.tool_output_tokens = tool_out;
                             }
                         }
                         SessionEvent::TurnCompleted {
@@ -1753,11 +1761,16 @@ fn translate_update(
             let delta = text_of(update);
             if state.text_item.is_none() && state.reasoning_item.is_none() {
                 state.usage.llm_rounds += 1;
-                usage::emit_progress(events, &turn_id, &state.usage);
+            }
+            if !state.usage_reported && !delta.is_empty() {
+                state.usage.output_tokens = state
+                    .usage
+                    .output_tokens
+                    .saturating_add(usage::estimate_tokens(&delta));
             }
             match state.text_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     item_id: id,
                     delta: ItemDelta::Text { delta },
                 }),
@@ -1766,21 +1779,27 @@ fn translate_update(
                     state.text_item = Some(id.clone());
                     state.reasoning_item = None;
                     emit(SessionEvent::Item {
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         item: TimelineItem::AssistantMessage { id, text: delta },
                     });
                 }
             }
+            usage::emit_progress(events, &turn_id, &state.usage);
         }
         "agent_thought_chunk" => {
             let delta = text_of(update);
             if state.text_item.is_none() && state.reasoning_item.is_none() {
                 state.usage.llm_rounds += 1;
-                usage::emit_progress(events, &turn_id, &state.usage);
+            }
+            if !state.usage_reported && !delta.is_empty() {
+                state.usage.output_tokens = state
+                    .usage
+                    .output_tokens
+                    .saturating_add(usage::estimate_tokens(&delta));
             }
             match state.reasoning_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     item_id: id,
                     delta: ItemDelta::Text { delta },
                 }),
@@ -1789,11 +1808,12 @@ fn translate_update(
                     state.reasoning_item = Some(id.clone());
                     state.text_item = None;
                     emit(SessionEvent::Item {
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         item: TimelineItem::Reasoning { id, text: delta },
                     });
                 }
             }
+            usage::emit_progress(events, &turn_id, &state.usage);
         }
         "tool_call" | "tool_call_update" => {
             // Any tool activity ends the current text run, so the next chunk
@@ -1867,6 +1887,7 @@ fn translate_update(
                     state.usage = parsed;
                     state.usage.llm_rounds = rounds;
                     state.usage.tool_output_tokens = tool_out;
+                    state.usage_reported = true;
                     usage::emit_progress(events, &turn_id, &state.usage);
                 }
             }
@@ -1905,6 +1926,16 @@ fn detail_from_update(update: &Value) -> ToolCallDetail {
                 .join("\n")
         })
         .unwrap_or_default();
+    let content = if content.is_empty() {
+        update
+            .get("rawOutput")
+            .and_then(|value| value.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    } else {
+        content
+    };
 
     match kind {
         "execute" => ToolCallDetail::Shell {
@@ -1940,6 +1971,11 @@ fn detail_from_update(update: &Value) -> ToolCallDetail {
                 .unwrap_or_default()
                 .to_string(),
             summary: content,
+        },
+        _ if !content.is_empty() => ToolCallDetail::Read {
+            path,
+            content,
+            truncated: false,
         },
         _ => ToolCallDetail::Unknown {
             raw: update.clone(),
@@ -2149,6 +2185,24 @@ mod tests {
     fn an_unrecognised_tool_kind_still_renders_through_unknown() {
         let detail = detail_from_update(&json!({"kind": "quantum", "title": "?"}));
         assert!(matches!(detail, ToolCallDetail::Unknown { .. }));
+    }
+
+    #[test]
+    fn cursor_raw_output_becomes_readable_tool_content() {
+        let detail = detail_from_update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "status": "completed",
+            "toolCallId": "c1",
+            "rawOutput": {"content": "skill text"}
+        }));
+        assert_eq!(
+            detail,
+            ToolCallDetail::Read {
+                path: String::new(),
+                content: "skill text".into(),
+                truncated: false
+            }
+        );
     }
 
     #[test]

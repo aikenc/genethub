@@ -86,6 +86,7 @@ pub fn add_usage(total: &mut Usage, value: &Value) {
             "cache_read_input_tokens",
             "cachedInputTokens",
             "cached_tokens",
+            "cachedReadTokens",
             "prompt_cache_hit_tokens",
         ],
     )
@@ -103,6 +104,7 @@ pub fn add_usage(total: &mut Usage, value: &Value) {
             "cacheWriteTokens",
             "cache_creation_input_tokens",
             "cacheCreationInputTokens",
+            "cachedWriteTokens",
         ],
     )
     .or_else(|| first_u64(&cache, &["write", "creation"]))
@@ -179,12 +181,32 @@ pub fn tool_output_text(detail: &ToolCallDetail) -> String {
             .map(item_tool_output)
             .collect::<Vec<_>>()
             .join("\n"),
-        ToolCallDetail::Unknown { raw } => raw
-            .get("output")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        ToolCallDetail::Unknown { raw } => unknown_tool_output(raw),
     }
+}
+
+/// Cursor ACP puts Read/Skill results on `rawOutput.content`, not `output`.
+fn unknown_tool_output(raw: &Value) -> String {
+    if let Some(text) = raw.get("output").and_then(Value::as_str) {
+        if !text.is_empty() {
+            return text.to_string();
+        }
+    }
+    if let Some(text) = raw
+        .get("rawOutput")
+        .and_then(|value| value.get("content"))
+        .and_then(Value::as_str)
+    {
+        if !text.is_empty() {
+            return text.to_string();
+        }
+    }
+    if let Some(text) = raw.get("content").and_then(Value::as_str) {
+        if !text.is_empty() {
+            return text.to_string();
+        }
+    }
+    String::new()
 }
 
 pub fn item_tool_output(item: &TimelineItem) -> String {
@@ -226,6 +248,28 @@ pub fn fill_usage_from_items(usage: &mut Usage, items: &[TimelineItem]) {
     }
     if usage.llm_rounds == 0 {
         usage.llm_rounds = inferred_llm_rounds(items);
+    }
+    // Cursor ACP currently omits PromptResponse.usage. Count the text the
+    // user can already see so the footer is not stuck at zero.
+    if usage.output_tokens == 0 {
+        usage.output_tokens = items
+            .iter()
+            .map(|item| match item {
+                TimelineItem::AssistantMessage { text, .. }
+                | TimelineItem::Reasoning { text, .. } => estimate_tokens(text),
+                _ => 0,
+            })
+            .sum();
+    }
+    if usage.input_tokens == 0 {
+        let user: u64 = items
+            .iter()
+            .map(|item| match item {
+                TimelineItem::UserMessage { text, .. } => estimate_tokens(text),
+                _ => 0,
+            })
+            .sum();
+        usage.input_tokens = user.saturating_add(usage.tool_output_tokens);
     }
 }
 
@@ -281,8 +325,15 @@ pub fn record_tool_output(
 }
 
 fn first_u64(value: &Value, keys: &[&str]) -> Option<u64> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_u64))
+    keys.iter().find_map(|key| as_u64(value.get(*key)?))
+}
+
+fn as_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().filter(|n| *n >= 0).map(|n| n as u64))
+        .or_else(|| value.as_f64().filter(|n| *n >= 0.0).map(|n| n as u64))
+        .or_else(|| value.as_str()?.parse().ok())
 }
 
 fn first_f64(value: &Value, keys: &[&str]) -> Option<f64> {
@@ -320,5 +371,49 @@ mod tests {
     fn estimate_is_chars_over_four() {
         assert_eq!(estimate_tokens("abcd"), 1);
         assert_eq!(estimate_tokens("abcde"), 2);
+    }
+
+    #[test]
+    fn cursor_acp_raw_output_counts_as_tool_out() {
+        let items = vec![TimelineItem::ToolCall {
+            id: "c1".into(),
+            name: "Read".into(),
+            status: ToolStatus::Ok,
+            detail: ToolCallDetail::Unknown {
+                raw: json!({"rawOutput": {"content": "abcdefgh"}}),
+            },
+        }];
+        assert_eq!(estimate_item_tool_output(&items), 2);
+    }
+
+    #[test]
+    fn missing_provider_usage_is_estimated_from_visible_text() {
+        let mut usage = Usage::default();
+        fill_usage_from_items(
+            &mut usage,
+            &[
+                TimelineItem::UserMessage {
+                    id: "u".into(),
+                    text: "abcd".into(),
+                    attachments: Vec::new(),
+                },
+                TimelineItem::AssistantMessage {
+                    id: "a".into(),
+                    text: "abcdefgh".into(),
+                },
+                TimelineItem::ToolCall {
+                    id: "c1".into(),
+                    name: "Read".into(),
+                    status: ToolStatus::Ok,
+                    detail: ToolCallDetail::Unknown {
+                        raw: json!({"rawOutput": {"content": "abcdefghijkl"}}),
+                    },
+                },
+            ],
+        );
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.tool_output_tokens, 3);
+        assert_eq!(usage.input_tokens, 4);
+        assert_eq!(usage.llm_rounds, 1);
     }
 }
