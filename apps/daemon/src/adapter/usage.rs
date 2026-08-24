@@ -154,7 +154,7 @@ pub fn preserve_timing(target: &mut Usage, source: &Usage) {
 /// Roughly chars/4, matching the estimator the frontend uses for the same
 /// strings. Exact tokenizer counts are not available on every adapter wire.
 pub fn estimate_tokens(text: &str) -> u64 {
-    ((text.chars().count() + 3) / 4) as u64
+    text.chars().count().div_ceil(4) as u64
 }
 
 pub fn emit_progress(events: &broadcast::Sender<SessionEvent>, turn_id: &str, usage: &Usage) {
@@ -417,31 +417,23 @@ pub fn completed_tool_output(event: &SessionEvent) -> Option<(String, String, St
     match event {
         SessionEvent::Item {
             turn_id,
-            item: TimelineItem::ToolCall {
-                id, status, detail, ..
-            },
-        } if matches!(
-            status,
-            ToolStatus::Ok | ToolStatus::Error | ToolStatus::Canceled
-        ) =>
-        {
-            Some((turn_id.clone(), id.clone(), tool_output_text(detail)))
-        }
+            item:
+                TimelineItem::ToolCall {
+                    id,
+                    status: ToolStatus::Ok | ToolStatus::Error | ToolStatus::Canceled,
+                    detail,
+                    ..
+                },
+        } => Some((turn_id.clone(), id.clone(), tool_output_text(detail))),
         SessionEvent::ItemDelta {
             turn_id,
             item_id,
             delta:
                 ItemDelta::ToolStatus {
-                    status,
+                    status: ToolStatus::Ok | ToolStatus::Error | ToolStatus::Canceled,
                     detail: Some(detail),
                 },
-        } if matches!(
-            status,
-            ToolStatus::Ok | ToolStatus::Error | ToolStatus::Canceled
-        ) =>
-        {
-            Some((turn_id.clone(), item_id.clone(), tool_output_text(detail)))
-        }
+        } => Some((turn_id.clone(), item_id.clone(), tool_output_text(detail))),
         _ => None,
     }
 }
@@ -588,8 +580,10 @@ mod tests {
 
     #[test]
     fn live_output_rate_uses_reported_tokens_over_active_generation_time() {
-        let mut usage = Usage::default();
-        usage.output_tokens = 120;
+        let mut usage = Usage {
+            output_tokens: 120,
+            ..Default::default()
+        };
         stream_span(&mut usage, 2_000, 100, 480);
         let live = with_live_output_rate(&usage);
         let rate = live.avg_output_rate_tps.expect("rate from reported tokens");
@@ -608,8 +602,10 @@ mod tests {
         // A 3-round turn: each round generated ~2s, with tool-execution gaps
         // between them. The old bug divided the whole turn's tokens by only
         // the last round's window, inflating the rate ~3x.
-        let mut usage = Usage::default();
-        usage.output_tokens = 360; // 120 tokens per round
+        let mut usage = Usage {
+            output_tokens: 360, // 120 tokens per round
+            ..Default::default()
+        };
         for _ in 0..2 {
             stream_span(&mut usage, 2_000, 0, 480);
             record_round_start(&mut usage); // closes the span, opens the gap
@@ -630,8 +626,10 @@ mod tests {
 
     #[test]
     fn output_rate_excludes_tool_execution_gaps() {
-        let mut usage = Usage::default();
-        usage.output_tokens = 120;
+        let mut usage = Usage {
+            output_tokens: 120,
+            ..Default::default()
+        };
         stream_span(&mut usage, 2_000, 0, 480); // round 1: 2s of generation
         record_round_start(&mut usage); // then tools ran for a long while
         stream_span(&mut usage, 60_000, 59_000, 0); // round 2 starts 60s later, 1s of output
@@ -670,11 +668,13 @@ mod tests {
         // Every round arrived as one chunk: no span has measurable duration,
         // so the rate uses the turn's first-output to last-output wall clock
         // rather than dividing by zero.
-        let mut usage = Usage::default();
-        usage.output_tokens = 100;
         let now = now_ms();
-        usage.turn_first_output_at_ms = Some(now - 4_000);
-        usage.last_output_at_ms = Some(now);
+        let mut usage = Usage {
+            output_tokens: 100,
+            turn_first_output_at_ms: Some(now - 4_000),
+            last_output_at_ms: Some(now),
+            ..Default::default()
+        };
         finalize_output_rate(&mut usage);
         let rate = usage.avg_output_rate_tps.expect("fallback rate");
         assert!(
@@ -685,8 +685,10 @@ mod tests {
 
     #[test]
     fn finalize_prefers_reported_tokens_over_visible_text() {
-        let mut usage = Usage::default();
-        usage.output_tokens = 200;
+        let mut usage = Usage {
+            output_tokens: 200,
+            ..Default::default()
+        };
         stream_span(&mut usage, 2_000, 100, 40); // few chars: would give a lower estimate
         finalize_output_rate(&mut usage);
         let rate = usage.avg_output_rate_tps.expect("rate");

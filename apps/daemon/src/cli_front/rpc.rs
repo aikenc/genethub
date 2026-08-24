@@ -78,6 +78,9 @@ impl std::error::Error for ConnectError {}
 
 /// What arrives on the event stream that a conversation cares about.
 #[derive(Debug, Clone, PartialEq)]
+// Event 携完整 SequencedEvent,Desync 仅几十字节;Box 收益不抵构造/匹配点
+// churn,放行 clippy。
+#[allow(clippy::large_enum_variant)]
 pub enum Payload {
     Event(SequencedEvent),
     Desync { session_id: String, missed: u64 },

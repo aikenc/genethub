@@ -827,6 +827,9 @@ pub struct ProtocolError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
+// Event 携完整 SequencedEvent(384B)远超次大 variant(56B);Box 会改动所有
+// 构造/匹配点,线格式不变但收益不抵 churn,放行 clippy。
+#[allow(clippy::large_enum_variant)]
 pub enum ServerFrame {
     /// A session event push. `topic` is `session:<id>`.
     #[serde(rename = "event", rename_all = "camelCase")]
