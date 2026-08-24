@@ -33,7 +33,7 @@ Collect only what is needed:
 - Existing isolated environment managers, containers, and already-downloaded model caches.
 - Current GeneHub state using the shipped CLI.
 
-Resolve the CLI from `GENEHUB_CLI` when present; otherwise use the channel's installed `genet` executable. Run:
+Use the exact front-door CLI path supplied in the GeneHub built-in Skill catalog and in `GENEHUB_CLI`. If neither is available, stop and report that this session has no CLI binding. Never guess a channel command. Run:
 
 ```text
 "$GENEHUB_CLI" speech runtime status

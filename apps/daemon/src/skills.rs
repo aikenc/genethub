@@ -1,4 +1,4 @@
-//! Daemon-owned Skills: materialize built-ins and inject one catalog
+//! GeneHub built-in Skills: materialize product-owned files and inject one catalog
 //! into every Agent session.
 //!
 //! Third-party Agents do not need a native Skill loader. They receive
@@ -14,10 +14,30 @@ struct BuiltinFile {
     contents: &'static str,
 }
 
-const BUILTIN_FILES: &[BuiltinFile] = &[BuiltinFile {
-    relative_path: "genehub-session-history/SKILL.md",
-    contents: include_str!("../builtin-skills/genehub-session-history/SKILL.md"),
-}];
+const BUILTIN_FILES: &[BuiltinFile] = &[
+    BuiltinFile {
+        relative_path: "genehub-session-history/SKILL.md",
+        contents: include_str!("../builtin-skills/genehub-session-history/SKILL.md"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/SKILL.md",
+        contents: include_str!("../builtin-skills/genehub-speech-runtime/SKILL.md"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/agents/openai.yaml",
+        contents: include_str!("../builtin-skills/genehub-speech-runtime/agents/openai.yaml"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/references/models.md",
+        contents: include_str!("../builtin-skills/genehub-speech-runtime/references/models.md"),
+    },
+    BuiltinFile {
+        relative_path: "genehub-speech-runtime/references/runtime-contract.md",
+        contents: include_str!(
+            "../builtin-skills/genehub-speech-runtime/references/runtime-contract.md"
+        ),
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
@@ -27,9 +47,23 @@ pub struct Skill {
     pub disable_model_invocation: bool,
 }
 
-/// `<data-dir>/skills` — GeneHub-owned built-ins, materialized from this crate.
-pub fn skills_dir(data_root: &Path) -> PathBuf {
-    data_root.join("skills")
+/// `<data-dir>/builtin-skills` — product-owned files, isolated from project or
+/// user Skill directories.
+pub fn builtin_skills_dir(data_root: &Path) -> PathBuf {
+    data_root.join("builtin-skills")
+}
+
+/// Runtime channel binding supplied by the launcher. A bare command name is
+/// not a binding: it could resolve to another installed channel via PATH.
+pub fn front_door_cli_from_env() -> Option<PathBuf> {
+    normalize_front_door_cli(std::env::var_os("GENEHUB_CLI"))
+}
+
+fn normalize_front_door_cli(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
 }
 
 /// Write built-in Skill files so Agents can `read` a real path.
@@ -52,7 +86,11 @@ pub fn materialize(root: &Path) -> Option<PathBuf> {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("builtin");
-        let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+        // The daemon may be a WASI guest and therefore has no process id of
+        // its own. The host pid is already the product-wide process identity
+        // used for locks and local admission, and is safe for this atomic
+        // materialization name as well.
+        let temporary = parent.join(format!(".{file_name}.{}.tmp", crate::host_pid::current()));
         let installed = std::fs::write(&temporary, file.contents).and_then(|_| {
             std::fs::rename(&temporary, &target).or_else(|first_error| {
                 if target.exists() {
@@ -76,29 +114,18 @@ pub fn materialize(root: &Path) -> Option<PathBuf> {
     Some(root.to_path_buf())
 }
 
-/// Built-ins first and reserved. Workspace overlay may add new names only.
-pub fn load(skills_root: &Path, cwd: &Path) -> Vec<Skill> {
+/// Load exactly the product-owned Skill entrypoints compiled into this daemon.
+/// Unknown files in the data directory are never promoted into Agent context.
+pub fn load(skills_root: &Path) -> Vec<Skill> {
     let mut skills = Vec::new();
-    let mut reserved = Vec::new();
-    if let Some(dir) = materialize(skills_root) {
-        for skill in load_dir(&dir) {
-            reserved.push(skill.name.clone());
-            skills.push(skill);
-        }
-    }
-    // Future project overlay. Nothing in a PipeSpace ships here yet.
-    for dir in [
-        cwd.join(".genethub").join("skills"),
-        cwd.join(".genehub").join("skills"),
-    ] {
-        for skill in load_dir(&dir) {
-            if reserved.iter().any(|name| name == &skill.name) {
+    if materialize(skills_root).is_some() {
+        for file in BUILTIN_FILES {
+            if !file.relative_path.ends_with("/SKILL.md") {
                 continue;
             }
-            if skills.iter().any(|existing| existing.name == skill.name) {
-                continue;
+            if let Some(skill) = parse_skill_file(&skills_root.join(file.relative_path)) {
+                skills.push(skill);
             }
-            skills.push(skill);
         }
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
@@ -107,12 +134,12 @@ pub fn load(skills_root: &Path, cwd: &Path) -> Vec<Skill> {
 
 /// Artifact-link rules plus the Skill catalog, or just the rules when
 /// this daemon has no skills directory.
-pub fn session_guidance(skills_root: Option<&Path>, cwd: &Path) -> String {
+pub fn session_guidance(skills_root: Option<&Path>, front_door_cli: Option<&Path>) -> String {
     let artifact = crate::session::artifact_links::guidance().to_string();
     let Some(root) = skills_root else {
         return artifact;
     };
-    let catalog = format_catalog(&load(root, cwd));
+    let catalog = format_catalog(&load(root), front_door_cli);
     if catalog.is_empty() {
         artifact
     } else {
@@ -120,7 +147,7 @@ pub fn session_guidance(skills_root: Option<&Path>, cwd: &Path) -> String {
     }
 }
 
-pub fn format_catalog(skills: &[Skill]) -> String {
+pub fn format_catalog(skills: &[Skill], front_door_cli: Option<&Path>) -> String {
     let visible: Vec<&Skill> = skills
         .iter()
         .filter(|skill| !skill.disable_model_invocation)
@@ -130,7 +157,16 @@ pub fn format_catalog(skills: &[Skill]) -> String {
     }
 
     let mut lines = vec![
-        "GeneHub provides these Skills as ordinary files. When a task matches a skill description, read that file and follow it. Do not invent skill names or session ids.".to_string(),
+        "GeneHub provides these built-in Skills as ordinary files. When a task matches a skill description, read that file and follow it. Do not invent skill names, session ids, or channel commands.".to_string(),
+        String::new(),
+        match front_door_cli {
+            Some(path) => format!(
+                "<genehub_cli>{}</genehub_cli>",
+                escape_xml(&path.to_string_lossy())
+            ),
+            None => "<genehub_cli unavailable=\"true\" />".to_string(),
+        },
+        "Use exactly the GeneHub CLI path above. It is also exported to the Agent as GENEHUB_CLI. If unavailable, stop instead of guessing genet, genet-dev, genet-beta, or another command.".to_string(),
         String::new(),
         "<available_skills>".to_string(),
     ];
@@ -149,29 +185,6 @@ pub fn format_catalog(skills: &[Skill]) -> String {
     }
     lines.push("</available_skills>".to_string());
     lines.join("\n")
-}
-
-fn load_dir(dir: &Path) -> Vec<Skill> {
-    if !dir.is_dir() {
-        return Vec::new();
-    }
-    let mut skills = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return skills;
-    };
-    let mut children: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect();
-    children.sort();
-    for child in children {
-        let skill_file = child.join("SKILL.md");
-        if let Some(skill) = parse_skill_file(&skill_file) {
-            skills.push(skill);
-        }
-    }
-    skills
 }
 
 fn parse_skill_file(path: &Path) -> Option<Skill> {
@@ -264,8 +277,7 @@ mod tests {
     #[test]
     fn session_history_is_materialized_under_the_daemon_skills_dir() {
         let root = temp_dir("builtin");
-        let cwd = temp_dir("cwd");
-        let skills = load(&root, &cwd);
+        let skills = load(&root);
         let skill = skills
             .iter()
             .find(|skill| skill.name == "genehub-session-history")
@@ -278,37 +290,32 @@ mod tests {
     }
 
     #[test]
-    fn workspace_overlay_cannot_replace_a_built_in_name() {
-        let root = temp_dir("reserved");
-        let cwd = temp_dir("overlay-cwd");
-        write_skill(
-            &cwd.join(".genethub").join("skills"),
-            "genehub-session-history",
-            "---\nname: genehub-session-history\ndescription: Project override\n---\n",
-        );
-        let skills = load(&root, &cwd);
-        let skill = skills
-            .iter()
-            .find(|skill| skill.name == "genehub-session-history")
-            .unwrap();
-        assert!(skill.file_path.starts_with(&root));
-        assert_ne!(skill.description, "Project override");
-    }
-
-    #[test]
-    fn workspace_overlay_can_add_a_new_skill() {
-        let root = temp_dir("extra");
-        let cwd = temp_dir("extra-cwd");
-        write_skill(
-            &cwd.join(".genethub").join("skills"),
-            "local-notes",
-            "---\nname: local-notes\ndescription: Project notes helper\n---\n",
-        );
-        let skills = load(&root, &cwd);
-        assert!(skills.iter().any(|skill| skill.name == "local-notes"));
+    fn all_product_built_ins_and_references_are_materialized() {
+        let root = temp_dir("all-builtins");
+        let skills = load(&root);
         assert!(skills
             .iter()
             .any(|skill| skill.name == "genehub-session-history"));
+        let speech = skills
+            .iter()
+            .find(|skill| skill.name == "genehub-speech-runtime")
+            .expect("speech runtime built-in");
+        let base = speech.file_path.parent().unwrap();
+        assert!(base.join("agents/openai.yaml").is_file());
+        assert!(base.join("references/models.md").is_file());
+        assert!(base.join("references/runtime-contract.md").is_file());
+    }
+
+    #[test]
+    fn unknown_data_dir_skill_is_not_in_the_genehub_catalog() {
+        let root = temp_dir("unknown");
+        write_skill(
+            &root,
+            "project-overlay",
+            "---\nname: project-overlay\ndescription: Must stay outside the product catalog\n---\n",
+        );
+        let skills = load(&root);
+        assert!(!skills.iter().any(|skill| skill.name == "project-overlay"));
     }
 
     #[test]
@@ -319,8 +326,9 @@ mod tests {
             file_path: PathBuf::from("/data/skills/demo/SKILL.md"),
             disable_model_invocation: false,
         }];
-        let catalog = format_catalog(&skills);
+        let catalog = format_catalog(&skills, Some(Path::new("/opt/genehub/genet-dev")));
         assert!(catalog.contains("<available_skills>"));
+        assert!(catalog.contains("<genehub_cli>/opt/genehub/genet-dev</genehub_cli>"));
         assert!(catalog.contains("<name>demo</name>"));
         assert!(catalog.contains("&lt;PDFs&gt; &amp; more"));
         assert!(catalog.contains("<location>/data/skills/demo/SKILL.md</location>"));
@@ -330,18 +338,43 @@ mod tests {
     #[test]
     fn session_guidance_keeps_artifact_rules_and_appends_the_catalog() {
         let root = temp_dir("guidance");
-        let cwd = temp_dir("guidance-cwd");
-        let prompt = session_guidance(Some(&root), &cwd);
+        let prompt = session_guidance(Some(&root), Some(Path::new("/opt/genehub/genet-beta")));
         assert!(prompt.contains("index.html"));
         assert!(prompt.contains("genehub-session-history"));
+        assert!(prompt.contains("genehub-speech-runtime"));
+        assert!(prompt.contains("/opt/genehub/genet-beta"));
         assert!(prompt.contains("<available_skills>"));
     }
 
     #[test]
     fn session_guidance_without_a_root_is_artifact_rules_only() {
-        let cwd = temp_dir("none");
-        let prompt = session_guidance(None, &cwd);
+        let prompt = session_guidance(None, Some(Path::new("/opt/genehub/genet")));
         assert!(prompt.contains("index.html"));
         assert!(!prompt.contains("available_skills"));
+    }
+
+    #[test]
+    fn missing_cli_binding_is_explicit_and_never_guessed() {
+        let root = temp_dir("no-cli");
+        let prompt = session_guidance(Some(&root), None);
+        assert!(prompt.contains("<genehub_cli unavailable=\"true\" />"));
+        assert!(prompt.contains("stop instead of guessing"));
+    }
+
+    #[test]
+    fn channel_front_doors_must_be_absolute_and_are_never_renamed() {
+        for path in [
+            "/opt/genehub/dev/genet-dev",
+            "/opt/genehub/beta/genet-beta",
+            "/opt/genehub/stable/genet",
+        ] {
+            assert_eq!(
+                normalize_front_door_cli(Some(path.into())),
+                Some(PathBuf::from(path))
+            );
+        }
+        assert_eq!(normalize_front_door_cli(Some("genet-dev".into())), None);
+        assert_eq!(normalize_front_door_cli(Some("genet".into())), None);
+        assert_eq!(normalize_front_door_cli(None), None);
     }
 }

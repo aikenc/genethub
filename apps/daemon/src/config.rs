@@ -101,10 +101,10 @@ impl Paths {
         self.root.join("updates")
     }
 
-    /// Daemon-owned Skills, materialized from this crate. Agents read the
+    /// GeneHub built-in Skills, materialized from this crate. Agents read the
     /// files; they do not live in a PipeSpace.
-    pub fn skills_dir(&self) -> PathBuf {
-        crate::skills::skills_dir(&self.root)
+    pub fn builtin_skills_dir(&self) -> PathBuf {
+        crate::skills::builtin_skills_dir(&self.root)
     }
 
     pub fn ensure(&self) -> Result<()> {

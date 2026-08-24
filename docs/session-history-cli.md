@@ -30,7 +30,7 @@ genet session narrative <session-id> --item <item-id>
 
 ## Built-in Skill
 
-`genehub-session-history` is a daemon-owned Skill, materialized under the daemon data directory and injected as a `{name, description, path}` catalog into every Agent session. Third-party Agents read the file; they do not need a native Skill loader. The built-in Agent also receives `GENEHUB_SKILLS_DIR` so `/skill:genehub-session-history` expands the same file.
+`genehub-session-history` is a GeneHub built-in Skill compiled into the daemon, materialized under the channel-specific daemon data directory, and injected with the other product Skills as a `{name, description, path}` catalog into every Agent session. The catalog also carries the exact bound front-door CLI path. Third-party Agents read the file; they do not need a native Skill loader. The built-in Agent receives the same directory only so `/skill:genehub-session-history` expands that file without injecting a duplicate catalog.
 
 The Skill is a command navigator: discover `genet capabilities` and `genet schema session.inspect` / `session.context`, then inspect, context, narrative/rounds, and only then trunks/blob. Do not treat `GENEHUB_SESSION_ID` as the source session being analysed. When the boundary is historical, pass `--through-round`.
 

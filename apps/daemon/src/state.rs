@@ -125,15 +125,21 @@ impl AppState {
         let homes = WorkspaceHomes::default();
         let store = Store::new(homes.clone());
         let diagnostics = Arc::new(crate::diagnostics::Diagnostics::new());
-        let skills_dir = paths.skills_dir();
+        let skills_dir = paths.builtin_skills_dir();
         let _ = crate::skills::materialize(&skills_dir);
+        let front_door_cli = crate::skills::front_door_cli_from_env();
+        if front_door_cli.is_none() {
+            tracing::warn!(
+                "GENEHUB_CLI is unavailable or not absolute; Agent sessions will not guess a channel command"
+            );
+        }
         let sessions = SessionManager::new_with_diagnostics(
             store,
             registry.clone(),
             config.replay_window,
             diagnostics.clone(),
         )
-        .with_skills_dir(skills_dir);
+        .with_builtin_skills(skills_dir, front_door_cli);
 
         let config = Arc::new(RwLock::new(config));
         let workspaces = Workspaces::new(config.clone(), paths.config_file(), homes);

@@ -68,11 +68,16 @@ pub struct GenetAdapter {
 
 impl GenetAdapter {
     pub fn discover() -> Self {
-        Self::discover_beside(
-            std::env::current_exe()
-                .ok()
-                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf)),
-        )
+        // The daemon is a WASI guest, where `current_exe()` is unsupported.
+        // The native host already supplies the exact front-door CLI path, so
+        // use its install directory for the legacy sibling-agent lookup too.
+        // If no front door was bound, PATH discovery below remains available;
+        // never invent a channel-specific executable name here.
+        let beside = std::env::var_os(crate::channel::ENV_CLI)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .and_then(|cli| cli.parent().map(std::path::Path::to_path_buf));
+        Self::discover_beside(beside)
     }
 
     /// `beside` is where the daemon itself lives, taken as an argument so a test
@@ -211,8 +216,8 @@ impl AgentAdapter for GenetAdapter {
             .arg("--genehub-session-id")
             .arg(&config.session_id)
             .current_dir(&config.cwd)
-            .env(crate::channel::ENV_AGENT_HOME, &home)
-            .env("GENEHUB_SESSION_ID", &config.session_id);
+            .env(crate::channel::ENV_AGENT_HOME, &home);
+        super::apply_session_environment(&mut command, &config);
         if let Some(dir) = &config.skills_dir {
             command.env("GENEHUB_SKILLS_DIR", dir);
         }

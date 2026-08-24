@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 
 import type { EnvironmentLease } from "../../../infrastructure/public.ts";
 import { daemonEndpoint, startDaemon } from "../../drivers/daemon.ts";
-import { locateGenet, tryLocateWasm } from "../../drivers/cli.ts";
+import { locateGenet, tryLocateDaemonComponent } from "../../drivers/cli.ts";
 import { connectProductClient } from "../../drivers/client.ts";
 
 export async function reconnectAfterStop(input: {
@@ -10,7 +10,7 @@ export async function reconnectAfterStop(input: {
   lease: EnvironmentLease;
 }): Promise<{ listed: boolean }> {
   const genet = locateGenet(input.openRoot);
-  const wasm = tryLocateWasm(input.openRoot);
+  const wasm = tryLocateDaemonComponent(input.openRoot);
   const first = startDaemon({ genet, wasm, lease: input.lease });
   const firstEndpoint = daemonEndpoint(first);
   const firstClient = await connectProductClient({

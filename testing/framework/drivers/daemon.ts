@@ -30,7 +30,7 @@ export function startDaemon(input: {
   const env = {
     ...process.env,
     ...input.lease.env,
-    ...(input.wasm ? { GENET_APP_WASM: input.wasm } : {}),
+    ...(input.wasm ? { GENEHUB_LOCAL_COMPONENT: input.wasm } : {}),
   };
   const started = runGenet(input.genet, ["daemon", "start"], env);
   if (started.code !== 0) {

@@ -60,7 +60,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 
 ### 2.3 产品系统上下文
 
-所有 adapter 接收同一个 `SessionConfig.additional_system_prompt`，但上层不认识任何 CLI 的私有字段。当前用途是两段固定产品上下文：Asset Preview 路径链接规则，以及 daemon 内置 Skill 目录（名称、描述、可 `read` 的绝对路径）。Skill 文件物化在 daemon 数据目录，不放在 PipeSpace 里。浏览器按自己真实的 origin + deployment channel + device + workspace 组成结构化 prefix，daemon 校验后只保留路径链接规则，再与 Skill 目录一起交给 adapter。
+所有 adapter 接收同一个 `SessionConfig.additional_system_prompt`。当前用途是两段固定产品上下文：Asset Preview 路径链接规则，以及 GeneHub 内置 Skill 摘要（名称、描述、可 `read` 的绝对路径、当前 channel 启动器绑定的前门 CLI 绝对路径）。Skill 随 daemon 编译、物化在当前 channel 的 daemon 数据目录，不使用 PipeBuilder，不放在 PipeSpace，也不扫描工作区 overlay。daemon 还把同一绝对路径显式设置为每个 live Agent 进程的 `GENEHUB_CLI`；缺失时摘要标记 unavailable 且子进程清除该变量，禁止回退或猜测命令。浏览器按自己真实的 origin + deployment channel + device + workspace 组成结构化 prefix，daemon 校验后只保留路径链接规则，再与内置 Skill 摘要一起交给 adapter。
 
 | Agent | adapter 映射 |
 |---|---|

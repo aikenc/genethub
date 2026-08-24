@@ -8,31 +8,6 @@ use ignore::WalkBuilder;
 
 const MAX_NAME_LENGTH: usize = 64;
 const MAX_DESCRIPTION_LENGTH: usize = 1024;
-struct BuiltinFile {
-    relative_path: &'static str,
-    contents: &'static str,
-}
-
-const BUILTIN_FILES: &[BuiltinFile] = &[
-    BuiltinFile {
-        relative_path: "genehub-speech-runtime/SKILL.md",
-        contents: include_str!("../builtin-skills/genehub-speech-runtime/SKILL.md"),
-    },
-    BuiltinFile {
-        relative_path: "genehub-speech-runtime/agents/openai.yaml",
-        contents: include_str!("../builtin-skills/genehub-speech-runtime/agents/openai.yaml"),
-    },
-    BuiltinFile {
-        relative_path: "genehub-speech-runtime/references/models.md",
-        contents: include_str!("../builtin-skills/genehub-speech-runtime/references/models.md"),
-    },
-    BuiltinFile {
-        relative_path: "genehub-speech-runtime/references/runtime-contract.md",
-        contents: include_str!(
-            "../builtin-skills/genehub-speech-runtime/references/runtime-contract.md"
-        ),
-    },
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
@@ -45,7 +20,6 @@ pub struct Skill {
 
 /// Global then project locations; on a name collision the first one wins.
 pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
-    let builtin_dir = materialize_builtins(agent_dir);
     let mut skills: Vec<Skill> = Vec::new();
     let mut push = |found: Vec<Skill>| {
         for skill in found {
@@ -59,7 +33,7 @@ pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
     // process at that directory so `/skill:` expansion sees the same catalog
     // every other Agent received as system context.
     if let Some(dir) = daemon_skills_dir() {
-        push(load_dir(&dir, false));
+        push(load_daemon_builtins(&dir));
     }
     push(load_dir(&agent_dir.join("skills"), true));
     if let Some(home) = home_dir() {
@@ -67,59 +41,20 @@ pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
     }
     push(load_dir(&cwd.join(".genehub").join("skills"), true));
     push(load_dir(&cwd.join(".agents").join("skills"), false));
-    if let Some(dir) = builtin_dir {
-        // Agent-local built-ins (speech runtime) stay last so a user or
-        // project skill with the same name can still replace them.
-        push(load_dir(&dir, false));
-    }
 
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
 }
 
-fn materialize_builtins(agent_dir: &Path) -> Option<PathBuf> {
-    let root = agent_dir.join("builtin-skills");
-    for file in BUILTIN_FILES {
-        let target = root.join(file.relative_path);
-        if std::fs::read_to_string(&target).ok().as_deref() == Some(file.contents) {
-            continue;
-        }
-        let parent = target.parent()?;
-        if let Err(error) = std::fs::create_dir_all(parent) {
-            eprintln!(
-                "genet-agent: could not create built-in skill directory for {}: {error}",
-                file.relative_path
-            );
-            return None;
-        }
-        let file_name = target
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("builtin");
-        let temporary = parent.join(format!(".{file_name}.{}.tmp", crate::os::pid()));
-        let installed = std::fs::write(&temporary, file.contents).and_then(|_| {
-            std::fs::rename(&temporary, &target).or_else(|first_error| {
-                // Windows does not replace an existing destination with rename.
-                // This fallback loses atomic replacement but keeps upgrades from
-                // silently dropping a built-in Skill on that platform.
-                if target.exists() {
-                    std::fs::remove_file(&target)?;
-                    std::fs::rename(&temporary, &target)
-                } else {
-                    Err(first_error)
-                }
-            })
-        });
-        if let Err(error) = installed {
-            let _ = std::fs::remove_file(&temporary);
-            eprintln!(
-                "genet-agent: could not install built-in file {}: {error}",
-                file.relative_path
-            );
-            return None;
-        }
+fn load_daemon_builtins(dir: &Path) -> Vec<Skill> {
+    let mut skills = load_dir(dir, false);
+    for skill in &mut skills {
+        // The daemon already injected this catalog uniformly into every Agent.
+        // Keep the entries for `/skill:` expansion without adding a second copy
+        // to the built-in Agent's own prompt.
+        skill.disable_model_invocation = true;
     }
-    Some(root)
+    skills
 }
 
 /// Only our own skill directories treat loose `.md` files as skills; shared
@@ -427,40 +362,16 @@ mod tests {
     }
 
     #[test]
-    fn built_in_speech_runtime_skill_and_references_are_materialized() {
-        let cwd = temp_dir("speech-builtin-cwd");
-        let agent_dir = temp_dir("speech-builtin-agent");
-        let skills = load(&cwd, &agent_dir);
-        let skill = skills
-            .iter()
-            .find(|skill| skill.name == "genehub-speech-runtime")
-            .expect("built-in speech runtime skill");
-        assert!(std::fs::read_to_string(&skill.file_path)
-            .unwrap()
-            .contains("speech runtime register"));
-        assert!(skill.base_dir.join("references/models.md").is_file());
-        assert!(skill
-            .base_dir
-            .join("references/runtime-contract.md")
-            .is_file());
-        assert!(skill.base_dir.join("agents/openai.yaml").is_file());
-    }
-
-    #[test]
-    fn project_skill_can_override_an_agent_local_builtin() {
-        let cwd = temp_dir("override-cwd");
-        let agent_dir = temp_dir("override-agent");
-        let override_path = write_skill(
-            &cwd.join(".agents").join("skills"),
-            "genehub-speech-runtime",
-            "---\nname: genehub-speech-runtime\ndescription: Project override\n---\n",
+    fn daemon_built_ins_remain_commands_without_duplicate_prompt_entries() {
+        let dir = temp_dir("daemon-builtins");
+        write_skill(
+            &dir,
+            "genehub-session-history",
+            "---\nname: genehub-session-history\ndescription: Read history\n---\n",
         );
-        let skills = load(&cwd, &agent_dir);
-        let skill = skills
-            .iter()
-            .find(|skill| skill.name == "genehub-speech-runtime")
-            .unwrap();
-        assert_eq!(skill.file_path, override_path);
-        assert_eq!(skill.description, "Project override");
+        let skills = load_daemon_builtins(&dir);
+        assert_eq!(skills.len(), 1);
+        assert!(skills[0].disable_model_invocation);
+        assert!(format_for_prompt(&skills).is_empty());
     }
 }

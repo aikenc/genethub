@@ -97,6 +97,7 @@ impl AgentAdapter for OpenCodeAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        super::apply_session_environment(&mut command, &config);
         super::owned_child(&mut command);
         let mut child = command
             .spawn()

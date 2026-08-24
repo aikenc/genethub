@@ -213,6 +213,9 @@ pub struct SessionManager {
     /// Daemon data-dir Skills root. Absent in unit tests that only need
     /// artifact-link guidance.
     skills_dir: Option<PathBuf>,
+    /// Exact channel front door supplied by the launcher. This is a runtime
+    /// binding, never inferred from a product or channel name.
+    front_door_cli: Option<PathBuf>,
 }
 
 impl SessionManager {
@@ -235,11 +238,17 @@ impl SessionManager {
             replay_window: replay_window.max(1),
             import_candidates: Mutex::new(HashMap::new()),
             skills_dir: None,
+            front_door_cli: None,
         }
     }
 
-    pub fn with_skills_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+    pub fn with_builtin_skills(
+        mut self,
+        dir: impl Into<PathBuf>,
+        front_door_cli: Option<PathBuf>,
+    ) -> Self {
         self.skills_dir = Some(dir.into());
+        self.front_door_cli = front_door_cli;
         self
     }
 
@@ -1500,10 +1509,9 @@ impl SessionManager {
         // must not be injected into Agent system prompts — only path-linking
         // rules (HTML entry file, supported kinds, no directory links).
         let _ = artifact_preview_base_url;
-        let cwd = live.meta.lock().await.cwd.clone();
         let additional_system_prompt = Some(crate::skills::session_guidance(
             self.skills_dir.as_deref(),
-            &cwd,
+            self.front_door_cli.as_deref(),
         ));
         {
             let mut status = live.status.lock().await;
@@ -1764,6 +1772,7 @@ impl SessionManager {
             runtime_values: meta.runtime_values.clone(),
             additional_system_prompt: additional_system_prompt.clone(),
             skills_dir: self.skills_dir.clone(),
+            front_door_cli: self.front_door_cli.clone(),
             scratch_dir: scratch.clone(),
             providers: providers.clone(),
             resume,
@@ -4692,7 +4701,7 @@ mod tests {
             ))])),
             16,
         )
-        .with_skills_dir(skills.path());
+        .with_builtin_skills(skills.path(), Some(PathBuf::from("/opt/genehub/genet-dev")));
         sessions
             .store
             .save_meta(&SessionMeta {
@@ -4716,6 +4725,8 @@ mod tests {
         let prompt = captured.lock().unwrap().clone().expect("catalog");
         assert!(prompt.contains("index.html"));
         assert!(prompt.contains("genehub-session-history"));
+        assert!(prompt.contains("genehub-speech-runtime"));
+        assert!(prompt.contains("/opt/genehub/genet-dev"));
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("<location>"));
         sessions.shutdown().await;

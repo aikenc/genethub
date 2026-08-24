@@ -45,9 +45,12 @@ pub struct SessionConfig {
     /// adapter maps it to its strongest available native system/developer
     /// instruction mechanism; ACP has a documented lower-priority fallback.
     pub additional_system_prompt: Option<String>,
-    /// Daemon-owned Skills directory. The built-in Agent also loads this so
+    /// GeneHub built-in Skills directory. The built-in Agent also loads this so
     /// `/skill:` expansion sees the same files the catalog named.
     pub skills_dir: Option<PathBuf>,
+    /// Absolute front-door CLI selected by the channel launcher. Every Agent
+    /// receives the same binding; absence is explicit and never guessed.
+    pub front_door_cli: Option<PathBuf>,
     /// Where the adapter may keep agent-private state for this session.
     pub scratch_dir: PathBuf,
     /// Provider credentials, keyed by provider id.
@@ -336,6 +339,24 @@ pub fn owned_child(command: &mut crate::os_process::Command) {
     crate::process::own_group(command);
 }
 
+/// Give every live Agent process the same GeneHub runtime bindings named in
+/// its injected built-in Skill catalog. Probe/import helpers intentionally do
+/// not receive session-scoped context.
+pub(super) fn apply_session_environment(
+    command: &mut crate::os_process::Command,
+    config: &SessionConfig,
+) {
+    command.env("GENEHUB_SESSION_ID", &config.session_id);
+    match &config.front_door_cli {
+        Some(path) => {
+            command.env("GENEHUB_CLI", path);
+        }
+        None => {
+            command.env_remove("GENEHUB_CLI");
+        }
+    }
+}
+
 /// Starts a child process without giving it a console window.
 ///
 /// Every agent here is a console program, and on Windows starting one from a GUI
@@ -497,6 +518,10 @@ mod tests {
                 "{file} starts a program without preparing it to be owned"
             );
             assert!(
+                source.contains("apply_session_environment"),
+                "{file} starts a live Agent without the shared GeneHub CLI/session binding"
+            );
+            assert!(
                 !source.contains("without_a_window"),
                 "{file} suppresses the console window but skips the process group"
             );
@@ -560,5 +585,40 @@ mod tests {
                 "first line\nhttps://app.example/assets/preview/v2/d/w/r_root/",
             ]
         );
+    }
+
+    #[test]
+    fn every_agent_process_receives_the_exact_front_door_binding() {
+        let mut command = crate::os_process::Command::new("agent");
+        let config = SessionConfig {
+            session_id: "s-bound".into(),
+            cwd: PathBuf::from("/workspace"),
+            model_id: None,
+            mode_id: None,
+            effort_id: None,
+            runtime_values: Default::default(),
+            additional_system_prompt: None,
+            skills_dir: None,
+            front_door_cli: Some(PathBuf::from("/opt/genehub/genet-beta")),
+            scratch_dir: PathBuf::from("/scratch"),
+            providers: Default::default(),
+            resume: None,
+        };
+        apply_session_environment(&mut command, &config);
+        let env: std::collections::BTreeMap<_, _> = command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            env.get("GENEHUB_CLI"),
+            Some(&Some("/opt/genehub/genet-beta".into()))
+        );
+        assert_eq!(env.get("GENEHUB_SESSION_ID"), Some(&Some("s-bound".into())));
     }
 }

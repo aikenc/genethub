@@ -10,7 +10,7 @@ import { BlockedError } from "../../../infrastructure/public.ts";
 import { assertions } from "../../assertions/index.ts";
 import { connectProductClient } from "../../drivers/client.ts";
 import { daemonEndpoint, startDaemon, type DaemonHandle } from "../../drivers/daemon.ts";
-import { locateGenet, tryLocateWasm } from "../../drivers/cli.ts";
+import { locateGenet, tryLocateDaemonComponent } from "../../drivers/cli.ts";
 import type { EnvironmentLease } from "../../../infrastructure/public.ts";
 import { startMockLlm } from "../../../infrastructure/public.ts";
 import { waitUntil } from "../../tools/wait.ts";
@@ -292,7 +292,7 @@ export async function startLocalEnvironment(input: {
   const mock = await startMockLlm();
   const daemon = startDaemon({
     genet: locateGenet(input.openRoot),
-    wasm: tryLocateWasm(input.openRoot),
+    wasm: tryLocateDaemonComponent(input.openRoot),
     lease: input.lease,
   });
   const endpoint = daemonEndpoint(daemon);

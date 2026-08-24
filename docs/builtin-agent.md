@@ -170,13 +170,14 @@ agent_end                {messages}
 
 遵循开放的 [Agent Skills 标准](https://agentskills.io/specification)，为别的工具写的技能目录可以直接拿来用：
 
-- 发现路径：daemon 的 `GENEHUB_SKILLS_DIR`（若已设置）、项目 `.genehub/skills/`、用户级 agent 目录、共享的 `.agents/skills`；目录内含 `SKILL.md` 即视为技能根，不再向下递归；尊重 `.gitignore` / `.ignore` / `.fdignore`
+- 发现路径分两类：daemon 的 `GENEHUB_SKILLS_DIR` 只包含 GeneHub 产品内置 Skill，优先且不可覆盖；项目 `.genehub/skills/`、用户级 agent 目录和共享 `.agents/skills` 属于 Agent 自己的扩展机制，不会进入 daemon 注入给第三方 Agent 的产品目录
 - frontmatter：`name`（缺省用父目录名，≤64 字符）、`description`（必填，≤1024 字符）、`disable-model-invocation`
-- 注入：把「名称 + 描述」清单写进系统提示；技能正文在被调用时才读入，避免撑爆上下文
+- 注入：daemon 对所有 Agent 统一写入一次 GeneHub 内置 Skill 的「名称 + 描述 + 路径」清单；内置 Agent 仍加载这些 entrypoint 以提供 `/skill:`，但不会重复注入第二份产品清单；技能正文在被调用时才读入
 - 相对路径：技能文件里的相对路径按 `SKILL.md` 所在目录解析
 - 同时通过 `get_commands` 暴露为 `/skill:<name>`，`source: "skill"`
-- 跨 Agent 的 `genehub-session-history` 由 daemon 物化并注入，不在 Agent 内建目录里；`GENEHUB_SKILLS_DIR` 里的同名 Skill 不可被项目覆盖
-- Agent 仍物化自己的 `genehub-speech-runtime`；用户或项目同名 Skill 可覆盖这类 Agent 本地 fallback
+- `genehub-session-history` 与 `genehub-speech-runtime` 都由 daemon 物化并注入所有内置/第三方 Agent，不再存在 Agent 私有的产品内置 Skill
+- daemon 只加载编译时登记的 GeneHub 内置 entrypoint；工作区 `.genethub/skills`、`.genehub/skills` 和数据目录中的未知文件都不能进入产品目录
+- daemon 同时在摘要中给出当前 channel 启动器绑定的 CLI 绝对路径，并向 Agent 进程设置 `GENEHUB_CLI`；绑定缺失时明确 unavailable，禁止猜命令名
 - `/skill:genehub-session-history [goal]` 在 daemon 会话里强制加载同一份 SOP；普通会话只注入名称、描述和路径
 
 ---

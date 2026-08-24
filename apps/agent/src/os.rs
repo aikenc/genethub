@@ -1,24 +1,9 @@
-//! Facts about the running process that WASI does not report.
+//! Filesystem facts that WASI does not report like a native process.
 //!
-//! The guest has no pid of its own and no temp directory: `std::process::id`
-//! and `std::env::temp_dir` both abort on `wasm32-wasip2` rather than return
-//! anything. See the v2 proposal §6.9.
+//! The guest has no temp directory, and `std::env::temp_dir` aborts on
+//! `wasm32-wasip2` rather than returning one. See the v2 proposal §6.9.
 
 use std::path::PathBuf;
-
-#[cfg(not(target_family = "wasm"))]
-pub fn pid() -> u32 {
-    std::process::id()
-}
-
-/// The shell's pid, which is the process anyone outside can actually see.
-#[cfg(target_family = "wasm")]
-pub fn pid() -> u32 {
-    std::env::var(crate::channel::ENV_HOST_PID)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0)
-}
 
 #[cfg(not(target_family = "wasm"))]
 pub fn temp_dir() -> PathBuf {

@@ -636,6 +636,7 @@ impl AgentAdapter for ClaudeAdapter {
             "--append-system-prompt",
             config.additional_system_prompt.as_deref(),
         );
+        super::apply_session_environment(&mut command, &config);
 
         if let Some(session_id) = config
             .resume
@@ -2606,6 +2607,7 @@ mod tests {
                 effort_id: None,
                 additional_system_prompt: None,
                 skills_dir: None,
+                front_door_cli: None,
                 session_id: "s1".into(),
                 cwd: dir.path().to_path_buf(),
                 model_id: None,
