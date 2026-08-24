@@ -56,13 +56,29 @@ pub struct Usage {
     #[ts(optional)]
     pub cost_usd: Option<f64>,
     /// Timing scratch, not part of the wire contract: when the in-flight
-    /// round's request started, and when its first token landed.
+    /// round's request started (drives TTFT).
     #[serde(skip)]
     #[ts(skip)]
     pub round_started_at_ms: Option<i64>,
+    /// First output moment of the currently open generation span. A span runs
+    /// from a round's first token to its last; spans are summed into
+    /// `active_output_ms` so the rate never divides by tool-execution gaps.
     #[serde(skip)]
     #[ts(skip)]
-    pub first_token_at_ms: Option<i64>,
+    pub span_started_at_ms: Option<i64>,
+    /// Most recent output activity in the open span.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub last_output_at_ms: Option<i64>,
+    /// Very first output of the turn: fallback clock when every round arrived
+    /// as a single chunk and no span has measurable duration.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub turn_first_output_at_ms: Option<i64>,
+    /// Sum of closed per-round generation windows in milliseconds.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub active_output_ms: u64,
     /// Visible output characters seen so far, used only to estimate the output
     /// rate for providers that report no token totals. Never serialized.
     #[serde(skip)]

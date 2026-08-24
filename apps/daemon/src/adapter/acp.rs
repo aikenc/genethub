@@ -760,15 +760,11 @@ impl AgentSession for AcpSession {
                             if parsed.input_tokens > 0 || parsed.output_tokens > 0 {
                                 let rounds = usage.llm_rounds;
                                 let tool_out = usage.tool_output_tokens;
-                                let avg_ttft = usage.avg_ttft_ms;
-                                let first_token = usage.first_token_at_ms;
-                                let visible_chars = usage.visible_output_chars;
+                                let previous = usage.clone();
                                 usage = parsed;
                                 usage.llm_rounds = rounds;
                                 usage.tool_output_tokens = tool_out;
-                                usage.avg_ttft_ms = avg_ttft;
-                                usage.first_token_at_ms = first_token;
-                                usage.visible_output_chars = visible_chars;
+                                usage::preserve_timing(&mut usage, &previous);
                             }
                         }
                         usage::finalize_output_rate(&mut usage);
@@ -1889,15 +1885,11 @@ fn translate_update(
                 if parsed.input_tokens > 0 || parsed.output_tokens > 0 {
                     let rounds = state.usage.llm_rounds;
                     let tool_out = state.usage.tool_output_tokens;
-                    let avg_ttft = state.usage.avg_ttft_ms;
-                    let first_token = state.usage.first_token_at_ms;
-                    let visible_chars = state.usage.visible_output_chars;
+                    let previous = state.usage.clone();
                     state.usage = parsed;
                     state.usage.llm_rounds = rounds;
                     state.usage.tool_output_tokens = tool_out;
-                    state.usage.avg_ttft_ms = avg_ttft;
-                    state.usage.first_token_at_ms = first_token;
-                    state.usage.visible_output_chars = visible_chars;
+                    usage::preserve_timing(&mut state.usage, &previous);
                     usage::emit_progress(events, &turn_id, &state.usage);
                 }
             }

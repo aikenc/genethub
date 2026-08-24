@@ -1202,8 +1202,8 @@ function TurnFooter({
               data-testid="usage-rate"
               title={
                 usage.outputRateEstimated
-                  ? "按可见输出文本估算（chars/4），该 Agent 未上报 output token"
-                  : "按 Provider 上报的 output token 统计"
+                  ? "可见输出文本(chars/4) ÷ 各轮生成时间之和（不含 TTFT 与工具执行）；该 Agent 未上报 output token，为估算值"
+                  : "Provider 上报 output tokens ÷ 各轮生成时间之和（不含 TTFT 与工具执行）"
               }
             >
               {usage.outputRateEstimated ? "~" : ""}
