@@ -1,6 +1,6 @@
 # 轻量 Asset Preview v4
 
-> 状态：v4.1。在 v4 单文件 Preview 与 E2EE 边界上，聊天/文档 Markdown 于渲染期绑定 Preview URL（不再向 Agent 注入部署前缀），HTML Viewer 对静态相对资源做 Blob 重映射。真 WebRoot HTTP origin、大文件和公开 Assets Gateway 仍不在本版本内。
+> 状态：v4.2。在 v4 单文件 Preview 与 E2EE 边界上，聊天/文档 Markdown 于渲染期绑定 Preview URL（不再向 Agent 注入部署前缀），HTML Viewer 重映射 CSS/JS/module 与站点根路径资源，并把 iframe 内相对 fetch/import 转回 `asset.preview`。单文件上限 64 MiB，含 WASM/二进制。真 WebRoot HTTP origin 与公开 Assets Gateway 仍不在本版本内。
 
 ## 1. 产品结论
 
@@ -10,10 +10,10 @@ Asset Preview 是给人和 Agent 快速打开 workspace 文件的轻量查看器
 - URL 明文包含稳定 device handle、workspace handle 和相对路径；路径不是秘密，也不是授权凭证。
 - 同一个 URL 可在另一台已配对电脑或手机浏览器打开。查看设备不需要安装 daemon；它只需能够加载工作台并持有本地配对凭证，或已登录有权访问该设备的托管账号。
 - 文件由资源所在设备的 daemon 读取，经已有 E2EE Data Plane 返回；Fabric Relay 不解析或解密内部 Preview request、MIME 与文件 bytes。URL locator 本身是明文产品地址，工作台 HTTPS 终止层会看到它，这与“不隐藏设备路径”的产品取舍一致。
-- 只返回完整原文件。源文件 `<= 4 MiB` 才成功，超过直接提示无法预览。
-- 支持图片、Markdown、任意有效 UTF-8 且不含 NUL 的文本、单文件 HTML、MP4/WebM 小视频；已知源码/配置格式尽可能语法着色。
-- HTML 可运行 inline/HTTPS script 并访问 HTTPS/WSS 网络，但位于无同源权限的 sandbox iframe 中，不能取得工作台权限。
-- 点击文件默认全屏预览，可最小化成可拖动、靠边停靠的微信式浮窗；浮窗可「新窗口打开」深链页。HTML 静态多文件通过内联 CSS/JS 与 data: 媒体嵌入（避免沙箱 iframe 无法使用父页 blob:）；真 WebRoot HTTP origin 仍不在本版本内。
+- 只返回完整原文件。源文件 `<= 64 MiB` 才成功，超过直接提示无法预览。
+- 支持图片、Markdown、任意有效 UTF-8 且不含 NUL 的文本、HTML、MP4/WebM、WASM，以及其他二进制资源；已知源码/配置格式尽可能语法着色。
+- HTML 可运行 inline/HTTPS/module script、编译 WASM，并访问 HTTPS/WSS 网络，但位于无同源权限的 sandbox iframe 中，不能取得工作台权限。
+- 点击文件默认全屏预览，可最小化成可拖动、靠边停靠的微信式浮窗；浮窗可「新窗口打开」深链页。HTML 多文件通过内联 CSS/JS/module 与 data: 媒体嵌入，相对 fetch/import 由父页转发；真 WebRoot HTTP origin 仍不在本版本内。
 - `file.read` 已删除，文件查看器统一使用 Preview；写文件仍是独立业务能力。
 
 v4 明确不做缩略图、摘要、截断、转码、poster、probe、Range、缓存、上传 bytes、HTTP URL、Git object、多文件 HTML 目录映射、Service Worker 或 daemon HTTPS。Agent artifact 仍是 workspace 普通文件；本版本只让 Agent 按统一 locator 输出链接，没有新增 artifact 存储。
@@ -99,7 +99,7 @@ ResponseHead {
   metadata: {
     kind?, mediaType?, sourceBytes?, version?,
     error?: notFound | forbidden | unsupported | tooLarge | sourceChanged,
-    limitBytes?: 4194304
+    limitBytes?: 67108864
   },
   bodyLength
 }
@@ -109,16 +109,16 @@ FIN
 
 method、metadata、status 和 body 都在 E2EE record 内。body 是 streaming bytes，不经过 JSON/base64；DataEndpoint 自动切成最多 16 KiB record 并与其他 logical streams 公平轮转。
 
-请求没有 body。成功 response 的 `bodyLength`、`sourceBytes` 和实际收到的 bytes 必须完全相等且不超过 4 MiB，否则 Viewer fail-close 当前 stream。失败 response body 必须为空。
+请求没有 body。成功 response 的 `bodyLength`、`sourceBytes` 和实际收到的 bytes 必须完全相等且不超过 64 MiB，否则 Viewer fail-close 当前 stream。失败 response body 必须为空。
 
 `source.kind` 在 MVP 只有 `workspaceFile`。未来若支持 artifact、Git revision 或生成文档，应新增明确 contract，而不是让 `path` 指向 workspace 外资源。
 
 ## 5. daemon 文件边界
 
 ```text
-MAX_PREVIEW_SOURCE_BYTES = 4 * 1024 * 1024
+MAX_PREVIEW_SOURCE_BYTES = 64 * 1024 * 1024
 PREVIEW_WORKERS = 2
-PREVIEW_TIMEOUT = 15 seconds
+PREVIEW_TIMEOUT = 60 seconds
 ```
 
 daemon 的顺序是：
@@ -127,9 +127,9 @@ daemon 的顺序是：
 2. 校验 route 限定的 project handle；解析为 daemon-local project id。
 3. 用首段查 daemon 级 root mapping，并确认该 rootHandle 是当前项目成员；再以对应 capability directory API 打开余下递归相对路径。
 4. 要求目标是普通文件；不把目录、FIFO、设备或 socket 当文件流。
-5. 先读 metadata。大于 4 MiB 直接返回 `tooLarge`，不开始传输。
-6. 最多读取 `4 MiB + 1`；增长越界返回 `tooLarge`，长度变化返回 `sourceChanged`。
-7. 图片/视频按扩展名 + magic 判定；Markdown/HTML 按扩展名 + UTF-8 判定；其他有效 UTF-8 无 NUL 内容作为安全文本。
+5. 先读 metadata。大于 64 MiB 直接返回 `tooLarge`，不开始传输。
+6. 最多读取 `64 MiB + 1`；增长越界返回 `tooLarge`，长度变化返回 `sourceChanged`。
+7. 图片/视频/WASM 按扩展名 + magic 判定；Markdown/HTML 按扩展名 + UTF-8 判定；其他有效 UTF-8 无 NUL 内容作为安全文本；其余二进制作为 `binary`。
 8. 对完整 bytes 计算截短 SHA-256 version，发送精确 response head 和 body。
 
 文件读取在 `spawn_blocking` 中执行，最多两个并发 Preview worker；它不占 carrier reader 或 DataEndpoint writer task。handler 等待 worker 时只占自己的 logical stream。
@@ -150,6 +150,8 @@ daemon 的顺序是：
 | `video` | `video/webm` | `.webm` + EBML marker |
 | `markdown` | `text/markdown` | `.md/.markdown/.mdown` + valid UTF-8 |
 | `html` | `text/html` | `.html/.htm` + valid UTF-8 |
+| `wasm` | `application/wasm` | `.wasm` + `\0asm` |
+| `binary` | `application/octet-stream` | 其他非文本字节 |
 | `text` | `text/plain` | 其他扩展名 + valid UTF-8 + 无 NUL |
 
 文本中任意位置含 NUL 或 UTF-8 非法时拒绝。daemon 不相信浏览器传来的 MIME，也不做可执行的通用 MIME sniffing；未知扩展名只要满足文本判定就作为转义文本显示。图片/视频仍必须同时匹配扩展名与 magic；否则若 bytes 本身是文本就降级为文本，其他二进制返回 `unsupported`。
@@ -158,7 +160,7 @@ daemon 的顺序是：
 
 ### 图片与视频
 
-Viewer 用完整 bytes 创建带 daemon allowlist MIME 的 Blob URL。图片使用 `<img>`，MP4/WebM 使用带 controls 的 `<video>`。没有 Range 和转码，因此 4 MiB 上限同时控制内存和首屏等待。
+Viewer 用完整 bytes 创建带 daemon MIME 的 Blob URL。图片使用 `<img>`，MP4/WebM 使用带 controls 的 `<video>`。没有 Range 和转码，因此 64 MiB 上限同时控制内存和首屏等待。
 
 ### Markdown 与文本
 
@@ -190,21 +192,21 @@ HTML 在 `iframe srcdoc` 中运行：
 关键边界：
 
 - 没有 `allow-same-origin`，document 是 opaque origin，不能读父页面 DOM、cookie、localStorage、IndexedDB 或 GeneHub credential。
-- 没有表单、弹窗、top navigation、下载、摄像头、麦克风、定位、剪贴板、USB、串口或 worker 权限。
+- 没有表单、弹窗、top navigation、下载、摄像头、麦克风、定位、剪贴板、USB 或串口权限。
 - Viewer 删除源文件自带 `<base>` 和 CSP，插入固定 `https://preview.invalid/` base 与自己的 CSP。
-- 允许 inline script/style，以及绝对 HTTPS script/style/image/media/font 和 HTTPS/WSS connect。
-- 禁止 object、嵌套 frame、worker、form action；相对资源会指向不可用的固定 base，不会隐式读取 workspace 邻接文件。
-- UI 明示“活动 HTML · 网络已开启”。
+- 允许 inline/module script、`wasm-unsafe-eval`、blob/data worker，以及绝对 HTTPS script/style/image/media/font 和 HTTPS/WSS connect。
+- 禁止 object、嵌套 frame、form action。相对资源先静态重映射；未重映射的 `https://preview.invalid/` 请求由父页转发为 `asset.preview`。
+- UI 明示 WASM/Worker 与运行时 fetch 已开启。
 
 `srcdoc` 会继承承载 Preview 页面的 HTTP CSP；iframe 内的 `<meta>` 只能继续收紧，不能放宽它。因此生产 edge 必须只对 `/assets/preview/v2/*` 页面提供上述 active-HTML CSP，并让普通工作台继续使用不含 `unsafe-inline` 的严格策略。Cloud 的 Caddy 配置已按路径分开；自托管若统一下发 `script-src 'self'`，HTML 文档能显示，但其中脚本会被浏览器阻止。这是部署契约，不能靠在 iframe 内插入另一条 CSP 绕过。
 
 “允许网络”是产品取舍：HTML 本身可向互联网发送它已经拥有的文件内容，所以用户不应把不可信 HTML 当成静态文档；但 sandbox 隔离保证它不能因此取得 GeneHub 页面或其他本地文件的权限。未来若提供无网络模式，应是显式渲染模式，不与当前契约混淆。
 
-## 8. 多文件 HTML 为什么不在 MVP
+## 8. 多文件 HTML 与运行时转发
 
-相对 URL 需要一个可解析的目录命名空间；单次 E2EE Exchange 只返回一个文件，浏览器不会自动把 iframe 的后续 HTTP 请求映射回 daemon。正确方案需要 WebRoot session、受限资源路由、生命周期、缓存/Range 和更细的 path policy，或 daemon HTTPS + 字节隧道。
+相对 URL 需要一个可解析的目录命名空间。Viewer 在入口 HTML 上做静态重映射，并把 `https://preview.invalid/` 上的运行时 fetch/import 转回同站点的 `asset.preview`。这覆盖 H5/WASM 游戏的常见加载方式，仍不是带独立 HTTP origin 的 WebRoot。
 
-MVP 的固定 base 会让相对 CSS、JS、图片和模块 import 明确失败，而不是悄悄发起新的未授权 workspace read。多文件站点应使用 [云端 Assets Gateway](./assets-cloud-gateway.md) 或 [daemon HTTPS + SNI 字节隧道](./assets-daemon-https-sni-tunnel.md) 的后续提案；不引入 Service Worker。
+真 WebRoot、Range/缓存和公开托管仍走 [云端 Assets Gateway](./assets-cloud-gateway.md) 或 [daemon HTTPS + SNI 字节隧道](./assets-daemon-https-sni-tunnel.md)；不引入 Service Worker。
 
 ## 9. 错误与用户提示
 
@@ -212,8 +214,8 @@ MVP 的固定 base 会让相对 CSS、JS、图片和模块 import 明确失败�
 |---|---:|---|
 | `notFound` | 404 | 找不到文件 |
 | `forbidden` | 403 | workspace/path 不在当前授权内 |
-| `unsupported` | 415 | 类型不在 allowlist |
-| `tooLarge` | 413 | 超过 4 MiB，不预览 |
+| `unsupported` | 415 | 目录或无法作为文件读取 |
+| `tooLarge` | 413 | 超过 64 MiB，不预览 |
 | `sourceChanged` | 409/500/408 | 读取期间变化、worker 异常或超时，请重试 |
 
 连接未配对、设备离线、URL 设备与握手身份不一致、版本不兼容和 E2EE 认证失败使用连接层错误，不伪装成文件不存在。协议版本不匹配直接关闭，不尝试旧 `file.read`。
@@ -235,7 +237,7 @@ Agent 不必输出部署相关的 Preview prefix。聊天与文档 Preview 共�
 
 `session.send` 的 `artifactPreviewBaseUrl` 仍保留在协议中以兼容旧客户端，但当前工作台始终传 `null`，daemon **不会**把它拼成部署相关 Preview 前缀注入 adapter。daemon 会注入一段与部署无关的路径链接指引：要求 Agent 输出工作区相对文件路径（Markdown 链接或裸路径）、禁止只给目录，并强调 H5/静态站必须落到入口 `.html`（通常是 `index.html`），同时列出 Preview 支持的文件种类。
 
-HTML 预览在 Viewer 内对入口文件做静态依赖 Blob 重映射（`link`/`script`/`img` 等相对引用与 CSS `url()`）；CSP 允许 `blob:` 的 script/style/font。动态 `fetch`/import、根路径 `/...` 与 WebRoot HTTP origin 仍不在本版本内。
+HTML 预览在 Viewer 内对入口文件做静态依赖重映射（`link`/`script`/`img` 等相对或站点根路径引用、`type=module`、CSS `url()`）；CSP 允许 `wasm-unsafe-eval` 与 `blob:` worker。运行时相对 `fetch`/import 经 iframe 桥转发到 `asset.preview`。真 WebRoot HTTP origin 仍不在本版本内。
 
 ## 11. 验收
 
@@ -243,7 +245,7 @@ HTML 预览在 Viewer 内对入口文件做静态依赖 Blob 重映射（`link`/
 - FilesPanel 用当前 daemon identity + workspace id + 相对 path 生成独立 Viewer URL。
 - Cloud 根入口可直接渲染 Preview deep link，并按 URL device handle 找账号或本地 pairing target。
 - 两台独立已配对客户端能用同一 locator 通过真实 self-hosted Relay/daemon 读取相同 bytes。
-- 文件恰好 4 MiB 成功，4 MiB + 1 byte 明确 `tooLarge`；没有截断或 overview。
+- 文件恰好 64 MiB 成功，64 MiB + 1 byte 明确 `tooLarge`；没有截断或 overview。
 - 目录只展开不导航；重新打开、回到页面或按刷新均能看到新文件，展开目录在 root refresh 后自行恢复。
 - 真实 wire 的折叠目录字段缺失；旧端的 `children:null` 也只触发展开请求，不会卸载页面。
 - `.code-workspace` 的注释、尾逗号、相对/绝对本地 path、folder name 和重复显示名称可用；URI root、重复目录、越界路径、超量定义明确拒绝。
@@ -255,5 +257,5 @@ HTML 预览在 Viewer 内对入口文件做静态依赖 Blob 重映射（`link`/
 - `session.send` 不注入部署相关 Preview URL 前缀；会注入路径链接指引（含 HTML 入口与支持类型）。
 - allowlist、UTF-8、magic、普通文件和 symlink escape 均有 daemon 测试。
 - 成功 response 精确校验三处长度；取消、超时和页面关闭能释放 stream/client/Blob。
-- HTML script 可运行，静态相对 CSS/JS/图片可经 Blob 重映射加载，网络策略可见，父页面同源权限不可得；动态加载与根路径站点仍不可用。
+- HTML script/module 可运行，静态相对或站点根路径 CSS/JS/图片可经重映射加载，相对 fetch/WASM 经父页转发，网络策略可见，父页面同源权限不可得。
 - `file.read`、`FileContent` 和旧查看器没有运行路径或 fallback。

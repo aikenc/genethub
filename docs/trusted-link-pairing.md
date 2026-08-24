@@ -62,9 +62,9 @@ capability；谁先拿到并打开，谁就获得这次设备登记机会。这�
 
 现有开源配对旅程已经具备正确的交互骨架：
 
-- `packages/web/src/devices/machines.ts` 把 `claim` 和 `endpoint` 放在 URL fragment，fragment 不进入 HTTP access log。
-- `packages/web/src/App.tsx` 发现待配对链接后自动核销，不等待第二次确认。
-- `packages/web/src/devices/claim.ts` 通过邀请凭证建立加密通道，只发送一次 `device.claim`，成功后保存长期设备凭证。
+- `packages/workbench/src/devices/machines.ts` 把 `claim` 和 `endpoint` 放在 URL fragment，fragment 不进入 HTTP access log。
+- `packages/workbench/src/App.tsx` 发现待配对链接后自动核销，不等待第二次确认。
+- `packages/workbench/src/devices/claim.ts` 通过邀请凭证建立加密通道，只发送一次 `device.claim`，成功后保存长期设备凭证。
 - `apps/daemon/src/devices.rs` 在 daemon 内存生成 15 分钟一次性 invite，并在加密 claim 中原子消费。
 
 需要替换的是托管通道和 v3 密钥派生：
@@ -73,7 +73,7 @@ capability；谁先拿到并打开，谁就获得这次设备登记机会。这�
   `redeemFabricPeerCapability` 再把同一 secret 交给 daemon。
 - `workspaces.ts`、`workspace-catalog.ts`、`enrollment.ts` 和 `app-api.ts` 将 `peerSecret` 或
   `channelSecret` 返回给浏览器/控制台。
-- `apps/daemon/src/channel_auth.rs` 与 `packages/web/src/devices/proof.ts` 只把 PSK 和两个公开 nonce
+- `apps/daemon/src/channel_auth.rs` 与 `packages/workbench/src/devices/proof.ts` 只把 PSK 和两个公开 nonce
   输入 KDF，没有临时 DH；日后拿到 PSK 的人可以解开过去记录的会话。
 - 当前 machine fingerprint 不是协议实际验证的公钥信任锚；如果 Control 同时替换目录和展示值，
   客户端没有独立证据拒绝假机器。
@@ -287,10 +287,10 @@ genet hub link
 
 - 协议：`packages/proto/src/data.rs`；
 - Rust 握手：`apps/daemon/src/channel_auth.rs`、`dataplane/handshake.rs`、`transport/admission.rs`；
-- Web 握手：`packages/web/src/dataplane/handshake.ts`、`devices/proof.ts`；
+- Web 握手：`packages/workbench/src/dataplane/handshake.ts`、`devices/proof.ts`；
 - 身份/证书/撤销：`apps/daemon/src/devices.rs` 及新的 trust-domain 模块；
-- 自动 claim：`packages/web/src/devices/claim.ts`、`devices/machines.ts`、`App.tsx`；
-- 链接统一：`apps/daemon/src/link.rs`、`apps/cli/src/hub.rs`、`packages/web/src/session/store.ts`。
+- 自动 claim：`packages/workbench/src/devices/claim.ts`、`devices/machines.ts`、`App.tsx`；
+- 链接统一：`apps/daemon/src/link.rs`、`apps/cli/src/hub.rs`、`packages/workbench/src/session/store.ts`。
 
 `hub.claimLink` 可以保持外部 RPC 名称和返回 URL 的形状，daemon 内部将 Control 的账号 transfer ticket
 与本地 `device.invite` 合并。这样桌面托盘、Web 设置页和 CLI 不需要出现第二套入口。

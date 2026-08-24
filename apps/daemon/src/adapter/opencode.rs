@@ -11,6 +11,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::os_process::{Child, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -19,7 +20,6 @@ use genehub_proto::{
     SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
-use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, Mutex};
 
 use super::{
@@ -68,6 +68,7 @@ impl AgentAdapter for OpenCodeAdapter {
         // running instance. Starting one just to fill a dropdown is too slow
         // for the agent picker; the session reports its models once open.
         Catalog {
+            runtime_axes: None,
             default_effort: None,
             // OpenCode has its own commands over HTTP, which we do not read yet.
             commands: Vec::new(),
@@ -116,7 +117,7 @@ impl AgentAdapter for OpenCodeAdapter {
         //
         // What is bounded is reaching the server at all: it is on loopback, so a
         // connect that does not happen immediately is not going to happen.
-        let http = reqwest::Client::builder()
+        let http = crate::http::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .build()?;
         wait_until_ready(&http, &base, &mut child, &chatter).await?;
@@ -293,7 +294,7 @@ impl AgentAdapter for OpenCodeAdapter {
 }
 
 struct OpenCodeImportServer {
-    http: reqwest::Client,
+    http: crate::http::Client,
     base: String,
     child: Child,
 }
@@ -323,7 +324,7 @@ impl OpenCodeImportServer {
         let chatter = Chatter::default();
         chatter.watch("opencode-import", child.stdout.take()).await;
         chatter.watch("opencode-import", child.stderr.take()).await;
-        let http = reqwest::Client::builder()
+        let http = crate::http::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .build()?;
         wait_until_ready(&http, &base, &mut child, &chatter).await?;
@@ -362,7 +363,7 @@ impl TurnState {
 }
 
 struct OpenCodeSession {
-    http: reqwest::Client,
+    http: crate::http::Client,
     base: String,
     remote_session: String,
     model: Mutex<Option<String>>,
@@ -536,7 +537,7 @@ fn pick_port() -> Result<u16> {
 /// timeline, and a blank OpenCode context is better than a session that cannot
 /// send at all.
 async fn open_session(
-    http: &reqwest::Client,
+    http: &crate::http::Client,
     base: &str,
     cwd: &Path,
     resume: &Option<PersistHandle>,
@@ -602,7 +603,7 @@ fn resume_session_id(resume: &Option<PersistHandle>) -> Option<String> {
 const READY_BUDGET: Duration = Duration::from_secs(180);
 
 async fn wait_until_ready(
-    http: &reqwest::Client,
+    http: &crate::http::Client,
     base: &str,
     child: &mut Child,
     chatter: &Chatter,
@@ -659,7 +660,7 @@ mod start_tests {
 
         let started = std::time::Instant::now();
         let error = wait_until_ready(
-            &reqwest::Client::new(),
+            &crate::http::Client::new(),
             // Nothing listens here, so readiness can only come from the child,
             // and the child is on its way out.
             "http://127.0.0.1:1",
@@ -683,7 +684,7 @@ mod start_tests {
 }
 
 async fn stream_events(
-    http: reqwest::Client,
+    http: crate::http::Client,
     base: String,
     remote_session: String,
     events: broadcast::Sender<SessionEvent>,

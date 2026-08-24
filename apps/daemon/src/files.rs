@@ -4,12 +4,11 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-#[cfg(not(unix))]
-use cap_std::ambient_authority;
-use cap_std::fs::Dir;
 use genehub_proto::FileNode;
 use genehub_proto::{AssetPreviewKind, AssetPreviewMetadata};
 use sha2::{Digest, Sha256};
+
+use crate::fs_cap::Dir;
 
 const MAX_ENTRIES_PER_DIR: usize = 2000;
 const MAX_TREE_NODES: usize = 10_000;
@@ -35,7 +34,7 @@ pub fn tree_with_prefix(
     path_prefix: &str,
     root_name: Option<&str>,
 ) -> Result<FileNode> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let relative = workspace_relative(root, path)?;
     let mut remaining = MAX_TREE_NODES;
     tree_in(
@@ -182,10 +181,19 @@ impl std::fmt::Display for PreviewFailure {
 
 impl std::error::Error for PreviewFailure {}
 
+/// How much of the file one step of the read below takes. Small enough that no
+/// single step is long, large enough that a preview of a few megabytes is a
+/// handful of steps rather than a thousand.
+const PREVIEW_STEP_BYTES: usize = 256 * 1024;
+
 /// Reads one complete regular workspace file or returns a low-cardinality
 /// preview failure. It never truncates, summarizes, probes, transforms, or
 /// follows a stream-like special file.
-pub fn preview(
+///
+/// The read is in steps: previews are as big as the user's file, up to
+/// [`genehub_proto::MAX_PREVIEW_SOURCE_BYTES`], and a guest that swallowed one
+/// whole would hold every other session for as long as the disk took.
+pub async fn preview(
     root: &Path,
     relative_path: &str,
 ) -> std::result::Result<PreviewFile, PreviewFailure> {
@@ -202,11 +210,21 @@ pub fn preview(
             source_bytes: before.len(),
         });
     }
+    let mut source = file
+        .into_std()
+        .take((genehub_proto::MAX_PREVIEW_SOURCE_BYTES + 1) as u64);
     let mut bytes = Vec::with_capacity(before.len() as usize);
-    file.into_std()
-        .take((genehub_proto::MAX_PREVIEW_SOURCE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(map_preview_io)?;
+    let mut hasher = Sha256::new();
+    let mut step = vec![0u8; PREVIEW_STEP_BYTES];
+    loop {
+        let read = source.read(&mut step).map_err(map_preview_io)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&step[..read]);
+        bytes.extend_from_slice(&step[..read]);
+        crate::blocking::breathe().await;
+    }
     if bytes.len() > genehub_proto::MAX_PREVIEW_SOURCE_BYTES {
         return Err(PreviewFailure::TooLarge {
             source_bytes: bytes.len() as u64,
@@ -214,12 +232,13 @@ pub fn preview(
     }
     // A replacement or growth between stat and EOF must not turn the promised
     // complete file into a prefix. Length catches the portable, meaningful
-    // race; hashing below makes the successful response version exact.
+    // race; the hash taken as it was read makes the successful response version
+    // exact.
     if bytes.len() as u64 != before.len() {
         return Err(PreviewFailure::SourceChanged);
     }
     let (kind, media_type) = preview_type(relative, &bytes)?;
-    let digest = Sha256::digest(&bytes);
+    let digest = hasher.finalize();
     let version = digest[..16]
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -290,41 +309,51 @@ fn preview_type(
         "webm" if bytes.starts_with(b"\x1a\x45\xdf\xa3") => {
             Some((AssetPreviewKind::Video, "video/webm"))
         }
+        "wasm" if bytes.starts_with(b"\0asm") => Some((AssetPreviewKind::Wasm, "application/wasm")),
         _ => None,
     };
     if let Some(found) = exact {
         return Ok(found);
     }
 
-    let text = std::str::from_utf8(bytes).map_err(|_| PreviewFailure::Unsupported)?;
-    if text.contains('\0') {
-        return Err(PreviewFailure::Unsupported);
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        if !text.contains('\0') {
+            return match extension.as_str() {
+                "md" | "markdown" | "mdown" => Ok((AssetPreviewKind::Markdown, "text/markdown")),
+                "html" | "htm" => Ok((AssetPreviewKind::Html, "text/html")),
+                _ => Ok((AssetPreviewKind::Text, "text/plain")),
+            };
+        }
     }
-    match extension.as_str() {
-        "md" | "markdown" | "mdown" => Ok((AssetPreviewKind::Markdown, "text/markdown")),
-        "html" | "htm" => Ok((AssetPreviewKind::Html, "text/html")),
-        // A text document is a property of its bytes, not of whether this
-        // release happened to know its suffix. The browser infers a language
-        // when it can and safely falls back to escaped plain text when it
-        // cannot; valid UTF-8 without NUL is therefore always previewable.
-        _ => Ok((AssetPreviewKind::Text, "text/plain")),
-    }
+    Ok((AssetPreviewKind::Binary, "application/octet-stream"))
 }
 
 pub fn write(root: &Path, path: &Path, content: &str) -> Result<()> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let relative = workspace_relative(root, path)?;
     if let Some(parent) = relative.parent() {
         directory.create_dir_all(parent)?;
     }
+    // Last complete writer wins. A sibling temp + rename keeps concurrent
+    // writes from interleaving two payloads in the same inode.
+    let tmp_name = format!(".{}.tmp", uuid::Uuid::new_v4().simple());
+    let tmp = match relative.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(&tmp_name),
+        _ => PathBuf::from(&tmp_name),
+    };
     directory
-        .write(&relative, content)
-        .with_context(|| format!("writing {}", relative.display()))
+        .write(&tmp, content)
+        .with_context(|| format!("writing {}", relative.display()))?;
+    if let Err(error) = directory.rename(&tmp, &directory, &relative) {
+        let _ = directory.remove_file(&tmp);
+        return Err(error).with_context(|| format!("writing {}", relative.display()));
+    }
+    Ok(())
 }
 
 /// Creates a directory (and missing parents) inside the workspace capability.
 pub fn mkdir(root: &Path, path: &Path) -> Result<()> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let relative = workspace_relative(root, path)?;
     if relative.as_os_str().is_empty() {
         anyhow::bail!("cannot create the workspace root");
@@ -339,7 +368,7 @@ pub fn mkdir(root: &Path, path: &Path) -> Result<()> {
 
 /// Deletes a file or directory tree inside the workspace capability.
 pub fn delete_path(root: &Path, path: &Path) -> Result<()> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let relative = workspace_relative(root, path)?;
     if relative.as_os_str().is_empty() {
         anyhow::bail!("cannot delete the workspace root");
@@ -360,7 +389,7 @@ pub fn delete_path(root: &Path, path: &Path) -> Result<()> {
 
 /// Moves or renames a path inside the same workspace root.
 pub fn move_path(root: &Path, from: &Path, to: &Path) -> Result<()> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let from_rel = workspace_relative(root, from)?;
     let to_rel = workspace_relative(root, to)?;
     validate_transfer(&from_rel, &to_rel)?;
@@ -379,7 +408,7 @@ pub fn move_path(root: &Path, from: &Path, to: &Path) -> Result<()> {
 
 /// Copies a file or directory tree inside the same workspace root.
 pub fn copy_path(root: &Path, from: &Path, to: &Path) -> Result<()> {
-    let directory = workspace_dir(root)?;
+    let directory = crate::fs_cap::open_workspace_root(root)?;
     let from_rel = workspace_relative(root, from)?;
     let to_rel = workspace_relative(root, to)?;
     validate_transfer(&from_rel, &to_rel)?;
@@ -442,36 +471,8 @@ fn copy_recursive(directory: &Dir, from: &Path, to: &Path) -> Result<()> {
     anyhow::bail!("unsupported file type: {}", from.display())
 }
 
-/// Opens the registered workspace as a directory capability.
-///
-/// All later lookups are relative to the opened handle. `cap-std` resolves
-/// every component without ever leaving that handle, including when another
-/// process swaps a checked parent directory for a symlink between lookup and
-/// open. A workspace root which is itself currently a symlink is rejected: a
-/// saved root cannot silently be retargeted after registration.
-fn workspace_dir(root: &Path) -> Result<Dir> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(root)
-            .with_context(|| format!("opening workspace root {}", root.display()))?;
-        Ok(Dir::from_std_file(file))
-    }
-
-    #[cfg(not(unix))]
-    {
-        let metadata = std::fs::symlink_metadata(root)
-            .with_context(|| format!("reading workspace root {}", root.display()))?;
-        if metadata.file_type().is_symlink() {
-            anyhow::bail!("workspace root is a symbolic link");
-        }
-        Dir::open_ambient_dir(root, ambient_authority())
-            .with_context(|| format!("opening workspace root {}", root.display()))
-    }
+fn workspace_dir(root: &Path) -> Result<crate::fs_cap::Dir> {
+    crate::fs_cap::open_workspace_root(root)
 }
 
 fn workspace_relative(root: &Path, path: &Path) -> Result<PathBuf> {
@@ -581,15 +582,18 @@ mod tests {
         assert!(dir.path().join("src/assets/note.txt").exists());
     }
 
-    #[test]
-    fn preview_returns_the_complete_four_megabyte_boundary() {
+    #[tokio::test]
+    async fn preview_returns_the_complete_four_megabyte_boundary() {
         let dir = tempfile::tempdir().unwrap();
         let bytes = vec![b'x'; genehub_proto::MAX_PREVIEW_SOURCE_BYTES];
         std::fs::write(dir.path().join("exact.txt"), &bytes).unwrap();
-        let shown = preview(dir.path(), "exact.txt").unwrap();
+        let shown = preview(dir.path(), "exact.txt").await.unwrap();
         assert_eq!(shown.bytes, bytes);
         assert_eq!(shown.metadata.kind, AssetPreviewKind::Text);
-        assert_eq!(shown.metadata.source_bytes, 4_194_304);
+        assert_eq!(
+            shown.metadata.source_bytes,
+            genehub_proto::MAX_PREVIEW_SOURCE_BYTES as u64
+        );
 
         std::fs::write(
             dir.path().join("large.txt"),
@@ -597,34 +601,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            preview(dir.path(), "large.txt").unwrap_err(),
+            preview(dir.path(), "large.txt").await.unwrap_err(),
             PreviewFailure::TooLarge {
-                source_bytes: 4_194_305
+                source_bytes: (genehub_proto::MAX_PREVIEW_SOURCE_BYTES + 1) as u64
             }
         );
     }
 
-    #[test]
-    fn preview_uses_magic_for_binary_types_and_utf8_for_documents() {
+    #[tokio::test]
+    async fn preview_uses_magic_for_binary_types_and_utf8_for_documents() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("page.md"), "# 结果\n").unwrap();
         assert_eq!(
-            preview(dir.path(), "page.md").unwrap().metadata.kind,
+            preview(dir.path(), "page.md").await.unwrap().metadata.kind,
             AssetPreviewKind::Markdown
         );
         std::fs::write(dir.path().join("page.html"), "<script>ok()</script>").unwrap();
         assert_eq!(
-            preview(dir.path(), "page.html").unwrap().metadata.kind,
+            preview(dir.path(), "page.html")
+                .await
+                .unwrap()
+                .metadata
+                .kind,
             AssetPreviewKind::Html
         );
         std::fs::write(dir.path().join("fake.png"), b"not a png").unwrap();
         assert_eq!(
-            preview(dir.path(), "fake.png").unwrap().metadata.kind,
+            preview(dir.path(), "fake.png").await.unwrap().metadata.kind,
             AssetPreviewKind::Text
         );
         std::fs::write(dir.path().join("real.png"), b"\x89PNG\r\n\x1a\nrest").unwrap();
         assert_eq!(
-            preview(dir.path(), "real.png").unwrap().metadata.media_type,
+            preview(dir.path(), "real.png")
+                .await
+                .unwrap()
+                .metadata
+                .media_type,
             "image/png"
         );
         std::fs::write(
@@ -634,6 +646,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             preview(dir.path(), "build.custom-language")
+                .await
                 .unwrap()
                 .metadata
                 .kind,
@@ -641,20 +654,37 @@ mod tests {
         );
         std::fs::write(dir.path().join("binary.custom"), b"prefix\0suffix").unwrap();
         assert_eq!(
-            preview(dir.path(), "binary.custom").unwrap_err(),
-            PreviewFailure::Unsupported
+            preview(dir.path(), "binary.custom")
+                .await
+                .unwrap()
+                .metadata
+                .kind,
+            AssetPreviewKind::Binary
+        );
+        std::fs::write(dir.path().join("game.wasm"), b"\0asm\x01\x00\x00\x00").unwrap();
+        assert_eq!(
+            preview(dir.path(), "game.wasm")
+                .await
+                .unwrap()
+                .metadata
+                .media_type,
+            "application/wasm"
         );
         let mut late_nul = vec![b'a'; 9_000];
         late_nul.push(0);
         std::fs::write(dir.path().join("late-nul.custom"), late_nul).unwrap();
         assert_eq!(
-            preview(dir.path(), "late-nul.custom").unwrap_err(),
-            PreviewFailure::Unsupported
+            preview(dir.path(), "late-nul.custom")
+                .await
+                .unwrap()
+                .metadata
+                .kind,
+            AssetPreviewKind::Binary
         );
     }
 
-    #[test]
-    fn preview_rejects_noncanonical_and_platform_escape_spelling() {
+    #[tokio::test]
+    async fn preview_rejects_noncanonical_and_platform_escape_spelling() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("ok.txt"), "ok").unwrap();
         for path in [
@@ -669,7 +699,7 @@ mod tests {
             "./ok.txt",
         ] {
             assert_eq!(
-                preview(dir.path(), path).unwrap_err(),
+                preview(dir.path(), path).await.unwrap_err(),
                 PreviewFailure::Forbidden,
                 "{path:?}"
             );
@@ -677,8 +707,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn preview_does_not_follow_a_symlink_outside_the_workspace() {
+    #[tokio::test]
+    async fn preview_does_not_follow_a_symlink_outside_the_workspace() {
         use std::os::unix::fs::symlink;
 
         let workspace = tempfile::tempdir().unwrap();
@@ -686,7 +716,7 @@ mod tests {
         std::fs::write(outside.path().join("secret.txt"), "host secret").unwrap();
         symlink(outside.path(), workspace.path().join("escape")).unwrap();
         assert!(matches!(
-            preview(workspace.path(), "escape/secret.txt"),
+            preview(workspace.path(), "escape/secret.txt").await,
             Err(PreviewFailure::Forbidden | PreviewFailure::NotFound | PreviewFailure::Unsupported)
         ));
     }

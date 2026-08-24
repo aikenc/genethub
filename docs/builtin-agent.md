@@ -2,6 +2,7 @@
 
 > 用 **Rust** 写的内置 coding agent，随桌面端分发，装完即可跑任务，不必先去装外部 CLI。  
 > **定位：它只是 daemon 众多 agent adapter 中的一个后端**，见 [architecture.md](./architecture.md) §3。产品不围绕它设计，它也不定义对外协议。
+> 状态（2026-08-22）：源码仍在 `apps/agent`，但产品不再发布独立 `genet-agent` 二进制；它与 daemon 编进同一份 `genehub_guest.wasm`，由独立 `genehub-host` OS 进程选择 `agent-run` 入口。下文协议不变，命令示例以 `genet agent-serve` 为当前入口。
 
 ---
 
@@ -20,12 +21,12 @@
 成熟的开源 agent 多是多包 monorepo（多 provider 抽象、运行时、CLI、TUI 四层起步），全量移植是数月工程量，直接打包又要背上 Node 运行时和上百兆依赖。而 daemon 使用一个 agent 只需要一个很窄的接口：
 
 ```
-daemon ──spawn──> genet-agent --mode rpc [--model M] [--thinking L] [--session FILE]
+daemon ──spawn──> $GENEHUB_CLI agent-serve --mode rpc [--model M] [--thinking L] [--session FILE]
        <──stdout── JSONL：事件流 + 命令响应
        ──stdin───> JSONL：命令
 ```
 
-接口窄到这个程度，自己实现反而比移植便宜：Rust 单文件二进制 < 15MB，零运行时依赖，与 Tauri 同栈。协议形状借鉴的是公开文档化的 stdio 约定，代码全部自有。
+接口窄到这个程度，自己实现反而比移植便宜：Rust 代码随同一个 WASM Component 分发，不引入 Node 运行时；每个会话仍有独立 host 进程与 stdio 生命周期。协议形状借鉴的是公开文档化的 stdio 约定，代码全部自有。
 
 ---
 
@@ -62,7 +63,7 @@ TUI、subagents、extensions、MCP、fork / branch / tree / rewind、steering �
 
 ### 3.0 只有 RPC 一种形态
 
-Genet Agent **不是给人直接用的 CLI**：没有交互式界面、没有 print 模式、没有配置向导、没有彩色输出。唯一入口是 `--mode rpc`，唯一使用者是 daemon。
+Genet Agent **不是给人直接用的 CLI**：没有交互式界面、没有 print 模式、没有配置向导、没有彩色输出。产品入口是隐藏的 `genet agent-serve --mode rpc`，launcher 再 exec host 的 `agent-run`；唯一使用者是 daemon。
 
 - 参数解析手写即可，不引入 CLI 框架
 - `--mode` 不是 `rpc`（含 `rpc-ui`）时，往 stderr 打一行原因并以非 0 退出
@@ -73,7 +74,7 @@ Genet Agent **不是给人直接用的 CLI**：没有交互式界面、没有 pr
 `genet` adapter 拼出的命令行（可执行文件路径由 `GENET_AGENT_COMMAND` 覆盖，便于开发时指向本地构建）：
 
 ```
-genet-agent --mode rpc
+genet agent-serve --mode rpc
             [--model <provider/id>] [--thinking <level>]
             [--no-session | --session <file>]
             [--genehub-session-id <public-session-id>]

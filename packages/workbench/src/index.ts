@@ -1,0 +1,63 @@
+/**
+ * The package entry point for anyone embedding the workbench.
+ *
+ * Another repository can import `App` and mount it itself, optionally passing
+ * extra tabs of its own. Nothing here knows what those tabs contain: an
+ * injected page talks to whatever backend it belongs to, which is what keeps
+ * this package free of any notion of accounts.
+ */
+
+// First, and for its side effects: the palette and the keyboard inset are set
+// up by importing this package, not by the host remembering to ask.
+import "./boot";
+
+export { App } from "./App";
+export { BUILD } from "./build";
+export { detectHost, browserHost, desktopHost, LOCAL_TARGET } from "./host";
+export type { Endpoint, Host, Notification, Target } from "./host";
+export { Client } from "./protocol/client";
+export { AssetPreviewPage } from "./preview/AssetPreviewPage";
+export { PreviewFloat } from "./preview/PreviewFloat";
+export { PreviewPopoutPage } from "./preview/PreviewPopoutPage";
+export { parsePreviewPopout } from "./preview/popout";
+export type { PreviewPopoutContext } from "./preview/popout";
+export { assetPreviewUrl, parseAssetPreviewPath } from "./preview/url";
+export {
+  formatWorkbenchHref,
+  formatWorkbenchPath,
+  parseWorkbenchHref,
+  parseWorkbenchPath,
+  scopedWorkbenchLocation,
+  NEW_SESSION_ID,
+} from "./location/workbench";
+export type { AddressScope, WorkbenchDialog, WorkbenchLocation } from "./location/workbench";
+export { workbenchDocumentTitle } from "./location/title";
+export {
+  expandLocator,
+  expandPreviewPath,
+  locatorsMatch,
+  TABS_QUERY_BUDGET,
+  TABS_URL_LIMIT,
+} from "./location/locator";
+export { currentAppHref, goApp, LOCATION_MOVED } from "./location/history";
+export {
+  patchWorkbenchLocation,
+  readWorkbenchDialog,
+  readWorkbenchLocation,
+} from "./location/sync";
+export { useWorkbench } from "./session/store";
+export type { SpeechInputProblem } from "./speech/useSpeechInput";
+export {
+  activeDiagnosticClient,
+  CLIENT_DIAGNOSTIC_EVENT,
+  registerDiagnosticClient,
+} from "./diagnostics";
+export type { ClientDiagnosticEvent, ClientDiagnosticKind } from "./protocol/client";
+export type {
+  SessionInspection,
+  SessionNarrativePage,
+  SessionRoundPage,
+  SessionSummary,
+  SupportDiagnostics,
+} from "@genehub/proto";
+export type { ExtraTab } from "./shell/tabs";

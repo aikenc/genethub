@@ -10,7 +10,7 @@ use super::endpoint::{PeerServices, ServerStream};
 use crate::files::{PreviewFailure, PreviewFile};
 
 static PREVIEW_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-const PREVIEW_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+const PREVIEW_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     if !stream.read_body(0).await?.is_empty() {
@@ -67,17 +67,13 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     };
     let root = resolved.root;
     let path = resolved.relative.to_string_lossy().replace('\\', "/");
-    let read = tokio::task::spawn_blocking(move || {
+    let read = async move {
         let _slot = slot;
-        crate::files::preview(&root, &path)
-    });
-    let result = tokio::time::timeout(PREVIEW_IO_TIMEOUT, read).await;
-    let file = match result {
-        Ok(Ok(Ok(file))) => file,
-        Ok(Ok(Err(failure))) => return failure_response(stream, failure).await,
-        Ok(Err(_)) => {
-            return preview_error(stream, 500, AssetPreviewError::SourceChanged, None).await
-        }
+        crate::files::preview(&root, &path).await
+    };
+    let file = match tokio::time::timeout(PREVIEW_IO_TIMEOUT, read).await {
+        Ok(Ok(file)) => file,
+        Ok(Err(failure)) => return failure_response(stream, failure).await,
         Err(_) => return preview_error(stream, 408, AssetPreviewError::SourceChanged, None).await,
     };
     send_file(stream, file).await

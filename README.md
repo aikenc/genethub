@@ -33,16 +33,30 @@ GeneHub Agent 随安装包提供，配置 Anthropic 或 OpenAI-compatible 模型
 
 ## 愿景与理念
 
-我们希望 coding agent 像 Git 和 SSH 一样，成为开发者**可以拥有、可以替换、可以自建**的基础设施，
-而不是被锁在某个终端、编辑器或云平台里的一次性对话。
+> **把你所有的机器变成一台，把你所有的 Agent 变成一个能对话的人——算力和作品都留在你自己手里。**
 
-GeneHub 的设计遵循五条原则：
+我们相信两件事：模型每隔几个月强一次，而人打字的速度从未变过，**人机之间的带宽会取代模型能力成为
+主要瓶颈**；同时，未发布的作品、商业软件许可、本地模型与外设、已经买下的硬件都长在端侧，
+**端侧生产力生态不会被 cloud-only 取代**。
 
-1. **机器是事实来源。** 工作区、密钥、进程和会话记录由你的机器持有；远端设备只是经过授权的操作界面。
-2. **Agent 是插件。** daemon 和前端只认统一协议，不把任何一家 agent 的私有事件格式变成产品协议。
-3. **会话应当跟着人，而不是跟着窗口。** 关掉页面、网络切换或换一台设备，都不该终止正在机器上执行的任务。
-4. **官方托管是便利，不是绑定。** 想省心，可以直接使用官方 Hub；需要自主控制时，也可以自行部署远程入口，不必迁移工作区或会话。
-5. **信任来自可核对的边界。** 数据保存在哪里、远程连接经过什么组件、设备如何获得授权，都应当在代码和文档中说清楚。
+由此产品分三层，顺序不能颠倒：**拥有**（工作区、密钥、进程和会话记录都在你自己的设备上）→
+**汇聚**（你的机器和 Agent 汇聚成一个可指挥的整体，多一台机器换来的是产能而不只是一个入口）→
+**带宽**（作品本身成为界面，你点、你选、你说，而不是把体验翻译成文字）。
+
+四条承诺，每条都能被验收：
+
+1. **资产不动。** 工作区、密钥、进程和会话记录由你的机器持有；远端设备只是经过授权的操作界面。
+2. **多机是常态。** 本机只是目录里延迟最低、断网也在的那一项，不是唯一的一等目标。
+3. **Agent 可替换。** daemon 和前端只认统一协议，不把任何一家 agent 的私有事件格式变成产品协议；
+   你已经付费和熟悉的 agent 是一等公民。
+4. **会话跟着人。** 关掉页面、切换网络或换一台设备，都不该终止正在机器上执行的任务，回来还能接上。
+
+两条工程纪律支撑上面四条：**信任来自可核对的边界**——数据存在哪里、远程连接经过什么组件、设备如何
+获得授权，都写在代码和文档里，开源侧不依赖官方服务也能独立部署；**业务更新不该变成用户的安装任务**
+——目标是 95% 的产品 change set 只更新 WASM guest 与工作台，stable 分钟级、beta/dev 秒级，
+后台验签、切换和失败回滚。当前 Linux/dev 运行时底座已验证，Windows owner-only ACL 已在 host 实现并经
+CI 的 NTFS 单测覆盖；安装后主旅程与自动交付链仍在 [roadmap](./docs/roadmap.md) 推进。在测量系统建立
+之前，95% 与分钟级都是目标而不是已达成的状态。
 
 ## 快速开始
 
@@ -83,9 +97,11 @@ genet hub link        # 为另一台设备生成一次性连接链接
 genet daemon stop     # 停止后台 daemon
 ```
 
-安装脚本会同时安装 `genet`（CLI 与 daemon 是同一个二进制）和 `genet-agent`，并在下载后强制校验
-`SHA256SUMS`。升级时请从 [GitHub Releases](https://github.com/aikenc/genethub/releases/latest)
-下载新版本并核对摘要。
+安装脚本会安装薄 CLI `genet`、原生装载壳 `genehub-host` 和同时承载 daemon/agent 两个入口的
+`genehub_guest.wasm`，并在下载后强制校验 `SHA256SUMS`。业务只跑在这份 WASM 里：没有原生
+daemon/agent 模式，缺件或不匹配直接失败，不会回退。**当前**升级仍需从
+[GitHub Releases](https://github.com/aikenc/genethub/releases/latest) 下载新版本并核对摘要；独立签名根、
+组件自动更新与回滚落地前，不会把摘要校验描述成安全的无感更新。
 
 ### macOS
 
@@ -96,7 +112,7 @@ macOS 桌面端代码和进程监督测试已经存在，但公开安装包要�
 
 ```mermaid
 flowchart LR
-    desktop[桌面工作台] -->|loopback| daemon[GeneHub daemon]
+    desktop[桌面工作台] -->|loopback| daemon[genehub-host + WASM daemon guest]
     remote[浏览器 / 手机] <-->|加密连接| relay[Relay]
     relay <-->|转发| daemon
     daemon --> kernel[会话 · 文件 · Git · 终端]
@@ -107,7 +123,8 @@ flowchart LR
 
 | 部件 | 职责 |
 | --- | --- |
-| **daemon**（Rust） | 机器上的唯一常驻进程；管理工作区、会话、文件、Git、终端、设备授权，并按需拉起 agent |
+| **daemon guest**（Rust → WASM Component） | 机器上的常驻业务运行时；管理工作区、会话、文件、Git、终端、设备授权，并按需拉起 agent |
+| **native host / CLI**（Rust） | Wasmtime/WASI 与 OS/连接资源、daemon 生命周期、薄 argv 转发；不解释产品动词 |
 | **adapter**（Rust） | 探测不同 agent，把它们的协议、事件和能力翻译成 GeneHub 的统一模型 |
 | **Relay**（Node.js） | 为跨设备连接转发加密数据；不解析业务内容，也不保存 GeneHub 会话 |
 | **workbench**（React） | 同一份前端运行在桌面 WebView、浏览器和手机上 |
@@ -154,43 +171,47 @@ GeneHub 的开源形态不依赖官方账号系统。最小远程部署由三部
 git clone https://github.com/aikenc/genethub.git
 cd genethub
 
-# Rust：CLI/daemon、内置 agent、协议与测试工具
-cargo build --workspace --bins
+# 原生 launcher/host，以及单平台 WASM guest
+# guest 用 iterate：opt-level=1 + strip，无 fat LTO。Stable 安装包才走 --release。
+cargo build -p genet-cli -p genehub-host
+cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
 
 # Web workbench 与 Relay
-npm ci --prefix packages/web
+npm ci --prefix packages/workbench
 npm ci --prefix apps/relay
-npm --prefix packages/web run build
+npm --prefix packages/workbench run build
 npm --prefix apps/relay run build
 ```
 
-源码树始终使用隔离的 `dev` channel：构建出的二进制名是 `genet-dev` / `genet-agent-dev`，版本为
-`0.0.0`，并且**没有默认 Hub 地址**。这是为了避免本地开发意外读写正式版的数据或连到正式服务。
+源码树始终使用隔离的 `local` 身份：构建出的原生入口是 `genet-local` / `genehub-host-local`，业务制品是
+`genehub_guest.wasm`，版本为 `0.0.0`，并且**没有默认 Hub 地址**。这是为了避免本地开发意外读写
+stable 线的数据或连到 stable 服务。
 
 ```bash
-./target/debug/genet-dev daemon start
-./target/debug/genet-dev status
+./target/debug/genet-local daemon start
+./target/debug/genet-local status
 
 # 需要测试远端流程时，显式指定与你的构建匹配的 Hub
-./target/debug/genet-dev hub login --hub https://your-hub.example --wait
+./target/debug/genet-local hub login --hub https://your-hub.example --wait
 ```
 
-不要直接执行仓库里的 `scripts/install.sh` 来安装正式版：源码中的脚本同样属于 `dev` channel，会有意拒绝下载。
+不要直接执行仓库里的 `scripts/install.sh` 来安装 stable 线：源码中的脚本同样盖着 `local` 章，会有意拒绝下载。
 正式版请使用[快速开始](#快速开始)中的发布入口。
 
 ### 测试
 
 ```bash
-# 旅程测试会拉起真实 daemon/agent 二进制，所以先 build
-cargo build --workspace --bins
+# 旅程测试会拉起真实 launcher/host/guest，所以先构建三件套
+cargo build -p genet-cli -p genehub-host
+cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
 cargo test --workspace --no-fail-fast
 
 npm --prefix apps/relay run typecheck
 npm --prefix apps/relay test
 
-npm --prefix packages/web run typecheck
-npm --prefix packages/web test
-npm --prefix packages/web run build
+npm --prefix packages/workbench run typecheck
+npm --prefix packages/workbench test
+npm --prefix packages/workbench run build
 ```
 
 Windows 或 macOS 上构建桌面安装包：
@@ -206,13 +227,15 @@ node apps/desktop/scripts/bundle.mjs
 
 | 路径 | 内容 |
 | --- | --- |
-| `apps/cli` | `genet` CLI，以及启动/管理 daemon 的入口 |
-| `apps/daemon` | 会话内核、adapter、工作区能力和本地/远端传输 |
-| `apps/agent` | 随包提供的 GeneHub Agent |
+| `apps/cli` | `genet` 薄 CLI，以及启动/管理 daemon 的原生入口 |
+| `apps/host` | Wasmtime/WASI 壳与 typed OS/RTC 连接资源 |
+| `apps/guest` | `genehub_guest.wasm` 的 daemon/agent 双入口 |
+| `apps/daemon` | 编入 guest 的会话内核、adapter、工作区能力和本地/远端传输 |
+| `apps/agent` | 编入同一 guest 的 GeneHub Agent |
 | `apps/relay` | 无状态 Fabric Relay |
 | `apps/desktop` | Windows/macOS Tauri 2 桌面壳 |
 | `packages/proto` | Rust 协议定义及生成的 TypeScript bindings |
-| `packages/web` | 浏览器、桌面和手机共用的工作台 |
+| `packages/workbench` | 浏览器、桌面和手机共用的工作台 |
 | `testing` | 跨部件旅程、安装与安全边界测试 |
 
 ## 继续阅读
@@ -220,6 +243,8 @@ node apps/desktop/scripts/bundle.mjs
 | 文档 | 适合什么时候读 |
 | --- | --- |
 | [architecture.md](./docs/architecture.md) | 理解顶层分层、不可让步的边界和演进顺序 |
+| [engineering-guidance.md](./docs/engineering-guidance.md) | 动手之前：这个方案该长什么形状 |
+| [engineering-laws.md](./docs/engineering-laws.md) | 实现与提交之前：哪些事不许做 |
 | [third-party-agents.md](./docs/third-party-agents.md) | 接入 Claude Code、Codex、OpenCode、Cursor 或自定义 ACP agent |
 | [daemon.md](./docs/daemon.md) | 修改会话内核、工作区、设备、传输或存储 |
 | [web-workbench.md](./docs/web-workbench.md) | 修改工作台、宿主适配与移动端体验 |
@@ -229,7 +254,8 @@ node apps/desktop/scripts/bundle.mjs
 | [testing.md](./docs/testing.md) | 选择受影响的测试与端到端门禁 |
 | [roadmap.md](./docs/roadmap.md) | 查看已经落地、正在推进和明确不做的能力 |
 
-如果你准备修改协议或跨部件行为，请先读 `architecture.md`，再运行对应窄测试与 `testing.md` 中的门禁。
+如果你准备修改协议或跨部件行为，请先读 `architecture.md` 确认边界，按 `engineering-guidance.md`
+形成方案，实现时对照 `engineering-laws.md`，最后运行对应窄测试与 `testing.md` 中的门禁。
 问题、设计讨论和功能建议可以提交到 [GitHub Issues](https://github.com/aikenc/genethub/issues)。
 
 ## License

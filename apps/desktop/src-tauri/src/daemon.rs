@@ -26,6 +26,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 const MAX_LOOPBACK_HTTP_RESPONSE_BYTES: usize = 64 * 1024;
+/// Fail-closed ceiling, not the expected start cost. A debug host (~500MB)
+/// compiling the 13MB iterate guest is ~6s to listening on Linux; the same
+/// image on a Windows runner with Defender scanning it blew 60s (CI #205).
+/// Desktop CI now stages the iterate host (~36MB, <1s here). Keep slack for
+/// a cold machine, not because compile is supposed to take a minute.
+const LISTEN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What the daemon prints once it is listening. The port is chosen by the OS,
 /// so reading it back is the only way to know where to connect.
@@ -213,11 +219,38 @@ impl Daemon {
     }
 
     fn spawn(&self) -> Result<Endpoint, String> {
-        // The daemon is the CLI binary in its other shape (`genethub-cli.md`
-        // §2): same file every client runs, `daemon run` is the resident one.
-        let mut command = Command::new(&self.binary);
+        // The daemon is the wasm component under the native shell. When the
+        // pair sits beside the CLI (the install layout), spawn the shell
+        // directly: the pid we then hold is the pid that holds the listener,
+        // with no `daemon run` exec in between. A CLI without the pair still
+        // goes through `daemon run`, which either finds them or fails closed.
+        let sibling = |name: &str| {
+            self.binary
+                .parent()
+                .map(|dir| dir.join(name))
+                .filter(|path| path.is_file())
+        };
+        let host_name = if cfg!(windows) {
+            format!("{}.exe", crate::channel::HOST_BINARY)
+        } else {
+            crate::channel::HOST_BINARY.to_string()
+        };
+        let mut command = match (sibling(&host_name), sibling("genehub_guest.wasm")) {
+            (Some(host), Some(component)) => {
+                let mut command = Command::new(host);
+                command.args(["run", "--component"]).arg(component);
+                // The shell hands this to the guest as GENEHUB_CLI, the front
+                // door the agent entry is reached through.
+                command.env(crate::channel::ENV_CLI, &self.binary);
+                command
+            }
+            _ => {
+                let mut command = Command::new(&self.binary);
+                command.args(["daemon", "run"]);
+                command
+            }
+        };
         command
-            .args(["daemon", "run"])
             .env(crate::channel::ENV_DATA_DIR, &self.data_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -255,7 +288,10 @@ impl Daemon {
             }
         });
 
-        match rx.recv_timeout(Duration::from_secs(20)) {
+        // The resident shell compiles the component in memory on every cold
+        // start. That is cheap with an iterate/release host; a debug host
+        // makes Cranelift the dominant cost.
+        match rx.recv_timeout(LISTEN_TIMEOUT) {
             Ok(()) => {
                 let (endpoint, published_pid) = self
                     .published()

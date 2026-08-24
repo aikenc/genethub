@@ -11,22 +11,22 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::os_process::{Child, ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, ImportContinuation, InteractionOption, InteractionQuestion, ItemDelta,
     ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome,
-    PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent, TimelineItem,
-    ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    PermissionRequest, PermissionRequestKind, ProbeState, RuntimeAxisInfo, RuntimeAxisValue,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
 use super::{
-    find_executable, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
+    find_executable_in, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
 };
 
@@ -36,11 +36,16 @@ const PROTOCOL_VERSION: i64 = 1;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
 /// `cursor-agent --list-models` is a file/network read, not a session.
 const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(15);
+/// Asking whether this install is logged in. Short: it reads a file.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct AcpAdapter {
     id: String,
     label: String,
     command: Vec<String>,
+    extra_dirs: Vec<PathBuf>,
+    /// When set, probe also asks this CLI whether it is logged in.
+    login_status: bool,
     /// What `session/new` told us about models and modes, read once per daemon
     /// run so the picker can be drawn before anyone opens a session.
     hello: tokio::sync::OnceCell<Option<Hello>>,
@@ -55,6 +60,7 @@ struct Hello {
     default_mode: Option<String>,
     model_config_id: Option<String>,
     mode_config_id: Option<String>,
+    runtime_axes: Vec<RuntimeAxisInfo>,
 }
 
 /// Parsed `session/new` result, reused by discovery and live sessions.
@@ -66,6 +72,7 @@ struct Setup {
     default_mode: Option<String>,
     model_config_id: Option<String>,
     mode_config_id: Option<String>,
+    runtime_axes: Vec<RuntimeAxisInfo>,
 }
 
 impl AcpAdapter {
@@ -74,12 +81,24 @@ impl AcpAdapter {
             id: id.into(),
             label: label.into(),
             command,
+            extra_dirs: Vec::new(),
+            login_status: false,
             hello: tokio::sync::OnceCell::new(),
         }
     }
 
+    pub fn with_extra_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.extra_dirs = dirs;
+        self
+    }
+
+    pub fn checking_login(mut self) -> Self {
+        self.login_status = true;
+        self
+    }
+
     fn program(&self) -> Option<PathBuf> {
-        find_executable(self.command.first()?)
+        find_executable_in(self.command.first()?, &self.extra_dirs)
     }
 
     async fn hello(&self, program: &Path) -> Option<Hello> {
@@ -125,13 +144,28 @@ impl AgentAdapter for AcpAdapter {
     }
 
     async fn probe(&self) -> ProbeState {
-        match self.program() {
-            Some(_) => ProbeState::Ready,
+        let Some(program) = self.program() else {
             // Every entry on this adapter now names the program it runs, so a
             // missing one is simply not installed. The one case that needed
             // more explaining than that — `codex` present but a bridge package
             // missing — went away when Codex got its own adapter.
-            None => ProbeState::NotInstalled,
+            return ProbeState::NotInstalled;
+        };
+        if !self.login_status {
+            return ProbeState::Ready;
+        }
+        // An API key is a documented alternative to `cursor-agent login`.
+        if std::env::var_os("CURSOR_API_KEY").is_some() {
+            return ProbeState::Ready;
+        }
+        match logged_in(&program).await {
+            Some(false) => ProbeState::Unavailable {
+                reason: "找到了 Cursor，但它还没登录：先跑 cursor-agent login".into(),
+            },
+            // Logged in, or the question could not be asked at all. A slow or
+            // unusual `cursor-agent status` is not a reason to hide a CLI that
+            // is sitting right there.
+            _ => ProbeState::Ready,
         }
     }
 
@@ -139,12 +173,15 @@ impl AgentAdapter for AcpAdapter {
         let Some(program) = self.program() else {
             return Catalog::default();
         };
-        let hello = self.hello(&program).await.unwrap_or_default();
+        let Some(hello) = self.hello(&program).await else {
+            return Catalog::default();
+        };
         Catalog {
             default_effort: None,
             // ACP does have a command list (`available_commands_update` on the
             // session), which we do not read yet.
             commands: Vec::new(),
+            runtime_axes: Some(hello.runtime_axes),
             models: hello.models,
             modes: hello.modes,
             default_model: hello.default_model,
@@ -201,6 +238,13 @@ impl AgentAdapter for AcpAdapter {
             resume_method: std::sync::Mutex::new(None),
             model_config_id: Mutex::new(hello.model_config_id),
             mode_config_id: Mutex::new(hello.mode_config_id),
+            runtime_axis_ids: Mutex::new(
+                hello
+                    .runtime_axes
+                    .iter()
+                    .map(|axis| axis.id.clone())
+                    .collect(),
+            ),
             additional_system_prompt: config.additional_system_prompt.clone(),
         };
 
@@ -321,7 +365,7 @@ impl AgentAdapter for AcpAdapter {
 struct AcpImportProbe {
     child: Child,
     stdin: ChildStdin,
-    lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    lines: tokio::io::Lines<BufReader<crate::os_process::ChildStdout>>,
     next_id: i64,
 }
 
@@ -516,6 +560,7 @@ struct AcpSession {
     resume_method: std::sync::Mutex<Option<ResumeMethod>>,
     model_config_id: Mutex<Option<String>>,
     mode_config_id: Mutex<Option<String>>,
+    runtime_axis_ids: Mutex<Vec<String>>,
     /// ACP has no standard system/developer-instruction field. The adapter
     /// therefore carries product guidance as a clearly delimited leading text
     /// block on each prompt, while the daemon timeline retains only user text.
@@ -604,6 +649,11 @@ impl AcpSession {
             let setup = parse_session_new(&result)?;
             *self.model_config_id.lock().await = setup.model_config_id.clone();
             *self.mode_config_id.lock().await = setup.mode_config_id.clone();
+            *self.runtime_axis_ids.lock().await = setup
+                .runtime_axes
+                .iter()
+                .map(|axis| axis.id.clone())
+                .collect();
             setup.session_id
         };
         *self.acp_session.lock().await = Some(session_id.clone());
@@ -625,6 +675,9 @@ impl AcpSession {
         if let Some(mode_id) = config.mode_id.as_ref() {
             self.set_mode(mode_id).await?;
         }
+        for (axis_id, value_id) in &config.runtime_values {
+            self.set_runtime_axis(axis_id, value_id).await?;
+        }
         Ok(())
     }
 
@@ -636,7 +689,7 @@ impl AcpSession {
             .ok_or_else(|| anyhow!("the ACP session was never established"))
     }
 
-    async fn set_config_option(&self, config_id: &str, value: &str) -> Result<()> {
+    async fn set_config_option(&self, config_id: &str, value: Value) -> Result<()> {
         let session_id = self.session_id().await?;
         self.call(
             "session/set_config_option",
@@ -784,7 +837,7 @@ impl AgentSession for AcpSession {
             .await
             .clone()
             .unwrap_or_else(|| "model".into());
-        self.set_config_option(&config_id, model_id).await
+        self.set_config_option(&config_id, json!(model_id)).await
     }
 
     async fn set_mode(&self, mode_id: &str) -> Result<()> {
@@ -804,9 +857,22 @@ impl AgentSession for AcpSession {
                     .await
                     .clone()
                     .unwrap_or_else(|| "mode".into());
-                self.set_config_option(&config_id, mode_id).await
+                self.set_config_option(&config_id, json!(mode_id)).await
             }
         }
+    }
+
+    async fn set_runtime_axis(&self, axis_id: &str, value_id: &str) -> Result<()> {
+        if !self
+            .runtime_axis_ids
+            .lock()
+            .await
+            .iter()
+            .any(|known| known == axis_id)
+        {
+            anyhow::bail!("ACP agent did not offer runtime axis '{axis_id}'");
+        }
+        self.set_config_option(axis_id, json!(value_id)).await
     }
 
     async fn respond_permission(
@@ -829,15 +895,85 @@ impl AgentSession for AcpSession {
     }
 }
 
+async fn logged_in(program: &Path) -> Option<bool> {
+    if let Some(answer) = run_status(program, &["status", "--format", "json"]).await {
+        return Some(answer);
+    }
+    run_status(program, &["status"]).await
+}
+
+async fn run_status(program: &Path, args: &[&str]) -> Option<bool> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    super::owned_child(&mut command);
+
+    let output = tokio::time::timeout(LOGIN_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    login_from_status_output(&output.stdout, &output.stderr)
+}
+
+/// Phrased as "is it logged in", because that is the only sentence worth
+/// acting on. Unknown wording — which account, which method, a new JSON
+/// shape — means the CLI is usable, and a check that guessed at those would
+/// hide working installs.
+fn login_from_status_output(stdout: &[u8], stderr: &[u8]) -> Option<bool> {
+    let mut said = String::from_utf8_lossy(stdout).to_string();
+    said.push_str(&String::from_utf8_lossy(stderr));
+    if let Some(value) = json_object_in(&said) {
+        if let Some(flag) = json_logged_in(&value) {
+            return Some(flag);
+        }
+    }
+    let lower = said.to_ascii_lowercase();
+    if lower.contains("not authenticated") || lower.contains("not logged in") {
+        return Some(false);
+    }
+    if lower.contains("logged in") {
+        return Some(true);
+    }
+    None
+}
+
+fn json_object_in(text: &str) -> Option<Value> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    serde_json::from_str(&text[start..=end]).ok()
+}
+
+fn json_logged_in(value: &Value) -> Option<bool> {
+    for key in [
+        "loggedIn",
+        "logged_in",
+        "authenticated",
+        "isAuthenticated",
+        "is_authenticated",
+    ] {
+        if let Some(flag) = value.get(key).and_then(Value::as_bool) {
+            return Some(flag);
+        }
+    }
+    None
+}
+
 /// Runs one handshake against a throwaway process and takes its answers away.
 ///
 /// A process of its own because the model and mode tables are wanted for the
 /// agent picker, which is drawn long before any session exists.
 async fn discover(program: &Path, command: &[String]) -> Option<Hello> {
+    // Somewhere that exists and says nothing about any of the user's projects:
+    // this answer is cached for every workspace.
+    let scratch = crate::os_process::scratch_dir();
     let mut spawn = Command::new(program);
     spawn
         .args(&command[1..])
-        .current_dir(std::env::temp_dir())
+        .current_dir(&scratch)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -891,7 +1027,7 @@ async fn discover(program: &Path, command: &[String]) -> Option<Hello> {
                 "jsonrpc": "2.0",
                 "id": next_id,
                 "method": "session/new",
-                "params": { "cwd": std::env::temp_dir(), "mcpServers": [] },
+                "params": { "cwd": scratch, "mcpServers": [] },
             }),
         )
         .await
@@ -932,6 +1068,7 @@ fn hello_from_setup(setup: Setup) -> Hello {
         default_mode: setup.default_mode,
         model_config_id: setup.model_config_id,
         mode_config_id: setup.mode_config_id,
+        runtime_axes: setup.runtime_axes,
     }
 }
 
@@ -1098,6 +1235,7 @@ fn parse_session_new(result: &Value) -> Result<Setup> {
         .to_string();
     let (models, default_model) = models_in(result);
     let (modes, default_mode) = modes_in(result);
+    let runtime_axes = runtime_axes_in(result);
     Ok(Setup {
         session_id,
         models,
@@ -1106,6 +1244,7 @@ fn parse_session_new(result: &Value) -> Result<Setup> {
         default_mode,
         model_config_id: config_id_for_category(result, "model"),
         mode_config_id: config_id_for_category(result, "mode"),
+        runtime_axes,
     })
 }
 
@@ -1299,6 +1438,84 @@ fn config_id_for_category(result: &Value, category: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn runtime_axes_in(result: &Value) -> Vec<RuntimeAxisInfo> {
+    config_options_in(result)
+        .into_iter()
+        .flatten()
+        .filter(|option| {
+            !matches!(
+                option.get("category").and_then(Value::as_str),
+                Some("model" | "mode")
+            )
+        })
+        .filter_map(|option| {
+            let id = option.get("id")?.as_str()?.to_string();
+            let label = option
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&id)
+                .to_string();
+            let description = option
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let (values, default_value) = match option.get("type").and_then(Value::as_str) {
+                Some("select") => {
+                    let values = flatten_select_options(
+                        option
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]),
+                    )
+                    .into_iter()
+                    .filter(|(id, _, _)| !id.is_empty())
+                    .map(|(id, label, description)| RuntimeAxisValue {
+                        id,
+                        label,
+                        description,
+                    })
+                    .collect::<Vec<_>>();
+                    let current = option
+                        .get("currentValue")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    (values, current)
+                }
+                Some("boolean") => {
+                    let current = option
+                        .get("currentValue")
+                        .and_then(Value::as_bool)
+                        .map(|value| value.to_string());
+                    (
+                        vec![
+                            RuntimeAxisValue {
+                                id: "false".into(),
+                                label: "关闭".into(),
+                                description: None,
+                            },
+                            RuntimeAxisValue {
+                                id: "true".into(),
+                                label: "开启".into(),
+                                description: None,
+                            },
+                        ],
+                        current,
+                    )
+                }
+                _ => return None,
+            };
+            (!values.is_empty()).then_some(RuntimeAxisInfo {
+                id,
+                label,
+                description,
+                values,
+                default_value,
+            })
+        })
+        .collect()
+}
+
 async fn answered<R>(lines: &mut tokio::io::Lines<BufReader<R>>, id: i64) -> Option<Value>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -1320,7 +1537,7 @@ where
 }
 
 async fn read_loop(
-    stdout: tokio::process::ChildStdout,
+    stdout: crate::os_process::ChildStdout,
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,
@@ -2255,6 +2472,23 @@ mod tests {
                     "category": "mode",
                     "currentValue": "agent",
                     "options": [{"value": "agent", "name": "Agent"}]
+                },
+                {
+                    "type": "select",
+                    "id": "fast",
+                    "name": "Fast",
+                    "currentValue": "standard",
+                    "options": [
+                        {"value": "standard", "name": "标准"},
+                        {"value": "fast", "name": "快速"},
+                        {"value": "max", "name": "极速"}
+                    ]
+                },
+                {
+                    "type": "boolean",
+                    "id": "autoApply",
+                    "name": "自动应用",
+                    "currentValue": true
                 }
             ]
         }))
@@ -2269,6 +2503,13 @@ mod tests {
         assert_eq!(setup.modes[1].id, "plan");
         assert_eq!(setup.models.len(), 2);
         assert_eq!(setup.models[1].id, "composer-2.5[fast=true]");
+        assert_eq!(setup.runtime_axes.len(), 2);
+        assert_eq!(setup.runtime_axes[0].id, "fast");
+        assert_eq!(setup.runtime_axes[0].values.len(), 3);
+        assert_eq!(
+            setup.runtime_axes[0].default_value.as_deref(),
+            Some("standard")
+        );
     }
 
     #[test]
@@ -2295,6 +2536,27 @@ mod tests {
         .expect("fixture parses");
         assert_eq!(setup.models[0].id, "sonnet");
         assert_eq!(setup.modes[0].id, "plan");
+    }
+
+    #[test]
+    fn parameters_inside_opaque_model_ids_do_not_invent_runtime_axes() {
+        let setup = parse_session_new(&json!({
+            "sessionId": "s1",
+            "configOptions": [{
+                "type": "select",
+                "id": "model",
+                "category": "model",
+                "currentValue": "grok-4.6[effort=high,fast=true]",
+                "options": [{
+                    "value": "grok-4.6[effort=high,fast=true]",
+                    "name": "grok-4.6"
+                }]
+            }]
+        }))
+        .expect("fixture parses");
+
+        assert!(setup.runtime_axes.is_empty());
+        assert_eq!(setup.models[0].id, "grok-4.6[effort=high,fast=true]");
     }
 
     #[test]
@@ -2425,13 +2687,24 @@ mod tests {
         assert_eq!(first_auth_method(&json!({})), None);
     }
 
-    /// When cursor-agent is on PATH, discovery should return real modes.
+    /// When cursor-agent is on PATH and signed in, discovery should return real
+    /// modes.
+    ///
+    /// A CLI that is installed but signed out answers `initialize` and then
+    /// refuses to open a session, which is the adapter working correctly — the
+    /// picker reports it as unavailable and says why. So this skips on the same
+    /// answer the adapter itself acts on, rather than reporting the machine's
+    /// login state as a defect in this code.
     #[tokio::test]
     async fn discover_cursor_when_installed() {
-        let Some(program) = find_executable("cursor-agent") else {
+        let Some(program) = crate::adapter::find_executable("cursor-agent") else {
             eprintln!("skipping discover_cursor_when_installed: cursor-agent not on PATH");
             return;
         };
+        if logged_in(&program).await == Some(false) {
+            eprintln!("skipping discover_cursor_when_installed: cursor-agent is not signed in");
+            return;
+        }
         let hello = discover(
             &program,
             &[
@@ -2454,5 +2727,38 @@ mod tests {
             hello.model_config_id.is_some() || !hello.models.is_empty(),
             "Cursor should expose model selection"
         );
+    }
+
+    #[tokio::test]
+    async fn extra_install_dir_is_enough_for_probe_when_path_misses() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "genehub-test-acp-extra-agent";
+        let suffix = if cfg!(windows) { ".bat" } else { "" };
+        std::fs::write(dir.path().join(format!("{name}{suffix}")), b"").unwrap();
+        let adapter = AcpAdapter::new("t", "T", vec![name.into()])
+            .with_extra_dirs(vec![dir.path().to_path_buf()]);
+        assert_eq!(adapter.probe().await, ProbeState::Ready);
+    }
+
+    #[test]
+    fn status_json_and_text_agree_on_login() {
+        assert_eq!(
+            login_from_status_output(br#"{"loggedIn":false}"#, b""),
+            Some(false)
+        );
+        assert_eq!(
+            login_from_status_output(br#"{"authenticated":true}"#, b""),
+            Some(true)
+        );
+        assert_eq!(
+            login_from_status_output(b"Not authenticated", b""),
+            Some(false)
+        );
+        assert_eq!(login_from_status_output(b"Not logged in", b""), Some(false));
+        assert_eq!(
+            login_from_status_output(b"Logged in as user@example.com", b""),
+            Some(true)
+        );
+        assert_eq!(login_from_status_output(b"usage: cursor-agent", b""), None);
     }
 }

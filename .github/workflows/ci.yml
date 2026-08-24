@@ -26,8 +26,11 @@ permissions:
   contents: read
 
 jobs:
-  # Decide which heavy jobs this change actually needs. main push and pull
-  # requests share the same path filter; only release (force_full) runs everything.
+  # Decide which heavy jobs this change actually needs. The decision lives in
+  # scripts/ci-classify.mjs (table-tested by scripts/ci-classify.test.mjs);
+  # main push and pull requests share it, only release (force_full) runs
+  # everything. The release type is NOT decided here — it is a runtime fact
+  # the publisher derives from the signed ABI hash at publish time.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -40,6 +43,13 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      # A broken classifier must never produce output: its own contract tests
+      # run in this job, before any classification is trusted.
+      - name: The classifier must pass its own contract tests
+        run: node --test scripts/ci-classify.test.mjs
       - id: filter
         shell: bash
         run: |
@@ -48,11 +58,7 @@ jobs:
           # Tag / rehearsal release: pay for the whole matrix once, at the point
           # something is about to ship. main and PR stay on the path filter.
           if [ "${{ inputs.force_full }}" = "true" ]; then
-            echo "rust=true" >> "$GITHUB_OUTPUT"
-            echo "relay=true" >> "$GITHUB_OUTPUT"
-            echo "web=true" >> "$GITHUB_OUTPUT"
-            echo "desktop=true" >> "$GITHUB_OUTPUT"
-            echo "force_full: full suite"
+            node scripts/ci-classify.mjs --all >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -63,79 +69,15 @@ jobs:
             base="${{ github.event.before }}"
             head="${{ github.sha }}"
             if [ "$base" = "0000000000000000000000000000000000000000" ] || [ -z "$base" ]; then
-              echo "rust=true" >> "$GITHUB_OUTPUT"
-              echo "relay=true" >> "$GITHUB_OUTPUT"
-              echo "web=true" >> "$GITHUB_OUTPUT"
-              echo "desktop=true" >> "$GITHUB_OUTPUT"
+              node scripts/ci-classify.mjs --all >> "$GITHUB_OUTPUT"
               echo "no usable before SHA: full suite"
               exit 0
             fi
           fi
 
-          mapfile -t files < <(git diff --name-only "$base" "$head")
-          printf 'changed (%d):\n' "${#files[@]}"
-          printf '  %s\n' "${files[@]}"
-
-          rust=false
-          relay=false
-          web=false
-          desktop=false
-          # Workflow or shared CI fixtures changed: trust nothing, run everything.
-          force=false
-
-          for f in "${files[@]}"; do
-            case "$f" in
-              .github/workflows/*|.github/agent-clis/*)
-                force=true
-                ;;
-              Cargo.toml|Cargo.lock|apps/daemon/*|apps/cli/*|apps/agent/*|apps/proto/*|testing/*)
-                rust=true
-                ;;
-              apps/relay/*)
-                relay=true
-                ;;
-              packages/web/*)
-                web=true
-                ;;
-              apps/desktop/*)
-                desktop=true
-                ;;
-            esac
-          done
-
-          if [ "$force" = true ]; then
-            rust=true
-            relay=true
-            web=true
-            desktop=true
-          fi
-
-          # The web job's mandatory journeys drive a real daemon, agent, and
-          # relay. A change on either side of that wire must re-prove it.
-          if [ "$rust" = true ] || [ "$relay" = true ]; then
-            web=true
-          fi
-
-          # Daemon persistence is shared with the desktop shell; a daemon-only
-          # change still has to exercise Windows DACL and supervision.
-          if [ "$rust" = true ]; then
-            for f in "${files[@]}"; do
-              case "$f" in
-                apps/daemon/*|apps/cli/*|Cargo.toml|Cargo.lock)
-                  desktop=true
-                  break
-                  ;;
-              esac
-            done
-          fi
-
-          {
-            echo "rust=$rust"
-            echo "relay=$relay"
-            echo "web=$web"
-            echo "desktop=$desktop"
-          } >> "$GITHUB_OUTPUT"
-          echo "filter: rust=$rust relay=$relay web=$web desktop=$desktop"
+          git diff --name-only "$base" "$head" | tee /tmp/changed-files
+          printf 'changed (%d)\n' "$(wc -l < /tmp/changed-files)"
+          node scripts/ci-classify.mjs --stdin < /tmp/changed-files >> "$GITHUB_OUTPUT"
 
   # A lock file records where each tarball came from. Written on a machine with a
   # company mirror in its npm config, it records that mirror — and then every
@@ -204,6 +146,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -232,6 +175,11 @@ jobs:
       # they did on every cold cache while a warm one kept the job green: a false
       # pass that survived until a release tag.
       - run: cargo build --workspace --bins
+      - name: Build the paired guest component
+        run: |
+          cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
+          mkdir -p target/debug
+          cp target/wasm32-wasip2/iterate/genehub_guest.wasm target/debug/genehub_guest.wasm
       # Journeys default to the mock model, so this stays offline and free.
       #
       # The failure list is repeated as annotations because reading a job's log
@@ -245,7 +193,7 @@ jobs:
           # The runner's shell already has `-e`, which would end this script at
           # the failing pipeline and skip the reporting below entirely.
           set +e
-          cargo test --workspace --no-fail-fast 2>&1 | tee /tmp/tests.log
+          cargo test --workspace --exclude genehub-testing --exclude genehub-host --no-fail-fast 2>&1 | tee /tmp/tests.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             # Indented single words in a `failures:` block are the case names.
@@ -267,8 +215,10 @@ jobs:
         with:
           name: open-ci-bins
           path: |
-            target/debug/genet-dev
-            target/debug/genet-agent-dev
+            target/debug/genet-local
+            target/debug/genet-agent-local
+            target/debug/genehub-host-local
+            target/debug/genehub_guest.wasm
           if-no-files-found: error
           retention-days: 1
 
@@ -316,11 +266,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GENET_E2E_REQUIRED: "1"
-      GENET_E2E_DAEMON: ${{ github.workspace }}/target/debug/genet-dev
-      GENET_E2E_AGENT: ${{ github.workspace }}/target/debug/genet-agent-dev
+      GENET_E2E_DAEMON: ${{ github.workspace }}/target/debug/genet-local
+      GENET_E2E_AGENT: ${{ github.workspace }}/target/debug/genet-agent-local
     defaults:
       run:
-        working-directory: packages/web
+        working-directory: packages/workbench
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -330,10 +280,12 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: |
-            packages/web/package-lock.json
+            packages/workbench/package-lock.json
             apps/relay/package-lock.json
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         if: needs.rust.result != 'success'
+        with:
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         if: needs.rust.result != 'success'
       # Prefer the bins the rust job already produced. Rebuild only when that job
@@ -349,9 +301,13 @@ jobs:
           path: target/debug
       - name: Build daemon and agent bins
         if: needs.rust.result != 'success'
-        run: cargo build -p genet-cli -p genet-agent
+        run: |
+          cargo build -p genet-cli -p genet-agent -p genehub-host
+          cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
+          mkdir -p target/debug
+          cp target/wasm32-wasip2/iterate/genehub_guest.wasm target/debug/genehub_guest.wasm
         working-directory: .
-      - run: chmod +x target/debug/genet-dev target/debug/genet-agent-dev
+      - run: chmod +x target/debug/genet-local target/debug/genet-agent-local target/debug/genehub-host-local
         working-directory: .
       # The artifact contains compiled JavaScript, not its runtime packages.
       # Keep the cheap production-only install while avoiding relay dev
@@ -379,6 +335,8 @@ jobs:
         run: |
           test -x "$GENET_E2E_DAEMON"
           test -x "$GENET_E2E_AGENT"
+          test -x "$GITHUB_WORKSPACE/target/debug/genehub-host-local"
+          test -f "$GITHUB_WORKSPACE/target/debug/genehub_guest.wasm"
           test -f "$GITHUB_WORKSPACE/apps/relay/dist/main.js"
       - run: npm test
       - run: npm run build
@@ -396,18 +354,43 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo build -p genet-cli
       # Daemon persistence is shared by the CLI and desktop shell. In
       # particular, the owner-only Windows DACL assertions must execute on a
       # real Windows filesystem; a Linux cross-check can only compile them.
       - run: cargo test -p genet-daemon --lib
+      # The WASM guest delegates chmod-equivalent hardening to the native host.
+      # Its Windows implementation must be exercised on NTFS, not merely
+      # cross-compiled from Linux.
+      - run: cargo test -p genehub-host --bin genehub-host-local fs_perms::tests
+      # Supervision launches the ordinary sibling pair. A debug host is ~500MB
+      # and runs Cranelift unoptimized: on this Linux box that is 6s to
+      # listening for the 13MB iterate guest; a Windows runner plus Defender
+      # scanning that image is what blew the old 60s budget (CI #205). The
+      # iterate profile is the product-shaped compile (opt-1, stripped, ~36MB,
+      # <1s here). Stage it next to the guest so the tests keep looking in
+      # target/debug.
+      - name: Stage iterate CLI, host, and guest for supervision
+        shell: bash
+        run: |
+          cargo build --profile iterate -p genet-cli -p genehub-host
+          cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
+          mkdir -p target/debug
+          exe=
+          if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
+          cp "target/iterate/genet-local${exe}" "target/debug/genet-local${exe}"
+          cp "target/iterate/genehub-host-local${exe}" "target/debug/genehub-host-local${exe}"
+          cp target/wasm32-wasip2/iterate/genehub_guest.wasm target/debug/genehub_guest.wasm
       - name: Refuse to skip real daemon supervision
         shell: bash
         run: |
-          binary=target/debug/genet-dev
-          if [ "$RUNNER_OS" = Windows ]; then binary="${binary}.exe"; fi
-          test -x "$binary"
+          exe=
+          if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
+          test -x "target/debug/genet-local${exe}"
+          test -x "target/debug/genehub-host-local${exe}"
+          test -f target/debug/genehub_guest.wasm
       - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check
       # The installer integrity gate is pure Rust but lives in the Tauri crate;
       # compile and execute it on the two desktop platforms we actually ship or
@@ -416,7 +399,12 @@ jobs:
       - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --test wiring
       # All lifecycle cases run on both platforms. Only the test which kills a
       # listener behind the supervisor's back is Unix-specific.
-      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --test supervision
+      # These tests deliberately share process environment and each cold-start
+      # a Wasmtime component. Running them concurrently races the environment
+      # and can exhaust a hosted runner compiling several components at once.
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --test supervision -- --test-threads=1
+        env:
+          GENEHUB_TEST_COMPONENT_CACHE_DIR: ${{ github.workspace }}/target/test-component-cache
       - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --test wiring --test supervision -- -D warnings
 
   # Single required check for branch protection. Skipped path-filtered jobs are

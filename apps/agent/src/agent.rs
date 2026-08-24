@@ -257,12 +257,15 @@ async fn stream_assistant(
                 name,
                 arguments,
             } => {
-                if let Some(Content::ToolCall {
-                    id: draft_id,
-                    name: draft_name,
-                    arguments: draft_arguments,
-                }) = draft.content.last_mut()
-                {
+                let target = draft.content.iter_mut().find_map(|block| match block {
+                    Content::ToolCall {
+                        id: draft_id,
+                        name: draft_name,
+                        arguments: draft_arguments,
+                    } if *draft_id == id => Some((draft_id, draft_name, draft_arguments)),
+                    _ => None,
+                });
+                if let Some((draft_id, draft_name, draft_arguments)) = target {
                     *draft_id = id.clone();
                     *draft_name = name.clone();
                     *draft_arguments = arguments.clone();

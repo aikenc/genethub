@@ -17,7 +17,7 @@ fn daemon_binary() -> PathBuf {
     // workspace's own target directory rather than this crate's.
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     // The stamp decides what the binary is called (`genet` in a release,
-    // `genet-dev` in the tree) — read it from the daemon's channel constants
+    // `genet-local` in the tree) — read it from the daemon's channel constants
     // rather than pinning one channel's name here.
     let channel = std::fs::read_to_string(repo.join("apps/daemon/src/channel.rs"))
         .expect("the daemon channel constants must be readable");
@@ -71,23 +71,28 @@ fn kill_whatever_is_listening_on(port: u16) {
 
 #[cfg(unix)]
 fn listeners_on(port: u16) -> Vec<String> {
-    // `ss` prints one row per listening socket, with `pid=NNN` in the last
-    // column: `LISTEN 0 511 127.0.0.1:41519 0.0.0.0:* users:(("x",pid=7,fd=9))`
-    if let Ok(output) = std::process::Command::new("ss")
-        .args(["-H", "-ltnp", "sport", "=", &format!(":{port}")])
-        .output()
+    // Linux `ss` prints one row per listening socket, with `pid=NNN` in the
+    // last column. macOS runners may ship a different `ss` whose rows are
+    // not that shape; trusting a non-empty misparse kills the wrong pid
+    // and the watchdog never sees a death.
+    #[cfg(target_os = "linux")]
     {
-        let listing = String::from_utf8_lossy(&output.stdout);
-        let pids: Vec<String> = listing
-            .split("pid=")
-            .skip(1)
-            .filter_map(|rest| {
-                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-                (!digits.is_empty()).then_some(digits)
-            })
-            .collect();
-        if !pids.is_empty() {
-            return pids;
+        if let Ok(output) = std::process::Command::new("ss")
+            .args(["-H", "-ltnp", "sport", "=", &format!(":{port}")])
+            .output()
+        {
+            let listing = String::from_utf8_lossy(&output.stdout);
+            let pids: Vec<String> = listing
+                .split("pid=")
+                .skip(1)
+                .filter_map(|rest| {
+                    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                    (!digits.is_empty()).then_some(digits)
+                })
+                .collect();
+            if !pids.is_empty() {
+                return pids;
+            }
         }
     }
 
@@ -109,7 +114,13 @@ fn listeners_on(port: u16) -> Vec<String> {
 fn contain_the_default_workspace() {
     static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     let home = HOME.get_or_init(|| tempfile::tempdir().expect("a temporary home"));
-    std::env::set_var("GENEHUB_WORKSPACE_DIR", home.path().join("GeneHub"));
+    // The tree stamps `local`; a released desktop binary would use its own infix.
+    std::env::set_var("GENEHUB_LOCAL_WORKSPACE_DIR", home.path().join("GeneHub"));
+    // Same cache testctl and workbench e2e use. Second and later starts then
+    // reuse the compiled image instead of running Cranelift again.
+    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/test-component-cache");
+    let _ = std::fs::create_dir_all(&cache);
+    std::env::set_var("GENEHUB_TEST_COMPONENT_CACHE_DIR", cache);
 }
 
 macro_rules! with_daemon {
@@ -244,18 +255,27 @@ fn the_watchdog_brings_the_daemon_back_and_says_where_it_went() {
 
     let restarts = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&restarts);
-    daemon.watch(move |change| {
-        if let Watch::Restarted(endpoint) = change {
-            seen.lock().unwrap().push(endpoint);
-        }
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let fail_seen = Arc::clone(&failures);
+    daemon.watch(move |change| match change {
+        Watch::Restarted(endpoint) => seen.lock().unwrap().push(endpoint),
+        Watch::Failed(error) => fail_seen.lock().unwrap().push(error),
+        _ => {}
     });
 
     kill_whatever_is_listening_on(first.port);
 
-    let restarted = wait_for(Duration::from_secs(30), || {
+    // Cold start compiles the guest in-process; the spawn path already waits
+    // for that. Thirty was racing a debug-host compile on restart.
+    let restarted = wait_for(Duration::from_secs(90), || {
         restarts.lock().unwrap().first().cloned()
     })
-    .expect("the watchdog should have restarted the daemon");
+    .unwrap_or_else(|| {
+        panic!(
+            "the watchdog should have restarted the daemon; failures={:?}",
+            failures.lock().unwrap()
+        )
+    });
 
     assert_ne!(
         restarted.port, first.port,

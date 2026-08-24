@@ -1,5 +1,6 @@
 #!/bin/sh
-# Installs the daemon and the built-in agent — no desktop shell, no Node.
+# Installs the CLI, the wasm shell and the guest component — the daemon and
+# the built-in agent both ride the component. No desktop shell, no Node.
 #
 # This is the path for a machine with no graphical session: a server, a VM, a
 # box you only ever reach over SSH. It is also the fallback when there is no
@@ -15,58 +16,62 @@
 # not always bash.
 set -eu
 
-# channel: dev — written by scripts/channel.mjs
+# channel: local — written by scripts/channel.mjs
 # Everything below that names a file, an address or an environment variable
-# derives from that one word, so a prerelease install can never reach for an
-# official asset — the channels install side by side on one machine and none
-# may touch another's binaries or overrides (`dual-channel-release.md`).
+# derives from that one word, so a prerelease install can never reach for a
+# stable asset — the channels install side by side on one machine and none
+# may touch another's binaries or overrides (`version-management.md`).
 # It is a plain assignment rather than something the script re-reads from its
 # own file, because the usual way to run this is `curl | sh`, where $0 is not
 # the script at all.
-channel=dev
+channel=local
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 case "$channel" in
-  alpha)
-    base="${GENEHUB_ALPHA_DOWNLOAD_BASE:-https://relay-alpha.genethub.com/download/alpha}"
-    bin_dir="${GENEHUB_ALPHA_BIN_DIR:-$HOME/.local/bin}"
-    tarball_prefix=genet-alpha
-    cli_binary=genet-alpha
-    agent_binary=genet-agent-alpha
+  dev)
+    base="${GENEHUB_DEV_DOWNLOAD_BASE:-https://relay-dev.genethub.com/download/dev}"
+    bin_dir="${GENEHUB_DEV_BIN_DIR:-$HOME/.local/bin}"
+    tarball_prefix=genet-dev
+    cli_binary=genet-dev
+    host_binary=genehub-host-dev
     ;;
   beta)
     base="${GENEHUB_BETA_DOWNLOAD_BASE:-https://relay-beta.genethub.com/download/beta}"
     bin_dir="${GENEHUB_BETA_BIN_DIR:-$HOME/.local/bin}"
     tarball_prefix=genet-beta
     cli_binary=genet-beta
-    agent_binary=genet-agent-beta
+    host_binary=genehub-host-beta
     ;;
-  official)
+  stable)
     base="${GENEHUB_DOWNLOAD_BASE:-https://github.com/aikenc/genethub/releases/latest/download}"
     bin_dir="${GENEHUB_BIN_DIR:-$HOME/.local/bin}"
     tarball_prefix=genet
     cli_binary=genet
-    agent_binary=genet-agent
+    host_binary=genehub-host
     ;;
   *)
-    # dev: the tree's own state. There is no dev artifact to download, so the
-    # only way this runs is someone piping the source checkout into sh — which
-    # would otherwise quietly install the *official* line over whatever they
-    # meant to test. Refuse, unless a download base is named on purpose (the
-    # way a CI rehearsal's artifacts get installed for a smoke test).
-    [ -n "${GENEHUB_DEV_DOWNLOAD_BASE:-}" ] || die "this install.sh comes from the source tree (channel: dev) and has nothing to install.
-  official:  curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL https://relay.genethub.com/install.sh | sh
-  beta:      curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL https://relay-beta.genethub.com/install.sh | sh
-  or set GENEHUB_DEV_DOWNLOAD_BASE to a directory of artifacts on purpose"
-    base="$GENEHUB_DEV_DOWNLOAD_BASE"
-    bin_dir="${GENEHUB_DEV_BIN_DIR:-$HOME/.local/bin}"
-    tarball_prefix=genet-dev
-    cli_binary=genet-dev
-    agent_binary=genet-agent-dev
+    # local: the tree's own state. There is no local artifact to download, so
+    # the only way this runs is someone piping the source checkout into sh —
+    # which would otherwise quietly install the *stable* line over whatever
+    # they meant to test. Refuse, unless a download base is named on purpose
+    # (the way a CI rehearsal's artifacts get installed for a smoke test).
+    [ -n "${GENEHUB_LOCAL_DOWNLOAD_BASE:-}" ] || die "this install.sh comes from the source tree (channel: local) and has nothing to install.
+  stable:  curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL https://relay.genethub.com/install.sh | sh
+  beta:    curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL https://relay-beta.genethub.com/install.sh | sh
+  or set GENEHUB_LOCAL_DOWNLOAD_BASE to a directory of artifacts on purpose"
+    base="$GENEHUB_LOCAL_DOWNLOAD_BASE"
+    bin_dir="${GENEHUB_LOCAL_BIN_DIR:-$HOME/.local/bin}"
+    tarball_prefix=genet-local
+    cli_binary=genet-local
+    host_binary=genehub-host-local
     ;;
 esac
+
+# The daemon and the agent are one wasm component; the CLI execs the shell
+# (host_binary) with it, so all three have to land side by side.
+component=genehub_guest.wasm
 
 # Downloads are executable code. Do not let an environment override turn the
 # explicit installer into an HTTP, local-file or credential-bearing fetch. A
@@ -149,20 +154,24 @@ got="$(digest "$tmp/$asset")"
 say "==> installing into $bin_dir"
 mkdir -p "$tmp/unpacked" "$bin_dir"
 tar -xzf "$tmp/$asset" -C "$tmp/unpacked"
-for binary in "$cli_binary" "$agent_binary"; do
+for binary in "$cli_binary" "$host_binary" "$component"; do
   found="$(find "$tmp/unpacked" -name "$binary" -type f -print | head -n 1)"
   [ -n "$found" ] || die "$binary is missing from $asset"
   # Replaced rather than written in place: overwriting a running binary is what
   # produces "text file busy" on Linux.
   rm -f "$bin_dir/$binary"
   cp "$found" "$bin_dir/$binary"
-  chmod 755 "$bin_dir/$binary"
+  case "$binary" in
+    *.wasm) chmod 644 "$bin_dir/$binary" ;;
+    *) chmod 755 "$bin_dir/$binary" ;;
+  esac
 done
 
 say ""
 say "Installed:"
 say "  $bin_dir/$cli_binary"
-say "  $bin_dir/$agent_binary"
+say "  $bin_dir/$host_binary"
+say "  $bin_dir/$component"
 
 # Explicit first-install automation may opt into starting/restarting the daemon
 # after files have landed. The CLI self-update command is deliberately disabled

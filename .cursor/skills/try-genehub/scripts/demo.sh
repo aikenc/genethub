@@ -31,7 +31,7 @@ CLOUD_PORT="${GENEHUB_DEMO_CLOUD_PORT:-47210}"
 RELAY_PORT="${GENEHUB_DEMO_RELAY_PORT:-47211}"
 DAEMON_BIN="$REPO/target/release/genet"
 AGENT_BIN="$REPO/target/release/genet-agent"
-WEB_DIR="$REPO/packages/web"
+WEB_DIR="$REPO/packages/workbench"
 RELAY_DIR="$REPO/apps/relay"
 CLOUD_DIR="$CLOUD_REPO/server"
 

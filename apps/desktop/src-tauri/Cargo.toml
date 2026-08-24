@@ -1,6 +1,6 @@
 [package]
 name = "genethub-desktop"
-# Written by `scripts/version.mjs` at release time, along with the workspace next
+# Written by `scripts/stamp-version.mjs` at release time, along with the workspace next
 # door and `tauri.conf.json`. A literal is unavoidable here — this crate sits
 # outside that workspace on purpose, and Cargo can neither inherit across
 # workspaces nor read another file — so a script writes it rather than a person.

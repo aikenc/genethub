@@ -1,0 +1,24 @@
+{
+  "schema": "genehub.interface-gaps.v1",
+  "notes": "Client data-plane methods compared to app-core finish_request. Update when product dispatch changes.",
+  "gaps": [
+    {
+      "id": "platform.logic.identity",
+      "plane": "action",
+      "owner": "app-core data-plane + PlatformBoot.active_logic",
+      "consumer": "@genehub/workbench/client establish()",
+      "status": "fixed",
+      "evidence": "journey.session.tool-write passed after dispatch; handshake uses stamped LogicIdentity",
+      "disposition": "guest answers identity; native stamps digest/revision into boot"
+    },
+    {
+      "id": "platform.patch",
+      "plane": "action",
+      "owner": "app-core data-plane (status) / native PatchService (apply)",
+      "consumer": "@genehub/workbench/client patch()",
+      "status": "dispatched-unconfigured",
+      "evidence": "data-plane no longer 404s; stamped-dev feeds are empty so check/apply return Unconfigured",
+      "disposition": "cold apply still owned by native HTTP/CLI; do not implement apply inside Wasm"
+    }
+  ]
+}

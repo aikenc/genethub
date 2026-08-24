@@ -11,7 +11,7 @@ use std::process::Command;
 use genet_daemon::isolation::{self, Policy, CONFINE_COMMAND_ENV};
 
 fn genet() -> &'static str {
-    env!("CARGO_BIN_EXE_genet-dev")
+    env!("CARGO_BIN_EXE_genet-local")
 }
 
 /// Runs a program through the wrapper, under a policy that allows `writable`.

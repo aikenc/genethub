@@ -1,6 +1,29 @@
 [workspace]
 resolver = "2"
-members = ["apps/agent", "apps/cli", "apps/daemon", "packages/proto", "testing"]
+members = [
+    "apps/agent",
+    "apps/cli",
+    "apps/daemon",
+    "apps/guest",
+    "apps/guest-probe",
+    "apps/host",
+    "packages/http",
+    "packages/native",
+    "packages/wasi-guest",
+    "packages/proto",
+    "testing/deprecated/rust",
+]
+# Frozen integration crate stays a member so `cargo test -p genehub-testing` still
+# works by hand. It is not a default member: ordinary `cargo test` does not run it.
+# genehub-host pulls Wasmtime; keep it off the default `cargo test` graph.
+default-members = [
+    "apps/agent",
+    "apps/cli",
+    "apps/daemon",
+    "packages/http",
+    "packages/native",
+    "packages/proto",
+]
 # The Tauri shell stays out of the workspace on purpose: it drags in a large,
 # slow-to-build native dependency tree that would otherwise be rebuilt whenever
 # the daemon changes.
@@ -45,3 +68,16 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Local / Dev / Beta Live guest builds. Custom profiles inherit from release
+# unless told otherwise — this one must not pick up fat LTO or opt-level="z".
+# debug=0 + strip drop the ~200MB DWARF that made load/test crawl; opt-level=1
+# keeps unoptimized WASM from being the next bottleneck. Neither is fat LTO.
+[profile.iterate]
+inherits = "dev"
+incremental = true
+lto = false
+codegen-units = 256
+opt-level = 1
+debug = 0
+strip = true

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities the GeneHub main window needs",
+  "description": "The remote product Web receives no native bridge capabilities",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-show", "core:window:allow-hide", "core:window:allow-set-focus", "core:window:allow-start-dragging", "core:window:allow-toggle-maximize"]
+  "permissions": []
 }

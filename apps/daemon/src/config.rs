@@ -122,7 +122,7 @@ impl Paths {
             self.devices_file(),
             self.log_file(),
         ] {
-            match fs::symlink_metadata(&path) {
+            match sensitive_metadata(&path) {
                 Ok(metadata) => {
                     reject_link_or_reparse(&path, &metadata)?;
                     if !metadata.is_file() {
@@ -141,6 +141,18 @@ impl Paths {
     }
 }
 
+/// `dirs::home_dir`, with a WASI answer: the `dirs` crate has no wasi sys
+/// implementation and returns `None` in the guest, while the guest does have
+/// the user's env — HOME comes through the shell like any other variable.
+pub fn home_dir() -> Option<PathBuf> {
+    dirs::home_dir().or_else(|| {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    })
+}
+
 /// The workspace override named by this channel, else a folder in the user's
 /// home named after it.
 ///
@@ -150,7 +162,7 @@ fn default_workspace() -> Result<PathBuf> {
     if let Ok(dir) = std::env::var(crate::channel::ENV_WORKSPACE_DIR) {
         return Ok(PathBuf::from(dir));
     }
-    let home = dirs::home_dir().context("no home directory")?;
+    let home = home_dir().context("no home directory")?;
     Ok(home.join(crate::channel::WORKSPACE_DIR_NAME))
 }
 
@@ -682,7 +694,7 @@ pub fn save_private(path: &Path, body: &[u8]) -> Result<()> {
     drop(file);
     replace_private(&tmp, path)?;
     cleanup.disarm();
-    let metadata = fs::symlink_metadata(path)
+    let metadata = sensitive_metadata(path)
         .with_context(|| format!("inspecting published private file {}", path.display()))?;
     reject_link_or_reparse(path, &metadata)?;
     if !metadata.is_file() {
@@ -748,7 +760,7 @@ impl Drop for PrivateTemp {
 }
 
 pub(crate) fn ensure_real_directory(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
+    match sensitive_metadata(path) {
         Ok(metadata) => {
             reject_link_or_reparse(path, &metadata)?;
             if !metadata.is_dir() {
@@ -762,13 +774,27 @@ pub(crate) fn ensure_real_directory(path: &Path) -> Result<()> {
         }
     }
     fs::create_dir_all(path)?;
-    let metadata = fs::symlink_metadata(path)
+    let metadata = sensitive_metadata(path)
         .with_context(|| format!("inspecting created directory {}", path.display()))?;
     reject_link_or_reparse(path, &metadata)?;
     if !metadata.is_dir() {
         anyhow::bail!("expected a directory at {}", path.display());
     }
     Ok(())
+}
+
+/// WASI on a Windows host cannot perform a no-follow metadata lookup and
+/// returns `ENOTSUP` before the native ACL import gets a chance to inspect the
+/// path. The import is the fail-closed no-follow boundary there; ordinary
+/// metadata remains useful to distinguish files and directories in the guest.
+#[cfg(target_family = "wasm")]
+fn sensitive_metadata(path: &Path) -> std::io::Result<fs::Metadata> {
+    fs::metadata(path)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn sensitive_metadata(path: &Path) -> std::io::Result<fs::Metadata> {
+    fs::symlink_metadata(path)
 }
 
 #[cfg(unix)]
@@ -818,7 +844,15 @@ pub(crate) fn replace_private(source: &Path, destination: &Path) -> Result<()> {
     windows_acl::replace_file(source, destination)
 }
 
-#[cfg(not(any(unix, windows)))]
+/// `wasi:filesystem` has rename but no permission bits. The shell owns the data
+/// directory's owner-only hardening; see the v2 proposal §5.1.6.
+#[cfg(target_family = "wasm")]
+pub(crate) fn replace_private(source: &Path, destination: &Path) -> Result<()> {
+    fs::rename(source, destination)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows, target_family = "wasm")))]
 pub(crate) fn replace_private(_source: &Path, _destination: &Path) -> Result<()> {
     anyhow::bail!("atomic private-file replacement is unsupported on this platform")
 }
@@ -905,12 +939,64 @@ fn restrict_existing_sensitive_tree(_root: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(unix, windows)))]
+/// WASI exposes no permission bits, so the shell performs what the guest names.
+/// Which paths are sensitive stays a guest decision — it is the side that knows
+/// what is in them. See the v2 proposal §6.9.
+#[cfg(target_family = "wasm")]
+pub fn restrict_to_owner(path: &Path) -> Result<()> {
+    genet_wasi::wit::genehub::host::fs_perms::restrict_to_owner(&path.to_string_lossy())
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+/// The shell reads the path's own type, so a directory gets `0o700` and a file
+/// `0o600` without the guest having to say which it is.
+#[cfg(target_family = "wasm")]
+pub(crate) fn restrict_dir_to_owner(path: &Path) -> Result<()> {
+    restrict_to_owner(path)
+}
+
+#[cfg(not(any(unix, windows, target_family = "wasm")))]
 pub fn restrict_to_owner(_path: &Path) -> Result<()> {
     anyhow::bail!("owner-only file permissions are unsupported on this platform")
 }
 
-#[cfg(not(any(unix, windows)))]
+/// Opens a log-style file to append to it.
+///
+/// wasip2 silently drops O_APPEND: an append handle there writes at offset 0
+/// every time, so guest code that appends this way overwrites the file from
+/// the top (seen as self-erasing daemon.log/chat.jsonl in the wasm shell).
+/// The guest instead opens read+write and positions at the end itself; the
+/// files this is used for have a single writer at a time. Native keeps
+/// O_APPEND, which is atomic across processes.
+#[cfg(not(target_family = "wasm"))]
+pub fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    // Readable too: callers dedupe against what is already there before they
+    // append. O_APPEND still owns where writes land.
+    options.read(true).create(true).append(true);
+    // Every caller restricts the file to its owner right after opening;
+    // creating with the final mode closes the window in between.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+#[cfg(target_family = "wasm")]
+pub fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::io::Seek;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
+    file.seek(std::io::SeekFrom::End(0))?;
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows, target_family = "wasm")))]
 pub(crate) fn restrict_dir_to_owner(_path: &Path) -> Result<()> {
     anyhow::bail!("owner-only directory permissions are unsupported on this platform")
 }

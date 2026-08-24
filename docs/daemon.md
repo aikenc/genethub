@@ -1,7 +1,8 @@
 # GeneHub Daemon 规格
 
-> 用户 PC 上唯一的常驻进程。Rust 实现，随桌面端分发。  
+> 用户 PC 上唯一的常驻业务服务。Rust 业务代码编进 `genehub_guest.wasm`，由原生 `genehub-host` 常驻装载；随桌面端或 Linux 三件套分发。
 > 上位文档：[architecture.md](./architecture.md)。本文只展开 daemon 内部。
+> 状态（2026-08-24）：默认 WASM、Fabric/RTC 与 Linux 能力 parity 已落地；Windows host 的 owner-only ACL 已实现，并在 GitHub `windows-latest` 上跑过 `fs_perms::tests`。尚未用待发布三件套关闭 Windows 安装后首启与主旅程。组件自动更新、签名与无损切换也尚未落地，见 [roadmap.md](./roadmap.md)“WASM 持续交付”。
 
 ---
 
@@ -12,9 +13,13 @@
 | **按 MVP 裁剪** | 成熟实现有几十个模块；我们只做闭环需要的那几个，不做"以后可能有用"的 |
 | **内核不认识具体 agent** | 具体知识全部关在 adapter 里，见 [architecture.md](./architecture.md) §2 |
 | **无状态优先** | 除会话记录外不缓存；重启后靠磁盘恢复，不靠内存 |
-| **单进程** | 不拆微服务，不引数据库服务；SQLite 或 JSONL 落盘 |
+| **单服务实例** | daemon 是一个 host + guest 实例，不拆微服务、不引数据库服务；agent/外部工具仍按需独立进程，SQLite 或 JSONL 落盘 |
+| **只有 WASM 业务运行时** | 产品全面切换到 `genehub_guest.wasm`。没有原生 daemon/agent 模式，缺件或不匹配即失败，禁止任何回退 |
+| **启动 ABI 配对** | host 与 guest 都嵌入 `sha256(wit/genehub-host.wit)`；装载、instantiate 之前比对，不一致则拒绝启动并要求成对重建 |
+| **崩溃可自动回收** | 无锁时清掉残留 `endpoint.json`，并删除旧版遗留的整个 `wasm-cache`；guest trap 不二次拖死 Store，进程退出后由 supervisor 只重启 daemon |
+| **编译只在内存** | host 用 `from_binary` 在本进程编译 guest；不写 `.cwasm`。内置 agent 是另一个 host 进程，同样从 wasm 字节编译，不读磁盘预编译像 |
 
-体积目标：release 二进制 **< 20MB**，加上内置 agent 与 Tauri 壳，整包仍在下载 80MB 内。
+体积门以真实 installer/tarball 为准：下载 ≤80MB。2026-08-22 本槽位分项是 launcher 2.35MB、host 11.17MB、guest 6.83MB；不能再用旧“单 daemon 二进制”口径验收。
 
 ---
 
@@ -22,18 +27,21 @@
 
 ```
 apps/daemon/src/
-├── main.rs           启动、单实例锁、优雅退出
+├── lib.rs / run.rs   guest 常驻入口、启动与 reload/shutdown outcome
 ├── config.rs         配置与数据目录
 ├── transport/
 │   ├── local.rs      本地 HTTP + WebSocket（127.0.0.1，回环）
 │   ├── fabric.rs     endpoint-neutral /fabric/v2 出站 uplink
+│   ├── ws.rs         WebSocket 客户端；原生直连，guest 经 wasi:sockets + wasi:tls
 │   └── admission.rs  loopback/device/hosted/RTC peer admission
 ├── dataplane/
 │   ├── handshake.rs  protocol-v3 PSK 双向证明
 │   ├── frame.rs      16 KiB record 内的 logical-stream frame
 │   ├── endpoint.rs   Exchange、流控、公平 writer、handler 隔离
-│   ├── preview.rs    ≤4 MiB workspace 文件 Preview
-│   ├── rtc.rs        E2EE signaling + WebRTC DataChannel
+│   ├── preview.rs    ≤64 MiB workspace 文件 Preview
+│   ├── rtc.rs        共享 signaling/policy 常量
+│   ├── rtc_guest.rs  guest admission、名额、超时与 Fabric 回落
+│   ├── rtc_host.rs   原生构建的连接实现（guest 构建改走 typed host resource）
 │   └── client.rs     daemon/CLI 使用的 v3 client endpoint
 ├── session/
 │   ├── manager.rs    会话生命周期、订阅广播、断线重放
@@ -64,7 +72,7 @@ MVP **不做**：定时任务、浏览器自动化、语音、worktree 编排、
 |---|---|
 | `ws://127.0.0.1:<port>/ws` | 同机 client；loopback 一次性 admission |
 | daemon 出站 `wss://<relay>/fabric/v2` | 所有跨设备连接的 E2EE baseline；一条 uplink 接收多条 routed peer carrier |
-| ordered reliable WebRTC DataChannel | 远端 peer 的可选 direct carrier；通过 baseline 内的 E2EE Exchange 协商 |
+| ordered reliable WebRTC DataChannel | 远端 peer 的可选 direct carrier；通过 baseline 内的 E2EE Exchange 协商。默认 WASM 下 host typed resource 提供 ICE/DTLS/SCTP 连接，guest 保留 admission、权限、超时与 baseline 回落，见 [wasm-guest-network.md](./wasm-guest-network.md) |
 
 三个 carrier 都承载同一套 protocol-v3 E2EE record、`DataEndpoint` 和 Exchange。daemon 永远不在公网或局域网监听特权协议；旧 `lanEnabled: true` 会明确失败。同 Wi-Fi 也先走 WSS Fabric，RTC 成功后新请求才 direct；只有 literal loopback 可使用明文 WS。
 
@@ -84,7 +92,7 @@ FIN
 
 每个客户端主动请求各占一条 logical stream。stream 有独立 sequence、256 KiB credit、receive queue、task、timeout、FIN/RESET 和精确 body-length 校验。writer 以 round-robin 每个 runnable stream 每轮一帧，因此 Preview 或慢 RPC 不会独占应用层发送链。
 
-carrier reader 只验证/decrypt 一条 record、decode 一条 frame 并投递到有界队列，不 await 文件 IO、Agent 或 handler。每个 incoming stream 在独立 task 中处理；阻塞 Preview 读取进入最多 2 路的 blocking 槽。单 peer 最多 256 active streams；daemon RTC registry 最多 32 peers。
+carrier reader 只验证/decrypt 一条 record、decode 一条 frame 并投递到有界队列，不 await 文件 IO、Agent 或 handler。每个 incoming stream 在独立 task 中处理；原生构建的阻塞 Preview 读取使用有界槽，WASM guest 则分块并 cooperative yield，不能调用 `spawn_blocking`。单 peer 最多 256 active streams；daemon RTC registry 最多 32 peers。
 
 完整 framing、Relay 可见性和 RTC 取舍见 [e2ee-data-plane.md](./e2ee-data-plane.md)。
 
@@ -96,7 +104,7 @@ DataEndpoint method 只有四个：
 |---|---|
 | `rpc` | 现有版本化 `Request/Reply` 业务 schema，作为 body；不再是 connection envelope |
 | `events` | 长期 response stream；`u32be length + ServerFrame JSON` |
-| `asset.preview` | workspace-relative、完整或失败、≤4 MiB 的文件 Preview |
+| `asset.preview` | workspace-relative、完整或失败、≤64 MiB 的文件 Preview |
 | `shell.run` | 在 workspace 内跑一条命令；metadata 带 argv 数组、cwd、env 与可选 `timeoutMs`，**request body 即命令的 stdin**（≤1 MiB，一次给全；需要一问一答的交互输入用 `pty.open`）。response 是 `u32be length + ShellFrame JSON`，stdout/stderr 分开、末帧带退出码与 `timedOut`。与 `pty.*` 同属 `pty` 能力，隔离决策也共用一处 |
 | `rtc.negotiate` | 在已认证基线连接内交换非 trickle SDP |
 

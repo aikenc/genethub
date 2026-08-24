@@ -1,0 +1,15 @@
+[package]
+name = "genet-wasi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Guest-side plumbing shared by the daemon and agent components"
+
+# Everything here is guest-only and compiles away to nothing on a native target,
+# so both binaries can depend on it unconditionally.
+[dependencies]
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+tokio = { version = "1", default-features = false, features = ["io-util", "time"] }
+wasi = "0.14"
+wit-bindgen = "0.57"

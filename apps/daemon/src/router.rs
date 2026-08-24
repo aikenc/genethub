@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use genehub_proto::{
-    ErrorCode, HelloResult, ProtocolError, Reply, Request, TransportKind, PROTOCOL_VERSION,
+    ErrorCode, HelloResult, ProtocolError, Reply, Request, TransportKind, WEB_PROTOCOL_VERSION,
 };
 use tokio::sync::broadcast;
 
@@ -86,6 +86,11 @@ fn failed(error: anyhow::Error) -> Handled {
         || message.contains("workspace folder")
         || message.contains(".code-workspace")
         || message.contains("not a directory")
+        || message.contains("是内置的")
+        || message.contains("只能清空")
+        || message.contains("this agent offers")
+        || message.contains("Claude Code offers")
+        || message.contains("unknown thinking level")
     {
         ErrorCode::BadRequest
     } else if message.contains("does not") || message.contains("not supported") {
@@ -136,12 +141,12 @@ async fn dispatch(
     match request {
         Request::ConnectionIdentity => Handled::ok(Reply::Hello(HelloResult {
             daemon_version: state.version.clone(),
-            protocol_version: PROTOCOL_VERSION,
+            web_protocol: WEB_PROTOCOL_VERSION,
             machine_id: state.machine.machine_id.clone(),
             fingerprint: state.machine.fingerprint(),
             transport,
             machine_name: crate::link::default_display_name(),
-            rtc_supported: true,
+            rtc_supported: crate::dataplane::rtc::SUPPORTED,
             features: Some(vec![
                 genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
                 genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
@@ -194,6 +199,7 @@ async fn dispatch(
             agent_id,
             model_id,
             mode_id,
+            runtime_values,
             title,
             cwd,
         } => {
@@ -226,7 +232,15 @@ async fn dispatch(
             };
             match state
                 .sessions
-                .create(&workspace_id, start_in, &agent_id, model_id, mode_id, title)
+                .create(
+                    &workspace_id,
+                    start_in,
+                    &agent_id,
+                    model_id,
+                    mode_id,
+                    runtime_values.unwrap_or_default(),
+                    title,
+                )
                 .await
             {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
@@ -618,6 +632,22 @@ async fn dispatch(
             }
         }
 
+        Request::SessionSetRuntimeAxis {
+            session_id,
+            axis_id,
+            value_id,
+        } => {
+            let providers = state.providers().await;
+            match state
+                .sessions
+                .set_runtime_axis(&session_id, &axis_id, &value_id, &providers)
+                .await
+            {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::SessionRespondPermission {
             session_id,
             request_id,
@@ -768,9 +798,18 @@ async fn dispatch(
             )))
         }
 
-        Request::UpdateCheck => automatic_update_refusal(),
+        Request::UpdateCheck => match crate::host_update::check() {
+            Ok(status) => Handled::ok(Reply::Update(status)),
+            Err(message) => Handled::err(ErrorCode::Unsupported, message),
+        },
 
-        Request::UpdateDownload => automatic_update_refusal(),
+        Request::UpdateDownload => match crate::host_update::apply("web") {
+            Ok(()) => {
+                state.reload.notify_waiters();
+                Handled::ok(Reply::UpdateDownload(state.updates.state()))
+            }
+            Err(message) => Handled::err(ErrorCode::Unsupported, message),
+        },
 
         Request::UpdateDownloadState => Handled::ok(Reply::UpdateDownload(state.updates.state())),
 
@@ -1315,19 +1354,9 @@ fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::Unsupported => "unsupported",
         ErrorCode::Forbidden => "forbidden",
         ErrorCode::Internal => "internal",
-        ErrorCode::ProtocolVersion => "protocolVersion",
+        ErrorCode::WebProtocol => "webProtocol",
         ErrorCode::IsolationUnavailable => "isolationUnavailable",
     }
-}
-
-/// Integrity metadata delivered beside a binary is not an authenticity root.
-/// Until releases have an independently pinned signing key, no protocol caller
-/// may make this machine fetch or execute an update.
-fn automatic_update_refusal() -> Handled {
-    Handled::err(
-        ErrorCode::Unsupported,
-        "自动更新尚未启用：请从官方发布页手动下载，并核对 SHA256SUMS",
-    )
 }
 
 async fn remote_status(state: &Shared) -> genehub_proto::RemoteAccess {
@@ -1406,6 +1435,10 @@ mod tests {
                 "artifact upload does not belong to this session",
                 ErrorCode::Forbidden,
             ),
+            (
+                "'not-a-model-this-cli-has' is not a model this Claude Code offers (default, opus, sonnet, haiku)",
+                ErrorCode::BadRequest,
+            ),
         ] {
             let handled = failed(anyhow::anyhow!(message));
             match handled.reply {
@@ -1416,15 +1449,11 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_update_entry_points_fail_closed() {
-        let handled = automatic_update_refusal();
-        match handled.reply {
-            Err(error) => {
-                assert_eq!(error.code, ErrorCode::Unsupported);
-                assert!(error.message.contains("手动下载"));
-                assert!(error.message.contains("SHA256SUMS"));
-            }
-            Ok(_) => panic!("an unsigned updater entry point was enabled"),
-        }
+    fn native_update_entry_points_fail_closed() {
+        let check = crate::host_update::check().expect_err("native check must refuse");
+        assert!(check.contains("手动下载"), "{check}");
+        assert!(check.contains("SHA256SUMS"), "{check}");
+        let apply = crate::host_update::apply("web").expect_err("native apply must refuse");
+        assert!(apply.contains("手动下载"), "{apply}");
     }
 }

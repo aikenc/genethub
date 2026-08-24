@@ -1,7 +1,7 @@
 //! Which agents exist on this machine, and what they can do.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -36,6 +36,26 @@ fn cursor_command() -> Vec<String> {
     .collect()
 }
 
+/// Official install locations, searched with the same `PATHEXT` walk as `PATH`.
+///
+/// Desktop daemons on Windows often inherit Explorer's `PATH`, which does not
+/// include `%LOCALAPPDATA%\cursor-agent` until the next login. Guessing
+/// `cursor-agent.exe` vs `.cmd` vs `.bat` is the thing that would break when
+/// the installer changes suffix.
+fn cursor_install_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        if !local.is_empty() {
+            dirs.push(PathBuf::from(local).join("cursor-agent"));
+        }
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    if let Some(home) = home {
+        dirs.push(PathBuf::from(home).join(".local").join("bin"));
+    }
+    dirs
+}
+
 impl Registry {
     /// Builds the adapter set: the built-ins, plus whatever the user declared.
     pub fn new(custom: &BTreeMap<String, CustomAgent>) -> Self {
@@ -57,7 +77,11 @@ impl Registry {
             // publishes for exactly this kind of embedding. Launch flags give
             // the CLI maximum authority; any residual ACP permission request
             // becomes a durable stopped interaction in the session manager.
-            Arc::new(AcpAdapter::new("cursor", "Cursor", cursor_command())),
+            Arc::new(
+                AcpAdapter::new("cursor", "Cursor", cursor_command())
+                    .with_extra_dirs(cursor_install_dirs())
+                    .checking_login(),
+            ),
             // A generic ACP entry so any other ACP-speaking CLI on PATH works
             // with no configuration at all.
             Arc::new(AcpAdapter::new(
@@ -241,11 +265,13 @@ mod tests {
         assert!(cursor.capabilities().set_model);
         assert!(cursor.capabilities().set_mode);
         assert!(cursor.capabilities().attachments);
-        // Probing is honest either way: ready when `cursor-agent` is on PATH,
-        // not installed when it is not — never an error the picker chokes on.
+        // Probing is honest either way: ready when `cursor-agent` is on PATH
+        // or in the official install dir, unavailable when it is present but
+        // not logged in, not installed when it is not — never an error the
+        // picker chokes on.
         assert!(matches!(
             cursor.probe().await,
-            ProbeState::Ready | ProbeState::NotInstalled
+            ProbeState::Ready | ProbeState::NotInstalled | ProbeState::Unavailable { .. }
         ));
     }
 
@@ -263,6 +289,25 @@ mod tests {
                 "acp",
             ]
         );
+    }
+
+    #[test]
+    fn cursor_install_dirs_are_the_official_locations_not_a_filename() {
+        let dirs = cursor_install_dirs();
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            if !local.is_empty() {
+                assert!(dirs.iter().any(|dir| dir.ends_with("cursor-agent")));
+            }
+        }
+        if std::env::var_os("HOME").is_some() || std::env::var_os("USERPROFILE").is_some() {
+            assert!(dirs
+                .iter()
+                .any(|dir| dir.ends_with(std::path::Path::new(".local").join("bin"))));
+        }
+        assert!(dirs.iter().all(|dir| !dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("cursor-agent."))));
     }
 
     #[tokio::test]

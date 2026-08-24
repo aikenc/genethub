@@ -1,0 +1,345 @@
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+use tempfile::{NamedTempFile, TempPath};
+
+use crate::artifact::{ArtifactVerifier, SignedArtifact, VerifiedArtifact};
+use crate::error::{ArtifactError, Result};
+use crate::version::ProductVersion;
+
+const ACTIVE_FILE: &str = "active.wasm";
+const CANDIDATE_FILE: &str = "candidate.wasm";
+const HIGH_WATER_FILE: &str = "highest-version";
+const MAX_HIGH_WATER_BYTES: usize = 64;
+const MAX_ENVELOPE_BYTES: usize = 16 * 1024;
+
+/// The complete durable update state: one active artifact, one staged
+/// candidate and one monotonic anti-replay scalar.
+///
+/// There is deliberately no slot history or previous artifact. The App ships
+/// the recovery baseline; an activated defect is fixed by a higher revision.
+pub(crate) struct ArtifactStore {
+    root: PathBuf,
+    active: PathBuf,
+    candidate: PathBuf,
+    high_water: PathBuf,
+    verifier: ArtifactVerifier,
+}
+
+impl ArtifactStore {
+    pub fn open(root: impl Into<PathBuf>, verifier: ArtifactVerifier) -> Result<Self> {
+        let root = root.into();
+        fs::create_dir_all(&root)?;
+        reject_non_file_if_present(&root.join(ACTIVE_FILE))?;
+        reject_non_file_if_present(&root.join(CANDIDATE_FILE))?;
+        reject_non_file_if_present(&root.join(HIGH_WATER_FILE))?;
+        sync_directory(&root)?;
+        Ok(Self {
+            active: root.join(ACTIVE_FILE),
+            candidate: root.join(CANDIDATE_FILE),
+            high_water: root.join(HIGH_WATER_FILE),
+            root,
+            verifier,
+        })
+    }
+
+    pub fn highest_version(&self) -> Result<Option<ProductVersion>> {
+        let bytes = match read_limited(&self.high_water, MAX_HIGH_WATER_BYTES) {
+            Ok(bytes) => bytes,
+            Err(ArtifactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| ArtifactError::State("highest version is not UTF-8".to_string()))?;
+        let version = text.strip_suffix('\n').unwrap_or(text);
+        let parsed = ProductVersion::parse(version)
+            .map_err(|_| ArtifactError::State("highest version is not canonical".to_string()))?;
+        if text != format!("{parsed}\n") {
+            return Err(ArtifactError::State(
+                "highest version is not a canonical line".to_string(),
+            ));
+        }
+        Ok(Some(parsed))
+    }
+
+    /// Advances the anti-replay fence before a staged candidate can become
+    /// active. Repeating the same version is allowed to repair a missing or
+    /// corrupted active file; lowering the fence is never allowed.
+    pub fn advance_high_water(&self, version: &ProductVersion) -> Result<()> {
+        let current = self.highest_version()?;
+        if let Some(current) = &current {
+            if version < current {
+                return Err(ArtifactError::VersionReplay {
+                    candidate: version.to_string(),
+                    highest: current.to_string(),
+                });
+            }
+            if version == current {
+                return Ok(());
+            }
+        }
+        replace_bytes(&self.high_water, format!("{version}\n").as_bytes())?;
+        sync_directory(&self.root)
+    }
+
+    pub fn load_active(&self) -> Result<Option<VerifiedArtifact>> {
+        self.load_optional(&self.active)
+    }
+
+    pub fn load_candidate(&self) -> Result<Option<VerifiedArtifact>> {
+        self.load_optional(&self.candidate)
+    }
+
+    pub fn stage(&self, artifact: &VerifiedArtifact) -> Result<()> {
+        let file = SignedArtifact::new(artifact.envelope.clone(), artifact.component.to_vec())
+            .to_single_file()?;
+        replace_bytes(&self.candidate, &file)?;
+        sync_directory(&self.root)
+    }
+
+    /// Publishes the already-fenced candidate as the sole downloaded active.
+    pub fn commit_candidate(&self, version: &ProductVersion) -> Result<()> {
+        let highest = self.highest_version()?;
+        if highest.as_ref() != Some(version) {
+            return Err(ArtifactError::State(format!(
+                "candidate version {version} does not match highest version {}",
+                highest
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "<none>".to_string())
+            )));
+        }
+        let candidate = self
+            .load_candidate()?
+            .ok_or_else(|| ArtifactError::State("staged candidate is missing".to_string()))?;
+        if &candidate.envelope().version() != version {
+            return Err(ArtifactError::State(format!(
+                "staged candidate version {} does not match highest version {version}",
+                candidate.envelope().release_version()
+            )));
+        }
+        atomic_replace(&self.candidate, &self.active)?;
+        sync_directory(&self.root)
+    }
+
+    /// Completes the only recoverable crash point: the high-water mark was
+    /// durable but candidate -> active had not yet become visible.
+    pub fn recover_candidate(&self) -> Result<bool> {
+        let Some(candidate) = self.load_candidate()? else {
+            return Ok(false);
+        };
+        if Some(&candidate.envelope().version()) != self.highest_version()?.as_ref() {
+            self.discard_candidate()?;
+            return Ok(false);
+        }
+        self.commit_candidate(&candidate.envelope().version())?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub fn discard_active(&self) -> Result<()> {
+        remove_if_present(&self.active)?;
+        sync_directory(&self.root)
+    }
+
+    pub fn discard_candidate(&self) -> Result<()> {
+        remove_if_present(&self.candidate)?;
+        sync_directory(&self.root)
+    }
+
+    fn load_optional(&self, path: &Path) -> Result<Option<VerifiedArtifact>> {
+        let limit = self
+            .verifier
+            .max_artifact_bytes()
+            .checked_add(MAX_ENVELOPE_BYTES)
+            .ok_or_else(|| ArtifactError::State("artifact storage limit overflow".to_string()))?;
+        let bytes = match read_limited(path, limit) {
+            Ok(bytes) => bytes,
+            Err(ArtifactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        let artifact = SignedArtifact::from_single_file(&bytes)?;
+        self.verifier.verify(&artifact).map(Some)
+    }
+}
+
+fn reject_non_file_if_present(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => Err(ArtifactError::State(format!(
+            "update state {} is not a regular file",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn replace_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ArtifactError::State("update path has no parent".to_string()))?;
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    temporary.as_file_mut().write_all(bytes)?;
+    temporary.as_file_mut().sync_all()?;
+    let temporary = temporary.into_temp_path();
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(ArtifactError::State(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    if metadata.len() > limit as u64 {
+        return Err(ArtifactError::State(format!(
+            "{} exceeds its {} byte storage limit",
+            path.display(),
+            limit
+        )));
+    }
+    let file = File::open(path)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(ArtifactError::State(format!(
+            "{} grew beyond its storage limit while being read",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
+    // TempPath provides the same overwrite-by-rename operation on Unix and
+    // Windows without putting platform FFI in the trust kernel. This path is
+    // an already durable staged candidate, not a disposable tempfile, so a
+    // failed persist must leave it available for the next recovery attempt.
+    let mut source = TempPath::try_from_path(source.to_path_buf())?;
+    source.disable_cleanup(true);
+    source.persist(destination).map_err(|error| error.error)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(any(windows, not(any(unix, windows))))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifact::{ArtifactEnvelope, ArtifactVerifier, SignedArtifact};
+    use ed25519_dalek::{Signer, SigningKey};
+
+    const EMPTY_WASM: &[u8] = b"\0asm\x01\x00\x00\x00";
+    const TEST_ABI_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn key() -> SigningKey {
+        SigningKey::from_bytes(&[7; 32])
+    }
+
+    fn version(raw: &str) -> crate::version::ProductVersion {
+        crate::version::ProductVersion::parse(raw).unwrap()
+    }
+
+    fn signed(version: &str) -> crate::artifact::VerifiedArtifact {
+        let envelope = ArtifactEnvelope::unsigned(
+            "genehub:client-component/wasm",
+            "dev",
+            version,
+            TEST_ABI_HASH,
+            3,
+            "dev-local",
+            EMPTY_WASM,
+        )
+        .unwrap();
+        let signature = key().sign(&envelope.signing_payload().unwrap());
+        let artifact = SignedArtifact::new(envelope.with_signature(&signature), EMPTY_WASM);
+        ArtifactVerifier::new(
+            "genehub:client-component/wasm",
+            "dev",
+            TEST_ABI_HASH,
+            64 * 1024,
+            [("dev-local".to_string(), key().verifying_key())],
+        )
+        .unwrap()
+        .verify(&artifact)
+        .unwrap()
+    }
+
+    fn store(dir: &tempfile::TempDir) -> ArtifactStore {
+        ArtifactStore::open(
+            dir.path(),
+            ArtifactVerifier::new(
+                "genehub:client-component/wasm",
+                "dev",
+                TEST_ABI_HASH,
+                64 * 1024,
+                [("dev-local".to_string(), key().verifying_key())],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn candidate_failure_never_changes_active_or_high_water() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let first = signed("0.1.2");
+        store.stage(&first).unwrap();
+        store.advance_high_water(&version("0.1.2")).unwrap();
+        store.commit_candidate(&version("0.1.2")).unwrap();
+        assert_eq!(store.highest_version().unwrap(), Some(version("0.1.2")));
+        assert!(store.stage(&signed("0.1.1")).is_ok());
+        assert!(store.advance_high_water(&version("0.1.1")).is_err());
+        assert_eq!(store.highest_version().unwrap(), Some(version("0.1.2")));
+        assert_eq!(
+            store
+                .load_active()
+                .unwrap()
+                .unwrap()
+                .envelope()
+                .release_version(),
+            "0.1.2"
+        );
+    }
+
+    #[test]
+    fn replay_is_rejected_and_equal_version_can_repair_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        store.stage(&signed("0.1.3")).unwrap();
+        store.advance_high_water(&version("0.1.3")).unwrap();
+        store.commit_candidate(&version("0.1.3")).unwrap();
+        assert!(store.advance_high_water(&version("0.1.2")).is_err());
+        store.discard_active().unwrap();
+        store.stage(&signed("0.1.3")).unwrap();
+        store.advance_high_water(&version("0.1.3")).unwrap();
+        store.commit_candidate(&version("0.1.3")).unwrap();
+        assert_eq!(store.highest_version().unwrap(), Some(version("0.1.3")));
+    }
+}

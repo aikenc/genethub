@@ -11,10 +11,25 @@ use crate::timeline::Attachment;
 
 /// Bumped when a change would break an older client. Clients that see a version
 /// they do not know must refuse to connect rather than guess.
-pub const PROTOCOL_VERSION: u32 = crate::data::DATA_PLANE_VERSION;
+///
+/// WebProtocol version spoken by Web/CLI clients. It deliberately does not
+/// inherit the binary carrier version: either side may evolve without turning
+/// a protocol adapter into a data-plane upgrade.
+pub const WEB_PROTOCOL_VERSION: u32 = 3;
+/// Lean carrier method that returns `{ webProtocol }` before the first
+/// business RPC. It is not a `Request` variant.
+pub const PROTOCOL_IDENTITY_METHOD: &str = "protocol.identity";
 /// Maximum typed RPC body accepted before it is divided into bounded v3 data
 /// frames.
 pub const MAX_RPC_BODY_BYTES: usize = 2_900_000;
+
+/// Advertised WebProtocol generation, independent of the carrier handshake.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ProtocolIdentity {
+    pub web_protocol: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
@@ -57,6 +72,9 @@ pub enum Request {
         model_id: Option<String>,
         #[serde(default)]
         mode_id: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        runtime_values: Option<std::collections::BTreeMap<String, String>>,
         #[serde(default)]
         title: Option<String>,
         /// Where the agent starts, inside the workspace. Absent means the
@@ -257,6 +275,12 @@ pub enum Request {
         session_id: String,
         effort_id: String,
     },
+    #[serde(rename = "session.setRuntimeAxis", rename_all = "camelCase")]
+    SessionSetRuntimeAxis {
+        session_id: String,
+        axis_id: String,
+        value_id: String,
+    },
     #[serde(rename = "session.respondPermission", rename_all = "camelCase")]
     SessionRespondPermission {
         session_id: String,
@@ -374,7 +398,7 @@ pub enum Request {
     /// Returns the daemon's bounded, privacy-safe support record.
     ///
     /// Unlike `log.tail`, this contains only fixed operation names, outcomes,
-    /// error classes and coarse connectivity state. It is safe for an official
+    /// error classes and coarse connectivity state. It is safe for a stable
     /// client to attach to an explicit feedback submission without copying
     /// terminal, Agent, prompt, filesystem path or credential text.
     #[serde(rename = "diagnostics.snapshot")]
@@ -787,7 +811,8 @@ pub enum ErrorCode {
     /// Path escaped its workspace, or a workspace was never registered.
     Forbidden,
     Internal,
-    ProtocolVersion,
+    /// The peer's WebProtocol generation is outside the retained window.
+    WebProtocol,
     /// The request needed the process to be confined by the operating system,
     /// and this machine cannot do that. Distinct from `Forbidden` because
     /// nothing about the caller is wrong: the same request on a machine with a

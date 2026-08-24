@@ -128,7 +128,7 @@ pub(super) async fn record(
     };
     let root = workspace.root.clone();
     let learned = learned_terms.clone();
-    tokio::task::spawn_blocking(move || store(&root, &record, &learned))
+    crate::blocking::run(move || store(&root, &record, &learned))
         .await
         .context("joining Qwen3 preference write")??;
     Ok(SpeechFeedbackReceipt {
@@ -535,14 +535,7 @@ fn store(root: &Path, record: &PreferenceRecord, learned_terms: &[String]) -> Re
 }
 
 fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).read(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(path)?;
+    let file = crate::config::open_append(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -575,11 +568,27 @@ fn ensure_private_gitignore(root: &Path) -> Result<()> {
     if missing.is_empty() {
         return Ok(());
     }
+    // Not config::open_append: this file is meant to stay shareable, so no
+    // owner-only mode at creation. The wasm branch still avoids append(true),
+    // which wasip2 silently drops (see config::open_append).
+    #[cfg(not(target_family = "wasm"))]
     let mut output = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .with_context(|| format!("opening {}", path.display()))?;
+    #[cfg(target_family = "wasm")]
+    let mut output = {
+        use std::io::Seek;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        file.seek(std::io::SeekFrom::End(0))?;
+        file
+    };
     if !existing.is_empty() && !existing.ends_with('\n') {
         output.write_all(b"\n")?;
     }

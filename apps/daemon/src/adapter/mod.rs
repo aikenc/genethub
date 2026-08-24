@@ -38,6 +38,9 @@ pub struct SessionConfig {
     /// the same reason the model is: the process only starts on the first prompt,
     /// so a level chosen before that would otherwise be recorded and dropped.
     pub effort_id: Option<String>,
+    /// Agent-declared runtime dimensions. Keys and values are opaque and have
+    /// already been checked against the current catalog by the session layer.
+    pub runtime_values: std::collections::BTreeMap<String, String>,
     /// Product-owned context added without changing the user's message. Each
     /// adapter maps it to its strongest available native system/developer
     /// instruction mechanism; ACP has a documented lower-priority fallback.
@@ -177,6 +180,11 @@ pub trait AgentSession: Send + Sync {
             "this agent has no effort levels to set ({effort_id})"
         ))
     }
+    async fn set_runtime_axis(&self, axis_id: &str, value_id: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "this agent has no runtime axis '{axis_id}' to set ({value_id})"
+        ))
+    }
     async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()>;
 
     /// `None` means the daemon must fall back to read-only replay of its own log.
@@ -273,7 +281,7 @@ impl Chatter {
 /// separate them, and both are already in hand here.
 pub async fn stopped(
     label: &str,
-    child: &Mutex<Option<tokio::process::Child>>,
+    child: &Mutex<Option<crate::os_process::Child>>,
     said: &Chatter,
 ) -> String {
     said.settle().await;
@@ -295,7 +303,7 @@ pub async fn stopped(
 /// Polled rather than awaited, and briefly: stdout closing is not quite the same
 /// as the process being gone, and a child that closed its pipes but kept running
 /// must not hold this lock — `stop()` needs it to kill the thing.
-async fn exit_code(child: &Mutex<Option<tokio::process::Child>>) -> Option<i32> {
+async fn exit_code(child: &Mutex<Option<crate::os_process::Child>>) -> Option<i32> {
     for _ in 0..20 {
         {
             let mut held = child.lock().await;
@@ -320,7 +328,7 @@ async fn exit_code(child: &Mutex<Option<tokio::process::Child>>) -> Option<i32> 
 /// no console window; everywhere it means a process group of our own, so that
 /// ending the agent ends what the agent started rather than orphaning a
 /// language server or a dev server onto init (`crate::process`).
-pub fn owned_child(command: &mut tokio::process::Command) {
+pub fn owned_child(command: &mut crate::os_process::Command) {
     without_a_window(command);
     crate::process::own_group(command);
 }
@@ -333,7 +341,7 @@ pub fn owned_child(command: &mut tokio::process::Command) {
 /// this for the daemon; the daemon has to do it for what it starts.
 ///
 /// A no-op everywhere else, so callers do not need a `cfg`.
-pub fn without_a_window(command: &mut tokio::process::Command) {
+pub fn without_a_window(command: &mut crate::os_process::Command) {
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -347,7 +355,7 @@ pub fn without_a_window(command: &mut tokio::process::Command) {
 /// Claude and the built-in Agent use different native flag names but share the
 /// same argument boundary and multiline-value safety.
 pub(super) fn append_system_prompt_arg(
-    command: &mut tokio::process::Command,
+    command: &mut crate::os_process::Command,
     flag: &str,
     prompt: Option<&str>,
 ) {
@@ -367,7 +375,7 @@ pub(super) fn append_system_prompt_arg(
 /// agent is a thing that runs commands, so the interesting processes are never
 /// the one we hold. They are reachable because the agent was started in a
 /// process group of its own (`crate::process::own_group`).
-pub async fn kill_tree(child: &mut tokio::process::Child) {
+pub async fn kill_tree(child: &mut crate::os_process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         crate::process::stop_tree(pid);
@@ -376,7 +384,7 @@ pub async fn kill_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         // `/T` is the whole point: the tree, not the shim. Failure is not worth
         // reporting — the direct kill below is still coming.
-        let _ = tokio::process::Command::new("taskkill")
+        let _ = crate::os_process::Command::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -389,29 +397,29 @@ pub async fn kill_tree(child: &mut tokio::process::Child) {
 
 /// Finds an executable on `PATH`, honouring `PATHEXT` on Windows.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
-    if name.contains(std::path::MAIN_SEPARATOR) {
-        let direct = PathBuf::from(name);
-        return direct.is_file().then_some(direct);
-    }
-    let path = std::env::var_os("PATH")?;
-    let extensions: Vec<String> = if cfg!(windows) {
-        std::env::var("PATHEXT")
-            .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
-            .split(';')
-            .map(|e| e.to_lowercase())
-            .collect()
-    } else {
-        vec![String::new()]
-    };
-    for dir in std::env::split_paths(&path) {
-        for extension in &extensions {
-            let candidate = dir.join(format!("{name}{extension}"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    find_executable_in(name, &[])
+}
+
+/// PATH first, then extra directories. Extra dirs use the same `PATHEXT` walk
+/// as `PATH` — we do not guess `.exe` vs `.cmd` vs `.bat`.
+#[cfg(not(target_family = "wasm"))]
+pub fn find_executable_in(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
+    genet_native::locate::find_executable_in(name, extra_dirs)
+}
+
+/// The same question, asked of the shell.
+///
+/// The guest cannot answer it: `PATH` is the host's list written with the
+/// host's separator, and WASI will not even split it. Nor is it the guest's
+/// question — the shell is what will run the program (`os_process`), so it is
+/// the one that has to find it.
+#[cfg(target_family = "wasm")]
+pub fn find_executable_in(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let extra: Vec<String> = extra_dirs
+        .iter()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .collect();
+    genet_wasi::wit::genehub::host::process::locate(name, &extra).map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -425,7 +433,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_child_that_stops_is_described_with_its_code_and_its_last_words() {
-        let mut child = tokio::process::Command::new("sh")
+        let mut child = crate::os_process::Command::new("sh")
             .arg("-c")
             .arg("echo 'Invalid API key · Please run /login' >&2; exit 1")
             .stderr(std::process::Stdio::piped())
@@ -451,7 +459,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_child_that_says_nothing_still_points_at_the_log() {
-        let mut child = tokio::process::Command::new("sh")
+        let mut child = crate::os_process::Command::new("sh")
             .arg("-c")
             .arg("exit 7")
             .stderr(std::process::Stdio::piped())
@@ -509,8 +517,29 @@ mod tests {
     }
 
     #[test]
+    fn extra_dirs_are_searched_after_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "genehub-test-extra-dir-agent";
+        let present = write_searchable(dir.path(), name);
+        assert!(find_executable(name).is_none());
+        assert_eq!(
+            find_executable_in(name, &[dir.path().to_path_buf()]),
+            Some(present)
+        );
+    }
+
+    /// Windows `PATHEXT` does not include the empty suffix, so a test file
+    /// without `.exe`/`.cmd`/`.bat` would hide the lookup this is proving.
+    fn write_searchable(dir: &std::path::Path, name: &str) -> PathBuf {
+        let suffix = if cfg!(windows) { ".bat" } else { "" };
+        let present = dir.join(format!("{name}{suffix}"));
+        std::fs::write(&present, b"").unwrap();
+        present
+    }
+
+    #[test]
     fn multiline_system_context_is_one_literal_cli_argument() {
-        let mut command = tokio::process::Command::new("agent");
+        let mut command = crate::os_process::Command::new("agent");
         append_system_prompt_arg(
             &mut command,
             "--append-system-prompt",

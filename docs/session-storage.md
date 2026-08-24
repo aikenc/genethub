@@ -201,7 +201,7 @@ N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = �
 
 ## 5. 被这次改动删掉的东西
 
-**`layered:false` 的全量时间线。** 新布局下重建一条完整时间线要打开每个 round 的每个 trunk 文件再归并，正是重排要消灭的 O(N)；而带宽上它本来就是无上限的。核查过消费者：`packages/web` 始终传 `layered:true`，relay 只转发不解析这个字段，CLI 还没有会话面，只有 `testing/` 在用 `false`。为一个没有生产消费者的路径保留一套更差的读法，是纯负债。`subscribe` 的 `layered` 参数一并去掉，分层成为唯一行为。
+**`layered:false` 的全量时间线。** 新布局下重建一条完整时间线要打开每个 round 的每个 trunk 文件再归并，正是重排要消灭的 O(N)；而带宽上它本来就是无上限的。核查过消费者：`packages/workbench` 始终传 `layered:true`，relay 只转发不解析这个字段，CLI 还没有会话面，只有 `testing/` 在用 `false`。为一个没有生产消费者的路径保留一套更差的读法，是纯负债。`subscribe` 的 `layered` 参数一并去掉，分层成为唯一行为。
 
 **`session.rounds.jsonl` 与 `RoundRecord.item_ids`。** 前者的内容并进了 chat.jsonl 的 round 行，后者不再有存在理由：work item 由 `rounds/r-NNN/t-NNNN.jsonl` 的路径定位，不需要一份 id 清单来指认归属。
 

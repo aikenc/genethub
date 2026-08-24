@@ -1,0 +1,26 @@
+{
+  "name": "@genehub/testing",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "description": "GeneHub testctl coordinator, adapters, and public catalog",
+  "bin": {
+    "testctl": "./bin/testctl.ts"
+  },
+  "scripts": {
+    "testctl": "tsx bin/testctl.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@genehub/proto": "file:../packages/proto",
+    "@genehub/workbench": "file:../packages/workbench",
+    "tsx": "^4.20.5",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.17.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.7.2"
+  }
+}

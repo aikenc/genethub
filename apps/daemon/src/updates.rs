@@ -8,7 +8,7 @@
 //! stay put (`.github/workflows/release.yml`).
 //!
 //! It lives in the daemon rather than in the desktop shell for two reasons: the
-//! shell exists on Windows and macOS only (the official macOS artifact still
+//! shell exists on Windows and macOS only (the stable macOS artifact still
 //! depends on signing/notarization), while Linux reaches the same workbench in a
 //! browser; and this way the outbound call needs no exception beyond what a
 //! released shell already opens for Hub WSS (`scripts/channel.mjs` stamps
@@ -34,7 +34,7 @@ use crate::state::Shared;
 /// The open repository's own releases rather than a service: a copy of this
 /// daemon should not have to reach anybody's control plane to learn that a newer
 /// copy of itself exists. Per channel, so a beta never measures itself against
-/// an official release — the address lives with the other channel names.
+/// a stable release — the address lives with the other channel names.
 pub use crate::channel::DEFAULT_MANIFEST_URL;
 
 /// Long enough for a slow link, short enough that the window says something
@@ -152,7 +152,7 @@ pub async fn check(manifest_url: &str, current: &str) -> UpdateStatus {
 
 async fn fetch(url: &str) -> Result<Manifest> {
     validate_manifest_url(url)?;
-    let response = reqwest::Client::builder()
+    let response = crate::http::Client::builder()
         .timeout(TIMEOUT)
         .redirect(update_redirect_policy(true))
         .build()?
@@ -161,7 +161,7 @@ async fn fetch(url: &str) -> Result<Manifest> {
         // and because whoever reads the release host's logs should be able to
         // tell what asked.
         .header(
-            reqwest::header::USER_AGENT,
+            crate::http::header::USER_AGENT,
             format!(
                 "{}/{}",
                 crate::channel::CLI_BINARY,
@@ -196,14 +196,14 @@ async fn fetch(url: &str) -> Result<Manifest> {
 }
 
 fn validate_manifest_url(value: &str) -> Result<()> {
-    let parsed = reqwest::Url::parse(value).context("reading the update manifest address")?;
+    let parsed = crate::http::Url::parse(value).context("reading the update manifest address")?;
     if !allowed_update_url(&parsed, true) {
         bail!("the update manifest must use https (plain http is loopback-only)");
     }
     Ok(())
 }
 
-fn allowed_update_url(url: &reqwest::Url, allow_loopback_http: bool) -> bool {
+fn allowed_update_url(url: &crate::http::Url, allow_loopback_http: bool) -> bool {
     if url.scheme() == "https" {
         return true;
     }
@@ -225,8 +225,8 @@ fn parse_url_ip_literal(host: &str) -> Option<std::net::IpAddr> {
 /// Applies the same transport rule after every redirect. Checking only the
 /// first URL would let an HTTPS endpoint downgrade the manifest to plaintext,
 /// at which point an on-path attacker could replace both the digest and asset.
-fn update_redirect_policy(allow_loopback_http: bool) -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(move |attempt| {
+fn update_redirect_policy(allow_loopback_http: bool) -> crate::http::redirect::Policy {
+    crate::http::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() < 5 && allowed_update_url(attempt.url(), allow_loopback_http) {
             attempt.follow()
         } else {
@@ -308,7 +308,7 @@ fn platform_key() -> String {
 /// line to ship.
 fn is_newer(current: &str, latest: &str) -> bool {
     // A build the release workflow never stamped calls itself 0.0.0
-    // (`scripts/version.mjs`), and it is behind nothing: whoever compiled it has
+    // (`scripts/stamp-version.mjs`), and it is behind nothing: whoever compiled it has
     // the source in front of them, and pointing that person at an installer is
     // telling them to replace their own tree with an older one.
     if parts(current).iter().all(|piece| *piece == 0) {
@@ -476,7 +476,8 @@ impl Downloader {
 /// something other than a release, and a name with a separator in it is a path
 /// we never agreed to write to.
 fn target_path(dir: &Path, url: &str) -> Result<PathBuf> {
-    let parsed = reqwest::Url::parse(url).with_context(|| format!("reading the address {url}"))?;
+    let parsed =
+        crate::http::Url::parse(url).with_context(|| format!("reading the address {url}"))?;
     if parsed.scheme() != "https" {
         bail!("拒绝下载：{} 不是 https 地址", parsed.scheme());
     }
@@ -505,13 +506,13 @@ async fn fetch_installer(
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
 
-    let mut response = reqwest::Client::builder()
+    let mut response = crate::http::Client::builder()
         .timeout(DOWNLOAD_TIMEOUT)
         .redirect(update_redirect_policy(false))
         .build()?
         .get(url)
         .header(
-            reqwest::header::USER_AGENT,
+            crate::http::header::USER_AGENT,
             format!(
                 "{}/{}",
                 crate::channel::CLI_BINARY,
@@ -798,20 +799,20 @@ mod tests {
             "https://releases.example/latest.json",
         ] {
             assert!(allowed_update_url(
-                &reqwest::Url::parse(accepted).unwrap(),
+                &crate::http::Url::parse(accepted).unwrap(),
                 false
             ));
         }
         assert!(!allowed_update_url(
-            &reqwest::Url::parse("http://objects.example/setup.exe").unwrap(),
+            &crate::http::Url::parse("http://objects.example/setup.exe").unwrap(),
             false
         ));
         assert!(allowed_update_url(
-            &reqwest::Url::parse("http://127.0.0.1:8080/latest.json").unwrap(),
+            &crate::http::Url::parse("http://127.0.0.1:8080/latest.json").unwrap(),
             true
         ));
         assert!(!allowed_update_url(
-            &reqwest::Url::parse("http://127.0.0.1:8080/setup.exe").unwrap(),
+            &crate::http::Url::parse("http://127.0.0.1:8080/setup.exe").unwrap(),
             false
         ));
     }

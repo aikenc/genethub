@@ -13,15 +13,18 @@ to the agent working directory (first workspace root), as Markdown \
 Do not invent `/assets/preview/...` URLs or deployment origins — the workbench \
 resolves paths at display time.
 
-Link only a regular file Asset Preview can open (≤ 4 MiB). Never link a \
+Link only a regular file Asset Preview can open (≤ 64 MiB). Never link a \
 directory alone.
 
 Supported kinds:
-- HTML (`.html` / `.htm`): for H5 games and multi-file static sites, always \
-point at the entry HTML file (usually `index.html`), not the folder.
+- HTML (`.html` / `.htm`): for H5 games, WASM games, and multi-file static \
+sites, always point at the entry HTML file (usually `index.html`), not the \
+folder. Preview remaps modules and relative/site-root assets and forwards \
+runtime fetch/import into the workspace.
 - Markdown (`.md` / `.markdown` / `.mdown`)
 - Images: `.png`, `.jpg` / `.jpeg`, `.gif`, `.webp`
 - Video: `.mp4`, `.webm`
+- WASM (`.wasm`) and other binary assets, loaded by the entry HTML
 - Text / source / config: any valid UTF-8 text without NUL (highlighted when \
 recognized)"
 }
@@ -39,5 +42,7 @@ mod tests {
         assert!(text.contains(".png"));
         assert!(text.contains(".mp4"));
         assert!(text.contains(".md"));
+        assert!(text.contains(".wasm"));
+        assert!(text.contains("64 MiB"));
     }
 }

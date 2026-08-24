@@ -61,6 +61,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::os_process::{Child, ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
@@ -71,7 +72,6 @@ use genehub_proto::{
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, Mutex};
 
 use super::stdio::write_json_line;
@@ -215,7 +215,7 @@ async fn initialize(program: &std::path::Path) -> Option<Value> {
         ])
         // Somewhere that exists and says nothing about any of the user's
         // projects: this answer is cached for every workspace.
-        .current_dir(std::env::temp_dir())
+        .current_dir(crate::os_process::scratch_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -513,6 +513,7 @@ impl AgentAdapter for ClaudeAdapter {
         let commands = hello.as_ref().map(commands_in).unwrap_or_default();
         let modes = self.modes(&program).await;
         Catalog {
+            runtime_axes: None,
             // Which level it is on right now is not in anything it tells us, and
             // guessing would put a wrong answer on screen — the picker offers
             // "default" for exactly this reason.
@@ -719,19 +720,11 @@ impl AgentAdapter for ClaudeAdapter {
         cwd: &Path,
         limit: usize,
     ) -> Result<Option<Vec<ImportCandidate>>> {
-        let cwd = cwd.to_path_buf();
-        let candidates = tokio::task::spawn_blocking(move || claude_candidates(&cwd, limit))
-            .await
-            .map_err(|error| anyhow!("Claude import discovery stopped: {error}"))??;
-        Ok(Some(candidates))
+        Ok(Some(claude_candidates(cwd, limit).await?))
     }
 
     async fn import_history(&self, cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
-        let cwd = cwd.to_path_buf();
-        let source_id = source_id.to_string();
-        tokio::task::spawn_blocking(move || claude_history(&cwd, &source_id))
-            .await
-            .map_err(|error| anyhow!("Claude history import stopped: {error}"))?
+        claude_history(cwd, source_id).await
     }
 }
 
@@ -739,7 +732,7 @@ fn claude_config_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         return Ok(PathBuf::from(path));
     }
-    dirs::home_dir()
+    crate::config::home_dir()
         .map(|home| home.join(".claude"))
         .ok_or_else(|| anyhow!("cannot find the Claude config directory"))
 }
@@ -793,7 +786,13 @@ fn radix36(mut value: u32) -> String {
     String::from_utf8(output).expect("base36 is ascii")
 }
 
-fn claude_candidates(cwd: &Path, limit: usize) -> Result<Vec<ImportCandidate>> {
+/// Lines of a session file read between yields. A session is as long as the
+/// user's conversation was, so the loop below has no bound of its own; see
+/// `blocking::breathe`. Candidate discovery yields once per file instead —
+/// there each step is an open and a read, not a `serde` call.
+const IMPORT_STEP: usize = 256;
+
+async fn claude_candidates(cwd: &Path, limit: usize) -> Result<Vec<ImportCandidate>> {
     let directory = claude_project_dir(cwd)?;
     let mut files = match std::fs::read_dir(&directory) {
         Ok(entries) => entries
@@ -812,6 +811,7 @@ fn claude_candidates(cwd: &Path, limit: usize) -> Result<Vec<ImportCandidate>> {
     files.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
     let mut output = Vec::new();
     for (path, modified) in files.into_iter().take(limit.saturating_mul(3).max(limit)) {
+        crate::blocking::breathe().await;
         let Some((session_id, title, preview)) = claude_descriptor(&path)? else {
             continue;
         };
@@ -871,7 +871,7 @@ fn claude_descriptor(path: &Path) -> Result<Option<(String, String, String)>> {
     Ok(Some((session_id, title.clone(), title)))
 }
 
-fn claude_history(cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
+async fn claude_history(cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
     if source_id.is_empty()
         || !source_id
             .chars()
@@ -888,7 +888,14 @@ fn claude_history(cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
     let mut title = None;
     let mut created_at_ms = i64::MAX;
     let mut updated_at_ms = 0_i64;
-    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+    for (read, line) in std::io::BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .enumerate()
+    {
+        if read % IMPORT_STEP == IMPORT_STEP - 1 {
+            crate::blocking::breathe().await;
+        }
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -1333,7 +1340,7 @@ impl AgentSession for ClaudeSession {
 
 #[allow(clippy::too_many_arguments)]
 async fn read_loop(
-    stdout: tokio::process::ChildStdout,
+    stdout: crate::os_process::ChildStdout,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
     native_session_id: Arc<std::sync::Mutex<Option<String>>>,
@@ -2602,6 +2609,7 @@ mod tests {
                 cwd: dir.path().to_path_buf(),
                 model_id: None,
                 mode_id: None,
+                runtime_values: Default::default(),
                 scratch_dir: dir.path().to_path_buf(),
                 providers: Default::default(),
                 resume: None,

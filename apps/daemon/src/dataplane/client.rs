@@ -1,6 +1,6 @@
 //! Carrier-neutral client half of the v3 data plane.
 //!
-//! The browser has the equivalent implementation in `packages/web`.  This
+//! The browser has the equivalent implementation in `packages/workbench`.  This
 //! small Rust half keeps CLI and integration clients on the exact same binary
 //! frame, flow-control and E2EE contract as every other peer.
 
@@ -18,7 +18,7 @@ use crate::dataplane::frame::{Frame, Kind, MAX_PAYLOAD_BYTES};
 const COMMAND_QUEUE: usize = 256;
 const STREAM_QUEUE: usize = 32;
 const MAX_REQUEST_BODY_BYTES: usize = 3 * 1024 * 1024;
-const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct ExchangeResponse {

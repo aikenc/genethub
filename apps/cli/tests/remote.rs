@@ -156,11 +156,11 @@ impl Cli {
     /// The same, with something on standard input — which is how the CLI is
     /// told what to give the command it runs.
     fn piping(&self, arguments: &[&str], input: Option<&str>) -> (String, i32) {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_genet-dev"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_genet-local"));
         command
             .args(arguments)
-            .env("GENEHUB_DEV_DATA_DIR", self.home())
-            .env("GENEHUB_DEV_WORKSPACE_DIR", self.home());
+            .env("GENEHUB_LOCAL_DATA_DIR", self.home())
+            .env("GENEHUB_LOCAL_WORKSPACE_DIR", self.home());
         let Some(input) = input else {
             let output = command.output().expect("the CLI could not be run");
             return (

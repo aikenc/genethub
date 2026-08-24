@@ -5,12 +5,16 @@ edition.workspace = true
 license.workspace = true
 description = "GeneHub daemon: session kernel, agent adapters and client transports"
 
-# No [[bin]] here: the daemon is a library, run through the `genet` binary
-# (`apps/cli`) as `genet daemon run` — one file that is both the client and
-# the resident process (`genethub-cli.md` §2).
+# Native product entry remains `genet daemon run` (`apps/cli`), which execs
+# the shell with the single v2 component (`apps/guest`) — this crate is the
+# daemon half of that component.
+
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
 genehub-proto = { path = "../../packages/proto" }
+genet-native = { path = "../../packages/native" }
 
 anyhow.workspace = true
 aes-gcm.workspace = true
@@ -18,29 +22,47 @@ base64.workspace = true
 bytes = "1"
 chrono.workspace = true
 futures-util.workspace = true
-fs2.workspace = true
 hmac.workspace = true
 ignore.workspace = true
 json5.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 uuid.workspace = true
 
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
-cap-std = "4.0.2"
 dirs = "6"
 libc = "0.2"
-portable-pty = "0.9"
 sha2 = "0.10"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-tower-http = { version = "0.6", features = ["cors", "fs"] }
+tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+genet-http = { path = "../../packages/http" }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+fs2.workspace = true
+tokio.workspace = true
+cap-std = "4.0.2"
+portable-pty = "0.9"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 webrtc = "0.17.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+genet-wasi = { path = "../../packages/wasi-guest" }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+tokio = { version = "1", default-features = false, features = [
+  "rt",
+  "macros",
+  "net",
+  "io-util",
+  "time",
+  "sync",
+  "io-std",
+  "process",
+  "fs",
+] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -51,8 +73,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-landlock = "0.4"
-
 [dev-dependencies]
 tempfile = "3"
+reqwest.workspace = true
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

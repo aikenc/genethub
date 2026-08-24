@@ -76,6 +76,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::os_process::{Child, ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
@@ -86,7 +87,6 @@ use genehub_proto::{
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
@@ -299,6 +299,7 @@ impl AgentAdapter for CodexAdapter {
         };
         let hello = self.hello(&program).await.unwrap_or_default();
         Catalog {
+            runtime_axes: None,
             models: hello.models,
             modes: MODES
                 .iter()
@@ -661,7 +662,7 @@ async fn discover(program: &Path) -> Option<Hello> {
         .args(app_server_args())
         // Somewhere that exists and says nothing about any of the user's
         // projects: this answer is cached for every workspace.
-        .current_dir(std::env::temp_dir())
+        .current_dir(crate::os_process::scratch_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1321,7 +1322,7 @@ fn decode_base64(input: &str) -> Result<Vec<u8>> {
         return Err(anyhow!("base64 length is not a multiple of 4"));
     }
     let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);
-    for chunk in cleaned.chunks_exact(4) {
+    for chunk in cleaned.as_chunks::<4>().0 {
         let pad = chunk.iter().filter(|&&byte| byte == b'=').count();
         if pad > 2 {
             return Err(anyhow!("base64 padding is longer than two characters"));
@@ -1384,7 +1385,7 @@ fn allow_or_deny() -> Vec<PermissionOption> {
 /// Everything the read loop needs, bundled because a function with eight
 /// positional arguments is a function whose call site cannot be read.
 struct Reader {
-    stdout: tokio::process::ChildStdout,
+    stdout: crate::os_process::ChildStdout,
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,

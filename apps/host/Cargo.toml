@@ -1,0 +1,58 @@
+[package]
+name = "genehub-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Thin native shell: from_binary load, WASI preopen, guest run-loop"
+publish = false
+
+[[bin]]
+name = "genehub-host-local"
+path = "src/main.rs"
+
+[build-dependencies]
+sha2 = "0.10"
+
+[dependencies]
+genehub-proto = { path = "../../packages/proto" }
+genet-native = { path = "../../packages/native" }
+
+anyhow.workspace = true
+base64.workspace = true
+bytes = "1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+fs2.workspace = true
+http = "1"
+http-body-util = "0.1"
+portable-pty = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tempfile = "3"
+thiserror.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "process", "io-util", "sync", "time"] }
+wasmparser = "0.239"
+wasmtime = { version = "48", default-features = false, features = ["anyhow", "async", "cache", "component-model", "cranelift", "parallel-compilation"] }
+wasmtime-wasi = "48"
+wasmtime-wasi-http = "48"
+wasmtime-wasi-tls = "48"
+# The connection half of `genehub:host/rtc`. Native by nature: ICE opens raw
+# UDP sockets and DTLS and SCTP run their own clocks, none of which a component
+# can do (`src/rtc.rs`).
+webrtc = "0.17.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
