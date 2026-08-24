@@ -6,7 +6,7 @@
   "mainBinaryName": "genethub-desktop-local",
   "build": {
     "frontendDist": "../boot",
-    "beforeDevCommand": "npm --prefix ../../packages/workbench run dest",
+    "beforeDevCommand": "npm --prefix ../../packages/workbench run dev",
     "devUrl": "http://127.0.0.1:5173"
   },
   "app": {

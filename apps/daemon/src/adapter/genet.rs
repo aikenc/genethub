@@ -212,14 +212,15 @@ impl AgentAdapter for GenetAdapter {
             .arg(&config.session_id)
             .current_dir(&config.cwd)
             .env(crate::channel::ENV_AGENT_HOME, &home)
-            .env("GENEHUB_SESSION_ID", &config.session_id)
+            .env("GENEHUB_SESSION_ID", &config.session_id);
+        if let Some(dir) = &config.skills_dir {
+            command.env("GENEHUB_SKILLS_DIR", dir);
+        }
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        if let Ok(cli) = std::env::current_exe() {
-            command.env("GENEHUB_CLI", cli);
-        }
         super::owned_child(&mut command);
 
         // Under the daemon, `models.json` is the only source of models. The

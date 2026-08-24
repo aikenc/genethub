@@ -33,7 +33,7 @@ pub fn lock_contended(error: &std::io::Error) -> bool {
 }
 
 /// After a crash the kernel has released the lock, but `endpoint.json` can
-/// still send the next start at a dead port. Older dest builds also left a
+/// still send the next start at a dead port. Older source-tree builds also left a
 /// `wasm-cache` of compiled images; those files are an exec path and must
 /// not stay. Only reclaim when nobody holds the lock.
 pub fn reap_stale_runtime(paths: &Paths) -> std::io::Result<()> {

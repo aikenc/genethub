@@ -210,6 +210,9 @@ pub struct SessionManager {
     processes: Arc<crate::processes::Processes>,
     replay_window: usize,
     import_candidates: Mutex<HashMap<String, CachedImportCandidate>>,
+    /// Daemon data-dir Skills root. Absent in unit tests that only need
+    /// artifact-link guidance.
+    skills_dir: Option<PathBuf>,
 }
 
 impl SessionManager {
@@ -231,7 +234,13 @@ impl SessionManager {
             processes: crate::processes::Processes::new(),
             replay_window: replay_window.max(1),
             import_candidates: Mutex::new(HashMap::new()),
+            skills_dir: None,
         }
+    }
+
+    pub fn with_skills_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.skills_dir = Some(dir.into());
+        self
     }
 
     /// A handle for the parts of the daemon that answer questions about
@@ -1491,7 +1500,11 @@ impl SessionManager {
         // must not be injected into Agent system prompts — only path-linking
         // rules (HTML entry file, supported kinds, no directory links).
         let _ = artifact_preview_base_url;
-        let additional_system_prompt = Some(super::artifact_links::guidance().to_string());
+        let cwd = live.meta.lock().await.cwd.clone();
+        let additional_system_prompt = Some(crate::skills::session_guidance(
+            self.skills_dir.as_deref(),
+            &cwd,
+        ));
         {
             let mut status = live.status.lock().await;
             if matches!(*status, SessionStatus::Running | SessionStatus::Waiting) {
@@ -1750,6 +1763,7 @@ impl SessionManager {
             effort_id: meta.effort_id.clone(),
             runtime_values: meta.runtime_values.clone(),
             additional_system_prompt: additional_system_prompt.clone(),
+            skills_dir: self.skills_dir.clone(),
             scratch_dir: scratch.clone(),
             providers: providers.clone(),
             resume,
@@ -4659,6 +4673,51 @@ mod tests {
             prompt.contains("index.html") && prompt.contains("Never link a directory"),
             "Agents still need file-path linking rules, especially HTML entry files"
         );
+        assert!(
+            !prompt.contains("available_skills"),
+            "unit tests without a skills dir must not invent a Skill catalog"
+        );
+        sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn daemon_skills_are_injected_into_every_adapter_system_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = tempfile::tempdir().unwrap();
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ContextRecorder(
+                captured.clone(),
+            ))])),
+            16,
+        )
+        .with_skills_dir(skills.path());
+        sessions
+            .store
+            .save_meta(&SessionMeta {
+                agent_id: "recorder".into(),
+                ..meta()
+            })
+            .unwrap();
+
+        sessions
+            .send(
+                "s1",
+                "查一下上一轮会话".into(),
+                vec![],
+                &ProviderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let prompt = captured.lock().unwrap().clone().expect("catalog");
+        assert!(prompt.contains("index.html"));
+        assert!(prompt.contains("genehub-session-history"));
+        assert!(prompt.contains("<available_skills>"));
+        assert!(prompt.contains("<location>"));
         sessions.shutdown().await;
     }
 

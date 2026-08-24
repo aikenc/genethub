@@ -28,8 +28,10 @@ genet session narrative <session-id> --item <item-id>
 
 `coverage` distinguishes full history from a clipped/imported view and says whether omitted detail is available through GeneHub, an external source, only the native Agent, or nowhere. Callers must not infer unavailable detail.
 
-## Built-in Agent integration
+## Built-in Skill
 
-The built-in `genehub-session-history` Skill contains the analysis SOP and is exposed as `/skill:genehub-session-history`. The daemon supplies `GENEHUB_CLI` and `GENEHUB_SESSION_ID` to the Agent.
+`genehub-session-history` is a daemon-owned Skill, materialized under the daemon data directory and injected as a `{name, description, path}` catalog into every Agent session. Third-party Agents read the file; they do not need a native Skill loader. The built-in Agent also receives `GENEHUB_SKILLS_DIR` so `/skill:genehub-session-history` expands the same file.
+
+The Skill is a command navigator: discover `genet capabilities` and `genet schema session.inspect` / `session.context`, then inspect, context, narrative/rounds, and only then trunks/blob. Do not treat `GENEHUB_SESSION_ID` as the source session being analysed. When the boundary is historical, pass `--through-round`.
 
 `/compact` is routed to the built-in Agent's compact control command. It obtains the same deterministic context projection, forces the Skill into a private `Session::in_memory` child run with tools disabled, and appends the resulting cited summary as a compaction entry. The child run creates no session file and never appears in GeneHub history. If model analysis is unavailable, the deterministic projection itself is retained as the fallback.

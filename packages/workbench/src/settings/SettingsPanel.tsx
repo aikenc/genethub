@@ -7,7 +7,7 @@ import type {
 import { useEffect, useState } from "react";
 
 import { BUILD } from "../build";
-import { CHANNEL, type ReleaseChannel } from "../channel";
+import { CHANNEL, type BuildIdentity } from "../channel";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
 import type { RtcState } from "../protocol/client";
@@ -517,7 +517,7 @@ const UNRELEASED = "0.0.0";
 // are two lines that never compare against each other, and the prefix is what
 // keeps a screenshot of this page from being read as the other line
 // (`scripts/channel.mjs` stamps CHANNEL in, like the version).
-const PREFIX: Record<ReleaseChannel, string> = {
+const PREFIX: Record<BuildIdentity, string> = {
   local: "",
   dev: "开发版 ",
   beta: "Beta版 ",

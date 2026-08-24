@@ -15,10 +15,6 @@ struct BuiltinFile {
 
 const BUILTIN_FILES: &[BuiltinFile] = &[
     BuiltinFile {
-        relative_path: "genehub-session-history/SKILL.md",
-        contents: include_str!("../builtin-skills/genehub-session-history/SKILL.md"),
-    },
-    BuiltinFile {
         relative_path: "genehub-speech-runtime/SKILL.md",
         contents: include_str!("../builtin-skills/genehub-speech-runtime/SKILL.md"),
     },
@@ -59,6 +55,12 @@ pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
         }
     };
 
+    // Daemon-owned Skills win. The harness materializes them and points this
+    // process at that directory so `/skill:` expansion sees the same catalog
+    // every other Agent received as system context.
+    if let Some(dir) = daemon_skills_dir() {
+        push(load_dir(&dir, false));
+    }
     push(load_dir(&agent_dir.join("skills"), true));
     if let Some(home) = home_dir() {
         push(load_dir(&home.join(".agents").join("skills"), false));
@@ -66,8 +68,8 @@ pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
     push(load_dir(&cwd.join(".genehub").join("skills"), true));
     push(load_dir(&cwd.join(".agents").join("skills"), false));
     if let Some(dir) = builtin_dir {
-        // Built-ins are guaranteed fallbacks. A user or project skill with the
-        // same name intentionally wins, which keeps the extension point real.
+        // Agent-local built-ins (speech runtime) stay last so a user or
+        // project skill with the same name can still replace them.
         push(load_dir(&dir, false));
     }
 
@@ -302,6 +304,12 @@ fn escape_xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+fn daemon_skills_dir() -> Option<PathBuf> {
+    std::env::var_os("GENEHUB_SKILLS_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -419,23 +427,6 @@ mod tests {
     }
 
     #[test]
-    fn built_in_session_history_skill_is_materialized_and_discovered() {
-        let cwd = temp_dir("builtin-cwd");
-        let agent_dir = temp_dir("builtin-agent");
-        let skills = load(&cwd, &agent_dir);
-        let skill = skills
-            .iter()
-            .find(|skill| skill.name == "genehub-session-history")
-            .expect("built-in skill");
-        assert!(skill
-            .file_path
-            .starts_with(agent_dir.join("builtin-skills")));
-        assert!(std::fs::read_to_string(&skill.file_path)
-            .unwrap()
-            .contains("GENEHUB_SESSION_ID"));
-    }
-
-    #[test]
     fn built_in_speech_runtime_skill_and_references_are_materialized() {
         let cwd = temp_dir("speech-builtin-cwd");
         let agent_dir = temp_dir("speech-builtin-agent");
@@ -456,18 +447,18 @@ mod tests {
     }
 
     #[test]
-    fn project_skill_can_override_the_built_in_fallback() {
+    fn project_skill_can_override_an_agent_local_builtin() {
         let cwd = temp_dir("override-cwd");
         let agent_dir = temp_dir("override-agent");
         let override_path = write_skill(
             &cwd.join(".agents").join("skills"),
-            "genehub-session-history",
-            "---\nname: genehub-session-history\ndescription: Project override\n---\n",
+            "genehub-speech-runtime",
+            "---\nname: genehub-speech-runtime\ndescription: Project override\n---\n",
         );
         let skills = load(&cwd, &agent_dir);
         let skill = skills
             .iter()
-            .find(|skill| skill.name == "genehub-session-history")
+            .find(|skill| skill.name == "genehub-speech-runtime")
             .unwrap();
         assert_eq!(skill.file_path, override_path);
         assert_eq!(skill.description, "Project override");

@@ -1,4 +1,4 @@
-//! Which release channel this build belongs to.
+//! Build identity: `local` for a source tree, otherwise the release channel.
 //!
 //! Written wholesale by `scripts/channel.mjs` — edit that script, not this
 //! file. The shell and the guest are separate crates that must agree on the

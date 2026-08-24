@@ -35,6 +35,7 @@ pub mod remote;
 pub mod router;
 pub mod run;
 pub mod session;
+pub mod skills;
 pub mod speech;
 pub mod state;
 pub mod transport;
