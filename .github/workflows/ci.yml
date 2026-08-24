@@ -335,6 +335,8 @@ jobs:
         run: |
           test -x "$GENET_E2E_DAEMON"
           test -x "$GENET_E2E_AGENT"
+          test -x "$GITHUB_WORKSPACE/target/debug/genehub-host-local"
+          test -f "$GITHUB_WORKSPACE/target/debug/genehub_guest.wasm"
           test -f "$GITHUB_WORKSPACE/apps/relay/dist/main.js"
       - run: npm test
       - run: npm run build

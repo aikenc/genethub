@@ -17,7 +17,7 @@ import {
   emptyTimeline,
 } from "../session/timeline";
 import { startMockModel, type MockModel } from "./mock-model";
-import { builtBinary, daemonEnvironment, missingArtifacts } from "./artifacts";
+import { builtBinary, missingArtifacts, runtimeArtifacts, startListeningDaemon } from "./artifacts";
 
 const REPO = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -51,7 +51,7 @@ const socketFactory = (url: string) =>
  * fail to add up to a usable product.
  */
 describe.skipIf(
-  missingArtifacts({ daemon: DAEMON, agent: AGENT, relay: RELAY }),
+  missingArtifacts({ ...runtimeArtifacts(DAEMON), agent: AGENT, relay: RELAY }),
 )("reaching a machine with nothing but open-source pieces", () => {
   let relay: ChildProcess;
   let relayOrigin: string;
@@ -71,7 +71,12 @@ describe.skipIf(
     homeDir = mkdtempSync(path.join(tmpdir(), "genehub-selfhost-home-"));
     model = await startMockModel(REPLY);
     writeConfig(dataDir, model.baseUrl);
-    const local = await startDaemon(dataDir, path.join(homeDir, "GeneHub"));
+    const local = await startListeningDaemon(DAEMON, {
+      dataDir,
+      workspaceDir: path.join(homeDir, "GeneHub"),
+      log: "warn",
+      agent: AGENT,
+    });
     daemon = local.process;
 
     owner = new Client({
@@ -395,69 +400,6 @@ async function startRelay(
   });
 
   return { process: child, origin };
-}
-
-function startDaemon(
-  dataDir: string,
-  defaultWorkspace: string,
-): Promise<{
-  process: ChildProcess;
-  url: string;
-  localServerProof: {
-    proof: string;
-    challenge: string;
-    pid: number;
-    machineId: string;
-    fingerprint: string;
-    expiresAt: number;
-  };
-}> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(DAEMON, ["daemon", "run"], {
-      env: {
-        ...process.env,
-        // Installed side by side in production; in a test the agent is wherever
-        // cargo put it.
-        ...daemonEnvironment(DAEMON, {
-          dataDir,
-          workspaceDir: defaultWorkspace,
-          log: "warn",
-          agent: AGENT,
-        }),
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error("the daemon never reported a port"));
-    }, 120_000);
-    child.stderr?.on("data", (chunk) =>
-      process.stderr.write(`[daemon] ${chunk}`),
-    );
-    child.stdout?.on("data", (chunk: Buffer) => {
-      for (const line of chunk.toString().split("\n").filter(Boolean)) {
-        const frame = JSON.parse(line) as {
-          event: string;
-          url: string;
-          serverProof: string;
-          admission: {
-            challenge: string;
-            pid: number;
-            machineId: string;
-            fingerprint: string;
-            expiresAt: number;
-          };
-        };
-        if (frame.event !== "listening") continue;
-        clearTimeout(timer);
-        resolve({
-          process: child,
-          url: frame.url,
-          localServerProof: { proof: frame.serverProof, ...frame.admission },
-        });
-      }
-    });
-  });
 }
 
 async function waitFor(

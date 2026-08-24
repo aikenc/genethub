@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import {
   existsSync,
@@ -23,7 +23,7 @@ import {
   emptyTimeline,
   fromSnapshot,
 } from "../session/timeline";
-import { builtBinary, daemonEnvironment, missingArtifacts } from "./artifacts";
+import { builtBinary, missingArtifacts, runtimeArtifacts, startListeningDaemon } from "./artifacts";
 
 const REPO = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -46,7 +46,7 @@ const DAEMON = builtBinary(
  * The model is the only thing faked, because that is the one part that costs
  * money and refuses to be deterministic.
  */
-describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
+describe.skipIf(missingArtifacts(runtimeArtifacts(DAEMON)))(
   "a session, end to end",
   () => {
     let model: MockModel;
@@ -71,7 +71,11 @@ describe.skipIf(missingArtifacts({ daemon: DAEMON }))(
         "# recursive\n",
       );
 
-      const started = await startDaemon(dataDir, path.join(homeDir, "GeneHub"));
+      const started = await startListeningDaemon(DAEMON, {
+        dataDir,
+        workspaceDir: path.join(homeDir, "GeneHub"),
+        log: "warn",
+      });
       daemon = started.process;
       client = new Client({
         url: started.url,
@@ -609,67 +613,6 @@ async function startMockModel(): Promise<MockModel> {
         server.close(() => resolve());
       }),
   };
-}
-
-function startDaemon(
-  dataDir: string,
-  defaultWorkspace: string,
-): Promise<{
-  process: ChildProcess;
-  url: string;
-  localServerProof: {
-    proof: string;
-    challenge: string;
-    pid: number;
-    machineId: string;
-    fingerprint: string;
-    expiresAt: number;
-  };
-}> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(DAEMON, ["daemon", "run"], {
-      env: {
-        ...process.env,
-        // Otherwise a test run leaves a folder in whoever's home ran it.
-        ...daemonEnvironment(DAEMON, {
-          dataDir,
-          workspaceDir: defaultWorkspace,
-          log: "warn",
-        }),
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error("the daemon never reported a port"));
-    }, 60_000);
-    child.stderr?.on("data", (chunk) =>
-      process.stderr.write(`[daemon] ${chunk}`),
-    );
-    child.stdout?.on("data", (chunk: Buffer) => {
-      for (const line of chunk.toString().split("\n").filter(Boolean)) {
-        const frame = JSON.parse(line) as {
-          event: string;
-          url: string;
-          serverProof: string;
-          admission: {
-            challenge: string;
-            pid: number;
-            machineId: string;
-            fingerprint: string;
-            expiresAt: number;
-          };
-        };
-        if (frame.event !== "listening") continue;
-        clearTimeout(timer);
-        resolve({
-          process: child,
-          url: frame.url,
-          localServerProof: { proof: frame.serverProof, ...frame.admission },
-        });
-      }
-    });
-  });
 }
 
 /** Whether an external agent is installed, so its case can skip rather than fail. */
