@@ -25,6 +25,9 @@ use futures_util::StreamExt;
 use genehub_proto::{ServerFrame, UpdateDownload, UpdateStatus};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(target_family = "wasm")]
+use std::io::Write as _;
+#[cfg(not(target_family = "wasm"))]
 use tokio::io::AsyncWriteExt;
 
 use crate::state::Shared;
@@ -105,6 +108,81 @@ impl Drop for PartialDownloadCleanup {
         if let Some(path) = self.0.take() {
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+type InstallerFile = tokio::fs::File;
+#[cfg(target_family = "wasm")]
+type InstallerFile = std::fs::File;
+
+async fn installer_create_dir_all(path: &Path) -> std::io::Result<()> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        tokio::fs::create_dir_all(path).await
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+async fn installer_file_create(path: &Path) -> std::io::Result<InstallerFile> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        tokio::fs::File::create(path).await
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        std::fs::File::create(path)
+    }
+}
+
+async fn installer_write(file: &mut InstallerFile, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        file.write_all(bytes).await
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        file.write_all(bytes)?;
+        crate::blocking::breathe().await;
+        Ok(())
+    }
+}
+
+async fn installer_flush(file: &mut InstallerFile) -> std::io::Result<()> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        file.flush().await?;
+        file.sync_all().await
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        file.flush()?;
+        file.sync_all()
+    }
+}
+
+async fn installer_remove(path: &Path) -> std::io::Result<()> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        tokio::fs::remove_file(path).await
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        std::fs::remove_file(path)
+    }
+}
+
+async fn installer_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        tokio::fs::rename(from, to).await
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        std::fs::rename(from, to)
     }
 }
 
@@ -502,7 +580,7 @@ async fn fetch_installer(
     expected_size: u64,
 ) -> Result<()> {
     let dir = target.parent().expect("the target has a directory");
-    tokio::fs::create_dir_all(dir)
+    installer_create_dir_all(dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
 
@@ -537,7 +615,7 @@ async fn fetch_installer(
     // never looks like a finished installer to the next click.
     let partial = with_suffix(target, ".part");
     let mut partial_cleanup = PartialDownloadCleanup::new(partial.clone());
-    let mut file = tokio::fs::File::create(&partial)
+    let mut file = installer_file_create(&partial)
         .await
         .with_context(|| format!("写入 {}", partial.display()))?;
     let mut received = 0u64;
@@ -547,11 +625,13 @@ async fn fetch_installer(
     while let Some(chunk) = response.chunk().await.context("下载安装包")? {
         received += chunk.len() as u64;
         if received > MOST_BYTES || received > expected_size {
-            let _ = tokio::fs::remove_file(&partial).await;
+            let _ = installer_remove(&partial).await;
             bail!("下载失败：安装包超过更新清单声明的长度");
         }
         digest.update(&chunk);
-        file.write_all(&chunk).await.context("写入安装包")?;
+        installer_write(&mut file, &chunk)
+            .await
+            .context("写入安装包")?;
         if announced.elapsed() >= PROGRESS_EVERY {
             announced = Instant::now();
             let progress = UpdateDownload::Fetching {
@@ -565,21 +645,20 @@ async fn fetch_installer(
     }
 
     if received == 0 {
-        let _ = tokio::fs::remove_file(&partial).await;
+        let _ = installer_remove(&partial).await;
         bail!("下载失败：文件是空的");
     }
     let actual_sha256 = format!("{:x}", digest.finalize());
     if let Err(error) = verify_integrity(received, &actual_sha256, expected_size, expected_sha256) {
         drop(file);
-        let _ = tokio::fs::remove_file(&partial).await;
+        let _ = installer_remove(&partial).await;
         return Err(error);
     }
     // Flushed before the rename, or the name appears over a file the OS has not
     // finished writing — and what runs then is half an installer.
-    file.flush().await.context("写入安装包")?;
-    file.sync_all().await.context("写入安装包")?;
+    installer_flush(&mut file).await.context("写入安装包")?;
     drop(file);
-    tokio::fs::rename(&partial, target)
+    installer_rename(&partial, target)
         .await
         .with_context(|| format!("重命名为 {}", target.display()))?;
     partial_cleanup.disarm();

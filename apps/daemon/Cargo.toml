@@ -55,13 +55,9 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["h
 tokio = { version = "1", default-features = false, features = [
   "rt",
   "macros",
-  "net",
   "io-util",
   "time",
   "sync",
-  "io-std",
-  "process",
-  "fs",
 ] }
 
 [target.'cfg(windows)'.dependencies]
