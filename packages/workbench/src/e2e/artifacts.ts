@@ -35,7 +35,7 @@ export function daemonEnvironment(
   const infix = channel ? `_${channel}` : "";
   // Same directory testctl uses. The host only honours it on the local
   // channel; without it every workbench e2e file pays a cold Component
-  // compile, and the 60s journey timer loses to iterate wasm on a cold runner.
+  // compile inside whatever host sits beside the CLI (debug host ~6s here).
   const cache =
     process.env.GENEHUB_TEST_COMPONENT_CACHE_DIR?.trim() ||
     path.join(path.dirname(daemon), "..", "test-component-cache");

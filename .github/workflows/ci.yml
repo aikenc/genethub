@@ -357,7 +357,6 @@ jobs:
         with:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo build -p genet-cli
       # Daemon persistence is shared by the CLI and desktop shell. In
       # particular, the owner-only Windows DACL assertions must execute on a
       # real Windows filesystem; a Linux cross-check can only compile them.
@@ -366,21 +365,32 @@ jobs:
       # Its Windows implementation must be exercised on NTFS, not merely
       # cross-compiled from Linux.
       - run: cargo test -p genehub-host --bin genehub-host-local fs_perms::tests
-      # Supervision launches the ordinary sibling executable; `cargo test`
-      # only creates a hashed test harness and is not a substitute for it.
-      - run: cargo build -p genehub-host
-      - name: Build the paired guest for supervision journeys
+      # Supervision launches the ordinary sibling pair. A debug host is ~500MB
+      # and runs Cranelift unoptimized: on this Linux box that is 6s to
+      # listening for the 13MB iterate guest; a Windows runner plus Defender
+      # scanning that image is what blew the old 60s budget (CI #205). The
+      # iterate profile is the product-shaped compile (opt-1, stripped, ~36MB,
+      # <1s here). Stage it next to the guest so the tests keep looking in
+      # target/debug.
+      - name: Stage iterate CLI, host, and guest for supervision
         shell: bash
         run: |
+          cargo build --profile iterate -p genet-cli -p genehub-host
           cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
           mkdir -p target/debug
+          exe=
+          if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
+          cp "target/iterate/genet-local${exe}" "target/debug/genet-local${exe}"
+          cp "target/iterate/genehub-host-local${exe}" "target/debug/genehub-host-local${exe}"
           cp target/wasm32-wasip2/iterate/genehub_guest.wasm target/debug/genehub_guest.wasm
       - name: Refuse to skip real daemon supervision
         shell: bash
         run: |
-          binary=target/debug/genet-local
-          if [ "$RUNNER_OS" = Windows ]; then binary="${binary}.exe"; fi
-          test -x "$binary"
+          exe=
+          if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
+          test -x "target/debug/genet-local${exe}"
+          test -x "target/debug/genehub-host-local${exe}"
+          test -f target/debug/genehub_guest.wasm
       - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check
       # The installer integrity gate is pure Rust but lives in the Tauri crate;
       # compile and execute it on the two desktop platforms we actually ship or

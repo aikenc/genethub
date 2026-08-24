@@ -116,8 +116,8 @@ fn contain_the_default_workspace() {
     let home = HOME.get_or_init(|| tempfile::tempdir().expect("a temporary home"));
     // The tree stamps `local`; a released desktop binary would use its own infix.
     std::env::set_var("GENEHUB_LOCAL_WORKSPACE_DIR", home.path().join("GeneHub"));
-    // Same cache testctl and workbench e2e use. Without it every supervision
-    // case pays a cold Windows compile against the listen timeout.
+    // Same cache testctl and workbench e2e use. Second and later starts then
+    // reuse the compiled image instead of running Cranelift again.
     let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/test-component-cache");
     let _ = std::fs::create_dir_all(&cache);
     std::env::set_var("GENEHUB_TEST_COMPONENT_CACHE_DIR", cache);
@@ -266,7 +266,7 @@ fn the_watchdog_brings_the_daemon_back_and_says_where_it_went() {
     kill_whatever_is_listening_on(first.port);
 
     // Cold start compiles the guest in-process; the spawn path already waits
-    // sixty seconds for that. Thirty was racing the same compile on restart.
+    // for that. Thirty was racing a debug-host compile on restart.
     let restarted = wait_for(Duration::from_secs(90), || {
         restarts.lock().unwrap().first().cloned()
     })

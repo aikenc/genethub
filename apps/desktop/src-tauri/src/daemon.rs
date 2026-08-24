@@ -26,9 +26,11 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 const MAX_LOOPBACK_HTTP_RESPONSE_BYTES: usize = 64 * 1024;
-/// Cold `Component::from_binary` of the iterate guest on a hosted Windows
-/// runner regularly exceeds one minute. 20s then 60s both lost that race
-/// while the process was still healthy (CI #205).
+/// Fail-closed ceiling, not the expected start cost. A debug host (~500MB)
+/// compiling the 13MB iterate guest is ~6s to listening on Linux; the same
+/// image on a Windows runner with Defender scanning it blew 60s (CI #205).
+/// Desktop CI now stages the iterate host (~36MB, <1s here). Keep slack for
+/// a cold machine, not because compile is supposed to take a minute.
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What the daemon prints once it is listening. The port is chosen by the OS,
@@ -287,8 +289,8 @@ impl Daemon {
         });
 
         // The resident shell compiles the component in memory on every cold
-        // start. Constrained Windows runners can spend more than a minute
-        // here even though the process is healthy.
+        // start. That is cheap with an iterate/release host; a debug host
+        // makes Cranelift the dominant cost.
         match rx.recv_timeout(LISTEN_TIMEOUT) {
             Ok(()) => {
                 let (endpoint, published_pid) = self
