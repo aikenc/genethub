@@ -171,8 +171,9 @@ git clone https://github.com/aikenc/genethub.git
 cd genethub
 
 # 原生 launcher/host，以及单平台 WASM guest
+# guest 用 iterate：无 fat LTO，给本地/Dev/Beta 热改。Stable 安装包才走 --release。
 cargo build -p genet-cli -p genehub-host
-cargo build --release -p genehub-guest --target wasm32-wasip2
+cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
 
 # Web workbench 与 Relay
 npm ci --prefix packages/workbench
@@ -201,7 +202,7 @@ stable 线的数据或连到 stable 服务。
 ```bash
 # 旅程测试会拉起真实 launcher/host/guest，所以先构建三件套
 cargo build -p genet-cli -p genehub-host
-cargo build --release -p genehub-guest --target wasm32-wasip2
+cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
 cargo test --workspace --no-fail-fast
 
 npm --prefix apps/relay run typecheck

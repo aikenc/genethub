@@ -20,5 +20,5 @@ genet-agent = { path = "../agent" }
 genet-daemon = { path = "../daemon" }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
+genet-wasi = { path = "../../packages/wasi-guest" }
 tokio = { version = "1", default-features = false, features = ["rt"] }
-wit-bindgen = "0.57"

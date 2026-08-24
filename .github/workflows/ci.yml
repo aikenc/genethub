@@ -177,8 +177,9 @@ jobs:
       - run: cargo build --workspace --bins
       - name: Build the paired guest component
         run: |
-          cargo build --release -p genehub-guest --target wasm32-wasip2
-          cp target/wasm32-wasip2/release/genehub_guest.wasm target/debug/genehub_guest.wasm
+          cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
+          mkdir -p target/debug
+          cp target/wasm32-wasip2/iterate/genehub_guest.wasm target/debug/genehub_guest.wasm
       # Journeys default to the mock model, so this stays offline and free.
       #
       # The failure list is repeated as annotations because reading a job's log
@@ -302,8 +303,9 @@ jobs:
         if: needs.rust.result != 'success'
         run: |
           cargo build -p genet-cli -p genet-agent -p genehub-host
-          cargo build --release -p genehub-guest --target wasm32-wasip2
-          cp target/wasm32-wasip2/release/genehub_guest.wasm target/debug/genehub_guest.wasm
+          cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
+          mkdir -p target/debug
+          cp target/wasm32-wasip2/iterate/genehub_guest.wasm target/debug/genehub_guest.wasm
         working-directory: .
       - run: chmod +x target/debug/genet-local target/debug/genet-agent-local target/debug/genehub-host-local
         working-directory: .
@@ -368,8 +370,9 @@ jobs:
       - name: Build the paired guest for supervision journeys
         shell: bash
         run: |
-          cargo build --release -p genehub-guest --target wasm32-wasip2
-          cp target/wasm32-wasip2/release/genehub_guest.wasm target/debug/genehub_guest.wasm
+          cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
+          mkdir -p target/debug
+          cp target/wasm32-wasip2/iterate/genehub_guest.wasm target/debug/genehub_guest.wasm
       - name: Refuse to skip real daemon supervision
         shell: bash
         run: |

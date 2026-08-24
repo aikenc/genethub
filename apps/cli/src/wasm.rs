@@ -73,18 +73,16 @@ pub fn locate() -> Result<Guest, String> {
 
     let mut components = vec![dir.join("genehub_guest.wasm")];
     if let Some(target) = target {
-        components.push(
-            target
-                .join("wasm32-wasip2")
-                .join("release")
-                .join("genehub_guest.wasm"),
-        );
-        components.push(
-            target
-                .join("wasm32-wasip2")
-                .join("debug")
-                .join("genehub_guest.wasm"),
-        );
+        // Prefer iterate over a leftover fat-LTO release artifact so local
+        // and Dev/Beta Live rebuilds do not silently pick the slow profile.
+        for profile in ["iterate", "debug", "release"] {
+            components.push(
+                target
+                    .join("wasm32-wasip2")
+                    .join(profile)
+                    .join("genehub_guest.wasm"),
+            );
+        }
     }
     let component = std::env::var("GENEHUB_LOCAL_COMPONENT")
         .ok()
@@ -96,7 +94,7 @@ pub fn locate() -> Result<Guest, String> {
         .filter(|path| is_file(path))
         .or_else(|| first_file(components))
         .ok_or_else(|| {
-            "genehub_guest.wasm is missing; build it with `cargo build -p genehub-guest --release --target wasm32-wasip2`"
+            "genehub_guest.wasm is missing; build it with `cargo build -p genehub-guest --profile iterate --target wasm32-wasip2`"
                 .to_string()
         })?;
 

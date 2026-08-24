@@ -1219,9 +1219,9 @@ version = "0.0.0"
 dependencies = [
  "genet-agent",
  "genet-daemon",
+ "genet-wasi",
  "sha2",
  "tokio",
- "wit-bindgen",
 ]
 
 [[package]]

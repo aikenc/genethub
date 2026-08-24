@@ -235,10 +235,15 @@ jobs:
           node scripts/stamp-version.mjs --from-tag
           node scripts/channel.mjs --from-tag
           . scripts/channel.env
-          cargo build --release -p genehub-guest --target wasm32-wasip2
+          if [[ "$CHANNEL" == stable ]]; then
+            cargo build --release -p genehub-guest --target wasm32-wasip2
+            raw=target/wasm32-wasip2/release/genehub_guest.wasm
+          else
+            cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
+            raw=target/wasm32-wasip2/iterate/genehub_guest.wasm
+          fi
           cargo build --release -p genehub-host
           mkdir -p dist
-          raw=target/wasm32-wasip2/release/genehub_guest.wasm
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             case "$CHANNEL" in
               beta) signing_key="$BETA_SIGNING_KEY"; key_id="$BETA_KEY_ID"; manifest=latest-beta.json ;;

@@ -69,11 +69,13 @@ if (preparedGuest && !existsSync(preparedGuest)) {
 
 console.log(`==> building the CLI and wasm shell (${CHANNEL})`);
 run("cargo", ["build", "--release", "--manifest-path", join(repo, "Cargo.toml"), "-p", "genet-cli", "-p", "genehub-host"]);
+const guestProfile = CHANNEL === "stable" ? "release" : "iterate";
 if (!preparedGuest) {
-  console.log("==> building the development guest component");
+  console.log(`==> building the ${guestProfile} guest component`);
   run("cargo", [
     "build",
-    "--release",
+    "--profile",
+    guestProfile,
     "--manifest-path",
     join(repo, "Cargo.toml"),
     "-p",
@@ -98,7 +100,7 @@ for (const binary of [CLI_BINARY, HOST_BINARY]) {
   cpSync(join(repo, "target/release", binary + exe), join(binDir, binary + exe));
 }
 cpSync(
-  preparedGuest ?? join(repo, "target/wasm32-wasip2/release/genehub_guest.wasm"),
+  preparedGuest ?? join(repo, "target/wasm32-wasip2", guestProfile, "genehub_guest.wasm"),
   join(binDir, "genehub_guest.wasm"),
 );
 

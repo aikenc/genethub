@@ -92,8 +92,9 @@ export function tryLocateDaemonComponent(openRoot: string): string | undefined {
     return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
   }
   return firstExistingFile([
-    path.resolve(openRoot, "target", "wasm32-wasip2", "release", "genehub_guest.wasm"),
+    path.resolve(openRoot, "target", "wasm32-wasip2", "iterate", "genehub_guest.wasm"),
     path.resolve(openRoot, "target", "wasm32-wasip2", "debug", "genehub_guest.wasm"),
+    path.resolve(openRoot, "target", "wasm32-wasip2", "release", "genehub_guest.wasm"),
   ]);
 }
 

@@ -48,7 +48,7 @@ async function main() {
     : "https://candidate.invalid";
   const raw = argumentsMap.get("raw")
     ? resolve(argumentsMap.get("raw"))
-    : buildRaw(argumentsMap.get("cargo") ?? "cargo");
+    : buildRaw(argumentsMap.get("cargo") ?? "cargo", channel);
   const signer = argumentsMap.get("signer")
     ? resolve(argumentsMap.get("signer"))
     : buildSigner(argumentsMap.get("cargo") ?? "cargo");
@@ -94,9 +94,14 @@ async function main() {
   }
 }
 
-function buildRaw(cargo) {
-  exec(cargo, ["build", "--release", "-p", "genehub-guest", "--target", "wasm32-wasip2"]);
-  return join(open, "target/wasm32-wasip2/release/genehub_guest.wasm");
+function guestProfile(channel) {
+  return channel === "stable" ? "release" : "iterate";
+}
+
+function buildRaw(cargo, channel) {
+  const profile = guestProfile(channel);
+  exec(cargo, ["build", "--profile", profile, "-p", "genehub-guest", "--target", "wasm32-wasip2"]);
+  return join(open, "target/wasm32-wasip2", profile, "genehub_guest.wasm");
 }
 
 function buildSigner(cargo) {
@@ -197,5 +202,6 @@ function usage() {
 The default uses an isolated candidate store. --commit additionally requires a
 clean paired checkout and GENEHUB_<CHANNEL>_COMPONENT_SIGNING_KEY / _KEY_ID.
 ABI hash changes additionally require --app-release VERSION --app-abi-hash HASH.
+Guest compile uses Cargo profile iterate unless --channel stable (then release).
 `);
 }

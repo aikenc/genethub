@@ -12,10 +12,7 @@
 #[link_section = "genehub-abi"]
 static ABI_DIGEST: [u8; 32] = *include_bytes!(concat!(env!("OUT_DIR"), "/genehub-abi.bin"));
 
-wit_bindgen::generate!({
-    path: "../../wit",
-    world: "daemon",
-});
+use genet_wasi::wit::Guest;
 
 struct GenehubGuest;
 
@@ -40,7 +37,7 @@ impl Guest for GenehubGuest {
     }
 }
 
-export!(GenehubGuest);
+genet_wasi::wit::export!(GenehubGuest);
 
 /// Both entries are `current_thread`: the instance runs on one fiber, and the
 /// guest code was written against exactly that.
