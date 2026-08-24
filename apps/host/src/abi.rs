@@ -1,10 +1,10 @@
 //! Pair the shell with the guest *before* Wasmtime instantiates anything.
 //!
-//! The digest is `sha256` of `wit/genehub-host.wit` as checked in. Host and
-//! guest bake the same 32 bytes at compile time; the guest carries them in a
-//! `genehub-abi` custom section. A WIT edit that only one side rebuilt is a
-//! start failure with a rebuild instruction, not an opaque linker trap after
-//! a long compile.
+//! The digest is `sha256` of `wit/genehub-host.wit` with CR bytes stripped, so
+//! a Linux-built guest pairs with a Windows-built host. Host and guest bake
+//! the same 32 bytes at compile time; the guest carries them in a `genehub-abi`
+//! custom section. A WIT edit that only one side rebuilt is a start failure
+//! with a rebuild instruction, not an opaque linker trap after a long compile.
 
 use anyhow::{Context, Result};
 
