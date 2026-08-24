@@ -21,6 +21,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, Mutex};
 
 use super::stdio::write_json_line;
+use super::usage;
 use super::{
     find_executable, AgentAdapter, AgentSession, Chatter, PromptInput, ProviderMap, SessionConfig,
 };
@@ -636,8 +637,10 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                 return;
             }
             if let Some(usage) = message.get("usage") {
-                accumulate_usage(&mut state.usage, usage);
+                usage::add_usage(&mut state.usage, usage);
             }
+            state.usage.llm_rounds += 1;
+            usage::emit_progress(events, &turn_id, &state.usage);
             match message.get("stopReason").and_then(Value::as_str) {
                 Some("error") => {
                     let message = message
@@ -715,21 +718,6 @@ fn classify_failure(message: &str) -> TurnError {
     TurnError {
         code,
         message: message.to_string(),
-    }
-}
-
-fn accumulate_usage(total: &mut Usage, usage: &Value) {
-    let field = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-    total.input_tokens += field("input");
-    total.output_tokens += field("output");
-    total.cache_read_tokens += field("cacheRead");
-    total.cache_write_tokens += field("cacheWrite");
-    if let Some(cost) = usage
-        .get("cost")
-        .and_then(|c| c.get("total"))
-        .and_then(Value::as_f64)
-    {
-        total.cost_usd = Some(total.cost_usd.unwrap_or(0.0) + cost);
     }
 }
 
@@ -1083,6 +1071,9 @@ mod tests {
     fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
+            if matches!(event, SessionEvent::TurnProgress { .. }) {
+                continue;
+            }
             out.push(event);
         }
         out
@@ -1314,6 +1305,7 @@ mod tests {
             SessionEvent::TurnCompleted { usage, .. } => {
                 assert_eq!(usage.input_tokens, 20);
                 assert_eq!(usage.output_tokens, 10);
+                assert_eq!(usage.llm_rounds, 2);
                 assert_eq!(usage.cost_usd, Some(0.5));
             }
             other => panic!("unexpected {other:?}"),

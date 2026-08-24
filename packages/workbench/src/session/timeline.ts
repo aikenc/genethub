@@ -176,6 +176,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         activeTurnStartedAtMs: event.startedAtMs || Date.now(),
         status: "running",
         lastError: null,
+        usage: null,
       };
 
     case "item":
@@ -198,6 +199,9 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
 
     case "itemDelta":
       return { ...state, items: applyDelta(state.items, event) };
+
+    case "turnProgress":
+      return { ...state, usage: event.usage };
 
     case "turnCompleted":
       return {

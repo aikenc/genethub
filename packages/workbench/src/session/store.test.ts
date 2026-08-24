@@ -451,7 +451,16 @@ describe("live session status in the sidebar", () => {
       event: {
         type: "turnCompleted",
         turnId: "t1",
-        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        usage: {
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          llmRounds: 1,
+          toolOutputTokens: 0,
+          compactionCount: 0,
+          outputRateEstimated: false,
+        },
       },
     });
     expect(useWorkbench.getState().sessions[0]?.status).toBe("idle");
