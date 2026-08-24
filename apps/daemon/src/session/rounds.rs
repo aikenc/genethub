@@ -113,6 +113,10 @@ pub enum TrunkItem<'a> {
     Monologue,
     Reasoning,
     ToolCall(&'a str),
+    /// A context-compaction marker. It never joins a batch: it closes the batch
+    /// in flight so the compression line renders between batches, not inside
+    /// one where it would read as part of the work it interrupted.
+    Compaction,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -201,11 +205,18 @@ pub struct TrunkBuilder {
 
 impl TrunkBuilder {
     pub fn push(&mut self, item_id: &str, item: TrunkItem<'_>) -> Option<ClosedTrunk> {
+        // A compaction cuts the batch short and stands alone between batches;
+        // it carries no blob of its own.
+        if matches!(item, TrunkItem::Compaction) {
+            self.close_batch();
+            return None;
+        }
         let mut closed_trunk = None;
         let starts_semantic_batch = match item {
             TrunkItem::Monologue => !self.current_batch.item_ids.is_empty(),
             TrunkItem::Reasoning => self.current_batch.tool_count >= BATCH_REASONING_TOOL_THRESHOLD,
             TrunkItem::ToolCall(_) => false,
+            TrunkItem::Compaction => unreachable!("handled above"),
         };
         if starts_semantic_batch {
             self.close_batch();
@@ -245,6 +256,7 @@ impl TrunkBuilder {
                     self.current_batch.first_reasoning_item_id = Some(item_id.to_string());
                 }
             }
+            TrunkItem::Compaction => unreachable!("handled above"),
         }
 
         if self.current_batch.tool_count >= BATCH_MAX_TOOL_CALLS
@@ -325,6 +337,7 @@ pub fn summarize_trunks(items: &[TimelineItem]) -> Vec<TrunkSummary> {
             TimelineItem::AssistantMessage { .. } => TrunkItem::Monologue,
             TimelineItem::Reasoning { .. } => TrunkItem::Reasoning,
             TimelineItem::ToolCall { name, .. } => TrunkItem::ToolCall(name),
+            TimelineItem::Compaction { .. } => TrunkItem::Compaction,
             _ => continue,
         };
         if let Some(trunk) = builder.push(item.id(), kind) {

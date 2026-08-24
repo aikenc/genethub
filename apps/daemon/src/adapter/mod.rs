@@ -12,6 +12,7 @@ pub mod genet;
 pub mod opencode;
 pub mod registry;
 pub mod stdio;
+pub mod usage;
 
 use std::path::PathBuf;
 use std::sync::Arc;

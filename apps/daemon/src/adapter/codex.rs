@@ -90,6 +90,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
+use super::usage;
 use super::{
     find_executable, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
@@ -887,6 +888,11 @@ struct TurnState {
     /// We asked for this turn to stop, so its end is a cancellation however the
     /// CLI happens to label it.
     interrupt_requested: bool,
+    /// Codex reports one compaction twice: a `thread/compacted` notification and
+    /// a completed `contextCompaction` item. This counts the notifications that
+    /// arrived first so the item does not emit a second marker for the same
+    /// squeeze.
+    unpaired_compactions: u32,
 }
 
 struct CodexSession {
@@ -1050,6 +1056,7 @@ impl AgentSession for CodexSession {
                 usage,
                 ..TurnState::default()
             };
+            usage::record_round_start(&mut state.usage);
         }
         let _ = self.events.send(SessionEvent::TurnStarted {
             turn_id: turn_id.clone(),
@@ -1870,9 +1877,18 @@ async fn translate(
             state.codex_turn = notification_turn_id(params).map(str::to_string);
         }
         "turn/completed" if is_current_turn(params, &state) => finish(&mut state, params, events),
-        "thread/tokenUsage/updated" if state.id.is_none() || is_current_turn(params, &state) => {
+        "thread/tokenUsage/updated" if accepts_token_usage(params, &state) => {
             if let Some(usage) = usage_in(params) {
+                let rounds = state.usage.llm_rounds;
+                let tool_out = state.usage.tool_output_tokens;
+                let previous = state.usage.clone();
                 state.usage = usage;
+                state.usage.llm_rounds = rounds;
+                state.usage.tool_output_tokens = tool_out;
+                usage::preserve_timing(&mut state.usage, &previous);
+                if let Some(turn_id) = state.id.clone() {
+                    usage::emit_progress(events, &turn_id, &state.usage);
+                }
             }
         }
         "item/started" | "item/completed" if is_current_turn(params, &state) => {
@@ -1889,6 +1905,7 @@ async fn translate(
         "turn/plan/updated" if is_current_turn(params, &state) => plan(params, &mut state, events),
         "thread/compacted" if is_current_turn(params, &state) => {
             if let Some(turn_id) = state.id.clone() {
+                state.unpaired_compactions += 1;
                 let _ = events.send(SessionEvent::Item {
                     turn_id,
                     item: TimelineItem::Compaction {
@@ -1932,6 +1949,12 @@ fn is_current_turn(params: &Value, state: &TurnState) -> bool {
     state.codex_turn.as_deref() == notification_turn_id(params) && state.codex_turn.is_some()
 }
 
+fn accepts_token_usage(params: &Value, state: &TurnState) -> bool {
+    // Resume may replay the last thread usage while no GeneHub turn is open.
+    // A usage frame can also beat `turn/started` binding; drop neither.
+    state.id.is_none() || state.codex_turn.is_none() || is_current_turn(params, state)
+}
+
 /// Closes out the turn in flight.
 fn finish(state: &mut TurnState, params: &Value, events: &broadcast::Sender<SessionEvent>) {
     let Some(turn_id) = state.id.take() else {
@@ -1968,9 +1991,11 @@ fn finish(state: &mut TurnState, params: &Value, events: &broadcast::Sender<Sess
             },
         }
     } else {
+        let mut usage = state.usage.clone();
+        usage::finalize_output_rate(&mut usage);
         SessionEvent::TurnCompleted {
             turn_id,
-            usage: state.usage.clone(),
+            usage,
             fork_checkpoint: state.codex_turn.clone(),
         }
     };
@@ -1997,15 +2022,17 @@ fn message_in(error: &Value) -> String {
 }
 
 fn usage_in(params: &Value) -> Option<Usage> {
-    let last = params.get("tokenUsage")?.get("last")?;
-    let count = |field: &str| last.get(field).and_then(Value::as_u64).unwrap_or(0);
+    let token_usage = params.get("tokenUsage")?;
+    let source = token_usage
+        .get("total")
+        .or_else(|| token_usage.get("last"))?;
+    let count = |field: &str| source.get(field).and_then(Value::as_u64).unwrap_or(0);
     Some(Usage {
         input_tokens: count("inputTokens"),
         output_tokens: count("outputTokens"),
         cache_read_tokens: count("cachedInputTokens"),
-        // Nothing on this wire distinguishes a cache write.
         cache_write_tokens: 0,
-        cost_usd: None,
+        ..Usage::default()
     })
 }
 
@@ -2030,6 +2057,8 @@ fn stream(
     if delta.is_empty() {
         return;
     }
+    usage::record_first_token(&mut state.usage);
+    usage::record_visible_output(&mut state.usage, &delta);
     if state.open.contains(item_id) {
         let _ = events.send(SessionEvent::ItemDelta {
             turn_id,
@@ -2098,6 +2127,11 @@ fn item_frame(
                 id,
                 text: text_of("text"),
             });
+            if settled {
+                state.usage.llm_rounds += 1;
+                usage::record_round_start(&mut state.usage);
+                usage::emit_progress(events, &turn_id, &state.usage);
+            }
         }
         "reasoning" => {
             state.open.insert(id.clone());
@@ -2187,10 +2221,18 @@ fn item_frame(
                 detail: ToolCallDetail::Unknown { raw: item.clone() },
             });
         }
-        "contextCompaction" => emit(TimelineItem::Compaction {
-            id,
-            reason: "Codex pruned its own history to make room.".into(),
-        }),
+        "contextCompaction" => {
+            // The same squeeze already produced a marker via `thread/compacted`;
+            // only emit when no notification is waiting to be paired.
+            if state.unpaired_compactions > 0 {
+                state.unpaired_compactions -= 1;
+            } else {
+                emit(TimelineItem::Compaction {
+                    id,
+                    reason: "Codex pruned its own history to make room.".into(),
+                });
+            }
+        }
         "error" => emit(TimelineItem::Error {
             id,
             message: match item.get("message") {
@@ -2693,19 +2735,27 @@ mod tests {
                 item: TimelineItem::AssistantMessage { ref id, ref text },
             } if turn_id == "t1" && id == "root-final" && text == "Done."
         ));
-        assert!(matches!(
-            seen.try_recv().expect("the root completion"),
-            SessionEvent::TurnCompleted {
-                ref turn_id,
-                ref usage,
-                ref fork_checkpoint,
-                ..
-            } if turn_id == "t1"
-                && usage.input_tokens == 101
-                && usage.cache_read_tokens == 61
-                && usage.output_tokens == 13
-                && fork_checkpoint.as_deref() == Some("root-turn")
-        ));
+        loop {
+            match seen.try_recv().expect("progress or completion") {
+                SessionEvent::TurnProgress { .. } => continue,
+                other => {
+                    assert!(matches!(
+                        other,
+                        SessionEvent::TurnCompleted {
+                            ref turn_id,
+                            ref usage,
+                            ref fork_checkpoint,
+                            ..
+                        } if turn_id == "t1"
+                            && usage.input_tokens == 101
+                            && usage.cache_read_tokens == 61
+                            && usage.output_tokens == 13
+                            && fork_checkpoint.as_deref() == Some("root-turn")
+                    ));
+                    break;
+                }
+            }
+        }
         assert!(matches!(
             seen.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)

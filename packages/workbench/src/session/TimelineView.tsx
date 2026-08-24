@@ -5,6 +5,7 @@ import type {
   RoundTrunkSummary,
   TimelineItem,
   TurnStats,
+  Usage,
 } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 import { stringify as toYaml } from "yaml";
@@ -266,7 +267,9 @@ export function TimelineView({
                 ) : index === turns.length - 1 && state.activeTurn ? (
                   <TurnFooter
                     liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
+                    liveUsage={state.usage}
                     liveTools={countTools(turn.items)}
+                    liveItems={turn.items}
                     text={hasRound ? "" : assistantText(turn.items)}
                     canFork={false}
                   />
@@ -436,6 +439,24 @@ function PendingBubble({
   );
 }
 
+/** A horizontal rule with a label, rendered between batches at a compaction. */
+function CompactionMarker({ reason }: { reason: string }) {
+  return (
+    <div
+      className="flex items-center gap-2 py-1"
+      role="separator"
+      data-testid="compaction-marker"
+    >
+      <span className="h-px flex-1 bg-line" aria-hidden="true" />
+      <span className="flex items-center gap-1.5 text-xs text-muted">
+        <span aria-hidden="true">✂️</span>
+        历史已压缩（{reason}）
+      </span>
+      <span className="h-px flex-1 bg-line" aria-hidden="true" />
+    </div>
+  );
+}
+
 function Item({ item }: { item: TimelineItem }) {
   switch (item.type) {
     case "userMessage":
@@ -489,11 +510,7 @@ function Item({ item }: { item: TimelineItem }) {
       );
 
     case "compaction":
-      return (
-        <p className="text-center text-xs text-muted">
-          —— 历史已压缩（{item.reason}）——
-        </p>
-      );
+      return <CompactionMarker reason={item.reason} />;
 
     case "error":
       return (
@@ -1031,17 +1048,75 @@ function countTools(items: TimelineItem[]): number {
   return items.reduce((total, item) => total + count(item), 0);
 }
 
+const EMPTY_USAGE: Usage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  llmRounds: 0,
+  toolOutputTokens: 0,
+  compactionCount: 0,
+  outputRateEstimated: false,
+};
+
+function uncachedTokens(usage: Usage): number {
+  return usage.inputTokens >= usage.cacheReadTokens
+    ? usage.inputTokens - usage.cacheReadTokens
+    : usage.inputTokens;
+}
+
+/** A token count the provider actually sent, or an em-dash when it never did. */
+function reportedTokens(value: number): string {
+  return value > 0 ? formatTokens(value) : "—";
+}
+
+function estimateToolOutputTokens(items: TimelineItem[]): number {
+  const textOf = (item: TimelineItem): string => {
+    if (item.type !== "toolCall") return "";
+    switch (item.detail.kind) {
+      case "overview":
+      case "shell":
+        return item.detail.output;
+      case "read":
+        return item.detail.content;
+      case "edit":
+        return item.detail.diff;
+      case "search":
+        return item.detail.matches
+          .map((entry) => (entry.preview ? `${entry.path}:${entry.preview}` : entry.path))
+          .join("\n");
+      case "fetch":
+        return item.detail.summary;
+      case "plan":
+        return item.detail.markdown;
+      case "subAgent":
+        return item.detail.items.map(textOf).join("\n");
+      case "unknown": {
+        const raw = item.detail.raw as { output?: unknown };
+        return typeof raw.output === "string" ? raw.output : "";
+      }
+      default:
+        return "";
+    }
+  };
+  return items.reduce((total, item) => total + Math.floor((textOf(item).length + 3) / 4), 0);
+}
+
 function TurnFooter({
   stats,
+  liveUsage,
   liveStartedAtMs,
   liveTools = 0,
+  liveItems,
   text,
   canFork,
   onFork,
 }: {
   stats?: TurnStats;
+  liveUsage?: Usage | null;
   liveStartedAtMs?: number;
   liveTools?: number;
+  liveItems?: TimelineItem[];
   text: string;
   canFork: boolean;
   onFork?: () => void;
@@ -1057,8 +1132,12 @@ function TurnFooter({
   }, [live]);
 
   const duration = stats?.durationMs ?? Math.max(0, now - (liveStartedAtMs ?? now));
-  const usage = stats?.usage;
+  const usage = stats?.usage ?? liveUsage ?? (live ? EMPTY_USAGE : undefined);
   const tools = stats?.toolCalls ?? liveTools;
+  const toolOut =
+    usage?.toolOutputTokens ||
+    (liveItems ? estimateToolOutputTokens(liveItems) : 0);
+  const rounds = usage?.llmRounds ?? 0;
   const forkTitle = canFork
     ? "从这个 turn 创建分支并选择 Agent"
     : live
@@ -1107,10 +1186,30 @@ function TurnFooter({
       </div>
       {details ? (
         <div className="mt-1 flex flex-wrap justify-end gap-x-3 rounded-md bg-raised px-2 py-1">
-          <span>Cached {usage ? formatTokens(usage.cacheReadTokens) : "—"}</span>
-          <span>Input {usage ? formatTokens(usage.inputTokens) : "—"}</span>
-          <span>Output {usage ? formatTokens(usage.outputTokens) : "—"}</span>
-          <span>Tools {tools}</span>
+          <span data-testid="usage-summary">
+            {usage
+              ? `input(cached:${reportedTokens(usage.cacheReadTokens)}, toolcall:${reportedTokens(toolOut)}, uncached:${reportedTokens(uncachedTokens(usage))}) output ${reportedTokens(usage.outputTokens)} turn ${tools}/${rounds}`
+              : "—"}
+          </span>
+          {usage && usage.compactionCount > 0 ? (
+            <span data-testid="usage-compactions">压缩 {usage.compactionCount}</span>
+          ) : null}
+          {usage?.avgTtftMs != null ? (
+            <span data-testid="usage-ttft">TTFT {formatDuration(usage.avgTtftMs)}</span>
+          ) : null}
+          {usage?.avgOutputRateTps != null ? (
+            <span
+              data-testid="usage-rate"
+              title={
+                usage.outputRateEstimated
+                  ? "可见输出文本(chars/4) ÷ 各轮生成时间之和（不含 TTFT 与工具执行）；该 Agent 未上报 output token，为估算值"
+                  : "Provider 上报 output tokens ÷ 各轮生成时间之和（不含 TTFT 与工具执行）"
+              }
+            >
+              {usage.outputRateEstimated ? "~" : ""}
+              {usage.avgOutputRateTps.toFixed(1)} tok/s
+            </span>
+          ) : null}
         </div>
       ) : null}
     </footer>
