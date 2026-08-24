@@ -75,6 +75,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, Mutex};
 
 use super::stdio::write_json_line;
+use super::usage;
 use super::{
     find_executable, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
@@ -1005,6 +1006,9 @@ struct TurnState {
     /// conversation — where, until this existed, a sub-agent's `Bash` and `Read`
     /// appeared as if the main agent had run them itself.
     subs: HashMap<String, Sub>,
+    usage: Usage,
+    /// Assistant snapshot ids (or a content key) already counted as LLM rounds.
+    seen_assistant: HashSet<String>,
 }
 
 /// What one sub-agent has done so far.
@@ -1701,12 +1705,35 @@ fn translate_assistant_snapshot(
         emit_sub_agent(&parent, &turn_id, state, events);
         return;
     }
-    let blocks = frame
-        .get("message")
-        .and_then(|message| message.get("content"))
+    let message = frame.get("message").unwrap_or(&Value::Null);
+    let blocks = message
+        .get("content")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let snapshot_key = message
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let tools: Vec<_> = blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .filter_map(|block| block.get("id").and_then(Value::as_str))
+                .collect();
+            if tools.is_empty() {
+                "assistant-text".into()
+            } else {
+                tools.join(",")
+            }
+        });
+    if state.seen_assistant.insert(snapshot_key) {
+        state.usage.llm_rounds += 1;
+        if let Some(reported) = message.get("usage").or_else(|| frame.get("usage")) {
+            usage::add_usage(&mut state.usage, reported);
+        }
+        usage::emit_progress(events, &turn_id, &state.usage);
+    }
     for block in blocks {
         if block.get("type").and_then(Value::as_str) != Some("tool_use") {
             continue;
@@ -1846,28 +1873,17 @@ fn translate_result(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if !is_error {
-        let usage = frame.get("usage").unwrap_or(&Value::Null);
+        let mut usage = std::mem::take(&mut state.usage);
+        state.seen_assistant.clear();
+        if usage.input_tokens == 0 && usage.output_tokens == 0 {
+            usage::add_usage(&mut usage, frame.get("usage").unwrap_or(&Value::Null));
+        }
+        if let Some(cost) = frame.get("total_cost_usd").and_then(Value::as_f64) {
+            usage.cost_usd = Some(cost);
+        }
         let _ = events.send(SessionEvent::TurnCompleted {
             turn_id,
-            usage: Usage {
-                input_tokens: usage
-                    .get("input_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                output_tokens: usage
-                    .get("output_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                cache_read_tokens: usage
-                    .get("cache_read_input_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                cache_write_tokens: usage
-                    .get("cache_creation_input_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                cost_usd: frame.get("total_cost_usd").and_then(Value::as_f64),
-            },
+            usage,
             fork_checkpoint: None,
         });
         return;
@@ -2651,6 +2667,9 @@ mod tests {
     fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
+            if matches!(event, SessionEvent::TurnProgress { .. }) {
+                continue;
+            }
             out.push(event);
         }
         out

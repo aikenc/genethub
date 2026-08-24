@@ -5,6 +5,7 @@ import type {
   RoundTrunkSummary,
   TimelineItem,
   TurnStats,
+  Usage,
 } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 import { stringify as toYaml } from "yaml";
@@ -266,7 +267,9 @@ export function TimelineView({
                 ) : index === turns.length - 1 && state.activeTurn ? (
                   <TurnFooter
                     liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
+                    liveUsage={state.usage}
                     liveTools={countTools(turn.items)}
+                    liveItems={turn.items}
                     text={hasRound ? "" : assistantText(turn.items)}
                     canFork={false}
                   />
@@ -1031,17 +1034,68 @@ function countTools(items: TimelineItem[]): number {
   return items.reduce((total, item) => total + count(item), 0);
 }
 
+const EMPTY_USAGE: Usage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  llmRounds: 0,
+  toolOutputTokens: 0,
+};
+
+function uncachedTokens(usage: Usage): number {
+  return usage.inputTokens >= usage.cacheReadTokens
+    ? usage.inputTokens - usage.cacheReadTokens
+    : usage.inputTokens;
+}
+
+function estimateToolOutputTokens(items: TimelineItem[]): number {
+  const textOf = (item: TimelineItem): string => {
+    if (item.type !== "toolCall") return "";
+    switch (item.detail.kind) {
+      case "overview":
+      case "shell":
+        return item.detail.output;
+      case "read":
+        return item.detail.content;
+      case "edit":
+        return item.detail.diff;
+      case "search":
+        return item.detail.matches
+          .map((entry) => (entry.preview ? `${entry.path}:${entry.preview}` : entry.path))
+          .join("\n");
+      case "fetch":
+        return item.detail.summary;
+      case "plan":
+        return item.detail.markdown;
+      case "subAgent":
+        return item.detail.items.map(textOf).join("\n");
+      case "unknown": {
+        const raw = item.detail.raw as { output?: unknown };
+        return typeof raw.output === "string" ? raw.output : "";
+      }
+      default:
+        return "";
+    }
+  };
+  return items.reduce((total, item) => total + Math.floor((textOf(item).length + 3) / 4), 0);
+}
+
 function TurnFooter({
   stats,
+  liveUsage,
   liveStartedAtMs,
   liveTools = 0,
+  liveItems,
   text,
   canFork,
   onFork,
 }: {
   stats?: TurnStats;
+  liveUsage?: Usage | null;
   liveStartedAtMs?: number;
   liveTools?: number;
+  liveItems?: TimelineItem[];
   text: string;
   canFork: boolean;
   onFork?: () => void;
@@ -1057,8 +1111,11 @@ function TurnFooter({
   }, [live]);
 
   const duration = stats?.durationMs ?? Math.max(0, now - (liveStartedAtMs ?? now));
-  const usage = stats?.usage;
+  const usage = stats?.usage ?? liveUsage ?? (live ? EMPTY_USAGE : undefined);
   const tools = stats?.toolCalls ?? liveTools;
+  const toolOut =
+    usage?.toolOutputTokens ||
+    (liveItems ? estimateToolOutputTokens(liveItems) : 0);
   const forkTitle = canFork
     ? "从这个 turn 创建分支并选择 Agent"
     : live
@@ -1109,7 +1166,10 @@ function TurnFooter({
         <div className="mt-1 flex flex-wrap justify-end gap-x-3 rounded-md bg-raised px-2 py-1">
           <span>Cached {usage ? formatTokens(usage.cacheReadTokens) : "—"}</span>
           <span>Input {usage ? formatTokens(usage.inputTokens) : "—"}</span>
+          <span>Uncached {usage ? formatTokens(uncachedTokens(usage)) : "—"}</span>
           <span>Output {usage ? formatTokens(usage.outputTokens) : "—"}</span>
+          <span>Tool out {usage || liveItems ? formatTokens(toolOut) : "—"}</span>
+          <span>LLM {usage ? String(usage.llmRounds ?? 0) : "—"}</span>
           <span>Tools {tools}</span>
         </div>
       ) : null}

@@ -34,6 +34,7 @@ use super::store::{
     SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
+use crate::adapter::usage::{self as token_usage};
 use crate::adapter::{AgentSession, PersistHandle, PromptInput, ProviderMap, SessionConfig};
 use crate::diagnostics::Diagnostics;
 
@@ -3028,6 +3029,8 @@ async fn pump_events(
     let mut raw_thinking: HashMap<String, String> = HashMap::new();
     let mut raw_tools: HashMap<String, TimelineItem> = HashMap::new();
     let mut turns: HashMap<String, (i64, HashSet<String>)> = HashMap::new();
+    let mut live_usage: HashMap<String, Usage> = HashMap::new();
+    let mut counted_tools: HashSet<String> = HashSet::new();
     let mut channel_closed = false;
     loop {
         let mut event = match receiver.recv().await {
@@ -3050,6 +3053,18 @@ async fn pump_events(
                 continue;
             }
         };
+
+        if let SessionEvent::TurnProgress { turn_id, usage } = &event {
+            token_usage::merge_progress(live_usage.entry(turn_id.clone()).or_default(), usage);
+            if let Some(merged) = live_usage.get(turn_id) {
+                event = SessionEvent::TurnProgress {
+                    turn_id: turn_id.clone(),
+                    usage: merged.clone(),
+                };
+            }
+        }
+        let tool_progress =
+            token_usage::record_tool_output(&event, &mut live_usage, &mut counted_tools);
 
         match &event {
             SessionEvent::TurnStarted { .. } => {
@@ -3206,7 +3221,10 @@ async fn pump_events(
             // starts a new native turn from the Agent's persisted session.
             if let Some(turn_id) = turns.keys().next().cloned() {
                 let canceled = SessionEvent::TurnCanceled { turn_id };
-                if let Some(stats) = turn_summary(&canceled, &mut turns) {
+                let items = live.items.lock().await;
+                let stats = turn_summary(&canceled, &mut turns, &mut live_usage, &items);
+                drop(items);
+                if let Some(stats) = stats {
                     let summary_event = SessionEvent::Item {
                         turn_id: stats.turn_id.clone(),
                         item: TimelineItem::TurnSummary {
@@ -3228,7 +3246,10 @@ async fn pump_events(
             break;
         }
 
-        let summary = turn_summary(&event, &mut turns);
+        let summary = {
+            let items = live.items.lock().await;
+            turn_summary(&event, &mut turns, &mut live_usage, &items)
+        };
         if let Some(stats) = summary {
             let summary_event = SessionEvent::Item {
                 turn_id: stats.turn_id.clone(),
@@ -3270,6 +3291,10 @@ async fn pump_events(
         }
 
         live.publish(event).await;
+        if let Some(progress) = tool_progress {
+            apply(&live, &progress).await;
+            live.publish(progress).await;
+        }
         live.trim_replay(replay_window).await;
 
         if settle {
@@ -3317,26 +3342,53 @@ fn collect_tool_ids(item: &TimelineItem, ids: &mut HashSet<String>) {
 fn turn_summary(
     event: &SessionEvent,
     turns: &mut HashMap<String, (i64, HashSet<String>)>,
+    live_usage: &mut HashMap<String, Usage>,
+    items: &[TimelineItem],
 ) -> Option<TurnStats> {
-    let (turn_id, outcome, usage, fork_checkpoint) = match event {
+    let (turn_id, outcome, mut usage, fork_checkpoint) = match event {
         SessionEvent::TurnCompleted {
             turn_id,
             usage,
             fork_checkpoint,
-        } => (
+        } => {
+            let mut usage = usage.clone();
+            if let Some(tracked) = live_usage.remove(turn_id) {
+                if usage.tool_output_tokens == 0 {
+                    usage.tool_output_tokens = tracked.tool_output_tokens;
+                }
+                if usage.llm_rounds == 0 {
+                    usage.llm_rounds = tracked.llm_rounds;
+                }
+                if usage.input_tokens == 0 && usage.output_tokens == 0 {
+                    usage.input_tokens = tracked.input_tokens;
+                    usage.output_tokens = tracked.output_tokens;
+                    usage.cache_read_tokens = tracked.cache_read_tokens;
+                    usage.cache_write_tokens = tracked.cache_write_tokens;
+                    usage.cost_usd = tracked.cost_usd.or(usage.cost_usd);
+                }
+            }
+            (
+                turn_id,
+                TurnOutcome::Completed,
+                usage,
+                fork_checkpoint.clone(),
+            )
+        }
+        SessionEvent::TurnFailed { turn_id, .. } => (
             turn_id,
-            TurnOutcome::Completed,
-            usage.clone(),
-            fork_checkpoint.clone(),
+            TurnOutcome::Failed,
+            live_usage.remove(turn_id).unwrap_or_default(),
+            None,
         ),
-        SessionEvent::TurnFailed { turn_id, .. } => {
-            (turn_id, TurnOutcome::Failed, Usage::default(), None)
-        }
-        SessionEvent::TurnCanceled { turn_id } => {
-            (turn_id, TurnOutcome::Canceled, Usage::default(), None)
-        }
+        SessionEvent::TurnCanceled { turn_id } => (
+            turn_id,
+            TurnOutcome::Canceled,
+            live_usage.remove(turn_id).unwrap_or_default(),
+            None,
+        ),
         _ => return None,
     };
+    token_usage::fill_usage_from_items(&mut usage, items);
     let finished_at_ms = now_ms();
     let (started_at_ms, tools) = turns
         .remove(turn_id)
@@ -3417,6 +3469,7 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
         SessionEvent::TurnStarted { .. } => {
             *live.status.lock().await = SessionStatus::Running;
         }
+        SessionEvent::TurnProgress { .. } => {}
         SessionEvent::TurnCompleted { .. } | SessionEvent::TurnCanceled { .. } => {
             let pending = !live.pending_permissions.lock().await.is_empty();
             *live.status.lock().await = if pending {

@@ -90,6 +90,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
+use super::usage;
 use super::{
     find_executable, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
@@ -1870,9 +1871,16 @@ async fn translate(
             state.codex_turn = notification_turn_id(params).map(str::to_string);
         }
         "turn/completed" if is_current_turn(params, &state) => finish(&mut state, params, events),
-        "thread/tokenUsage/updated" if state.id.is_none() || is_current_turn(params, &state) => {
+        "thread/tokenUsage/updated" if accepts_token_usage(params, &state) => {
             if let Some(usage) = usage_in(params) {
+                let rounds = state.usage.llm_rounds;
+                let tool_out = state.usage.tool_output_tokens;
                 state.usage = usage;
+                state.usage.llm_rounds = rounds;
+                state.usage.tool_output_tokens = tool_out;
+                if let Some(turn_id) = state.id.clone() {
+                    usage::emit_progress(events, &turn_id, &state.usage);
+                }
             }
         }
         "item/started" | "item/completed" if is_current_turn(params, &state) => {
@@ -1930,6 +1938,12 @@ fn bind_started_turn_from_response(state: &mut TurnState, genehub_turn: &str, up
 
 fn is_current_turn(params: &Value, state: &TurnState) -> bool {
     state.codex_turn.as_deref() == notification_turn_id(params) && state.codex_turn.is_some()
+}
+
+fn accepts_token_usage(params: &Value, state: &TurnState) -> bool {
+    // Resume may replay the last thread usage while no GeneHub turn is open.
+    // A usage frame can also beat `turn/started` binding; drop neither.
+    state.id.is_none() || state.codex_turn.is_none() || is_current_turn(params, state)
 }
 
 /// Closes out the turn in flight.
@@ -1997,15 +2011,17 @@ fn message_in(error: &Value) -> String {
 }
 
 fn usage_in(params: &Value) -> Option<Usage> {
-    let last = params.get("tokenUsage")?.get("last")?;
-    let count = |field: &str| last.get(field).and_then(Value::as_u64).unwrap_or(0);
+    let token_usage = params.get("tokenUsage")?;
+    let source = token_usage
+        .get("total")
+        .or_else(|| token_usage.get("last"))?;
+    let count = |field: &str| source.get(field).and_then(Value::as_u64).unwrap_or(0);
     Some(Usage {
         input_tokens: count("inputTokens"),
         output_tokens: count("outputTokens"),
         cache_read_tokens: count("cachedInputTokens"),
-        // Nothing on this wire distinguishes a cache write.
         cache_write_tokens: 0,
-        cost_usd: None,
+        ..Usage::default()
     })
 }
 
@@ -2098,6 +2114,10 @@ fn item_frame(
                 id,
                 text: text_of("text"),
             });
+            if settled {
+                state.usage.llm_rounds += 1;
+                usage::emit_progress(events, &turn_id, &state.usage);
+            }
         }
         "reasoning" => {
             state.open.insert(id.clone());
@@ -2693,19 +2713,27 @@ mod tests {
                 item: TimelineItem::AssistantMessage { ref id, ref text },
             } if turn_id == "t1" && id == "root-final" && text == "Done."
         ));
-        assert!(matches!(
-            seen.try_recv().expect("the root completion"),
-            SessionEvent::TurnCompleted {
-                ref turn_id,
-                ref usage,
-                ref fork_checkpoint,
-                ..
-            } if turn_id == "t1"
-                && usage.input_tokens == 101
-                && usage.cache_read_tokens == 61
-                && usage.output_tokens == 13
-                && fork_checkpoint.as_deref() == Some("root-turn")
-        ));
+        loop {
+            match seen.try_recv().expect("progress or completion") {
+                SessionEvent::TurnProgress { .. } => continue,
+                other => {
+                    assert!(matches!(
+                        other,
+                        SessionEvent::TurnCompleted {
+                            ref turn_id,
+                            ref usage,
+                            ref fork_checkpoint,
+                            ..
+                        } if turn_id == "t1"
+                            && usage.input_tokens == 101
+                            && usage.cache_read_tokens == 61
+                            && usage.output_tokens == 13
+                            && fork_checkpoint.as_deref() == Some("root-turn")
+                    ));
+                    break;
+                }
+            }
+        }
         assert!(matches!(
             seen.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)

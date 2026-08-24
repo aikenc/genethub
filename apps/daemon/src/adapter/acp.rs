@@ -25,6 +25,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
+use super::usage;
 use super::{
     find_executable_in, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
@@ -523,6 +524,7 @@ struct TurnState {
     /// held here and extended until something else interrupts it.
     text_item: Option<String>,
     reasoning_item: Option<String>,
+    usage: Usage,
 }
 
 impl TurnState {
@@ -748,11 +750,19 @@ impl AgentSession for AcpSession {
                             message: "The agent declined this request.".into(),
                         },
                     },
-                    _ => SessionEvent::TurnCompleted {
-                        turn_id: completed_turn,
-                        usage: Usage::default(),
-                        fork_checkpoint: None,
-                    },
+                    _ => {
+                        let mut usage = state.usage.clone();
+                        if let Some(reported) = value.get("usage") {
+                            if usage.input_tokens == 0 && usage.output_tokens == 0 {
+                                usage::add_usage(&mut usage, reported);
+                            }
+                        }
+                        SessionEvent::TurnCompleted {
+                            turn_id: completed_turn,
+                            usage,
+                            fork_checkpoint: None,
+                        }
+                    }
                 },
                 Ok(Err(message)) => SessionEvent::TurnFailed {
                     turn_id: completed_turn,
@@ -1741,6 +1751,10 @@ fn translate_update(
     match kind {
         "agent_message_chunk" => {
             let delta = text_of(update);
+            if state.text_item.is_none() && state.reasoning_item.is_none() {
+                state.usage.llm_rounds += 1;
+                usage::emit_progress(events, &turn_id, &state.usage);
+            }
             match state.text_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
                     turn_id,
@@ -1760,6 +1774,10 @@ fn translate_update(
         }
         "agent_thought_chunk" => {
             let delta = text_of(update);
+            if state.text_item.is_none() && state.reasoning_item.is_none() {
+                state.usage.llm_rounds += 1;
+                usage::emit_progress(events, &turn_id, &state.usage);
+            }
             match state.reasoning_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
                     turn_id,
@@ -1840,7 +1858,19 @@ fn translate_update(
                 });
             }
         }
-        _ => {}
+        _ => {
+            if let Some(reported) = update.get("usage").or_else(|| update.get("tokenUsage")) {
+                let parsed = usage::parse_usage(reported);
+                if parsed.input_tokens > 0 || parsed.output_tokens > 0 {
+                    let rounds = state.usage.llm_rounds;
+                    let tool_out = state.usage.tool_output_tokens;
+                    state.usage = parsed;
+                    state.usage.llm_rounds = rounds;
+                    state.usage.tool_output_tokens = tool_out;
+                    usage::emit_progress(events, &turn_id, &state.usage);
+                }
+            }
+        }
     }
 }
 
@@ -1933,6 +1963,9 @@ mod tests {
     fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
+            if matches!(event, SessionEvent::TurnProgress { .. }) {
+                continue;
+            }
             out.push(event);
         }
         out

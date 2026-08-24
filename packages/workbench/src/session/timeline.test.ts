@@ -129,6 +129,29 @@ describe("the session timeline", () => {
     expect(state.runtimeValues).toEqual({ fast: "max" });
   });
 
+  it("updates token totals while a turn is still running", () => {
+    const state = run([
+      { type: "turnStarted", turnId: "t1", startedAtMs: 1 },
+      {
+        type: "turnProgress",
+        turnId: "t1",
+        usage: {
+          inputTokens: 12,
+          outputTokens: 3,
+          cacheReadTokens: 8,
+          cacheWriteTokens: 0,
+          llmRounds: 1,
+          toolOutputTokens: 20,
+        },
+      },
+    ]);
+
+    expect(state.activeTurn).toBe("t1");
+    expect(state.usage?.inputTokens).toBe(12);
+    expect(state.usage?.llmRounds).toBe(1);
+    expect(state.usage?.toolOutputTokens).toBe(20);
+  });
+
   it("clears the previous failure when a new turn starts", () => {
     const state = run([
       { type: "turnStarted", turnId: "t1", startedAtMs: 1 },

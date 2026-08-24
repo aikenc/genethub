@@ -964,6 +964,8 @@ describe("what the user sees in a session", () => {
             outputTokens: 20,
             cacheReadTokens: 0,
             cacheWriteTokens: 0,
+            llmRounds: 1,
+            toolOutputTokens: 0,
           },
           toolCalls: 0,
         },
@@ -1780,6 +1782,8 @@ describe("a whole turn as the timeline sees it", () => {
               outputTokens: 5,
               cacheReadTokens: 3,
               cacheWriteTokens: 0,
+              llmRounds: 1,
+              toolOutputTokens: 4,
               costUsd: undefined,
             },
             toolCalls: 1,
@@ -1795,6 +1799,8 @@ describe("a whole turn as the timeline sees it", () => {
           outputTokens: 5,
           cacheReadTokens: 0,
           cacheWriteTokens: 0,
+          llmRounds: 1,
+          toolOutputTokens: 4,
           costUsd: undefined,
         },
       },
@@ -1812,6 +1818,9 @@ describe("a whole turn as the timeline sees it", () => {
     await userEvent.click(screen.getByRole("button", { name: /5 输出 tokens/ }));
     expect(screen.getByText("Cached 3")).toBeInTheDocument();
     expect(screen.getByText("Input 10")).toBeInTheDocument();
+    expect(screen.getByText("Uncached 7")).toBeInTheDocument();
+    expect(screen.getByText("Tool out 4")).toBeInTheDocument();
+    expect(screen.getByText("LLM 1")).toBeInTheDocument();
     expect(screen.getByText("Tools 1")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled();
     expect(state.status).toBe("idle");
@@ -1870,6 +1879,8 @@ describe("a whole turn as the timeline sees it", () => {
             outputTokens: 1,
             cacheReadTokens: 0,
             cacheWriteTokens: 0,
+            llmRounds: 1,
+            toolOutputTokens: 0,
             costUsd: undefined,
           },
           toolCalls: 0,

@@ -17,6 +17,18 @@ pub struct Usage {
     pub cache_read_tokens: u64,
     #[ts(type = "number")]
     pub cache_write_tokens: u64,
+    /// Completed LLM calls in this GeneHub turn. One completion that fires
+    /// several tools in parallel is still one round; those tools are not
+    /// extra rounds.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub llm_rounds: u64,
+    /// Estimated tokens in tool *results* (chars/4). This is not
+    /// `input - cached`: uncached input also contains the prompt, history
+    /// and tool schemas, so the two numbers are compared, never equated.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub tool_output_tokens: u64,
     #[ts(optional)]
     pub cost_usd: Option<f64>,
 }
@@ -226,6 +238,10 @@ pub enum SessionEvent {
         item_id: String,
         delta: ItemDelta,
     },
+    /// In-flight totals for the turn still running. Transport-only: the
+    /// durable footer is `TurnSummary` / `TurnCompleted`.
+    #[serde(rename_all = "camelCase")]
+    TurnProgress { turn_id: String, usage: Usage },
     #[serde(rename_all = "camelCase")]
     TurnCompleted {
         turn_id: String,

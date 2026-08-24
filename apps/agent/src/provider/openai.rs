@@ -279,15 +279,55 @@ pub fn convert_messages(system_prompt: &str, messages: &[Message]) -> Value {
 }
 
 fn apply_usage(usage: &mut Usage, value: &Value) {
-    if let Some(input) = value["prompt_tokens"].as_u64() {
+    if value.is_null() {
+        return;
+    }
+    if let Some(input) = first_u64(
+        value,
+        &["prompt_tokens", "input_tokens", "inputTokens", "input"],
+    ) {
         usage.input = input;
     }
-    if let Some(output) = value["completion_tokens"].as_u64() {
+    if let Some(output) = first_u64(
+        value,
+        &[
+            "completion_tokens",
+            "output_tokens",
+            "outputTokens",
+            "output",
+        ],
+    ) {
         usage.output = output;
     }
-    if let Some(cached) = value["prompt_tokens_details"]["cached_tokens"].as_u64() {
+    if let Some(cached) = first_u64(
+        &value["prompt_tokens_details"],
+        &["cached_tokens", "cachedTokens"],
+    )
+    .or_else(|| {
+        first_u64(
+            value,
+            &[
+                "prompt_cache_hit_tokens",
+                "cache_read_input_tokens",
+                "cached_tokens",
+                "cachedInputTokens",
+                "cacheRead",
+            ],
+        )
+    }) {
         usage.cache_read = cached;
     }
+    if let Some(written) = first_u64(
+        value,
+        &["cache_creation_input_tokens", "cacheWrite", "cache_write"],
+    ) {
+        usage.cache_write = written;
+    }
+}
+
+fn first_u64(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_u64))
 }
 
 fn map_finish_reason(reason: &str) -> StopReason {
@@ -420,5 +460,33 @@ mod tests {
         assert_eq!(map_finish_reason("tool_calls"), StopReason::ToolUse);
         assert_eq!(map_finish_reason("length"), StopReason::Length);
         assert_eq!(map_finish_reason("stop"), StopReason::Stop);
+    }
+
+    #[test]
+    fn usage_accepts_openai_and_deepseek_field_names() {
+        let mut usage = Usage::default();
+        apply_usage(
+            &mut usage,
+            &json!({
+                "input_tokens": 11,
+                "output_tokens": 4,
+                "prompt_cache_hit_tokens": 7
+            }),
+        );
+        assert_eq!(usage.input, 11);
+        assert_eq!(usage.output, 4);
+        assert_eq!(usage.cache_read, 7);
+
+        apply_usage(
+            &mut usage,
+            &json!({
+                "prompt_tokens": 20,
+                "completion_tokens": 6,
+                "prompt_tokens_details": { "cached_tokens": 15 }
+            }),
+        );
+        assert_eq!(usage.input, 20);
+        assert_eq!(usage.output, 6);
+        assert_eq!(usage.cache_read, 15);
     }
 }

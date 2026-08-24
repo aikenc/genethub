@@ -489,6 +489,8 @@ describe("switching from the sidebar", () => {
             outputTokens: 1,
             cacheReadTokens: 0,
             cacheWriteTokens: 0,
+            llmRounds: 1,
+            toolOutputTokens: 0,
           },
           toolCalls: 0,
           forkCheckpoint: "native-only",

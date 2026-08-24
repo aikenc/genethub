@@ -22,6 +22,7 @@ use genehub_proto::{
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex};
 
+use super::usage;
 use super::{
     find_executable, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
@@ -347,6 +348,7 @@ struct TurnState {
     /// the reply; without this the prompt would be echoed as an answer.
     assistant_messages: std::collections::HashSet<String>,
     counter: u64,
+    usage: Usage,
 }
 
 impl TurnState {
@@ -421,10 +423,24 @@ impl AgentSession for OpenCodeSession {
                         return;
                     }
                     reconcile(&settled, &mut state, &events, &completed);
+                    let mut usage = state.usage.clone();
+                    if usage.llm_rounds == 0 {
+                        usage.llm_rounds = state.assistant_messages.len() as u64;
+                    }
+                    let reported = usage_from_info(settled.get("info").unwrap_or(&Value::Null));
+                    if reported.input_tokens > usage.input_tokens
+                        || reported.output_tokens > usage.output_tokens
+                    {
+                        usage.input_tokens = reported.input_tokens;
+                        usage.output_tokens = reported.output_tokens;
+                        usage.cache_read_tokens = reported.cache_read_tokens;
+                        usage.cache_write_tokens = reported.cache_write_tokens;
+                        usage.cost_usd = reported.cost_usd.or(usage.cost_usd);
+                    }
                     state.id = None;
                     SessionEvent::TurnCompleted {
                         turn_id: completed,
-                        usage: usage_from_info(settled.get("info").unwrap_or(&Value::Null)),
+                        usage,
                         fork_checkpoint: None,
                     }
                 }
@@ -796,8 +812,24 @@ fn translate_event(
             }
             if info.get("role").and_then(Value::as_str) == Some("assistant") {
                 if let Some(id) = info.get("id").and_then(Value::as_str) {
-                    state.assistant_messages.insert(id.to_string());
+                    if state.assistant_messages.insert(id.to_string()) {
+                        state.usage.llm_rounds += 1;
+                    }
                 }
+                let parsed = usage_from_info(info);
+                if parsed.input_tokens > state.usage.input_tokens
+                    || parsed.output_tokens > state.usage.output_tokens
+                {
+                    state.usage.input_tokens = parsed.input_tokens.max(state.usage.input_tokens);
+                    state.usage.output_tokens = parsed.output_tokens.max(state.usage.output_tokens);
+                    state.usage.cache_read_tokens =
+                        parsed.cache_read_tokens.max(state.usage.cache_read_tokens);
+                    state.usage.cache_write_tokens = parsed
+                        .cache_write_tokens
+                        .max(state.usage.cache_write_tokens);
+                    state.usage.cost_usd = parsed.cost_usd.or(state.usage.cost_usd);
+                }
+                usage::emit_progress(events, &turn_id, &state.usage);
             }
         }
         "message.part.removed" | "session.idle" | "session.updated" => {}
@@ -934,6 +966,7 @@ fn usage_from_info(info: &Value) -> Usage {
         cache_read_tokens: count(&cache, "read"),
         cache_write_tokens: count(&cache, "write"),
         cost_usd: info.get("cost").and_then(Value::as_f64),
+        ..Usage::default()
     }
 }
 
@@ -1089,6 +1122,9 @@ mod tests {
     fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
+            if matches!(event, SessionEvent::TurnProgress { .. }) {
+                continue;
+            }
             out.push(event);
         }
         out
