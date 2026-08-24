@@ -55,6 +55,22 @@ pub fn finalize_output_rate(usage: &mut Usage) {
     }
 }
 
+/// The output rate right now: tokens reported so far over the streaming
+/// wall-clock since the first token. Returns a clone with the live rate filled
+/// in, leaving the tracked usage untouched so the final `finalize_output_rate`
+/// still measures the whole turn. `None` (field absent) when the provider has
+/// not reported any output tokens yet — we never invent a rate from nothing.
+pub fn with_live_output_rate(usage: &Usage) -> Usage {
+    let mut live = usage.clone();
+    if let Some(first) = usage.first_token_at_ms {
+        let elapsed = now_ms().saturating_sub(first).max(1) as u64;
+        if usage.output_tokens > 0 {
+            live.avg_output_rate_tps = Some(usage.output_tokens as f64 / (elapsed as f64 / 1000.0));
+        }
+    }
+    live
+}
+
 /// Roughly chars/4, matching the estimator the frontend uses for the same
 /// strings. Exact tokenizer counts are not available on every adapter wire.
 pub fn estimate_tokens(text: &str) -> u64 {
@@ -67,7 +83,7 @@ pub fn emit_progress(events: &broadcast::Sender<SessionEvent>, turn_id: &str, us
     }
     let _ = events.send(SessionEvent::TurnProgress {
         turn_id: turn_id.to_string(),
-        usage: usage.clone(),
+        usage: with_live_output_rate(usage),
     });
 }
 
@@ -463,5 +479,31 @@ mod tests {
         assert_eq!(usage.tool_output_tokens, 3);
         assert_eq!(usage.llm_rounds, 1);
         assert_eq!(usage.compaction_count, 1);
+    }
+
+    #[test]
+    fn live_output_rate_uses_reported_tokens_and_first_token_clock() {
+        let mut usage = Usage::default();
+        usage.output_tokens = 120;
+        usage.first_token_at_ms = Some(now_ms() - 2_000);
+        let live = with_live_output_rate(&usage);
+        let rate = live.avg_output_rate_tps.expect("rate from reported tokens");
+        assert!(
+            (rate - 60.0).abs() < 5.0,
+            "120 tokens over ~2s should be ~60 tok/s, got {rate}"
+        );
+        // The tracked usage is left for finalize to close out.
+        assert_eq!(usage.avg_output_rate_tps, None);
+        assert!(usage.first_token_at_ms.is_some());
+    }
+
+    #[test]
+    fn live_output_rate_stays_absent_when_provider_reports_no_tokens() {
+        // Cursor ACP never reports output_tokens; without a real count there is
+        // no honest rate, so the field stays absent rather than fabricated.
+        let mut usage = Usage::default();
+        usage.first_token_at_ms = Some(now_ms() - 2_000);
+        let live = with_live_output_rate(&usage);
+        assert_eq!(live.avg_output_rate_tps, None);
     }
 }

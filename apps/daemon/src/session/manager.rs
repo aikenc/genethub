@@ -3367,6 +3367,16 @@ fn turn_summary(
                     usage.cache_write_tokens = tracked.cache_write_tokens;
                     usage.cost_usd = tracked.cost_usd.or(usage.cost_usd);
                 }
+                // The adapter's final event is authoritative for the rate
+                // stats, but a provider that reports usage only in a trailing
+                // event can replace the usage wholesale and drop them; backfill
+                // from the live track so the footer does not lose TTFT/rate.
+                if usage.avg_ttft_ms.is_none() {
+                    usage.avg_ttft_ms = tracked.avg_ttft_ms;
+                }
+                if usage.avg_output_rate_tps.is_none() {
+                    usage.avg_output_rate_tps = tracked.avg_output_rate_tps;
+                }
             }
             (
                 turn_id,
