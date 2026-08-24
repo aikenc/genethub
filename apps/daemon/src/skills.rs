@@ -52,7 +52,7 @@ pub fn materialize(root: &Path) -> Option<PathBuf> {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("builtin");
-        let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+        let temporary = parent.join(format!(".{file_name}.{}.tmp", crate::host_pid::current()));
         let installed = std::fs::write(&temporary, file.contents).and_then(|_| {
             std::fs::rename(&temporary, &target).or_else(|first_error| {
                 if target.exists() {
