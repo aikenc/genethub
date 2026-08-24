@@ -246,14 +246,14 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 | 平台 | 做法 |
 |------|------|
 | Linux（有无图形界面都一样） | `scripts/install.sh` 只装 daemon/CLI + 内置 agent，工作台用浏览器打开；不构建、不测试 Linux 桌面壳。用例见 §8.1「安装脚本」 |
-| Windows | 发布流水线（`.github/workflows/release.yml`）构建安装包；桌面 CI 在 Windows runner 上执行壳层 library、wiring 与 lint 门禁 |
-| macOS | 桌面 CI 在 macOS runner 上执行壳层 library、wiring、真实 daemon supervision 与 lint 门禁；正式安装包等待签名、公证完成后再发布 |
+| Windows | 发布流水线（`.github/workflows/release.yml`）构建安装包；桌面 CI 在 Windows runner 上执行壳层 library、wiring、真实 daemon supervision 与 lint。supervision 等 `listening` 的预算是 120 秒（iterate guest 冷编译经常超过一分钟），并设置 `GENEHUB_TEST_COMPONENT_CACHE_DIR` |
+| macOS | 桌面 CI 在 macOS runner 上执行同一组壳层 library、wiring、真实 daemon supervision 与 lint；正式安装包等待签名、公证完成后再发布 |
 
 Windows/macOS **装包之后**的首启仍要每次发版手动过一遍主旅程——runner 上没有能点托盘的人。Linux 的安装门禁只覆盖 daemon/CLI，不能拿 Linux WebView 编译代替两个桌面目标的验证。
 
 自检项：可执行权限、内置 agent 二进制可用、数据目录创建、**默认工作目录被建出来**（见 [daemon.md](./daemon.md) §4.2；这条决定了新装用户第一屏是聊天还是文件选择器）、单实例锁、卸载残留清理，以及**安装目录内不存在 `node` / `node.exe` / `node_modules`**（PC 端零 Node 运行时，见 [desktop-client.md](./desktop-client.md) §4.1）。
 
-跑测试时用 `$GENEHUB_WORKSPACE_DIR` 把默认工作目录指到临时目录：任何一次测试运行都不该在跑它的人的 home 里留下文件夹。
+跑测试时用当前 channel 的 workspace 环境变量（源码树是 `$GENEHUB_LOCAL_WORKSPACE_DIR`）把默认工作目录指到临时目录：任何一次测试运行都不该在跑它的人的 home 里留下文件夹。
 
 外部 agent（OpenCode 等）由**测试环境预装**，不随分发包安装——这正是要验证的行为之一：装了就出现在选择器里，没装就不出现，且不影响其他 agent。CI 用 `.github/agent-clis/package-lock.json` 固定测试过的 CLI 与 tarball 完整性，再通过 `npm ci --prefix .github/agent-clis` 安装；这些依赖不进入任何产品包。本地没装时相关用例跳过并打印原因，其余照跑。
 

@@ -114,7 +114,13 @@ fn listeners_on(port: u16) -> Vec<String> {
 fn contain_the_default_workspace() {
     static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     let home = HOME.get_or_init(|| tempfile::tempdir().expect("a temporary home"));
-    std::env::set_var("GENEHUB_WORKSPACE_DIR", home.path().join("GeneHub"));
+    // The tree stamps `local`; a released desktop binary would use its own infix.
+    std::env::set_var("GENEHUB_LOCAL_WORKSPACE_DIR", home.path().join("GeneHub"));
+    // Same cache testctl and workbench e2e use. Without it every supervision
+    // case pays a cold Windows compile against the listen timeout.
+    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/test-component-cache");
+    let _ = std::fs::create_dir_all(&cache);
+    std::env::set_var("GENEHUB_TEST_COMPONENT_CACHE_DIR", cache);
 }
 
 macro_rules! with_daemon {

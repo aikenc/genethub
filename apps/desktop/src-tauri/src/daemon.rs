@@ -26,6 +26,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 const MAX_LOOPBACK_HTTP_RESPONSE_BYTES: usize = 64 * 1024;
+/// Cold `Component::from_binary` of the iterate guest on a hosted Windows
+/// runner regularly exceeds one minute. 20s then 60s both lost that race
+/// while the process was still healthy (CI #205).
+const LISTEN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What the daemon prints once it is listening. The port is chosen by the OS,
 /// so reading it back is the only way to know where to connect.
@@ -283,9 +287,9 @@ impl Daemon {
         });
 
         // The resident shell compiles the component in memory on every cold
-        // start. Constrained Windows and macOS runners can legitimately spend
-        // longer than twenty seconds here even though the process is healthy.
-        match rx.recv_timeout(Duration::from_secs(60)) {
+        // start. Constrained Windows runners can spend more than a minute
+        // here even though the process is healthy.
+        match rx.recv_timeout(LISTEN_TIMEOUT) {
             Ok(()) => {
                 let (endpoint, published_pid) = self
                     .published()
