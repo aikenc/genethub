@@ -169,16 +169,20 @@ jobs:
           echo "$GITHUB_WORKSPACE/.github/agent-clis/node_modules/.bin" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # The journeys start real daemon and agent processes, and `cargo test` does
-      # not build another package's executables — it only compiles them as test
-      # harnesses. Without this the cases panic on a missing binary, which is what
-      # they did on every cold cache while a warm one kept the job green: a false
-      # pass that survived until a release tag.
-      - run: cargo build --workspace --bins
-      - name: Build the paired guest component
+      # Journeys and the web job start these processes. A debug host is ~500MB
+      # and runs Cranelift unoptimized (~6s to listening here). Iterate is the
+      # product-shaped compile. Stage into target/debug because locators and
+      # the artifact handoff still look there. `cargo test` only builds test
+      # harnesses and may overwrite genet-local with a debug CLI; restage
+      # after the tests so the web job does not get that image.
+      - name: Stage iterate CLI, host, agent, and guest
         run: |
+          cargo build --profile iterate -p genet-cli -p genet-agent -p genehub-host
           cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
           mkdir -p target/debug
+          cp target/iterate/genet-local target/debug/genet-local
+          cp target/iterate/genet-agent-local target/debug/genet-agent-local
+          cp target/iterate/genehub-host-local target/debug/genehub-host-local
           cp target/wasm32-wasip2/iterate/genehub_guest.wasm target/debug/genehub_guest.wasm
       # Journeys default to the mock model, so this stays offline and free.
       #
@@ -209,7 +213,12 @@ jobs:
               | while IFS= read -r line; do echo "::error::$line"; done
             exit "$status"
           fi
-      # The web job reuses these instead of compiling the same debug bins again.
+      - name: Restage iterate runtime after cargo test
+        run: |
+          cp target/iterate/genet-local target/debug/genet-local
+          cp target/iterate/genet-agent-local target/debug/genet-agent-local
+          cp target/iterate/genehub-host-local target/debug/genehub-host-local
+      # The web job reuses these instead of compiling the same runtime again.
       # Retention is short: they are only a same-run handoff.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -302,9 +311,12 @@ jobs:
       - name: Build daemon and agent bins
         if: needs.rust.result != 'success'
         run: |
-          cargo build -p genet-cli -p genet-agent -p genehub-host
+          cargo build --profile iterate -p genet-cli -p genet-agent -p genehub-host
           cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
           mkdir -p target/debug
+          cp target/iterate/genet-local target/debug/genet-local
+          cp target/iterate/genet-agent-local target/debug/genet-agent-local
+          cp target/iterate/genehub-host-local target/debug/genehub-host-local
           cp target/wasm32-wasip2/iterate/genehub_guest.wasm target/debug/genehub_guest.wasm
         working-directory: .
       - run: chmod +x target/debug/genet-local target/debug/genet-agent-local target/debug/genehub-host-local

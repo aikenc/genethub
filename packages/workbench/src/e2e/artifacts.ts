@@ -10,7 +10,9 @@ export function builtBinary(
 ): string {
   if (override?.trim()) return override;
   const suffix = process.platform === "win32" ? ".exe" : "";
-  const candidates = names.map((name) => path.join(repo, "target", "debug", `${name}${suffix}`));
+  const candidates = (["iterate", "debug", "release"] as const).flatMap((profile) =>
+    names.map((name) => path.join(repo, "target", profile, `${name}${suffix}`)),
+  );
   return candidates.find(existsSync) ?? candidates[0]!;
 }
 

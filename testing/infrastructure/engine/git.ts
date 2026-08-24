@@ -24,12 +24,14 @@ export function repoIdentity(repo: string): RepoIdentity {
 export function artifactIdentity(openRoot: string): ArtifactIdentity {
   const suffix = process.platform === "win32" ? ".exe" : "";
   const names = ["genet-local", "genet-dev", "genet-beta", "genet"];
-  for (const name of names) {
-    const candidate = path.join(openRoot, "target", "debug", `${name}${suffix}`);
-    if (!existsSync(candidate)) continue;
-    const digest = spawnSync("sha256sum", [candidate], { encoding: "utf8" });
-    const hash = (digest.stdout ?? "").split(/\s+/)[0] || null;
-    return { path: candidate, hash, kind: name };
+  for (const profile of ["iterate", "debug", "release"] as const) {
+    for (const name of names) {
+      const candidate = path.join(openRoot, "target", profile, `${name}${suffix}`);
+      if (!existsSync(candidate)) continue;
+      const digest = spawnSync("sha256sum", [candidate], { encoding: "utf8" });
+      const hash = (digest.stdout ?? "").split(/\s+/)[0] || null;
+      return { path: candidate, hash, kind: name };
+    }
   }
   return { path: null, hash: null, kind: "missing" };
 }

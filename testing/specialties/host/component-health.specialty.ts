@@ -48,7 +48,7 @@ defineSpecialty(
       guest = tryLocateGuestProbe(t.openRoot);
     }
     if (!host) {
-      build(t.openRoot, ["build", "-p", "genehub-host", "--bin", "genehub-host-local"]);
+      build(t.openRoot, ["build", "--profile", "iterate", "-p", "genehub-host", "--bin", "genehub-host-local"]);
       host = tryLocateHost(t.openRoot);
     }
     if (!host || !guest) {
