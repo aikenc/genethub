@@ -871,6 +871,7 @@ fn emit_part(
                 .to_string();
             if !text.is_empty() {
                 usage::record_first_token(&mut state.usage);
+                usage::record_visible_output(&mut state.usage, &text);
             }
             if part_type == "reasoning" {
                 TimelineItem::Reasoning { id: item_id, text }

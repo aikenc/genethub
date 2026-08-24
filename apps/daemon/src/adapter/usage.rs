@@ -43,29 +43,54 @@ pub fn record_first_token(usage: &mut Usage) {
     usage.first_token_at_ms = Some(now);
 }
 
+/// Counts visible output text as it streams past. This feeds only the output
+/// *rate* for providers that report no token totals; it never becomes a token
+/// count on the wire.
+pub fn record_visible_output(usage: &mut Usage, text: &str) {
+    usage.visible_output_chars = usage
+        .visible_output_chars
+        .saturating_add(text.chars().count() as u64);
+}
+
+/// The output rate in tokens per second, and whether it was estimated from
+/// visible text. Reported tokens give an exact rate; otherwise the visible
+/// text (chars/4) gives an estimate. `None` when nothing has streamed yet.
+fn output_rate(usage: &Usage, elapsed_ms: u64) -> Option<(f64, bool)> {
+    let elapsed = elapsed_ms.max(1) as f64 / 1000.0;
+    if usage.output_tokens > 0 {
+        return Some((usage.output_tokens as f64 / elapsed, false));
+    }
+    if usage.visible_output_chars > 0 {
+        let estimated_tokens = usage.visible_output_chars as f64 / 4.0;
+        return Some((estimated_tokens / elapsed, true));
+    }
+    None
+}
+
 /// Closes the output-rate window at end of turn: tokens produced divided by
-/// the streaming wall-clock. Only meaningful when tokens were actually seen.
+/// the streaming wall-clock. Reported tokens win; otherwise the visible text
+/// yields an estimate the footer marks with `~`.
 pub fn finalize_output_rate(usage: &mut Usage) {
     let Some(first) = usage.first_token_at_ms.take() else {
         return;
     };
-    let elapsed = now_ms().saturating_sub(first).max(1) as u64;
-    if usage.output_tokens > 0 {
-        usage.avg_output_rate_tps = Some(usage.output_tokens as f64 / (elapsed as f64 / 1000.0));
+    let elapsed = now_ms().saturating_sub(first).max(0) as u64;
+    if let Some((rate, estimated)) = output_rate(usage, elapsed) {
+        usage.avg_output_rate_tps = Some(rate);
+        usage.output_rate_estimated = estimated;
     }
 }
 
-/// The output rate right now: tokens reported so far over the streaming
-/// wall-clock since the first token. Returns a clone with the live rate filled
-/// in, leaving the tracked usage untouched so the final `finalize_output_rate`
-/// still measures the whole turn. `None` (field absent) when the provider has
-/// not reported any output tokens yet — we never invent a rate from nothing.
+/// The output rate right now, for the live footer. Returns a clone with the
+/// rate filled in, leaving the tracked usage untouched so the final
+/// `finalize_output_rate` still measures the whole turn.
 pub fn with_live_output_rate(usage: &Usage) -> Usage {
     let mut live = usage.clone();
     if let Some(first) = usage.first_token_at_ms {
-        let elapsed = now_ms().saturating_sub(first).max(1) as u64;
-        if usage.output_tokens > 0 {
-            live.avg_output_rate_tps = Some(usage.output_tokens as f64 / (elapsed as f64 / 1000.0));
+        let elapsed = now_ms().saturating_sub(first).max(0) as u64;
+        if let Some((rate, estimated)) = output_rate(usage, elapsed) {
+            live.avg_output_rate_tps = Some(rate);
+            live.output_rate_estimated = estimated;
         }
     }
     live
@@ -219,6 +244,10 @@ pub fn merge_progress(tracked: &mut Usage, incoming: &Usage) {
     }
     if incoming.avg_output_rate_tps.is_some() {
         tracked.avg_output_rate_tps = incoming.avg_output_rate_tps;
+        tracked.output_rate_estimated = incoming.output_rate_estimated;
+    }
+    if incoming.visible_output_chars > tracked.visible_output_chars {
+        tracked.visible_output_chars = incoming.visible_output_chars;
     }
     if incoming.compaction_count > tracked.compaction_count {
         tracked.compaction_count = incoming.compaction_count;
@@ -492,18 +521,46 @@ mod tests {
             (rate - 60.0).abs() < 5.0,
             "120 tokens over ~2s should be ~60 tok/s, got {rate}"
         );
+        assert!(!live.output_rate_estimated, "reported tokens are exact");
         // The tracked usage is left for finalize to close out.
         assert_eq!(usage.avg_output_rate_tps, None);
         assert!(usage.first_token_at_ms.is_some());
     }
 
     #[test]
-    fn live_output_rate_stays_absent_when_provider_reports_no_tokens() {
-        // Cursor ACP never reports output_tokens; without a real count there is
-        // no honest rate, so the field stays absent rather than fabricated.
+    fn live_output_rate_estimates_from_visible_text_when_no_tokens_reported() {
+        // Cursor ACP never reports output_tokens; the rate falls back to the
+        // visible text (chars/4) and is flagged so the footer shows `~`.
+        let mut usage = Usage::default();
+        usage.first_token_at_ms = Some(now_ms() - 2_000);
+        record_visible_output(&mut usage, &"a".repeat(480)); // 480 chars ≈ 120 tokens
+        let live = with_live_output_rate(&usage);
+        let rate = live.avg_output_rate_tps.expect("estimated rate");
+        assert!(
+            (rate - 60.0).abs() < 5.0,
+            "480 chars ≈ 120 tokens over ~2s should be ~60 tok/s, got {rate}"
+        );
+        assert!(live.output_rate_estimated, "estimate must be flagged");
+    }
+
+    #[test]
+    fn live_output_rate_stays_absent_when_nothing_streamed() {
         let mut usage = Usage::default();
         usage.first_token_at_ms = Some(now_ms() - 2_000);
         let live = with_live_output_rate(&usage);
         assert_eq!(live.avg_output_rate_tps, None);
+    }
+
+    #[test]
+    fn finalize_prefers_reported_tokens_over_visible_text() {
+        let mut usage = Usage::default();
+        usage.output_tokens = 200;
+        usage.first_token_at_ms = Some(now_ms() - 2_000);
+        record_visible_output(&mut usage, & "a".repeat(40)); // would give a lower estimate
+        finalize_output_rate(&mut usage);
+        let rate = usage.avg_output_rate_tps.expect("rate");
+        assert!((rate - 100.0).abs() < 8.0, "reported tokens win, got {rate}");
+        assert!(!usage.output_rate_estimated);
+        assert!(usage.first_token_at_ms.is_none(), "window closed");
     }
 }

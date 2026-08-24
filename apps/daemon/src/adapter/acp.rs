@@ -762,11 +762,13 @@ impl AgentSession for AcpSession {
                                 let tool_out = usage.tool_output_tokens;
                                 let avg_ttft = usage.avg_ttft_ms;
                                 let first_token = usage.first_token_at_ms;
+                                let visible_chars = usage.visible_output_chars;
                                 usage = parsed;
                                 usage.llm_rounds = rounds;
                                 usage.tool_output_tokens = tool_out;
                                 usage.avg_ttft_ms = avg_ttft;
                                 usage.first_token_at_ms = first_token;
+                                usage.visible_output_chars = visible_chars;
                             }
                         }
                         usage::finalize_output_rate(&mut usage);
@@ -1770,6 +1772,7 @@ fn translate_update(
             }
             if !delta.is_empty() {
                 usage::record_first_token(&mut state.usage);
+                usage::record_visible_output(&mut state.usage, &delta);
             }
             match state.text_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
@@ -1797,6 +1800,7 @@ fn translate_update(
             }
             if !delta.is_empty() {
                 usage::record_first_token(&mut state.usage);
+                usage::record_visible_output(&mut state.usage, &delta);
             }
             match state.reasoning_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
@@ -1887,11 +1891,13 @@ fn translate_update(
                     let tool_out = state.usage.tool_output_tokens;
                     let avg_ttft = state.usage.avg_ttft_ms;
                     let first_token = state.usage.first_token_at_ms;
+                    let visible_chars = state.usage.visible_output_chars;
                     state.usage = parsed;
                     state.usage.llm_rounds = rounds;
                     state.usage.tool_output_tokens = tool_out;
                     state.usage.avg_ttft_ms = avg_ttft;
                     state.usage.first_token_at_ms = first_token;
+                    state.usage.visible_output_chars = visible_chars;
                     usage::emit_progress(events, &turn_id, &state.usage);
                 }
             }

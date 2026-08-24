@@ -143,6 +143,7 @@ describe("the session timeline", () => {
           llmRounds: 1,
           toolOutputTokens: 20,
           compactionCount: 0,
+          outputRateEstimated: false,
         },
       },
     ]);

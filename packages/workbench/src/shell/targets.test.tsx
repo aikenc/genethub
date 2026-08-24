@@ -492,6 +492,7 @@ describe("switching from the sidebar", () => {
             llmRounds: 1,
             toolOutputTokens: 0,
             compactionCount: 0,
+            outputRateEstimated: false,
           },
           toolCalls: 0,
           forkCheckpoint: "native-only",

@@ -1521,6 +1521,7 @@ fn translate_stream_event(
                 return;
             };
             usage::record_first_token(&mut state.usage);
+            usage::record_visible_output(&mut state.usage, text);
             let Some((item_id, _, accumulated)) = state.open_blocks.get_mut(&index) else {
                 return;
             };

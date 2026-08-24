@@ -1056,6 +1056,7 @@ const EMPTY_USAGE: Usage = {
   llmRounds: 0,
   toolOutputTokens: 0,
   compactionCount: 0,
+  outputRateEstimated: false,
 };
 
 function uncachedTokens(usage: Usage): number {
@@ -1197,7 +1198,17 @@ function TurnFooter({
             <span data-testid="usage-ttft">TTFT {formatDuration(usage.avgTtftMs)}</span>
           ) : null}
           {usage?.avgOutputRateTps != null ? (
-            <span data-testid="usage-rate">{usage.avgOutputRateTps.toFixed(1)} tok/s</span>
+            <span
+              data-testid="usage-rate"
+              title={
+                usage.outputRateEstimated
+                  ? "按可见输出文本估算（chars/4），该 Agent 未上报 output token"
+                  : "按 Provider 上报的 output token 统计"
+              }
+            >
+              {usage.outputRateEstimated ? "~" : ""}
+              {usage.avgOutputRateTps.toFixed(1)} tok/s
+            </span>
           ) : null}
         </div>
       ) : null}

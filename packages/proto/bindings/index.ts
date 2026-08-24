@@ -1314,7 +1314,14 @@ avgTtftMs?: number,
  * Mean output tokens per second while the turn was streaming. `None`
  * when no tokens were observed.
  */
-avgOutputRateTps?: number, costUsd?: number, };
+avgOutputRateTps?: number, 
+/**
+ * True when `avg_output_rate_tps` was estimated from the visible output
+ * text (chars/4) because the provider reported no output tokens. The
+ * footer prefixes such a rate with `~` so it is never mistaken for a
+ * provider-reported figure.
+ */
+outputRateEstimated: boolean, costUsd?: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 

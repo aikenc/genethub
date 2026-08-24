@@ -46,6 +46,13 @@ pub struct Usage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub avg_output_rate_tps: Option<f64>,
+    /// True when `avg_output_rate_tps` was estimated from the visible output
+    /// text (chars/4) because the provider reported no output tokens. The
+    /// footer prefixes such a rate with `~` so it is never mistaken for a
+    /// provider-reported figure.
+    #[serde(default)]
+    #[ts(type = "boolean")]
+    pub output_rate_estimated: bool,
     #[ts(optional)]
     pub cost_usd: Option<f64>,
     /// Timing scratch, not part of the wire contract: when the in-flight
@@ -56,6 +63,11 @@ pub struct Usage {
     #[serde(skip)]
     #[ts(skip)]
     pub first_token_at_ms: Option<i64>,
+    /// Visible output characters seen so far, used only to estimate the output
+    /// rate for providers that report no token totals. Never serialized.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub visible_output_chars: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

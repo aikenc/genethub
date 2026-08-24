@@ -1881,9 +1881,15 @@ async fn translate(
             if let Some(usage) = usage_in(params) {
                 let rounds = state.usage.llm_rounds;
                 let tool_out = state.usage.tool_output_tokens;
+                let avg_ttft = state.usage.avg_ttft_ms;
+                let first_token = state.usage.first_token_at_ms;
+                let visible_chars = state.usage.visible_output_chars;
                 state.usage = usage;
                 state.usage.llm_rounds = rounds;
                 state.usage.tool_output_tokens = tool_out;
+                state.usage.avg_ttft_ms = avg_ttft;
+                state.usage.first_token_at_ms = first_token;
+                state.usage.visible_output_chars = visible_chars;
                 if let Some(turn_id) = state.id.clone() {
                     usage::emit_progress(events, &turn_id, &state.usage);
                 }
@@ -2056,6 +2062,7 @@ fn stream(
         return;
     }
     usage::record_first_token(&mut state.usage);
+    usage::record_visible_output(&mut state.usage, &delta);
     if state.open.contains(item_id) {
         let _ = events.send(SessionEvent::ItemDelta {
             turn_id,

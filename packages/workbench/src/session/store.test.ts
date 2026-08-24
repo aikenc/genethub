@@ -459,6 +459,7 @@ describe("live session status in the sidebar", () => {
           llmRounds: 1,
           toolOutputTokens: 0,
           compactionCount: 0,
+          outputRateEstimated: false,
         },
       },
     });
