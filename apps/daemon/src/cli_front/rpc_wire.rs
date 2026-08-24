@@ -103,7 +103,7 @@ impl Rpc {
         })?;
         let endpoint_file: EndpointFile = serde_json::from_str(&raw)
             .map_err(|error| ConnectError::Unavailable(format!("parse endpoint.json: {error}")))?;
-        let admission = crate::transport::local::websocket_admission(
+        let admission = genet_frontdoor::proof::websocket_admission(
             endpoint_file.port,
             &endpoint_file.token,
             endpoint_file.pid,
@@ -697,7 +697,7 @@ where
 
 fn verify_local_identity(
     hello: &HelloResult,
-    admission: &crate::transport::local::LocalWebSocketAdmission,
+    admission: &genet_frontdoor::proof::LocalWebSocketAdmission,
 ) -> Result<(), ConnectError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -788,16 +788,13 @@ mod tests {
     use super::*;
     use genehub_proto::{ErrorCode, TransportKind};
 
-    fn local_contract() -> (
-        crate::transport::local::LocalWebSocketAdmission,
-        HelloResult,
-    ) {
+    fn local_contract() -> (genet_frontdoor::proof::LocalWebSocketAdmission, HelloResult) {
         let expires_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
             + 10;
-        let admission = crate::transport::local::LocalWebSocketAdmission {
+        let admission = genet_frontdoor::proof::LocalWebSocketAdmission {
             url: "ws://127.0.0.1:1/ws".into(),
             server_proof: "a".repeat(64),
             challenge: "b".repeat(64),

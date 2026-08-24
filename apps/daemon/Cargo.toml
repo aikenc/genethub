@@ -14,6 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 genehub-proto = { path = "../../packages/proto" }
+genet-frontdoor = { path = "../../packages/frontdoor" }
 genet-native = { path = "../../packages/native" }
 
 anyhow.workspace = true

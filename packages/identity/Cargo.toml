@@ -1,0 +1,10 @@
+[package]
+name = "genehub-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Which protocol generation a GeneHub build speaks"
+
+# Deliberately dependency-free. Everything that needs these numbers gets to
+# have them without also linking the 4k-line session schema: that is the whole
+# reason this crate exists.

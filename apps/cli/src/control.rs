@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use genet_daemon::channel;
-use genet_daemon::config::Paths;
-use genet_daemon::lifecycle;
+use genet_frontdoor::channel;
+use genet_frontdoor::lifecycle;
+use genet_frontdoor::Paths;
 
 use crate::{fail, ok, EXIT_FAILED, EXIT_UNREACHABLE};
 
@@ -43,8 +43,8 @@ struct Health {
 }
 
 impl Endpoint {
-    fn websocket_admission(&self) -> genet_daemon::transport::local::LocalWebSocketAdmission {
-        genet_daemon::transport::local::websocket_admission(
+    fn websocket_admission(&self) -> genet_frontdoor::proof::LocalWebSocketAdmission {
+        genet_frontdoor::proof::websocket_admission(
             self.port,
             &self.token,
             self.pid,
@@ -309,7 +309,7 @@ fn start_log(paths: &Paths) -> std::io::Result<(std::fs::File, std::fs::File)> {
         options.mode(0o600);
     }
     let file = options.open(&path)?;
-    genet_daemon::config::restrict_to_owner(&path)
+    genet_frontdoor::perms::restrict_to_owner(&path)
         .map_err(|error| std::io::Error::other(format!("restricting startup log: {error:#}")))?;
     Ok((file.try_clone()?, file))
 }
@@ -452,7 +452,7 @@ fn health(endpoint: &Endpoint) -> bool {
     let Ok(found) = serde_json::from_slice::<Health>(body) else {
         return false;
     };
-    let expected = genet_daemon::transport::local::health_proof(
+    let expected = genet_frontdoor::proof::health_proof(
         &endpoint.token,
         &challenge,
         endpoint.pid,
@@ -462,7 +462,7 @@ fn health(endpoint: &Endpoint) -> bool {
     found.pid == endpoint.pid
         && found.machine_id == endpoint.machine_id
         && found.fingerprint == endpoint.fingerprint
-        && genet_daemon::transport::auth::token_matches(&expected, &found.proof)
+        && genet_frontdoor::proof::token_matches(&expected, &found.proof)
 }
 
 fn health_challenge() -> String {
@@ -493,7 +493,7 @@ fn http_ok_body(answer: &[u8]) -> Option<&[u8]> {
 fn ask_to_stop(endpoint: &Endpoint) {
     let challenge = health_challenge();
     let expires_at = unix_seconds().saturating_add(15);
-    let proof = genet_daemon::transport::local::shutdown_proof(
+    let proof = genet_frontdoor::proof::shutdown_proof(
         &endpoint.token,
         &challenge,
         endpoint.pid,

@@ -28,7 +28,8 @@
 ```
 apps/daemon/src/
 ├── lib.rs / run.rs   guest 常驻入口、启动与 reload/shutdown outcome
-├── config.rs         配置与数据目录
+├── config.rs         guest 读的 `Config`；磁盘布局与权限加固来自 `packages/frontdoor`
+│                     （原生前门要创建并检查同一批文件，见 cli-thin-forwarder.md §6）
 ├── transport/
 │   ├── local.rs      本地 HTTP + WebSocket（127.0.0.1，回环）
 │   ├── fabric.rs     endpoint-neutral /fabric/v2 出站 uplink

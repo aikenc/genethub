@@ -65,7 +65,7 @@ relay 只认 Fabric 帧头与 opaque endpoint/route admission，不 parse E2EE p
 
 WASM 重构的交付北星是：**不牺牲产品能力、可靠性和安全性，滚动 90 天内至少 95% 的产品问题与新特性只通过 Live Release（Client Component + Web）完成端到端更新。stable 在线用户分钟级收敛；beta/dev 高频版本秒级收敛；用户不确认、不下载安装、不重启，浏览器 UI 变化最多只需刷新。**
 
-95% 按产品 change set 计，不按 commit 或代码行数计。纯文档/治理不进分母；同时更新 Client Component 与浏览器、却让 desktop WebView 继续旧能力的 change set 不进分子。修改 WIT、host/Wasmtime、CLI 生命周期、desktop OS 壳、安装器或签名根时必须走 App Release，目标占比不超过 5%。CI 要保存滚动 90 天的机械分类与证据，未建立报表前不得声称达标。
+95% 按产品 change set 计，不按 commit 或代码行数计。纯文档/治理不进分母；同时更新 Client Component 与浏览器、却让 desktop WebView 继续旧能力的 change set 不进分子。修改 WIT、host/Wasmtime、CLI 生命周期、desktop OS 壳、安装器或签名根时必须走 App Release，目标占比不超过 5%。Windows 与 macOS runner 只在这一类变更上启动，与 beta 还是 stable 无关；被编进原生二进制却动不了 ABI digest 的改动（会话协议、`packages/http`、daemon 库）只在 Linux 上过一次编译兜底。wasm / Web 在 Linux 开发机上构建并上传。dev 只编本机 App，不上跨平台 CI。未建立 90 天报表前不得声称达标。
 
 | Release 类型 | 制品边界 | P95 目标（从 validated immutable candidate 被批准推广开始） |
 |---|---|---|
@@ -288,7 +288,10 @@ apps/guest       ← wasm32-wasip2 Component：daemon/agent 双入口
 apps/host        ← 原生 Wasmtime/WASI 与 typed OS/RTC 连接层
 apps/relay       ← Node：转发层。无数据库、无业务、可自建
 apps/desktop     ← 仅 Windows/macOS 的 Tauri 2 壳；复用 Web 工作台
-packages/native  ← 跨 CLI/host 的原生进程与隔离机制
+packages/native  ← 跨 CLI/host 的原生进程与隔离机制，隔离报告类型的定义处
+packages/frontdoor ← 原生前门自己的词汇：构建身份、磁盘布局与权限、daemon 生命周期、
+                     loopback 控制面证明、答复信封形状、全局选择器解析
+packages/identity ← 协议世代常量（webProtocol / dataPlane），零依赖
 packages/wasi-guest ← guest 的非阻塞 WASI/process/TLS/stdio 桥
 packages/workbench     ← 工作台前端（四个宿主同一份产物）
 packages/proto   ← 会话协议的唯一定义处，生成 TS 类型与 Rust 结构
@@ -297,6 +300,8 @@ testing/         ← 跨部件旅程测试（daemon + agent + mock 模型）
 ```
 
 `packages/proto` 单独成包是刻意的：协议只能有一处定义，否则前后端各写一遍，第三次改字段时必然对不上。
+
+`packages/frontdoor` 与 `packages/identity` 单独成包也是刻意的，理由相反：原生前门和 host 只需要极少几样东西，为此链进整份会话 schema 会让每一次会话协议改动都长得像 App 改动。前门要构建身份、数据目录、锁文件、控制面证明和信封形状；host 只要 `webProtocol` 一个数字和一份隔离报告翻译。把这些拆出来之后，`apps/cli` 不再链 `genet-daemon`，`apps/host` 不再链 `genehub-proto`——改 `apps/daemon` 或 `packages/proto` 时两个原生二进制都不重编。
 
 ---
 

@@ -22,23 +22,44 @@ test("guest sources are not part of the host fingerprint", () => {
   assert.notEqual(host, withGuest);
 });
 
-test("daemon sources are part of the cli fingerprint, not the host", () => {
-  const hostFiles = TREES.host.flatMap((spec) => listTree(REPO, spec));
-  assert.equal(
-    hostFiles.some((file) => file.startsWith("apps/daemon/")),
-    false,
-    "host tree must not list the daemon crate",
-  );
-  const cliFiles = TREES.cli.flatMap((spec) => listTree(REPO, spec));
-  assert.equal(
-    cliFiles.some((file) => file.startsWith("apps/daemon/")),
-    true,
-    "cli tree must list the daemon crate it links",
-  );
-  const cli = fingerprint(REPO, TREES.cli);
-  const cliWithoutDaemon = fingerprint(
-    REPO,
-    TREES.cli.filter((spec) => spec !== "apps/daemon/"),
-  );
-  assert.notEqual(cli, cliWithoutDaemon);
+test("the component's own sources reach neither native fingerprint", () => {
+  // The daemon and the session schema are inside `genehub_guest.wasm`, which
+  // the shell loads at run time. A cached host or CLI binary built before they
+  // changed is still exactly the binary this tree produces, so expiring it
+  // would be a rebuild that proves nothing. This is the property the crate
+  // split exists to make true; asserting it is how it stays true.
+  const files = {
+    host: TREES.host.flatMap((spec) => listTree(REPO, spec)),
+    cli: TREES.cli.flatMap((spec) => listTree(REPO, spec)),
+  };
+  for (const [binary, listed] of Object.entries(files)) {
+    for (const component of ["apps/daemon/", "packages/proto/", "apps/agent/", "apps/guest/"]) {
+      assert.equal(
+        listed.some((file) => file.startsWith(component)),
+        false,
+        `${binary} tree must not list ${component}: it is loaded, not linked`,
+      );
+    }
+  }
+});
+
+test("what is linked into each binary does reach its fingerprint", () => {
+  // The other half of the promise: a cache hit must mean the sources that
+  // produce the binary are unchanged, so everything compiled into it is listed.
+  const linked = {
+    host: ["apps/host/", "packages/native/", "packages/identity/"],
+    cli: ["apps/cli/", "packages/frontdoor/", "packages/native/", "packages/http/"],
+  };
+  for (const [binary, trees] of Object.entries(linked)) {
+    const listed = TREES[binary].flatMap((spec) => listTree(REPO, spec));
+    for (const crate of trees) {
+      assert.ok(
+        listed.some((file) => file.startsWith(crate)),
+        `${binary} links ${crate}, so a cached ${binary} must expire with it`,
+      );
+    }
+    // Lockfile too: a dependency bump changes the binary without touching a
+    // single first-party source file.
+    assert.ok(listed.includes("Cargo.lock"), `${binary} must expire with the lockfile`);
+  }
 });

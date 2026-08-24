@@ -25,6 +25,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use super::stdio::write_json_line;
+use super::usage;
 use super::{
     find_executable_in, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
@@ -534,6 +535,7 @@ struct TurnState {
     /// held here and extended until something else interrupts it.
     text_item: Option<String>,
     reasoning_item: Option<String>,
+    usage: Usage,
 }
 
 impl TurnState {
@@ -720,6 +722,9 @@ impl AgentSession for AcpSession {
                 id: Some(turn_id.clone()),
                 ..TurnState::default()
             };
+            // The first round's clock starts with the request, not the first
+            // chunk, so TTFT includes the model's thinking-before-typing.
+            usage::record_round_start(&mut turn.usage);
         }
         let _ = self.events.send(SessionEvent::TurnStarted {
             turn_id: turn_id.clone(),
@@ -773,11 +778,27 @@ impl AgentSession for AcpSession {
                             message: "The agent declined this request.".into(),
                         },
                     },
-                    _ => SessionEvent::TurnCompleted {
-                        turn_id: completed_turn,
-                        usage: Usage::default(),
-                        fork_checkpoint: None,
-                    },
+                    _ => {
+                        let mut usage = state.usage.clone();
+                        if let Some(reported) = value.get("usage") {
+                            let parsed = usage::parse_usage(reported);
+                            if parsed.input_tokens > 0 || parsed.output_tokens > 0 {
+                                let rounds = usage.llm_rounds;
+                                let tool_out = usage.tool_output_tokens;
+                                let previous = usage.clone();
+                                usage = parsed;
+                                usage.llm_rounds = rounds;
+                                usage.tool_output_tokens = tool_out;
+                                usage::preserve_timing(&mut usage, &previous);
+                            }
+                        }
+                        usage::finalize_output_rate(&mut usage);
+                        SessionEvent::TurnCompleted {
+                            turn_id: completed_turn,
+                            usage,
+                            fork_checkpoint: None,
+                        }
+                    }
                 },
                 Ok(Err(message)) => SessionEvent::TurnFailed {
                     turn_id: completed_turn,
@@ -1915,9 +1936,17 @@ fn translate_update(
     match kind {
         "agent_message_chunk" => {
             let delta = text_of(update);
+            if state.text_item.is_none() && state.reasoning_item.is_none() {
+                state.usage.llm_rounds += 1;
+                usage::record_round_start(&mut state.usage);
+            }
+            if !delta.is_empty() {
+                usage::record_first_token(&mut state.usage);
+                usage::record_visible_output(&mut state.usage, &delta);
+            }
             match state.text_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     item_id: id,
                     delta: ItemDelta::Text { delta },
                 }),
@@ -1926,17 +1955,26 @@ fn translate_update(
                     state.text_item = Some(id.clone());
                     state.reasoning_item = None;
                     emit(SessionEvent::Item {
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         item: TimelineItem::AssistantMessage { id, text: delta },
                     });
                 }
             }
+            usage::emit_progress(events, &turn_id, &state.usage);
         }
         "agent_thought_chunk" => {
             let delta = text_of(update);
+            if state.text_item.is_none() && state.reasoning_item.is_none() {
+                state.usage.llm_rounds += 1;
+                usage::record_round_start(&mut state.usage);
+            }
+            if !delta.is_empty() {
+                usage::record_first_token(&mut state.usage);
+                usage::record_visible_output(&mut state.usage, &delta);
+            }
             match state.reasoning_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     item_id: id,
                     delta: ItemDelta::Text { delta },
                 }),
@@ -1945,11 +1983,12 @@ fn translate_update(
                     state.reasoning_item = Some(id.clone());
                     state.text_item = None;
                     emit(SessionEvent::Item {
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         item: TimelineItem::Reasoning { id, text: delta },
                     });
                 }
             }
+            usage::emit_progress(events, &turn_id, &state.usage);
         }
         "tool_call" | "tool_call_update" => {
             // Any tool activity ends the current text run, so the next chunk
@@ -2014,7 +2053,21 @@ fn translate_update(
                 });
             }
         }
-        _ => {}
+        _ => {
+            if let Some(reported) = update.get("usage").or_else(|| update.get("tokenUsage")) {
+                let parsed = usage::parse_usage(reported);
+                if parsed.input_tokens > 0 || parsed.output_tokens > 0 {
+                    let rounds = state.usage.llm_rounds;
+                    let tool_out = state.usage.tool_output_tokens;
+                    let previous = state.usage.clone();
+                    state.usage = parsed;
+                    state.usage.llm_rounds = rounds;
+                    state.usage.tool_output_tokens = tool_out;
+                    usage::preserve_timing(&mut state.usage, &previous);
+                    usage::emit_progress(events, &turn_id, &state.usage);
+                }
+            }
+        }
     }
 }
 
@@ -2049,6 +2102,16 @@ fn detail_from_update(update: &Value) -> ToolCallDetail {
                 .join("\n")
         })
         .unwrap_or_default();
+    let content = if content.is_empty() {
+        update
+            .get("rawOutput")
+            .and_then(|value| value.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    } else {
+        content
+    };
 
     match kind {
         "execute" => ToolCallDetail::Shell {
@@ -2085,6 +2148,11 @@ fn detail_from_update(update: &Value) -> ToolCallDetail {
                 .to_string(),
             summary: content,
         },
+        _ if !content.is_empty() => ToolCallDetail::Read {
+            path,
+            content,
+            truncated: false,
+        },
         _ => ToolCallDetail::Unknown {
             raw: update.clone(),
         },
@@ -2107,6 +2175,9 @@ mod tests {
     fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
+            if matches!(event, SessionEvent::TurnProgress { .. }) {
+                continue;
+            }
             out.push(event);
         }
         out
@@ -2290,6 +2361,24 @@ mod tests {
     fn an_unrecognised_tool_kind_still_renders_through_unknown() {
         let detail = detail_from_update(&json!({"kind": "quantum", "title": "?"}));
         assert!(matches!(detail, ToolCallDetail::Unknown { .. }));
+    }
+
+    #[test]
+    fn cursor_raw_output_becomes_readable_tool_content() {
+        let detail = detail_from_update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "status": "completed",
+            "toolCallId": "c1",
+            "rawOutput": {"content": "skill text"}
+        }));
+        assert_eq!(
+            detail,
+            ToolCallDetail::Read {
+                path: String::new(),
+                content: "skill text".into(),
+                truncated: false
+            }
+        );
     }
 
     #[test]

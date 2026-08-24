@@ -1240,7 +1240,7 @@ dependencies = [
  "bytes",
  "ed25519-dalek",
  "fs2",
- "genehub-proto",
+ "genehub-identity",
  "genet-native",
  "http",
  "http-body-util",
@@ -1263,10 +1263,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "genehub-identity"
+version = "0.0.0"
+
+[[package]]
 name = "genehub-proto"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "genehub-identity",
  "serde",
  "serde_json",
  "ts-rs",
@@ -1328,7 +1333,9 @@ dependencies = [
  "futures-util",
  "genehub-testing",
  "genet-daemon",
+ "genet-frontdoor",
  "genet-http",
+ "genet-native",
  "serde",
  "serde_json",
  "tempfile",
@@ -1351,6 +1358,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "genehub-proto",
+ "genet-frontdoor",
  "genet-http",
  "genet-native",
  "genet-wasi",
@@ -1377,6 +1385,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "genet-frontdoor"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "fs2",
+ "genet-wasi",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "genet-http"
 version = "0.0.0"
 dependencies = [
@@ -1397,7 +1422,6 @@ name = "genet-native"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "genehub-proto",
  "landlock",
  "libc",
 ]

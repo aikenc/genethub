@@ -125,7 +125,9 @@ impl AppState {
         let homes = WorkspaceHomes::default();
         let store = Store::new(homes.clone());
         let diagnostics = Arc::new(crate::diagnostics::Diagnostics::new());
-        let skills_dir = paths.builtin_skills_dir();
+        // The front door owns the shared data layout; the daemon owns the
+        // product Skill subtree and the exact CLI binding exposed to Agents.
+        let skills_dir = crate::skills::builtin_skills_dir(&paths.root);
         let _ = crate::skills::materialize(&skills_dir);
         let front_door_cli = crate::skills::front_door_cli_from_env();
         if front_door_cli.is_none() {

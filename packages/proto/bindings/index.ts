@@ -783,7 +783,7 @@ export type SessionEvent = { "type": "turnStarted", turnId: string,
  * Zero is accepted from adapters; the session boundary replaces it
  * with its own wall clock before the event reaches a client.
  */
-startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "runtimeAxisChanged", axisId: string, valueId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
+startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnProgress", turnId: string, usage: Usage, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "runtimeAxisChanged", axisId: string, valueId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
 
 /**
  * One lightweight external conversation returned by the discovery pass.
@@ -1286,7 +1286,42 @@ downloadUrl?: string,
  */
 problem?: string, };
 
-export type Usage = { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number, costUsd?: number, };
+export type Usage = { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number, 
+/**
+ * Completed LLM calls in this GeneHub turn. One completion that fires
+ * several tools in parallel is still one round; those tools are not
+ * extra rounds.
+ */
+llmRounds: number, 
+/**
+ * Estimated tokens in tool *results* (chars/4). This is not
+ * `input - cached`: uncached input also contains the prompt, history
+ * and tool schemas, so the two numbers are compared, never equated.
+ */
+toolOutputTokens: number, 
+/**
+ * Context compactions that happened during this turn. Counted from the
+ * timeline markers the agent emitted, so it is exact even when the
+ * provider reports no token totals.
+ */
+compactionCount: number, 
+/**
+ * Mean time from one LLM round's request to its first token, across the
+ * rounds of this turn. `None` when no adapter timing was captured.
+ */
+avgTtftMs?: number, 
+/**
+ * Mean output tokens per second while the turn was streaming. `None`
+ * when no tokens were observed.
+ */
+avgOutputRateTps?: number, 
+/**
+ * True when `avg_output_rate_tps` was estimated from the visible output
+ * text (chars/4) because the provider reported no output tokens. The
+ * footer prefixes such a rate with `~` so it is never mistaken for a
+ * provider-reported figure.
+ */
+outputRateEstimated: boolean, costUsd?: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 

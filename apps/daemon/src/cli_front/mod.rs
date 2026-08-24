@@ -31,10 +31,10 @@ use tokio::sync::mpsc;
 
 use crate::state::Shared;
 
-pub const EXIT_OK: i32 = 0;
-pub const EXIT_INVALID_ARGS: i32 = 2;
-pub const EXIT_UNREACHABLE: i32 = 3;
-pub const EXIT_FAILED: i32 = 4;
+// Frozen for scripts and agents, and shared with the native front door: a verb
+// that runs here and a verb that stays on the CLI must not disagree about what
+// exit 3 means (`genethub-cli.md` §3.2).
+pub use genet_frontdoor::envelope::{EXIT_FAILED, EXIT_INVALID_ARGS, EXIT_OK, EXIT_UNREACHABLE};
 
 tokio::task_local! {
     static LOCAL_STATE: Shared;

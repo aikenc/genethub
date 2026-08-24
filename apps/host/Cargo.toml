@@ -14,7 +14,11 @@ path = "src/main.rs"
 sha2 = "0.10"
 
 [dependencies]
-genehub-proto = { path = "../../packages/proto" }
+# Not `genehub-proto`. The shell states which protocol generation the component
+# it packs speaks, and translates the isolation report it probed; it never reads
+# a session message. Linking the schema for that put every session-protocol edit
+# on the Windows and macOS build matrix (`docs/cli-thin-forwarder.md` §6).
+genehub-identity = { path = "../../packages/identity" }
 genet-native = { path = "../../packages/native" }
 
 anyhow.workspace = true

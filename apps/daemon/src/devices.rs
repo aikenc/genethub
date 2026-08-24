@@ -24,6 +24,12 @@ use tokio::sync::broadcast;
 use crate::authz::GrantSet;
 use crate::channel_auth::{self, SessionKey};
 
+// One generator for every secret and nonce in the product, front door included:
+// device secrets, RTC capabilities and handshake nonces all have to come out of
+// the same CSPRNG, and a second implementation is how one of them silently
+// becomes weaker than the rest.
+pub use genet_frontdoor::proof::random_token;
+
 /// How long an invite is worth anything. Short because it is the one moment
 /// this machine will talk to a stranger.
 const INVITE_LIFETIME_MINUTES: i64 = 15;
@@ -399,14 +405,6 @@ pub fn rendezvous_id(machine_id: &str, machine_secret: &str) -> String {
         .take(16)
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-pub fn random_token() -> String {
-    format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
 }
 
 #[cfg(test)]

@@ -212,10 +212,9 @@ mod tests {
     }
 
     #[test]
-    fn protocol_identity_is_camel_case_and_independent_of_the_carrier() {
-        assert_eq!(WEB_PROTOCOL_VERSION, 3);
-        assert_eq!(DATA_PLANE_VERSION, 3);
-        assert_eq!(PROTOCOL_IDENTITY_METHOD, "protocol.identity");
+    fn protocol_identity_is_camel_case_on_the_wire() {
+        // The numbers themselves are pinned in `genehub-identity`, which owns
+        // them. What this crate owns is the shape they travel in.
         let encoded = serde_json::to_value(ProtocolIdentity {
             web_protocol: WEB_PROTOCOL_VERSION,
         })

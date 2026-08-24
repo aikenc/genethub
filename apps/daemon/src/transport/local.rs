@@ -15,13 +15,18 @@ use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use genehub_proto::ServerFrame;
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use tokio::sync::{broadcast, mpsc};
 
+// Minted and checked in the front door, because the other end of every one of
+// these is the native `genet` binary: the two sides have to agree byte for byte
+// about what a proof is, and a copy on each side is how they stop agreeing.
+use genet_frontdoor::proof::{
+    cli_proof, health_proof, shutdown_proof, token_matches, unix_seconds, valid_control_challenge,
+    websocket_proof, websocket_server_proof, ADMISSION_LIFETIME_SECS,
+};
+
 use super::admission::Admission;
-use super::auth;
 use crate::dataplane::{endpoint, handshake};
 use crate::pty::PtyMessage;
 use crate::router;
@@ -30,7 +35,6 @@ use crate::state::Shared;
 const MAX_WS_MESSAGE_BYTES: usize = genehub_proto::MAX_DATA_FRAME_BYTES;
 const WS_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const WS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const WS_ADMISSION_LIFETIME_SECS: u64 = 15;
 const MAX_USED_CONTROL_ADMISSIONS: usize = 1024;
 
 pub struct Listener {
@@ -169,172 +173,6 @@ async fn health(
         .into_response()
 }
 
-/// Proof that a health response came from the daemon which owns endpoint.json.
-///
-/// The endpoint bearer never leaves the machine-private file. A fresh public
-/// challenge prevents a stale response from being replayed after the daemon's
-/// pid or port has been reused by another process.
-pub fn health_proof(
-    token: &str,
-    challenge: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-) -> String {
-    control_proof(token, b"health", challenge, pid, machine_id, fingerprint)
-}
-
-/// One-use proof for the destructive loopback shutdown action.
-pub fn shutdown_proof(
-    token: &str,
-    challenge: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-    expires_at: u64,
-) -> String {
-    expiring_control_proof(
-        token,
-        b"shutdown",
-        challenge,
-        pid,
-        machine_id,
-        fingerprint,
-        expires_at,
-    )
-}
-
-/// One-use proof for forwarding a native CLI invocation into this daemon.
-pub fn cli_proof(
-    token: &str,
-    challenge: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-    expires_at: u64,
-) -> String {
-    expiring_control_proof(
-        token,
-        b"cli",
-        challenge,
-        pid,
-        machine_id,
-        fingerprint,
-        expires_at,
-    )
-}
-
-/// One-use, short-lived admission for opening the privileged loopback WS.
-pub fn websocket_proof(
-    token: &str,
-    challenge: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-    expires_at: u64,
-) -> String {
-    expiring_control_proof(
-        token,
-        b"websocket",
-        challenge,
-        pid,
-        machine_id,
-        fingerprint,
-        expires_at,
-    )
-}
-
-/// The listener's half of loopback mutual authentication. This value is
-/// returned out-of-band by the owner-only CLI/Tauri control path and is never
-/// placed in the WebSocket URL, so a process that steals the port cannot forge
-/// Hello merely by accepting the upgrade.
-pub fn websocket_server_proof(
-    token: &str,
-    challenge: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-    expires_at: u64,
-) -> String {
-    expiring_control_proof(
-        token,
-        b"websocket-server",
-        challenge,
-        pid,
-        machine_id,
-        fingerprint,
-        expires_at,
-    )
-}
-
-fn expiring_control_proof(
-    token: &str,
-    action: &[u8],
-    challenge: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-    expires_at: u64,
-) -> String {
-    let mut mac = control_mac(token, action, challenge, pid, machine_id, fingerprint);
-    let expiry = expires_at.to_be_bytes();
-    mac.update(&(expiry.len() as u64).to_be_bytes());
-    mac.update(&expiry);
-    mac.finalize()
-        .into_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn control_proof(
-    token: &str,
-    action: &[u8],
-    challenge: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-) -> String {
-    let mac = control_mac(token, action, challenge, pid, machine_id, fingerprint);
-    mac.finalize()
-        .into_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn control_mac(
-    token: &str,
-    action: &[u8],
-    challenge: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-) -> Hmac<Sha256> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(token.as_bytes())
-        .expect("HMAC accepts every bearer length");
-    for field in [
-        b"genehub-loopback-control-v1".as_slice(),
-        action,
-        challenge.as_bytes(),
-        &pid.to_be_bytes(),
-        machine_id.as_bytes(),
-        fingerprint.as_bytes(),
-    ] {
-        mac.update(&(field.len() as u64).to_be_bytes());
-        mac.update(field);
-    }
-    mac
-}
-
-fn valid_control_challenge(challenge: &str) -> bool {
-    !challenge.is_empty()
-        && challenge.len() <= 128
-        && challenge
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-}
-
 /// Ends the daemon on request from the shell that owns this machine.
 ///
 /// Restricted to loopback in addition to the action proof. Remote shutdown is
@@ -359,7 +197,7 @@ async fn shutdown(
         &context.state.machine.fingerprint(),
         params.expires_at,
     );
-    if !auth::token_matches(&expected, &params.proof)
+    if !token_matches(&expected, &params.proof)
         || !consume_control_admission(
             &context.used_control_admissions,
             "shutdown",
@@ -431,7 +269,7 @@ async fn cli(
         &context.state.machine.fingerprint(),
         params.expires_at,
     );
-    if !auth::token_matches(&expected, &params.proof)
+    if !token_matches(&expected, &params.proof)
         || !consume_control_admission(
             &context.used_control_admissions,
             "cli",
@@ -521,7 +359,7 @@ async fn upgrade(
         &context.state.machine.fingerprint(),
         params.expires_at,
     );
-    if !auth::token_matches(&expected, &params.proof)
+    if !token_matches(&expected, &params.proof)
         || !consume_control_admission(
             &context.used_control_admissions,
             "websocket",
@@ -562,7 +400,7 @@ fn consume_control_admission(
     expires_at: u64,
 ) -> bool {
     let now = unix_seconds();
-    if expires_at <= now || expires_at > now.saturating_add(WS_ADMISSION_LIFETIME_SECS) {
+    if expires_at <= now || expires_at > now.saturating_add(ADMISSION_LIFETIME_SECS) {
         return false;
     }
     let mut used = used.lock().expect("websocket admission lock");
@@ -579,13 +417,6 @@ fn consume_control_admission(
     }
     used.insert(key, expires_at);
     true
-}
-
-fn unix_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 async fn connection(
@@ -676,119 +507,19 @@ async fn connection(
     writer.abort();
 }
 
-/// Mints a short-lived URL without putting the reusable bearer on the wire.
-pub struct LocalWebSocketAdmission {
-    pub url: String,
-    pub server_proof: String,
-    pub challenge: String,
-    pub pid: u32,
-    pub machine_id: String,
-    pub fingerprint: String,
-    pub expires_at: u64,
-}
-
-/// Mints both halves of a short-lived loopback admission. Only `url` crosses
-/// the socket boundary; `server_proof` and its transcript travel through the
-/// owner-only local control path.
-pub fn websocket_admission(
-    port: u16,
-    token: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-) -> LocalWebSocketAdmission {
-    let challenge = crate::devices::random_token();
-    let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
-    let proof = websocket_proof(token, &challenge, pid, machine_id, fingerprint, expires_at);
-    let server_proof =
-        websocket_server_proof(token, &challenge, pid, machine_id, fingerprint, expires_at);
-    LocalWebSocketAdmission {
-        url: format!(
-            "ws://127.0.0.1:{port}/ws?challenge={challenge}&pid={pid}&expiresAt={expires_at}&proof={proof}"
-        ),
-        server_proof,
-        challenge,
-        pid,
-        machine_id: machine_id.to_owned(),
-        fingerprint: fingerprint.to_owned(),
-        expires_at,
-    }
-}
-
-/// Mints a one-use loopback URL for `POST /cli`. The reusable bearer stays in
-/// endpoint.json; only this short-lived proof crosses the socket.
-pub fn cli_url(port: u16, token: &str, pid: u32, machine_id: &str, fingerprint: &str) -> String {
-    let challenge = crate::devices::random_token();
-    let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
-    let proof = cli_proof(token, &challenge, pid, machine_id, fingerprint, expires_at);
-    format!(
-        "http://127.0.0.1:{port}/cli?challenge={challenge}&pid={pid}&expiresAt={expires_at}&proof={proof}"
-    )
-}
-
-pub fn websocket_url(
-    port: u16,
-    token: &str,
-    pid: u32,
-    machine_id: &str,
-    fingerprint: &str,
-) -> String {
-    websocket_admission(port, token, pid, machine_id, fingerprint).url
-}
-
 pub type SharedListener = Arc<Listener>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_websocket_url_carries_only_a_short_lived_action_proof() {
-        let url = websocket_url(1234, "never-send-me", 42, "machine", "fingerprint");
-        assert!(url.starts_with("ws://127.0.0.1:1234/ws?challenge="));
-        assert!(url.contains("&pid=42&expiresAt="));
-        assert!(url.contains("&proof="));
-        assert!(!url.contains("never-send-me"));
-        assert!(!url.contains("token="));
-    }
+    // Only the tests mint here: in the product these URLs are minted by the
+    // native front door and handed to this listener, never the other way round.
+    use genet_frontdoor::proof::{cli_url, websocket_admission, websocket_url};
 
-    #[test]
-    fn websocket_proof_has_a_stable_cross_client_contract() {
-        assert_eq!(
-            websocket_proof(
-                "token-1",
-                "challenge-1",
-                42,
-                "machine-1",
-                "fingerprint-1",
-                1_234_567_890,
-            ),
-            "cb10c4c41a54062a453ddd359fd970815064e19ac5a5e2c511103a924129c3c7"
-        );
-        let server = websocket_server_proof(
-            "token-1",
-            "challenge-1",
-            42,
-            "machine-1",
-            "fingerprint-1",
-            1_234_567_890,
-        );
-        assert_eq!(
-            server,
-            "6b02a83a6c67e128a762565b92b7184874e9eb806269581b35c8c05f13e3e5c2"
-        );
-        assert_ne!(
-            server,
-            websocket_proof(
-                "token-1",
-                "challenge-1",
-                42,
-                "machine-1",
-                "fingerprint-1",
-                1_234_567_890,
-            )
-        );
-    }
+    // Proof shapes are covered where they are minted, in
+    // `genet_frontdoor::proof`. What is worth asserting here is that this
+    // listener actually refuses what those proofs say it should refuse.
 
     #[tokio::test]
     async fn websocket_admissions_are_single_use_short_lived_and_domain_separated() {
@@ -874,7 +605,7 @@ mod tests {
         assert!(tokio_tungstenite::connect_async(expired_url).await.is_err());
 
         let challenge = crate::devices::random_token();
-        let far_future = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS + 1);
+        let far_future = unix_seconds().saturating_add(ADMISSION_LIFETIME_SECS + 1);
         let far_future_proof = websocket_proof(
             &state.token,
             &challenge,
@@ -893,7 +624,7 @@ mod tests {
             .is_err());
 
         let challenge = crate::devices::random_token();
-        let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
+        let expires_at = unix_seconds().saturating_add(ADMISSION_LIFETIME_SECS);
         let wrong_domain = shutdown_proof(
             &state.token,
             &challenge,
@@ -929,7 +660,7 @@ mod tests {
         let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
 
         let challenge = "fresh-shutdown-challenge";
-        let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
+        let expires_at = unix_seconds().saturating_add(ADMISSION_LIFETIME_SECS);
         let proof = shutdown_proof(
             &state.token,
             challenge,
@@ -969,7 +700,7 @@ mod tests {
             .unwrap();
         let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
         let challenge = "attacker-challenge";
-        let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
+        let expires_at = unix_seconds().saturating_add(ADMISSION_LIFETIME_SECS);
         let health_mac = health_proof(
             &state.token,
             challenge,
@@ -989,7 +720,7 @@ mod tests {
             ),
             "health and shutdown proofs must be domain-separated"
         );
-        assert!(!auth::token_matches(&state.token, &health_mac));
+        assert!(!token_matches(&state.token, &health_mac));
 
         let response = crate::http::Client::new()
             .post(format!(
@@ -1036,7 +767,7 @@ mod tests {
     #[test]
     fn admission_cache_is_bounded_without_making_live_proofs_replayable() {
         let used = std::sync::Mutex::new(HashMap::new());
-        let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
+        let expires_at = unix_seconds().saturating_add(ADMISSION_LIFETIME_SECS);
         for index in 0..MAX_USED_CONTROL_ADMISSIONS {
             assert!(consume_control_admission(
                 &used,
@@ -1115,30 +846,6 @@ mod tests {
         );
         assert!(!body.to_string().contains(&state.token));
         listener.handle.abort();
-    }
-
-    #[test]
-    fn cli_proof_is_domain_separated_from_shutdown_and_health() {
-        let cli = cli_proof(
-            "token-1",
-            "challenge-1",
-            42,
-            "machine-1",
-            "fingerprint-1",
-            1_234_567_890,
-        );
-        let shutdown = shutdown_proof(
-            "token-1",
-            "challenge-1",
-            42,
-            "machine-1",
-            "fingerprint-1",
-            1_234_567_890,
-        );
-        let health = health_proof("token-1", "challenge-1", 42, "machine-1", "fingerprint-1");
-        assert_ne!(cli, shutdown);
-        assert_ne!(cli, health);
-        assert!(!cli.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1234,7 +941,7 @@ mod tests {
             .unwrap();
         let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
         let challenge = crate::devices::random_token();
-        let expires_at = unix_seconds().saturating_add(WS_ADMISSION_LIFETIME_SECS);
+        let expires_at = unix_seconds().saturating_add(ADMISSION_LIFETIME_SECS);
         let proof = shutdown_proof(
             &state.token,
             &challenge,

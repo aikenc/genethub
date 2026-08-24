@@ -11,7 +11,7 @@
 //! different stories — including the callers in the *other* process, since the
 //! wrapper this answer describes is a native binary of ours.
 
-use genehub_proto::IsolationBackend;
+use genet_native::confine::IsolationBackend;
 
 use crate::bindings::genehub::host::isolation as wit;
 

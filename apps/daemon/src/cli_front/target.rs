@@ -10,6 +10,11 @@
 
 use super::output::CliFailure;
 
+// Parsing `--machine` and `--cwd` is front-door work: it happens before any
+// verb exists. The table below — which verbs a selector *means* something for —
+// is business, and stays here with the verbs.
+pub use genet_frontdoor::selectors::{split, Selection};
+
 /// Whether a command means the same thing when aimed at another machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Routing {
@@ -90,91 +95,6 @@ pub fn routing(command: &str) -> Routing {
 
 pub fn accepts_cwd(command: &str) -> bool {
     TAKES_CWD.contains(&command)
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Selection {
-    pub machine: Option<String>,
-    pub cwd: Option<String>,
-}
-
-/// Pulls the global selectors out of the argument list and returns the rest in
-/// order.
-///
-/// A bare `--` ends flag scanning and is dropped, so a prompt or a future
-/// `genet shell` command line can contain anything without being reinterpreted.
-pub fn split(args: &[String]) -> Result<(Selection, Vec<String>), CliFailure> {
-    let mut selection = Selection::default();
-    let mut rest = Vec::with_capacity(args.len());
-    let mut index = 0;
-    while index < args.len() {
-        let argument = args[index].as_str();
-        if argument == "--" {
-            rest.extend(args[index + 1..].iter().cloned());
-            break;
-        }
-        if let Some(value) = flag_value(args, &mut index, "--machine")? {
-            assign(&mut selection.machine, value, "--machine")?;
-            index += 1;
-            continue;
-        }
-        if let Some(value) = flag_value(args, &mut index, "--cwd")? {
-            assign(&mut selection.cwd, value, "--cwd")?;
-            index += 1;
-            continue;
-        }
-        if argument == "--device" || argument.starts_with("--device=") {
-            return Err(CliFailure::invalid_args(
-                "--device selects a client that may connect to this machine, not an execution \
-                 target; use --machine <machineId> and `genet machine list` to see paired \
-                 machines",
-            ));
-        }
-        rest.push(args[index].clone());
-        index += 1;
-    }
-    Ok((selection, rest))
-}
-
-/// Reads `--flag value` or `--flag=value`, advancing past a detached value.
-fn flag_value(
-    args: &[String],
-    index: &mut usize,
-    flag: &str,
-) -> Result<Option<String>, CliFailure> {
-    let argument = args[*index].as_str();
-    let value = if argument == flag {
-        let value = args.get(*index + 1).ok_or_else(|| {
-            CliFailure::invalid_args(format!("{flag} needs a value; none followed it"))
-        })?;
-        if value.starts_with('-') {
-            return Err(CliFailure::invalid_args(format!(
-                "{flag} needs a value; {value} looks like another flag"
-            )));
-        }
-        *index += 1;
-        value.clone()
-    } else if let Some(inline) = argument.strip_prefix(&format!("{flag}=")) {
-        inline.to_string()
-    } else {
-        return Ok(None);
-    };
-    if value.trim().is_empty() {
-        return Err(CliFailure::invalid_args(format!(
-            "{flag} needs a non-empty value"
-        )));
-    }
-    Ok(Some(value))
-}
-
-fn assign(slot: &mut Option<String>, value: String, flag: &str) -> Result<(), CliFailure> {
-    if slot.is_some() {
-        return Err(CliFailure::invalid_args(format!(
-            "{flag} may be supplied only once"
-        )));
-    }
-    *slot = Some(value);
-    Ok(())
 }
 
 /// The canonical dotted name for an argument list, used to look up routing and

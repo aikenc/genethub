@@ -84,9 +84,26 @@ pub fn report() -> IsolationInfo {
     REPORT.get_or_init(probe).clone()
 }
 
+// Both arms translate somebody else's answer into the wire type. Neither
+// invents one: the native probe belongs to `genet_native`, which owns a kernel,
+// and the guest's belongs to the shell it asks over `genehub:host/isolation`.
 #[cfg(not(target_family = "wasm"))]
 fn probe() -> IsolationInfo {
-    genet_native::confine::report()
+    use genehub_proto::IsolationBackend;
+    use genet_native::confine::IsolationBackend as Native;
+
+    let report = genet_native::confine::report();
+    IsolationInfo {
+        backend: match report.backend {
+            Native::Landlock => IsolationBackend::Landlock,
+            Native::Namespaces => IsolationBackend::Namespaces,
+            Native::Seatbelt => IsolationBackend::Seatbelt,
+            Native::AppContainer => IsolationBackend::AppContainer,
+            Native::None => IsolationBackend::None,
+        },
+        enforced: report.enforced,
+        detail: report.detail,
+    }
 }
 
 #[cfg(target_family = "wasm")]
