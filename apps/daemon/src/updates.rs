@@ -1037,4 +1037,32 @@ mod tests {
         assert!(!status.newer);
         assert!(status.problem.is_some());
     }
+
+    /// The RPC the workbench's App row asks: the router hands the configured
+    /// manifest address and this build's version to this module, and the
+    /// answer is an `Update` reply — a failure included, because a check that
+    /// reached nothing is something to say out loud.
+    #[tokio::test]
+    async fn the_router_answers_an_app_check_with_this_machines_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let handled = crate::router::handle(
+            &state,
+            genehub_proto::TransportKind::Loopback,
+            &crate::authz::Principal::LocalUser,
+            genehub_proto::Request::UpdateAppCheck,
+        )
+        .await;
+        // The tree's manifest URL is empty (local is not on a release scale),
+        // which is the one answer that needs no network: current, nothing to
+        // compare against, no problem to report.
+        let genehub_proto::Reply::Update(status) = handled.reply.expect("an app check answers")
+        else {
+            panic!("an app check answers with an update status");
+        };
+        assert_eq!(status.current, state.version);
+        assert!(status.latest.is_none());
+        assert!(!status.newer);
+        assert!(status.problem.is_none());
+    }
 }
