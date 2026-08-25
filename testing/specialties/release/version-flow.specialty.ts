@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -63,33 +63,55 @@ interface ComponentIdentity {
   webProtocol: number;
 }
 
+interface ComponentSpec {
+  version: string;
+  bytes: Buffer;
+  identity: ComponentIdentity;
+  channel?: string;
+  /** Defaults to enabled; a paused channel refuses downloads with the reason. */
+  activation?: { enabled: boolean; pausedReason?: string };
+  /** Overrides the manifest's releaseVersion, letting it disagree with the
+   * envelope inside `bytes`. */
+  manifestVersion?: string;
+  /** Overrides the manifest's artifact digest, letting it disagree with the
+   * bytes actually served. */
+  sha256?: string;
+}
+
 interface ReleaseService {
   origin: string;
   close(): Promise<void>;
   setAppManifest(version: string): void;
-  setComponent(
-    component: { version: string; bytes: Buffer; identity: ComponentIdentity; channel?: string } | null,
-  ): void;
+  /** Serves a verbatim body (or 404s on null) so malformed answers are
+   * testable too. */
+  setAppManifestRaw(body: string | null): void;
+  setComponent(component: ComponentSpec | null): void;
+  setComponentRaw(body: string | null): void;
 }
 
 async function startReleaseService(): Promise<ReleaseService> {
-  let appManifest: Record<string, unknown> | null = null;
-  let component: { version: string; bytes: Buffer; identity: ComponentIdentity; channel?: string } | null =
-    null;
+  let appManifest: string | null = null;
+  let component: ComponentSpec | null = null;
+  let componentRaw: string | null = null;
   const server: Server = createServer((req, res) => {
     if (req.url === "/app/latest.json" && appManifest) {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(appManifest));
+      res.end(appManifest);
+      return;
+    }
+    if (req.url === "/component/latest.json" && componentRaw) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(componentRaw);
       return;
     }
     if (req.url === "/component/latest.json" && component) {
-      const sha256 = createHash("sha256").update(component.bytes).digest("hex");
+      const sha256 = component.sha256 ?? createHash("sha256").update(component.bytes).digest("hex");
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
           schema: "genehub.release-manifest.v2",
           channel: component.channel ?? "local",
-          releaseVersion: component.version,
+          releaseVersion: component.manifestVersion ?? component.version,
           appAbiHash: component.identity.appAbiHash,
           webProtocol: component.identity.webProtocol,
           artifact: {
@@ -98,7 +120,9 @@ async function startReleaseService(): Promise<ReleaseService> {
             size: component.bytes.length,
           },
           source: { kind: "test" },
-          activation: { enabled: true },
+          activation: component.activation?.enabled === false
+            ? { enabled: false, pausedReason: component.activation.pausedReason ?? "paused" }
+            : { enabled: true },
         }),
       );
       return;
@@ -119,10 +143,22 @@ async function startReleaseService(): Promise<ReleaseService> {
     origin,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
     setAppManifest(version: string) {
-      appManifest = { version, page: `https://example.test/releases/tag/v${version}`, platforms: {} };
+      appManifest = JSON.stringify({
+        version,
+        page: `https://example.test/releases/tag/v${version}`,
+        platforms: {},
+      });
+    },
+    setAppManifestRaw(body: string | null) {
+      appManifest = body;
     },
     setComponent(next) {
       component = next;
+      componentRaw = null;
+    },
+    setComponentRaw(body: string | null) {
+      componentRaw = body;
+      component = null;
     },
   };
 }
@@ -718,6 +754,556 @@ function readComponentIdentity(host: string, signed: string): ComponentIdentity 
   }
   return { appAbiHash: identity.appAbiHash, webProtocol: identity.webProtocol };
 }
+
+/** The durable update store, laid out by hand so a case can start the daemon
+ * on top of a crash-shaped state. */
+function plantStore(
+  t: CaseContext,
+  layout: { active?: string; candidate?: string; highest?: string },
+): void {
+  const root = path.join(t.env.data, "component");
+  mkdirSync(root, { recursive: true });
+  if (layout.active) cpSync(layout.active, path.join(root, "active.wasm"));
+  if (layout.candidate) cpSync(layout.candidate, path.join(root, "candidate.wasm"));
+  if (layout.highest) writeFileSync(path.join(root, "highest-version"), `${layout.highest}\n`);
+}
+
+/** A signed file whose component bytes were flipped after signing: the
+ * envelope still parses, but the signature no longer covers the payload. */
+function tamperComponent(signed: string, outDir: string): Buffer {
+  const bytes = Buffer.from(readFileSync(signed));
+  bytes[bytes.length - 8] = bytes[bytes.length - 8]! ^ 0xff;
+  writeFileSync(path.join(outDir, "tampered.wasm"), bytes);
+  return bytes;
+}
+
+defineSpecialty(
+  meta(
+    "specialty.release.live-update-rejects-paused-channel",
+    "A paused channel refuses the download and says why",
+    "activation.enabled false fails update.download with the pause reason and the daemon stays put",
+    [
+      "a paused channel still pushes the staged component to machines",
+      "the pause reason never reaches the operator",
+    ],
+  ),
+  async (t) => {
+    const { host, guest } = requireArtifacts(t.openRoot);
+    const dir = mkdtempSync(path.join(tmpdir(), "genehub-release-pack-"));
+    const service = await startReleaseService();
+    try {
+      const signedCurrent = packComponent(host, guest, COMPONENT_VERSION, dir);
+      const signedNext = packComponent(host, guest, "0.7.0-beta.5", dir);
+      const identity = readComponentIdentity(host, signedCurrent);
+      service.setComponent({
+        version: "0.7.0-beta.5",
+        bytes: readFileSync(signedNext),
+        identity,
+        activation: { enabled: false, pausedReason: "beta.5 回滚中,通道暂停" },
+      });
+      const handle = await startReleaseDaemon(t, {
+        wasm: signedCurrent,
+        env: { GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json` },
+      });
+      try {
+        let refused: unknown = null;
+        try {
+          await handle.client.call({ type: "update.download" });
+        } catch (error) {
+          refused = error;
+        }
+        t.assertions.assert(refused !== null, "a paused channel's download was accepted");
+        t.assertions.assert(
+          String(refused).includes("回滚中"),
+          `the pause reason did not reach the caller: ${String(refused).slice(0, 120)}`,
+        );
+        t.assertions.assert(
+          handle.client.identity?.daemonVersion === COMPONENT_VERSION,
+          `daemon moved to ${handle.client.identity?.daemonVersion}`,
+        );
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.live-update-rejects-corrupted-download",
+    "Bytes that do not match the manifest digest never reach the store",
+    "a manifest whose sha256 disagrees with the served bytes fails update.download",
+    [
+      "transport corruption is staged as a valid component",
+      "the digest check compares the wrong scale and honest downloads die here",
+    ],
+  ),
+  async (t) => {
+    const { host, guest } = requireArtifacts(t.openRoot);
+    const dir = mkdtempSync(path.join(tmpdir(), "genehub-release-pack-"));
+    const service = await startReleaseService();
+    try {
+      const signedCurrent = packComponent(host, guest, COMPONENT_VERSION, dir);
+      const signedNext = packComponent(host, guest, "0.7.0-beta.5", dir);
+      const identity = readComponentIdentity(host, signedCurrent);
+      service.setComponent({
+        version: "0.7.0-beta.5",
+        bytes: readFileSync(signedNext),
+        identity,
+        sha256: createHash("sha256").update("not the served bytes").digest("hex"),
+      });
+      const handle = await startReleaseDaemon(t, {
+        wasm: signedCurrent,
+        env: { GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json` },
+      });
+      try {
+        let refused: unknown = null;
+        try {
+          await handle.client.call({ type: "update.download" });
+        } catch (error) {
+          refused = error;
+        }
+        t.assertions.assert(refused !== null, "a corrupted download was accepted");
+        t.assertions.assert(
+          handle.client.identity?.daemonVersion === COMPONENT_VERSION,
+          `daemon moved to ${handle.client.identity?.daemonVersion}`,
+        );
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.live-update-rejects-tampered-component",
+    "A component modified after signing fails verification",
+    "bytes whose envelope parses but whose payload no longer matches the signature fail update.download",
+    [
+      "signature verification is skipped when the envelope parses",
+      "a tampered component replaces the running one",
+    ],
+  ),
+  async (t) => {
+    const { host, guest } = requireArtifacts(t.openRoot);
+    const dir = mkdtempSync(path.join(tmpdir(), "genehub-release-pack-"));
+    const service = await startReleaseService();
+    try {
+      const signedCurrent = packComponent(host, guest, COMPONENT_VERSION, dir);
+      const signedNext = packComponent(host, guest, "0.7.0-beta.5", dir);
+      const identity = readComponentIdentity(host, signedCurrent);
+      // The manifest digest matches the tampered bytes, so the transport
+      // check passes and only the signature can catch this.
+      const tampered = tamperComponent(signedNext, dir);
+      service.setComponent({ version: "0.7.0-beta.5", bytes: tampered, identity });
+      const handle = await startReleaseDaemon(t, {
+        wasm: signedCurrent,
+        env: { GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json` },
+      });
+      try {
+        let refused: unknown = null;
+        try {
+          await handle.client.call({ type: "update.download" });
+        } catch (error) {
+          refused = error;
+        }
+        t.assertions.assert(refused !== null, "a tampered component was accepted");
+        t.assertions.assert(
+          handle.client.identity?.daemonVersion === COMPONENT_VERSION,
+          `daemon moved to ${handle.client.identity?.daemonVersion}`,
+        );
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.live-update-rejects-envelope-mismatch",
+    "A manifest naming one version while serving another is refused",
+    "releaseVersion 0.7.0-beta.6 in the manifest with a 0.7.0-beta.5 envelope fails update.download",
+    [
+      "the manifest's identity fields are trusted over the signed envelope's",
+      "a mislabelled release installs the wrong component",
+    ],
+  ),
+  async (t) => {
+    const { host, guest } = requireArtifacts(t.openRoot);
+    const dir = mkdtempSync(path.join(tmpdir(), "genehub-release-pack-"));
+    const service = await startReleaseService();
+    try {
+      const signedCurrent = packComponent(host, guest, COMPONENT_VERSION, dir);
+      const signedNext = packComponent(host, guest, "0.7.0-beta.5", dir);
+      const identity = readComponentIdentity(host, signedCurrent);
+      service.setComponent({
+        version: "0.7.0-beta.5",
+        manifestVersion: "0.7.0-beta.6",
+        bytes: readFileSync(signedNext),
+        identity,
+      });
+      const handle = await startReleaseDaemon(t, {
+        wasm: signedCurrent,
+        env: { GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json` },
+      });
+      try {
+        let refused: unknown = null;
+        try {
+          await handle.client.call({ type: "update.download" });
+        } catch (error) {
+          refused = error;
+        }
+        t.assertions.assert(refused !== null, "a mislabelled manifest was accepted");
+        t.assertions.assert(
+          handle.client.identity?.daemonVersion === COMPONENT_VERSION,
+          `daemon moved to ${handle.client.identity?.daemonVersion}`,
+        );
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.live-update-rejects-noncanonical-version",
+    "A manifest with a non-canonical version is not an update",
+    "releaseVersion 1.2 answers check with newer false and fails update.download",
+    [
+      "a malformed version is parsed leniently and ordered wrongly",
+      "the download path accepts what the check path rejected",
+    ],
+  ),
+  async (t) => {
+    const { host, guest } = requireArtifacts(t.openRoot);
+    const dir = mkdtempSync(path.join(tmpdir(), "genehub-release-pack-"));
+    const service = await startReleaseService();
+    try {
+      const signedCurrent = packComponent(host, guest, COMPONENT_VERSION, dir);
+      const signedNext = packComponent(host, guest, "0.7.0-beta.5", dir);
+      const identity = readComponentIdentity(host, signedCurrent);
+      service.setComponent({
+        version: "0.7.0-beta.5",
+        manifestVersion: "1.2",
+        bytes: readFileSync(signedNext),
+        identity,
+      });
+      const handle = await startReleaseDaemon(t, {
+        wasm: signedCurrent,
+        env: { GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json` },
+      });
+      try {
+        const check = await handle.client.call({ type: "update.check" });
+        t.assertions.assert(check?.type === "update", `update.check answered ${check?.type}`);
+        if (check?.type === "update") {
+          t.assertions.assert(check.data.newer === false, "a non-canonical version looked newer");
+        }
+        let refused: unknown = null;
+        try {
+          await handle.client.call({ type: "update.download" });
+        } catch (error) {
+          refused = error;
+        }
+        t.assertions.assert(refused !== null, "a non-canonical version was downloaded");
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.live-update-unreachable-manifest",
+    "A missing manifest is a problem answer, not a crash",
+    "a 404 component manifest answers update.check with a problem and the daemon keeps serving",
+    [
+      "a fetch failure kills the daemon or wedges the update state",
+      "the problem is reported as success with no update",
+    ],
+  ),
+  async (t) => {
+    const { host, guest } = requireArtifacts(t.openRoot);
+    const dir = mkdtempSync(path.join(tmpdir(), "genehub-release-pack-"));
+    const service = await startReleaseService();
+    try {
+      const signedCurrent = packComponent(host, guest, COMPONENT_VERSION, dir);
+      // Nothing is served: every manifest request is a 404.
+      const handle = await startReleaseDaemon(t, {
+        wasm: signedCurrent,
+        env: { GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json` },
+      });
+      try {
+        const check = await handle.client.call({ type: "update.check" });
+        t.assertions.assert(check?.type === "update", `update.check answered ${check?.type}`);
+        if (check?.type !== "update") return;
+        t.assertions.assert(
+          typeof check.data.problem === "string" && check.data.problem.length > 0,
+          `a 404 manifest reported no problem: ${JSON.stringify(check.data)}`,
+        );
+        t.assertions.assert(check.data.newer === false, "a missing manifest looked newer");
+        const state = await handle.client.call({ type: "update.downloadState" });
+        t.assertions.assert(
+          state?.type === "updateDownload",
+          "the daemon stopped serving after the 404",
+        );
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.live-update-rejects-malformed-manifest",
+    "A malformed manifest body is a problem answer, not a crash",
+    "a non-JSON component manifest answers update.check with a problem and the daemon keeps serving",
+    ["a parse failure kills the daemon", "the parse failure is reported as an empty update"],
+  ),
+  async (t) => {
+    const { host, guest } = requireArtifacts(t.openRoot);
+    const dir = mkdtempSync(path.join(tmpdir(), "genehub-release-pack-"));
+    const service = await startReleaseService();
+    try {
+      const signedCurrent = packComponent(host, guest, COMPONENT_VERSION, dir);
+      service.setComponentRaw("this is not json");
+      const handle = await startReleaseDaemon(t, {
+        wasm: signedCurrent,
+        env: { GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json` },
+      });
+      try {
+        const check = await handle.client.call({ type: "update.check" });
+        t.assertions.assert(check?.type === "update", `update.check answered ${check?.type}`);
+        if (check?.type !== "update") return;
+        t.assertions.assert(
+          typeof check.data.problem === "string" && check.data.problem.length > 0,
+          `a malformed manifest reported no problem: ${JSON.stringify(check.data)}`,
+        );
+        t.assertions.assert(check.data.newer === false, "a malformed manifest looked newer");
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.live-update-recovers-interrupted-commit",
+    "A crash between the high-water mark and the commit still lands the update",
+    "a store holding highest 0.7.0-beta.5 with the candidate staged boots the daemon on 0.7.0-beta.5",
+    [
+      "the interrupted commit is forgotten and the machine stays on the old component",
+      "the half-committed store wedges every later update",
+    ],
+  ),
+  async (t) => {
+    const { host, guest } = requireArtifacts(t.openRoot);
+    const dir = mkdtempSync(path.join(tmpdir(), "genehub-release-pack-"));
+    const service = await startReleaseService();
+    try {
+      const signedCurrent = packComponent(host, guest, COMPONENT_VERSION, dir);
+      const signedNext = packComponent(host, guest, "0.7.0-beta.5", dir);
+      // The crash shape: the fence advanced and the candidate is staged, but
+      // candidate -> active never happened.
+      plantStore(t, {
+        active: signedCurrent,
+        candidate: signedNext,
+        highest: "0.7.0-beta.5",
+      });
+      const handle = await startReleaseDaemon(t, {
+        wasm: signedCurrent,
+        env: { GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json` },
+      });
+      try {
+        t.assertions.assert(
+          handle.client.identity?.daemonVersion === "0.7.0-beta.5",
+          `the interrupted commit recovered as ${handle.client.identity?.daemonVersion}`,
+        );
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.bundled-baseline-fences-stale-active",
+    "An App upgrade outranking the downloaded component runs the bundled one",
+    "with the store active on 0.7.0-beta.4 and the App bundling 0.7.0-beta.5, the daemon runs 0.7.0-beta.5",
+    [
+      "a stale download keeps running after the App shipped a newer component",
+      "the bundled baseline is ignored once any download exists",
+    ],
+  ),
+  async (t) => {
+    const { host, guest } = requireArtifacts(t.openRoot);
+    const dir = mkdtempSync(path.join(tmpdir(), "genehub-release-pack-"));
+    const service = await startReleaseService();
+    try {
+      const signedCurrent = packComponent(host, guest, COMPONENT_VERSION, dir);
+      const signedNext = packComponent(host, guest, "0.7.0-beta.5", dir);
+      plantStore(t, { active: signedCurrent, highest: COMPONENT_VERSION });
+      const handle = await startReleaseDaemon(t, {
+        wasm: signedNext,
+        env: {
+          GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json`,
+          GENEHUB_BUNDLED_RELEASE_VERSION: "0.7.0-beta.5",
+        },
+      });
+      try {
+        t.assertions.assert(
+          handle.client.identity?.daemonVersion === "0.7.0-beta.5",
+          `the stale store active won over the bundled baseline: ${handle.client.identity?.daemonVersion}`,
+        );
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.app-check-reports-newer-with-url",
+    "An available App update carries its version and release page",
+    "with App 0.8.0 installed, a 0.9.0 manifest answers newer true with latest 0.9.0 and the page URL",
+    [
+      "the newer flag arrives without the version or the link, and the UI cannot render the answer",
+      "the release page URL is built from the wrong field",
+    ],
+  ),
+  async (t) => {
+    const service = await startReleaseService();
+    service.setAppManifest("0.9.0");
+    try {
+      const { guest } = requireArtifacts(t.openRoot);
+      const handle = await startReleaseDaemon(t, {
+        wasm: guest,
+        env: { GENEHUB_APP_VERSION: "0.8.0" },
+        config: { updateManifestUrl: `${service.origin}/app/latest.json` },
+      });
+      try {
+        const reply = await handle.client.call({ type: "update.appCheck" });
+        t.assertions.assert(reply?.type === "update", `appCheck answered ${reply?.type}`);
+        if (reply?.type !== "update") return;
+        t.assertions.assert(reply.data.newer === true, "0.9.0 did not look newer than 0.8.0");
+        t.assertions.assert(reply.data.latest === "0.9.0", `latest was ${reply.data.latest}`);
+        t.assertions.assert(
+          reply.data.url === "https://example.test/releases/tag/v0.9.0",
+          `the release page was ${reply.data.url}`,
+        );
+        t.assertions.assert(
+          reply.data.problem === null || reply.data.problem === undefined,
+          `a healthy newer answer carried a problem: ${reply.data.problem}`,
+        );
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.app-check-unreachable-manifest",
+    "An unreachable App manifest is a problem answer, not a crash",
+    "an App manifest URL nothing listens on answers update.appCheck with a problem",
+    [
+      "a connection refusal kills the appCheck route",
+      "the failure is reported as 'no update available'",
+    ],
+  ),
+  async (t) => {
+    const { guest } = requireArtifacts(t.openRoot);
+    const handle = await startReleaseDaemon(t, {
+      wasm: guest,
+      // Nothing listens on port 1.
+      config: { updateManifestUrl: "http://127.0.0.1:1/app/latest.json" },
+    });
+    try {
+      const reply = await handle.client.call({ type: "update.appCheck" });
+      t.assertions.assert(reply?.type === "update", `appCheck answered ${reply?.type}`);
+      if (reply?.type !== "update") return;
+      t.assertions.assert(
+        typeof reply.data.problem === "string" && reply.data.problem.length > 0,
+        `an unreachable manifest reported no problem: ${JSON.stringify(reply.data)}`,
+      );
+      t.assertions.assert(reply.data.newer === false, "an unreachable manifest looked newer");
+    } finally {
+      await stopReleaseDaemon(handle);
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.app-check-malformed-manifest",
+    "A malformed App manifest is a problem answer, not a crash",
+    "a non-JSON App manifest answers update.appCheck with a problem",
+    ["a parse failure kills the appCheck route", "the failure is reported as 'already current'"],
+  ),
+  async (t) => {
+    const service = await startReleaseService();
+    service.setAppManifestRaw("this is not json");
+    try {
+      const { guest } = requireArtifacts(t.openRoot);
+      const handle = await startReleaseDaemon(t, {
+        wasm: guest,
+        config: { updateManifestUrl: `${service.origin}/app/latest.json` },
+      });
+      try {
+        const reply = await handle.client.call({ type: "update.appCheck" });
+        t.assertions.assert(reply?.type === "update", `appCheck answered ${reply?.type}`);
+        if (reply?.type !== "update") return;
+        t.assertions.assert(
+          typeof reply.data.problem === "string" && reply.data.problem.length > 0,
+          `a malformed manifest reported no problem: ${JSON.stringify(reply.data)}`,
+        );
+        t.assertions.assert(reply.data.newer === false, "a malformed manifest looked newer");
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+    }
+  },
+);
+
 
 async function waitForDaemonVersion(client: Client, version: string): Promise<void> {
   const deadline = Date.now() + 60_000;

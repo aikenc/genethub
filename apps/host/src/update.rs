@@ -162,6 +162,14 @@ fn open_runtime() -> Result<Runtime> {
 }
 
 fn bundled_version() -> Result<Option<ProductVersion>> {
+    // Release builds stamp the bundled component's version at build time; a
+    // debug build additionally honours the variable at runtime so the release
+    // specialties can split the bundled line from the store without a stamped
+    // rebuild. Release builds keep it a build-time fact.
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("GENEHUB_BUNDLED_RELEASE_VERSION") {
+        return parse_bundled_version(if value.is_empty() { None } else { Some(value.as_str()) });
+    }
     parse_bundled_version(option_env!("GENEHUB_BUNDLED_RELEASE_VERSION"))
 }
 

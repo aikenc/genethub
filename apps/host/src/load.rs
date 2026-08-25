@@ -266,6 +266,8 @@ fn build_instance(
                 | crate::channel::ENV_CLI
                 | crate::channel::ENV_COMPONENT_FILE
                 | "GENEHUB_COMPONENT_VERSION"
+                | "GENEHUB_APP_VERSION"
+                | "GENEHUB_BUNDLED_RELEASE_VERSION"
         ) {
             wasi.env(key, crate::guest_paths::env_value_for_guest(value));
         }
