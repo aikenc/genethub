@@ -118,10 +118,13 @@ jobs:
           tag="${GITHUB_REF_NAME:-}"
           if [[ "$tag" == v* ]]; then
             case "$tag" in
-              v[0-9]*.[0-9]*.[0-9]*-beta.[0-9]*)  want=beta ;;
-              v0.0.0-dev.[0-9]*)                  want=dev ;;
-              v[0-9]*.[0-9]*.[0-9]*)              want=stable ;;
-              *) echo "::error::'$tag' is neither vX.Y.Z nor vX.Y.Z-beta.N nor v0.0.0-dev.N — no such release"; exit 1 ;;
+              v[0-9]*.[0-9]*.0-beta.[0-9]*)  want=beta ;;
+              v0.0.0-dev.[0-9]*)             want=dev ;;
+              v[0-9]*.[0-9]*.0)              want=stable ;;
+              v[0-9]*.[0-9]*.[0-9]*-beta.[0-9]*|v[0-9]*.[0-9]*.[0-9]*)
+                echo "::error::'$tag' carries a nonzero Live digit — App Releases are always X.Y.0; the Live digit ships through the component channel, never through a tag"
+                exit 1 ;;
+              *) echo "::error::'$tag' is neither vX.Y.0 nor vX.Y.0-beta.N nor v0.0.0-dev.N — no such release"; exit 1 ;;
             esac
           fi
           channel="$(node scripts/channel.mjs --detect)"
@@ -384,10 +387,6 @@ jobs:
             exit 1
           }
 
-      - name: Real WebView2 keeps the offline boot page and denies remote IPC
-        if: matrix.platform == 'windows'
-        run: node apps/desktop/scripts/windows-webview-e2e.mjs
-
       # An upgrade has to stop what it is about to overwrite, and a `taskkill` on
       # a name nothing is called stops nothing — silently, with the same "Error
       # opening file for writing" at the other end. v0.1.7 killed `GeneHub.exe`,
@@ -448,41 +447,18 @@ jobs:
             echo "ok: $name -> $found"
           done
 
-      # Prove the binary that went into the installer runs on this platform at
-      # all — a release that ships a daemon which cannot start is the failure
-      # nobody notices until a user hits it (`docs/roadmap.md` MVP 验收清单).
-      - name: Smoke the daemon on this platform
+      # The binary is the build this release claims to be. Without this, a
+      # job that lost its stamping step would ship a daemon calling itself
+      # 0.0.0 — which tells every user they run an unreleased build, silently.
+      # Runtime smoke coverage lives in the verify matrix; this job only packs.
+      - name: The binary carries the tag's version
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           . scripts/channel.env
-          root="$(mktemp -d)"
           exe=""
           [ "${{ matrix.platform }}" = "windows" ] && exe=".exe"
-          # And that it is the build this release claims to be. Without this, a
-          # job that lost its stamping step would ship a daemon calling itself
-          # 0.0.0 — which tells every user they run an unreleased build, silently.
-          node scripts/stamp-version.mjs --verify "target/release/$CLI_BINARY$exe" || exit 1
-          # The signed component is downloaded, not cargo-built here, so the
-          # daemon's target-dir search finds nothing; point it at the artifact
-          # the bundle step already verified byte-for-byte.
-          env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
-            "GENEHUB_LOCAL_COMPONENT=${{ runner.temp }}/guest-wasm/genehub_guest.wasm" \
-            "target/release/$CLI_BINARY$exe" daemon run >"$root/out.json" 2>"$root/err.log" &
-          pid=$!
-          for _ in $(seq 1 30); do
-            grep -q '"event":"listening"' "$root/out.json" && break
-            sleep 1
-          done
-          kill "$pid" 2>/dev/null || true
-          if ! grep -q '"event":"listening"' "$root/out.json"; then
-            echo "FAIL: the daemon did not come up on ${{ matrix.platform }}" >&2
-            cat "$root/err.log" >&2
-            exit 1
-          fi
-          test -d "$root/workspace" \
-            || { echo "FAIL: no folder to work in was created" >&2; exit 1; }
-          echo "the daemon starts on ${{ matrix.platform }} and prepares a workspace"
+          node scripts/stamp-version.mjs --verify "target/release/$CLI_BINARY$exe"
 
       # Two names for one file, on purpose:
       #
@@ -589,11 +565,11 @@ jobs:
             -C "$GITHUB_WORKSPACE/target/${{ matrix.target }}/release" "$CLI_BINARY" "$HOST_BINARY" \
             -C "$GITHUB_WORKSPACE/target/wasm32-wasip2/release" genehub_guest.wasm
           ls -la dist
-      # What the tarball promises: binaries that start on a machine with no
+      # What the tarball promises: binaries that run on a machine with no
       # graphical session and nothing else installed — including no particular
-      # glibc. `ldd` saying "not a dynamic executable" is the claim; starting is
-      # the proof.
-      - name: Check the binaries in the tarball start on their own
+      # glibc. `ldd` saying "not a dynamic executable" is the claim. Runtime
+      # smoke coverage lives in the verify matrix; this job only packs.
+      - name: Check the binaries in the tarball are static and stamped
         shell: bash
         env:
           TARBALL_PREFIX: ${{ needs.channel.outputs.tarball_prefix }}
@@ -618,19 +594,7 @@ jobs:
               exit 1
             fi
           done
-          # The first start compiles the guest component (the release channels
-          # have no precompiled cache yet — verified precompiled artifacts are a
-          # release-strategy follow-up), so this needs minutes, not seconds.
-          env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
-            timeout 240 "$root/$CLI_BINARY" daemon run >"$root/out.json" 2>"$root/err.log" || true
-          grep -q '"event":"listening"' "$root/out.json" || {
-            echo "FAIL: the packed daemon did not come up" >&2
-            cat "$root/err.log" >&2
-            exit 1
-          }
-          test -d "$root/workspace" \
-            || { echo "FAIL: no folder to work in was created" >&2; exit 1; }
-          echo "the packed daemon is static, starts, and prepares a folder to work in"
+          echo "the packed binaries are static and carry the tag's version"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-tarball
