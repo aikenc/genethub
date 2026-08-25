@@ -512,7 +512,7 @@ describe("what the user sees in a session", () => {
     expect(within(trunks[1]!).getByRole("button")).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("keeps streaming progress headers on one line as their text grows", () => {
+  it("keeps streaming progress headers to two lines as their text grows", () => {
     const round = {
       roundId: "r1",
       userItemId: "u1",
@@ -565,10 +565,58 @@ describe("what the user sees in a session", () => {
     );
 
     const header = within(screen.getByTestId("round-trunk")).getAllByRole("button")[0]!;
-    expect(header.querySelector(".truncate")).toHaveAttribute(
+    expect(header.querySelector(".line-clamp-2")).toHaveAttribute(
       "title",
       "正在核对对话中持续刷新的信息面板与布局边界。",
     );
+  });
+
+  it("keeps a long first sentence in the expanded body so a phone can read it without hover", async () => {
+    const longFirst =
+      "Cursor 会把整段规划写成没有短句号的一行所以折叠标题会被裁掉而展开后再藏掉首句手机就读不到了。";
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const batch = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 0,
+      text: longFirst,
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 0,
+      title: longFirst,
+      batches: [batch],
+    };
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "继续", attachments: [] },
+      }),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [summary] } },
+        roundTrunks: {
+          "r1:0": {
+            summary,
+            batches: [{ summary: batch, monologue: `${longFirst} 然后再改代码。`, blobs: [] }],
+          },
+        },
+      },
+    );
+
+    render(<TimelineView state={state} />);
+    await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
+    expect(screen.getByTestId("batch-monologue")).toHaveTextContent(longFirst);
+    expect(screen.getByTestId("batch-monologue")).toHaveTextContent("然后再改代码。");
   });
 
   it("moves the open tail along with the round and lets a reader hold one open", async () => {
@@ -791,7 +839,7 @@ describe("what the user sees in a session", () => {
     expect(batches[0]!).toHaveTextContent("💭");
     expect(batches[0]!).toHaveTextContent("核对入口与权限");
     expect(batches[0]!).toHaveTextContent("2 项");
-    expect(within(batches[0]!).getByRole("button").querySelector(".truncate")).toHaveAttribute(
+    expect(within(batches[0]!).getByRole("button").querySelector(".line-clamp-2")).toHaveAttribute(
       "title",
       "核对入口与权限。随后检查角色边界。",
     );
@@ -921,9 +969,8 @@ describe("what the user sees in a session", () => {
 
     await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
     expect(screen.queryByTestId("round-batch")).not.toBeInTheDocument();
-    expect(screen.getByTestId("batch-monologue")).toHaveTextContent(
-      "先彻底核对权限链路，再给结论。",
-    );
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("先彻底核对权限链路，再给结论。");
+    expect(screen.queryByTestId("batch-monologue")).not.toBeInTheDocument();
     expect(screen.getAllByText("最终结论：需要修复授权边界。")).toHaveLength(1);
   });
 

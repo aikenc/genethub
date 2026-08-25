@@ -539,6 +539,15 @@ function turnSectionKey(turn: TurnBlock, index: number): string {
 /** How many one-line blobs the live window keeps in view. */
 const LIVE_TAIL_ROWS = 5;
 
+/**
+ * Two phone lines of Chinese at text-sm, after the icon and counts take
+ * their share. Longer text stays in the expanded body; hover is not a
+ * reading path on a phone.
+ */
+const HEADER_FULLY_VISIBLE_CHARS = 32;
+
+const HEADER_TITLE_CLASS = "min-w-0 flex-1 break-words line-clamp-2";
+
 /** Manual toggle wins; otherwise the card follows the default for this moment. */
 function useCardOpen(defaultOpen: boolean): {
   open: boolean;
@@ -724,7 +733,7 @@ function TrunkCard({
         <span className="shrink-0" aria-hidden="true">
           🧭
         </span>
-        <span className="min-w-0 flex-1 truncate text-sm font-medium" title={trunkTitle}>
+        <span className={`${HEADER_TITLE_CLASS} text-sm font-medium`} title={trunkTitle}>
           {trunkTitle}
         </span>
         <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>
@@ -738,7 +747,7 @@ function TrunkCard({
           {flattenCompleted ? (
             <BatchContent
               batch={flattenCompleted}
-              monologue={monologueAfterTitle(flattenCompleted.monologue ?? "", summary.title)}
+              monologue={monologueAfterTitle(flattenCompleted.monologue ?? "", trunkTitle)}
             />
           ) : (
             batches?.map((batch) => <BatchCard key={batch.summary.index} batch={batch} />)
@@ -772,7 +781,7 @@ function BatchCard({
           💭
         </span>
         <span
-          className="min-w-0 flex-1 truncate text-xs"
+          className={`${HEADER_TITLE_CLASS} text-xs`}
           title={monologue.first || batch.summary.text}
         >
           {monologue.first || batch.summary.text}
@@ -782,7 +791,15 @@ function BatchCard({
           {open ? "▴" : "▾"}
         </span>
       </button>
-      {open ? <BatchContent batch={batch} monologue={monologue.rest} /> : null}
+      {open ? (
+        <BatchContent
+          batch={batch}
+          monologue={monologueAfterTitle(
+            batch.monologue ?? "",
+            monologue.first || batch.summary.text,
+          )}
+        />
+      ) : null}
     </div>
   );
 }
@@ -848,8 +865,13 @@ function splitMonologue(monologue: string): { first: string; rest: string } {
   return { first, rest };
 }
 
+function headerShowsFullText(text: string): boolean {
+  return [...text].filter((character) => !/\s/u.test(character)).length <= HEADER_FULLY_VISIBLE_CHARS;
+}
+
 function monologueAfterTitle(monologue: string, title: string): string {
   const { first, rest } = splitMonologue(monologue);
+  if (!headerShowsFullText(first) || !headerShowsFullText(title)) return monologue;
   const comparable = (text: string) =>
     normalizeProgressTitle(text)
       .replace(/[\p{P}\p{S}\s]/gu, "")
